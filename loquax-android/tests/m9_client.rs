@@ -4,8 +4,8 @@
 //! host's executor (`client::run_ask`) against a real mailbox on its own
 //! node, through a transport node that carries the device link, the way
 //! the board reaches its home over the mesh. The pairing starts at the
-//! keyboard: scan frames through the board's driver and its provisional
-//! layout to key events, the typed code, the join, `HOME admitted`.
+//! keyboard: the controller's answers through the board's measured read
+//! and its driver to key events, the typed code, the join, `HOME admitted`.
 //!
 //! Between the board's node and the transport node sits a proxy that
 //! reads the HDLC frames of the TCP link both ways and keeps each
@@ -32,8 +32,8 @@ use loquax::outbox::OutboxEvent;
 use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel};
 use loquax_m9::field::Field;
 use loquax_m9::group;
-use loquax_m9::kbraw::provisional_layout;
-use loquax_m9::keyboard::{Cap, Keyboard, Layout, Scan, COLUMNS, POLL_MS, ROWS};
+use loquax_m9::kbraw::{Read, MEASURED};
+use loquax_m9::keyboard::Key;
 use loquax_m9::keys::{event, M9Key};
 use loquax_m9::pair::Pairing;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -211,88 +211,60 @@ async fn board_node(proxy: SocketAddr, dir: &std::path::Path) -> Arc<ReticulumNo
     Arc::new(node)
 }
 
-/// Where a character sits in `layout`, and whether it needs Sym.
-fn cell(layout: &Layout, c: char) -> (usize, usize, bool) {
-    for row in 0..ROWS {
-        for column in 0..COLUMNS {
-            if let Cap::Char { plain, sym, .. } = layout.0[row][column] {
-                if plain == c {
-                    return (row, column, false);
-                }
-                if sym == c {
-                    return (row, column, true);
-                }
-            }
-        }
-    }
-    panic!("no key types {c:?}");
+/// The controller's answers for pressing the key of `code` once: the
+/// code in all eight bytes, then an idle read, as the bench capture of
+/// 2026-11-04 read them (`loquax-m9/tests/keyboard/capture-20261104.txt`).
+fn tap(answers: &mut Vec<[u8; 8]>, code: u8) {
+    answers.push([code; 8]);
+    answers.push([0; 8]);
 }
 
-fn key_cell(layout: &Layout, want: Cap) -> (usize, usize) {
-    (0..ROWS)
-        .flat_map(|row| (0..COLUMNS).map(move |column| (row, column)))
-        .find(|&(row, column)| layout.0[row][column] == want)
-        .unwrap_or_else(|| panic!("no {want:?} key"))
-}
-
-/// The scan frames of pressing `cell` once: down three polls, up three,
-/// past the driver's debounce of two.
-fn tap(scans: &mut Vec<Scan>, cell: (usize, usize)) {
-    scans.extend([Scan::of(&[cell]); 3]);
-    scans.extend([Scan::NONE; 3]);
-}
-
-/// The scans that type `text`: a digit is a tapped Sym and its key.
-fn typing_scans(layout: &Layout, text: &str) -> Vec<Scan> {
-    let sym = key_cell(layout, Cap::Sym);
-    let mut scans = Vec::new();
+/// The answers that type `text`: the controller sends a character as its
+/// ASCII code (the capture read letters and `0`; the digits 2 to 7 of a
+/// code are taken to follow `0`, which the reviewer's walk confirms).
+fn typing_answers(text: &str) -> Vec<[u8; 8]> {
+    let mut answers = Vec::new();
     for c in text.chars() {
-        let (row, column, needs_sym) = cell(layout, c);
-        if needs_sym {
-            tap(&mut scans, sym);
-        }
-        tap(&mut scans, (row, column));
+        tap(&mut answers, u8::try_from(c).expect("an ASCII character"));
     }
-    scans
+    answers
 }
 
-/// The driver over `scans`, from `*now` on, POLL_MS apart.
-fn keys(keyboard: &mut Keyboard<'_>, now: &mut u32, scans: &[Scan]) -> Vec<KeyEvent> {
-    let mut events = Vec::new();
-    for scan in scans {
-        keyboard.poll(*now, *scan, &mut |event| events.push(event));
-        *now += POLL_MS;
-    }
-    events
+/// The board's read and driver over `answers`.
+fn keys(answers: &[[u8; 8]]) -> Vec<KeyEvent> {
+    answers
+        .iter()
+        .filter_map(|answer| match MEASURED.read(answer) {
+            Read::Code(code) => Key::of(code).and_then(Key::event),
+            Read::Idle | Read::Mixed => None,
+        })
+        .collect()
 }
 
 /// The pairing walk: the code typed on the board's keys with one stray
 /// character and its Backspace, then Enter. What the board joins with.
 fn typed_code(code: &HomeCode) -> HomeCode {
-    let layout = provisional_layout();
-    let mut keyboard = Keyboard::new(&layout);
-    let mut now = 0;
     let mut pairing = Pairing::new();
     let text = code.encode();
-    let mut feed = |pairing: &mut Pairing, scans: Vec<Scan>| {
-        keys(&mut keyboard, &mut now, &scans)
+    let feed = |pairing: &mut Pairing, answers: Vec<[u8; 8]>| {
+        keys(&answers)
             .iter()
             .filter_map(|event| pairing.key(event))
             .last()
     };
-    assert_eq!(feed(&mut pairing, typing_scans(&layout, &text[..20])), None);
+    assert_eq!(feed(&mut pairing, typing_answers(&text[..20])), None);
     assert_eq!(pairing.typing(), Typing::Short { typed: 20 });
-    // '9' is Sym on 'o': no base32 character, named where it stands.
-    feed(&mut pairing, typing_scans(&layout, "9"));
+    // '9' is no base32 character, named where it stands.
+    feed(&mut pairing, typing_answers("9"));
     assert_eq!(pairing.typing(), Typing::Stray { at: 20 });
-    let mut scans = Vec::new();
-    tap(&mut scans, key_cell(&layout, Cap::Key(M9Key::Backspace)));
-    feed(&mut pairing, scans);
-    feed(&mut pairing, typing_scans(&layout, &text[20..]));
+    let mut answers = Vec::new();
+    tap(&mut answers, 0x08);
+    feed(&mut pairing, answers);
+    feed(&mut pairing, typing_answers(&text[20..]));
     println!("pairing screen: {:?}", pairing.lines());
-    let mut scans = Vec::new();
-    tap(&mut scans, key_cell(&layout, Cap::Key(M9Key::Enter)));
-    feed(&mut pairing, scans).expect("Enter on the complete code joins")
+    let mut answers = Vec::new();
+    tap(&mut answers, 0x0d);
+    feed(&mut pairing, answers).expect("Enter on the complete code joins")
 }
 
 async fn ask(
@@ -773,6 +745,7 @@ async fn pull_into_model(
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: message.message_id,
                 source: message.source_hash,
                 title: message.title,

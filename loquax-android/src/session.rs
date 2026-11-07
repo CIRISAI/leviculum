@@ -63,6 +63,22 @@ pub const IDLE_PUMP: Duration = watch::LOOK;
 /// The longest the pump sleeps while a position share runs (1273): its
 /// shortest gap, so a report and the end are at most that late.
 pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_S as u64);
+/// How one pump turn folds the engine's events under the session's lock
+/// (1446, 1464): [`loquax::fanout::SLICE`], the desktop shell's too. Every
+/// event folded is a store commit with its fsyncs, and the first pull of
+/// a big mailbox brings thousands: before 1446 one turn folded all of
+/// them, 12.8 s on the host for 4000 entries, while
+/// `ConversationsActivity.onResume` waited on the lock from the UI thread
+/// and Android said the app was not responding. One event between two
+/// looks at the clock and at the callers waiting for the lock (1464): with
+/// eight a turn ran 60 to 80 ms past its budget on the host, and a command
+/// that came in the middle waited for all of it.
+pub const SLICE: loquax::fanout::Slice = loquax::fanout::SLICE;
+/// How long the pump lets go of the lock between two slices of a backlog:
+/// long enough for a screen woken from its wait on the lock to take it,
+/// short against a [`SLICE`], so the history still comes at nine tenths of
+/// the speed.
+pub const BACKLOG_PUMP: Duration = Duration::from_millis(5);
 /// How long a send runner waits for its bubble to be named.
 const SETTLE: Duration = Duration::from_secs(5);
 /// How often the TCP interface is looked at while the pump runs fast.
@@ -142,7 +158,12 @@ impl InputBuffer for Line {
 /// A runner's end, folded by the pump.
 enum Finished {
     Send(UiEvent),
-    Pull(runner::PullEnd),
+    /// A pull's end, with the store's conversations read off the lock when
+    /// it imported history (1464).
+    Pull(
+        runner::PullEnd,
+        Option<Result<Vec<loquax::ui::history::Restored>, String>>,
+    ),
     /// Another runner's answer, the event the model folds (1307).
     Event(UiEvent),
 }
@@ -187,6 +208,18 @@ struct Inner {
     origin: std::time::Instant,
     /// Something the screen shows changed since the last `changed`.
     dirty: bool,
+    /// The last pump turn stopped at its [`SLICE`], or for a caller waiting
+    /// for the lock (1464), with events still waiting in the engine's
+    /// queue (1446).
+    backlog: bool,
+    /// How many callers of [`Session::lock`] wait for the lock now: the
+    /// pump ends its turn after the event it is folding (1464).
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// The list screens as of the pump's last change (1464), which the UI
+    /// thread reads while the pump holds the lock.
+    scene: Arc<Mutex<Scene>>,
+    /// [`schema::Event::Changed::counts`] as the last scene made it.
+    counts: u64,
     gone: bool,
     /// Whether the TCP interface to the home node was up at the last look,
     /// none before the first, and when that look was.
@@ -221,6 +254,42 @@ struct Inner {
     redials_seen: usize,
     /// What the device link cost since the last `WAKE_SUMMARY` (1346).
     costs: DeviceCosts,
+}
+
+/// The two list screens' answers, encoded, as the pump left them at the
+/// end of its last turn that changed something, or as the last caller who
+/// found the lock free saw them (1464). The UI thread asks for the list once
+/// per event (the Pixel's profile: 992 times in 44 s of a first pull), and
+/// while the pump folds that pull it holds the lock 50 ms at a time: an
+/// answer that waited for it froze the screen 80 to 100 ms per event. A
+/// list asked while the lock is held is this one: never older than the last
+/// `changed` the screens were told.
+#[derive(Default)]
+struct Scene {
+    conversations: Option<Vec<u8>>,
+    archived: Option<Vec<u8>>,
+    /// Nobody took the lock since the two were made: a caller who finds
+    /// the lock free takes them as they are, and computes them only when
+    /// not. Every [`Session::lock`] and every pump turn clears it.
+    fresh: bool,
+}
+
+/// [`schema::Event::Changed::counts`] of `listed` (1464): every row's
+/// peer, unread count, muted and sharing flag, hashed.
+fn counts(listed: &schema::Conversations) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in &listed.conversations {
+        (&row.peer, row.unread, row.muted, row.sharing).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Which of the two lists of [`Scene`].
+#[derive(Clone, Copy)]
+enum Listed {
+    Conversations,
+    Archived,
 }
 
 /// The phone's side of the `WAKE_SUMMARY` line (1346): the pump's turns,
@@ -283,6 +352,10 @@ impl DeviceCosts {
 /// A running session.
 pub struct Session {
     inner: Arc<Mutex<Inner>>,
+    /// [`Inner::waiting`].
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// [`Inner::scene`].
+    scene: Arc<Mutex<Scene>>,
     /// Wakes the pump when a request may have started work (1176).
     wake: Arc<tokio::sync::Notify>,
     events: Mutex<Receiver<Event>>,
@@ -391,7 +464,7 @@ impl Session {
                 )
             })?;
         for server in &servers {
-            loquax::engine::parse_server(server).map_err(|text| {
+            one_server(server).map_err(|text| {
                 StartError::said(Some("server"), StrId::JoinBadWhere, lang, Some(text))
             })?;
         }
@@ -554,6 +627,8 @@ impl Session {
             },
             Arc::clone(&wake),
         ));
+        let waiting = Arc::clone(&inner.waiting);
+        let scene = Arc::clone(&inner.scene);
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
@@ -579,6 +654,8 @@ impl Session {
         });
         let session = Self {
             inner,
+            waiting,
+            scene,
             wake,
             events: Mutex::new(events_rx),
             runtime: Mutex::new(Some(runtime)),
@@ -743,13 +820,14 @@ impl Session {
                 .unwrap_or_default(),
             false => String::new(),
         };
+        let name = match here {
+            true => mailbox::name(&home),
+            false => String::new(),
+        };
+        let words = self.profile_words(&home, here, &name, &lxma, (qr_size, modules.clone()));
         Ok(schema::Profile {
             v: VERSION,
-            name: if here {
-                mailbox::name(&home)
-            } else {
-                String::new()
-            },
+            name,
             name_editable: here,
             address: loquax::address::to_hex(&self.address),
             initials,
@@ -773,7 +851,56 @@ impl Session {
                 .join("\n"),
             propagation_node,
             version: loquax::VERSION.to_string(),
+            words,
         })
+    }
+
+    /// The core's profile scene (1443) in the reader's words: the phone's
+    /// facts told to the model (the name, where the mailbox is and how the
+    /// phone reaches it, the devices, the code), then the scene the window
+    /// and the terminal draw, resolved for the activity.
+    fn profile_words(
+        &self,
+        home: &std::path::Path,
+        here: bool,
+        name: &str,
+        lxma: &str,
+        qr: (u32, Vec<bool>),
+    ) -> schema::ProfileWords {
+        use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
+        let mailbox = match here {
+            true => Mailbox::Here,
+            false => {
+                let relayed = self.rendezvous().iter().any(|(_, up)| *up);
+                let link = self.lock().link;
+                Mailbox::Away {
+                    host: Some(server_host(&self.server).to_string()),
+                    rung: relayed.then_some(Rung::Relayed),
+                    word: link.map(|up| match up {
+                        true => loquax::home::board::Word::Connected,
+                        false => loquax::home::board::Word::Unreachable,
+                    }),
+                }
+            }
+        };
+        let others = match here {
+            true => mailbox::devices(home).unwrap_or_default(),
+            false => Vec::new(),
+        };
+        let devices = std::iter::once(Device {
+            name: String::new(),
+            this: true,
+        })
+        .chain(others.into_iter().map(|name| Device { name, this: false }))
+        .collect();
+        let mut inner = self.lock();
+        inner.model.own_code = Some(loquax::ui::OwnCode::of(lxma.to_string(), Some(qr)));
+        inner.apply(UiEvent::ProfileFacts(ProfileFacts {
+            name: name.to_string(),
+            mailbox,
+            devices,
+        }));
+        profile_words(&inner.model, inner.lang)
     }
 
     /// A contact from its contact code ([`schema::Request::AddContact`],
@@ -1040,11 +1167,57 @@ impl Session {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
+        use std::sync::atomic::Ordering;
+        // Counted while it waits, so the pump lets go after the event it
+        // is folding (1464).
+        self.waiting.fetch_add(1, Ordering::SeqCst);
         // A panic under the lock is caught at the JNI edge; what it left
         // is still the best state there is.
-        self.inner
+        let inner = self
+            .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        inner.stale_scene();
+        inner
+    }
+
+    /// A list screen without waiting for the lock (1464): the [`Scene`]
+    /// while the lock is held, or while it is free and nobody took it
+    /// since the scene was made; else computed under the free lock, or
+    /// (before the first scene) after the wait.
+    fn listed_now(&self, which: Listed) -> Vec<u8> {
+        let mut inner = match self.inner.try_lock() {
+            Ok(inner) => inner,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if let Some(kept) = self.scene_of(which, false) {
+                    return kept;
+                }
+                self.lock()
+            }
+        };
+        if let Some(kept) = self.scene_of(which, true) {
+            return kept;
+        }
+        inner.show_scene();
+        self.scene_of(which, false).unwrap_or_default()
+    }
+
+    /// The scene's `which`, when there is one, and when `fresh` only if
+    /// it is.
+    fn scene_of(&self, which: Listed, fresh: bool) -> Option<Vec<u8>> {
+        let scene = self
+            .scene
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if fresh && !scene.fresh {
+            return None;
+        }
+        match which {
+            Listed::Conversations => scene.conversations.clone(),
+            Listed::Archived => scene.archived.clone(),
+        }
     }
 
     /// What the user did. The pump is woken after it: whatever the request
@@ -1052,6 +1225,9 @@ impl Session {
     /// and an idle pump would otherwise sleep through it (1176).
     pub fn request(&self, request: schema::Request) -> Result<(), String> {
         let done = self.requested(request);
+        // The lists as the request left them (1464), for a UI thread that
+        // asks while the pump holds the lock.
+        self.lock().show_scene();
         self.wake.notify_one();
         done
     }
@@ -1174,6 +1350,8 @@ impl Session {
             }
             Intent::Viewport { peer, keys } => UiEvent::Viewport { peer, keys },
             Intent::Name(name) => return self.rename(&name),
+            Intent::Profile => UiEvent::Profile { open: true },
+            Intent::Back if self.lock().model.profile_open => UiEvent::Profile { open: false },
             Intent::AddContact { lxma, name } => return self.add_contact(&lxma, name.as_deref()),
             // The group verbs (1307) are the model's own.
             Intent::Group(verb) => UiEvent::Group(verb),
@@ -1548,6 +1726,23 @@ impl Session {
             }
             _ => {}
         }
+        // The list screens' own questions never wait for the pump (1464).
+        match &query {
+            schema::Query::Conversations { search: None } => {
+                return Ok(self.listed_now(Listed::Conversations));
+            }
+            schema::Query::Archived { search: None } => {
+                return Ok(self.listed_now(Listed::Archived));
+            }
+            schema::Query::Code { text, lang } => {
+                return Ok(schema::encode(&read_code(
+                    text,
+                    Lang::of_tag(lang.as_deref().unwrap_or_default()),
+                    |_| String::new(),
+                )?));
+            }
+            _ => {}
+        }
         let inner = self.lock();
         Ok(match query {
             schema::Query::Conversations { search } => {
@@ -1644,6 +1839,7 @@ impl Session {
             | schema::Query::SaveFile { .. }
             | schema::Query::Recording { .. }
             | schema::Query::Browse
+            | schema::Query::Code { .. }
             | schema::Query::Voice { .. } => return Err("answered above".to_string()),
             // The viewer's zoom needs no session: `lib.rs` answers it.
             schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
@@ -1669,6 +1865,42 @@ impl Session {
     /// The map's pins as the session's model knows them now.
     pub fn map_pins(&self) -> Vec<MapPin> {
         self.lock().model.map_pins()
+    }
+
+    /// The peers with a position inside the tracks' time window (1386):
+    /// what "fit all" brings into view; none before the clock is known.
+    pub fn map_inside(&self) -> Vec<[u8; 16]> {
+        let inner = self.lock();
+        match inner.model.now {
+            Some(now) => loquax::ui::tracks::inside(
+                &inner.model.track_input(),
+                inner.model.track_window,
+                &now,
+            ),
+            None => Vec::new(),
+        }
+    }
+
+    /// The map's tracks on a view whose screen pixel spans `unit` world
+    /// units, drawn at `scale` (1385), after a window `chosen` in the map
+    /// menu's sheet (1419); the window they are drawn in, and the phone's
+    /// language the map's title and sheet are said in.
+    pub fn map_tracks(
+        &self,
+        unit: f64,
+        scale: f32,
+        chosen: Option<loquax::ui::tracks::TrackWindow>,
+    ) -> (
+        Vec<loquax::ui::tracks::Track>,
+        loquax::ui::tracks::TrackWindow,
+        Lang,
+    ) {
+        let mut inner = self.lock();
+        if let Some(chosen) = chosen {
+            inner.model.track_window = chosen;
+        }
+        let window = inner.model.track_window;
+        (inner.model.map_tracks(unit, scale), window, inner.lang)
     }
 
     /// The next event, waiting at most `wait`.
@@ -1759,6 +1991,10 @@ impl Inner {
         let mut model = known(home, &store)?;
         model.lang = lang;
         model.home_client = true;
+        // A phone that never settled a pull, a new one or one the mailbox
+        // moved to, is about to be handed the home's history (1429): none
+        // of it is read by arriving.
+        model.history = loquax::home::client::history_owed(home);
         model.list_apart = true;
         // The phone hosts lnomad as its Browse tab (1337), behind the
         // config's `browse_tab` until the fetch through the phone's own
@@ -1784,6 +2020,9 @@ impl Inner {
         let now = wall_now(offset);
         update(&mut model, UiEvent::Clock(now));
         model.restore(store.restore().map_err(|error| error.to_string())?);
+        // What the propagation node is still to be asked about (1409).
+        model.pn_asker =
+            loquax::pn_status::Asker::restore(store.pn_asks().map_err(|error| error.to_string())?);
         // A share runs on across a restart (1273); one whose time ran out
         // meanwhile ends at the next clock with its end report.
         model.restore_shares(store.shares().map_err(|error| error.to_string())?);
@@ -1827,6 +2066,10 @@ impl Inner {
             runtime,
             origin: std::time::Instant::now(),
             dirty: true,
+            backlog: false,
+            waiting: Arc::default(),
+            scene: Arc::default(),
+            counts: 0,
             gone: false,
             link: None,
             // The first pump looks, and says what it saw.
@@ -1938,53 +2181,67 @@ impl Inner {
         }
     }
 
+    /// Fold the engine's events the fan-out took into the screen and the
+    /// store.
+    fn fold(&mut self, events: Vec<OutboxEvent>) {
+        for event in events {
+            if runner::already_held(&self.store, &event) {
+                continue;
+            }
+            runner::keep_signature(&mut self.store, &event);
+            let named = match &event {
+                OutboxEvent::Announced {
+                    destination,
+                    name: Some(_),
+                    ..
+                } => Some(*destination),
+                _ => None,
+            };
+            self.apply(UiEvent::Engine(event));
+            if let Some(peer) = named {
+                runner::keep_name(&mut self.store, &self.model.names, self.model.address, peer);
+            }
+        }
+    }
+
     fn pump(&mut self) -> bool {
         if self.gone {
             return false;
         }
         self.costs.window.pumps += 1;
-        match self.fanout.pump(&mut self.attached.outbox) {
-            Ok(events) => {
-                for event in events {
-                    if runner::already_held(&self.store, &event) {
-                        continue;
-                    }
-                    runner::keep_signature(&mut self.store, &event);
-                    let named = match &event {
-                        OutboxEvent::Announced {
-                            destination,
-                            name: Some(_),
-                            ..
-                        } => Some(*destination),
-                        _ => None,
-                    };
-                    self.apply(UiEvent::Engine(event));
-                    if let Some(peer) = named {
-                        runner::keep_name(
-                            &mut self.store,
-                            &self.model.names,
-                            self.model.address,
-                            peer,
-                        );
-                    }
+        // The engine's events a slice at a time (1446): each one folded is
+        // a store commit, and a first pull of a big mailbox brings
+        // thousands. The pump holds the session's lock for its whole turn,
+        // and the screens wait on that lock, so the turn stops after
+        // [`SLICE`] and the next one comes after [`BACKLOG_PUMP`], in which
+        // a waiting caller takes the lock. A caller waiting for the lock
+        // ends the turn after the event in hand (1464): a screen's command
+        // waits for one commit, not for a slice.
+        self.stale_scene();
+        let mut slicing = loquax::fanout::Slicing::new(SLICE);
+        loop {
+            let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            match slicing.next(&mut self.fanout, &mut self.attached.outbox, waited) {
+                Ok(Some(events)) => self.fold(events),
+                Ok(None) => break,
+                Err(gone) => {
+                    self.gone = true;
+                    let _ = self.events.send(Event::Stopped {
+                        v: VERSION,
+                        detail: gone.to_string(),
+                    });
+                    return false;
                 }
             }
-            Err(gone) => {
-                self.gone = true;
-                let _ = self.events.send(Event::Stopped {
-                    v: VERSION,
-                    detail: gone.to_string(),
-                });
-                return false;
-            }
         }
+        self.backlog = slicing.backlog();
         while let Ok(finished) = self.finished_rx.try_recv() {
             match finished {
                 Finished::Send(event) => {
                     self.sending = false;
                     self.apply(event);
                 }
-                Finished::Pull(end) => self.pulled(end),
+                Finished::Pull(end, stored) => self.pulled(end, stored),
                 Finished::Event(event) => self.apply(event),
             }
         }
@@ -2004,7 +2261,13 @@ impl Inner {
         self.quiet(UiEvent::Tick);
         self.apply(UiEvent::Elapsed(elapsed));
         if std::mem::take(&mut self.dirty) {
-            let _ = self.events.send(Event::Changed { v: VERSION });
+            // The lists first: a screen told `changed` reads them at once,
+            // and may find the lock held by the next turn (1464).
+            self.show_scene();
+            let _ = self.events.send(Event::Changed {
+                v: VERSION,
+                counts: self.counts,
+            });
         }
         true
     }
@@ -2013,6 +2276,11 @@ impl Inner {
     /// while anything is going on, else until the pull schedule's next
     /// pull, at most [`IDLE_PUMP`].
     fn next_pump(&self) -> Duration {
+        // Events still wait in the engine's queue (1446): the next slice
+        // soon, after a screen waiting on the lock had its turn.
+        if self.backlog {
+            return BACKLOG_PUMP;
+        }
         let busy = self.front
             || !self.watching
             || self.sending
@@ -2242,7 +2510,13 @@ impl Inner {
                 }
                 // Every rotation of the session hears it (1298).
                 UiEffect::Network { kind, changed } => self.network.say(kind, changed),
-                UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
+                UiEffect::Log(line) | UiEffect::Notice(line) | UiEffect::PnLine(line) => {
+                    tracing::info!("{line}")
+                }
+                // A client of its home asks no propagation node (1409): the
+                // mailbox asks, its own or the app's, and the answer comes
+                // as a pulled entry.
+                UiEffect::AskPn { .. } => {}
                 // A petname set here or pulled (1139): the contacts file
                 // in the app's directory, which the next start reads.
                 UiEffect::Contact(contact) => {
@@ -2440,7 +2714,20 @@ impl Inner {
             let wake = Arc::clone(&self.wake);
             self.runtime.spawn(async move {
                 let end = runner::pull(&mut tap, &client, &home, BUDGET).await;
-                let _ = done.send(Finished::Pull(end));
+                // The history it imported, read here, off the session's
+                // lock (1464): the store's read was the pull end's turn.
+                let stored = match end.imported {
+                    0 => None,
+                    _ => {
+                        let key = client.public_key;
+                        let read =
+                            tokio::task::spawn_blocking(move || runner::read_imported(&home, &key))
+                                .await
+                                .map_err(|error| error.to_string());
+                        Some(read.and_then(|read| read))
+                    }
+                };
+                let _ = done.send(Finished::Pull(end, stored));
                 wake.notify_one();
             });
         }
@@ -2452,12 +2739,22 @@ impl Inner {
     /// it imported (1159) the runner wrote to the store itself; the model
     /// takes it from there, as the session lives on in the service and is
     /// never restarted by closing the app.
-    fn pulled(&mut self, end: runner::PullEnd) {
+    fn pulled(
+        &mut self,
+        end: runner::PullEnd,
+        stored: Option<Result<Vec<loquax::ui::history::Restored>, String>>,
+    ) {
         self.pulling = false;
         runner::settle_pull(&self.home, end.cursor);
-        if end.imported > 0 {
+        // Once a pull settled, what arrives is live mail (1429).
+        if end.cursor.is_some() {
+            self.model.history = false;
+        }
+        if let Some(stored) = stored {
             self.persist();
-            match runner::show_imported(&mut self.model, &self.store) {
+            let shown = stored
+                .and_then(|stored| runner::show_restored(&mut self.model, &self.store, stored));
+            match shown {
                 Ok(()) => tracing::info!("HOME imported rows={} shown", end.imported),
                 Err(error) => {
                     tracing::warn!("HOME imported rows={} not shown: {error}", end.imported)
@@ -2469,6 +2766,31 @@ impl Inner {
             self.say(say);
         }
         self.apply(UiEvent::FetchDone(end.result));
+    }
+
+    /// The two lists into [`Inner::scene`] (1464), and the digest of the
+    /// counts the service notifies by.
+    fn show_scene(&mut self) {
+        let listed = self.conversations(None);
+        self.counts = counts(&listed);
+        let conversations = schema::encode(&listed);
+        let archived = schema::encode(&self.listed(self.model.archived_order(), None));
+        let mut scene = self
+            .scene
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        scene.conversations = Some(conversations);
+        scene.archived = Some(archived);
+        scene.fresh = true;
+    }
+
+    /// Something may change what the lists show: the next caller who
+    /// finds the lock free computes them (1464).
+    fn stale_scene(&self) {
+        self.scene
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .fresh = false;
     }
 
     fn conversations(&self, search: Option<&str>) -> schema::Conversations {
@@ -2970,6 +3292,11 @@ pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
         model.names.link(peer, &link.name, &link.lookup);
     }
     model.restore_positions(store.positions().map_err(|error| error.to_string())?);
+    model.restore_tracks(
+        store
+            .fixes_between(None, i64::MIN, i64::MAX)
+            .map_err(|error| error.to_string())?,
+    );
     Ok(model)
 }
 
@@ -3427,6 +3754,10 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             keys: keys.into_iter().map(schema::model_key).collect(),
         },
         R::Name { name } => Intent::Name(name),
+        // The profile's activity is the scene's renderer (1443): it comes
+        // with the avatar's intent and leaves with Back.
+        R::Profile { open: true } => Intent::Profile,
+        R::Profile { open: false } => Intent::Back,
         R::Link { peer, contact } => {
             return Ok(Decoded::Platform(Platform::Link {
                 peer: parse_peer(&peer)?,
@@ -3915,6 +4246,29 @@ fn link_up(node: &leviculum_std::driver::ReticulumNode) -> bool {
         .any(|interface| !interface.is_local_client && interface.online)
 }
 
+/// The core's profile scene of `model` (1443, `loquax::ui::profile`) in
+/// `lang`'s words, as [`schema::Profile::words`] carries it to the
+/// activity: the scene the window and the terminal draw, resolved.
+pub fn profile_words<B>(model: &UiModel<B>, lang: Lang) -> schema::ProfileWords {
+    let screen = loquax::ui::profile::profile(model);
+    schema::ProfileWords {
+        title: screen.title.resolve(lang),
+        name: screen.name.resolve(lang),
+        address_label: screen.address_label.resolve(lang),
+        fours: screen.fours.clone(),
+        caption: screen.caption.resolve(lang),
+        mailbox: screen.mailbox.resolve(lang),
+        state: screen
+            .state
+            .as_ref()
+            .map(|state| state.resolve(lang))
+            .unwrap_or_default(),
+        devices_label: screen.devices_label.resolve(lang),
+        devices: screen.devices.iter().map(|d| d.resolve(lang)).collect(),
+        share: screen.share.label_key.text(lang).to_string(),
+    }
+}
+
 /// An address in groups of four hex digits, to read out and compare.
 pub fn fingerprint(peer: &[u8; 16]) -> String {
     let hex = loquax::address::to_hex(peer);
@@ -3970,8 +4324,14 @@ fn dial_list(
     home: &Path,
 ) -> Option<Vec<String>> {
     use loquax::home::rendezvous::{default_list, defaults_held_back, reach, Reach};
+    // A code's servers are the code's business (1471): a field that only
+    // shows the code's tail, the whole list `mailbox admit` printed, is not
+    // a server the user typed, and the join walks the code's ladder in its
+    // order. A server typed by hand is one `host:port` and wins.
     if let Some(given) = given.map(str::trim).filter(|given| !given.is_empty()) {
-        return Some(vec![given.to_string()]);
+        if !is_carried(given, &carried) {
+            return Some(vec![given.to_string()]);
+        }
     }
     let known = match carried.is_empty() {
         true => load_servers(home),
@@ -3983,6 +4343,26 @@ fn dial_list(
         Reach::List(list) if list == default_list() && defaults_held_back() => None,
         Reach::List(list) => Some(list),
     }
+}
+
+/// Whether `given` is the list `carried` a code brought, as a field shows
+/// it: its entries joined by the code's separator, whitespace ignored.
+fn is_carried(given: &str, carried: &[String]) -> bool {
+    let compact: String = given.chars().filter(|c| !c.is_whitespace()).collect();
+    !carried.is_empty() && compact == carried.join(&loquax::home::code::LIST_SEPARATOR.to_string())
+}
+
+/// One server the user typed, `host:port`, or why it is not one. A list,
+/// which only a code carries (1471), is named as such: the parser would
+/// read its commas as part of the host and blame an IPv6 bracket.
+fn one_server(text: &str) -> Result<(), String> {
+    let text = text.trim();
+    if text.contains(loquax::home::code::LIST_SEPARATOR) {
+        return Err(format!(
+            "'{text}' names several servers: write one, as host:port, e.g. 192.168.1.20:4242"
+        ));
+    }
+    loquax::engine::parse_server(text).map(|_| ())
 }
 
 /// A peer's address as the app hands it back.
@@ -4000,6 +4380,68 @@ pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1471: a code with three servers joins over all three, in the code's
+    /// order, whether the field is empty or shows the code's tail (what the
+    /// join screen's field held on the Pixel, refused before 1471). A server
+    /// typed by hand wins; a hand-typed list is refused with words that say
+    /// it is a list, under the sentence naming one address.
+    #[test]
+    fn a_code_with_several_servers_dials_them_all_in_order() {
+        let home = tempfile::tempdir().expect("a dir");
+        let config = loquax::config::Config::default();
+        let three = vec![
+            "192.168.178.61:4343".to_string(),
+            "leviculum.network:4343".to_string(),
+            "leviculum.network:4242".to_string(),
+        ];
+        let field = "192.168.178.61:4343,leviculum.network:4343,leviculum.network:4242";
+        assert_eq!(
+            dial_list(None, &config, three.clone(), home.path()),
+            Some(three.clone())
+        );
+        assert_eq!(
+            dial_list(Some(field), &config, three.clone(), home.path()),
+            Some(three.clone())
+        );
+        assert_eq!(
+            dial_list(
+                Some(" 192.168.178.61:4343, leviculum.network:4343,\nleviculum.network:4242 "),
+                &config,
+                three.clone(),
+                home.path()
+            ),
+            Some(three.clone())
+        );
+        // One server in the code.
+        let one = vec!["127.0.0.1:4242".to_string()];
+        assert_eq!(
+            dial_list(Some("127.0.0.1:4242"), &config, one.clone(), home.path()),
+            Some(one)
+        );
+        // A server typed by hand, with or without servers in the code.
+        assert_eq!(
+            dial_list(Some("home.example:4242"), &config, three, home.path()),
+            Some(vec!["home.example:4242".to_string()])
+        );
+        assert_eq!(
+            dial_list(Some("home.example:4242"), &config, Vec::new(), home.path()),
+            Some(vec!["home.example:4242".to_string()])
+        );
+        // A list typed by hand, not the code's, stays the user's and is refused.
+        let typed = "a.example:4242,b.example:4242";
+        assert_eq!(
+            dial_list(Some(typed), &config, Vec::new(), home.path()),
+            Some(vec![typed.to_string()])
+        );
+        let refused = one_server(typed).expect_err("a list is not one server");
+        assert!(refused.contains("several servers"), "{refused}");
+        assert!(one_server("home.example:4242").is_ok());
+        // Control: without the list check the parser blames a bracket.
+        assert!(loquax::engine::parse_server(typed)
+            .expect_err("the parser refuses it too")
+            .contains("IPv6"));
+    }
 
     /// 1307 pass five: the home's answer to Create or Add asks for no
     /// effect, and without a `changed` the list Java shows never takes the

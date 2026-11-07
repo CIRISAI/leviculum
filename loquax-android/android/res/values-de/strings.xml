@@ -271,18 +271,11 @@
     <string name="privacy_shared">Geteilte Positionen</string>
     <string name="privacy_shared_none">Du hast deine Position noch nicht geteilt.</string>
     <!-- Das Profil hinter unserem Avatar (1187). -->
-    <string name="profile_title">Dein Profil</string>
     <string name="profile_name_hint">Dein Name</string>
-    <string name="profile_name_elsewhere">Dein Name wird dort festgelegt, wo dein Postfach läuft.</string>
     <string name="profile_name_saved">Name gespeichert</string>
-    <string name="profile_address">Deine Adresse</string>
-    <string name="profile_qr_caption">Scanne diesen Code, um mich als Kontakt hinzuzufügen</string>
     <string name="profile_share_picture">Als Bild teilen</string>
     <string name="profile_copy_address">Adresse kopieren</string>
     <string name="profile_scan">Code eines Kontakts scannen</string>
-    <string name="profile_mailbox_here">Postfach: auf diesem Handy</string>
-    <string name="profile_mailbox_away">Postfach: auf %1$s, seit %2$s</string>
-    <string name="profile_mailbox_away_undated">Postfach: auf %1$s</string>
     <string name="profile_mailbox_change">Anderes Postfach verwenden</string>
     <!-- Ein Gerät mit dem Postfach auf diesem Handy verbinden (1264). -->
     <string name="profile_link_device">Gerät verbinden</string>

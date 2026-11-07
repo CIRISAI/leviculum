@@ -201,9 +201,52 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }
     }
 
+    /**
+     * A section drawn from the library's answer (1464): asked on the
+     * engine's thread, drawn into a place of its own on the page, so the
+     * page's order holds whichever answer comes first. The section adds to
+     * {@link #body} as the others do: `body` is its place while it draws.
+     */
+    private void section(Engine.Ask<Map<String, Object>> ask,
+            final Engine.Got<Map<String, Object>> draw) {
+        final LinearLayout place = new LinearLayout(this);
+        place.setOrientation(LinearLayout.VERTICAL);
+        body.addView(place, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        Engine.ask(ask, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (isDestroyed()) {
+                    return;
+                }
+                LinearLayout page = body;
+                body = place;
+                try {
+                    draw.got(answer);
+                } finally {
+                    body = page;
+                }
+            }
+        });
+    }
+
     /** Where the mailbox is. */
     private void mailbox() {
-        boolean phone = Core.bool(Core.me(), "here");
+        section(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.me();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                mailbox(answer);
+            }
+        });
+    }
+
+    private void mailbox(Map<String, Object> answer) {
+        boolean phone = Core.bool(answer, "here");
         body.addView(padded(text(getString(phone ? R.string.mailbox_here : R.string.mailbox_away),
                 15, R.color.text_secondary)));
     }
@@ -313,7 +356,24 @@ public class SettingsActivity extends Activity implements Events.Listener {
 
     /** Store `set` as the photo size, or with null only ask; as theme(). */
     private void photoSize(final String set, final RadioButton[] choices, final String[] words) {
-        Map<String, Object> answer = Core.photoSize(set);
+        // Asked on the engine's thread (1464).
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.photoSize(set);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (!isDestroyed()) {
+                    photoSize(answer, set, choices, words);
+                }
+            }
+        });
+    }
+
+    private void photoSize(Map<String, Object> answer, String set, RadioButton[] choices,
+            String[] words) {
         if (!Core.bool(answer, "ok")) {
             android.widget.Toast.makeText(SettingsActivity.this,
                     Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
@@ -334,7 +394,27 @@ public class SettingsActivity extends Activity implements Events.Listener {
         TextView header = text(getString(R.string.blocked_contacts), 14, R.color.accent);
         header.setPadding(dp(16), dp(16), dp(16), dp(4));
         body.addView(header);
-        Map<String, Object> answer = Core.blocked();
+        blockedRows();
+        runningShares();
+        sharedPositions();
+    }
+
+    /** The blocked contacts' rows, as the library lists them. */
+    private void blockedRows() {
+        section(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.blocked();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                blockedRows(answer);
+            }
+        });
+    }
+
+    private void blockedRows(Map<String, Object> answer) {
         List<Map<String, Object>> rows = Core.list(answer, "conversations");
         if (answer.containsKey("error")) {
             body.addView(padded(text(Core.str(answer, "error"), 15, R.color.text_secondary)));
@@ -344,8 +424,6 @@ public class SettingsActivity extends Activity implements Events.Listener {
         for (Map<String, Object> row : rows) {
             body.addView(blocked(row));
         }
-        runningShares();
-        sharedPositions();
     }
 
     /**
@@ -353,7 +431,20 @@ public class SettingsActivity extends Activity implements Events.Listener {
      * list, with whom and for how long, each with its Stop.
      */
     private void runningShares() {
-        Map<String, Object> answer = Core.shares();
+        section(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.shares();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                runningShares(answer);
+            }
+        });
+    }
+
+    private void runningShares(Map<String, Object> answer) {
         TextView header = text(Core.str(answer, "title"), 14, R.color.accent);
         header.setPadding(dp(16), dp(24), dp(16), dp(4));
         body.addView(header);
@@ -384,13 +475,22 @@ public class SettingsActivity extends Activity implements Events.Listener {
             stop.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    String error = Core.stopShare(peer);
-                    if (error != null) {
-                        android.widget.Toast.makeText(SettingsActivity.this, error,
-                                android.widget.Toast.LENGTH_LONG).show();
-                    }
-                    ShareService.look(SettingsActivity.this, false);
-                    recreate();
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.stopShare(peer);
+                        }
+                    }, new Engine.Said() {
+                        @Override
+                        public void said(String error) {
+                            if (error != null) {
+                                android.widget.Toast.makeText(SettingsActivity.this, error,
+                                        android.widget.Toast.LENGTH_LONG).show();
+                            }
+                            ShareService.look(SettingsActivity.this, false);
+                            recreate();
+                        }
+                    });
                 }
             });
             line.addView(stop);
@@ -586,18 +686,42 @@ public class SettingsActivity extends Activity implements Events.Listener {
         final Switch on = new Switch(this);
         on.setId(R.id.privacy_receipts);
         on.setContentDescription(getString(R.string.read_receipts));
-        on.setChecked(Core.bool(Core.receipts(null), "on"));
+        // Asked and set on the engine's thread (1464).
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.receipts(null);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                on.setChecked(Core.bool(answer, "on"));
+            }
+        });
         on.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                Map<String, Object> answer = Core.receipts(on.isChecked());
-                if (answer.containsKey("error")) {
-                    android.widget.Toast.makeText(SettingsActivity.this,
-                            Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
-                    on.setChecked(!on.isChecked());
-                    return;
-                }
-                on.setChecked(Core.bool(answer, "on"));
+                final boolean wanted = on.isChecked();
+                Engine.ask(new Engine.Ask<Map<String, Object>>() {
+                    @Override
+                    public Map<String, Object> ask() {
+                        return Core.receipts(wanted);
+                    }
+                }, new Engine.Got<Map<String, Object>>() {
+                    @Override
+                    public void got(Map<String, Object> answer) {
+                        if (isDestroyed()) {
+                            return;
+                        }
+                        if (answer.containsKey("error")) {
+                            android.widget.Toast.makeText(SettingsActivity.this,
+                                    Core.str(answer, "error"), android.widget.Toast.LENGTH_LONG).show();
+                            on.setChecked(!wanted);
+                            return;
+                        }
+                        on.setChecked(Core.bool(answer, "on"));
+                    }
+                });
             }
         });
         row.addView(on);
@@ -610,7 +734,25 @@ public class SettingsActivity extends Activity implements Events.Listener {
         TextView header = text(getString(R.string.privacy_shared), 14, R.color.accent);
         header.setPadding(dp(16), dp(24), dp(16), dp(4));
         body.addView(header);
-        Map<String, Object> answer = Core.shared();
+        sharedRows();
+    }
+
+    /** The shared positions' rows, as the library lists them. */
+    private void sharedRows() {
+        section(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.shared();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                sharedRows(answer);
+            }
+        });
+    }
+
+    private void sharedRows(Map<String, Object> answer) {
         List<Map<String, Object>> rows = Core.list(answer, "shared");
         if (answer.containsKey("error")) {
             body.addView(padded(text(Core.str(answer, "error"), 15, R.color.text_secondary)));
@@ -680,7 +822,21 @@ public class SettingsActivity extends Activity implements Events.Listener {
 
     /** The mailbox's backup when it is on this phone. */
     private void backup() {
-        boolean phone = Core.bool(Core.me(), "here");
+        section(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.me();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                backup(answer);
+            }
+        });
+    }
+
+    private void backup(Map<String, Object> answer) {
+        boolean phone = Core.bool(answer, "here");
         if (!phone) {
             body.addView(padded(text(getString(R.string.settings_backup_away), 15,
                     R.color.text_secondary)));
@@ -787,8 +943,17 @@ public class SettingsActivity extends Activity implements Events.Listener {
         unblock.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                Core.block(peer, false);
-                refresh();
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.block(peer, false);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String error) {
+                        refresh();
+                    }
+                });
             }
         });
         line.addView(unblock);

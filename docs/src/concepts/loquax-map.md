@@ -28,13 +28,13 @@ Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 `RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
 fields beside id, source, title, body and the verification
-(`loquax/src/engine.rs:503`, `loquax/src/outbox.rs:272`). The core reads
+(`loquax/src/engine.rs:503`, `loquax/src/outbox.rs:283`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
-`loquax/src/telemetry.rs:144`), the screen model keeps each peer's latest
+`loquax/src/telemetry.rs:166`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:4220`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2912`) and the positions in a table of
-their own (`SCHEMA_V2`, `loquax/src/store.rs:194`). The sender's timestamp
+`loquax/src/ui.rs:4497`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:3157`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:196`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
 change of its own and not the one line of plumbing the fields were.
@@ -336,7 +336,7 @@ The frontends:
   it.
 
   The cost, measured 2026-10-31 on the coder host (10 vCPUs, eight
-  workers) with `loquax/examples/names_cost.rs` over Berlin Mitte (cut
+  workers) with `names_cost` (folded into `map_eye_bench` by 1422) over Berlin Mitte (cut
   from the Protomaps build of that day, `--bbox
   13.33,52.49,13.45,52.55`, and a z12 cut of the country around it),
   the median of ten frames of a pinch out by 0.05 a frame, in ms (the
@@ -1312,9 +1312,10 @@ announce itself hands its name and how long ago it heard it.
 identity proves), so an announced fix joins the peer's telemetry
 positions in `UiModel::positions`: the newest fix wins by
 `Fix::newer_than` whichever way it came, and `Fix::source` remembers
-which (`Telemetry` or `Mesh`). It is a state: the store keeps no
-announced fix, since the node announces again at its cadence and a
-stranger leaves no trace once gone. An announced fix newer than every
+which (`Telemetry` or `Mesh`). Until 1385 it was a state the store did
+not keep; since schema 14 the store keeps every announced fix for the
+track, marked `positions.source = 1`, one row a peer and fix time
+([tracks on the map](loquax-tracks.md)). An announced fix newer than every
 report is the row's newest fix (`UiModel::liveness`), so the list's ⌖
 (1224), the ring and the Friends sheet show it unchanged.
 
@@ -1429,6 +1430,9 @@ The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
 
 ## See also
 
+- [Loquax: tracks on the map](loquax-tracks.md): each peer's current
+  movement as lines, the rest collapsed into places, the time window
+  (1385)
 - [A messenger whose core runs anywhere](handheld-messenger.md), "The map"
 - [Telemetry](telemetry.md), the format and the collector exchange
 - [A GUI toolkit for the desktop and the M9](gui-toolkit.md)

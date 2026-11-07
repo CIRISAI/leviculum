@@ -135,36 +135,6 @@ fn every_screen_keeps_the_boards_budgets() {
     }
 }
 
-/// Archive entries as a home keeps them: LXMF messages of `len` bytes.
-fn entries(n: u64, len: usize) -> Vec<wire::Entry> {
-    (1..=n)
-        .map(|seq| wire::Entry {
-            seq,
-            kind: loquax::home::KIND_RECEIVED,
-            at: 1_793_600_000,
-            packed: vec![seq as u8; len],
-        })
-        .collect()
-}
-
-/// The answers a home gives a client that asks LoRa pages, walked by
-/// cursor as the home walks them (`wire::fit_page`).
-fn lora_answers(all: &[wire::Entry]) -> Vec<Vec<u8>> {
-    let mut answers = Vec::new();
-    let mut at = 0;
-    while at < all.len() {
-        let mut page = wire::Page {
-            entries: all[at..].to_vec(),
-            more: false,
-            first: 1,
-        };
-        wire::fit_page(&mut page, LORA_PAGE_BYTES);
-        at += page.entries.len();
-        answers.push(wire::sync_answer(&page));
-    }
-    answers
-}
-
 /// The client session's pull (1363): thirty messages of 200 bytes, a
 /// typical text with its signature and fields, in LoRa pages; then the
 /// same archive as one page of the home's own bound, the positive
@@ -176,8 +146,8 @@ fn a_client_sessions_pull_keeps_its_budget_in_lora_pages() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut probe = HostProbe { before: 0, low: 0 };
     let home = leviculum_core::Identity::generate(&mut rand_core::OsRng).public_key_bytes();
-    let all = entries(30, 200);
-    let answers = lora_answers(&all);
+    let all = census::archive(30, 200);
+    let answers = census::lora_answers(&all);
     assert!(answers.iter().all(|answer| answer.len() <= LORA_PAGE_BYTES));
     let got = census::session(&mut probe, &home, &answers).expect("session");
     let line = census::SessionLine(&got);
@@ -188,16 +158,27 @@ fn a_client_sessions_pull_keeps_its_budget_in_lora_pages() {
     );
     assert!(got.peak > 0 && got.stack > 0, "the probe measured nothing");
     assert_eq!(line.over(), None, "{line}");
+    // The batch the board runs with on this census (1414): the LoRa page.
+    assert_eq!(
+        census::batch(&got, 64 * 1024).page_bytes,
+        LORA_PAGE_BYTES as u64
+    );
 
     // Control: the home's own page, 64 KiB of these, in one answer.
-    let all = entries(300, 200);
+    let all = census::archive(300, 200);
     let whole = vec![wire::sync_answer(&wire::Page {
         entries: all,
         more: false,
         first: 1,
+        left: None,
     })];
     let got = census::session(&mut probe, &home, &whole).expect("session");
     let line = census::SessionLine(&got);
     println!("[CENSUS] control {line} answer={} B", whole[0].len());
     assert_eq!(line.over(), Some("session_peak"), "{line}");
+    // A board that measured this would ask the floor's page, not panic.
+    assert_eq!(
+        census::batch(&got, 64 * 1024).page_bytes,
+        loquax::home::board::MIN_PAGE_BYTES
+    );
 }

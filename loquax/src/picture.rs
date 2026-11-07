@@ -38,7 +38,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::vec::Vec;
 
-use embedded_graphics::prelude::{Dimensions, Point};
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::prelude::Point;
 use embedded_graphics::primitives::Rectangle;
 use leviculum_map::choice::{drawn, view_zooms};
 use leviculum_map::draw::{attach_buildings, draw_in_scaled, draw_tiles, draws_buildings, Ink};
@@ -46,8 +47,9 @@ use leviculum_map::labels::ViewLabel;
 use leviculum_map::outline;
 use leviculum_map::region::{Header, Region, TileId};
 use leviculum_map::viewport::{ViewTile, Viewport};
+use leviculum_mapfill::coverage::{Coverage, Hard};
 use leviculum_mapfill::fill::{Edge, Scratch};
-use leviculum_mapfill::frame::Frame;
+use leviculum_mapfill::frame::{Frame, RgbaFrame};
 use leviculum_mapfill::render::{NoClock, Work};
 use leviculum_mapfill::style::{MapTheme, Profile, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
@@ -253,6 +255,14 @@ pub fn load(dir: &Path) -> (Vec<Installed>, Vec<String>) {
     (regions, problems)
 }
 
+/// One view drawn into opaque RGBA ([`Painter::draw_rgba`]): its bytes,
+/// the credit, the tiles owed as [`Drawn`] has them.
+pub struct DrawnRgba {
+    pub rgba: Vec<u8>,
+    pub attribution: String,
+    pub pending: usize,
+}
+
 /// One view drawn: its pixels, Rgb565 in the frame's byte order, and the
 /// credit the picture carries.
 pub struct Drawn {
@@ -375,9 +385,62 @@ impl Painter {
     /// A region whose tile does not read is left out. The directory is read
     /// again first when it changed.
     pub fn draw(&mut self, view: &Viewport, ink: Ink, style: Style, percent: u32) -> Drawn {
-        self.refresh();
         let (w, h) = view.size();
         let mut fb = vec![0u16; (w as usize) * (h as usize)];
+        let (attribution, pending) = match Frame::new(&mut fb, w, h) {
+            Some(mut frame) => self.draw_into(view, ink, style, percent, &mut frame),
+            None => (outline::ATTRIBUTION.to_string(), 0),
+        };
+        Drawn {
+            fb,
+            attribution,
+            pending,
+        }
+    }
+
+    /// [`draw`](Self::draw) into opaque 8-bit RGBA, four bytes a pixel:
+    /// the same picture, each pixel the Rgb565 one widened by
+    /// [`leviculum_mapfill::frame::rgb888`], without a pass to widen it
+    /// afterwards (1422). What the tile cache holds. With `smooth` the
+    /// fills' and lines' edges are blended by their coverage
+    /// ([`leviculum_mapfill::coverage`]); without, the picture is the
+    /// Rgb565 one exactly.
+    pub fn draw_rgba(
+        &mut self,
+        view: &Viewport,
+        ink: Ink,
+        style: Style,
+        percent: u32,
+        smooth: bool,
+    ) -> DrawnRgba {
+        let (w, h) = view.size();
+        // Opaque black, as the Rgb565 frame's zeros widen.
+        let mut rgba = [0u8, 0, 0, 0xff].repeat((w as usize) * (h as usize));
+        let (attribution, pending) = match RgbaFrame::new(&mut rgba, w, h) {
+            Some(frame) => self.draw_into(view, ink, style, percent, &mut frame.smoothed(smooth)),
+            None => (outline::ATTRIBUTION.to_string(), 0),
+        };
+        DrawnRgba {
+            rgba,
+            attribution,
+            pending,
+        }
+    }
+
+    /// [`draw`](Self::draw)'s picture into `frame`: its credit and the
+    /// tiles owed.
+    fn draw_into<D>(
+        &mut self,
+        view: &Viewport,
+        ink: Ink,
+        style: Style,
+        percent: u32,
+        frame: &mut D,
+    ) -> (String, usize)
+    where
+        D: Coverage<Color = Rgb565, Error = core::convert::Infallible>,
+    {
+        self.refresh();
         let order = drawn(
             self.regions
                 .iter()
@@ -387,51 +450,47 @@ impl Painter {
         let mut attribution = outline::ATTRIBUTION.to_string();
         let mut shown: Vec<usize> = Vec::new();
         let mut pending = 0;
-        if let Some(mut frame) = Frame::new(&mut fb, w, h) {
-            // The outline goes under the view unless one region fills it.
-            let whole = frame.bounding_box();
-            let filled = order
-                .iter()
-                .any(|&i| self.regions[i].region.area(view) == whole);
-            if !filled {
-                let Ok(_) = outline::draw(
-                    outline::WORLD_50M,
-                    outline::BORDERS_50M,
-                    view,
-                    ink,
-                    style.theme,
-                    &mut frame,
-                );
-            }
-            for &i in &order {
-                let installed = &self.regions[i];
-                let area = installed.region.area(view);
-                if let Some(owed) = region_into(
-                    &installed.region,
-                    view,
-                    area,
-                    ink,
-                    style,
-                    percent,
-                    &mut self.read,
-                    &mut self.buildings,
-                    &mut self.scratch,
-                    &mut frame,
-                ) {
-                    attribution = installed.region.attribution().to_string();
-                    shown.push(i);
-                    pending += owed;
-                }
+        // The outline goes under the view unless one region fills it.
+        let whole = frame.bounding_box();
+        let filled = order
+            .iter()
+            .any(|&i| self.regions[i].region.area(view) == whole);
+        if !filled {
+            // Hard, as the tile cache draws it under a composed frame
+            // (`tiles::outline_under`): the two pictures agree there.
+            let Ok(_) = outline::draw(
+                outline::WORLD_50M,
+                outline::BORDERS_50M,
+                view,
+                ink,
+                style.theme,
+                &mut Hard(frame),
+            );
+        }
+        for &i in &order {
+            let installed = &self.regions[i];
+            let area = installed.region.area(view);
+            if let Some(owed) = region_into(
+                &installed.region,
+                view,
+                area,
+                ink,
+                style,
+                percent,
+                &mut self.read,
+                &mut self.buildings,
+                &mut self.scratch,
+                frame,
+            ) {
+                attribution = installed.region.attribution().to_string();
+                shown.push(i);
+                pending += owed;
             }
         }
         for i in shown {
             self.viewed(i);
         }
-        Drawn {
-            fb,
-            attribution,
-            pending,
-        }
+        (attribution, pending)
     }
 
     /// The names `view` shows from every region that reaches into it, in
@@ -493,7 +552,7 @@ impl Painter {
 /// how many of its tiles are not there yet (1291), `None` when a tile
 /// could not be read, and the region is left out.
 #[allow(clippy::too_many_arguments)]
-fn region_into(
+fn region_into<D>(
     region: &Region<File>,
     view: &Viewport,
     area: Rectangle,
@@ -503,8 +562,11 @@ fn region_into(
     read: &mut Vec<(ViewTile, Vec<u8>)>,
     buildings: &mut Vec<(TileId, Vec<u8>)>,
     fill: &mut FillScratch,
-    frame: &mut Frame<'_>,
-) -> Option<usize> {
+    frame: &mut D,
+) -> Option<usize>
+where
+    D: Coverage<Color = Rgb565, Error = core::convert::Infallible>,
+{
     let Ok(pending) = region.read_view(view, read) else {
         return None;
     };

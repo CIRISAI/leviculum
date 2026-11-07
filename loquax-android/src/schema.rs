@@ -388,6 +388,12 @@ pub enum Request {
     Name {
         name: String,
     },
+    /// The profile came to the front, or left it (1443): a tap on the
+    /// avatar is `Intent::Profile` on every target, and the model's
+    /// profile scene is what [`Query::Profile`] answers from.
+    Profile {
+        open: bool,
+    },
     /// Linked `peer` to a contact of the address book the user picked or
     /// confirmed (1139), or the link's copy refreshed: what the contact
     /// said right then, its thumbnail's bytes among it.
@@ -773,6 +779,15 @@ pub enum Query {
     /// none). Answered without a session too, `known` then empty: the
     /// first start's scanner asks before anything runs.
     Lxma {
+        text: String,
+        #[serde(default)]
+        lang: Option<String>,
+    },
+    /// [`Query::Lxma`] never asking the session (1464), `known` always
+    /// empty: whether `text` is a code and which kind, for the UI thread,
+    /// which may not wait on the session's lock (a shared text's first
+    /// word, before the screen decides where it goes).
+    Code {
         text: String,
         #[serde(default)]
         lang: Option<String>,
@@ -1322,6 +1337,31 @@ pub struct Profile {
     pub propagation_node: String,
     /// Advanced: the app's version and commit.
     pub version: String,
+    /// The core's profile scene (1443, `loquax::ui::profile`), its words
+    /// in the reader's language: what the screen says, from the
+    /// catalogue, so the activity draws them and words nothing itself.
+    #[serde(default)]
+    pub words: ProfileWords,
+}
+
+/// The words of the core's profile scene, resolved: the title, the name
+/// as the screen shows it, the address's label and its groups of four,
+/// the QR's caption, where the mailbox is and how it is reached, the
+/// devices, and the share's label.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileWords {
+    pub title: String,
+    pub name: String,
+    pub address_label: String,
+    pub fours: String,
+    pub caption: String,
+    pub mailbox: String,
+    /// How the mailbox is reached or how far a pull came; empty when the
+    /// phone knows neither.
+    pub state: String,
+    pub devices_label: String,
+    pub devices: Vec<String>,
+    pub share: String,
 }
 
 /// What [`Query::Lxma`] answers for a code (`loquax::code::read`, 1263):
@@ -2263,8 +2303,15 @@ pub struct BarButton {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Event {
-    /// Something the screen shows changed: ask again.
-    Changed { v: u32 },
+    /// Something the screen shows changed: ask again. `counts` is a digest
+    /// of every listed conversation's unread count and its muted and
+    /// sharing flags (1464): the service that notifies asks the list only
+    /// when it moved, not once per event.
+    Changed {
+        v: u32,
+        #[serde(default)]
+        counts: u64,
+    },
     /// A line for the user: what the terminal shows as a toast.
     Notice { v: u32, text: String },
     /// A pull began (`running`), ended (`done`, with how many new
@@ -2406,6 +2453,16 @@ pub struct MapRequest {
     pub own_lat_e6: Option<i32>,
     #[serde(default)]
     pub own_lon_e6: Option<i32>,
+    /// A time window chosen in the map menu's sheet (1385, 1419): a
+    /// [`TrackChoice::word`], `now` for the current movement, `today`,
+    /// `yesterday`, `week`, `month` or `all`. The answer's `track_window`
+    /// says which the frame drew.
+    #[serde(default)]
+    pub track_window: Option<String>,
+    /// The map menu's "fit all" chosen (1386): every peer with a position
+    /// inside the tracks' time window in view.
+    #[serde(default)]
+    pub fit_window: bool,
 }
 
 /// One region of the maps directory, for the Maps page (1201, 1207).
@@ -2445,6 +2502,14 @@ pub struct MapMark {
     /// for a pin.
     #[serde(default)]
     pub split_milli: Option<u32>,
+    /// Under the radar (1386), where no region touches the view: how far
+    /// and which way the pin is from the radar's centre, "1.3 km NE";
+    /// absent on a map, on a cluster and on the centre's own pin.
+    #[serde(default)]
+    pub way: Option<String>,
+    /// The pin's battery is below a fifth (1386): a battery beside it.
+    #[serde(default)]
+    pub low_battery: bool,
 }
 
 /// The map frame's description; its pixels follow it (see the table
@@ -2502,6 +2567,12 @@ pub struct MapShown {
     pub dark: bool,
     #[serde(default)]
     pub theme_chosen: bool,
+    /// The map's ground in its table, `0xAARRGGBB` (1441): what the
+    /// view shows where the frame it moves or scales does not reach, a
+    /// pan past the margin or a pinch out, instead of the window's dark
+    /// background. An older core sends none, zero, and the app draws none.
+    #[serde(default)]
+    pub ground: u32,
     /// The config's `map_theme` as the settings page shows it: `auto`,
     /// `light` or `dark`; `auto` when unset.
     #[serde(default)]
@@ -2555,6 +2626,30 @@ pub struct MapShown {
     /// in [`FILLING_MS`], when more of it may be there.
     #[serde(default)]
     pub filling: bool,
+    /// The tracks' time window the frame drew (1385): `now` for the
+    /// current movement, else the window's word.
+    #[serde(default)]
+    pub track_window: String,
+    /// The map screen's title (1419): "Map" with the default window, "Map
+    /// · This week" with another, in the phone's language; empty in a
+    /// prefetch's answer, which draws nothing.
+    #[serde(default)]
+    pub title: String,
+    /// The map menu's "Time window" sheet (1419): its entries in order,
+    /// the default first, the window the frame drew chosen.
+    #[serde(default)]
+    pub track_windows: Vec<TrackChoice>,
+}
+
+/// An entry of the map menu's time window sheet (1419).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackChoice {
+    /// What [`MapRequest::track_window`] sends back when it is chosen.
+    pub word: String,
+    /// Its words in the phone's language.
+    pub label: String,
+    /// The window the frame drew.
+    pub chosen: bool,
 }
 
 /// How long after a frame that says [`MapShown::filling`] the app asks

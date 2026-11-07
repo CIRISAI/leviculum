@@ -132,6 +132,7 @@ use leviculum_lxmf::Field;
 
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
+pub mod arrival;
 pub mod browse;
 pub mod by_hand;
 pub mod chat;
@@ -144,10 +145,13 @@ pub mod history;
 pub mod hit;
 pub mod info;
 pub mod intent;
+pub mod inventory;
 pub mod layout;
 pub mod liveness;
 pub mod map;
 pub mod photos;
+pub mod profile;
+pub mod radar;
 pub mod reactions;
 pub mod receipts;
 pub mod recording;
@@ -158,6 +162,7 @@ pub mod search;
 pub mod share;
 pub mod state;
 pub mod strings;
+pub mod tracks;
 pub mod verbs;
 pub mod viewload;
 pub mod voice;
@@ -431,6 +436,11 @@ pub struct Conversation {
     /// The model's activity count at the last message, for the list's order:
     /// most recent first, a conversation without messages by its place.
     pub activity: u64,
+    /// When something that is no message moved it up the list (a group's
+    /// invitation or its making, unix seconds by our clock): the list's
+    /// time for a conversation that has no message yet, in this run
+    /// ([`Conversation::last_written`]).
+    pub touched: Option<i64>,
     /// What the conversation says between its messages: the peer's name
     /// changes, each once.
     pub notes: Vec<Note>,
@@ -456,6 +466,22 @@ pub struct Note {
 }
 
 impl Conversation {
+    /// When its newest message was written, for the list's order (1445): a
+    /// position report or a group's state moves the list nowhere, unless
+    /// the conversation has nothing else; a group's invitation or making
+    /// counts by when it came ([`Conversation::touched`]). `None` while
+    /// nothing has a time.
+    pub fn last_written(&self) -> Option<i64> {
+        let newest = |moves: bool| {
+            self.messages
+                .iter()
+                .filter(|m| !moves || !(m.is_report() || m.is_group_state()))
+                .filter_map(|m| m.at.map(|at| at.unix_secs))
+                .max()
+        };
+        newest(true).or_else(|| newest(false)).max(self.touched)
+    }
+
     fn new(peer: [u8; 16]) -> Self {
         Self {
             peer,
@@ -463,6 +489,7 @@ impl Conversation {
             unread: 0,
             new_rule: None,
             activity: 0,
+            touched: None,
             notes: Vec::new(),
             pinned: false,
             flags: history::Flags::default(),
@@ -686,8 +713,12 @@ pub struct UiModel<B> {
     /// (the QR needs the `qr` feature, the model does not): what `my code`
     /// shows (1279).
     pub own_code: Option<OwnCode>,
-    /// Whether `my code`'s view is up, drawn as a detail view.
-    pub code_shown: bool,
+    /// Whether the profile is up (1443): what a tap on the avatar and
+    /// `my code` open, the scene's [`profile::ProfileScreen`] while it is.
+    pub profile_open: bool,
+    /// What the shell knows of the reader for the profile: the name the
+    /// announce carries, the mailbox, the devices.
+    pub profile: profile::ProfileFacts,
     /// Draw the delivery glyphs' ASCII fallback.
     pub ascii: bool,
     /// The tick counter: spinner frames and toast ages.
@@ -775,6 +806,15 @@ pub struct UiModel<B> {
     /// reads and deletes here is marked for the home's other devices, and a
     /// send is followed by a pull.
     pub home_client: bool,
+    /// The messages arriving now are the home's history, not live mail
+    /// (1429): a client whose first pull has not yet settled (its cursor is
+    /// still 0) is being handed the archive, the new device after `loquax
+    /// mailbox join` or a phone the mailbox moved to. Nobody read those
+    /// here, so none is marked read, even in the open conversation; their
+    /// read state is the archive's, the read marks the other devices sent,
+    /// which come in the same pull behind them. The shell sets it from the
+    /// cursor at start and clears it once a pull settled.
+    pub history: bool,
     /// The list is a screen of its own, as on a phone: a message arriving
     /// while no conversation is open leaves it closed and unread, where the
     /// terminal, which shows the list beside the conversation, opens it.
@@ -800,6 +840,17 @@ pub struct UiModel<B> {
     pub positions: BTreeMap<[u8; 16], Fix>,
     /// Positions received since the store last wrote, in arrival order.
     fixes_received: Vec<Fix>,
+    /// Every peer's fixes in time order, the track (1385): the store's at
+    /// start, then every fix received or announced; ours from the shell's
+    /// own fixes while it runs.
+    /// Shared, so a frontend takes them without a copy.
+    pub tracks: BTreeMap<[u8; 16], alloc::sync::Arc<Vec<tracks::TrackFix>>>,
+    /// The map's time window for the tracks' lines: a map control, the
+    /// current episode until the reader picks another.
+    pub track_window: tracks::TrackWindow,
+    /// The fix time of the own fix the store last kept (1386): the way
+    /// back is stored a row every [`OWN_TRACK_EVERY_SECS`] at most.
+    own_stored_at: Option<i64>,
     /// The map, when open: it takes the conversation pane.
     pub map: Option<map::MapState>,
     /// What the shell draws the map with ([`UiEvent::MapSetup`]).
@@ -836,6 +887,16 @@ pub struct UiModel<B> {
     drafts_due: BTreeMap<[u8; 16], u64>,
     /// What the reader saw, and the read receipts owed (1231).
     pub reading: receipts::Reading,
+    /// The propagation receipts owed (1395).
+    pub arrivals: arrival::Arrivals,
+    /// What the propagation node is to be asked about our uploads (1409),
+    /// on a device that is its own node; a home's client waits for the
+    /// home's [`crate::home::KIND_PN_STATUS`] instead. The shell restores
+    /// it from the store ([`crate::pn_status::Asker::restore`]).
+    pub pn_asker: crate::pn_status::Asker,
+    /// The sync rounds this session finished: the asker asks a node once a
+    /// round.
+    pn_round: u64,
     /// How far a photo is scaled before it goes (1220, `photo_size` in
     /// the config): the shell scales by it before
     /// [`UiEvent::SendPhoto`].
@@ -923,7 +984,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             scroll_top: None,
             detail: None,
             own_code: None,
-            code_shown: false,
+            profile_open: false,
+            profile: profile::ProfileFacts::default(),
             detail_scroll: 0,
             mailbox: MailboxShown::default(),
             activity: 0,
@@ -941,6 +1003,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             changed_peers: BTreeSet::new(),
             forgotten: Vec::new(),
             home_client: false,
+            history: false,
             list_apart: false,
             marks: Vec::new(),
             petnames: Vec::new(),
@@ -950,6 +1013,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             reveal_pending: None,
             positions: BTreeMap::new(),
             fixes_received: Vec::new(),
+            tracks: BTreeMap::new(),
+            track_window: tracks::TrackWindow::default(),
+            own_stored_at: None,
             map: None,
             map_setup: map::MapSetup::default(),
             map_picture: None,
@@ -964,6 +1030,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             compose_cleared: false,
             drafts_due: BTreeMap::new(),
             reading: receipts::Reading::default(),
+            arrivals: arrival::Arrivals::default(),
+            pn_asker: crate::pn_status::Asker::default(),
+            pn_round: 0,
             photo_size: photos::PhotoSize::default(),
             playing: None,
             bar: compose::Bar::default(),
@@ -1058,13 +1127,13 @@ impl<B: InputBuffer> UiModel<B> {
 impl<B> UiModel<B> {
     /// Whether a detail view is up: a message's, or `my code`'s.
     pub fn detail_open(&self) -> bool {
-        self.detail.is_some() || self.code_shown
+        self.detail.is_some() || self.profile_open
     }
 
     /// Close the detail view up, whichever it is.
     pub fn close_detail(&mut self) {
         self.detail = None;
-        self.code_shown = false;
+        self.profile_open = false;
     }
 
     /// `peer`'s message went out: its draft goes, from the store at once,
@@ -1240,8 +1309,10 @@ impl<B> UiModel<B> {
     }
 
     /// The conversations in the list's order: the pinned first, then the
-    /// rest, each by their last message, most recent first; those without
-    /// one after, in the order they came. Only those the list shows
+    /// rest, each by when their newest message was written, most recent
+    /// first ([`Conversation::last_written`], 1445: a history pulled at
+    /// once keeps its order), then by when it came here; those without one
+    /// after, in the order they came. Only those the list shows
     /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
     pub fn order(&self) -> Vec<usize> {
         // The blocked view lists the blocked, archived or not.
@@ -1253,7 +1324,11 @@ impl<B> UiModel<B> {
             .collect();
         order.sort_by_key(|&i| {
             let c = &self.conversations[i];
-            (core::cmp::Reverse(c.pinned), core::cmp::Reverse(c.activity))
+            (
+                core::cmp::Reverse(c.pinned),
+                core::cmp::Reverse(c.last_written()),
+                core::cmp::Reverse(c.activity),
+            )
         });
         order
     }
@@ -1412,6 +1487,13 @@ pub enum UiEvent {
     SendLeg(Leg),
     /// The fetch finished: how many messages were new, or why it failed.
     FetchDone(Result<usize, String>),
+    /// The propagation node `node` answered [`UiEffect::AskPn`] (1409):
+    /// the statuses, or `None` when the link failed, the request went
+    /// unanswered or the node refused, which leaves every id open.
+    PnAnswered {
+        node: [u8; 16],
+        answer: Option<Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>>,
+    },
     /// A line a runner or the stamp worker said along the way (the auto
     /// fallback's "trying a propagation node", a mailbox adoption), the
     /// lines the CLI writes to stderr.
@@ -1525,6 +1607,14 @@ pub enum UiEvent {
     },
     /// The reader's photo size (1220), set: the settings page's row.
     PhotoSize(photos::PhotoSize),
+    /// The profile (1443), opened or closed: [`intent::Intent::Profile`],
+    /// and Back from it.
+    Profile { open: bool },
+    /// What the shell knows of the reader for the profile, anew.
+    ProfileFacts(profile::ProfileFacts),
+    /// The profile's "Share my address" where the share is a copy: the
+    /// window and the terminal ([`intent::Intent::ShareCode`]).
+    ShareCode,
     /// A photo the camera took for `peer` (1270), scaled by the shell as
     /// [`UiEvent::SendPhoto`]'s: it waits in the compose bar, and the next
     /// [`UiEvent::Write`] sends it with the text as its caption.
@@ -1548,6 +1638,9 @@ pub enum UiEvent {
     /// The map's centre as the shell's map shows it, or none while it has
     /// no map (1371): what the position sheet's "map centre" row takes.
     MapCentre(Option<leviculum_lxmf::telemetry::Location>),
+    /// The tracks' time window chosen in the map's menu (1385, 1419): the
+    /// window's single choice, the default among them.
+    TrackWindow(tracks::TrackWindow),
     /// The position sheet's "map centre" row: the map's centre is the own
     /// fix (1371).
     FixAtMapCentre,
@@ -1692,6 +1785,14 @@ pub enum UiEffect {
     /// Drain the mailbox, as `loquax fetch` does; reported with
     /// [`UiEvent::FetchDone`].
     Fetch,
+    /// Ask the propagation node `node` what became of `ids`, our uploads'
+    /// `transient_id`s, over a link of its own that is never identified
+    /// (1409, `crate::home::client::ask_pn_status`); reported with
+    /// [`UiEvent::PnAnswered`].
+    AskPn { node: [u8; 16], ids: Vec<[u8; 32]> },
+    /// A line of the asking for the log at info level
+    /// (`PN_STATUS_ASKED …`, `PN_STATUS_SKIPPED reason=…`).
+    PnLine(String),
     /// Leave.
     Quit,
     /// Draw the whole screen again from scratch (`Ctrl-l`).
@@ -1821,8 +1922,12 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // What the reader saw, and the receipts it owes: on this fold's sends,
     // or alone once due (1231).
     model.read_step(&mut effects);
+    // The propagation receipts owed (1395): on this fold's sends, or alone
+    // once due.
+    model.arrival_step(&mut effects);
     // Every message sent says the sender takes read receipts (1230), while
-    // the switch is on, and understands groups (1307), always.
+    // the switch is on, understands groups (1307) and acknowledges
+    // propagated post (1395), always.
     receipts::mark_sends(&mut effects, groups::client_caps(model.reading.on));
     effects
 }
@@ -1937,11 +2042,49 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::OwnFix(fix) => {
+            if let (Some(own), Some(location)) = (model.address, fix) {
+                let at = model.now.map(|now| now.unix_secs);
+                let t = match at {
+                    Some(now) if location.last_update > now + telemetry::FUTURE_TOLERANCE_SECS => {
+                        now
+                    }
+                    _ => location.last_update,
+                };
+                let own_fix = Fix {
+                    peer: own,
+                    via: own,
+                    message: None,
+                    received_at: at,
+                    location,
+                    telemetry: Vec::new(),
+                    source: telemetry::Source::Telemetry,
+                };
+                let mut point = tracks::TrackFix::of(&own_fix);
+                point.t = t;
+                tracks::insert(
+                    alloc::sync::Arc::make_mut(model.tracks.entry(own).or_default()),
+                    point,
+                );
+                // The way back (1386): the own fixes stored too, a row a
+                // minute at most, so the track outlives a restart and needs
+                // no network.
+                let due = model
+                    .own_stored_at
+                    .is_none_or(|last| t >= last + OWN_TRACK_EVERY_SECS || t < last);
+                if due {
+                    model.own_stored_at = Some(t);
+                    model.fixes_received.push(own_fix);
+                }
+            }
             model.bar.own_fix = fix;
             model.bar.by_hand = false;
             model.shares_due()
         }
         UiEvent::EnterPosition { text } => model.enter_position(&text),
+        UiEvent::TrackWindow(chosen) => {
+            model.track_window = chosen;
+            Vec::new()
+        }
         UiEvent::MapCentre(centre) => {
             model.bar.map_centre = centre;
             Vec::new()
@@ -1965,6 +2108,12 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::StartShare { peer, span } => model.start_share(peer, span),
         UiEvent::StopShare { peer } => model.stop_share(peer),
         UiEvent::ShareFix { peer } => model.share_fix(peer),
+        UiEvent::Profile { open } => model.show_profile(open),
+        UiEvent::ProfileFacts(facts) => {
+            model.profile = facts;
+            Vec::new()
+        }
+        UiEvent::ShareCode => model.share_code(),
         UiEvent::PhotoSize(size) => {
             model.photo_size = size;
             vec![UiEffect::Remember {
@@ -2043,7 +2192,19 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             }
             Vec::new()
         }
-        UiEvent::FetchDone(result) => on_fetch_done(model, result),
+        UiEvent::FetchDone(result) => {
+            let synced = result.is_ok();
+            let mut effects = on_fetch_done(model, result);
+            if synced {
+                effects.extend(pn_round(model));
+            }
+            effects
+        }
+        UiEvent::PnAnswered { node, answer } => {
+            let (answers, line) = model.pn_asker.answered(node, answer.as_deref());
+            model.pn_answered(&answers);
+            vec![UiEffect::PnLine(line)]
+        }
         UiEvent::Open { peer } => {
             let index = model.conversation(peer);
             model.select(index);
@@ -2138,6 +2299,27 @@ fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Ve
         effects.extend(start_pull(model, reason));
     }
     effects
+}
+
+/// The end of a sync round on a device that is its own node (1409): ask
+/// each propagation node that holds an open upload, once, or say why not.
+/// Only a round that synced: one that failed found the node silent. A
+/// home's client asks nothing; its home asks and archives the answer.
+fn pn_round<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    if model.home_client {
+        return Vec::new();
+    }
+    model.pn_round += 1;
+    let now = model.now.map_or(0, |at| at.unix_secs);
+    model
+        .pn_asker
+        .round(model.pn_round, now)
+        .into_iter()
+        .map(|(node, asked)| match asked {
+            Ok(ids) => UiEffect::AskPn { node, ids },
+            Err(skip) => UiEffect::PnLine(skip.line()),
+        })
+        .collect()
 }
 
 /// On a client of a home node, a send is followed by a pull, so the bubble
@@ -2282,6 +2464,11 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
         return Vec::new();
     }
     if model.detail_open() {
+        // The profile's "Share my address" (1443): the code to the
+        // clipboard, as the window's button does.
+        if model.profile_open && key.code == KeyCode::Char('s') {
+            return model.share_code();
+        }
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Enter) {
             model.close_detail();
         } else if let Some(cmd) = keys::overlay_scroll(&key, model.ctx()) {
@@ -2553,6 +2740,15 @@ fn map_load<B: InputBuffer>(model: &mut UiModel<B>, load: MapLoad) {
     }
 }
 
+/// The own fixes the store keeps for the way back (1386): one a minute at
+/// most, whatever the receiver's cadence; a day outdoors is 1 440 rows.
+pub const OWN_TRACK_EVERY_SECS: i64 = 60;
+
+/// World units a pixel of `view` spans.
+fn viewport_unit(view: &leviculum_map::viewport::Viewport) -> f64 {
+    libm::exp2(24.0 - f64::from(view.zoom()))
+}
+
 /// The palette's `map`: the map in the conversation's place, every pin in
 /// view, the first in `Tab` order selected.
 fn open_map<B: InputBuffer>(model: &mut UiModel<B>) {
@@ -2604,6 +2800,12 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
     let setup = model.map_setup.clone();
     let area = model.map_area();
     let pins = model.map_pins();
+    let inside = match (cmd, model.now) {
+        (MapCmd::FitWindow, Some(now)) => {
+            tracks::inside(&model.track_input(), model.track_window, &now)
+        }
+        _ => Vec::new(),
+    };
     let Some(state) = model.map.as_mut() else {
         return Vec::new();
     };
@@ -2616,6 +2818,12 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
         MapCmd::Pan(dx, dy) => pan_map(state, area, &setup, dx, dy),
         MapCmd::Fit => {
             let (centre, zoom) = map::fit(&pins, area, &setup);
+            state.centre = centre;
+            state.zoom = zoom;
+        }
+        MapCmd::FitWindow => {
+            let shown = map::in_window(&pins, &inside);
+            let (centre, zoom) = map::fit(&shown, area, &setup);
             state.centre = centre;
             state.zoom = zoom;
         }
@@ -2658,6 +2866,11 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
             }
         }
         MapCmd::GlyphTest => model.map_glyph_test = !model.map_glyph_test,
+        MapCmd::TrackWindow(forward) => {
+            model.track_window = model.track_window.step(forward);
+            let word = model.track_window.word();
+            model.toast(ToastKind::Info, format!("tracks: {word}"));
+        }
     }
     Vec::new()
 }
@@ -2887,6 +3100,7 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
         }
         Target::Badge(index) => open_at_new(model, index),
         Target::SearchHint | Target::SearchField => open_search(model),
+        Target::Me => return model.show_profile(true),
         Target::Result(index) => {
             if let Some(search) = model.search.as_mut() {
                 search.selected = index;
@@ -3427,10 +3641,19 @@ fn leg_words(leg: Leg) -> &'static str {
     }
 }
 
+/// The ledger line of a proof (1462): the recipient's identity, its
+/// mailbox or its device, has it.
+pub const PROOF_LINE: &str = "arrived: proof received";
+
+/// The proof's ledger line before 1462, when a proof was shown as two
+/// ticks: a ledger kept from then still says it.
+pub const PROOF_LINE_BEFORE_1462: &str = "delivered: proof received";
+
 /// What a message's ledger says when it reaches a state.
 fn ledger_words(state: DeliveryState) -> &'static str {
     match state {
-        DeliveryState::Delivered => "delivered: proof received",
+        DeliveryState::Arrived => PROOF_LINE,
+        DeliveryState::Delivered => "on the recipient's device",
         DeliveryState::Rejected => "rejected by the peer",
         DeliveryState::Failed => "failed",
         other => state_words(other),
@@ -3445,7 +3668,8 @@ fn state_words(state: DeliveryState) -> &'static str {
         DeliveryState::InFlight => "in flight",
         DeliveryState::Sent => "sent, no proof yet",
         DeliveryState::InMailbox => "waiting at a propagation node",
-        DeliveryState::Delivered => "delivered",
+        DeliveryState::Arrived => "arrived",
+        DeliveryState::Delivered => "on the device",
         DeliveryState::Read { .. } => "read",
         DeliveryState::Rejected => "rejected",
         DeliveryState::Failed => "not sent",
@@ -3478,7 +3702,8 @@ fn detail_words(state: DeliveryState, who: &str, offset_secs: i32) -> String {
         DeliveryState::InFlight => "being sent now".into(),
         DeliveryState::Sent => "sent; nobody has confirmed it arrived yet".into(),
         DeliveryState::InMailbox => format!("in the mailbox, delivered once {who} is online"),
-        DeliveryState::Delivered => format!("delivered: it arrived on {who}'s device"),
+        DeliveryState::Arrived => format!("arrived: {who}'s mailbox or device has it"),
+        DeliveryState::Delivered => format!("on {who}'s device: it said so"),
         DeliveryState::Read { at } => {
             let at = WallTime {
                 unix_secs: i64::from(at),
@@ -3489,6 +3714,12 @@ fn detail_words(state: DeliveryState, who: &str, offset_secs: i32) -> String {
         DeliveryState::Rejected => "not sent: refused; its mark sends it again".into(),
         DeliveryState::Failed => "not sent: given up; its mark sends it again".into(),
     }
+}
+
+/// ` 10:31`, when this device learned something, for the detail view's
+/// words; nothing without a time.
+fn at_words(at: Option<WallTime>) -> String {
+    at.map(|at| format!(" {}", at.hh_mm())).unwrap_or_default()
 }
 
 /// `Enter` on a message: its detail view, with what this device saw
@@ -3797,16 +4028,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             member: None,
             confirmed: false,
         }),
-        PaletteCommand::MyCode => {
-            match model.own_code {
-                Some(_) => {
-                    model.code_shown = true;
-                    model.detail_scroll = 0;
-                }
-                None => model.toast(ToastKind::Error, NO_OWN_CODE.to_string()),
-            }
-            Vec::new()
-        }
+        PaletteCommand::MyCode => model.show_profile(true),
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -3901,7 +4123,7 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
 /// | `Sending` | `InFlight` (spinner) |
 /// | `Sent` | `Sent` ◇ |
 /// | `AwaitingCollection` | `InMailbox` ⌂ |
-/// | `Delivered` | `Delivered` ✓ |
+/// | `Delivered` (a proof) | `Arrived` ✓ |
 /// | `Rejected` | `Rejected` ✗ |
 /// | `Failed`, `Cancelled` | `Failed` ✗ (dim) |
 ///
@@ -3913,7 +4135,9 @@ pub fn delivery_of(state: MessageState) -> DeliveryState {
         MessageState::Sending => DeliveryState::InFlight,
         MessageState::Sent => DeliveryState::Sent,
         MessageState::AwaitingCollection => DeliveryState::InMailbox,
-        MessageState::Delivered => DeliveryState::Delivered,
+        // A proof is the recipient's identity, which its mailbox holds
+        // too (1462): one tick. Two are the device's own word.
+        MessageState::Delivered => DeliveryState::Arrived,
         MessageState::Rejected => DeliveryState::Rejected,
         MessageState::Failed | MessageState::Cancelled => DeliveryState::Failed,
     }
@@ -3930,7 +4154,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             return schedule(model, SyncEvent::Start);
         }
         // Free evidence that the mailbox is reachable now.
-        OutboxEvent::NodeAnnounced { destination } => {
+        OutboxEvent::NodeAnnounced {
+            destination,
+            status,
+        } => {
+            model.pn_asker.announced(destination, status);
             if model.mailbox.node == Some(destination) {
                 return schedule(model, SyncEvent::Announce);
             }
@@ -3958,7 +4186,27 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
             }
         }
-        OutboxEvent::State { message_id, state } => apply_state(model, message_id, state),
+        OutboxEvent::State { message_id, state } => {
+            if state == MessageState::Delivered {
+                // A proof says more than the node can.
+                model.pn_asker.settled(&message_id);
+            }
+            apply_state(model, message_id, state)
+        }
+        // A node proved our upload (1409): asked about at the next rounds'
+        // ends, on a device that is its own node.
+        OutboxEvent::Uploaded {
+            message_id,
+            transient_id,
+            node,
+        } => {
+            if let (Some(node), false) = (node.or(model.mailbox.node), model.home_client) {
+                let now = model.now.map_or(0, |at| at.unix_secs);
+                model.pn_asker.uploaded(node, message_id, transient_id, now);
+            }
+        }
+        // What the home's propagation node said (1409).
+        OutboxEvent::HomePnStatus { answers } => model.pn_answered(&answers),
         OutboxEvent::HomeStalled { message_id } => home_stalled(model, message_id),
         OutboxEvent::HomeSent {
             message_id,
@@ -3986,12 +4234,20 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
             }
             crate::home::wire::MarkFlag::Seen { .. } => model.home_seen(&mark.ids),
+            // Another device said these are on it (1462): this one owes
+            // its own word no more.
+            crate::home::wire::MarkFlag::Arrived { .. } => model.home_arrived(&mark.ids),
         },
         OutboxEvent::Left {
             message_id,
             last: Some(state),
             ..
-        } => apply_state(model, message_id, state),
+        } => {
+            if state == MessageState::Delivered {
+                model.pn_asker.settled(&message_id);
+            }
+            apply_state(model, message_id, state)
+        }
         OutboxEvent::MeshPosition {
             identity,
             location,
@@ -4017,12 +4273,16 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
             }
         }
+        OutboxEvent::Propagated { message_id, source } => {
+            return model.arrived_here(source, message_id);
+        }
         OutboxEvent::Received {
             message_id,
             source,
             body,
             fields,
             verified,
+            sent_at,
             ..
         } => {
             let lev = leviculum_lxmf::lev::Lev::from_fields(&fields);
@@ -4053,7 +4313,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             }
             model.learn_group(source, false, &fields);
             let state = groups::is_state(&String::from_utf8_lossy(&body), &fields);
+            // When this device took it, for its ledger and the Info sheet's
+            // "Received"; the bubble shows when its writer wrote it (1445).
             let at = model.now;
+            let shown = written_time(at, sent_at, lev.as_ref());
             let activity = model.bump();
             let conversation = &mut model.conversations[index];
             let first = conversation.messages.is_empty();
@@ -4069,7 +4332,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 },
                 leg: None,
                 unproven: false,
-                at,
+                at: shown,
                 ledger: vec![LedgerEntry::new(
                     at,
                     match verified {
@@ -4100,6 +4363,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             // A group's state (1307) is kept and stored, and asks for no
             // attention: no unread, no toast, no cursor. A group the
             // reader deleted leaves this device with it (pass four).
+            if !state {
+                // On this device now: its sender is told so (1462).
+                effects.extend(model.arrived_here(source, message_id));
+            }
             if state {
                 model.forget_deleted_groups();
                 return effects;
@@ -4122,7 +4389,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
                 return effects;
             }
-            if open && model.home_client {
+            // History (1429) is not read by arriving: the open conversation
+            // takes it as a closed one would, unread until the archive's
+            // marks or the reader say otherwise.
+            let history = model.history;
+            if open && model.home_client && !history {
                 // Read where it arrived, so read on the home's other devices.
                 model.mark_out(crate::home::wire::MarkFlag::Read, vec![message_id]);
             }
@@ -4132,22 +4403,28 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             // no toast and brings no archived conversation back. Its row
             // and the peer's liveness say what it changed.
             if report {
-                if !open {
+                if !open || history {
                     model.changed_peers.insert(peer);
                     model.conversations[index].unread += 1;
-                } else if follow {
+                }
+                if open && follow {
                     model.message_cursor = model.conversations[index].messages.len() - 1;
                 }
                 return effects;
             }
             // Muted: counted, raised nowhere; archived and not muted: back
             // in the list (1146).
-            let raise = model.arrived(index);
-            if !open {
+            // History raises no toast either: thousands of old messages
+            // are no news.
+            let raise = model.arrived(index) && !history;
+            if !open || history {
                 model.changed_peers.insert(peer);
                 let conversation = &mut model.conversations[index];
                 conversation.unread += 1;
                 conversation.mark_new();
+                if open && follow {
+                    model.message_cursor = conversation.messages.len() - 1;
+                }
             } else if follow {
                 let conversation = &mut model.conversations[index];
                 // A reader at the newest message stays at the newest.
@@ -4375,19 +4652,51 @@ impl<B> UiModel<B> {
         let state = self.map.as_ref()?;
         let area = self.map_area();
         let viewport = map::viewport(state, area, &self.map_setup);
+        let mut shown = self.map_pins();
+        // No region touches the view: the radar (1386), its pins labelled
+        // by distance and compass point from the centre.
+        let radar = match radar::shows(&viewport, &self.map_setup.regions) {
+            true => radar::radar(&shown, viewport_unit(&viewport), viewport.size()),
+            false => None,
+        };
+        if let Some(r) = &radar {
+            radar::label(&mut shown, r);
+        }
         let pins = map::place(
-            &self.map_pins(),
+            &shown,
             &viewport,
             area,
             &self.map_setup,
             state.selected,
             self.ascii,
         );
+        // The tracks under the pins: a pixel of the view is an image
+        // pixel, a place's cell two cells across.
+        let unit = libm::exp2(24.0 - f64::from(viewport.zoom()));
+        let scale = f32::from(self.map_setup.cell_px.0.max(1)) / 4.0;
+        let tracks = tracks::cells::cells(
+            &self.map_tracks(unit, scale),
+            &viewport,
+            area,
+            self.map_setup.cell_px,
+            self.ascii,
+        );
+        let radar = radar.map(|r| map::RadarCells {
+            note: r.note(),
+            cells: radar::cells(&r, &viewport, area, self.map_setup.cell_px, self.ascii),
+        });
         Some(map::MapView {
             area,
             viewport,
             cell_px: self.map_setup.cell_px,
             pins,
+            tracks,
+            radar,
+            window_word: self
+                .track_window
+                .title_word()
+                .map(|w| w.text(self.lang).to_string()),
+            moving: self.map_press.as_ref().is_some_and(|p| p.dragging),
         })
     }
 
@@ -4401,7 +4710,46 @@ impl<B> UiModel<B> {
         if newer {
             self.positions.insert(fix.peer, fix.clone());
         }
+        tracks::insert(
+            alloc::sync::Arc::make_mut(self.tracks.entry(fix.peer).or_default()),
+            tracks::TrackFix::of(&fix),
+        );
         self.fixes_received.push(fix);
+    }
+
+    /// The store's fixes at start, every peer's in time order: the tracks.
+    pub fn restore_tracks(&mut self, fixes: Vec<Fix>) {
+        for fix in fixes {
+            tracks::insert(
+                alloc::sync::Arc::make_mut(self.tracks.entry(fix.peer).or_default()),
+                tracks::TrackFix::of(&fix),
+            );
+        }
+    }
+
+    /// The tracks of every peer the map shows a pin for (blocked peers
+    /// have none), drawn on a view whose screen pixel spans `unit` world
+    /// units at `scale` ([`tracks::track`]), in the model's window; none
+    /// before the shell has said the time.
+    pub fn map_tracks(&self, unit: f64, scale: f32) -> Vec<tracks::Track> {
+        let Some(now) = self.now else {
+            return Vec::new();
+        };
+        tracks::tracks(&self.track_input(), self.track_window, &now, unit, scale)
+    }
+
+    /// The fixes the map draws tracks of: every peer's but a blocked
+    /// one's, ours marked; shared, so a frontend that draws them at its
+    /// own zoom takes them without a copy.
+    pub fn track_input(&self) -> tracks::TrackInput {
+        self.tracks
+            .iter()
+            .filter(|(peer, fixes)| {
+                !fixes.is_empty()
+                    && (self.names.trust(peer) != Trust::Blocked || self.address == Some(**peer))
+            })
+            .map(|(peer, fixes)| (*peer, self.address == Some(*peer), fixes.clone()))
+            .collect()
     }
 
     /// The store's latest positions at start, one a peer.
@@ -4421,8 +4769,7 @@ impl<B> UiModel<B> {
     /// address of the identity that announced, so it joins the peer's
     /// telemetry positions, and the newest fix wins by [`Fix::newer_than`]
     /// whichever way it came; [`Fix::source`] says which. The store keeps
-    /// none of it: the node announces again at its cadence, and a node
-    /// nearby that is no contact leaves no trace once it is gone.
+    /// it for the track (1385), marked as announced.
     pub fn mesh_position(
         &mut self,
         identity: [u8; 16],
@@ -4449,6 +4796,13 @@ impl<B> UiModel<B> {
             .positions
             .get(&peer)
             .is_none_or(|held| fix.newer_than(held));
+        tracks::insert(
+            alloc::sync::Arc::make_mut(self.tracks.entry(peer).or_default()),
+            tracks::TrackFix::of(&fix),
+        );
+        // The track keeps it (1385): stored, one row a peer and fix time,
+        // so a node announcing the same fix again costs nothing.
+        self.fixes_received.push(fix.clone());
         if newer {
             self.positions.insert(peer, fix);
         }
@@ -4512,36 +4866,47 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
     let groups = &model.groups;
     for (c, conversation) in model.conversations.iter_mut().enumerate() {
         // In a group (1307 pass four) the group's proof is one tick: the
-        // group has it. The two come with its status, once every member's
-        // copy is proven, and a late proof does not take them back.
+        // group has it. Its status moves it on (1466: arrived once every
+        // member's copy is proven, two ticks once every copy is on a
+        // device), and a late proof takes neither back.
         let group = groups.contains_key(&conversation.peer);
         let shown = match delivered {
-            DeliveryState::Delivered if group => DeliveryState::InMailbox,
+            DeliveryState::Arrived if group => DeliveryState::InMailbox,
             other => other,
         };
         for (m, message) in conversation.messages.iter_mut().enumerate() {
             if !message.outbound || message.id != Some(id) {
                 continue;
             }
-            if group && message.delivery == Some(DeliveryState::Delivered) {
+            if group
+                && matches!(
+                    message.delivery,
+                    Some(DeliveryState::Arrived | DeliveryState::Delivered)
+                )
+            {
                 continue;
             }
             if gives_up(shown) && running.contains(&(c, m)) {
                 // The runner may still carry it another way.
                 continue;
             }
-            // Read implies delivered (1230): a late proof leaves it.
-            if matches!(message.delivery, Some(DeliveryState::Read { .. })) {
+            // Read implies delivered (1230), and the device's own word
+            // (1462) says more than its identity's proof: a late proof
+            // leaves either.
+            if matches!(
+                message.delivery,
+                Some(DeliveryState::Read { .. } | DeliveryState::Delivered)
+            ) {
                 continue;
             }
             if message.unproven
-                && !matches!(shown, DeliveryState::Delivered | DeliveryState::Rejected)
-                && !(group && delivered == DeliveryState::Delivered)
+                && !matches!(shown, DeliveryState::Arrived | DeliveryState::Rejected)
+                && !(group && delivered == DeliveryState::Arrived)
             {
                 continue;
             }
             if message.delivery != Some(shown) {
-                let words = match group && delivered == DeliveryState::Delivered {
+                let words = match group && delivered == DeliveryState::Arrived {
                     true => "the group has it: proof received",
                     false => ledger_words(shown),
                 };
@@ -4579,6 +4944,31 @@ pub const STALLED_NOTE: &str = "sending stopped without an answer, trying again"
 /// bubble this device has for it says sent, and a device without one gets
 /// it. A bubble further along (waiting at a propagation node, delivered) stays: a pull
 /// asked again after a crash brings the sent entry a second time.
+/// The time a received message shows (1445): when its writer wrote it,
+/// not when this device took it, so a history a new device pulls at once
+/// keeps its days. A group copy's own timestamp is the home's acceptance,
+/// the group's order (`crate::home::group`), so its writer's time comes
+/// from the copy's `lev` pair. A time from the future (a writer's clock
+/// ahead of ours) shows as now, and one not known (0) as now too; `None`
+/// before the shell said the time.
+fn written_time(
+    now: Option<WallTime>,
+    sent_at: i64,
+    lev: Option<&leviculum_lxmf::lev::Lev>,
+) -> Option<WallTime> {
+    let written = lev
+        .and_then(|lev| lev.group_copy)
+        .and_then(|copy| i64::try_from(copy.sent_ms / 1000).ok())
+        .unwrap_or(sent_at);
+    now.map(|now| WallTime {
+        unix_secs: match written > 0 {
+            true => written.min(now.unix_secs),
+            false => now.unix_secs,
+        },
+        ..now
+    })
+}
+
 fn home_sent<B>(
     model: &mut UiModel<B>,
     message_id: [u8; 32],
@@ -4721,7 +5111,10 @@ fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> 
         message.unproven = true;
         message.note(now, "sent over a link, no delivery proof yet");
         // A proof that came in the same breath as the runner's end stays.
-        if message.delivery != Some(DeliveryState::Delivered) {
+        if !matches!(
+            message.delivery,
+            Some(DeliveryState::Arrived | DeliveryState::Delivered | DeliveryState::Read { .. })
+        ) {
             message.delivery = Some(DeliveryState::Sent);
         }
     }
@@ -4778,8 +5171,24 @@ pub struct DetailView {
 pub struct OwnCode {
     /// The `lxma://` code, what a friend pastes.
     pub code: String,
-    /// Its QR code, as lines of half blocks.
-    pub qr: Vec<String>,
+    /// Its QR code verbatim in byte mode, as the phone's and the
+    /// window's scanners read it (`loquax::home::qr::verbatim_modules`):
+    /// `side` modules a side, row by row, true for dark. A side of 0 where
+    /// the build encodes none (no `qr` feature).
+    pub side: u32,
+    pub modules: Vec<bool>,
+}
+
+impl OwnCode {
+    /// `code` with its QR, the side and the modules, where there is one.
+    pub fn of(code: String, qr: Option<(u32, Vec<bool>)>) -> Self {
+        let (side, modules) = qr.unwrap_or_default();
+        Self {
+            code,
+            side,
+            modules,
+        }
+    }
 }
 
 /// What each part of the screen shows.
@@ -4867,9 +5276,6 @@ pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
 
 /// What the share's chip row says after its words in the terminal (1273).
 pub const SHARE_CLICK: &str = "click to stop";
-
-/// What `my code` says when the frontend has no code to show.
-pub const NO_OWN_CODE: &str = "Your code is not known yet.";
 
 /// The toast of a send that failed: the legs' reasons are in its details.
 pub const NOT_SENT: &str = "Not sent. Its details say why.";
@@ -5109,7 +5515,18 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
         match (message.delivery, message.signature) {
             (Some(state), _) => {
                 let state = shown_delivery(state, model.home_client, model.reading.on);
-                format!("state  {}", detail_words(state, &who, offset))
+                let words = match (state, arrival::witness(message)) {
+                    (DeliveryState::Arrived, Some((arrival::Witness::Collected, at))) => {
+                        format!("collected from the propagation network{}", at_words(at))
+                    }
+                    (
+                        DeliveryState::Sent | DeliveryState::InMailbox,
+                        Some((arrival::Witness::NotCollected, _)),
+                    ) => "not collected at the propagation node; perhaps delivered via another"
+                        .to_string(),
+                    _ => detail_words(state, &who, offset),
+                };
+                format!("state  {words}")
             }
             (None, Signature::Verified) => "signature verified".to_string(),
             (None, Signature::Unverified) => "signature NOT verified".to_string(),
@@ -5147,27 +5564,61 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
     })
 }
 
-/// `my code`'s view: the code a friend pastes, then its QR to scan.
-fn code_view(code: &OwnCode) -> DetailView {
+/// The profile's view (1443): the scene's [`profile::ProfileScreen`] in
+/// the terminal's detail view, its words in the reader's language: the
+/// name, the address in fours, the mailbox and how it is reached, the
+/// devices, then the code a friend pastes and its QR to scan, and the key
+/// that shares the address.
+fn profile_view(screen: &profile::ProfileScreen, lang: strings::Lang) -> DetailView {
+    let mut rows = vec![
+        screen.name.resolve(lang),
+        String::new(),
+        screen.address_label.resolve(lang),
+        screen.fours.clone(),
+        String::new(),
+        screen.mailbox.resolve(lang),
+    ];
+    rows.extend(screen.state.as_ref().map(|state| state.resolve(lang)));
+    if !screen.devices.is_empty() {
+        rows.push(String::new());
+        rows.push(screen.devices_label.resolve(lang));
+        rows.extend(
+            screen
+                .devices
+                .iter()
+                .map(|d| format!("  {}", d.resolve(lang))),
+        );
+    }
+    let mut fixed = Vec::new();
+    if let Some(code) = &screen.code {
+        rows.push(String::new());
+        rows.push(format!("s  {}", strings::StrId::ProfileShare.text(lang)));
+        rows.push(String::new());
+        rows.push(screen.caption.resolve(lang));
+        rows.push(String::new());
+        rows.push(code.clone());
+        rows.push(String::new());
+        fixed = screen
+            .qr
+            .as_ref()
+            .map(|qr| qr.half_blocks(QR_QUIET))
+            .unwrap_or_default();
+    }
     DetailView {
-        title: "your code".to_string(),
-        rows: vec![
-            "A friend adds you with this code: they scan the QR, or you send \
-             them the text."
-                .to_string(),
-            String::new(),
-            code.code.clone(),
-            String::new(),
-        ],
-        fixed: code.qr.clone(),
+        title: screen.title.resolve(lang),
+        rows,
+        fixed,
     }
 }
 
-/// The detail view up, `my code`'s or a message's.
+/// The light margin a scanner needs around a QR code, in modules.
+const QR_QUIET: u32 = 4;
+
+/// The detail view up, the profile's or a message's.
 fn shown_detail<B>(model: &UiModel<B>) -> Option<DetailView> {
-    match (&model.own_code, model.code_shown) {
-        (Some(code), true) => Some(code_view(code)),
-        _ => model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+    match model.profile_screen() {
+        Some(screen) => Some(profile_view(&screen, model.lang)),
+        None => model.detail.and_then(|(c, m)| detail_view(model, c, m)),
     }
 }
 
@@ -5183,7 +5634,7 @@ fn no_read_words<B>(
     who: &str,
 ) -> Option<String> {
     let state = shown_delivery(message.delivery?, model.home_client, model.reading.on);
-    if !message.outbound || state != DeliveryState::Delivered {
+    if !message.outbound || !matches!(state, DeliveryState::Arrived | DeliveryState::Delivered) {
         return None;
     }
     match (model.reading.on, conversation.flags.receipts) {
@@ -5857,6 +6308,7 @@ pub(crate) mod tests {
         lev: &leviculum_lxmf::lev::Lev,
     ) -> OutboxEvent {
         OutboxEvent::Received {
+            sent_at: 0,
             message_id: id,
             source,
             title: Vec::new(),
@@ -5881,6 +6333,482 @@ pub(crate) mod tests {
                 offset_secs: 0,
             }),
         );
+    }
+
+    /// A message from `source` with bit 2 in its mark, that came by
+    /// propagation (1395): the received event and the engine's word after it.
+    fn propagated(model: &mut UiModel<Field>, source: [u8; 16], id: [u8; 32], caps: u64) {
+        engine(model, with_lev(source, id, "via the node", &caps_lev(caps)));
+        engine(
+            model,
+            OutboxEvent::Propagated {
+                message_id: id,
+                source,
+            },
+        );
+    }
+
+    fn caps_lev(capabilities: u64) -> leviculum_lxmf::lev::Lev {
+        caps(capabilities)
+    }
+
+    /// The propagation receipts among `effects`: to whom, and the ids.
+    fn arrival_receipts(effects: &[UiEffect]) -> Vec<([u8; 16], Vec<[u8; 32]>)> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                UiEffect::Send { to, fields, .. } => leviculum_lxmf::lev::Lev::from_fields(fields)
+                    .and_then(|lev| lev.propagation_receipt)
+                    .map(|receipt| (*to, receipt.ids)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 1395 and 1462, the rule: a message on this device that carries bit
+    /// 2 is acknowledged with 0x07 after the batch window, alone, with the
+    /// clock of its arrival, whatever the read-receipts switch says, and
+    /// however it came, by propagation or direct; one without bit 2 is not;
+    /// a second copy owes none.
+    #[test]
+    fn a_message_with_bit_2_is_acknowledged_however_it_came_and_no_other() {
+        use leviculum_lxmf::lev::{CAP_GROUPS, CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS};
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        wall(&mut model, RT);
+        // Receipts off: the propagation receipt does not follow the switch.
+        update(&mut model, UiEvent::ReadReceipts(false));
+        let all = CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS;
+        propagated(&mut model, PEER, ID, all);
+        propagated(&mut model, PEER, ID2, all);
+        // Direct: the same mark, no Propagated word; its proof says only
+        // that the identity has it, so it owes the device's word too.
+        engine(
+            &mut model,
+            with_lev(PEER, [0x33; 32], "direct", &caps_lev(all)),
+        );
+        // Propagated without bit 2: a client that does not ask.
+        propagated(
+            &mut model,
+            OTHER,
+            [0x44; 32],
+            CAP_READ_RECEIPTS | CAP_GROUPS,
+        );
+        assert_eq!(model.arrivals.owed(&PEER), Some(&[ID, ID2, [0x33; 32]][..]));
+        assert_eq!(model.arrivals.owed(&OTHER), None);
+        let early = update(&mut model, UiEvent::Elapsed(receipts::BATCH_MS - 1));
+        assert!(
+            arrival_receipts(&early).is_empty(),
+            "inside the batch window"
+        );
+        let due = update(&mut model, UiEvent::Elapsed(receipts::BATCH_MS));
+        assert_eq!(arrival_receipts(&due), [(PEER, vec![ID, ID2, [0x33; 32]])]);
+        let lev = due
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::Send { fields, body, .. } if body.is_empty() => {
+                    leviculum_lxmf::lev::Lev::from_fields(fields)
+                }
+                _ => None,
+            })
+            .expect("a receipt alone");
+        assert_eq!(lev.capabilities, None, "alone, without the mark");
+        assert_eq!(
+            lev.propagation_receipt.map(|r| r.received_at),
+            Some(RT as u32)
+        );
+        assert_eq!(model.sending.back(), Some(&(receipts::RECEIPT_SEND, 0)));
+        // The same message again by propagation owes nothing more.
+        propagated(&mut model, PEER, ID, all);
+        assert_eq!(model.arrivals.owed(&PEER), None);
+    }
+
+    /// 1395, read wins: a message seen inside the batch window while read
+    /// receipts go to its sender is named by the read receipt only.
+    #[test]
+    fn a_message_read_inside_the_window_gets_the_read_receipt_only() {
+        use leviculum_lxmf::lev::{CAP_GROUPS, CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        propagated(
+            &mut model,
+            PEER,
+            ID,
+            CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS,
+        );
+        let key = model.conversations[0].messages[0].activity;
+        update(&mut model, UiEvent::Front(true));
+        update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![key],
+            },
+        );
+        update(&mut model, UiEvent::Elapsed(receipts::SEEN_MS + 10));
+        let mut effects = Vec::new();
+        effects.extend(update(
+            &mut model,
+            UiEvent::Elapsed(receipts::BATCH_MS + 2_000),
+        ));
+        effects.extend(update(&mut model, UiEvent::Front(false)));
+        effects.extend(update(
+            &mut model,
+            UiEvent::Elapsed(receipts::BATCH_MS + 3_000),
+        ));
+        assert!(arrival_receipts(&effects).is_empty(), "{effects:?}");
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::Send { fields, .. }
+                if leviculum_lxmf::lev::Lev::from_fields(fields).is_some_and(|l| l.receipt.is_some())
+        )));
+    }
+
+    /// 1395 and 1462, the mark: a 0x07 for our message is two grey ticks,
+    /// the delivered rung, "on the device" in the Info, the terminal's
+    /// detail and for the screen reader; read receipts off do not hide it;
+    /// a later proof or 0x07 changes nothing; read still wins.
+    #[test]
+    fn a_device_receipt_is_two_grey_ticks_with_its_own_words() {
+        use super::arrival::{Witness, ON_DEVICE};
+        use super::strings::{Lang, StrId};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        update(&mut model, UiEvent::ReadReceipts(false));
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::AwaitingCollection);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::InMailbox));
+        wall(&mut model, RT + 3_600);
+        let alone = super::arrival::alone(leviculum_lxmf::lev::PropagationReceipt {
+            received_at: (RT + 60) as u32,
+            ids: vec![ID, ID2],
+        });
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(with_lev(PEER, [0x33; 32], "", &alone)),
+        );
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(model.conversations[0].messages.len(), 1, "no bubble");
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            UiEffect::Log(line) if line.starts_with("ARRIVAL receipt dropped id=2222")
+        )));
+        let message = &model.conversations[0].messages[0];
+        assert_eq!(
+            super::arrival::witness(message).map(|(w, _)| w),
+            Some(Witness::Receipt)
+        );
+        assert!(message.ledger.iter().any(|e| e.what == ON_DEVICE));
+        let key = message.activity;
+        let info = info::message_info(&model, PEER, key).expect("its info");
+        let state_row = |lang| {
+            info.rows
+                .iter()
+                .map(|row| row.resolve(lang))
+                .find(|(label, _)| {
+                    label == &super::strings::Text::key(StrId::InfoState).resolve(lang)
+                })
+                .map(|(_, value)| value)
+        };
+        let who = model.names.label(&PEER);
+        assert_eq!(state_row(Lang::En), Some(format!("On {who}'s device")));
+        assert_eq!(
+            state_row(Lang::De),
+            Some(format!("Auf dem Gerät von {who}"))
+        );
+        let detail = detail_view(&model, 0, 0).expect("its detail").rows;
+        assert!(
+            detail
+                .iter()
+                .any(|row| row == &format!("state  on {who}'s device: it said so")),
+            "{detail:?}"
+        );
+        let bubble = chat::bubbles(&model, 0)
+            .into_iter()
+            .last()
+            .expect("the bubble");
+        assert_eq!(bubble.mark, Some(chat::Mark::Delivered));
+        assert_eq!(bubble.witness, Some(Witness::Receipt));
+        assert_eq!(
+            scene::mark_words(chat::Mark::Delivered, None, bubble.witness, None).resolve(Lang::En),
+            "On the recipient's device"
+        );
+        // A late proof takes nothing back; read still moves it on.
+        state(&mut model, ID, MessageState::Delivered);
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(
+            super::arrival::witness(&model.conversations[0].messages[0]).map(|(w, _)| w),
+            Some(Witness::Receipt)
+        );
+        update(&mut model, UiEvent::ReadReceipts(true));
+        engine(
+            &mut model,
+            with_lev(PEER, [0x34; 32], "", &receipt((RT + 90) as u32, &[ID])),
+        );
+        assert!(matches!(
+            last_delivery(&model),
+            Some(DeliveryState::Read { .. })
+        ));
+    }
+
+    /// 1395, the node's word: collected is the arrived rung (1462: one
+    /// tick, the recipient's mailbox may have collected it) with its own
+    /// words; expired and evicted keep the one tick and say "not collected
+    /// here", never lost; held and unknown change nothing; a proof before
+    /// keeps the proof's words.
+    #[test]
+    fn what_the_node_answers_moves_the_marks_it_may() {
+        use super::strings::{Lang, StrId};
+        use leviculum_lxmf::lev_status::MessageStatus;
+        let ids = [[0x61; 32], [0x62; 32], [0x63; 32], [0x64; 32], [0x65; 32]];
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        for (i, id) in ids.iter().enumerate() {
+            match i {
+                0 => {
+                    sent(&mut model, "m0");
+                }
+                _ => {
+                    typed(&mut model, &format!("m{i}"));
+                    update(&mut model, key(KeyCode::Enter));
+                }
+            }
+            engine(&mut model, OutboxEvent::Queued { message_id: *id });
+            state(&mut model, *id, MessageState::AwaitingCollection);
+            update(&mut model, UiEvent::SendDone(Ok(())));
+        }
+        state(&mut model, ids[4], MessageState::Delivered);
+        model.pn_answered(&[
+            (ids[0], MessageStatus::Collected),
+            (ids[1], MessageStatus::Expired),
+            (ids[2], MessageStatus::Held),
+            (ids[3], MessageStatus::Unknown),
+            (ids[4], MessageStatus::Collected),
+        ]);
+        let states: Vec<Option<DeliveryState>> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.delivery)
+            .collect();
+        assert_eq!(
+            states,
+            [
+                Some(DeliveryState::Arrived),
+                Some(DeliveryState::InMailbox),
+                Some(DeliveryState::InMailbox),
+                Some(DeliveryState::InMailbox),
+                Some(DeliveryState::Arrived),
+            ]
+        );
+        let words = |m: usize, lang| {
+            let key = model.conversations[0].messages[m].activity;
+            info::message_info(&model, PEER, key)
+                .expect("info")
+                .rows
+                .iter()
+                .map(|row| row.resolve(lang))
+                .find(|(label, _)| {
+                    label == &super::strings::Text::key(StrId::InfoState).resolve(lang)
+                })
+                .map(|(_, value)| value)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            words(0, Lang::En),
+            "Collected from the propagation network at 08:00"
+        );
+        assert_eq!(
+            words(1, Lang::En),
+            "Not collected at the propagation node; perhaps delivered via another"
+        );
+        assert!(!words(1, Lang::En).to_lowercase().contains("lost"));
+        assert_eq!(
+            words(1, Lang::De),
+            "Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt"
+        );
+        assert_eq!(words(4, Lang::En), "Arrived");
+        assert_eq!(words(4, Lang::De), "Angekommen");
+        assert_eq!(
+            model.conversations[0].messages[2].ledger.len(),
+            model.conversations[0].messages[3].ledger.len()
+        );
+    }
+
+    /// 1409: a device that is its own node asks the node that proved the
+    /// upload, at the end of a round that synced, once a round, and folds
+    /// the answer into the marks; the store learns what is open.
+    #[test]
+    fn a_device_asks_the_node_after_a_round_and_folds_its_word() {
+        use leviculum_lxmf::lev_status::MessageStatus;
+        const PN: [u8; 16] = [0x9c; 16];
+        let id = [0x61; 32];
+        let transient = [0x81; 32];
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        wall(&mut model, RT);
+        sent(&mut model, "via the node");
+        engine(&mut model, OutboxEvent::Queued { message_id: id });
+        engine(
+            &mut model,
+            OutboxEvent::Uploaded {
+                message_id: id,
+                transient_id: transient,
+                node: Some(PN),
+            },
+        );
+        state(&mut model, id, MessageState::AwaitingCollection);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        let kept = model
+            .take_writes()
+            .into_iter()
+            .find_map(|w| match w {
+                history::StoreWrite::PnAsks(state) => Some(state),
+                _ => None,
+            })
+            .expect("the upload is kept");
+        assert_eq!(kept.open.len(), 1);
+        assert_eq!(kept.open[0].transient_id, transient);
+        // A stock node: never asked.
+        assert_eq!(
+            update(&mut model, UiEvent::FetchDone(Ok(0))),
+            [UiEffect::PnLine(
+                "PN_STATUS_SKIPPED reason=no_capability".into()
+            )]
+        );
+        engine(
+            &mut model,
+            OutboxEvent::NodeAnnounced {
+                destination: PN,
+                status: Some(1),
+            },
+        );
+        // A round that failed found the node silent: nothing asked.
+        let failed = update(&mut model, UiEvent::FetchDone(Err("no route".into())));
+        assert!(
+            !failed.iter().any(|e| matches!(e, UiEffect::AskPn { .. })),
+            "{failed:?}"
+        );
+        let asked = update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert_eq!(
+            asked,
+            [UiEffect::AskPn {
+                node: PN,
+                ids: vec![transient]
+            }]
+        );
+        // `unknown` changes nothing and leaves it open.
+        let line = update(
+            &mut model,
+            UiEvent::PnAnswered {
+                node: PN,
+                answer: Some(vec![(transient, MessageStatus::Unknown)]),
+            },
+        );
+        assert_eq!(
+            line,
+            [UiEffect::PnLine("PN_STATUS_ASKED ids=1 answered=0".into())]
+        );
+        assert_eq!(
+            model.conversations[0].messages[0].delivery,
+            Some(DeliveryState::InMailbox)
+        );
+        // A link that failed leaves it open: the next round asks again.
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        update(
+            &mut model,
+            UiEvent::PnAnswered {
+                node: PN,
+                answer: None,
+            },
+        );
+        assert_eq!(model.pn_asker.open(), 1);
+        assert!(matches!(
+            update(&mut model, UiEvent::FetchDone(Ok(0))).as_slice(),
+            [UiEffect::AskPn { .. }]
+        ));
+        let line = update(
+            &mut model,
+            UiEvent::PnAnswered {
+                node: PN,
+                answer: Some(vec![(transient, MessageStatus::Collected)]),
+            },
+        );
+        assert_eq!(
+            line,
+            [UiEffect::PnLine("PN_STATUS_ASKED ids=1 answered=1".into())]
+        );
+        assert_eq!(
+            model.conversations[0].messages[0].delivery,
+            Some(DeliveryState::Arrived)
+        );
+        assert_eq!(
+            update(&mut model, UiEvent::FetchDone(Ok(0))),
+            [UiEffect::PnLine(
+                "PN_STATUS_SKIPPED reason=no_open_ids".into()
+            )]
+        );
+        let kept = model
+            .take_writes()
+            .into_iter()
+            .find_map(|w| match w {
+                history::StoreWrite::PnAsks(state) => Some(state),
+                _ => None,
+            })
+            .expect("the answer closed it");
+        assert!(kept.open.is_empty());
+    }
+
+    /// 1409: a home's client never asks; the home's pulled word moves its
+    /// marks, and a proof or a receipt settles an upload on a device that
+    /// asks.
+    #[test]
+    fn a_homes_client_takes_the_homes_word_and_asks_nothing() {
+        use leviculum_lxmf::lev_status::MessageStatus;
+        let id = [0x62; 32];
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        wall(&mut model, RT);
+        sent(&mut model, "through the home");
+        engine(&mut model, OutboxEvent::Queued { message_id: id });
+        state(&mut model, id, MessageState::AwaitingCollection);
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        engine(
+            &mut model,
+            OutboxEvent::Uploaded {
+                message_id: id,
+                transient_id: [0x82; 32],
+                node: Some([0x9c; 16]),
+            },
+        );
+        assert_eq!(model.pn_asker.open(), 0);
+        let round = update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert!(
+            !round
+                .iter()
+                .any(|e| matches!(e, UiEffect::AskPn { .. } | UiEffect::PnLine(_))),
+            "{round:?}"
+        );
+        engine(
+            &mut model,
+            OutboxEvent::HomePnStatus {
+                answers: vec![(id, MessageStatus::Collected)],
+            },
+        );
+        assert_eq!(
+            model.conversations[0].messages[0].delivery,
+            Some(DeliveryState::Arrived)
+        );
+        let mut own = UiModel::<Field>::new(&[PEER]);
+        own.pn_asker.uploaded([0x9c; 16], [1; 32], [0x91; 32], 0);
+        own.pn_asker.uploaded([0x9c; 16], [2; 32], [0x92; 32], 0);
+        engine(
+            &mut own,
+            OutboxEvent::State {
+                message_id: [1; 32],
+                state: MessageState::Delivered,
+            },
+        );
+        assert_eq!(own.pn_asker.open(), 1, "a proof settles it");
     }
 
     /// 1230: a receipt alone reads the message it names, at the reader's
@@ -5984,6 +6912,7 @@ pub(crate) mod tests {
             let event = match mark {
                 true => with_lev(PEER, [0x40 + i; 32], &format!("line {i}"), &lev),
                 false => OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [0x40 + i; 32],
                     source: PEER,
                     title: Vec::new(),
@@ -6204,9 +7133,13 @@ pub(crate) mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "hi".to_string(),
-                fields: caps(leviculum_lxmf::lev::CAP_GROUPS).fields().to_vec(),
+                fields: caps(
+                    leviculum_lxmf::lev::CAP_GROUPS | leviculum_lxmf::lev::CAP_PROPAGATION_RECEIPTS
+                )
+                .fields()
+                .to_vec(),
             }],
-            "the switch off sends no receipt bit, the groups bit still (1307)"
+            "the switch off sends no receipt bit, the groups bit and bit 2 still (1307, 1395)"
         );
     }
 
@@ -6291,9 +7224,13 @@ pub(crate) mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "hi".to_string(),
-                fields: caps(leviculum_lxmf::lev::CAP_GROUPS).fields().to_vec(),
+                fields: caps(
+                    leviculum_lxmf::lev::CAP_GROUPS | leviculum_lxmf::lev::CAP_PROPAGATION_RECEIPTS
+                )
+                .fields()
+                .to_vec(),
             }],
-            "off: no receipt bit, the groups bit still (1307)"
+            "off: no receipt bit, the groups bit and bit 2 still (1307, 1395)"
         );
         assert_eq!(
             update(&mut model, UiEvent::ReadReceipts(true)),
@@ -6324,7 +7261,8 @@ pub(crate) mod tests {
         state(&mut model, ID, MessageState::Delivered);
         update(&mut model, UiEvent::SendDone(Ok(())));
         assert!(model.conversations[0].flags.receipts);
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        // A proof is one tick (1462).
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
         model
     }
 
@@ -6386,16 +7324,16 @@ pub(crate) mod tests {
             ),
             "{effects:?}"
         );
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
         let (mark, rows) = shown_last(&model);
-        assert_eq!(mark, Some(chat::Mark::Delivered));
+        assert_eq!(mark, Some(chat::Mark::Arrived));
         assert!(
             rows.iter().any(|r| r.starts_with("read receipts are off")),
             "{rows:?}"
         );
         // On again: the ignored receipt was not kept; the next one reads.
         update(&mut model, UiEvent::ReadReceipts(true));
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
         engine(
             &mut model,
             with_lev(PEER, [0x34; 32], "", &receipt(1_800_000_020, &[ID])),
@@ -6418,10 +7356,7 @@ pub(crate) mod tests {
         ));
         let (mark, rows) = shown_last(&model);
         assert_eq!(mark, Some(chat::Mark::Delivered));
-        assert!(
-            rows.iter().any(|r| r.starts_with("state  delivered")),
-            "{rows:?}"
-        );
+        assert!(rows.iter().any(|r| r.starts_with("state  on ")), "{rows:?}");
         assert!(chat::list_rows(&model)[0].read_at.is_none());
         update(&mut model, UiEvent::ReadReceipts(true));
         assert_eq!(shown_last(&model).0, Some(chat::Mark::Read));
@@ -6435,7 +7370,7 @@ pub(crate) mod tests {
     fn a_peer_without_receipts_is_named_in_the_detail_view() {
         let mut model = delivered_to_a_marked_peer();
         let (mark, rows) = shown_last(&model);
-        assert_eq!(mark, Some(chat::Mark::Delivered));
+        assert_eq!(mark, Some(chat::Mark::Arrived));
         assert!(
             !rows.iter().any(|r| r.contains("read receipts")),
             "{rows:?}"
@@ -6444,6 +7379,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [0x31; 32],
                 source: PEER,
                 title: Vec::new(),
@@ -6597,7 +7533,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             model.conversations[1].messages[0].delivery,
-            Some(DeliveryState::Delivered)
+            Some(DeliveryState::Arrived)
         );
         let stranger = [0x99; 16];
         let effects = update(
@@ -6608,7 +7544,7 @@ pub(crate) mod tests {
         assert!(model.conversations.iter().all(|c| c.peer != stranger));
         assert_eq!(
             model.conversations[1].messages[0].delivery,
-            Some(DeliveryState::Delivered)
+            Some(DeliveryState::Arrived)
         );
     }
 
@@ -6620,7 +7556,7 @@ pub(crate) mod tests {
             .into_iter()
             .filter_map(|mark| match mark.flag {
                 MarkFlag::Seen { at } => Some((at, mark.ids)),
-                MarkFlag::Read | MarkFlag::Deleted => None,
+                MarkFlag::Read | MarkFlag::Deleted | MarkFlag::Arrived { .. } => None,
             })
             .collect()
     }
@@ -6796,10 +7732,10 @@ pub(crate) mod tests {
         assert!(model.sending.is_empty());
         // The proof arrives after the runner has finished.
         state(&mut model, ID, MessageState::Delivered);
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
         // A state for some other id touches nothing.
         state(&mut model, ID2, MessageState::Failed);
-        assert_eq!(last_delivery(&model), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Arrived));
     }
 
     #[test]
@@ -6917,7 +7853,7 @@ pub(crate) mod tests {
         engine(&mut late, OutboxEvent::Queued { message_id: ID });
         update(&mut late, UiEvent::SendUnproven(String::new()));
         state(&mut late, ID, MessageState::Delivered);
-        assert_eq!(last_delivery(&late), Some(DeliveryState::Delivered));
+        assert_eq!(last_delivery(&late), Some(DeliveryState::Arrived));
     }
 
     /// The row names the leg and its seconds while the send waits, and drops
@@ -6956,7 +7892,7 @@ pub(crate) mod tests {
             (Sending, DeliveryState::InFlight),
             (Sent, DeliveryState::Sent),
             (AwaitingCollection, DeliveryState::InMailbox),
-            (Delivered, DeliveryState::Delivered),
+            (Delivered, DeliveryState::Arrived),
             (Rejected, DeliveryState::Rejected),
             (Cancelled, DeliveryState::Failed),
             (Failed, DeliveryState::Failed),
@@ -6970,6 +7906,7 @@ pub(crate) mod tests {
     fn a_received_message_opens_its_conversation_and_counts_unread() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         let received = OutboxEvent::Received {
+            sent_at: 0,
             message_id: ID,
             source: OTHER,
             title: Vec::new(),
@@ -6992,6 +7929,7 @@ pub(crate) mod tests {
 
     fn received_from(source: [u8; 16], id: [u8; 32], body: &str) -> OutboxEvent {
         OutboxEvent::Received {
+            sent_at: 0,
             message_id: id,
             source,
             title: Vec::new(),
@@ -7040,6 +7978,101 @@ pub(crate) mod tests {
                 ),
                 false => assert!(marks.is_empty()),
             }
+        }
+    }
+
+    /// The ids of every read mark in `marks`, in order.
+    fn read_ids(marks: &[crate::home::wire::Mark]) -> Vec<[u8; 32]> {
+        use crate::home::wire::MarkFlag;
+        marks
+            .iter()
+            .inspect(|mark| assert_eq!(mark.flag, MarkFlag::Read))
+            .flat_map(|mark| mark.ids.iter().copied())
+            .collect()
+    }
+
+    /// A new device's first pull marks nothing read (1429): a device that
+    /// joined a home with an archive of messages across three conversations
+    /// pulls from cursor 0. On the terminal the first arriving conversation
+    /// opens itself, on the phone the reader opens one while the pull runs;
+    /// neither reads the history arriving into it. The read state comes
+    /// from the archive's marks, which another device sent. Once the pull
+    /// settled, a message the reader opens and one arriving in the open
+    /// conversation are read, and only those.
+    #[test]
+    fn a_new_devices_first_pull_marks_nothing_read() {
+        use crate::home::wire::{Mark, MarkFlag};
+        const PER: u8 = 30;
+        let peers: [[u8; 16]; 3] = [[0xa1; 16], [0xb2; 16], [0xc3; 16]];
+        let id = |p: usize, n: u8| {
+            let mut id = [0u8; 32];
+            id[0] = 0xa0 + p as u8;
+            id[1] = n;
+            id
+        };
+        for phone in [false, true] {
+            let mut model = UiModel::<Field>::new(&[]);
+            model.home_client = true;
+            model.list_apart = phone;
+            // What both shells set for a client whose cursor is still 0.
+            model.history = true;
+            for n in 0..PER {
+                for (p, peer) in peers.iter().enumerate() {
+                    engine(&mut model, received_from(*peer, id(p, n), "history"));
+                }
+                // The phone's reader opens the first conversation early on:
+                // what it shows then is read, what the pull brings into it
+                // afterwards is not.
+                if phone && n == 4 {
+                    update(&mut model, UiEvent::Open { peer: peers[0] });
+                    assert_eq!(read_ids(&model.take_marks()).len(), 5, "phone={phone}");
+                }
+            }
+            // Another device read the second conversation up to its 20th.
+            engine(
+                &mut model,
+                OutboxEvent::HomeMarked {
+                    mark: Mark {
+                        flag: MarkFlag::Read,
+                        ids: vec![id(1, 19)],
+                    },
+                },
+            );
+            assert!(
+                model.take_marks().is_empty(),
+                "phone={phone}: the history pull marked read"
+            );
+            assert!(
+                !model
+                    .toasts
+                    .iter()
+                    .any(|t| t.text.starts_with("message from")),
+                "phone={phone}: history is no news"
+            );
+            let unread = |model: &UiModel<Field>, p: usize| {
+                let c = model.conversations.iter().find(|c| c.peer == peers[p]);
+                c.expect("listed").unread
+            };
+            let open_unread = match phone {
+                true => usize::from(PER) - 5,
+                false => usize::from(PER),
+            };
+            assert_eq!(unread(&model, 0), open_unread, "phone={phone}");
+            assert_eq!(unread(&model, 1), 10, "phone={phone}: the archive's marks");
+            assert_eq!(unread(&model, 2), usize::from(PER), "phone={phone}");
+            assert_eq!(model.conversations[model.selected].peer, peers[0]);
+            // The pull settled: live mail from here on.
+            model.history = false;
+            let live = [0x77; 32];
+            engine(&mut model, received_from(peers[0], live, "live"));
+            assert_eq!(read_ids(&model.take_marks()), [live], "phone={phone}");
+            // The reader opens the third conversation: its unread, and only
+            // those, are read.
+            update(&mut model, UiEvent::Open { peer: peers[2] });
+            let read = read_ids(&model.take_marks());
+            assert_eq!(read.len(), usize::from(PER), "phone={phone}");
+            assert!(read.iter().all(|r| r[0] == 0xa2), "phone={phone}");
+            assert_eq!(unread(&model, 1), 10, "phone={phone}: unopened stays");
         }
     }
 
@@ -7228,12 +8261,12 @@ pub(crate) mod tests {
         // Again: one bubble.
         engine(&mut model, home_sent(ID, OTHER));
         assert_eq!(model.conversations[1].messages.len(), 1);
-        // Delivered, then the sent entry again: stays delivered.
+        // Proven, then the sent entry again: stays proven.
         state(&mut model, ID, MessageState::Delivered);
         engine(&mut model, home_sent(ID, OTHER));
         assert_eq!(
             model.conversations[1].messages[0].delivery,
-            Some(DeliveryState::Delivered)
+            Some(DeliveryState::Arrived)
         );
         // The device that sent it: its queued bubble says sent.
         sent(&mut model, "mine");
@@ -7368,6 +8401,7 @@ pub(crate) mod tests {
     fn a_reader_at_the_newest_message_follows_a_new_one() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         let from_peer = |id: [u8; 32]| OutboxEvent::Received {
+            sent_at: 0,
             message_id: id,
             source: PEER,
             title: Vec::new(),
@@ -7759,9 +8793,9 @@ pub(crate) mod tests {
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
         assert_eq!(shown(&model), [layout::EARLIEST, "hi  ◷"]);
         state(&mut model, ID, MessageState::Delivered);
-        assert_eq!(shown(&model)[1], "hi  ✓✓");
+        assert_eq!(shown(&model)[1], "hi  ✓");
         model.ascii = true;
-        assert_eq!(shown(&model)[1], "hi  vv");
+        assert_eq!(shown(&model)[1], "hi  v");
         assert_eq!(
             text(&view(&model).conversations[0]).trim_end(),
             "▌<abababab…>"
@@ -7813,6 +8847,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -7873,6 +8908,7 @@ pub(crate) mod tests {
         engine(
             model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -8181,7 +9217,7 @@ pub(crate) mod tests {
                 "peer   abababababababababababababababab",
                 &format!("id     {}", "11".repeat(32)),
                 "size   5 bytes",
-                "state  delivered: it arrived on <abababab…>'s device",
+                "state  arrived: <abababab…>'s mailbox or device has it",
                 // The peer never sent a message with the mark (1233).
                 "<abababab…> sends no read receipts",
                 "",
@@ -8190,7 +9226,7 @@ pub(crate) mod tests {
                 "14:02:00  trying direct",
                 "14:02:00  queued by the router as 11111111",
                 "14:03:00  in flight (direct)",
-                "14:03:00  delivered: proof received (direct)",
+                "14:03:00  arrived: proof received (direct)",
             ]
         );
         update(&mut model, key(KeyCode::Char('q')));
@@ -8280,6 +9316,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -8306,6 +9343,7 @@ pub(crate) mod tests {
             engine(
                 &mut model,
                 OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: id,
                     source: PEER,
                     title: Vec::new(),
@@ -8517,10 +9555,12 @@ pub(crate) mod tests {
         update(&mut model, UiEvent::Elapsed(120_000));
         let other = OutboxEvent::NodeAnnounced {
             destination: [0x42; 16],
+            status: None,
         };
         assert!(engine_says(&mut model, other).is_empty());
         let ours = OutboxEvent::NodeAnnounced {
             destination: [0x9c; 16],
+            status: None,
         };
         assert_eq!(engine_says(&mut model, ours), [UiEffect::Fetch]);
         assert_eq!(model.fetch_reason, Some(Reason::Announce));
@@ -9521,6 +10561,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -9743,7 +10784,7 @@ pub(crate) mod tests {
         let writes = model.take_writes();
         match &writes[..] {
             [StoreWrite::Message { message, .. }] => {
-                assert_eq!(message.delivery, Some(DeliveryState::Delivered));
+                assert_eq!(message.delivery, Some(DeliveryState::Arrived));
             }
             other => panic!("one message write, not {other:?}"),
         }
@@ -10057,6 +11098,7 @@ pub(crate) mod tests {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -10443,6 +11485,39 @@ pub(crate) mod tests {
         }
     }
 
+    /// 1386, the way back: the own receiver's fixes go into our track and
+    /// to the store, a row a minute at most however often the receiver
+    /// reports, so the track outlives a restart without a network.
+    #[test]
+    fn the_own_fixes_are_stored_a_row_a_minute_for_the_way_back() {
+        const OWN: [u8; 16] = [0x0e; 16];
+        let mut model = UiModel::<Field>::new(&[]);
+        model.address = Some(OWN);
+        clock(&mut model, 26, 14, 0);
+        let _ = model.take_writes();
+        // Every 5 s for three minutes, as the phone's watch reports.
+        for k in 0..36 {
+            let at = two_pm() - 180 + 5 * i64::from(k);
+            let location = fix_at(1_000_000 + k, 11_260_000, at).location;
+            update(&mut model, UiEvent::OwnFix(location));
+        }
+        let stored: Vec<i64> = model
+            .take_writes()
+            .iter()
+            .filter_map(|w| match w {
+                StoreWrite::Position(f) if f.peer == OWN => Some(f.fix_time()),
+                _ => None,
+            })
+            .collect();
+        let t0 = two_pm() - 180;
+        assert_eq!(stored, [t0, t0 + 60, t0 + 120], "a row a minute");
+        assert_eq!(model.tracks[&OWN].len(), 36, "the track keeps every fix");
+        assert!(model
+            .track_input()
+            .iter()
+            .any(|(p, own, _)| *p == OWN && *own));
+    }
+
     /// 1302, the merge rule: an announced position joins the telemetry
     /// positions of the identity's delivery address, the newest fix wins
     /// whichever way it came, and the fix remembers how it came. The store
@@ -10478,7 +11553,11 @@ pub(crate) mod tests {
             .iter()
             .filter(|w| matches!(w, StoreWrite::Position(_)))
             .count();
-        assert_eq!(positions, 0, "the store keeps no announced position");
+        // 1385: the track keeps every announced fix, the store one row a
+        // fix time, and the older one too, which the screen did not take.
+        assert_eq!(positions, 3, "the store keeps the announced positions");
+        let track: Vec<i64> = model.tracks[&peer].iter().map(|f| f.t).collect();
+        assert_eq!(track.len(), 4, "the report and three announced: {track:?}");
         // A newer report wins back.
         arrive(
             &mut model,
@@ -10540,6 +11619,36 @@ pub(crate) mod tests {
     /// is selected, and Enter adds it: its conversation opens, named by its
     /// announce, and its pin is a friend's from then on. A contact's pin
     /// and our own are never nearby.
+    /// The tracks' time window (1419): the map's scene has no word with
+    /// the default, the chosen window's word with another; `w` steps,
+    /// the menu's choice sets, the default among them, and a choice of
+    /// the window shown keeps it.
+    #[test]
+    fn the_map_scene_names_a_window_that_is_not_the_default() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        assert_eq!(model.map_view().expect("open").window_word, None);
+        update(&mut model, key(KeyCode::Char('w')));
+        assert_eq!(model.track_window, tracks::TrackWindow::Today);
+        assert_eq!(
+            model.map_view().expect("open").window_word.as_deref(),
+            Some("Today")
+        );
+        update(&mut model, UiEvent::TrackWindow(tracks::TrackWindow::Week));
+        update(&mut model, UiEvent::TrackWindow(tracks::TrackWindow::Week));
+        assert_eq!(model.track_window, tracks::TrackWindow::Week);
+        model.lang = strings::Lang::De;
+        assert_eq!(
+            model.map_view().expect("open").window_word.as_deref(),
+            Some("Diese Woche")
+        );
+        update(
+            &mut model,
+            UiEvent::TrackWindow(tracks::TrackWindow::Episode),
+        );
+        assert_eq!(model.map_view().expect("open").window_word, None);
+    }
+
     #[test]
     fn a_node_nearby_is_a_neutral_pin_with_a_card_and_enter_adds_it() {
         const STRANGER: [u8; 16] = [0x44; 16];
@@ -12058,32 +13167,53 @@ pub(crate) mod tests {
 
     /// `rename` asks in the palette, holding the petname to edit: `Enter`
     /// sets the typed one, sanitised, and an empty line clears it.
-    /// 1279: `my code` shows the code a friend pastes and its QR, closes as
-    /// a detail view does, and says so when the frontend had none to give.
+    /// 1279, 1443: `my code` and `P` open the profile, the scene's, in the
+    /// detail view: the name, the address, the code a friend pastes and
+    /// its QR in half blocks under the text, never wrapped. Without a code
+    /// it opens all the same, without the code and with nothing to share;
+    /// with one, `s` copies it and says so; Esc closes it.
     #[test]
-    fn my_code_shows_the_code_and_its_qr_and_closes() {
+    fn my_code_opens_the_profile_with_the_code_and_its_qr() {
         let mut model = UiModel::<Field>::new(&[PEER]);
+        model.address = Some([0xcd; 16]);
         assert!(palette(&mut model, "my code").is_empty());
+        let detail = view(&model).detail.expect("the profile's view");
+        assert_eq!(detail.title, "Your profile");
+        assert!(detail.fixed.is_empty(), "no code, no QR: {detail:?}");
+        assert!(update(&mut model, key(KeyCode::Char('s'))).is_empty());
+        update(&mut model, key(KeyCode::Esc));
         assert!(!model.detail_open());
-        assert_eq!(
-            model.current_toast().map(|t| t.text.as_str()),
-            Some(NO_OWN_CODE)
-        );
-        model.own_code = Some(OwnCode {
-            code: "lxma://00:11".to_string(),
-            qr: vec!["█▀▀█".to_string(), "█▄▄█".to_string()],
-        });
-        palette(&mut model, "my code");
-        let detail = view(&model).detail.expect("the code's view");
-        assert_eq!(detail.title, "your code");
+
+        model.own_code = Some(OwnCode::of(
+            "lxma://00:11".to_string(),
+            Some((1, vec![true])),
+        ));
+        update(&mut model, key(KeyCode::Char('P')));
+        assert!(model.profile_open, "P opens it from the list");
+        let detail = view(&model).detail.expect("the profile's view");
         assert!(
             detail.rows.contains(&"lxma://00:11".to_string()),
             "{detail:?}"
         );
-        assert_eq!(detail.fixed, ["█▀▀█", "█▄▄█"]);
-        // Drawn as they are, after the text, never wrapped.
+        assert!(
+            detail
+                .rows
+                .contains(&"cdcd cdcd cdcd cdcd cdcd cdcd cdcd cdcd".to_string()),
+            "{detail:?}"
+        );
+        // A 1x1 code in a quiet zone of four: nine modules a side, five
+        // rows of half blocks, drawn as they are after the text.
+        assert_eq!(detail.fixed.len(), 5);
         let (_, rows) = detail_layout(&detail, Rect::new(0, 0, 80, 40));
-        assert_eq!(rows[rows.len() - 2..], ["█▀▀█", "█▄▄█"]);
+        assert_eq!(rows[rows.len() - 5..], detail.fixed[..]);
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('s'))),
+            [UiEffect::Copy("lxma://00:11".to_string())]
+        );
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("Your address is on the clipboard")
+        );
         update(&mut model, key(KeyCode::Esc));
         assert!(!model.detail_open());
         assert!(view(&model).detail.is_none());
@@ -12225,6 +13355,7 @@ pub(crate) mod tests {
         engine(
             model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: id,
                 source: PEER,
                 title: Vec::new(),
@@ -12239,6 +13370,7 @@ pub(crate) mod tests {
         engine(
             model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: id,
                 source: PEER,
                 title: Vec::new(),
@@ -12481,6 +13613,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -12521,6 +13654,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -12532,6 +13666,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -12593,6 +13728,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -12604,6 +13740,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID2,
                 source: PEER,
                 title: Vec::new(),
@@ -12665,6 +13802,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -12709,6 +13847,7 @@ pub(crate) mod tests {
         engine(
             &mut model,
             OutboxEvent::Received {
+                sent_at: 0,
                 message_id: ID,
                 source: PEER,
                 title: Vec::new(),
@@ -12828,19 +13967,21 @@ pub(crate) mod tests {
         let de = said(strings::Lang::De);
         let name = model.names.label(&PEER);
         assert_eq!(de[0], ("Von".to_string(), name.clone()));
+        // Written and taken at once here: both rows say so (1445).
+        assert_eq!(de[1], ("Gesendet".to_string(), "Heute · 14:00".to_string()));
         assert_eq!(
-            de[1],
+            de[2],
             ("Empfangen".to_string(), "Heute · 14:00".to_string())
         );
         assert_eq!(
-            de[2],
+            de[3],
             (
                 "Absender".to_string(),
                 "Durch die Signatur bestätigt".to_string()
             )
         );
-        assert_eq!(de[3], ("Größe".to_string(), "0,1 KB".to_string()));
-        assert_eq!(de.len(), 4, "{de:?}");
+        assert_eq!(de[4], ("Größe".to_string(), "0,1 KB".to_string()));
+        assert_eq!(de.len(), 5, "{de:?}");
         let hex = to_hex(&ID);
         assert!(
             de.iter()
@@ -12854,7 +13995,7 @@ pub(crate) mod tests {
         );
         let en = said(strings::Lang::En);
         assert_eq!(en[0], ("From".to_string(), name));
-        assert_eq!(en[3], ("Size".to_string(), "0.1 KB".to_string()));
+        assert_eq!(en[4], ("Size".to_string(), "0.1 KB".to_string()));
         assert!(info::message_info(&model, PEER, 999).is_none());
     }
 
@@ -13102,5 +14243,274 @@ pub(crate) mod tests {
         let peer = crate::home::lxmf_address(&key).expect("an address");
         update(&mut model, UiEvent::CodeRead(code));
         assert_eq!(model.conversations[model.selected].peer, peer);
+    }
+
+    /// A pulled message keeps the time its writer wrote it (1445, UI walk 1
+    /// finding 2). A mailbox holds three days of a direct history and a
+    /// group's, a new device joins and pulls it all at once on the third
+    /// day at 17:53, through the client engine as `take_in` hands it on,
+    /// into the screen and its store. Every message shows its writer's
+    /// time, a group copy its writer's (the `lev` pair), not the home's
+    /// acceptance; each chat runs in that order with its day lines; the
+    /// list is in order of each chat's newest message, though the oldest
+    /// chat's message was pulled last; the Info sheet says when it was
+    /// written and when this device fetched it; and the store gives the
+    /// same back after a restart.
+    #[test]
+    fn a_pulled_history_keeps_its_writers_times_in_the_chats_the_list_and_the_store() {
+        use crate::engine::{delivery_address, Engine};
+        use crate::outbox::Command;
+        use leviculum_core::node::NodeCoreBuilder;
+        use leviculum_core::{DestinationHash, Identity};
+        use leviculum_lxmf::lev::{GroupCopy, Lev};
+        use leviculum_lxmf::DeliveryMethod;
+        use leviculum_std::driver::{StdClock, StdStorage};
+
+        const DAY: i64 = 86_400;
+        const H: i64 = 3_600;
+        const M: i64 = 60;
+        let d0: i64 = 20_833 * DAY;
+        let pulled_at = d0 + 2 * DAY + 17 * H + 53 * M;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let us = leviculum_std::generate_identity();
+        let address = delivery_address(&us).expect("our address");
+        let mut engine = Engine::client(address);
+        let mut core = NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir.path().join("core")).expect("storage"),
+        );
+        let person = || {
+            let identity = leviculum_std::generate_identity();
+            let address = delivery_address(&identity).expect("address");
+            (identity, address)
+        };
+        let (alice, alice_at) = person();
+        let (dave, dave_at) = person();
+        let (group, group_at) = person();
+        let (bob, bob_at) = person();
+        let (carol, carol_at) = person();
+        for (identity, at) in [(&alice, alice_at), (&dave, dave_at), (&group, group_at)] {
+            core.remember_identity(DestinationHash::new(at), identity.clone());
+        }
+        let message = |to: [u8; 16], from: &Identity, at: i64, body: &str, fields| {
+            leviculum_lxmf::Message::create(
+                to,
+                delivery_address(from).expect("source"),
+                from,
+                at as f64,
+                Vec::new(),
+                body.as_bytes().to_vec(),
+                fields,
+                DeliveryMethod::Direct,
+            )
+            .expect("message")
+        };
+        // The home's copy of what `writer` wrote at `written`, accepted at
+        // `accepted`: the copy's own timestamp is the acceptance.
+        let copy = |writer: [u8; 16], written: i64, accepted: i64, body: &str| {
+            let mut fields = Vec::new();
+            Lev {
+                group_copy: Some(GroupCopy {
+                    sender: writer,
+                    sent_ms: written as u64 * 1000,
+                    epoch: 1,
+                }),
+                ..Lev::default()
+            }
+            .put_into(&mut fields);
+            message(address, &group, accepted, body, fields)
+        };
+        let _ = (&bob, &carol);
+        // The archive in its order, as the pull brings it: (entry, writer's
+        // time). Dave's came to the home late and is the last entry.
+        enum Entry {
+            In(leviculum_lxmf::Message),
+            Sent(leviculum_lxmf::Message),
+        }
+        let entries = [
+            (
+                Entry::In(message(address, &alice, d0 + 9 * H, "question", Vec::new())),
+                d0 + 9 * H,
+            ),
+            (
+                Entry::Sent(message(
+                    alice_at,
+                    &us,
+                    d0 + 9 * H + 48 * M,
+                    "answer",
+                    Vec::new(),
+                )),
+                d0 + 9 * H + 48 * M,
+            ),
+            (
+                Entry::In(copy(bob_at, d0 + 12 * H, d0 + 12 * H + 5, "bob: hi all")),
+                d0 + 12 * H,
+            ),
+            (
+                Entry::Sent(message(
+                    group_at,
+                    &us,
+                    d0 + DAY + 8 * H,
+                    "morning",
+                    Vec::new(),
+                )),
+                d0 + DAY + 8 * H,
+            ),
+            (
+                Entry::In(message(
+                    address,
+                    &alice,
+                    d0 + DAY + 10 * H,
+                    "monday",
+                    Vec::new(),
+                )),
+                d0 + DAY + 10 * H,
+            ),
+            // Written before midnight, accepted after: the writer's day.
+            (
+                Entry::In(copy(
+                    carol_at,
+                    d0 + DAY + 23 * H + 50 * M,
+                    d0 + 2 * DAY + 10 * M,
+                    "carol: late",
+                )),
+                d0 + DAY + 23 * H + 50 * M,
+            ),
+            (
+                Entry::In(message(
+                    address,
+                    &alice,
+                    d0 + 2 * DAY + 8 * H,
+                    "today",
+                    Vec::new(),
+                )),
+                d0 + 2 * DAY + 8 * H,
+            ),
+            (
+                Entry::In(message(address, &dave, d0 + 7 * H, "old news", Vec::new())),
+                d0 + 7 * H,
+            ),
+        ];
+        let mut written = std::collections::HashMap::new();
+        for (entry, at) in &entries {
+            let (command, id) = match entry {
+                Entry::In(m) => (Command::Ingest { packed: m.pack() }, m.message_id),
+                Entry::Sent(m) => (Command::HomeSent { packed: m.pack() }, m.message_id),
+            };
+            written.insert(id, *at);
+            engine.submit(command);
+        }
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events: Vec<OutboxEvent> = core::iter::from_fn(|| engine.next_event()).collect();
+
+        let clock = WallTime {
+            unix_secs: pulled_at,
+            offset_secs: 0,
+        };
+        let mut model = UiModel::<Field>::new(&[]);
+        model.home_client = true;
+        model.history = true;
+        update(&mut model, UiEvent::Clock(clock));
+        for event in events {
+            update(&mut model, UiEvent::Engine(event));
+        }
+        model.history = false;
+
+        // Read the screen: every message's time, each chat's order and day
+        // lines, the list's order.
+        let check = |model: &UiModel<Field>, when: &str| {
+            let mut seen = 0;
+            for conversation in &model.conversations {
+                let times: Vec<i64> = conversation
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        let id = m.id.expect("an id");
+                        let shown = m.at.expect("a time").unix_secs;
+                        assert_eq!(
+                            shown, written[&id],
+                            "{when}: {:?} shows {shown}, written {} (pulled at {pulled_at})",
+                            m.body, written[&id]
+                        );
+                        seen += 1;
+                        shown
+                    })
+                    .collect();
+                assert!(
+                    times.windows(2).all(|w| w[0] <= w[1]),
+                    "{when}: not in writer order: {times:?}"
+                );
+            }
+            assert_eq!(seen, entries.len(), "{when}");
+            let peers: Vec<[u8; 16]> = model
+                .order()
+                .into_iter()
+                .map(|i| model.conversations[i].peer)
+                .collect();
+            assert_eq!(
+                peers,
+                [alice_at, group_at, dave_at],
+                "{when}: the list is not by each chat's newest message"
+            );
+            let g = model
+                .conversations
+                .iter()
+                .position(|c| c.peer == group_at)
+                .expect("the group's chat");
+            let days: Vec<bool> = chat::placements(&chat::bubbles(model, g))
+                .iter()
+                .map(|p| p.day)
+                .collect();
+            assert_eq!(days, [true, true, false], "{when}: the group's day lines");
+        };
+        check(&model, "pulled");
+
+        // The Info sheet of Alice's last: written then, fetched now.
+        let today = written
+            .iter()
+            .find(|(_, at)| **at == d0 + 2 * DAY + 8 * H)
+            .map(|(id, _)| *id)
+            .expect("today's id");
+        let alice_chat = model
+            .conversations
+            .iter()
+            .find(|c| c.peer == alice_at)
+            .expect("alice's chat");
+        let key = alice_chat
+            .messages
+            .iter()
+            .find(|m| m.id == Some(today))
+            .expect("today's message")
+            .activity;
+        let sheet = info::message_info(&model, alice_at, key).expect("its Info");
+        let row = |label: strings::StrId| {
+            sheet
+                .rows
+                .iter()
+                .find(|r| r.label == strings::Text::key(label))
+                .map(|r| format!("{:?}", r.value))
+        };
+        let sent = row(strings::StrId::InfoSent).expect("a Sent row");
+        let received = row(strings::StrId::InfoReceived).expect("a Received row");
+        assert!(sent.contains("\"08:00\""), "Sent: {sent}");
+        assert!(received.contains("\"17:53\""), "Received: {received}");
+
+        // The store keeps it across a restart.
+        #[cfg(feature = "history")]
+        {
+            let path = dir.path().join("history.sqlite3");
+            let mut store = crate::store::Store::open(&path, address).expect("store");
+            store.write(&model.take_writes()).expect("written");
+            drop(store);
+            let store = crate::store::Store::open(&path, address).expect("store again");
+            let mut restarted = UiModel::<Field>::new(&[]);
+            restarted.home_client = true;
+            update(&mut restarted, UiEvent::Clock(clock));
+            restarted.restore(store.restore().expect("restored"));
+            check(&restarted, "restarted");
+        }
     }
 }

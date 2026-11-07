@@ -30,9 +30,10 @@ switch is under Privacy (`loquax-android-navigation.md`, Settings).
 | Glyphs | the tick ladder below | the language the 90 % user knows; shape and weight carry it, colour only adds |
 | Ratchets | no glyph; at most a line under Advanced in the detail view | every message is encrypted; a lock on some would be a lie about the others |
 | Reciprocity | yes | one rule, enforced by the wire, saves airtime |
-| A contact without receipts | stays at two grey ticks, the detail view says so | never pretend |
+| A contact without receipts | stays at one grey tick (its proof) or two (its device's `0x07`), the detail view says it sends no read receipts | never pretend |
+| What two ticks mean (1462) | one tick is the proof, two the recipient's device saying it has it (`0x07`), read the accent | the recipient's mailbox signs the proof with the recipient's identity, so a proof cannot say "on the device" |
 | Publish the namespace | yes, on this page | so other clients can adopt it; an offer, not an upstream report |
-| Groups | parked | Loquax has none; when they come: read once all have read, "read by 2 of 3" in the detail view |
+| Groups | built (1307, 1466) | read once every member that sends receipts read it, "read by 2 of 3" in the Info; one tick once every copy is proven, two once every copy is on its member's device (section 6) |
 
 ## 1. The wire: the `lev` namespace
 
@@ -123,13 +124,18 @@ reference packs the fields, unpacks the message with
 same bytes. `leviculum-lxmf/tests/lev_vectors.rs` holds both directions;
 the codec is `leviculum-lxmf/src/lev.rs`.
 
-### The propagation receipt
+### The device receipt
 
-Capability bit 2 and key `0x07` acknowledge a message that arrived
-through the propagation network, which has no proof the sender ever sees.
-The recipient sends it, not switchable, only for messages that arrived by
-propagation from a sender that set bit 2:
-[receipts for propagated post](loquax-propagation-receipts.md).
+Capability bit 2 and key `0x07` say "these messages of yours are on my
+device". Built first for post that arrived through the propagation network,
+which has no proof the sender ever sees
+([receipts for propagated post](loquax-propagation-receipts.md)); since
+1462 for every message on the device, direct, propagated or pulled from the
+recipient's mailbox. The recipient's device sends it, not switchable, only
+to a sender whose message set bit 2. A client of a mailbox holds no
+identity, so it hands its mailbox an arrived mark and the mailbox signs the
+receipt; the mailbox never sends one on its own, archiving is no device.
+Section 6 says why the proof is not enough.
 
 ### The group keys
 
@@ -163,6 +169,18 @@ no longer there; its text is then the English sentence ("sent a photo
 (too large for the radio)", the caption after `": "`). Every other line
 keeps three elements, and a reader before it reads the first three.
 
+Every copy, to a member that understands groups or not, carries the
+text as `"Name: text"`, one wire shape for all: a Loquax reader takes the
+writer from `0x02` and the name from the membership and strips exactly
+`"Name: "`, so a name with a colon in it stays whole; the prefix is what
+still names the writer when the field is lost. A copy without words
+says what it carries and from whom instead, `"Photo from Lew"`, `"Voice
+message from Lew"`, `"File from Lew"` or `"Position from Lew"`, where it
+said a bare `"Lew:"` before (1388, 2026-11-04). A Loquax reader knows the
+sentence by `0x02`, the writer's name and the kind the fields carry and
+draws the bubble without it: the photo under its writer, and on the
+terminal `"Lew:"` over it as every copy names its writer there.
+
 Wire text is English. Localisation happens on the reader from the lev
 data. The invitation's text, "Lew invited you to Familie: lxma://…
 Reply /leave to leave.", is English whatever the admin's language, and
@@ -183,9 +201,18 @@ many were made, and how many of those members send read receipts. The
 study wrote four elements; `readers` is appended so "read by N of M"
 counts only the members whose receipts are on, and a member with them
 off is never waited for. The home sends it, empty with the pair alone,
-once the last copy is proven (the writer's two ticks), again when a late
-copy is proven after a digest, and when the last reader read it (the
-writer's read mark). A status of four elements is no status.
+once the last copy is proven (the writer's one tick, since 1466), again
+when a late copy is proven after a digest, when the last reader read it
+(the writer's read mark), and since 1466 when every member whose device
+says so has said it. A status of four elements is no status.
+
+1466 appends two elements: `uint on_device`, the copies whose member's
+device said it has them (its `0x07` to the group, or its read receipt,
+which includes it), and `[[bin16 member, uint proven_at, uint
+on_device_at, uint read_at], ...]`, each counted member's rungs in unix
+seconds, 0 for not yet. A status of five elements is a home's from before
+1466; it never says a device, so its writer stays at one tick. A reader of
+five skips the rest, as for any appended element.
 
 A deleted group's last membership carries a third element, the standing
 `1` (ended): `[uint epoch, [[...], ...], 1]`, every member flagged left
@@ -413,13 +440,15 @@ rule that the three truths are never collapsed (`loquax-ui.md`, section
 | Queued, Stamping, InFlight | being sent | `CLOCK` | `◷ `, the braille spinner while the machine works | `.` / `*` | grey | "Sending" |
 | Sent (opportunistic, no proof) | left this device, nobody confirmed it | `CLOCK` | `◷ ` | `.` | grey | "Sent, not confirmed yet" |
 | InMailbox | the mailbox confirmed it: the upload to the propagation node is done | `TICK` | `✓ ` | `v` | grey | "Waiting in the mailbox" |
-| Delivered | on the recipient's device (proof) | `TICKS` | `✓✓` | `vv` | grey | "Delivered" |
+| Arrived (1462) | the recipient's identity proved it, its mailbox or its device (proof, or the propagation node saw it collected) | `TICK` | `✓ ` | `v` | grey | "Arrived" |
+| Delivered | on the recipient's device: its device receipt, `lev` `0x07` | `TICKS` | `✓✓` | `vv` | grey | "On the recipient's device" |
 | Read | read | `TICKS_READ`, heavier stroke | `✔✔`, bold | `VV` | accent | "Read at 10:32" |
 | Rejected, Failed | not sent | `FAILED`, red circle with `!` | `! `, bold | `!` | red | "Not sent. Double tap to send again" |
 
-No eye, no ratchet glyph. Two grey ticks are also the end state for every
-contact without receipts, which is honest: nothing is claimed that is not
-known. The accent ticks carry weight as well as colour (Android stroke 2.6
+No eye, no ratchet glyph. One grey tick is the end state for every
+contact that sends no device receipt (a stock client, an older Loquax), and
+two for one whose device says so without read receipts, which is honest:
+nothing is claimed that is not known. The accent ticks carry weight as well as colour (Android stroke 2.6
 against 2.0, the terminal's heavy `✔` and bold), so red-green weak eyes,
 screen readers and monochrome tell them apart. The terminal's column
 becomes two cells wide, every glyph padded to two. The detail view keeps
@@ -458,11 +487,12 @@ As built (1232):
   mailbox" (`loquax-ui.md`, the settings' Mailbox). Without a home node a
   propagation node's acceptance is the one tick.
 - **Words.** The catalogue's `state_sending`, `state_unconfirmed`,
-  `state_mailbox`, `state_delivered`, `state_read` (with the reader's time)
+  `state_mailbox`, `state_arrived` (1462), `state_delivered`, `state_read` (with the reader's time)
   and `state_failed`, in English and German; the scene's `MarkNode`
   carries them, the phone's `Ui.state` reads them. The detail view says
   "sent; nobody has confirmed it arrived yet", "in the mailbox, delivered
-  once [name] is online", "delivered: it arrived on [name]'s device",
+  once [name] is online", "arrived: [name]'s mailbox or device has it",
+  "on [name]'s device: it said so" (1462),
   "read 10:32, delivered before", "not sent: … its mark sends it again".
 - **Send again.** The failed mark's tap is `Intent::SendAgain`, the core's
   `UiEvent::SendAgain`: the failed message leaves the device (on a home's
@@ -477,6 +507,62 @@ As built (1232):
 Not yet: the M9 has no Loquax screen yet, its renderer will read the same `Mark` and `Shape`;
 an imported read message loses its time in the import's archive entry
 (state code 8 without `read_at`), so it says "Read at" the epoch.
+
+### The ticks tell the truth (1462)
+
+Measured on 2026-11-06 (1445, finding 25): the double tick came 0.4 s after
+a send to a recipient with a mailbox. The mailbox proves a message once it
+archived it (`loquax/src/home/daemon.rs`, `Command::Prove`), with the
+recipient's identity, so the writer cannot tell its proof from a device's;
+two ticks for a proof said "on the device" when nothing was on a device.
+
+- **One tick is the proof** (`DeliveryState::Arrived`,
+  `leviculum-ui/src/delivery.rs`; `loquax::ui::delivery_of` maps the
+  router's `Delivered` to it): "Arrived", neutral, at the mailbox or the
+  device. A propagation node's `collected` is the same rung.
+- **Two ticks are the device's word**, `lev` `0x07`
+  (`loquax/src/ui/arrival.rs`): a device sends it for every message whose
+  mark carries bit 2, however it came, after the batch window or on a
+  reply; read wins. One rule, no guess about who has a mailbox: a
+  recipient without one sends it as well. A client of a mailbox hands its
+  mailbox an arrived mark (`MarkFlag::Arrived`, `loquax/src/home/wire.rs`,
+  code 3) and the mailbox signs, the first device's mark winning
+  (`loquax/src/home/server.rs`, `arrived`). History a new device's first
+  pull hands it owes none. Without bit 2 in the writer's mark, or from a
+  stock recipient, two ticks never come, and no timer turns one into two.
+- **Read** (`0x01`) stays the accent ticks.
+- **The Info sheet names the times**: Sent, Arrived, On the device, Read,
+  each once known (`loquax/src/ui/info.rs`). The ledger line of a proof is
+  `arrived: proof received`, of a device receipt `on the recipient's
+  device: its receipt`.
+- **Kept from before.** A stored message at two ticks whose ledger shows a
+  proof, a mailbox-signed propagation receipt or a collection, and no
+  device receipt, loads at one tick (`arrival::before_1462`); a group's
+  status keeps its own.
+- **Cells** (`loquax/tests/device_receipts.rs`, and the stock Python
+  recipient in `loquax/tests/home_node.rs`): a mailbox-backed recipient
+  shows two ticks only after its device pulls; without the capability one
+  tick forever; without a mailbox two ticks on the device's receipt; a lost
+  receipt stays one tick, a week on too; a stock recipient one tick on its
+  proof, never two. The scene golden `scene-ladder.json` pins every rung,
+  one tick and two, for the four targets that draw the scene.
+- **Groups (1466)** tell the same truth. Every member's copy proven is one
+  tick, "Arrived"; two ticks, "On the devices", come only once every
+  member's copy is on its member's device; read is unchanged (every member
+  that sends receipts read it). A group's copy carries its writer's bit 2,
+  so a member's device answers the group with `0x07` (a client of a
+  mailbox through its mailbox's signature, as above); the home books it
+  (`group_fanout.device_at`, store schema 16) and counts it in the
+  status. A member whose device never says it (a stock client, whose copy
+  has no `lev`, or a Loquax without bit 2) keeps the writer at one tick;
+  so does a lost receipt, and no timer flips it. The Info sheet has a row
+  per member with its rung and since when. A group line stored at two
+  ticks from a status that counted proofs loads at one
+  (`groups::before_1466`). Cells: the group cells in
+  `loquax/tests/device_receipts.rs` and the stock Python member in
+  `loquax/tests/home_node.rs`; goldens `scene-group-ticks.json`,
+  `tui-group-ticks.txt`, `gui-group-ticks.png`, `m9-group-ticks.png` and
+  the phone's `group-ticks.json`.
 
 ## 7. Settings (built, R4)
 
@@ -573,7 +659,7 @@ periculum cells, to come with R2 and R6:
 
 | Cell | Setup | Holds |
 |---|---|---|
-| `loquax_tui_receipts_stock` | Alice `loquax tui`, Bob the Python `lxmf_node.py` | Bob receives Alice's text with the pair as specified; Bob's message read by Alice brings Bob nothing but Alice's texts; Alice's bubble stays at two grey ticks. Positive control: Bob sends with a mark set by hand, then exactly one receipt arrives |
+| `loquax_tui_receipts_stock` | Alice `loquax tui`, Bob the Python `lxmf_node.py` | Bob receives Alice's text with the pair as specified; Bob's message read by Alice brings Bob nothing but Alice's texts; Alice's bubble stays at one grey tick (1462). Positive control: Bob sends with a mark set by hand, then exactly one receipt arrives |
 | `loquax_receipts_pair` | two `loquax tui`, one lnsd | read at A shows at B with its time; a reply inside the batch time carries the receipt and none goes alone; B's switch off: B's messages without bit 0, A sends B none, B shows none |
 | `lxmf_pn_loquax_receipts` | A writes, B offline, collected through lnpnd; A offline, B reads; A collects | A shows read at B's time of reading, not the collection's; a control twin against the Python node |
 | `loquax_receipts_mixed` | Alice sends one text to Loquax Bob and Python Carol | Bob confirms, Carol receives only text |

@@ -3816,11 +3816,26 @@ impl ReticulumNode {
         request_id: &[u8; 16],
         response_data: &[u8],
     ) -> Result<(), Error> {
+        self.send_response_resource_with(link_id, request_id, response_data, true)
+            .await
+    }
+
+    /// [`send_response_resource`](Self::send_response_resource), saying
+    /// whether the resource may be compressed: `false` for a responder whose
+    /// requesters include boards, which link no decompressor and refuse a
+    /// compressed resource (`NodeCore::send_response_resource_with`, 1459).
+    pub async fn send_response_resource_with(
+        &self,
+        link_id: &LinkId,
+        request_id: &[u8; 16],
+        response_data: &[u8],
+        compress: bool,
+    ) -> Result<(), Error> {
         dispatch_committed(&self.action_dispatch_tx, || {
             let (_resource_hash, output) = {
                 let mut inner = self.inner.lock_recover();
                 inner
-                    .send_response_resource(link_id, request_id, response_data)
+                    .send_response_resource_with(link_id, request_id, response_data, compress)
                     .map_err(Error::Resource)?
             };
             self.completions.note_send_began(*link_id);

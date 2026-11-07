@@ -188,7 +188,12 @@ fn the_group_screens_say_what_the_scene_carries() {
         .map(|l| l.cells.iter().map(|c| c.ch).collect())
         .collect()
     };
-    let has = |rows: &[String], words: &str| rows.iter().any(|r| r.contains(words));
+    // A sentence may wrap over rows at 32 cells: the rows read as one
+    // text, a space between two, the padding folded.
+    let has = |rows: &[String], words: &str| {
+        let text: Vec<&str> = rows.iter().map(|r| r.trim()).collect();
+        rows.iter().any(|r| r.contains(words)) || text.join(" ").contains(words)
+    };
 
     let list = text(Screen::Groups);
     assert!(
@@ -235,6 +240,9 @@ fn the_group_screens_say_what_the_scene_carries() {
     assert!(has(&ask, "Delete Kletterhalle for everyone?"), "{ask:#?}");
     assert!(has(&ask, "[y] Yes   [n] No"), "{ask:#?}");
     assert!(!has(&ask, "[d]"), "the question replaces the verbs");
+    // Control for the joined reading: words that are on no row do not
+    // turn up between two.
+    assert!(!has(&ask, "everyone? everyone?"), "{ask:#?}");
 
     let pick = text(Screen::Pick);
     assert!(pick[0].contains("2 selected"), "{pick:#?}");

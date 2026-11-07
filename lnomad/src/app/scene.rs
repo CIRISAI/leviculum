@@ -321,6 +321,7 @@ pub(crate) fn top_bar(model: &Model) -> TopBar {
                 fingerprint: model.fingerprint.chars().take(8).collect(),
             },
             link: None,
+            open: None,
         },
     };
     let loaded = model.history.current().is_some();

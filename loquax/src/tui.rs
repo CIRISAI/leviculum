@@ -48,7 +48,7 @@ use leviculum_ui_ratatui::geometry::to_ratatui;
 use leviculum_ui_ratatui::images::{self, Between, Picker};
 use leviculum_ui_ratatui::style::downgrade_buffer;
 use leviculum_ui_ratatui::terminal::{
-    draw_synced, install_panic_hook, set_mouse_capture, TerminalOps,
+    draw_changed, install_panic_hook, set_mouse_capture, Held, TerminalOps,
 };
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
 
@@ -246,8 +246,10 @@ async fn run_terminal(
         enhanced,
     })
     .map_err(|e| e.to_string())?;
-    let mut terminal =
-        Terminal::new(CrosstermBackend::new(std::io::stdout())).map_err(|e| e.to_string())?;
+    // A pass of the loop that changes no cell writes nothing (1455): the
+    // loop runs every 20 ms for the engine's queue.
+    let (writer, mut drawn) = Held::new(std::io::stdout());
+    let mut terminal = Terminal::new(CrosstermBackend::new(writer)).map_err(|e| e.to_string())?;
     // The map's backend, asked of the terminal in raw mode, before the
     // event stream reads stdin. Only when a protocol may be taken: braille
     // and half-blocks need no answer, and `--no-color` sends no query.
@@ -362,7 +364,7 @@ async fn run_terminal(
         // so a terminal never shows a map picture's erase without the
         // picture (1118).
         match unwound(|| {
-            draw_synced(&mut terminal, |frame| {
+            draw_changed(&mut terminal, &mut drawn, |frame| {
                 draw_screen(frame, &shell.model, &view, Some(&mut painter))
             })
         }) {
@@ -904,6 +906,7 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
         // `pn` names the state as the screen does since 1153; `mailbox`
         // stays for the scripts written before.
         "pn" | "mailbox" => DeliveryState::InMailbox,
+        "arrived" => DeliveryState::Arrived,
         "delivered" => DeliveryState::Delivered,
         "rejected" => DeliveryState::Rejected,
         "failed" => DeliveryState::Failed,
@@ -1615,6 +1618,16 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
             }
         }
         (Some(shown), None) => {
+            // The tracks under the pins (1385), without colour here.
+            for t in &shown.tracks {
+                if !area.contains(Position::new(t.col, t.row)) {
+                    continue;
+                }
+                let room = usize::from((inner.x + inner.width).saturating_sub(t.col));
+                frame
+                    .buffer_mut()
+                    .set_stringn(t.col, t.row, &t.text, room, Style::default());
+            }
             for pin in &shown.pins {
                 let apart = pin.apart.iter().map(|a| (a.col, a.row, &a.text));
                 for (col, row, text) in std::iter::once((pin.col, pin.row, &pin.text)).chain(apart)
@@ -1804,6 +1817,34 @@ mod tests {
             .draw(|frame| draw_screen(frame, model, &view, None))
             .expect("draw");
         frame_text(drawn.buffer)
+    }
+
+    mod group_ticks {
+        include!("../tests/support/group_ticks.rs");
+    }
+
+    /// 1466, the group's ticks tell the truth too: the terminal draws the
+    /// group's chat of `scene-group-ticks.json`, our line every member's
+    /// device has with two ticks and the one Ben's device has not said yet
+    /// with one; the golden is the screen, 80 by 24.
+    #[test]
+    fn a_groups_one_and_two_ticks_are_the_terminals_golden() {
+        let mut model = Model::new(&[]);
+        model.address = Some([0x30; 16]);
+        group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
+        model.focus = loquax::ui::Pane::Messages;
+        let screen = whole_screen(&model);
+        let line = |words: &str| {
+            screen
+                .lines()
+                .rfind(|l| l.contains(words))
+                .unwrap_or_else(|| panic!("{words:?} is not on the screen:\n{screen}"))
+                .to_string()
+        };
+        assert!(line("Brot ist da").contains("✓✓"), "{screen}");
+        let one = line("Wer kommt mit?");
+        assert!(one.contains("✓") && !one.contains("✓✓"), "{screen}");
+        same_text("tui-group-ticks.txt", &screen);
     }
 
     /// 1379: the Rooms tab in the terminal: `R` brings it and asks the
@@ -2889,57 +2930,97 @@ mod tests {
         }
     }
 
-    /// 1279, walk finding 23: `my code` shows the contact code a friend
-    /// pastes and its QR, which a phone's scanner reads as that code. At
-    /// 80x40 the whole QR is on screen; pinned in
-    /// `tests/fixtures/tui_my_code.frames`.
+    /// 1279, 1443: `P` opens the profile, the scene's, as a tap on the
+    /// avatar does on the phone: the name, the address in fours, the
+    /// mailbox and how it is reached, the devices, the contact code and
+    /// its QR, the modules the window draws (`verbatim_modules`), which a
+    /// phone's scanner reads as that code. At 100x60 the whole QR is on
+    /// screen; pinned in `tests/fixtures/tui_profile.frames`. Esc closes
+    /// it, and a click on the list's title, the reader's own, opens it.
     #[test]
-    fn my_code_shows_the_contact_code_and_its_qr() {
+    fn the_profile_shows_the_name_the_address_and_the_code_and_its_qr() {
+        use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
         let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
         let key_bytes = leviculum_core::Identity::from_private_key_bytes(&private)
             .expect("a key")
             .public_key_bytes();
         let code = loquax::lxma::encode(&key_bytes).expect("a code");
-        let qr = loquax::home::qr::lines(&code).expect("a QR");
+        let qr = loquax::home::qr::verbatim_modules(&code).expect("a QR");
         let mut model = Model::new(&[[0xab; 16]]);
-        model.own_code = Some(ui::OwnCode {
-            code: code.clone(),
-            qr: qr.clone(),
-        });
-        update(
-            &mut model,
-            UiEvent::Resize {
-                width: 80,
-                height: 40,
+        model.address = Some([0x4c; 16]);
+        model.own_code = Some(ui::OwnCode::of(code.clone(), Some(qr.clone())));
+        model.profile = ProfileFacts {
+            name: "Mia Sander".to_string(),
+            mailbox: Mailbox::Away {
+                host: Some("leviculum.network".to_string()),
+                rung: Some(Rung::Relayed),
+                word: Some(loquax::home::board::Word::Connected),
             },
-        );
-        for name in [":", "m", "y", "space", "c", "o", "d", "e", "enter"] {
-            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+            devices: vec![
+                Device {
+                    name: "Laptop".to_string(),
+                    this: true,
+                },
+                Device {
+                    name: "Pixel 8".to_string(),
+                    this: false,
+                },
+            ],
+        };
+        let (width, height) = (100, 60);
+        update(&mut model, UiEvent::Resize { width, height });
+        update(&mut model, UiEvent::Key(parse_key("P").expect("key")));
+        let shown = screen(&model, width, height);
+        assert!(shown.contains(" Your profile "), "{shown}");
+        for words in [
+            "Mia Sander",
+            "4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c",
+            "Mailbox: on leviculum.network",
+            "Connected over a relay server",
+            "Laptop (this device)",
+            "Pixel 8",
+            "s  Share my address",
+        ] {
+            assert!(shown.contains(words), "{words}: {shown}");
         }
-        let shown = screen(&model, 80, 40);
-        assert!(shown.contains(" your code "), "{shown}");
         // The code wraps at the box's width; its pieces are all there.
         let flat: String = shown
             .lines()
             .map(|row| row.trim_matches(|c| c == '│' || c == ' '))
             .collect();
         assert!(flat.contains(&code), "{shown}");
-        for row in &qr {
+        let node = loquax::ui::profile::QrNode {
+            side: qr.0,
+            modules: qr.1.clone(),
+        };
+        for row in node.half_blocks(4) {
             assert!(shown.contains(row.as_str()), "the QR row {row:?}: {shown}");
         }
         update(&mut model, UiEvent::Key(parse_key("esc").expect("key")));
-        assert!(!screen(&model, 80, 40).contains(" your code "));
+        assert!(!screen(&model, width, height).contains(" Your profile "));
 
-        let expected = include_str!("../tests/fixtures/tui_my_code.frames");
+        let expected = include_str!("../tests/fixtures/tui_profile.frames");
         if shown != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-my-code.frames");
+            let kept = std::env::temp_dir().join("loquax-tui-profile.frames");
             let _ = std::fs::write(&kept, &shown);
             panic!(
                 "the frame moved; this run's is in {}, the pinned one in \
-                 loquax/tests/fixtures/tui_my_code.frames\n{shown}",
+                 loquax/tests/fixtures/tui_profile.frames\n{shown}",
                 kept.display()
             );
         }
+
+        // The click on the list's title, its third cell: the profile.
+        update(
+            &mut model,
+            UiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 3,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert!(model.profile_open, "a click on the title opens it");
     }
 
     #[test]
@@ -3128,6 +3209,7 @@ mod tests {
             update(
                 m,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [n; 32],
                     source: from,
                     title: Vec::new(),
@@ -3263,7 +3345,7 @@ mod tests {
         frames.push_str(&format!("--- cursor ---\n{}", screen(&model, 80, 24)));
         update(&mut model, UiEvent::Key(parse_key("enter").expect("key")));
         let detail = screen(&model, 80, 24);
-        assert!(detail.contains("delivered: proof received"), "{detail}");
+        assert!(detail.contains("arrived: proof received"), "{detail}");
         frames.push_str(&format!("--- detail ---\n{detail}"));
         let model = mockup(60, 20);
         frames.push_str(&format!(
@@ -3308,6 +3390,7 @@ mod tests {
             update(
                 m,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [id; 32],
                     source: alice,
                     title: Vec::new(),
@@ -3414,6 +3497,7 @@ mod tests {
             update(
                 m,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [id; 32],
                     source: alice,
                     title: Vec::new(),
@@ -3513,6 +3597,7 @@ mod tests {
             update(
                 &mut model,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [0x7b; 32],
                     source: [0xb7; 16],
                     title: Vec::new(),
@@ -3591,6 +3676,7 @@ mod tests {
             update(
                 &mut model,
                 UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
                     message_id: [0x77; 32],
                     source: [0xb7; 16],
                     title: Vec::new(),
@@ -3655,6 +3741,7 @@ mod tests {
         let direct = [0xd1; 32];
         let from_alice = |id: [u8; 32], body: &str| {
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: id,
                 source: alice,
                 title: Vec::new(),

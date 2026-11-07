@@ -20,6 +20,9 @@ mod nomadnet_tree;
 #[path = "../../loquax/tests/support/ugly_store.rs"]
 mod ugly_store;
 
+#[path = "../../loquax/tests/support/lnpnd.rs"]
+mod lnpnd_node;
+
 mod support {
     pub mod java;
 }
@@ -116,6 +119,20 @@ fn a_first_start_says_what_it_needs() {
     assert!(answer.error.unwrap().contains("192.168.1.20:4242"));
     assert!(answer.details.unwrap().contains("has no port"));
 
+    // A list typed by hand (1471) is refused, with the sentence naming one
+    // address; a code's own list is not typed and goes whole.
+    let answer = started(&loquax_android::start(&start_bytes(&Start {
+        code: Some(code_for(&leviculum_core::Identity::generate(
+            &mut rand_core::OsRng,
+        ))),
+        server: Some("a.example:4242,b.example:4242".to_string()),
+        dir: dir.path().display().to_string(),
+        ..Start::default()
+    })));
+    assert_eq!(answer.need.as_deref(), Some("server"));
+    assert!(answer.error.unwrap().contains("192.168.1.20:4242"));
+    assert!(answer.details.unwrap().contains("several servers"));
+
     let answer = started(&loquax_android::start(b"\xc1"));
     assert!(!answer.ok);
     assert!(answer.error.unwrap().contains("did not decode"));
@@ -166,6 +183,14 @@ fn code_for(identity: &leviculum_core::Identity) -> String {
         token: [7; 16],
     }
     .encode()
+}
+
+/// `code` with the rendezvous list `servers` behind it, as `mailbox admit`
+/// prints it (1471).
+fn with_servers(code: &str, servers: &[String]) -> String {
+    loquax::home::code::HomeCode::parse(code)
+        .expect("a code")
+        .encode_with_rendezvous(servers)
 }
 
 /// A token issued for "phone" in the store of the home node of `home`, and
@@ -283,6 +308,10 @@ fn wait_for<T: serde::de::DeserializeOwned + std::fmt::Debug>(
 /// which names the bubble; a pull runs; the conversation list shows it. The
 /// second start needs neither code nor server and shows the conversation
 /// from the store. A second code on a joined phone is refused.
+///
+/// The code carries three servers, as `mailbox admit` prints the ladder
+/// (1471), and the start names none, as the join screen sends it: the
+/// session dials the code's list in its order and keeps all three.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_phone_joins_sends_pulls_and_comes_back() {
     let instance = instance();
@@ -292,16 +321,27 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
-    let code = admit(home.path());
+    // Two more rendezvous behind the home's own server, ports nobody
+    // listens on: the ladder's later rungs, never reached.
+    let silent = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a loopback port")
+            .local_addr()
+            .expect("its address")
+            .to_string()
+    };
+    let servers = vec![format!("127.0.0.1:{port}"), silent(), silent()];
+    let code = with_servers(&admit(home.path()), &servers);
     ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
     let home_dir = home.path().to_path_buf();
 
     let phone = tempfile::tempdir().expect("app dir");
     let dir = phone.path().display().to_string();
+    let saved = phone.path().join(loquax_android::session::SERVER_FILE);
     let first = Start {
         dir: dir.clone(),
-        server: Some(format!("127.0.0.1:{port}")),
+        server: None,
         code: Some(code.clone()),
         name: Some("Pixel".to_string()),
         offset: 3600,
@@ -713,6 +753,17 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     })
     .await
     .expect("the first session");
+
+    // All three kept, in the code's order.
+    let kept = std::fs::read_to_string(&saved).expect("the servers kept");
+    assert_eq!(
+        kept.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>(),
+        servers.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{kept}"
+    );
 
     // The second start: no code, no server, the conversation from the store.
     let again = Start {
@@ -1673,6 +1724,8 @@ struct HomeNode {
     daemon: tokio::task::JoinHandle<Result<(), String>>,
     /// The daemon's stop: dropping it stops the daemon too.
     stop: tokio::sync::oneshot::Sender<()>,
+    /// The home's own propagation node on the transport's instance (1409).
+    pn: Option<lnpnd_node::PropagationNode>,
 }
 
 impl HomeNode {
@@ -1682,16 +1735,71 @@ impl HomeNode {
         rns: &Path,
         home: &Path,
     ) -> Self {
-        let mut transport = ReticulumNodeBuilder::new()
+        Self::start_linked(listener, instance, rns, home, None).await
+    }
+
+    /// [`HomeNode::start`] with a TCP link to a Python daemon on
+    /// `python`, so the home reaches a stock member there.
+    async fn start_linked(
+        listener: std::net::TcpListener,
+        instance: &str,
+        rns: &Path,
+        home: &Path,
+        python: Option<u16>,
+    ) -> Self {
+        Self::start_full(listener, instance, rns, home, python, None).await
+    }
+
+    /// [`HomeNode::start_linked`] with the home's own propagation node
+    /// (1409): lnpnd on the transport's instance, asking stamp cost `.0`,
+    /// as the daemon's `--pn`, and a sync round every `.1` ms.
+    async fn start_full(
+        listener: std::net::TcpListener,
+        instance: &str,
+        rns: &Path,
+        home: &Path,
+        python: Option<u16>,
+        pn: Option<(u8, u64)>,
+    ) -> Self {
+        Self::start_capped(listener, instance, rns, home, python, pn, ugly_store::CAP).await
+    }
+
+    /// [`HomeNode::start_full`] with an archive of `cap` bytes: the big
+    /// mailbox of 1446 does not fit the facade tests' 1 MiB.
+    async fn start_capped(
+        listener: std::net::TcpListener,
+        instance: &str,
+        rns: &Path,
+        home: &Path,
+        python: Option<u16>,
+        pn: Option<(u8, u64)>,
+        cap: u64,
+    ) -> Self {
+        let mut builder = ReticulumNodeBuilder::new()
             .enable_transport(true)
             .share_instance(true)
             .instance_name(instance.to_string())
-            .add_tcp_server_listener(listener)
+            .add_tcp_server_listener(listener);
+        if let Some(port) = python {
+            let python: std::net::SocketAddr = format!("127.0.0.1:{port}")
+                .parse()
+                .expect("loopback address");
+            builder = builder.add_tcp_client(python);
+        }
+        let mut transport = builder
             .storage_path(rns.join("storage"))
             .build_sync()
             .expect("the transport node");
         transport.start().await.expect("start it");
         tokio::time::sleep(Duration::from_millis(500)).await;
+        let (pn, pn_setup) = match pn {
+            Some((cost, sync_ms)) => {
+                let node = lnpnd_node::PropagationNode::start(instance, cost).await;
+                let hash = node.hash;
+                (Some(node), Some((hash, sync_ms)))
+            }
+            None => (None, None),
+        };
 
         let identity = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
         let daemon_storage = home.join("storage");
@@ -1712,12 +1820,12 @@ impl HomeNode {
                 storage_dir: daemon_storage,
                 identity,
                 display_name: b"home".to_vec(),
-                archive_cap_bytes: 1 << 20,
+                archive_cap_bytes: cap,
                 token_ttl_secs: 3600,
                 policy: loquax::home::policy(&loquax::config::Config::default()),
-                preferred_pn: None,
-                pn_source: "none",
-                sync_bound_ms: None,
+                preferred_pn: pn_setup.map(|(hash, _)| hash),
+                pn_source: if pn_setup.is_some() { "--pn" } else { "none" },
+                sync_bound_ms: pn_setup.map(|(_, sync_ms)| sync_ms),
                 fetch_budget: Duration::from_secs(10),
                 wake: true,
                 stop: Some(stopped),
@@ -1729,6 +1837,7 @@ impl HomeNode {
             transport,
             daemon,
             stop,
+            pn,
         }
     }
 
@@ -2093,6 +2202,190 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
     node.kill().await;
 }
 
+/// The phone never freezes after joining (1446). UI walk 1 on the Pixel 3a
+/// XL: right after the join, `ConversationsActivity.onResume` called
+/// `Core.close()` on the UI thread, and that call waited on the session's
+/// lock while the pump held it to fold the first pull of a full mailbox,
+/// one store commit per message: Android said "Loquax reagiert nicht".
+/// Here a mailbox of [`BIG_CONVERSATIONS`] conversations, thousands of
+/// entries, as Lew's holds, on disk (the store's fsyncs are what the
+/// pump's turn waits on; a tmpfs would hide them). The phone joins; while
+/// the first pull runs, two probes measure each block. The engine's
+/// thread does what `onResume` hands it (close, front) every 50 ms, as
+/// `Engine.run` would; the UI thread asks the conversation list every
+/// 16 ms, as `ConversationsActivity.ask` does once per frame (1464: the
+/// Pixel spent 83.6 % of 44 s in that query, 79 to 100 ms a call while
+/// the pull ran). The list's longest block must stay under [`UI_BAR`], a
+/// few frames, so no tap is lost; the engine's under [`ENGINE_BAR`]. The
+/// history must arrive whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
+    let _facade = facade_turn().await;
+    let instance = instance();
+    let scratch = env!("CARGO_TARGET_TMPDIR");
+    let rns = tempfile::tempdir_in(scratch).expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir_in(scratch).expect("home node dir");
+    let code = admit(home.path());
+    let filled = ugly_store::fill_archive_of(home.path(), BIG_CONVERSATIONS, BIG_CAP);
+    assert_eq!(
+        filled.messages,
+        BIG_CONVERSATIONS * ugly_store::PER_CONVERSATION
+    );
+    let node = HomeNode::start_capped(
+        listener,
+        &instance,
+        rns.path(),
+        home.path(),
+        None,
+        None,
+        BIG_CAP,
+    )
+    .await;
+
+    let phone = tempfile::tempdir_in(scratch).expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let joined = std::time::Instant::now();
+        let answer = started(&loquax_android::start(&schema::encode(&first)));
+        assert!(answer.ok, "{answer:?}");
+        eprintln!("BIGPULL join: {} ms", joined.elapsed().as_millis());
+
+        // The engine's thread with onResume's commands, every 50 ms, and
+        // the UI thread with the list, once a frame, while the pull runs.
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probing = std::sync::Arc::clone(&done);
+        let probe = std::thread::spawn(move || {
+            let close = schema::encode(&Request::Close);
+            let front = schema::encode(&Request::Front { front: true });
+            let mut blocks = Vec::new();
+            while !probing.load(std::sync::atomic::Ordering::Relaxed) {
+                let began = std::time::Instant::now();
+                let _ = loquax_android::command(&close);
+                let _ = loquax_android::command(&front);
+                blocks.push(began.elapsed());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            blocks
+        });
+        let looking = std::sync::Arc::clone(&done);
+        let look = std::thread::spawn(move || {
+            let list = schema::encode(&schema::Query::Conversations { search: None });
+            let mut blocks = Vec::new();
+            let mut rows = 0;
+            while !looking.load(std::sync::atomic::Ordering::Relaxed) {
+                let began = std::time::Instant::now();
+                let answer: schema::Conversations =
+                    rmp_serde::from_slice(&loquax_android::query(&list)).expect("the list");
+                blocks.push(began.elapsed());
+                rows = rows.max(answer.conversations.len());
+                std::thread::sleep(Duration::from_millis(16));
+            }
+            (blocks, rows)
+        });
+
+        // The history whole: every conversation but the archived and the
+        // blocked one listed, each of them with every bubble.
+        let pulled = std::time::Instant::now();
+        let listed = BIG_CONVERSATIONS - 2;
+        let deadline = std::time::Instant::now() + Duration::from_secs(BIG_PULL_SECS);
+        let mut whole = false;
+        while std::time::Instant::now() < deadline {
+            // The check reads all hundred conversations under the lock: four
+            // times a second, not once per event, or the harness's own
+            // reads are the probes' longest waits (1464).
+            std::thread::sleep(Duration::from_millis(250));
+            for _ in 0..10_000 {
+                if loquax_android::next_event(Duration::ZERO).is_none() {
+                    break;
+                }
+            }
+            let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
+                &schema::encode(&schema::Query::Conversations { search: None }),
+            ))
+            .expect("the list");
+            if list.conversations.len() < listed {
+                continue;
+            }
+            whole = (0..BIG_CONVERSATIONS)
+                .filter(|i| *i != ugly_store::BLOCKED)
+                .all(|i| {
+                    let messages: schema::Messages = rmp_serde::from_slice(&loquax_android::query(
+                        &schema::encode(&schema::Query::Messages {
+                            peer: ugly_store::peer_hex(i),
+                        }),
+                    ))
+                    .expect("the messages");
+                    messages.messages.len() == ugly_store::PER_CONVERSATION - ugly_store::REACTIONS
+                });
+            if whole {
+                break;
+            }
+        }
+        let took = pulled.elapsed();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let blocks = probe.join().expect("the probe");
+        let (looks, rows) = look.join().expect("the list's probe");
+        let longest = blocks.iter().max().copied().unwrap_or_default();
+        let longest_look = looks.iter().max().copied().unwrap_or_default();
+        let slow_looks = looks.iter().filter(|block| **block >= FRAME).count();
+        eprintln!(
+            "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms; \
+             list probes={} longest={} ms over a frame={} rows={rows}",
+            took.as_millis(),
+            blocks.len(),
+            longest.as_millis(),
+            looks.len(),
+            longest_look.as_millis(),
+            slow_looks,
+        );
+        loquax_android::stop();
+        assert!(whole, "the history not whole in {BIG_PULL_SECS} s");
+        assert!(
+            longest_look < UI_BAR,
+            "the list's query blocked the UI thread {} ms during the first pull (bar {} ms)",
+            longest_look.as_millis(),
+            UI_BAR.as_millis()
+        );
+        assert!(
+            longest < ENGINE_BAR,
+            "onResume's commands blocked the engine's thread {} ms during the first pull \
+             (bar {} ms)",
+            longest.as_millis(),
+            ENGINE_BAR.as_millis()
+        );
+    })
+    .await
+    .expect("the session");
+    node.kill().await;
+}
+
+/// The big mailbox of 1446: 100 conversations of 40, 4000 entries.
+const BIG_CONVERSATIONS: usize = 100;
+/// Its archive cap: room for all of it.
+const BIG_CAP: u64 = 64 << 20;
+/// How long its first pull may take on the host.
+const BIG_PULL_SECS: u64 = 240;
+/// The longest block we accept (1464): 100 ms, a few frames. 1446's 1 s
+/// kept Android's 5 s input limit away, but the Pixel still froze 35 s
+/// in blocks of 80 to 100 ms, one per event, and lost taps.
+const UI_BAR: Duration = Duration::from_millis(100);
+/// The engine thread's longest block for onResume's two commands (1464):
+/// each makes a store commit of its own and waits for at most the one
+/// event the pump is folding, another commit; on the host's disk a commit
+/// takes 10 to 35 ms with fsync spikes past 50 ms, so the two together
+/// measured 64 to 110 ms. Not the screen's wait since 1446, and below the
+/// 156 to 287 ms they took when the pump held the lock for whole slices.
+const ENGINE_BAR: Duration = Duration::from_millis(250);
+/// One frame at 60 Hz: the list's blocks longer than this are counted.
+const FRAME: Duration = Duration::from_millis(16);
+
 /// The mailbox on the phone (1152): the first start that chooses it needs no
 /// code and no server, the phone's node dials its entry server (here a stock
 /// Python RNS instance), a stock Python LXMF sender delivers DIRECT to the
@@ -2428,6 +2721,7 @@ fn a_run_of_reports_is_one_row_counted_once_and_expands() {
     // never (1209); the next report updates that row.
     let report = |id: u8, lat: i32| {
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [id; 32],
             source: peer,
             title: Vec::new(),
@@ -2492,6 +2786,7 @@ fn a_position_report_is_a_state_not_a_message() {
     let toasts = model.toasts.len();
     let received = |id: u8, body: &str, fields: Vec<_>| {
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [id; 32],
             source: peer,
             title: Vec::new(),
@@ -2701,6 +2996,7 @@ fn a_fresh_position_puts_the_map_pin_on_the_list_row() {
     update(
         &mut model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [0xc4; 32],
             source: peer,
             title: Vec::new(),
@@ -2835,6 +3131,7 @@ fn the_phone_reads_grouping_days_and_search_from_the_scene() {
     update(
         &mut model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [0xc1; 32],
             source: peer,
             title: Vec::new(),
@@ -2890,6 +3187,7 @@ fn the_friends_sheet_lists_positions_newest_first_with_the_day_marked() {
     );
     let report = |n: u8, peer: [u8; 16], at: i64, lat: i32| {
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [n; 32],
             source: peer,
             title: Vec::new(),
@@ -3007,6 +3305,7 @@ fn a_shared_position_reaches_the_privacy_list_and_a_bad_fix_is_refused() {
     update(
         &mut model,
         UiEvent::Engine(loquax::outbox::OutboxEvent::Received {
+            sent_at: 0,
             message_id: [7; 32],
             source: bob,
             title: Vec::new(),
@@ -4304,6 +4603,7 @@ fn a_read_receipt_reads_ours_on_the_phone_and_survives_the_store() {
     let effects = update(
         &mut model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [0xe1; 32],
             source: peer,
             title: Vec::new(),
@@ -4340,6 +4640,361 @@ fn a_read_receipt_reads_ours_on_the_phone_and_survives_the_store() {
             .and_then(|m| m.delivery),
         Some(DeliveryState::Read { at: want })
     );
+}
+
+/// 1395 and 1462, against the ugly store: a device receipt (0x07) from a
+/// peer turns the message of ours it names into two grey ticks on the
+/// phone's rows, `delivered`, adds no row, and the Info says "on the
+/// device" in the reader's language, with the time it came; the words
+/// survive the store. Read receipts off do not hide it.
+#[test]
+fn a_device_receipt_shows_two_ticks_on_the_phone_and_survives_the_store() {
+    use leviculum_lxmf::lev::{Lev, PropagationReceipt};
+    use leviculum_ui::delivery::DeliveryState;
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent};
+    use loquax::when::WallTime;
+    use loquax_android::session;
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    ugly_store::fill_store_of(home.path(), &identity);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let mut store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    let mut model = session::known(home.path(), &store).expect("a model");
+    let start = ugly_store::BASE + 3 * 86_400;
+    update(
+        &mut model,
+        UiEvent::Clock(WallTime {
+            unix_secs: start,
+            offset_secs: 0,
+        }),
+    );
+    model.restore(store.restore().expect("restore"));
+    update(&mut model, UiEvent::ReadReceipts(false));
+    let (c, id, key) = model
+        .conversations
+        .iter()
+        .enumerate()
+        .find_map(|(c, conversation)| {
+            conversation.messages.iter().find_map(|m| {
+                (m.outbound
+                    && m.id.is_some()
+                    && !matches!(
+                        m.delivery,
+                        Some(DeliveryState::Delivered | DeliveryState::Read { .. })
+                    ))
+                .then(|| (c, m.id.expect("an id"), m.activity))
+            })
+        })
+        .expect("a message of ours not delivered yet");
+    let peer = model.conversations[c].peer;
+    let rows_before = session::rows(&model, c, Lang::En).len();
+    let receipt = Lev {
+        propagation_receipt: Some(PropagationReceipt {
+            received_at: (start - 60) as u32,
+            ids: vec![id],
+        }),
+        ..Lev::default()
+    };
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [0xe7; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: receipt.fields().to_vec(),
+            verified: true,
+        }),
+    );
+    // The words carry when this device learned it, the session's clock.
+    let at = WallTime {
+        unix_secs: start,
+        offset_secs: 0,
+    }
+    .hh_mm();
+    let rows = session::rows(&model, c, Lang::En);
+    assert_eq!(rows.len(), rows_before, "a receipt is no row");
+    let row = rows.iter().find(|r| r.id == hex(&id)).expect("the row");
+    assert_eq!(row.state, "delivered");
+    let state_words = |model: &loquax::ui::UiModel<_>, lang: Lang| {
+        loquax::ui::info::message_info(model, peer, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| row.resolve(lang))
+            .find(|(label, _)| label == "Status")
+            .map(|(_, value)| value)
+            .expect("a status row")
+    };
+    let who = model.names.label(&peer);
+    assert_eq!(state_words(&model, Lang::En), format!("On {who}'s device"));
+    assert_eq!(
+        state_words(&model, Lang::De),
+        format!("Auf dem Gerät von {who}")
+    );
+    let on_device = |model: &loquax::ui::UiModel<_>| {
+        loquax::ui::info::message_info(model, peer, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| row.resolve(Lang::En))
+            .find(|(label, _)| label == "On the device")
+            .map(|(_, value)| value)
+    };
+    assert!(
+        on_device(&model).is_some_and(|value| value.ends_with(&at)),
+        "{:?}",
+        on_device(&model)
+    );
+    store.write(&model.take_writes()).expect("written");
+    drop(store);
+    let store = loquax::store::Store::open_in(home.path(), me).expect("again");
+    let mut again = session::known(home.path(), &store).expect("a model");
+    update(
+        &mut again,
+        UiEvent::Clock(WallTime {
+            unix_secs: start,
+            offset_secs: 0,
+        }),
+    );
+    again.restore(store.restore().expect("restore"));
+    let key = again
+        .conversations
+        .iter()
+        .flat_map(|c| c.messages.iter())
+        .find(|m| m.id == Some(id))
+        .map(|m| m.activity)
+        .expect("ours, restored");
+    let restored = loquax::ui::info::message_info(&again, peer, key)
+        .expect("its info")
+        .rows
+        .iter()
+        .map(|row| row.resolve(Lang::En))
+        .find(|(label, _)| label == "Status")
+        .map(|(_, value)| value);
+    assert_eq!(restored, Some(format!("On {who}'s device")));
+    assert!(
+        on_device(&again).is_some_and(|value| value.ends_with(&at)),
+        "{:?}",
+        on_device(&again)
+    );
+}
+
+/// 1409 end to end: the phone sends through its home to a stock recipient
+/// that is not there; the home propagates it to its lnpnd, which announces
+/// `/lev/status`. The stock Python recipient comes up and collects, and
+/// sends no receipt of its own. The home's next sync round asks the node
+/// over a link it never identifies, archives the node's `collected`, and
+/// the phone's row moves from the mailbox's tick to the arrived rung (1462:
+/// still one tick, the recipient's identity collected it, which its own
+/// mailbox might have done), its Info saying "Collected from the
+/// propagation network", which only the node's word gives (a proof would
+/// say "Arrived"). The phone, a client of its home, asks nothing itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_collected_at_the_node_shows_collected_on_the_phone() {
+    let recipient_peer = python_peer::PythonPeer::start();
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start_full(
+        listener,
+        &instance,
+        rns.path(),
+        home.path(),
+        Some(recipient_peer.rns_port),
+        Some((8, 10_000)),
+    )
+    .await;
+    let pn = node.pn.as_ref().expect("the home's node");
+    let pn_hash = pn.hex();
+
+    // The recipient's key reaches the home by its contact code; the
+    // recipient itself is not up, so the direct leg finds nobody.
+    let recipient = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let recipient_code = loquax::lxma::encode(&recipient.public_key_bytes()).expect("code");
+    let recipient_address = loquax::address::to_hex(
+        &loquax::home::lxmf_address(&recipient.public_key_bytes()).expect("address"),
+    );
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let body = "abgeholt am Knoten";
+    let peer = recipient_address.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        session
+            .request(Request::AddContact {
+                lxma: recipient_code,
+                name: Some("Anna".to_string()),
+            })
+            .expect("added");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while session.keys_told() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the home node never took the key"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+        session
+            .request(Request::Send {
+                peer: peer.clone(),
+                body: body.to_string(),
+            })
+            .expect("send");
+        wait_for(
+            &session,
+            schema::Query::Messages { peer },
+            60,
+            |m: &schema::Messages| m.messages.last().is_some_and(|b| !b.id.is_empty()),
+        );
+        session
+    })
+    .await
+    .expect("the send");
+
+    // The node takes it once the direct leg ended.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
+    loop {
+        match pn.events.try_recv() {
+            Ok(lnpnd::engine::EngineEvent::Accepted { .. }) => break,
+            Ok(_) => {}
+            Err(_) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the node never took the message"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+    let row_peer = recipient_address.clone();
+    let row_state = move |session: &Session| -> (String, String) {
+        let messages: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: row_peer.clone(),
+                })
+                .expect("messages"),
+        )
+        .expect("decode");
+        let bubble = messages
+            .messages
+            .iter()
+            .find(|m| m.body == body)
+            .expect("the bubble");
+        (bubble.state.clone(), bubble.id.clone())
+    };
+    let (before, _) = row_state(&session);
+    assert_eq!(before, "mailbox", "nobody collected it yet");
+    let row_state = std::sync::Arc::new(row_state);
+    let row_state_later = std::sync::Arc::clone(&row_state);
+
+    // The stock recipient comes up and collects from the node.
+    recipient_peer.rpc(
+        "lxmf_init",
+        serde_json::json!({
+            "identity_prv": hex(&recipient.private_key_bytes().expect("private key")),
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Err(error) = recipient_peer.try_rpc(
+        "lxmf_set_propagation_node",
+        serde_json::json!({ "dest_hash": pn_hash }),
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never heard the propagation node: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    recipient_peer.rpc("lxmf_request_from_propagation_node", serde_json::json!({}));
+    let content = hex(body.as_bytes());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !recipient_peer
+        .received()
+        .iter()
+        .any(|m| m.get("content").and_then(|v| v.as_str()) == Some(content.as_str()))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never collected it"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // The home asks at its next round; the phone's row moves.
+    let (session, id) = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let (state, id) = row_state_later(&session);
+            if state == "arrived" {
+                break (session, id);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the row never moved past {state}"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+    })
+    .await
+    .expect("the row");
+    let session = tokio::task::spawn_blocking(move || {
+        let messages: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: loquax::address::to_hex(
+                        &loquax::home::lxmf_address(&recipient.public_key_bytes())
+                            .expect("address"),
+                    ),
+                })
+                .expect("messages"),
+        )
+        .expect("decode");
+        let bubble = messages
+            .messages
+            .iter()
+            .find(|m| m.id == id)
+            .expect("the bubble");
+        // The phone's language is the session's, English here; the German
+        // words are the catalogue's, tested beside the model.
+        let info: schema::Info = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Info {
+                    peer: loquax::address::to_hex(
+                        &loquax::home::lxmf_address(&recipient.public_key_bytes())
+                            .expect("address"),
+                    ),
+                    key: bubble.key,
+                })
+                .expect("info"),
+        )
+        .expect("decode");
+        assert!(
+            info.rows.iter().any(|row| row
+                .value
+                .starts_with("Collected from the propagation network at ")),
+            "{info:?}"
+        );
+        session
+    })
+    .await
+    .expect("the info");
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+    node.stop().await;
 }
 
 /// The photo fixture (1220, `loquax/tests/fixtures/make-photo.py`): 1800 x 2400
@@ -5282,6 +5937,7 @@ fn media_without_words_has_an_empty_body() {
     let mut model = UiModel::<Line>::new(&[anna]);
     let carrying = |n: u8, body: &str, fields| {
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [n; 32],
             source: anna,
             title: Vec::new(),
@@ -6013,6 +6669,7 @@ fn the_phone_reads_groups_from_the_scene_and_asks_their_verbs() {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -6415,4 +7072,208 @@ async fn a_group_made_on_the_phone_is_in_the_list_at_once_and_after_a_restart() 
     .await
     .expect("the second session");
     node.stop().await;
+}
+
+/// 1388, Lew's live test with a stock Columba member 2026-11-03: a photo
+/// without words from the phone, in a group on its home, reaches a stock
+/// Python member from the group's address as the photo with the English
+/// sentence `"Photo from <name>"`, not the bare `"<name>:"` it said before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer() {
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start_linked(
+        listener,
+        &instance,
+        rns.path(),
+        home.path(),
+        Some(peer.rns_port),
+    )
+    .await;
+    // The home learns the stock member's key before it invites it.
+    peer.lxmf_announce();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let bob = python.clone();
+    let (session, group) = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let verb = |verb: &str, peer: &str, text: &str| {
+            session
+                .request(Request::Group {
+                    verb: verb.to_string(),
+                    peer: peer.to_string(),
+                    member: String::new(),
+                    text: text.to_string(),
+                    confirmed: false,
+                })
+                .unwrap_or_else(|error| panic!("{verb}: {error}"));
+        };
+        verb("new", "", "");
+        verb("pick", &bob, "");
+        verb("next", "", "");
+        verb("name", "", "Familie");
+        while session.next_event(Duration::from_millis(300)).is_some() {}
+        verb("create", "", "");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let group = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no changed with the group"
+            );
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Notice { text, .. }) => panic!("the home refused: {text}"),
+                Some(Event::Changed { .. }) => {
+                    let shown: schema::Conversations = rmp_serde::from_slice(
+                        &session
+                            .query(schema::Query::Conversations { search: None })
+                            .expect("the list"),
+                    )
+                    .expect("decode");
+                    if let Some(row) = shown
+                        .conversations
+                        .iter()
+                        .find(|row| row.name.starts_with("Familie"))
+                    {
+                        break row.peer.clone();
+                    }
+                }
+                _ => {}
+            }
+        };
+        session
+            .request(Request::Photo {
+                peer: group.clone(),
+                data: schema::Blob(PHOTO.to_vec()),
+            })
+            .unwrap_or_else(|error| panic!("the photo: {error}"));
+        (session, group)
+    })
+    .await
+    .expect("the session");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let got = loop {
+        let found = peer
+            .received()
+            .into_iter()
+            .find(|m| m["source_hash"] == group.as_str() && python_photo(m).is_some());
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stock member never got the photo: {:?}",
+            peer.received()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    // The peer hands content over as hex.
+    let content = got["content"].as_str().expect("content");
+    let content: Vec<u8> = (0..content.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&content[i..i + 2], 16).expect("hex"))
+        .collect();
+    let content = String::from_utf8(content).expect("utf-8");
+    let name = content
+        .strip_prefix("Photo from ")
+        .unwrap_or_else(|| panic!("the sentence, not {content:?}"));
+    assert!(
+        !name.is_empty() && !name.contains(':'),
+        "a name after it: {content:?}"
+    );
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+    node.stop().await;
+}
+
+mod group_ticks {
+    include!("../../loquax/tests/support/group_ticks.rs");
+}
+
+/// 1466, the group's ticks tell the truth too, on the phone: the group's
+/// chat of `scene-group-ticks.json` as Java reads its rows (our line every
+/// member's device has `delivered`, the one Ben's device has not said yet
+/// `arrived`) and each line's Info in German, a row per member with its
+/// rung and since when. Pinned as `golden/group-ticks.json`;
+/// `LOQUAX_WRITE_GOLDEN=1` writes it again.
+#[test]
+fn a_groups_one_and_two_ticks_are_the_phones_golden() {
+    use loquax_android::session;
+    let mut model = loquax::ui::UiModel::<session::Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    let c = group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
+    let rows = session::rows(&model, c, Lang::De);
+    let states: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|r| r.ours)
+        .map(|r| (r.body.as_str(), r.state.as_str()))
+        .collect();
+    assert_eq!(
+        states,
+        [("Brot ist da", "delivered"), ("Wer kommt mit?", "arrived")]
+    );
+    let info = |id: [u8; 32]| -> Vec<schema::InfoRow> {
+        let key = model.conversations[c]
+            .messages
+            .iter()
+            .find(|m| m.id == Some(id))
+            .expect("our line")
+            .activity;
+        loquax::ui::info::message_info(&model, group_ticks::TICKS_GROUP, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| {
+                let (label, value) = row.resolve(Lang::De);
+                schema::InfoRow { label, value }
+            })
+            .collect()
+    };
+    let two = info(group_ticks::TICKS_TWO);
+    let one = info(group_ticks::TICKS_ONE);
+    let value = |rows: &[schema::InfoRow], label: &str| {
+        rows.iter()
+            .find(|r| r.label == label)
+            .map(|r| r.value.clone())
+            .unwrap_or_else(|| panic!("no {label}: {rows:?}"))
+    };
+    assert_eq!(value(&two, "Status"), "Auf den Geräten");
+    assert_eq!(value(&one, "Status"), "Angekommen");
+    assert!(
+        value(&one, "Anna").starts_with("Auf dem Gerät · "),
+        "{one:?}"
+    );
+    assert!(value(&one, "Ben").starts_with("Angekommen · "), "{one:?}");
+    let mut got = serde_json::to_string_pretty(&serde_json::json!({
+        "rows": rows,
+        "info_two_ticks": two,
+        "info_one_tick": one,
+    }))
+    .expect("json");
+    got.push('\n');
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/group-ticks.json");
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, &got).expect("write the golden");
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "group-ticks.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
+    );
 }

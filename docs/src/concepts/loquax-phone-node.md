@@ -20,7 +20,7 @@ change to the interface seam keeps the way to the full node open.
 (`loquax/src/engine.rs:377`) says it "registers nothing, by
 construction", and a guard test, `a_client_engine_registers_no_delivery_destination`,
 holds that. The session attaches through `attach_leaf`
-(`loquax-android/src/session.rs:416`) with `Role::Client`. That node runs
+(`loquax-android/src/session.rs:489`) with `Role::Client`. That node runs
 with transport off and has no interface from the config: the rendezvous
 rotation dials one TCP client at a time (`Upstream::Tcp`,
 `loquax/src/engine/shell.rs:828`). The only destination it talks to is the
@@ -50,7 +50,11 @@ each with its own directory and store. There are two shapes:
   node has, because a path to `loquax.home` does not care which medium
   carries it.
 
-Section 5 leaves open which of the two shapes is the default.
+Section 5 leaves open which of the two shapes is the default. Which of
+the node's media carries the client's link to the mailbox, and how the
+most direct one is kept, is [Reaching the mailbox from anywhere](loquax-reachability.md):
+each medium this page adds (WiFi AutoInterface, BLE) becomes a rung of
+that ladder.
 
 ## 2. One interface per medium, behind the host seam
 

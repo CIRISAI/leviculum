@@ -55,7 +55,7 @@ public class MapActivity extends Activity implements Events.Listener {
         menu.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                ConversationsActivity.showMenu(MapActivity.this, menu);
+                ConversationsActivity.showMenu(MapActivity.this, menu, map);
             }
         });
         final String from = getIntent().getStringExtra(SELECTED);
@@ -69,6 +69,11 @@ public class MapActivity extends Activity implements Events.Listener {
                 }
                 startActivity(new Intent(MapActivity.this, ChatActivity.class)
                         .putExtra(ChatActivity.PEER, peer));
+            }
+
+            @Override
+            public void title(String said) {
+                ((TextView) findViewById(R.id.title)).setText(said);
             }
         });
         if (getIntent().hasExtra(FRIEND)) {
@@ -115,14 +120,24 @@ public class MapActivity extends Activity implements Events.Listener {
     protected void onResume() {
         super.onResume();
         Events.listen(this);
-        Core.front(true);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(true);
+            }
+        });
         map.ask();
     }
 
     @Override
     protected void onPause() {
         map.pause();
-        Core.front(false);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(false);
+            }
+        });
         Events.listen(null);
         super.onPause();
     }

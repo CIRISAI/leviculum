@@ -373,6 +373,11 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
         ),
         ("pull", java_map(&[("t", Java::Str("pull"))]), Request::Pull),
         (
+            "profileShown",
+            java_map(&[("t", Java::Str("profile")), ("open", Java::Bool(true))]),
+            Request::Profile { open: true },
+        ),
+        (
             "front",
             java_map(&[("t", Java::Str("front")), ("front", Java::Bool(true))]),
             Request::Front { front: true },
@@ -638,6 +643,18 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
                 ("lang", Java::Str("de-DE")),
             ]),
             Query::Lxma {
+                text: s(LXMA),
+                lang: Some(s("de-DE")),
+            },
+        ),
+        (
+            "code",
+            java_map(&[
+                ("t", Java::Str("code")),
+                ("text", Java::Str(LXMA)),
+                ("lang", Java::Str("de-DE")),
+            ]),
+            Query::Code {
                 text: s(LXMA),
                 lang: Some(s("de-DE")),
             },

@@ -1042,6 +1042,17 @@ fn router_encrypts_stamps_uploads_and_awaits_collection_of_a_propagated_message(
     assert_eq!(outer_stamp, propagation_stamp);
     assert_eq!(&unstamped[..16], recipient_hash.as_bytes());
     assert_eq!(full_hash(unstamped), request.transient_id);
+    // 1395: the proven upload names the id the node stores it under, for
+    // the sender's `/lev/status` question.
+    assert!(
+        client.events.iter().any(|event| event
+            == &RouterEvent::PropagationUploaded {
+                message_id,
+                transient_id: full_hash(unstamped),
+            }),
+        "the proven upload names its transient id: {:?}",
+        client.events
+    );
 
     let clear_tail = recipient_delivery
         .decrypt(&unstamped[16..])

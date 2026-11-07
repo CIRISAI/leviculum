@@ -493,6 +493,21 @@ struct Cli {
     /// testing against a captured tree; no board is ever touched through it.
     #[arg(long, value_name = "DIR", hide = true)]
     sysfs: Option<PathBuf>,
+
+    /// Make the ThinkNode M9 on --port a device of a Loquax home, then
+    /// exit: the admission code `loquax mailbox admit` prints (or the
+    /// phone's Link a device screen shows), as one argument, quoted when
+    /// it carries spaces. The board writes it to flash and joins the home
+    /// over its node; its [HOME] lines on the same port say how it goes.
+    /// The port must be free, so stop lnsd on it first. No flashing.
+    #[arg(long, value_name = "CODE", requires = "port")]
+    home: Option<String>,
+
+    /// The serial port of the board --home talks to, such as
+    /// /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 for the M9's
+    /// CH340K. Opening it resets the board; the session waits for its boot.
+    #[arg(long, value_name = "TTY", requires = "home")]
+    port: Option<PathBuf>,
 }
 
 /// Parse what `--store-storm` was given: `COUNT[,BYTES]` (#384).
@@ -765,6 +780,17 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         console = Console::new(cli.quiet);
         &mut console
     };
+
+    if let (Some(code), Some(port)) = (&cli.home, &cli.port) {
+        let reply = lnflash::home::give(port, code, lnflash::home::BOOT_WITHIN)
+            .map_err(|err| format!("{}: {err}", port.display()))?;
+        ui.say(&lnflash::home::said(port, reply));
+        return Ok(if reply.took_it() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
 
     if let Some(file) = &cli.summarize {
         let text = std::fs::read_to_string(file)
@@ -1329,6 +1355,23 @@ mod tests {
         assert!(
             line.contains("-if00") && line.contains("/dev/ttyACM3"),
             "{line}"
+        );
+    }
+
+    /// 1415: `--home` names its port and `--port` serves only `--home`;
+    /// the code is one argument, spaces and all.
+    #[test]
+    fn the_home_code_needs_its_port_and_the_port_its_code() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        assert!(parse(&["--home", "lqxh1aaaaa"]).is_err());
+        assert!(parse(&["--port", "/dev/ttyUSB0"]).is_err());
+        let cli = parse(&["--home", "lqxh1 aaaaa bbbbb", "--port", "/dev/ttyUSB0"]).expect("both");
+        assert_eq!(cli.home.as_deref(), Some("lqxh1 aaaaa bbbbb"));
+        assert_eq!(
+            cli.port.as_deref(),
+            Some(std::path::Path::new("/dev/ttyUSB0"))
         );
     }
 

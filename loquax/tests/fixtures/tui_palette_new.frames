@@ -23,7 +23,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │code.              │▸ send  Enter                         │                   │
 │                   │  new conversation                    │                   │
 │                   │  add contact                         │                   │
-│                   │  my code                             │                   │
+│                   │  my code  P                          │                   │
 │                   │  fetch  F5                           │                   │
 │                   │  quit  q                             │                   │
 │                   │  help  ?                             │                   │

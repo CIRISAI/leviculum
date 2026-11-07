@@ -159,6 +159,12 @@ pub enum Command {
     /// ([`crate::home::KIND_STALLED`]); reported as
     /// [`OutboxEvent::HomeStalled`].
     HomeStalled { message_id: [u8; 32] },
+    /// What the propagation node said of messages the home sent (1409,
+    /// [`crate::home::KIND_PN_STATUS`]); reported as
+    /// [`OutboxEvent::HomePnStatus`].
+    HomePnStatus {
+        answers: Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>,
+    },
     /// On a client: a name the home node heard a peer announce, pulled from
     /// the archive; reported as [`OutboxEvent::Announced`], as an announce
     /// the client heard itself would be.
@@ -233,6 +239,11 @@ pub enum OutboxEvent {
     /// The home node gave up a silent leg of a message and tries again
     /// ([`Command::HomeStalled`]).
     HomeStalled { message_id: [u8; 32] },
+    /// What the propagation node said of messages the home sent
+    /// ([`Command::HomePnStatus`]).
+    HomePnStatus {
+        answers: Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>,
+    },
     /// The reader's name for a peer, set on one of the home's devices
     /// ([`Command::HomePetname`]).
     HomePetname {
@@ -280,6 +291,22 @@ pub enum OutboxEvent {
         fields: Vec<Field>,
         /// Whether the signature verified against a known source identity.
         verified: bool,
+        /// The message's LXMF timestamp in unix seconds: when its writer
+        /// wrote it by the writer's clock (a group copy's is the home's
+        /// acceptance, its writer's own rides the `lev` pair). The bubble
+        /// shows this, not when this device fetched it (1445); 0 when not
+        /// known.
+        sent_at: i64,
+    },
+    /// The message just [`OutboxEvent::Received`] came through the
+    /// propagation network: the router handed it on as
+    /// `DeliveryMethod::Propagated` (set where a collected message is
+    /// unpacked, `leviculum-lxmf/src/router/propagation_runtime.rs`). The
+    /// screen owes its sender a propagation receipt when the message asks
+    /// for one (1395, [`crate::ui::arrival`]).
+    Propagated {
+        message_id: [u8; 32],
+        source: [u8; 16],
     },
     /// The message just [`OutboxEvent::Received`] came from a sender whose
     /// key is not known, so its signature could not be checked. The engine
@@ -318,7 +345,23 @@ pub enum OutboxEvent {
     /// A propagation node announced its `lxmf.propagation` destination: the
     /// screen's mailbox schedule syncs on its own node's
     /// (`crate::sync::SyncEvent::Announce`).
-    NodeAnnounced { destination: [u8; 16] },
+    /// `status` is the `/lev/status` version its announce says it answers
+    /// (`{"lev": {"status": 1}}` under `PN_META_CUSTOM`, lnpnd); none for a
+    /// stock node, which a sender never asks (1395).
+    NodeAnnounced {
+        destination: [u8; 16],
+        status: Option<u64>,
+    },
+    /// A propagation node proved the upload of the queued message
+    /// `message_id`, which it stores under `transient_id`: what a sender
+    /// asks it by later (`/lev/status`, 1395, [`crate::pn_status`]).
+    /// `node` is the propagation node the router had selected, the one
+    /// that proved it.
+    Uploaded {
+        message_id: [u8; 32],
+        transient_id: [u8; 32],
+        node: Option<[u8; 16]>,
+    },
     /// A node announced its position on `lev.position` (1302,
     /// [`crate::mesh_position`]): `identity` is the hash of the identity
     /// the announce proved, `location` what its app data said, timed by

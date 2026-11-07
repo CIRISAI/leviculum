@@ -302,7 +302,7 @@ fn history_verifies_what_it_can_and_keeps_the_source_verdict_as_the_sources() {
     // Ours, signed with the tree's identity: checked, and it holds.
     assert!(messages[0].outbound);
     assert_eq!(messages[0].signature, Signature::Verified);
-    assert_eq!(messages[0].delivery, Some(DeliveryState::Delivered));
+    assert_eq!(messages[0].delivery, Some(DeliveryState::Arrived));
     // Intact from a sender whose key loquax does not have: unverified, its
     // bytes kept for the check when the key comes.
     assert_eq!(messages[1].signature, Signature::Unverified);
@@ -1128,7 +1128,7 @@ fn ratspeak_history_comes_over_unsigned_in_utc_and_deleted_stays_deleted() {
         ]
     );
     assert!(messages[0].outbound && !messages[1].outbound);
-    assert_eq!(messages[0].delivery, Some(DeliveryState::Delivered));
+    assert_eq!(messages[0].delivery, Some(DeliveryState::Arrived));
     for message in &messages {
         assert_eq!(message.signature, Signature::Unverified);
         let ledger: Vec<&str> = message.ledger.iter().map(|e| e.what.as_str()).collect();
@@ -1807,7 +1807,7 @@ fn ratspeak_schema_33_is_read_with_its_replies_and_reactions() {
             .find(|m| m.id == Some(id))
             .expect("imported")
     };
-    assert_eq!(by_id(rat.ids[0]).delivery, Some(DeliveryState::Delivered));
+    assert_eq!(by_id(rat.ids[0]).delivery, Some(DeliveryState::Arrived));
     assert_eq!(by_id(rat.ids[3]).delivery, Some(DeliveryState::InMailbox));
     // Half a second of the received time is Ratspeak's, kept as whole seconds.
     assert_eq!(

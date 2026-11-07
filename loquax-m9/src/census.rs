@@ -290,6 +290,51 @@ pub fn session(
     Ok(measured)
 }
 
+/// The archive a session's census pulls: `n` entries as a home keeps
+/// them, LXMF messages of `len` bytes each (1363 measured thirty of 200
+/// bytes, a typical text with its signature and fields).
+pub fn archive(n: u64, len: usize) -> alloc::vec::Vec<loquax::home::wire::Entry> {
+    (1..=n)
+        .map(|seq| loquax::home::wire::Entry {
+            seq,
+            kind: loquax::home::KIND_RECEIVED,
+            at: 1_793_600_000,
+            packed: alloc::vec![seq as u8; len],
+        })
+        .collect()
+}
+
+/// The answers a home gives a client that asks LoRa pages, walked by
+/// cursor as the home walks them (`wire::fit_page`): what [`session`] is
+/// fed on the board and on the host alike.
+pub fn lora_answers(all: &[loquax::home::wire::Entry]) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+    use loquax::home::ask::LORA_PAGE_BYTES;
+    use loquax::home::wire;
+    let mut answers = alloc::vec::Vec::new();
+    let mut at = 0;
+    while at < all.len() {
+        let mut page = wire::Page {
+            entries: all[at..].to_vec(),
+            more: false,
+            first: 1,
+            left: Some(wire::LEFT_UNCOUNTED),
+        };
+        wire::fit_page(&mut page, LORA_PAGE_BYTES);
+        at += page.entries.len();
+        page.left = Some((all.len() - at) as u64);
+        answers.push(wire::sync_answer(&page));
+    }
+    answers
+}
+
+/// The pull batch a board runs with after its session census (1414): the
+/// LoRa page while the measured peak keeps [`SESSION_PEAK`], a smaller page
+/// in proportion when it does not; answers up to `max_answer`, the largest
+/// message the board's node takes in.
+pub fn batch(session: &Step, max_answer: usize) -> loquax::home::board::Batch {
+    loquax::home::board::Batch::sized(session.peak, SESSION_PEAK, max_answer)
+}
+
 /// The session census line: what the pull cost and the verdict.
 pub struct SessionLine<'a>(pub &'a Step);
 

@@ -357,13 +357,22 @@ final class Locator {
                             say.line(activity.getString(R.string.location_none));
                             return;
                         }
-                        String error = share(peer, location);
-                        say.line(error == null
-                                ? activity.getString(R.string.shared_to, name)
-                                : activity.getString(R.string.share_failed, error));
-                        if (error == null && done != null) {
-                            done.on(location);
-                        }
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return share(peer, location);
+                            }
+                        }, new Engine.Said() {
+                            @Override
+                            public void said(String error) {
+                                say.line(error == null
+                                        ? activity.getString(R.string.shared_to, name)
+                                        : activity.getString(R.string.share_failed, error));
+                                if (error == null && done != null) {
+                                    done.on(location);
+                                }
+                            }
+                        });
                     }
                 });
             }

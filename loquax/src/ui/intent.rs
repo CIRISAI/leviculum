@@ -75,7 +75,8 @@
 //! | `Command::LoadMapArea`, `MapDrawing` | the same names |
 //! | `Command::Blocked`, `Archived` | `ShowBlocked`, `ShowArchived` |
 //! | `Command::Import` | `Import` |
-//! | `Command::MyCode` | `MyCode` |
+//! | `Command::MyCode`, a tap or click on the reader's avatar, the phone's profile activity (1443) | `Profile` |
+//! | (new) the profile's "Share my address" (1443) | `ShareCode` |
 //! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
 //! | the Maps page's last row (1290), `Request::DeleteRegions` | `DeleteAllRegions` (`confirmed` tells the asked from the asking) |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
@@ -426,8 +427,13 @@ pub enum Intent {
     /// the model as [`super::UiEvent::Group`].
     Group(Verb),
     NewConversation,
-    /// Show our own contact code and its QR (1279).
-    MyCode,
+    /// The reader's profile (1443): name, address, the contact code's QR,
+    /// the mailbox, the devices. What a tap on the avatar raises on every
+    /// target, and `my code` in the palette.
+    Profile,
+    /// The profile's "Share my address": the contact code to the phone's
+    /// share sheet, the window's or the terminal's clipboard.
+    ShareCode,
     /// The name recipients see.
     Name(String),
 
@@ -621,7 +627,8 @@ impl Intent {
                 Verb::Close => StrId::Close,
             },
             Intent::NewConversation => StrId::NewConversation,
-            Intent::MyCode => StrId::MyCode,
+            Intent::Profile => StrId::ProfileTitle,
+            Intent::ShareCode => StrId::ProfileShare,
             Intent::Name(_) => StrId::Name,
             Intent::Scroll(_) => StrId::Scroll,
             Intent::ScrollMessages(_) => StrId::ScrollMessages,
@@ -642,11 +649,13 @@ impl Intent {
             Intent::Map(MapCmd::ZoomOut) => StrId::ZoomOut,
             Intent::Map(MapCmd::Pan(..)) => StrId::Pan,
             Intent::Map(MapCmd::Fit) => StrId::Fit,
+            Intent::Map(MapCmd::FitWindow) => StrId::FitWindow,
             Intent::Map(MapCmd::Step(_)) => StrId::StepPin,
             Intent::Map(MapCmd::Open) => StrId::Open,
             Intent::Map(MapCmd::Close) => StrId::Close,
             Intent::Map(MapCmd::Drawing(_)) => StrId::MapDrawing,
             Intent::Map(MapCmd::GlyphTest) => StrId::GlyphTest,
+            Intent::Map(MapCmd::TrackWindow(_)) => StrId::TrackWindow,
             Intent::SelectPin(_) => StrId::SelectPin,
             Intent::LoadMapArea => StrId::LoadMapArea,
             Intent::MapDrawing => StrId::MapDrawing,
@@ -744,7 +753,7 @@ impl From<Command> for Intent {
             Command::Import => Intent::Import,
             Command::ReadReceipts => Intent::ReadReceipts { on: Switch::Toggle },
             Command::NewConversation => Intent::NewConversation,
-            Command::MyCode => Intent::MyCode,
+            Command::MyCode => Intent::Profile,
             // No code yet: the frontend asks for it.
             Command::AddContact => Intent::AddContact {
                 lxma: String::new(),

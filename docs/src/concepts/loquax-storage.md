@@ -83,7 +83,7 @@ Three reasons for the shape:
    problem it once was on our side: the emission timestamp carries it, as
    the reference's `time.time()` does, because at whole-second granularity
    two identical messages created inside one second collapse to one ID —
-   `leviculum-lxmf/src/router.rs:583-587`, Codeberg #217. Precision and
+   `leviculum-lxmf/src/router.rs:593-597`, Codeberg #217. Precision and
    skew are different failures, and only the second one is a sorting
    question.)
 3. **`fields` stored as raw msgpack, not exploded into columns.** Unknown

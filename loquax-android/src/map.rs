@@ -65,13 +65,19 @@ use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
 use loquax::tiles::Stats;
-use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant};
+use loquax::ui::map::{
+    fit, fit_at, in_window, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant,
+};
+use loquax::ui::radar;
+use loquax::ui::strings::Lang;
+use loquax::ui::tracks::TrackWindow;
 use loquax::ui::viewload::ViewLoads;
 use loquax::when::WallTime;
 
 use crate::friends;
 use crate::schema::{
-    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, RegionRow, VERSION,
+    MapFlingChoice, MapMark, MapRegions, MapRequest, MapShown, MapThemeChoice, RegionRow,
+    TrackChoice, VERSION,
 };
 use crate::session::pins_in;
 
@@ -385,7 +391,7 @@ impl Renderer {
         let now = self.now_ms();
         let polled = self.loader.poll(now);
         let landed = self.steps(polled, &mut notice);
-        let setup = screenmap::setup(self.frames.painter());
+        let setup = screenmap::setup_for(self.frames.painter(), pins);
         let area = screenmap::area((request.w.max(1), request.h.max(1)));
         let scale = (request.density_milli.max(100) as f32) / 1000.0;
         let mut selected = request
@@ -440,6 +446,13 @@ impl Renderer {
             if let Some(want) = want_place(at, &setup.regions) {
                 self.ask(want, &mut notice);
             }
+        } else if request.fit_window {
+            // "Fit all" (1386): every peer inside the tracks' time window.
+            let inside = crate::current()
+                .map(|session| session.map_inside())
+                .unwrap_or_default();
+            fit_to(&mut view, fit(&in_window(pins, &inside), area, &setup));
+            self.fitted_at = Some(fitted(&view));
         } else if first || request.fit || refit {
             fit_to(&mut view, fit(pins, area, &setup));
             self.fitted_at = Some(fitted(&view));
@@ -529,6 +542,32 @@ impl Renderer {
         let flag = self.theme.or(Some(ThemeFlag::Auto));
         let table = map_theme(flag, Some(screen));
         let style = Style::SCREEN.in_theme(table);
+        // The running session's tracks at the view's tile zoom (1385);
+        // none without a session, as a test or a measuring tool draws.
+        let chosen = request
+            .track_window
+            .as_deref()
+            .and_then(TrackWindow::of_word);
+        let unit = (24.0 - f64::from(view.tile_zoom())).exp2();
+        let (tracks, window, lang) = match crate::current() {
+            Some(session) => session.map_tracks(unit, scale, chosen),
+            None => (Vec::new(), TrackWindow::default(), Lang::En),
+        };
+        // No region touches the view: the radar (1386), every pin saying
+        // how far and which way it is from the centre.
+        let radar = match radar::shows(&view.at_zoom(rest_zoom), &setup.regions) {
+            true => radar::radar(pins, view.unit(), view.size()),
+            false => None,
+        };
+        let mut labelled;
+        let pins = match &radar {
+            Some(r) => {
+                labelled = pins.to_vec();
+                radar::label(&mut labelled, r);
+                &labelled[..]
+            }
+            None => pins,
+        };
         let ask = Ask {
             view,
             margin: (mx, my),
@@ -536,6 +575,8 @@ impl Renderer {
             style,
             scale,
             pins,
+            tracks: &tracks,
+            radar: radar.as_ref(),
             selected,
             zooms,
             draw_pins: !request.avatars,
@@ -549,11 +590,18 @@ impl Renderer {
         };
         let (w, h) = shot.view.size();
         let marks = match request.avatars {
-            true => marks(pins, &shot.shows, (mx, my), scale, ceiling.max(floor)),
+            true => marks(
+                pins,
+                &shot.shows,
+                (mx, my),
+                scale,
+                ceiling.max(floor),
+                radar.as_ref(),
+            ),
             false => Vec::new(),
         };
         let no_map = !self.loader.loading_here()
-            && !any_region(&setup.regions, &shot.shows.at_zoom(rest_zoom));
+            && !radar::any_region(&setup.regions, &shot.shows.at_zoom(rest_zoom));
         let name = |peer: [u8; 16]| pins.iter().find(|p| p.peer == peer).map(|p| p.words());
         let own = match (request.own_lat_e6, request.own_lon_e6) {
             (Some(lat), Some(lon)) => {
@@ -594,6 +642,7 @@ impl Renderer {
             notice,
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,
+            ground: ground(table),
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
             theme: theme_word(self.theme).to_string(),
             prefetching: self.frames.at_rest(),
@@ -607,6 +656,9 @@ impl Renderer {
             fling: self.fling,
             room_north,
             room_south,
+            track_window: window.word().to_string(),
+            title: window.title(lang),
+            track_windows: track_choices(window, lang),
         };
         shown
     }
@@ -662,17 +714,33 @@ impl Renderer {
     }
 }
 
+/// The map menu's "Time window" sheet (1419) in `lang`: every window in
+/// the menu's order, the default first, `shown` chosen. Java draws the
+/// entries and sends the chosen one's word back.
+pub fn track_choices(shown: TrackWindow, lang: Lang) -> Vec<TrackChoice> {
+    TrackWindow::CHOICES
+        .iter()
+        .map(|&w| TrackChoice {
+            word: w.word().to_string(),
+            label: w.label().text(lang).to_string(),
+            chosen: w == shown,
+        })
+        .collect()
+}
+
 /// The avatar pins of `pins` in the screen's view `shows` (1200), in
 /// view pixels, clustered by [`friends::cluster`] with circles of
 /// [`friends::PIN_DP`] at `scale`: those that land in the frame, its
 /// `margin` on each side included; each cluster with the zoom that parts
-/// it, no deeper than `max_milli`.
+/// it, no deeper than `max_milli`. Under a `radar` (1386) a pin says how
+/// far and which way it is from the radar's centre.
 pub fn marks(
     pins: &[MapPin],
     shows: &ExactView,
     margin: (u32, u32),
     scale: f32,
     max_milli: u32,
+    radar: Option<&radar::Radar>,
 ) -> Vec<MapMark> {
     let (w, h) = shows.size();
     let (mx, my) = (f64::from(margin.0), f64::from(margin.1));
@@ -690,6 +758,10 @@ pub fn marks(
         .into_iter()
         .map(|members| {
             let (x, y) = points[members[0]];
+            let pin = landed[members[0]].0;
+            let way = radar
+                .filter(|r| members.len() == 1 && pin.at != r.centre)
+                .map(|r| radar::relative(r.centre, pin.at));
             MapMark {
                 x: x.round() as i32,
                 y: y.round() as i32,
@@ -704,30 +776,20 @@ pub fn marks(
                     diameter,
                     max_milli,
                 ),
+                way,
+                low_battery: members.len() == 1 && pin.low_battery(),
             }
         })
         .collect()
 }
 
-/// Whether any of `regions` reaches into `view` at some zoom: without one
-/// the map shows only the world's outline there, "No map here yet"
-/// (1200). A box across the antimeridian counts as reaching in.
-fn any_region(
-    regions: &[leviculum_map::region::Header],
-    view: &leviculum_map::viewport::Viewport,
-) -> bool {
-    let b = view.bounds();
-    regions.iter().any(|h| {
-        let r = h.bounds;
-        r.west > r.east
-            || b.west > b.east
-            || (r.west <= b.east && b.west <= r.east && r.south <= b.north && b.south <= r.north)
-    })
-}
-
 /// The process's renderers, one a directory: the app has one; a test
 /// process one a test.
 static RENDERERS: Mutex<Vec<Renderer>> = Mutex::new(Vec::new());
+
+/// Rungs held for directories whose renderer is not made yet
+/// ([`hold_rung`]): it starts held.
+static HELD_RUNGS: Mutex<Vec<(PathBuf, Option<u8>)>> = Mutex::new(Vec::new());
 
 /// One map frame for `request`, as [`crate::schema::frame`] lays it out.
 /// The pins are `pins`' when given, the running session's, or the store's
@@ -773,6 +835,13 @@ pub fn theme(dir: &Path, set: Option<&str>) -> Result<MapThemeChoice, String> {
 /// the renderer the map draws with, so the next frame says it.
 pub fn fling(dir: &Path, set: Option<bool>) -> Result<MapFlingChoice, String> {
     with_dir(dir, |renderer| renderer.fling(set))
+}
+
+/// The map's ground in `table` as Android's `0xAARRGGBB` (1441): the
+/// land a frame is cleared to, opaque.
+fn ground(table: MapTheme) -> u32 {
+    let [r, g, b] = leviculum_mapfill::frame::rgb888(table.palette().background);
+    0xff00_0000 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
 }
 
 /// How many whole pixels the centre of `view`, held to one world, may
@@ -845,7 +914,14 @@ fn with_dir<T>(dir: &Path, f: impl FnOnce(&mut Renderer) -> T) -> T {
     let at = match renderers.iter().position(|r| r.dir == dir) {
         Some(at) => at,
         None => {
-            renderers.push(Renderer::new(dir));
+            let mut renderer = Renderer::new(dir);
+            let mut held = HELD_RUNGS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(i) = held.iter().position(|(d, _)| d == dir) {
+                renderer.frames.hold_rung(held.swap_remove(i).1);
+            }
+            renderers.push(renderer);
             renderers.len() - 1
         }
     };
@@ -943,6 +1019,28 @@ pub fn tune_clock(dir: &Path, now_ms: Option<u64>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(r) = renderers.iter_mut().find(|r| r.dir == dir) {
         r.held_ms = now_ms;
+    }
+}
+
+/// Hold the frame budget of the renderer over `dir` at `rung` (1422):
+/// moving frames at that rung, every frame at rest the full one at once;
+/// with `None` the measured times pick both again. A test that reads
+/// what one frame at rest shows holds it, or how fast the host draws
+/// decides how many frames the picture takes to grow full. Before the
+/// directory's first frame the renderer it makes starts held.
+pub fn hold_rung(dir: &Path, rung: Option<u8>) {
+    let mut renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match renderers.iter_mut().find(|r| r.dir == dir) {
+        Some(r) => r.frames.hold_rung(rung),
+        None => {
+            let mut held = HELD_RUNGS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            held.retain(|(d, _)| d != dir);
+            held.push((dir.to_path_buf(), rung));
+        }
     }
 }
 

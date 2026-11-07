@@ -518,8 +518,10 @@ fn mark(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
     if let Some(refused) = refuse_unless_admitted(store, &device, "mark") {
         return Answer::only(refused);
     }
-    if let wire::MarkFlag::Seen { at } = mark.flag {
-        return seen(store, home, &mark.ids, at, device, now);
+    match mark.flag {
+        wire::MarkFlag::Seen { at } => return seen(store, home, &mark.ids, at, device, now),
+        wire::MarkFlag::Arrived { at } => return arrived(store, home, &mark.ids, at, device, now),
+        wire::MarkFlag::Read | wire::MarkFlag::Deleted => {}
     }
     Answer::only(keep_mark(store, home, &mark, data, device, now as i64))
 }
@@ -653,6 +655,183 @@ fn seen(
     }
 }
 
+/// A device has these messages, at its clock `at` (1462): the home node
+/// holds the identity, so it signs the device receipts (`lev` `0x07`). The
+/// home itself never does: a proof is its word already, and it is no
+/// device. The first device wins: an id an arrived mark in the archive
+/// names already is passed over, and so is one a seen mark names when its
+/// sender takes read receipts, since the read receipt went and read
+/// includes it. The rest is kept as one arrived mark, and each sender whose
+/// message asks for it ([`crate::ui::arrival::acknowledges`]) gets a
+/// receipt alone, signed here and delivered from the outbox. A message the
+/// archive does not hold as received gets none.
+fn arrived(
+    store: &mut Store,
+    home: &Home<'_>,
+    ids: &[[u8; 32]],
+    at: u32,
+    device: [u8; 16],
+    now: f64,
+) -> Answer {
+    let mut new = Vec::new();
+    let mut owed: alloc::collections::BTreeMap<[u8; 16], Vec<[u8; 32]>> = Default::default();
+    for id in ids {
+        let (acknowledged, seen, entry) = match (
+            store.archive_arrived(id),
+            store.archive_seen(id),
+            store.archive_entry(super::KIND_RECEIVED, id),
+        ) {
+            (Ok(acknowledged), Ok(seen), Ok(entry)) => (acknowledged, seen, entry),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                tracing::warn!("HOME mark arrived: {error}");
+                return Answer::only(wire::status_answer(Status::Failed));
+            }
+        };
+        if acknowledged || new.contains(id) {
+            continue;
+        }
+        let Some(message) = entry.and_then(|packed| {
+            leviculum_lxmf::Message::unpack(&packed, None, None, DeliveryMethod::Direct).ok()
+        }) else {
+            continue;
+        };
+        let lev = leviculum_lxmf::lev::Lev::from_fields(&message.fields);
+        let read = seen && lev.as_ref().is_some_and(|lev| lev.supports_receipts());
+        if read
+            || message.source_hash == home.address
+            || !crate::ui::arrival::acknowledges(lev.as_ref())
+        {
+            continue;
+        }
+        new.push(*id);
+        owed.entry(message.source_hash).or_default().push(*id);
+    }
+    if new.is_empty() {
+        tracing::info!(
+            "HOME mark arrived device={} messages={} new=0",
+            crate::address::to_hex(&device),
+            ids.len()
+        );
+        return Answer::only(wire::status_answer(Status::Ok));
+    }
+    let kept = wire::Mark {
+        flag: wire::MarkFlag::Arrived { at },
+        ids: new,
+    };
+    let status = keep_mark(
+        store,
+        home,
+        &kept,
+        &wire::mark_request(&kept),
+        device,
+        now as i64,
+    );
+    if wire::read_status(&status) != Ok(Status::Ok) {
+        return Answer::only(status);
+    }
+    Answer {
+        bytes: status,
+        accepted: device_receipts(store, home, owed, at, now),
+        watching: None,
+        learned: None,
+        gone: false,
+        group: None,
+        added: None,
+        deleted: None,
+    }
+}
+
+/// The ids of ours a received message's receipt names, read or
+/// propagation (1409): the propagation node need not be asked about them
+/// any more ([`crate::pn_status::Asker::settled`]).
+pub fn settles(packed: &[u8]) -> Vec<[u8; 32]> {
+    let Ok(message) = leviculum_lxmf::Message::unpack(packed, None, None, DeliveryMethod::Direct)
+    else {
+        return Vec::new();
+    };
+    let Some(lev) = leviculum_lxmf::lev::Lev::from_fields(&message.fields) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    if let Some(receipt) = lev.receipt {
+        ids.extend(receipt.ids);
+    }
+    if let Some(receipt) = lev.propagation_receipt {
+        ids.extend(receipt.ids);
+    }
+    ids
+}
+
+/// Keep what the propagation node answered as archive entries every
+/// device folds (1409, [`super::KIND_PN_STATUS`]): only the words that
+/// move a mark (`collected`, `delivered`, `expired`, `evicted`), at most
+/// [`wire::MARK_IDS_MAX`] an entry. The newest sequence appended, none when
+/// nothing moved.
+pub fn keep_pn_status(
+    store: &mut Store,
+    cap_bytes: u64,
+    answers: &[([u8; 32], leviculum_lxmf::lev_status::MessageStatus)],
+    now: i64,
+) -> Option<u64> {
+    let moved: Vec<_> = answers
+        .iter()
+        .copied()
+        .filter(|(_, status)| crate::pn_status::final_word(*status))
+        .collect();
+    let mut newest = None;
+    for chunk in moved.chunks(wire::MARK_IDS_MAX) {
+        let data = wire::pn_status_entry(chunk);
+        let id = leviculum_core::crypto::sha256(&data);
+        match store.archive_append(super::KIND_PN_STATUS, &id, &data, now, cap_bytes) {
+            Ok(seq) => {
+                tracing::info!(
+                    "HOME pn status ids={} seq={}",
+                    chunk.len(),
+                    seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
+                );
+                newest = newest.max(seq);
+            }
+            Err(error) => tracing::warn!("HOME pn status: {error}"),
+        }
+    }
+    newest
+}
+
+/// Sign the device receipts `owed` (1462), per sender the ids a device
+/// said it has, at the device's clock `received_at`, and put each in the
+/// outbox as the seen mark puts a read receipt: the new outbox entries,
+/// delivered direct first and then by the propagation node.
+fn device_receipts(
+    store: &mut Store,
+    home: &Home<'_>,
+    owed: alloc::collections::BTreeMap<[u8; 16], Vec<[u8; 32]>>,
+    received_at: u32,
+    now: f64,
+) -> Vec<Outgoing> {
+    let mut accepted = Vec::new();
+    for (peer, ids) in owed {
+        for receipt in leviculum_lxmf::lev::PropagationReceipt::batches(received_at, &ids) {
+            let count = receipt.ids.len();
+            match lev_out(store, home, peer, crate::ui::arrival::alone(receipt), now) {
+                Ok(Some(outgoing)) => {
+                    tracing::info!(
+                        "HOME device receipt to={} ids={count} received_at={received_at} message={}",
+                        crate::address::to_hex(&peer),
+                        crate::address::to_hex(&outgoing.id)
+                    );
+                    accepted.push(outgoing);
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    "HOME device receipt to {}: {error}",
+                    crate::address::to_hex(&peer)
+                ),
+            }
+        }
+    }
+    accepted
+}
+
 /// Sign one receipt alone to `peer` and put it in the outbox under its own
 /// id: the new outbox entry, `None` when the outbox held it already.
 fn receipt_out(
@@ -662,6 +841,24 @@ fn receipt_out(
     receipt: leviculum_lxmf::lev::Receipt,
     now: f64,
 ) -> Result<Option<Outgoing>, alloc::string::String> {
+    lev_out(
+        store,
+        home,
+        peer,
+        leviculum_lxmf::lev::Lev::mark_with(receipt),
+        now,
+    )
+}
+
+/// Sign a message to `peer` that is nothing but the namespace `lev`, and
+/// put it in the outbox under its own id.
+fn lev_out(
+    store: &mut Store,
+    home: &Home<'_>,
+    peer: [u8; 16],
+    lev: leviculum_lxmf::lev::Lev,
+    now: f64,
+) -> Result<Option<Outgoing>, alloc::string::String> {
     let message = leviculum_lxmf::Message::create(
         peer,
         home.address,
@@ -669,9 +866,7 @@ fn receipt_out(
         now,
         Vec::new(),
         Vec::new(),
-        leviculum_lxmf::lev::Lev::mark_with(receipt)
-            .fields()
-            .to_vec(),
+        lev.fields().to_vec(),
         DeliveryMethod::Direct,
     )
     .map_err(|error| error.to_string())?;
@@ -1030,7 +1225,7 @@ fn moved(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> A
 }
 
 fn sync(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
-    let Ok((cursor, asked)) = wire::read_sync_paged(data) else {
+    let Ok((cursor, asked, fold)) = wire::read_sync_asked(data) else {
         return wire::status_answer(Status::Malformed);
     };
     if let Some(refused) = refuse_unless_admitted(store, &device, "sync") {
@@ -1043,16 +1238,32 @@ fn sync(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
             asked.min(super::SYNC_PAGE_BYTES)
         })
     });
-    match store.archive_since(cursor, bound) {
+    // A device that says what it folds (1439) is served only that, and
+    // `left` counts only that.
+    match store.archive_since_folded(cursor, bound, fold) {
         Ok(mut page) => {
             if asked.is_some() {
+                // A client that asks a bound reads how many wait (1415);
+                // the cut counts with the longest such number, so the
+                // real one never pushes the answer past the bound.
+                page.left = Some(wire::LEFT_UNCOUNTED);
                 wire::fit_page(&mut page, bound);
+                let after = page.entries.last().map_or(cursor, |entry| entry.seq);
+                match store.archive_count_after_folded(after, fold) {
+                    Ok(left) => page.left = Some(left),
+                    Err(error) => {
+                        tracing::warn!("HOME sync: {error}");
+                        return wire::status_answer(Status::Failed);
+                    }
+                }
             }
             tracing::info!(
-                "HOME sync device={} cursor={cursor} entries={} more={}",
+                "HOME sync device={} cursor={cursor} entries={} more={} left={} fold={}",
                 crate::address::to_hex(&device),
                 page.entries.len(),
-                page.more
+                page.more,
+                page.left.map_or(-1, |left| left as i64),
+                fold.word().unwrap_or("all")
             );
             wire::sync_answer(&page)
         }
@@ -1689,6 +1900,110 @@ mod tests {
         read_status(&answer.bytes).expect("status")
     }
 
+    /// 1462: the home signs a device receipt only on a device's arrived
+    /// mark, never on its own archiving. The first device's mark is kept
+    /// and signs one receipt per sender, alone, at the device's clock; a
+    /// second device's mark of the same ids signs nothing. A message
+    /// without bit 2, the home's own, an id already seen by a sender who
+    /// takes read receipts, and one the archive does not hold owe none.
+    #[test]
+    fn the_home_signs_a_device_receipt_only_on_a_devices_arrived_mark() {
+        use leviculum_lxmf::lev::{Lev, CAP_GROUPS, CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS};
+        const PHONE: [u8; 16] = [0x44; 16];
+        let (_dir, mut store) = store();
+        store.issue_token(&TOKEN, "laptop", 10).expect("token");
+        assert_eq!(join(&mut store, LAPTOP, TOKEN), Status::Ok);
+        store.issue_token(&[0x34; 16], "phone", 10).expect("token");
+        assert_eq!(join(&mut store, PHONE, [0x34; 16]), Status::Ok);
+        let home = home();
+        let sender = Identity::generate(&mut rand_core::OsRng);
+        let from = crate::home::lxmf_address(&sender.public_key_bytes()).expect("address");
+        let message = |caps: u64, body: &[u8]| {
+            leviculum_lxmf::Message::create(
+                HOME,
+                from,
+                &sender,
+                100.0,
+                Vec::new(),
+                body.to_vec(),
+                Lev {
+                    capabilities: Some(caps),
+                    ..Lev::default()
+                }
+                .fields()
+                .to_vec(),
+                DeliveryMethod::Direct,
+            )
+            .expect("message")
+        };
+        let asks = message(CAP_GROUPS | CAP_PROPAGATION_RECEIPTS, b"hi");
+        let also = message(CAP_PROPAGATION_RECEIPTS, b"again");
+        let silent = message(CAP_GROUPS, b"quiet");
+        let read = message(CAP_READ_RECEIPTS | CAP_PROPAGATION_RECEIPTS, b"read");
+        for m in [&asks, &also, &silent, &read] {
+            store
+                .archive_append(KIND_RECEIVED, &m.message_id, &m.pack(), 50, u64::MAX)
+                .expect("archived");
+        }
+        // Archiving signed nothing: the outbox is empty.
+        assert!(store.outbox_open().expect("outbox").is_empty());
+        // Read on a device first: its read receipt names it.
+        let seen = wire::Mark {
+            flag: wire::MarkFlag::Seen { at: 1_799_999_000 },
+            ids: vec![read.message_id],
+        };
+        let answer_of = |store: &mut Store, mark: &wire::Mark, device: [u8; 16]| {
+            answer(
+                store,
+                &home,
+                crate::home::MARK_PATH,
+                &wire::mark_request(mark),
+                Some(device),
+                200.0,
+            )
+        };
+        assert_eq!(answer_of(&mut store, &seen, PHONE).accepted.len(), 1);
+        let mark = wire::Mark {
+            flag: wire::MarkFlag::Arrived { at: 1_800_000_000 },
+            ids: vec![
+                asks.message_id,
+                also.message_id,
+                silent.message_id,
+                read.message_id,
+                [0x77; 32],
+            ],
+        };
+        let first = answer_of(&mut store, &mark, LAPTOP);
+        assert_eq!(read_status(&first.bytes), Ok(Status::Ok));
+        assert_eq!(first.accepted.len(), 1, "one receipt for the one sender");
+        assert_eq!(first.accepted[0].destination, from);
+        let receipt = leviculum_lxmf::Message::unpack(
+            &first.accepted[0].packed,
+            None,
+            None,
+            DeliveryMethod::Direct,
+        )
+        .expect("the receipt");
+        assert_eq!(receipt.source_hash, HOME, "signed by the home's identity");
+        let lev = Lev::from_fields(&receipt.fields).expect("lev");
+        assert_eq!(lev.capabilities, None);
+        assert_eq!(
+            lev.propagation_receipt.map(|r| (r.received_at, r.ids)),
+            Some((1_800_000_000, vec![asks.message_id, also.message_id]))
+        );
+        assert!(receipt.content.is_empty());
+        assert!(store.archive_arrived(&asks.message_id).expect("kept"));
+        assert!(!store.archive_arrived(&silent.message_id).expect("not kept"));
+        // The phone pulled them too: the laptop said it first.
+        let second = answer_of(&mut store, &mark, PHONE);
+        assert_eq!(read_status(&second.bytes), Ok(Status::Ok));
+        assert!(second.accepted.is_empty());
+        // A stranger's mark is refused and signs nothing.
+        let stranger = answer_of(&mut store, &mark, [0x55; 16]);
+        assert_eq!(read_status(&stranger.bytes), Ok(Status::NotAdmitted));
+        assert!(stranger.accepted.is_empty());
+    }
+
     /// A contact's key (1187) is taken from an admitted device when its
     /// address is the one the key makes, archives nothing, and comes back
     /// for the daemon to remember; a mismatched pair or a stranger's
@@ -2088,6 +2403,8 @@ mod tests {
             assert!(!page.entries.is_empty());
             walked.extend(page.entries.iter().map(|e| e.seq));
             cursor = page.entries.last().expect("one").seq;
+            // 1415: the page says how many wait after it, exactly.
+            assert_eq!(page.left, Some((seqs.len() - walked.len()) as u64));
             if !page.more {
                 break;
             }
@@ -2102,14 +2419,12 @@ mod tests {
             100.0,
         );
         assert!(whole.bytes.len() > bound);
-        assert_eq!(
-            read_sync_answer(&whole.bytes)
-                .expect("answer")
-                .expect("page")
-                .entries
-                .len(),
-            5
-        );
+        let whole = read_sync_answer(&whole.bytes)
+            .expect("answer")
+            .expect("page");
+        assert_eq!(whole.entries.len(), 5);
+        // A client that asked no bound gets the four elements it reads.
+        assert_eq!(whole.left, None);
         // One entry larger than the bound still comes, alone.
         let big = store
             .archive_append(KIND_RECEIVED, &[9; 32], &[9; 600], 50, u64::MAX)
@@ -2122,6 +2437,88 @@ mod tests {
             [big]
         );
         assert!(len > bound && !page.more);
+    }
+
+    /// 1439: a home whose archive opens with 800 imported entries, then
+    /// 100 a board shows, a delivery state and a photo it shows neither of.
+    /// A board that says `board` walks only the 100, in pages of a serial
+    /// line, each page saying honestly how many of them still wait; the
+    /// phone, which says nothing, gets every entry as before. Control: the
+    /// board's word dropped, the same walk brings the imported head first.
+    #[test]
+    fn a_board_is_served_what_it_folds_and_the_phone_everything() {
+        use crate::home::board::{Batch, LinkClass};
+        use crate::home::{KIND_DELIVERED, KIND_IMPORTED};
+        let (_dir, mut store) = store();
+        admitted(&mut store);
+        let mut put = |kind: u8, n: u32, len: usize| {
+            let mut id = [kind; 32];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            store
+                .archive_append(kind, &id, &alloc::vec![7; len], 50, u64::MAX)
+                .expect("append")
+                .expect("new")
+        };
+        for n in 0..800 {
+            put(KIND_IMPORTED, n, 150);
+        }
+        let real: Vec<u64> = (0..100).map(|n| put(KIND_RECEIVED, n, 150)).collect();
+        put(KIND_DELIVERED, 0, 40);
+        put(KIND_RECEIVED, 1_000, wire::BOARD_ENTRY_MAX + 1);
+        let board = Batch {
+            page_bytes: crate::home::ask::LORA_PAGE_BYTES as u64,
+            max_answer: 256 * 1024,
+        };
+        let serial = LinkClass::Serial.page_bytes(crate::home::ask::SERIAL_LINK_MDU, None, board);
+        assert_eq!(serial, 11_520, "a second of 115200 baud");
+        // Each walk: the sequences, and per page how many it brought and
+        // how many it said still wait.
+        let walk = |store: &mut Store, fold: wire::Fold| {
+            let (mut cursor, mut walked, mut pages) = (0, Vec::new(), Vec::new());
+            loop {
+                let data = wire::sync_request_folded(cursor, serial, fold);
+                let answer = answer(store, &home(), SYNC_PATH, &data, Some(LAPTOP), 100.0);
+                let page = read_sync_answer(&answer.bytes)
+                    .expect("answer")
+                    .expect("page");
+                // One entry over the page comes alone, as before.
+                assert!(answer.bytes.len() <= serial as usize || page.entries.len() == 1);
+                walked.extend(page.entries.iter().map(|e| e.seq));
+                pages.push((page.entries.len() as u64, page.left));
+                let Some(last) = page.entries.last() else {
+                    break;
+                };
+                cursor = last.seq;
+                if !page.more {
+                    break;
+                }
+            }
+            (walked, pages)
+        };
+        let honest = |pages: &[(u64, Option<u64>)], all: u64| {
+            let mut taken = 0;
+            for &(n, left) in pages {
+                taken += n;
+                assert_eq!(left, Some(all - taken), "{pages:?}");
+            }
+            assert_eq!(taken, all);
+        };
+        let (walked, pages) = walk(&mut store, wire::Fold::Board);
+        assert_eq!(walked, real, "the board gets the hundred, in order");
+        honest(&pages, 100);
+        assert!(pages.len() <= 3, "a serial page carries dozens: {pages:?}");
+        // The phone says no word and gets all 902, the photo and the state
+        // too, every page counting all of them.
+        let (phone, pages) = walk(&mut store, wire::Fold::All);
+        assert_eq!(phone.len(), 902);
+        honest(&pages, 902);
+        // Control: without the word the walk opens with the imported head.
+        assert!(phone[..800].iter().all(|seq| !real.contains(seq)));
+        let store_left = store
+            .archive_count_after_folded(0, wire::Fold::Board)
+            .expect("count");
+        assert_eq!(store_left, 100);
+        assert_eq!(store.archive_count_after(0).expect("count"), 902);
     }
 
     #[test]

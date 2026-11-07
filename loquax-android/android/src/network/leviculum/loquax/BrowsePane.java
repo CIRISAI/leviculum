@@ -156,11 +156,9 @@ final class BrowsePane {
         verb("tab", "", "");
     }
 
-    /** Back: the browser's back while it has one; false when it has none. */
+    /** Back: the browser's back while it has one, as last drawn; false when it has none. */
     boolean back() {
-        Map<String, Object> shown = Core.browseScreen();
-        handOver(shown);
-        if (!Core.bool(shown, "back")) {
+        if (last == null || !Core.bool(last, "back")) {
             return false;
         }
         verb("back", "", "");
@@ -178,22 +176,60 @@ final class BrowsePane {
         if (c > 0 && r > 0 && (c != cols || r != lines)) {
             cols = c;
             lines = r;
-            Core.browseSize(c, r);
-            draw();
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.browseSize(c, r);
+                }
+            }, new Engine.Said() {
+                @Override
+                public void said(String error) {
+                    draw();
+                }
+            });
         }
     }
 
-    private void verb(String verb, String node, String text) {
-        String error = Core.browse(verb, node, text);
-        if (error != null) {
-            Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
-        }
-        draw();
+    /** A verb on the engine's thread (1446); the tab drawn after it. */
+    private void verb(final String verb, final String node, final String text) {
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.browse(verb, node, text);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (error != null) {
+                    Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
+                }
+                draw();
+            }
+        });
     }
 
-    /** Draw what the library says the tab shows. */
+    /** What the tab showed last (1464): Back decides by it. */
+    private Map<String, Object> last;
+
+    /** Draw what the library says the tab shows, asked on the engine's thread (1464). */
     void draw() {
-        Map<String, Object> shown = Core.browseScreen();
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.browseScreen();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                if (!screen.isDestroyed()) {
+                    show(shown);
+                }
+            }
+        });
+    }
+
+    private void show(Map<String, Object> shown) {
+        last = shown;
         handOver(shown);
         if (!Core.bool(shown, "open")) {
             host.left();

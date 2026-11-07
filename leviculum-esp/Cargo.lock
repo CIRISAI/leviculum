@@ -1257,16 +1257,21 @@ dependencies = [
 
 [[package]]
 name = "leviculum-esp"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
+ "critical-section",
  "embedded-alloc",
  "embedded-hal-async",
  "esp-bootloader-esp-idf",
  "esp-hal",
+ "esp-storage",
  "leviculum-core",
  "leviculum-log-line",
+ "leviculum-serial-mux",
+ "leviculum-ui",
  "loquax",
  "loquax-m9",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -1306,6 +1311,13 @@ version = "0.10.0-dev.6"
 [[package]]
 name = "leviculum-rrc"
 version = "0.10.0-dev.6"
+
+[[package]]
+name = "leviculum-serial-mux"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
 
 [[package]]
 name = "leviculum-ui"
@@ -1359,7 +1371,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lnomad"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "leviculum-core",
  "leviculum-micron",

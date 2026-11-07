@@ -154,7 +154,7 @@ public class MainActivity extends Activity {
             if (!AddContact.is(word)) {
                 continue;
             }
-            Map<String, Object> read = Core.lxma(word);
+            Map<String, Object> read = Core.code(word);
             if (!read.containsKey("error") && !"mailbox".equals(Core.str(read, "kind"))) {
                 return word;
             }
@@ -202,15 +202,21 @@ public class MainActivity extends Activity {
 
     /** The address behind a combined code, into an empty address field. */
     private void fillServer(String text) {
-        int at = text.indexOf('@');
-        if (at < 0 || !server.getText().toString().trim().isEmpty()) {
-            return;
+        // The field follows the code's tail while it holds what the code
+        // gave it (1464, ServerField): typed one character at a time, the
+        // code used to leave the first character after its `@` there.
+        String field = server.getText().toString();
+        String next = ServerField.follow(text, field, serverGiven);
+        if (!next.equals(field)) {
+            server.setText(next);
+            serverGiven = next.trim();
         }
-        String address = text.substring(at + 1).trim();
-        if (!address.isEmpty()) {
-            server.setText(address);
-        }
+        // The code's servers are the code's business (1471): shown, not edited.
+        server.setEnabled(!ServerField.carried(text));
     }
+
+    /** What the code gave the server field last (1464). */
+    private String serverGiven = "";
 
     private String home() {
         return getFilesDir().getAbsolutePath();
@@ -219,7 +225,10 @@ public class MainActivity extends Activity {
     /** Start the session, with what the form holds when asked to join. */
     private void start(final boolean joining) {
         final String typedCode = joining ? code.getText().toString().trim() : null;
-        final String typedServer = joining ? server.getText().toString().trim() : null;
+        // A code with servers names none here: the library takes the
+        // code's list whole, in its order (1471).
+        final String typedServer = joining
+                ? ServerField.request(typedCode, server.getText().toString()) : null;
         final boolean first = typedCode != null && !typedCode.isEmpty();
         join.setEnabled(false);
         retry.setVisibility(View.GONE);

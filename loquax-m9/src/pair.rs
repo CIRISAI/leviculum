@@ -6,7 +6,7 @@
 //! the join the board's executor performs ([`loquax::home::ask::Ask::join`]).
 //!
 //! What the screen shows is [`Pairing::lines`]: the code typed so far in
-//! groups of five, wrapped to the panel's 53 cells, and one line saying
+//! groups of five, wrapped to the panel's 32 cells less the margin, and one line saying
 //! how far it came or which character cannot stand where it stands.
 
 use alloc::format;
@@ -23,8 +23,9 @@ use crate::field::Field;
 /// list shows.
 pub const DEVICE_NAME: &str = "M9";
 
-/// Cells on one line of the panel.
-const WIDTH: usize = 53;
+/// Cells a code line may take: the panel's, less the margin cell the
+/// screen puts before it. Five groups of five: 29.
+const WIDTH: usize = crate::screen::COLS - 1;
 
 /// The code being typed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -86,12 +87,76 @@ impl Pairing {
     }
 }
 
+/// The pairing screen, `cols` x `rows` cells (1415): a bar saying what
+/// it is for and, once a code was taken, how the join goes (`home`), the
+/// code typed so far in fives under it, the verdict, and the two keys
+/// that matter. The words are the code's own (`verdict`), which the
+/// pairing has said in English since 1363.
+pub fn screen(
+    pairing: &Pairing,
+    home: Option<loquax::home::board::Word>,
+    look: &crate::screen::Look,
+    cols: usize,
+    rows: usize,
+) -> Vec<leviculum_ui::style::RLine> {
+    use crate::screen::{fill, painted, push};
+    use leviculum_ui::style::{RLine, RStyle};
+    let chrome = painted(look.tokens.chrome);
+    let plain = RStyle::default();
+    let text = |words: &str, style| {
+        let mut line = RLine::default();
+        push(&mut line, words, style);
+        fill(line, cols, style)
+    };
+    let title = match home {
+        Some(word) => format!(" {}", word.text().resolve(look.lang)),
+        None => String::from(" Link this M9 to your mailbox"),
+    };
+    let mut out = alloc::vec![text(&title, chrome), text("", plain)];
+    out.push(text(" Type your mailbox's code:", plain));
+    let mut lines = pairing.lines();
+    let verdict = lines.pop().unwrap_or_default();
+    for line in lines {
+        out.push(text(&format!(" {line}"), plain));
+    }
+    out.push(text("", plain));
+    out.push(text(&format!(" {verdict}"), plain));
+    while out.len() + 1 < rows {
+        out.push(text("", plain));
+    }
+    out.push(text(" Enter links   Back leaves", chrome));
+    out.truncate(rows);
+    out
+}
+
+/// The `FRAME_DUMP` screen byte of the pairing screen (1440): the byte
+/// after the fixture's screens ([`crate::fixture::SCREENS`]). The pairing
+/// is no screen of the model but a text drawn over it, so it is not one
+/// of them: the census and the walks have nothing to measure in it. The
+/// board dumps it fresh, nothing typed, no home: the screen a board
+/// without a client record opens on, golden `m9-fw-pairing.png`.
+pub const DUMP_BYTE: u8 = crate::fixture::SCREENS.len() as u8;
+
+/// Its name in the board's `[DUMP]` line and the golden's file name.
+pub const DUMP_NAME: &str = "pairing";
+
+/// Draw `pairing` as the board draws it, over `look`, with the home's
+/// word in the title once a code was taken.
+pub fn draw(
+    renderer: &mut crate::render::Renderer<'_, crate::frame::Frame>,
+    pairing: &Pairing,
+    home: Option<loquax::home::board::Word>,
+    look: &crate::screen::Look,
+) -> Result<(), crate::render::DrawError> {
+    renderer.text(|cols, rows| screen(pairing, home, look, cols, rows))
+}
+
 /// One line on how far the code came.
 fn verdict(typing: &Typing) -> String {
     match typing {
         Typing::Short { typed } => format!("{typed} of {TYPED_LEN} typed"),
-        Typing::Stray { at } => format!("character {} cannot stand there", at + 1),
-        Typing::Complete(Ok(_)) => String::from("complete: Enter links this device"),
+        Typing::Stray { at } => format!("character {} is out of place", at + 1),
+        Typing::Complete(Ok(_)) => String::from("complete: Enter links"),
         Typing::Complete(Err(error)) => format!("{error}"),
     }
 }
@@ -125,7 +190,7 @@ mod tests {
         assert_eq!(pairing.typing(), Typing::Short { typed: 12 });
         pairing.key(&event(M9Key::Char('9')));
         assert_eq!(pairing.typing(), Typing::Stray { at: 12 });
-        assert_eq!(pairing.lines()[1], "character 13 cannot stand there");
+        assert_eq!(pairing.lines()[1], "character 13 is out of place");
         assert_eq!(pairing.key(&event(M9Key::Enter)), None);
         pairing.key(&event(M9Key::Backspace));
         typed(&mut pairing, &text[12..]);
@@ -134,7 +199,7 @@ mod tests {
         assert!(lines.iter().all(|line| line.chars().count() <= WIDTH));
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("complete: Enter links this device")
+            Some("complete: Enter links")
         );
         // Control: one character changed is the checksum's typo, no join.
         let mut wrong = text.clone();

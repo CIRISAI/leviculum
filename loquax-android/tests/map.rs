@@ -50,6 +50,10 @@ fn home() -> tempfile::TempDir {
         "map_autoload = off\n",
     )
     .expect("config");
+    // Every frame at rest the full picture and every moving frame at the
+    // full rung, however fast the host draws (1422): a test reads what
+    // one frame shows. A test of the ladder lets go.
+    loquax_android::map::hold_rung(home.path(), Some(0));
     home
 }
 
@@ -84,6 +88,9 @@ fn pin(peer: u8, label: &str, lat: f64, lon: f64) -> MapPin {
         age: Some("5m".to_string()),
         stale: false,
         nearby: false,
+        own: false,
+        fix_at: None,
+        battery: None,
     }
 }
 
@@ -98,18 +105,14 @@ fn now() -> WallTime {
 /// as RGBA.
 fn picture(home: &Path, theme: MapTheme) -> Vec<u8> {
     let mut painter = Painter::new(Maps::new(Some(home.join("maps"))));
-    let view = Viewport::new(project(LatLon::from_degrees(LAT, LON)), 16, W, H);
-    let drawn = painter.draw(&view, Ink::Colour, Style::PC.in_theme(theme), 100);
-    drawn
-        .fb
-        .iter()
-        .flat_map(|&px| {
-            use embedded_graphics::pixelcolor::raw::RawU16;
-            use embedded_graphics::pixelcolor::Rgb565;
-            let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
-            [r, g, b, 0xff]
-        })
-        .collect()
+    // On a whole pixel of its step, as the frame sits (1134): smoothed
+    // edges show a sub-pixel shift that integer ones hide (1422).
+    let at = ExactView::new(project(LatLon::from_degrees(LAT, LON)), 16_000, W, H).on_whole_pixel();
+    let view = Viewport::new(at.centre, 16, W, H);
+    // Smoothed, as a frame at rest draws its tiles (1422).
+    painter
+        .draw_rgba(&view, Ink::Colour, Style::PC.in_theme(theme), 100, true)
+        .rgba
 }
 
 /// How many of the pixels of `a` and `b` are the same, per cent.
@@ -119,7 +122,7 @@ fn same_share(a: &[u8], b: &[u8]) -> usize {
 }
 
 /// The frame through the facade with one pin: the window's renderer's
-/// pixels for the view, its names and its pin, but for a tenth of a per
+/// pixels for the view, its names and its pin, but for a fifth of a per
 /// cent at the tile seams
 /// (`loquax::screenmap::render` called here as the window's code calls
 /// it); the map under them `loquax::picture`'s; the pin's marker at its
@@ -157,6 +160,7 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
         Style::PC,
         1.0,
         &pins,
+        &[],
         None,
         true,
     );
@@ -164,14 +168,17 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
     // dashed path crosses a seam: its dashes start again at each tile's
     // edge, as they do at a view's. A turned name's sprite rounds its
     // coverage to a level (1156), so its pixels may be a step or two of
-    // a channel off the whole view's float paint: not counted.
+    // a channel off the whole view's float paint: not counted. With the
+    // edges smoothed (1422) a dash's end covers two pixels where it set
+    // one, so the restarted dashes at the view's left edge (x 0 to 14
+    // here, one dash period) count about twice: a fifth of a per cent.
     let differ = rgba
         .chunks(4)
         .zip(direct.picture.rgba.chunks(4))
         .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
         .count();
     assert!(
-        differ * 1000 < (W * H) as usize,
+        differ * 500 < (W * H) as usize,
         "the shared renderer's pixels: {differ} differ"
     );
     assert!(
@@ -193,6 +200,66 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
     assert_eq!(&rgba[at..at + 3], &[0x20, 0x50, 0xc0], "the marker's blue");
 
     same_as("map-florence-z16.png", &rgba, W, H);
+}
+
+/// The map menu's time window (1419) as the frame says it: without a
+/// running session the default, the title "Map" alone, and the sheet's six
+/// entries with the current movement first and chosen; a word Java sends
+/// back is one of the sheet's.
+#[test]
+fn the_frame_carries_the_title_and_the_time_window_sheet() {
+    let home = home();
+    let mut ask = request(home.path(), false);
+    ask.track_window = Some("week".to_string());
+    let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert_eq!(shown.track_window, "now", "no session keeps no window");
+    assert_eq!(shown.title, "Map");
+    let words: Vec<&str> = shown
+        .track_windows
+        .iter()
+        .map(|c| c.word.as_str())
+        .collect();
+    assert_eq!(words, ["now", "today", "yesterday", "week", "month", "all"]);
+    let chosen: Vec<&str> = shown
+        .track_windows
+        .iter()
+        .filter(|c| c.chosen)
+        .map(|c| c.word.as_str())
+        .collect();
+    assert_eq!(chosen, ["now"]);
+    assert_eq!(shown.track_windows[0].label, "Current movement");
+}
+
+/// The sheet and the title in the phone's language for a window that is
+/// not the default (1419): German, "Diese Woche" chosen and after the
+/// title; every entry's word names its window again.
+#[test]
+fn a_window_not_the_default_is_chosen_in_the_sheet_and_named_in_the_title() {
+    use loquax::ui::tracks::TrackWindow;
+    let sheet = loquax_android::map::track_choices(TrackWindow::Week, Lang::De);
+    let labels: Vec<&str> = sheet.iter().map(|c| c.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Aktuelle Bewegung",
+            "Heute",
+            "Gestern",
+            "Diese Woche",
+            "Dieser Monat",
+            "Alles"
+        ]
+    );
+    let chosen: Vec<&str> = sheet
+        .iter()
+        .filter(|c| c.chosen)
+        .map(|c| c.word.as_str())
+        .collect();
+    assert_eq!(chosen, ["week"]);
+    for (entry, window) in sheet.iter().zip(TrackWindow::CHOICES) {
+        assert_eq!(TrackWindow::of_word(&entry.word), Some(window));
+    }
+    assert_eq!(TrackWindow::Week.title(Lang::De), "Karte · Diese Woche");
+    assert_eq!(TrackWindow::Episode.title(Lang::De), "Karte");
 }
 
 /// The phone in its dark setting draws the map's dark table: the frame
@@ -232,6 +299,7 @@ fn the_phone_draws_the_buildings_as_the_window_does() {
         .join("../leviculum-map/fixtures/buildings/firenze.lmr");
     std::fs::copy(fixture, maps.join("firenze.lmr")).expect("the region");
     let bare = tempfile::tempdir().expect("bare");
+    loquax_android::map::hold_rung(bare.path(), Some(0));
     std::fs::create_dir_all(bare.path().join("maps")).expect("maps");
     std::fs::copy(
         home.path().join(loquax::config::CONFIG_FILE),
@@ -371,6 +439,17 @@ fn the_map_switch_wins_over_the_phone_until_it_follows_again() {
     );
     let (shown, _) = draw(&request(home.path(), true));
     assert!(shown.dark && !shown.theme_chosen, "and the dark one");
+    // Its ground (1441), what the view shows where the frame it moves
+    // does not reach: the dark table's land, opaque; the light one's in
+    // the light table.
+    let argb = |theme: MapTheme| {
+        let [r, g, b] = rgb888(theme.palette().background);
+        0xff00_0000 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
+    };
+    assert_eq!(shown.ground, argb(MapTheme::Dark));
+    let (shown, _) = draw(&request(home.path(), false));
+    assert_eq!(shown.ground, argb(MapTheme::Light));
+    assert_ne!(argb(MapTheme::Light), argb(MapTheme::Dark));
 }
 
 /// A choice stored before the app draws its first map wins over the
@@ -986,6 +1065,7 @@ fn a_tap_on_a_text_with_a_position_opens_the_map_at_it() {
         update(
             &mut model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: peer,
                 title: Vec::new(),

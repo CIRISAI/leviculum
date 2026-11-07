@@ -26,8 +26,8 @@ use alloc::vec::Vec;
 use core::iter::Peekable;
 
 use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
+use leviculum_mapfill::coverage::{Clip, Coverage};
 use leviculum_mapfill::fill::Scratch;
 use leviculum_mapfill::fixture::{Feature, Features, Fixture};
 use leviculum_mapfill::render::{Clock, Look, Pass, Placement, RenderStats, Work};
@@ -128,7 +128,7 @@ pub fn draw<D, C>(
     clock: &mut C,
 ) -> Result<RenderStats, D::Error>
 where
-    D: DrawTarget<Color = Rgb565>,
+    D: Coverage<Color = Rgb565>,
     C: Clock,
 {
     let all = target.bounding_box();
@@ -152,10 +152,10 @@ pub fn draw_in_scaled<D, C>(
     clock: &mut C,
 ) -> Result<RenderStats, D::Error>
 where
-    D: DrawTarget<Color = Rgb565>,
+    D: Coverage<Color = Rgb565>,
     C: Clock,
 {
-    let target = &mut target.clipped(&area);
+    let target = &mut Clip::new(target, &area);
     // Every tile of one view is at the view's zoom less its overzoom.
     let zoom = tiles
         .first()
@@ -245,7 +245,7 @@ fn buildings<D, C>(
     clock: &mut C,
 ) -> Result<(), D::Error>
 where
-    D: DrawTarget<Color = Rgb565>,
+    D: Coverage<Color = Rgb565>,
     C: Clock,
 {
     if tile.id.z != BUILDING_ZOOM {
@@ -330,7 +330,7 @@ pub fn draw_in<D, C>(
     clock: &mut C,
 ) -> Result<RenderStats, D::Error>
 where
-    D: DrawTarget<Color = Rgb565>,
+    D: Coverage<Color = Rgb565>,
     C: Clock,
 {
     draw_in_scaled(

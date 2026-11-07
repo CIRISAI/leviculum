@@ -12,8 +12,9 @@
 //! (`leviculum_map::draw`) straight into the panel, not cells through
 //! mousefood. 1375 measured both for this screen
 //! (`handheld-messenger.md`, "Slice seven, host half"): through mousefood
-//! the map is braille or quadrant cells, 106 x 84 dots at best on 53 x 21
-//! cells, and slower to make than the pixels it stands for.
+//! the map is braille or quadrant cells, 106 x 84 dots at best on the
+//! 53 x 21 cells of the 6 x 10 atlas then (64 x 36 on today's 32 x 9 of
+//! the 10 x 20, 1428), and slower to make than the pixels it stands for.
 //!
 //! A draw is the cells first, the bar and the legend with the picture's
 //! rows blank, then the map over those rows, then the pins. ratatui draws
@@ -51,13 +52,12 @@ use loquax::ui::{Pane, UiModel};
 use crate::keys::M9Key;
 use crate::screen::{cut, fill, muted, painted, push, Look, COLS, ROWS as GRID_ROWS};
 
-/// The pixels of one cell of mousefood's 6 x 10 atlas: what the model
+/// The pixels of one cell of the atlas ([`crate::font`]): what the model
 /// scales the picture's cells by, so its viewport is the picture's pixels.
-pub const CELL_PX: (u16, u16) = (6, 10);
+pub use crate::font::CELL_PX;
 
 /// The picture's cells: the whole width under the top bar, above the
-/// legend and the keys. 53 x 21 cells, 318 x 210 pixels; the panel's two
-/// pixels past the last cell are the map's background.
+/// legend and the keys. 32 x 9 cells, 320 x 180 pixels.
 pub const PICTURE: Rect = Rect::new(0, 1, COLS as u16, (GRID_ROWS - 3) as u16);
 
 /// The region the board shows before it has one of its own (1375): the

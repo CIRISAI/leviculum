@@ -1,0 +1,837 @@
+//! The window bench (1441, `just window-bench`): the gestures Lew's window
+//! stutters at, replayed in real time through iced's user interface as
+//! its loop runs on X11 ([`leviculum_ui_iced::headless::drive`]), the
+//! frames presented as the software renderer's compositor presents them,
+//! damage and all; at four window sizes. The chat's gestures run over two
+//! conversations, 1441's 3000 one-line bubbles (`chat-*`) and one shaped
+//! like Lew's real chats (`real-*`, 1456), and the idle case counts the
+//! compose field's blink frames; at Lew's tall size every gesture runs a
+//! second time with the frame meter's overlay on (`+fps`). The overlay is
+//! a switch for the whole process: only `window_bench` turns it on, and
+//! it runs alone (`--exact`). One `WINDOW_BENCH` line a size
+//! and gesture: frames a second while it runs, a frame's time (mean, 95th
+//! percentile, longest, all on the window's thread: update, view and draw,
+//! present), the parts' means, the share of the window rasterised, and
+//! the views built and messages handled per frame.
+//!
+//! Run with `LOQUAX_WINDOW_BENCH` naming the file the lines go to:
+//! `LOQUAX_WINDOW_BENCH=target/window-bench/run.txt cargo test --release
+//! -p loquax --features gui --bins window_bench -- --nocapture`; without
+//! it the test returns at once. The map gestures run over the Florence
+//! fixture, or over the regions in `LOQUAX_WINDOW_BENCH_MAPS`.
+
+use super::tests::{long_chat, real_chat, real_chat_grown, seen_of, window_over_florence, ANNA};
+use super::*;
+use iced::advanced::Layout;
+use leviculum_ui_iced::headless::{self, DrawnFrame, Program};
+use std::sync::mpsc;
+
+/// The window sizes: the one the goldens use, Lew's three (2026-11-06,
+/// the second his window on the tall screen where it ran at 6 to 7
+/// frames a second, 1456, the third the same screen's window a little
+/// wider, where the CPU track's bar is set, 1442), a full HD screen.
+const SIZES: [(u32, u32); 5] = [
+    (900, 560),
+    (1280, 1190),
+    (1276, 2099),
+    (1527, 2099),
+    (1920, 1080),
+];
+
+/// The sizes the gestures run at a second time with the frame meter's
+/// overlay on (`--fps`, 1456): Lew's tall windows, where he read it.
+const OVERLAY_SIZES: [(u32, u32); 2] = [(1276, 2099), (1527, 2099)];
+
+/// When the gesture begins, after the first frames settled the window.
+const SETTLE: Duration = Duration::from_millis(400);
+
+/// A mouse's report interval: 125 a second.
+const MOUSE: Duration = Duration::from_millis(8);
+
+/// The window with its worker as iced runs them: the map's frames drawn
+/// on a thread, taken in as the loop's messages.
+pub(super) struct Window {
+    pub(super) app: App,
+    jobs: mpsc::Sender<Order>,
+    done: mpsc::Receiver<Arc<Shown>>,
+    /// A frame from the worker came since the last frame presented.
+    fresh: std::cell::Cell<bool>,
+}
+
+impl Window {
+    pub(super) fn new(app: App) -> Self {
+        let (jobs, orders) = mpsc::channel::<Order>();
+        let (painted, done) = mpsc::channel();
+        let frames = app.frames.clone();
+        std::thread::spawn(move || {
+            for order in orders {
+                if painted.send(draw(&frames, order)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            app,
+            jobs,
+            done,
+            fresh: std::cell::Cell::new(false),
+        }
+    }
+
+    /// The worker's next job, as [`App::paint`] hands it to iced's pool;
+    /// no prefetch.
+    pub(super) fn dispatch(&mut self) {
+        match self.app.next_job() {
+            Some(Job::Draw(order)) => {
+                let _ = self.jobs.send(*order);
+            }
+            Some(Job::Prefetch(_)) => self.app.busy = false,
+            None => {}
+        }
+    }
+}
+
+impl Program for Window {
+    type Message = Message;
+
+    fn view(&self) -> Element<'_, Message> {
+        self.app.view()
+    }
+
+    fn update(&mut self, message: Message) {
+        // The map's messages as the update folds them, the worker's job
+        // taken here; the others through the update, whose tasks (a
+        // scroll's operation, a timer) the bench does not run.
+        let map = matches!(
+            message,
+            Message::Pointer(_)
+                | Message::Painted(_)
+                | Message::Frame(_)
+                | Message::WheelRest
+                | Message::MapSize(_)
+                | Message::Prefetched(_)
+        );
+        if matches!(message, Message::Painted(_)) {
+            self.fresh.set(true);
+        }
+        match map {
+            true => {
+                if self.app.apply(message) {
+                    self.dispatch();
+                }
+            }
+            false => {
+                let _ = self.app.update(message);
+            }
+        }
+    }
+
+    fn pump(&self, drawn: bool) -> Vec<Message> {
+        let mut out: Vec<Message> = self.done.try_iter().map(Message::Painted).collect();
+        if self
+            .app
+            .wheel
+            .is_some_and(|at| at.elapsed() >= Duration::from_millis(WHEEL_REST_MS))
+        {
+            out.push(Message::WheelRest);
+        }
+        // `window::frames` while the glide runs or a frame is owed.
+        if drawn && self.app.screen == Screen::Map && (self.app.animating() || self.app.owed) {
+            out.push(Message::Frame(Instant::now()));
+        }
+        out
+    }
+
+    fn idle(&self) -> bool {
+        !self.app.busy && self.app.wheel.is_none() && !self.app.animating() && !self.app.owed
+    }
+
+    fn marked(&self) -> bool {
+        self.fresh.replace(false)
+    }
+
+    fn style(&self) -> (Theme, Color, Color) {
+        (
+            self.app.theme(),
+            chat::colour(self.app.tokens().text),
+            chat::colour(self.app.tokens().background),
+        )
+    }
+}
+
+/// The map window `w` by `h` over the Florence fixture (or the regions
+/// of `LOQUAX_WINDOW_BENCH_MAPS`), at z15 over Piazza d'Azeglio, and
+/// where its map canvas lies.
+pub(super) fn map_window(w: u32, h: u32) -> (App, Rectangle) {
+    let mut app = window_over_florence(Vec::new(), 15 * MILLI);
+    if let Some(dir) = std::env::var_os("LOQUAX_WINDOW_BENCH_MAPS") {
+        let frames = Frames::new(loquax::picture::Maps::new(Some(dir.into())));
+        app.seen.maps = frames.painter().epoch();
+        app.frames = Arc::new(Mutex::new(frames));
+    }
+    app.window = Size::new(w as f32, h as f32);
+    // The window without the frame meter's overlay, which stacks over it
+    // and would move the path below (1456).
+    let node = headless::layout(app.window_view(), w, h).expect("a renderer");
+    // The rail, then the map screen: the column, then the map over its bar.
+    let map = Layout::new(&node)
+        .children()
+        .nth(1)
+        .and_then(|screen| screen.children().nth(1))
+        .and_then(|column| column.children().next())
+        .expect("the map")
+        .bounds();
+    (app, map)
+}
+
+/// A script of events at times since the start; `None` once its last is
+/// handed out.
+fn script(
+    mut timed: Vec<(Duration, iced::Event)>,
+) -> impl FnMut(Duration) -> Option<Vec<iced::Event>> {
+    timed.sort_by_key(|(t, _)| *t);
+    let mut next = 0;
+    move |now| {
+        if next >= timed.len() {
+            return None;
+        }
+        let from = next;
+        while next < timed.len() && timed[next].0 <= now {
+            next += 1;
+        }
+        Some(timed[from..next].iter().map(|(_, e)| e.clone()).collect())
+    }
+}
+
+fn moved(p: Point) -> iced::Event {
+    iced::Event::Mouse(mouse::Event::CursorMoved { position: p })
+}
+
+fn button(down: bool) -> iced::Event {
+    iced::Event::Mouse(match down {
+        true => mouse::Event::ButtonPressed(mouse::Button::Left),
+        false => mouse::Event::ButtonReleased(mouse::Button::Left),
+    })
+}
+
+fn wheel(y: f32) -> iced::Event {
+    iced::Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Lines { x: 0.0, y },
+    })
+}
+
+/// A drag from `from` by `step` a mouse report for `span`: the pointer
+/// there first, a settle, the press, the moves, the release.
+fn drag(from: Point, step: iced::Vector, span: Duration) -> Vec<(Duration, iced::Event)> {
+    let mut out = vec![(Duration::ZERO, moved(from)), (SETTLE, button(true))];
+    let n = (span.as_micros() / MOUSE.as_micros()) as u32;
+    for i in 1..=n {
+        let p = from + step * i as f32;
+        out.push((SETTLE + MOUSE * i, moved(p)));
+    }
+    out.push((SETTLE + MOUSE * (n + 1), button(false)));
+    out
+}
+
+/// The conversation a chat gesture runs over.
+#[derive(Clone, Copy, Debug)]
+enum Chat {
+    /// 3000 one-line bubbles ([`long_chat`]), 1441's.
+    Long,
+    /// A few hundred long, wrapping messages with quotes and wide bubbles
+    /// of ours, shaped like Lew's ([`real_chat`], 1456).
+    Real,
+}
+
+impl Chat {
+    fn open(self, w: u32, h: u32) -> App {
+        match self {
+            Chat::Long => long_chat(w, h),
+            Chat::Real => real_chat(w, h),
+        }
+    }
+}
+
+/// One gesture.
+#[derive(Clone, Copy, Debug)]
+enum Case {
+    MapDrag,
+    MapWheel,
+    ChatWheel(Chat),
+    ChatScrollbar(Chat),
+    ChatDrag(Chat),
+    ChatTouchpad(Chat),
+    /// The compose field focused and nothing else: the cursor's blink, two
+    /// frames a second (1456).
+    ChatIdle(Chat),
+}
+
+/// From the idle case's settle, when the blink frames are counted, and
+/// when the focus leaves the field again.
+const IDLE_FROM: Duration = Duration::from_millis(600);
+const IDLE_UNTIL: Duration = Duration::from_millis(3000);
+
+impl Case {
+    const ALL: [Case; 12] = [
+        Case::MapDrag,
+        Case::MapWheel,
+        Case::ChatWheel(Chat::Long),
+        Case::ChatScrollbar(Chat::Long),
+        Case::ChatDrag(Chat::Long),
+        Case::ChatTouchpad(Chat::Long),
+        Case::ChatIdle(Chat::Long),
+        Case::ChatWheel(Chat::Real),
+        Case::ChatScrollbar(Chat::Real),
+        Case::ChatDrag(Chat::Real),
+        Case::ChatTouchpad(Chat::Real),
+        Case::ChatIdle(Chat::Real),
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Case::MapDrag => "map-drag",
+            Case::MapWheel => "map-wheel",
+            Case::ChatWheel(Chat::Long) => "chat-wheel",
+            Case::ChatScrollbar(Chat::Long) => "chat-scrollbar",
+            Case::ChatDrag(Chat::Long) => "chat-drag",
+            Case::ChatTouchpad(Chat::Long) => "chat-touchpad",
+            Case::ChatIdle(Chat::Long) => "chat-idle",
+            Case::ChatWheel(Chat::Real) => "real-wheel",
+            Case::ChatScrollbar(Chat::Real) => "real-scrollbar",
+            Case::ChatDrag(Chat::Real) => "real-drag",
+            Case::ChatTouchpad(Chat::Real) => "real-touchpad",
+            Case::ChatIdle(Chat::Real) => "real-idle",
+        }
+    }
+
+    /// The frames measured: from when, until when (the end without).
+    fn span(self) -> (Duration, Option<Duration>) {
+        match self {
+            Case::ChatIdle(_) => (SETTLE + IDLE_FROM, Some(SETTLE + IDLE_UNTIL)),
+            _ => (SETTLE, None),
+        }
+    }
+
+    /// The window and the gesture at `w` by `h`.
+    fn setup(self, w: u32, h: u32) -> (App, Vec<(Duration, iced::Event)>) {
+        let (wf, hf) = (w as f32, h as f32);
+        let two = Duration::from_secs(2);
+        match self {
+            // Two seconds of a drag to the left, 4 pixels a report (500
+            // pixels a second), from the map's right half.
+            Case::MapDrag => {
+                let (app, map) = map_window(w, h);
+                let from = Point::new(map.x + map.width * 0.75, map.y + map.height / 2.0);
+                (app, drag(from, iced::Vector::new(-4.0, 0.0), two))
+            }
+            // Five notches in, one every 120 ms, at the map's middle;
+            // the glide and the rest after them.
+            Case::MapWheel => {
+                let (app, map) = map_window(w, h);
+                let at = Point::new(map.x + map.width / 2.0, map.y + map.height / 2.0);
+                let mut events = vec![(Duration::ZERO, moved(at))];
+                for i in 0..5u32 {
+                    events.push((SETTLE + Duration::from_millis(120) * i, wheel(1.0)));
+                }
+                (app, events)
+            }
+            // Two seconds of a wheel turned fast, a notch every 50 ms,
+            // back into the 3000 messages.
+            Case::ChatWheel(chat) => {
+                let at = Point::new(wf - 200.0, hf / 2.0);
+                let mut events = vec![(Duration::ZERO, moved(at))];
+                for i in 0..40u32 {
+                    events.push((SETTLE + Duration::from_millis(50) * i, wheel(1.0)));
+                }
+                (chat.open(w, h), events)
+            }
+            // The scrollbar at the window's right edge taken at the
+            // middle and dragged up for two seconds, 2 pixels a report.
+            Case::ChatScrollbar(chat) => {
+                let from = Point::new(wf - 4.0, hf / 2.0);
+                (
+                    chat.open(w, h),
+                    drag(from, iced::Vector::new(0.0, -2.0), two),
+                )
+            }
+            // The messages themselves pressed and dragged down for two
+            // seconds, 2 pixels a report, as Lew drags the chat. iced's
+            // scrollable scrolls on a finger's drag, not on a mouse's:
+            // this scrolls nothing and costs what the widgets do with
+            // every move over 3000 bubbles.
+            Case::ChatDrag(chat) => {
+                let from = Point::new(wf - 200.0, hf / 3.0);
+                (
+                    chat.open(w, h),
+                    drag(from, iced::Vector::new(0.0, 2.0), two),
+                )
+            }
+            // The chat dragged on a touchpad, two fingers: two seconds of
+            // pixel scrolls, 4 pixels a report, back into the messages.
+            Case::ChatTouchpad(chat) => {
+                let at = Point::new(wf - 200.0, hf / 2.0);
+                let mut events = vec![(Duration::ZERO, moved(at))];
+                let n = (two.as_micros() / MOUSE.as_micros()) as u32;
+                for i in 0..n {
+                    events.push((
+                        SETTLE + MOUSE * i,
+                        iced::Event::Mouse(mouse::Event::WheelScrolled {
+                            delta: mouse::ScrollDelta::Pixels { x: 0.0, y: 4.0 },
+                        }),
+                    ));
+                }
+                (chat.open(w, h), events)
+            }
+            // A press into the compose field at the window's foot, then
+            // nothing for longer than the frames counted (the cursor
+            // blinks), then a press on the chat list's empty foot, which
+            // takes the focus and ends the blinking.
+            Case::ChatIdle(chat) => {
+                let field = Point::new(wf - 250.0, hf - 28.0);
+                let list = Point::new(200.0, hf - 40.0);
+                let events = vec![
+                    (Duration::ZERO, moved(field)),
+                    (SETTLE, button(true)),
+                    (SETTLE + MOUSE, button(false)),
+                    (SETTLE + IDLE_UNTIL, moved(list)),
+                    (SETTLE + IDLE_UNTIL + MOUSE, button(true)),
+                    (SETTLE + IDLE_UNTIL + MOUSE * 2, button(false)),
+                ];
+                (chat.open(w, h), events)
+            }
+        }
+    }
+}
+
+/// What a case measured, over the frames from the gesture's start.
+#[derive(Debug)]
+pub(super) struct Measured {
+    pub size: (u32, u32),
+    /// The gesture's name, `+fps` with the frame meter's overlay on.
+    pub case: String,
+    pub fps: f64,
+    pub mean: f64,
+    pub p95: f64,
+    pub max: f64,
+    pub parts: (f64, f64, f64),
+    pub damage: f64,
+    /// The present of a frame showing a map frame new from the worker,
+    /// and of one showing the frame on screen moved; zero without.
+    pub fresh: f64,
+    pub held: f64,
+    pub views: f64,
+    pub messages: f64,
+    pub frames: usize,
+    /// The first and the last frame's pixels differ: the gesture moved
+    /// something.
+    pub moved: bool,
+}
+
+impl Measured {
+    pub fn line(&self) -> String {
+        format!(
+            "WINDOW_BENCH size={}x{} case={} fps={:.0} frame_ms_mean={:.2} p95={:.2} max={:.2} update={:.2} draw={:.2} present={:.2} damage={:.2} present_fresh={:.2} present_held={:.2} views_per_frame={:.2} messages_per_frame={:.2} frames={} moved={}",
+            self.size.0,
+            self.size.1,
+            self.case,
+            self.fps,
+            self.mean,
+            self.p95,
+            self.max,
+            self.parts.0,
+            self.parts.1,
+            self.parts.2,
+            self.damage,
+            self.fresh,
+            self.held,
+            self.views,
+            self.messages,
+            self.frames,
+            self.moved,
+        )
+    }
+}
+
+/// `case` at `w` by `h`, run; with the frame meter's overlay over the
+/// window when `overlay`, as `loquax --fps` draws it.
+fn measure(case: Case, w: u32, h: u32, overlay: bool) -> Measured {
+    measure_slowed(case, w, h, overlay, 1)
+}
+
+/// [`measure`] with the gesture's clock `slow` times slower: its events
+/// that much further apart, for a profiler that runs the program that
+/// much slower (1468).
+fn measure_slowed(case: Case, w: u32, h: u32, overlay: bool, slow: u32) -> Measured {
+    let (app, events) = case.setup(w, h);
+    let events = events.into_iter().map(|(t, e)| (t * slow, e)).collect();
+    let mut window = Window::new(app);
+    let mut script = script(events);
+    if overlay {
+        leviculum_ui_iced::fps::enable(|_| {});
+    }
+    let run = headless::drive(&mut window, w, h, &mut script, SETTLE * slow);
+    if overlay {
+        leviculum_ui_iced::fps::disable();
+    }
+    let run = run.expect("the software renderer");
+    let (from, until) = case.span();
+    let (from, until) = (from * slow, until.map(|u| u * slow));
+    let at = from.as_secs_f64();
+    let until = until.map_or(f64::INFINITY, |u| u.as_secs_f64());
+    let frames: Vec<&DrawnFrame> = run
+        .frames
+        .iter()
+        .filter(|f| f.at >= at && f.at < until)
+        .collect();
+    let n = frames.len().max(1);
+    let mut totals: Vec<f64> = frames.iter().map(|f| f.total_ms()).collect();
+    totals.sort_by(f64::total_cmp);
+    let mean =
+        |f: fn(&DrawnFrame) -> f64| 0.0 + frames.iter().map(|x| f(x)).sum::<f64>() / n as f64;
+    let present_of = |marked: bool| {
+        let p: Vec<f64> = frames
+            .iter()
+            .filter(|f| f.marked == marked)
+            .map(|f| f.present_ms)
+            .collect();
+        0.0 + p.iter().sum::<f64>() / p.len().max(1) as f64
+    };
+    let span = match case.span().1 {
+        Some(_) => until - at,
+        None => frames.last().map_or(0.0, |f| f.at - at),
+    }
+    .max(1e-3);
+    let pick = |q: usize| {
+        totals
+            .get((totals.len() * q / 100).min(totals.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    Measured {
+        size: (w, h),
+        case: format!("{}{}", case.name(), if overlay { "+fps" } else { "" }),
+        fps: frames.len() as f64 / span,
+        mean: 0.0 + totals.iter().sum::<f64>() / n as f64,
+        p95: pick(95),
+        max: totals.last().copied().unwrap_or(0.0),
+        parts: (
+            mean(|f| f.update_ms),
+            mean(|f| f.draw_ms),
+            mean(|f| f.present_ms),
+        ),
+        damage: mean(|f| f64::from(f.damage)),
+        fresh: present_of(true),
+        held: present_of(false),
+        views: frames.iter().filter(|f| f.rebuilt).count() as f64 / n as f64,
+        messages: run.messages as f64 / n as f64,
+        frames: frames.len(),
+        moved: run.marked_rgb.as_ref().is_some_and(|f| f != &run.rgb),
+    }
+}
+
+/// The bench (`just window-bench`): every gesture at every size, the
+/// lines to `LOQUAX_WINDOW_BENCH`'s file and to stdout.
+#[test]
+fn window_bench() {
+    let Some(out) = std::env::var_os("LOQUAX_WINDOW_BENCH") else {
+        return;
+    };
+    let mut lines = Vec::new();
+    let runs = SIZES
+        .iter()
+        .flat_map(|&size| Case::ALL.map(|case| (size, case, false)))
+        .chain(
+            OVERLAY_SIZES
+                .iter()
+                .flat_map(|&size| Case::ALL.map(|case| (size, case, true))),
+        );
+    for ((w, h), case, overlay) in runs {
+        let line = measure(case, w, h, overlay).line();
+        println!("{line}");
+        lines.push(line);
+    }
+    std::fs::write(&out, lines.join("\n") + "\n").expect("the bench's file");
+}
+
+/// One gesture of the bench alone, for a profiler (1468): the case
+/// `LOQUAX_PROFILE_CASE` names (`chat-touchpad`, `+fps` for the overlay)
+/// at `LOQUAX_PROFILE_SIZE` (`1527x2099` without), its clock slowed
+/// `LOQUAX_PROFILE_SLOW` times (a profiler's own slowness), its line
+/// printed.
+/// Under callgrind, `--dump-after='*headless*Surface*present*'` writes a
+/// profile per frame. Without the variable the test returns at once.
+#[test]
+fn one_gesture_for_a_profiler() {
+    let Some(name) = std::env::var("LOQUAX_PROFILE_CASE").ok() else {
+        return;
+    };
+    let (w, h) = std::env::var("LOQUAX_PROFILE_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or((1527, 2099));
+    let overlay = name.ends_with("+fps");
+    let bare = name.trim_end_matches("+fps");
+    let case = Case::ALL
+        .into_iter()
+        .find(|c| c.name() == bare)
+        .expect("a case of the bench");
+    let slow = std::env::var("LOQUAX_PROFILE_SLOW")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    println!("{}", measure_slowed(case, w, h, overlay, slow).line());
+}
+
+/// The bench's gestures do what they say (1441), at the small size: the
+/// map's drag and wheel move the map, the chat's wheel and its scrollbar
+/// scroll the messages, each in frames that the window drew; the drag on
+/// the messages is measured, whatever it moves. And a wheel's notch on the
+/// chat builds no view per frame, where the scrollbar's drag is a message
+/// to the update per mouse report or not, as the line says. The idle
+/// case draws the cursor's blink frames. The real-shaped chat's gestures
+/// run only in an optimised build: unoptimised, its first view (300 long
+/// paragraphs shaped) takes longer than the gesture lasts, and the
+/// release bench runs them (`the_real_chat_is_shaped_like_lews` holds the
+/// fixture in every build). Unoptimised, a gesture draws at least one
+/// frame; optimised, more than three.
+#[test]
+fn the_benchs_gestures_move_the_window() {
+    let optimised = !cfg!(debug_assertions);
+    for case in Case::ALL {
+        if !optimised
+            && matches!(
+                case,
+                Case::ChatWheel(Chat::Real)
+                    | Case::ChatScrollbar(Chat::Real)
+                    | Case::ChatDrag(Chat::Real)
+                    | Case::ChatTouchpad(Chat::Real)
+                    | Case::ChatIdle(Chat::Real)
+            )
+        {
+            continue;
+        }
+        let m = measure(case, 900, 560, false);
+        println!("{}", m.line());
+        // More than three frames where the build is optimised; one
+        // unoptimised, where a view of 3000 bubbles built per mouse
+        // report can take the gesture's two seconds in three frames
+        // under load (1442: `chat-scrollbar` sat at 3 once).
+        let least = if optimised { 3 } else { 0 };
+        assert!(
+            m.frames > least || matches!(case, Case::ChatDrag(_)),
+            "{}",
+            m.line()
+        );
+        if !matches!(case, Case::ChatDrag(_) | Case::ChatIdle(_)) {
+            assert!(m.moved, "{}", m.line());
+        }
+    }
+}
+
+/// A scroll drawn as a shift of the frame on the window (1468) is the
+/// scroll drawn as the damage says, frame for frame, up to the partial
+/// pixels of anti-aliased edges: the chat's wheel, touchpad and scrollbar
+/// gestures run with a twin surface that never shifts, and in no frame
+/// does a channel differ by more than [`EDGE`], nor more than
+/// [`EDGE_PIXELS`] pixels by more than one step. tiny-skia does not draw
+/// an edge's partial pixel to the same byte when a clip cuts the shape
+/// (its mask rounds the coverage a second time) as when it is drawn
+/// whole, nor a curve or a stroke at two heights (the rounding of its
+/// path's points); a strip redrawn after a shift cuts the bubbles it
+/// crosses, and the moved rows keep the edges where the last frame drew
+/// them. Measured over three runs of every case: all but one pixel a
+/// frame within one step, that one within 10 (the real-shaped chat's
+/// scrollbar at 1527x2099). A shift by a wrong row, the control, moves
+/// thousands of pixels by up to 228. And frames were shifted, else the
+/// comparison held nothing. At the small size in every build; the
+/// real-shaped chat and Lew's tall window where the build is optimised
+/// (its first view is slow unoptimised, as above).
+/// How far a channel of an anti-aliased edge's pixel may lie from the
+/// twin's: a quarter of full coverage, one of the four rows tiny-skia
+/// samples a pixel's row in.
+const EDGE: u8 = 64;
+
+/// How many pixels of a frame may lie more than one step from the twin's.
+const EDGE_PIXELS: usize = 4;
+
+#[test]
+fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
+    let optimised = !cfg!(debug_assertions);
+    let mut runs = vec![(900, 560, Chat::Long)];
+    if optimised {
+        runs.extend([
+            (900, 560, Chat::Real),
+            (1527, 2099, Chat::Long),
+            (1527, 2099, Chat::Real),
+        ]);
+    }
+    for (w, h, chat) in runs {
+        for case in [
+            Case::ChatWheel(chat),
+            Case::ChatTouchpad(chat),
+            Case::ChatScrollbar(chat),
+        ] {
+            let (app, events) = case.setup(w, h);
+            let mut window = Window::new(app);
+            let mut script = script(events);
+            let run = headless::drive_twinned(&mut window, w, h, &mut script, SETTLE)
+                .expect("the software renderer");
+            let what = format!(
+                "{} at {w}x{h}: {} frames, {} shifted, at most {} pixels a frame off, {} by more than one step, by at most {}; more at {:?}, first within {:?}",
+                case.name(),
+                run.frames.len(),
+                run.shifted,
+                run.off,
+                run.past_one,
+                run.worst,
+                run.differed,
+                run.first_difference
+            );
+            println!("{what}");
+            assert!(run.worst <= EDGE, "{what}");
+            assert!(run.past_one <= EDGE_PIXELS, "{what}");
+            // A scrollbar's drag over 3000 messages moves them further
+            // than the pane is high with every report: nothing to keep.
+            if !matches!(case, Case::ChatScrollbar(_)) {
+                assert!(run.shifted > 0, "{what}");
+            }
+        }
+    }
+}
+
+/// How many messages a first pull brings the window per state in
+/// [`a_first_pull_never_costs_a_frame_over_the_budget`]: the shell folds
+/// [`loquax::fanout::SLICE`] at a time and sends the window what changed
+/// after each poll; on the host a 50 ms slice folded 16 to 35 events.
+const PULL_SLICE: usize = 10;
+
+/// A frame's budget while a first pull arrives (1464): one refresh of a
+/// 60 Hz screen.
+const REFRESH_BUDGET_MS: f64 = 1000.0 / 60.0;
+
+/// The window as a first pull reaches it: after each frame drawn, the
+/// next state the shell sent.
+struct Pulling {
+    window: Window,
+    states: std::cell::RefCell<std::collections::VecDeque<Seen>>,
+}
+
+impl Program for Pulling {
+    type Message = Message;
+
+    fn view(&self) -> Element<'_, Message> {
+        self.window.view()
+    }
+
+    fn update(&mut self, message: Message) {
+        self.window.update(message);
+    }
+
+    fn pump(&self, drawn: bool) -> Vec<Message> {
+        let mut out = self.window.pump(drawn);
+        if drawn {
+            if let Some(next) = self.states.borrow_mut().pop_front() {
+                out.push(Message::Seen(Box::new(next)));
+            }
+        }
+        out
+    }
+
+    fn idle(&self) -> bool {
+        self.states.borrow().is_empty() && self.window.idle()
+    }
+
+    fn marked(&self) -> bool {
+        self.window.marked()
+    }
+
+    fn style(&self) -> (Theme, Color, Color) {
+        self.window.style()
+    }
+}
+
+/// The first pull of the real-shaped chat never costs the window a frame
+/// over the refresh budget (1464). Before 1464 the shell folded a whole
+/// pull in one poll and the window saw nothing until all of it was in;
+/// now it folds a slice per poll and sends the window each state: the
+/// chat open, it grows [`PULL_SLICE`] messages a state, each drawn as it
+/// comes. Every state arrives and the last frame shows the whole chat;
+/// in an optimised build no frame of the pull takes longer than
+/// [`REFRESH_BUDGET_MS`] (6.5 to 10 ms each at 900 by 560 on the host).
+/// Unoptimised, a view of these 300 long paragraphs shaped takes longer
+/// than a frame (as [`the_benchs_gestures_move_the_window`] says), so
+/// the frame times are only printed there.
+#[test]
+fn a_first_pull_never_costs_a_frame_over_the_budget() {
+    let (w, h) = (900, 560);
+    let mut states = std::collections::VecDeque::new();
+    let mut opened = false;
+    let mut count = 0;
+    let model = real_chat_grown(|model| {
+        if !opened {
+            loquax::ui::update(model, UiEvent::Open { peer: ANNA });
+            opened = true;
+        }
+        count += 1;
+        if count % PULL_SLICE == 0 {
+            states.push_back(seen_of(model));
+        }
+    });
+    states.push_back(seen_of(&model));
+    let slices = states.len();
+    let first = states.pop_front().expect("a state");
+    let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+    app.window = Size::new(w as f32, h as f32);
+    app.apply(Message::Seen(Box::new(first)));
+    let mut pulling = Pulling {
+        window: Window::new(app),
+        states: std::cell::RefCell::new(states),
+    };
+    let mut script = |now: Duration| (now < SETTLE).then(Vec::new);
+    let run =
+        headless::drive(&mut pulling, w, h, &mut script, SETTLE).expect("the software renderer");
+    // The pull's frames: the first frame is the window opening on the
+    // chat before the pull's first state, its present a fresh surface's
+    // (14.6 ms of its 20.7 in the release run that set the budget).
+    let longest = run
+        .frames
+        .iter()
+        .skip(1)
+        .map(DrawnFrame::total_ms)
+        .fold(0.0, f64::max);
+    let views = run.frames.iter().filter(|f| f.rebuilt).count();
+    println!(
+        "FIRST_PULL states={slices} frames={} views={views} longest_ms={longest:.2}",
+        run.frames.len()
+    );
+    assert!(
+        pulling.states.borrow().is_empty(),
+        "every state reached the window"
+    );
+    let chat = pulling
+        .window
+        .app
+        .scene
+        .chat
+        .as_ref()
+        .expect("the chat open");
+    let bubbles: usize = chat.groups.iter().map(|g| g.bubbles.len()).sum();
+    assert!(
+        bubbles >= 300,
+        "the whole chat at the end: {bubbles} bubbles"
+    );
+    assert!(
+        views >= slices - 1,
+        "a view per state: {views} for {slices}"
+    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            longest < REFRESH_BUDGET_MS,
+            "a frame of the first pull took {longest:.2} ms (budget {REFRESH_BUDGET_MS:.1} ms)"
+        );
+    }
+}

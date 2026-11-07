@@ -76,7 +76,7 @@ fn the_phone_draws_the_shapes_of_the_core() {
     for mark in MARKS {
         let kind = match mark {
             Mark::Sending | Mark::Unconfirmed => "CLOCK",
-            Mark::Mailbox => "TICK",
+            Mark::Mailbox | Mark::Arrived => "TICK",
             Mark::Delivered => "TICKS",
             Mark::Read => "TICKS_READ",
             Mark::Failed => "FAILED",

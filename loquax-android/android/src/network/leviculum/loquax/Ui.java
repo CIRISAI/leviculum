@@ -144,6 +144,7 @@ final class Ui {
             case "sending": return context.getString(R.string.state_sending);
             case "unconfirmed": return context.getString(R.string.state_unconfirmed);
             case "mailbox": return context.getString(R.string.state_mailbox);
+            case "arrived": return context.getString(R.string.state_arrived);
             case "delivered": return context.getString(R.string.state_delivered);
             case "read": return context.getString(R.string.state_read, clock(readAt));
             case "failed": return context.getString(R.string.state_failed);

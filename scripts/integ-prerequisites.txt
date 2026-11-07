@@ -90,6 +90,8 @@ reference/LXMF/LXMF/__init__.py loquax/python_interop
 # that recipe reads these lines through scripts/with-prerequisites.sh.
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_message_collected_at_the_node_shows_collected_on_the_phone
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_message_collected_at_the_node_shows_collected_on_the_phone
 # The voice round trip (1222) starts the same Python peer, and makes and
 # judges its sounds with the reference codecs: opus-tools and codec2 from
 # apt (scripts/install-ci.sh). Looked up on PATH, not at /usr/bin: a host
@@ -108,6 +110,9 @@ reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_travels_both_w
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_photo_travels_both_ways_with_python_lxmf_at_each_size
 reference/Reticulum/RNS/__init__.py loquax-android/facade a_file_travels_both_ways_with_python_lxmf
 reference/LXMF/LXMF/__init__.py loquax-android/facade a_file_travels_both_ways_with_python_lxmf
+# 1388: a group's photo without words to a stock Python member.
+reference/Reticulum/RNS/__init__.py loquax-android/facade a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer
+reference/LXMF/LXMF/__init__.py loquax-android/facade a_photo_without_words_reaches_a_stock_member_as_photo_from_its_writer
 reference/Reticulum/RNS/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
 reference/LXMF/LXMF/__init__.py loquax/home_node a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it
 reference/Reticulum/RNS/__init__.py loquax/home_node a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
@@ -116,6 +121,8 @@ reference/Reticulum/RNS/__init__.py loquax/home_node a_message_the_recipient_can
 reference/LXMF/LXMF/__init__.py loquax/home_node a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once
 reference/Reticulum/RNS/__init__.py loquax/home_node a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_node
 reference/LXMF/LXMF/__init__.py loquax/home_node a_message_to_an_announced_recipient_that_left_reaches_a_costly_local_node
+reference/Reticulum/RNS/__init__.py loquax/home_node the_home_asks_its_node_what_became_of_a_message_across_a_restart
+reference/LXMF/LXMF/__init__.py loquax/home_node the_home_asks_its_node_what_became_of_a_message_across_a_restart
 reference/Reticulum/RNS/__init__.py loquax/home_node a_group_copy_for_an_offline_member_reaches_the_homes_node
 reference/LXMF/LXMF/__init__.py loquax/home_node a_group_copy_for_an_offline_member_reaches_the_homes_node
 reference/Reticulum/RNS/__init__.py loquax/home_node what_one_client_reads_and_sends_shows_on_the_other
@@ -128,6 +135,9 @@ reference/Reticulum/RNS/__init__.py loquax/home_node a_group_on_the_home_reaches
 reference/LXMF/LXMF/__init__.py loquax/home_node a_group_on_the_home_reaches_a_stock_member_with_names_and_replies
 reference/Reticulum/RNS/__init__.py loquax/home_node the_owner_deletes_a_group_and_every_member_is_told
 reference/LXMF/LXMF/__init__.py loquax/home_node the_owner_deletes_a_group_and_every_member_is_told
+# 1462: the stock Python recipient's proof is one tick, never two.
+reference/Reticulum/RNS/__init__.py loquax/home_node a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two
+reference/LXMF/LXMF/__init__.py loquax/home_node a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two
 
 # loquax-android fling compiles Fling.java and its host test with javac and
 # runs them with java (1209). rust:bookworm carries no JDK, and the land gate
@@ -192,3 +202,13 @@ command:java loquax-android/fling the_recorders_windows_are_the_librarys
 # The service notice's rules (1345): Notice.java run with its host test.
 command:javac loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
 command:java loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
+
+# When nothing changes, nothing is drawn (1455): Quiet.java run with its
+# host test.
+command:javac loquax-android/fling the_phone_draws_nothing_while_nothing_changes
+command:java loquax-android/fling the_phone_draws_nothing_while_nothing_changes
+
+# The join screen's server field (1464): ServerField.java run with its host
+# test.
+command:javac loquax-android/fling the_server_field_follows_a_typed_code
+command:java loquax-android/fling the_server_field_follows_a_typed_code

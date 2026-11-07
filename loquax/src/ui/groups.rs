@@ -33,9 +33,14 @@
 //! left. Leave and Remove ask once.
 //!
 //! 1307 pass four: the home's status (`0x03`) moves the reader's own line
-//! to two ticks once every present member's copy is proven, and to read
-//! once every member that sends receipts read it; until then the group's
-//! proof is one tick (the group has it). The admin deletes the group from
+//! to read once every member that sends receipts read it; until then the
+//! group's proof is one tick (the group has it). 1466, the ticks tell the
+//! truth in a group too: every member's copy proven is one tick, "Arrived"
+//! (a member's mailbox proves with the member's identity, so a proof is no
+//! device's word), and two ticks, "On the devices", come only once every
+//! member's device said it has its copy (`0x07`, or its read receipt). A
+//! member whose device never says it keeps the line at one tick, and the
+//! Info names each member's rung and since when ([`UiModel::group_rungs`]). The admin deletes the group from
 //! the member sheet ("Delete group", asked once, through the home,
 //! `/groupdelete`): the admin's devices forget it whole, a member's keep
 //! the history, closed, with the line "Lew ended the group." A group the
@@ -47,8 +52,9 @@ use alloc::vec::Vec;
 
 use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE};
 use leviculum_lxmf::lev::{
-    DigestLine, GroupStatus, Lev, Member, Members, CAP_GROUPS, CAP_READ_RECEIPTS, LEFT_OUT_FILE,
-    LEFT_OUT_GONE, LEFT_OUT_PHOTO, LEFT_OUT_VOICE, MEMBER_ADMIN, MEMBER_JOINED, MEMBER_LEFT,
+    DigestLine, GroupStatus, Lev, Member, MemberRung, Members, StandIn, CAP_GROUPS,
+    CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS, LEFT_OUT_FILE, LEFT_OUT_GONE, LEFT_OUT_PHOTO,
+    LEFT_OUT_VOICE, MEMBER_ADMIN, MEMBER_JOINED, MEMBER_LEFT,
 };
 use leviculum_lxmf::Field;
 use leviculum_ui::delivery::DeliveryState;
@@ -57,6 +63,7 @@ use super::contacts::Ask;
 use super::intent::Target;
 use super::strings::{Arg, Lang, StrId, Text};
 use super::{Message, Palette, UiEffect, UiModel};
+use crate::when::WallTime;
 
 /// The slot of [`UiModel::sending`] a group's state takes (a Join, a
 /// Leave, a Remove): it runs in the shell's queue like every send, and no
@@ -64,10 +71,11 @@ use super::{Message, Palette, UiEffect, UiModel};
 pub const STATE_SEND: usize = usize::MAX - 1;
 
 /// The capabilities every Loquax client says on every message it sends
-/// (1307): bit 1, it understands groups, always; bit 0, read receipts,
-/// while the reader's switch is on.
+/// (1307): bit 1, it understands groups, always; bit 2, it acknowledges
+/// propagated post and wants its own acknowledged, always (1395, not
+/// switchable); bit 0, read receipts, while the reader's switch is on.
 pub fn client_caps(receipts: bool) -> u64 {
-    CAP_GROUPS | if receipts { CAP_READ_RECEIPTS } else { 0 }
+    CAP_GROUPS | CAP_PROPAGATION_RECEIPTS | if receipts { CAP_READ_RECEIPTS } else { 0 }
 }
 
 /// Why the home did not make a group (1307 pass five): the answer to
@@ -296,13 +304,52 @@ pub fn is_state(body: &str, fields: &[Field]) -> bool {
 /// The writer of a group's copy and the text the home put after its
 /// `"Name: "` prefix (study 3.1): `(writer, name, text)`. None for a
 /// message that is no copy.
-pub fn copy_of<'a>(body: &'a str, fields: &[Field]) -> Option<([u8; 16], &'a str, &'a str)> {
+///
+/// The writer comes from the copy's `0x02` and the name from `info`, the
+/// group's membership, and exactly `"name: "` (or `"name:"`) is taken off,
+/// so a name with a colon in it stays whole (1388). A copy whose text is
+/// the home's sentence for a message without words, `"Photo from Anna"`
+/// ([`StandIn`]), has no text: the bubble draws the photo under its
+/// writer. Only for a writer the membership does not name is the name
+/// what stands before the first colon, or after the sentence's words.
+pub fn copy_of<'a>(
+    body: &'a str,
+    fields: &[Field],
+    info: Option<&'a GroupInfo>,
+) -> Option<([u8; 16], &'a str, &'a str)> {
     let copy = Lev::from_fields(fields)?.group_copy?;
+    let known = info
+        .and_then(|info| info.member(&copy.sender))
+        .map(|m| m.name.as_str())
+        .filter(|name| !name.is_empty());
+    if let Some(name) = known {
+        if StandIn::read(body, fields, name) {
+            return Some((copy.sender, name, ""));
+        }
+        if let Some(rest) = body
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            return Some((copy.sender, name, rest.strip_prefix(' ').unwrap_or(rest)));
+        }
+    }
+    if let Some(name) = StandIn::name_in(body, fields) {
+        return Some((copy.sender, name, ""));
+    }
     let (name, text) = match body.split_once(':') {
         Some((name, rest)) => (name, rest.strip_prefix(' ').unwrap_or(rest)),
         None => ("", body),
     };
     Some((copy.sender, name, text))
+}
+
+/// The words the terminal draws for a group's copy whose text is the
+/// home's sentence for a message without words (1388): `"Anna:"`, the
+/// writer as every other copy names them there, over the media. None for
+/// every other message, whose text the terminal draws as it came.
+pub fn stand_in_line(body: &str, fields: &[Field]) -> Option<String> {
+    Lev::from_fields(fields)?.group_copy?;
+    StandIn::name_in(body, fields).map(|name| alloc::format!("{name}:"))
 }
 
 /// The line a membership from the group at `index` of `messages` makes
@@ -550,6 +597,7 @@ impl<B> UiModel<B> {
                 let index = self.conversation(invite.group);
                 let activity = self.bump();
                 self.conversations[index].activity = activity;
+                self.conversations[index].touched = self.now.map(|now| now.unix_secs);
             }
         }
         if let Some(members) = &lev.members {
@@ -632,6 +680,12 @@ impl<B> UiModel<B> {
             status.delivered,
             status.members
         )];
+        if let Some(on_device) = status.on_device {
+            rows.push(alloc::format!(
+                "       on the devices of {on_device} of {}",
+                status.members
+            ));
+        }
         rows.push(match status.readers {
             0 => "read   nobody in it sends read receipts".to_string(),
             readers => alloc::format!("read   by {} of {readers}", status.read),
@@ -642,13 +696,52 @@ impl<B> UiModel<B> {
                 "       {quiet} send no read receipts and are not counted"
             ));
         }
+        for (name, rung) in self.group_rungs(peer, id) {
+            let at = |t: u32| WallTime {
+                unix_secs: i64::from(t),
+                offset_secs: self.now.map_or(0, |n| n.offset_secs),
+            };
+            let said = match (rung.read_at, rung.on_device_at, rung.proven_at) {
+                (r, _, _) if r > 0 => alloc::format!("read {}", at(r).hh_mm()),
+                (_, d, _) if d > 0 => alloc::format!("on the device {}", at(d).hh_mm()),
+                (_, _, p) if p > 0 => alloc::format!("arrived {}", at(p).hh_mm()),
+                _ => "not arrived yet".to_string(),
+            };
+            rows.push(alloc::format!("       {name}: {said}"));
+        }
         rows
     }
 
-    /// The group's status of our message (1307 pass four): two ticks once
-    /// every present member's copy is proven, read once every member that
-    /// sends receipts read it; the counts go into its ledger either way,
-    /// so the detail view says them. Read is never taken back.
+    /// Each member's rungs of our message `id` in the group at `peer`, as
+    /// the newest status says them (1466), with the name the group gave the
+    /// member: the Info's row per member. Empty where `peer` is no group or
+    /// its home said no rungs (before 1466).
+    pub fn group_rungs(&self, peer: &[u8; 16], id: &[u8; 32]) -> Vec<(String, MemberRung)> {
+        let Some(group) = self.groups.get(peer) else {
+            return Vec::new();
+        };
+        let Some(status) = self.group_status(peer, id) else {
+            return Vec::new();
+        };
+        status
+            .rungs
+            .into_iter()
+            .map(|rung| {
+                let name = group
+                    .member(&rung.member)
+                    .map(|m| m.name.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| self.names.label(&rung.member));
+                (name, rung)
+            })
+            .collect()
+    }
+
+    /// The group's status of our message (1307 pass four, 1466): one tick,
+    /// arrived, once every present member's copy is proven; two once every
+    /// copy is on its member's device; read once every member that sends
+    /// receipts read it. The counts go into its ledger either way, so the
+    /// detail view says them. No rung is taken back ([`status_rung`]).
     fn learn_status(&mut self, peer: [u8; 16], status: &GroupStatus) {
         if !self.groups.contains_key(&peer) {
             return;
@@ -665,20 +758,15 @@ impl<B> UiModel<B> {
         };
         let now = self.now;
         let at = now.map_or(0, |n| u32::try_from(n.unix_secs).unwrap_or(0));
-        let next = match (status.read_by_all(), status.delivered_to_all()) {
-            (true, _) => Some(DeliveryState::Read { at }),
-            (false, true) => Some(DeliveryState::Delivered),
-            (false, false) => None,
-        };
+        let next = status_rung(status, at);
         let Some(message) = self.message_mut(c, m) else {
             return;
         };
         message.note(now, &status_line(status));
-        if matches!(message.delivery, Some(DeliveryState::Read { .. })) {
-            return;
-        }
         if let Some(next) = next {
-            message.delivery = Some(next);
+            if rank(Some(next)) > rank(message.delivery) {
+                message.delivery = Some(next);
+            }
         }
     }
 
@@ -726,21 +814,92 @@ impl<B> UiModel<B> {
     }
 }
 
+/// The rung a group's status puts our line on (1466): read once every
+/// member that sends receipts read it, two ticks once every copy is on its
+/// member's device, one tick, arrived, once every copy is proven; none
+/// before. `at` is this device's clock, the read rung's time.
+pub fn status_rung(status: &GroupStatus, at: u32) -> Option<DeliveryState> {
+    if status.read_by_all() {
+        Some(DeliveryState::Read { at })
+    } else if status.on_devices_of_all() {
+        Some(DeliveryState::Delivered)
+    } else if status.delivered_to_all() {
+        Some(DeliveryState::Arrived)
+    } else {
+        None
+    }
+}
+
+/// Where a state stands on the ladder a group's line climbs: nothing a
+/// status says moves it down, and the group's proof (in the mailbox) is
+/// the lowest of the rungs above sending.
+fn rank(state: Option<DeliveryState>) -> u8 {
+    match state {
+        Some(DeliveryState::Read { .. }) => 4,
+        Some(DeliveryState::Delivered) => 3,
+        Some(DeliveryState::Arrived) => 2,
+        Some(DeliveryState::InMailbox) => 1,
+        _ => 0,
+    }
+}
+
+/// A line of ours kept from before 1466 at two ticks in a group: its two
+/// came from a status that counted proofs, which a member's mailbox signs
+/// too. Unless a status it kept says every copy is on a device, it shows
+/// one tick now. The store applies it as it loads a message, beside
+/// [`super::arrival::before_1462`]; the next write keeps it.
+pub fn before_1466(message: &mut Message) {
+    if !message.outbound || message.delivery != Some(DeliveryState::Delivered) {
+        return;
+    }
+    let statuses: Vec<Vec<u64>> = message
+        .ledger
+        .iter()
+        .filter_map(|entry| {
+            let rest = entry
+                .what
+                .strip_prefix(STATUS_LINE)
+                .or(entry.what.strip_prefix(OLD_STATUS_LINE))?;
+            Some(
+                rest.split(|c: char| !c.is_ascii_digit())
+                    .filter(|n| !n.is_empty())
+                    .filter_map(|n| n.parse().ok())
+                    .collect(),
+            )
+        })
+        .collect();
+    if statuses.is_empty() {
+        return;
+    }
+    // `group-status delivered members read readers on_device`.
+    let on_every_device = statuses
+        .iter()
+        .any(|n| matches!(n.as_slice(), &[_, members, _, _, on_device] if members > 0 && on_device >= members));
+    if !on_every_device {
+        message.delivery = Some(DeliveryState::Arrived);
+    }
+}
+
 /// The start of a group status's ledger line (1381): the four numbers
 /// follow it, so the line is data and [`ledger_line`] says it in the
 /// reader's language.
 const STATUS_LINE: &str = "group-status";
 
 /// The ledger line of `status`: `group-status 2 3 1 2`, delivered, members,
-/// read and readers.
+/// read and readers, and since 1466 the copies on a device after them,
+/// `group-status 3 3 1 2 2`, when the home said it.
 fn status_line(status: &GroupStatus) -> String {
-    alloc::format!(
+    let mut line = alloc::format!(
         "{STATUS_LINE} {} {} {} {}",
         status.delivered,
         status.members,
         status.read,
         status.readers
-    )
+    );
+    if let Some(on_device) = status.on_device {
+        line.push_str(&alloc::format!(" {on_device}"));
+    }
+    line
 }
 
 /// The English sentence a store written before 1381 kept for a status.
@@ -780,6 +939,17 @@ pub fn ledger_line(what: &str, lang: Lang) -> String {
             alloc::vec![
                 Arg::Int(delivered),
                 Arg::Int(members),
+                Arg::Int(read),
+                Arg::Int(readers),
+            ],
+        )
+        .resolve(lang),
+        Some(&[delivered, members, read, readers, on_device]) => Text::Key(
+            StrId::GroupStatusDevicesNote,
+            alloc::vec![
+                Arg::Int(delivered),
+                Arg::Int(members),
+                Arg::Int(on_device),
                 Arg::Int(read),
                 Arg::Int(readers),
             ],
@@ -1354,6 +1524,7 @@ impl<B: Default> UiModel<B> {
         let index = self.conversation(address);
         let activity = self.bump();
         self.conversations[index].activity = activity;
+        self.conversations[index].touched = self.now.map(|now| now.unix_secs);
         self.select(index);
         Vec::new()
     }
@@ -1488,6 +1659,7 @@ mod tests {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -2327,11 +2499,15 @@ mod tests {
         assert_eq!(members.iter().map(|m| m.0).collect::<Vec<_>>(), [ANNA, BOB]);
     }
 
-    /// Every client says bit 1; bit 0 rides with the switch.
+    /// Every client says bit 1 and bit 2 (1395, not switchable); bit 0
+    /// rides with the switch.
     #[test]
     fn every_client_says_it_understands_groups() {
-        assert_eq!(client_caps(true), CAP_GROUPS | CAP_READ_RECEIPTS);
-        assert_eq!(client_caps(false), CAP_GROUPS);
+        assert_eq!(
+            client_caps(true),
+            CAP_GROUPS | CAP_PROPAGATION_RECEIPTS | CAP_READ_RECEIPTS
+        );
+        assert_eq!(client_caps(false), CAP_GROUPS | CAP_PROPAGATION_RECEIPTS);
     }
 
     /// 1307 pass six, Lew's finding: opening a fresh group asked whether
@@ -2523,6 +2699,7 @@ mod tests {
             .expect("the group's chat")
     }
 
+    /// A status of a home before 1466: five counts, no device's word.
     fn status(original: [u8; 32], delivered: u64, read: u64, readers: u64) -> Lev {
         Lev {
             capabilities: Some(CAP_READ_RECEIPTS | CAP_GROUPS),
@@ -2532,18 +2709,38 @@ mod tests {
                 read,
                 members: 3,
                 readers,
+                on_device: None,
+                rungs: Vec::new(),
             }),
             ..Lev::default()
         }
     }
 
-    /// 1307 pass four, the reviewer's two ticks: the group's proof of our
-    /// line is one tick (the group has it), the home's status with every
-    /// copy proven two, and with every member that sends receipts read
-    /// the read mark; the detail view says "read by N of M" of those
-    /// members alone. Controls: a status with one copy unproven moves
-    /// nothing, the same status from an address that is no group moves
-    /// nothing, and a late group proof does not take the two ticks back.
+    /// A status since 1466: `on_device` copies on a device.
+    fn status_on(
+        original: [u8; 32],
+        delivered: u64,
+        read: u64,
+        readers: u64,
+        on_device: u64,
+    ) -> Lev {
+        let mut lev = status(original, delivered, read, readers);
+        if let Some(status) = lev.status.as_mut() {
+            status.on_device = Some(on_device);
+        }
+        lev
+    }
+
+    /// 1307 pass four, the reviewer's ticks, and 1466's truth: the group's
+    /// proof of our line is one tick (the group has it), the home's status
+    /// with every copy proven is one tick, arrived (a member's mailbox
+    /// proves with the member's identity), every copy on a device is two,
+    /// and with every member that sends receipts read the read mark; the
+    /// detail view says "read by N of M" of those members alone. Controls:
+    /// a status with one copy unproven moves nothing, the same status from
+    /// an address that is no group moves nothing, a home before 1466 (no
+    /// device count) never gives two, two of three on a device stay at one,
+    /// and a late group proof takes nothing back.
     #[test]
     fn our_line_has_one_tick_from_the_group_and_two_from_its_status() {
         const OURS: [u8; 32] = [0x44; 32];
@@ -2606,6 +2803,26 @@ mod tests {
         );
 
         arrive(&mut model, GROUP, 12, "", status(OURS, 3, 1, 2));
+        assert_eq!(
+            ours(&model),
+            Some(DeliveryState::Arrived),
+            "every copy proven is one tick, arrived"
+        );
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::State {
+                message_id: OURS,
+                state: leviculum_lxmf::router::MessageState::Delivered,
+            }),
+        );
+        assert_eq!(ours(&model), Some(DeliveryState::Arrived), "a late proof");
+        arrive(&mut model, GROUP, 14, "", status_on(OURS, 3, 1, 2, 2));
+        assert_eq!(
+            ours(&model),
+            Some(DeliveryState::Arrived),
+            "two of three devices"
+        );
+        arrive(&mut model, GROUP, 15, "", status_on(OURS, 3, 1, 2, 3));
         assert_eq!(ours(&model), Some(DeliveryState::Delivered), "two ticks");
         update(
             &mut model,
@@ -2615,6 +2832,8 @@ mod tests {
             }),
         );
         assert_eq!(ours(&model), Some(DeliveryState::Delivered), "kept");
+        arrive(&mut model, GROUP, 16, "", status(OURS, 3, 1, 2));
+        assert_eq!(ours(&model), Some(DeliveryState::Delivered), "never down");
         let key = model.conversations[c]
             .messages
             .iter()
@@ -2688,20 +2907,86 @@ mod tests {
         );
     }
 
+    /// 1466: a group line kept at two ticks from a status that counted
+    /// proofs loads at one; one whose kept status said every copy is on a
+    /// device keeps two. Controls: a line with no status (a direct
+    /// message's), an incoming one, and one at read keep what they had.
+    #[test]
+    fn a_group_line_kept_from_before_1466_is_one_tick_unless_every_device_said_it() {
+        use crate::ui::{LedgerEntry, Signature};
+        let message = |outbound: bool, delivery: DeliveryState, lines: &[&str]| Message {
+            outbound,
+            size: 2,
+            body: "hi".into(),
+            id: Some([1; 32]),
+            delivery: Some(delivery),
+            signature: Signature::Verified,
+            leg: None,
+            unproven: false,
+            at: None,
+            ledger: lines
+                .iter()
+                .map(|line| LedgerEntry::new(None, line))
+                .collect(),
+            last_leg: None,
+            activity: 1,
+            fields: Vec::new(),
+        };
+        let after = |mut m: Message| {
+            before_1466(&mut m);
+            m.delivery
+        };
+        let two = DeliveryState::Delivered;
+        let proofs = "group-status 3 3 0 2";
+        let old = "the group: delivered to 3 of 3, read by 0 of 2";
+        for lines in [&[proofs][..], &[old], &["group-status 3 3 0 2 2"]] {
+            assert_eq!(
+                after(message(true, two, lines)),
+                Some(DeliveryState::Arrived),
+                "{lines:?}"
+            );
+        }
+        assert_eq!(
+            after(message(true, two, &[proofs, "group-status 3 3 0 2 3"])),
+            Some(two)
+        );
+        assert_eq!(after(message(true, two, &["queued"])), Some(two));
+        assert_eq!(after(message(false, two, &[proofs])), Some(two));
+        let read = DeliveryState::Read { at: 5 };
+        assert_eq!(after(message(true, read, &[proofs])), Some(read));
+    }
+
     /// 1381: a status's ledger line is data, said in the reader's
     /// language; the English sentence a store kept before is said so too.
     /// Controls: a line that only starts like one, and any other line,
     /// stay as written.
     #[test]
     fn a_status_ledger_line_is_said_in_the_readers_language() {
-        let line = status_line(&GroupStatus {
+        let status = GroupStatus {
             original: [0; 32],
             delivered: 2,
             members: 3,
             read: 1,
             readers: 2,
-        });
+            on_device: None,
+            rungs: Vec::new(),
+        };
+        let line = status_line(&status);
         assert_eq!(line, "group-status 2 3 1 2");
+        // 1466: the copies on a device follow the four.
+        let devices = status_line(&GroupStatus {
+            on_device: Some(1),
+            ..status
+        });
+        assert_eq!(devices, "group-status 2 3 1 2 1");
+        assert_eq!(
+            ledger_line(&devices, Lang::En),
+            "Group: arrived at 2 of 3, on the devices of 1, read by 1 of 2"
+        );
+        assert_eq!(
+            ledger_line(&devices, Lang::De),
+            "Gruppe: bei 2 von 3 angekommen, auf den Geräten von 1, von 1 von 2 gelesen"
+        );
         assert_eq!(
             ledger_line(&line, Lang::En),
             "Group: delivered to 2 of 3, read by 1 of 2"
@@ -2894,6 +3179,109 @@ mod tests {
             .map(|b| b.body)
             .collect();
         assert_eq!(bodies, ["Anna: Brot\nBob: Danke"]);
+    }
+
+    /// 1388: the bubble takes the writer from `0x02` and strips exactly
+    /// the name the membership gives them, so a name with a colon and a
+    /// line that starts with one stay whole; a photo without words, whose
+    /// copy says "Photo from a:b", is the photo alone under its writer.
+    /// Controls: a writer the membership does not name falls back to the
+    /// split at the first colon, and a stock reader (no `0x02`) keeps the
+    /// text as it came.
+    #[test]
+    fn a_copy_loses_exactly_its_writers_name_and_a_photo_its_sentence() {
+        const CAROL: [u8; 16] = [0x05; 16];
+        let mut model = in_familie(false);
+        arrive(
+            &mut model,
+            GROUP,
+            3,
+            "",
+            members(
+                2,
+                &[
+                    (LEW, "Lew", 2 | 4),
+                    (ME, "Me", 4),
+                    (ANNA, "a:b", 4),
+                    (BOB, "Bob", 4),
+                ],
+            ),
+        );
+        arrive(&mut model, GROUP, 20, "a:b: hello", copy_at(ANNA, 10));
+        arrive(&mut model, GROUP, 21, "Bob: : smile", copy_at(BOB, 11));
+        let photo = crate::ui::photos::photo_fields("webp", vec![1, 2, 3]);
+        let mut fields = lev_fields(copy_at(ANNA, 12));
+        fields.extend(photo.iter().cloned());
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
+                message_id: [22; 32],
+                source: GROUP,
+                title: Vec::new(),
+                body: b"Photo from a:b".to_vec(),
+                fields,
+                verified: true,
+            }),
+        );
+        // A writer the membership does not name: the split.
+        arrive(
+            &mut model,
+            GROUP,
+            23,
+            "Carol: hi: there",
+            copy_at(CAROL, 13),
+        );
+        let c = group_chat(&model);
+        let drawn: Vec<(String, String, bool)> = super::super::chat::bubbles(&model, c)
+            .into_iter()
+            .filter(|b| !b.note && !b.ours)
+            .map(|b| {
+                (
+                    b.writer.map(|w| w.1).unwrap_or_default(),
+                    b.body,
+                    b.photo.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                ("a:b", "hello", false),
+                ("Bob", ": smile", false),
+                ("a:b", "", true),
+                ("Carol", "hi: there", false),
+            ]
+            .map(|(w, b, p)| (w.to_string(), b.to_string(), p))
+        );
+
+        // The terminal names the writer over the photo as every copy does
+        // there, `"a:b:"`, and never says the sentence.
+        let rows: Vec<String> = super::super::view(&model)
+            .messages
+            .iter()
+            .map(|row| row.cells.iter().map(|c| c.ch).collect::<String>())
+            .collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.trim_start().starts_with("a:b:") && !row.contains("hello")),
+            "{rows:#?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("Photo from")),
+            "{rows:#?}"
+        );
+
+        // Control: a stock reader's copy has no 0x02, its text stays.
+        let mut stock = in_familie(false);
+        arrive(&mut stock, GROUP, 20, "Photo from a:b", Lev::default());
+        let c = group_chat(&stock);
+        let bodies: Vec<String> = super::super::chat::bubbles(&stock, c)
+            .into_iter()
+            .filter(|b| !b.note)
+            .map(|b| b.body)
+            .collect();
+        assert_eq!(bodies, ["Photo from a:b"]);
     }
 
     fn ended(epoch: u64, list: &[([u8; 16], &str, u64)]) -> Lev {

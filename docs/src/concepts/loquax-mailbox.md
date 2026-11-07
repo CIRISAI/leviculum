@@ -20,9 +20,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1570`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1576`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1286-1297`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1292-1303`).
 
 ### When to sync
 
@@ -171,7 +171,7 @@ TRUSTED** (its `NomadNetworkApp.py`, lines 607-631). columba auto-selects
 the fewest-hops node, full stop. The library's own auto-selection ranks by
 route, hops, peering cost and stamp cost
 (`select_outbound_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1319-1568`) with no trust
+`leviculum-lxmf/src/router/propagation_runtime.rs:1325-1574`) with no trust
 input at all, because it has no notion of trust.
 
 Your propagation node sees the *envelope* of every message sent to you: who sent it
@@ -289,7 +289,7 @@ default for a user who runs two clients on the same identity, because the
 first one to sync takes the mail. This must be a visible setting with the
 consequence spelled out, not a config-file default nobody reads. Loquax
 does not expose it yet: it enables the client with
-`PropagationClientConfig::default()` (`loquax/src/engine.rs:1780`).
+`PropagationClientConfig::default()` (`loquax/src/engine.rs:1807`).
 
 Set to `true`, our client keeps every message on the node. That is a
 deviation from the reference client, whose flag only keeps messages it
@@ -300,7 +300,7 @@ acknowledges every download unconditionally (`LXMRouter.py:1623-1638`,
 acknowledgement (`LXMRouter.py:1508-1519`). So with the reference client
 the flag does not keep a fresh download on the node, and a second client
 would never see it. Ours withholds the acknowledgement as well
-(`leviculum-lxmf/src/router/propagation_runtime.rs:702`). Wire-neutral:
+(`leviculum-lxmf/src/router/propagation_runtime.rs:708`). Wire-neutral:
 the node holds an unacknowledged message until expiry, exactly as for a
 client that drops before acknowledging. The same client does not fetch it
 again, since the message is in its router's store and the next list's
@@ -315,9 +315,9 @@ list until older ones expire.
 - The sync schedule (there is none in the library).
 - Persistence of known propagation nodes and of the selection, since
   neither is in the router snapshot (`snapshot`,
-  `leviculum-lxmf/src/router.rs:2323-2340`); replay via
+  `leviculum-lxmf/src/router.rs:2333-2350`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1522`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1528`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.
@@ -357,7 +357,7 @@ Two further facts a UI must not paper over. `Message::verification` can be
 `Unverified` when the source identity has never been announced to us
 (`leviculum-lxmf/src/message.rs:232-234`), and such messages **are
 delivered to the application anyway**
-(`leviculum-lxmf/src/router.rs:1682-1685`). And the router discards the
+(`leviculum-lxmf/src/router.rs:1692-1695`). And the router discards the
 display name from announces entirely, so **the client must maintain its own
 hash-to-name map** from raw `NodeEvent::AnnounceReceived`.
 

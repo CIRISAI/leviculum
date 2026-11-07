@@ -1,46 +1,23 @@
-//! The keyboard controller's answer to a [`Scan`] (slice four, 1361): what
-//! the board reads over I2C, logged raw, and the table that turns it into
-//! the matrix the driver ([`crate::keyboard`]) debounces.
+//! The keyboard controller's answer (slice four, 1361; measured in 1427):
+//! what the board reads over I2C, logged raw, and what one answer says.
 //!
-//! The controller's register map is unread (`thinknode-m9.md`, "Keyboard"
-//! and "Open"): all that is measured is that it ACKs at 0x6D on our V1.1
-//! unit and that the community port reads register 0x01 on a key press.
-//! So nothing here claims to know the answer's shape. The firmware reads
-//! [`Protocol::len`] bytes after writing [`Protocol::register`], prints
-//! every answer as a `KBRAW <ms> <hex>` line before it decodes anything,
-//! and decodes it by a table, [`Decode`]. Until the reviewer has read a
-//! capture with each key pressed once, the board runs [`PROVISIONAL`]: the
-//! answer taken as the matrix's bitmap, bit for bit. A capture replays on
-//! the host through [`parse_raw`] and any other table, so the right table
-//! is found without a flash per guess.
+//! The firmware writes [`Protocol::register`], reads [`Protocol::len`]
+//! bytes, and prints every answer as a `KBRAW <ms> <hex>` line before it
+//! reads anything into it, so a capture replays on the host through
+//! [`parse_raw`]. The capture of 2026-11-04 (`thinknode-m9.md`, "The
+//! keyboard controller, measured"; `tests/keyboard/capture-20261104.txt`)
+//! read the protocol: an idle answer is all zeros, a press is one answer
+//! with one key code in every byte ([`Protocol::read`]), and the code is
+//! the driver's ([`crate::keyboard::Key::of`]).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use crate::keyboard::{Cap, Layout, Scan, COLUMNS, POSITIONS, ROWS};
-use crate::keys::M9Key;
-
 /// The longest answer the firmware reads in one poll.
 pub const MAX_ANSWER: usize = 16;
 
-/// A table entry for an answer bit or code that is no key.
-pub const NO_KEY: u8 = 0xFF;
-
-/// How the answer becomes a scan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Decode {
-    /// The answer is a bitmap of keys down: bit `b` of byte `k` is answer
-    /// bit `8 * k + b`, and the table names the matrix position of each
-    /// answer bit, or [`NO_KEY`].
-    Bitmap(&'static [u8]),
-    /// Each answer byte is the code of one key down, `0` for none, and the
-    /// table maps a code to its matrix position.
-    Codes(&'static [(u8, u8)]),
-}
-
-/// What the firmware asks the controller each poll, and how it reads the
-/// answer.
+/// What the firmware asks the controller each poll.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Protocol {
     /// The controller's address: 0x6D on V1.1, 0x6C on V1.0.
@@ -49,61 +26,43 @@ pub struct Protocol {
     pub register: Option<u8>,
     /// How many bytes it reads, at most [`MAX_ANSWER`].
     pub len: usize,
-    pub decode: Decode,
 }
 
-/// Answer bit `i` is matrix position `i`, past the matrix none.
-pub const IDENTITY: [u8; 8 * MAX_ANSWER] = identity();
-
-const fn identity() -> [u8; 8 * MAX_ANSWER] {
-    let mut table = [NO_KEY; 8 * MAX_ANSWER];
-    let mut i = 0;
-    while i < POSITIONS {
-        table[i] = i as u8;
-        i += 1;
-    }
-    table
-}
-
-/// What the board runs until a capture reads the controller: register 0x01,
-/// the one the community port reads, eight bytes, taken as the matrix bit
-/// for bit. Unproven; the `KBRAW` lines are what proves or replaces it.
-pub const PROVISIONAL: Protocol = Protocol {
+/// The protocol the capture was taken with and read: register 0x01 of
+/// 0x6D, eight bytes. Every byte of an answer carried the same code, so
+/// one byte would do; whether a shorter read or register 0x00 or 0x02
+/// answers the same is a bench question, and until it is asked the board
+/// keeps the read the capture proved, and [`Protocol::read`] holds the
+/// eight bytes to agreeing.
+pub const MEASURED: Protocol = Protocol {
     address: 0x6D,
     register: Some(0x01),
     len: 8,
-    decode: Decode::Bitmap(&IDENTITY),
 };
 
+/// What one answer says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Read {
+    /// All zeros: no key since the last read.
+    Idle,
+    /// One press: the key code every byte carried.
+    Code(u8),
+    /// The bytes disagree, which the capture never saw: no key is taken
+    /// from it, the firmware says so, and the `KBRAW` line keeps it.
+    Mixed,
+}
+
 impl Protocol {
-    /// The scan `answer` reads as.
-    pub fn scan(&self, answer: &[u8]) -> Scan {
-        let mut down: Vec<(usize, usize)> = Vec::new();
-        let mut mark = |position: u8| {
-            let position = usize::from(position);
-            if position < POSITIONS {
-                down.push((position / COLUMNS, position % COLUMNS));
-            }
-        };
-        match self.decode {
-            Decode::Bitmap(table) => {
-                for (k, byte) in answer.iter().enumerate() {
-                    for b in 0..8 {
-                        if byte & (1 << b) != 0 {
-                            mark(table.get(8 * k + b).copied().unwrap_or(NO_KEY));
-                        }
-                    }
-                }
-            }
-            Decode::Codes(table) => {
-                for code in answer.iter().filter(|c| **c != 0) {
-                    if let Some((_, position)) = table.iter().find(|(c, _)| c == code) {
-                        mark(*position);
-                    }
-                }
-            }
+    /// What `answer` says: idle, one code, or bytes that disagree.
+    pub fn read(&self, answer: &[u8]) -> Read {
+        match answer.split_first() {
+            None | Some((0, [])) => Read::Idle,
+            Some((code, rest)) if rest.iter().all(|b| b == code) => match code {
+                0 => Read::Idle,
+                code => Read::Code(*code),
+            },
+            Some(_) => Read::Mixed,
         }
-        Scan::of(&down)
     }
 }
 
@@ -118,15 +77,6 @@ pub fn raw_line(ms: u32, answer: &[u8]) -> String {
     let mut out = String::with_capacity(8 + 11 + 2 * answer.len());
     let _ = write!(out, "KBRAW {ms} ");
     hex(&mut out, answer);
-    out
-}
-
-/// The recording line of slice three: `KB <ms> <14 hex>`, the scan the
-/// table made of the answer ([`crate::keyboard::parse_recording`] reads it).
-pub fn scan_line(ms: u32, scan: Scan) -> String {
-    let mut out = String::with_capacity(32);
-    let _ = write!(out, "KB {ms} ");
-    hex(&mut out, &scan.frame());
     out
 }
 
@@ -151,87 +101,98 @@ pub fn parse_raw(text: &str) -> impl Iterator<Item = Result<(u32, Vec<u8>), usiz
     })
 }
 
-/// The layout the board types with until its own is read: the test layout
-/// of slice three (`keyboard.rs`), not the board's. q to p on row 0, a to l
-/// and Backspace on row 1, Shift, z to m, Sym on row 2, the arrows, Enter,
-/// Back and the space on row 3.
-pub fn provisional_layout() -> Layout {
-    let mut cells = [[Cap::None; COLUMNS]; ROWS];
-    for (column, (plain, sym)) in "qwertyuiop".chars().zip("1234567890".chars()).enumerate() {
-        cells[0][column] = Cap::letter(plain, sym);
-    }
-    for (column, (plain, sym)) in "asdfghjkl".chars().zip("@#&*-+=()".chars()).enumerate() {
-        cells[1][column] = Cap::letter(plain, sym);
-    }
-    cells[1][9] = Cap::Key(M9Key::Backspace);
-    cells[2][0] = Cap::Shift;
-    for (column, (plain, sym)) in "zxcvbnm".chars().zip("!?,.;:'".chars()).enumerate() {
-        cells[2][column + 1] = Cap::letter(plain, sym);
-    }
-    cells[2][9] = Cap::Sym;
-    let keys = [M9Key::Up, M9Key::Down, M9Key::Left, M9Key::Right];
-    for (column, key) in keys.into_iter().enumerate() {
-        cells[3][column] = Cap::Key(key);
-    }
-    cells[3][4] = Cap::Key(M9Key::Enter);
-    cells[3][5] = Cap::Key(M9Key::Back);
-    cells[3][6] = Cap::Char {
-        plain: ' ',
-        shifted: ' ',
-        sym: ' ',
-    };
-    Layout(cells)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keyboard::parse_recording;
+    use crate::keyboard::Key;
 
+    const CAPTURE: &str = include_str!("../tests/keyboard/capture-20261104.txt");
+    const DISTINCT: &str = include_str!("../tests/keyboard/distinct-20261104.txt");
+
+    /// The key names of `capture`'s answers, in order, idle reads skipped.
+    fn names(capture: &str) -> Vec<String> {
+        parse_raw(capture)
+            .map(|answer| answer.expect("every captured line reads"))
+            .filter_map(|(_, bytes)| match MEASURED.read(&bytes) {
+                Read::Idle => None,
+                Read::Code(code) => Some(Key::of(code).expect("a non-zero code").name()),
+                Read::Mixed => panic!("the capture has no mixed answer"),
+            })
+            .collect()
+    }
+
+    /// The first 60 presses of the bench capture, through the measured
+    /// protocol and the driver, name the keys Lew pressed: the top letter
+    /// row, the home row backwards, the bottom row, then the keys that
+    /// are no character, by the roles the walk of 2026-11-06 measured
+    /// (1459, [`crate::keyboard::SPECIALS`]); `0x90` is no key it pressed.
     #[test]
-    fn the_provisional_table_reads_the_answer_as_the_matrix() {
-        let answer = [0x00, 0x80, 0, 0, 0, 0, 0x04, 0xff];
-        let scan = PROVISIONAL.scan(&answer);
-        // Bit 15 is (1, 5); bit 50 is past the matrix, as is byte 7.
-        assert_eq!(scan, Scan::of(&[(1, 5)]));
-        assert_eq!(scan_line(190, scan), "KB 190 00800000000000");
+    fn the_bench_capture_replays_to_its_key_names() {
+        let names = names(CAPTURE);
+        let want = "q w e new_message r t y ring_right u enter i o p pin \
+                    i u y t g f d s z x c v b n m m j h g t \
+                    chats new_message home \
+                    back back back back \
+                    ring_down ring_down ring_right ring_left ring_up \
+                    back map pin back e d \
+                    new_message home new_message space special_0x90 \
+                    new_message back back";
+        assert_eq!(names.join(" "), want);
+        assert_eq!(names.len(), 60);
+    }
+
+    /// Every distinct answer of the capture is one code in all eight
+    /// bytes, and the "state byte" the matrix decoder's `KB` line showed
+    /// last was no state: it is that code's two low bits, the two matrix
+    /// positions (48, 49) the bitmap table read from byte 6.
+    #[test]
+    fn every_captured_answer_is_one_code_and_the_kb_state_byte_was_its_low_bits() {
+        let mut seen = 0;
+        for line in DISTINCT.lines().filter(|l| !l.starts_with('#')) {
+            let mut words = line.split_whitespace();
+            let (Some(raw), Some(_count), Some(kb)) = (words.next(), words.next(), words.next())
+            else {
+                panic!("a distinct line has three words: {line}");
+            };
+            let bytes: Vec<u8> = (0..raw.len() / 2)
+                .map(|i| u8::from_str_radix(&raw[2 * i..2 * i + 2], 16).expect("hex"))
+                .collect();
+            let Read::Code(code) = MEASURED.read(&bytes) else {
+                panic!("{raw} is one code");
+            };
+            let last = u8::from_str_radix(&kb[12..14], 16).expect("hex");
+            assert_eq!(last, code & 0x03, "{raw} -> {kb}");
+            seen += 1;
+        }
+        assert_eq!(seen, 42, "the capture's 42 distinct codes");
     }
 
     #[test]
-    fn a_code_table_maps_each_code_to_its_position() {
-        const CODES: [(u8, u8); 2] = [(0x21, 7), (0x48, 49)];
-        let protocol = Protocol {
-            decode: Decode::Codes(&CODES),
-            len: 3,
-            ..PROVISIONAL
-        };
-        assert_eq!(
-            protocol.scan(&[0x48, 0x21, 0x00]),
-            Scan::of(&[(0, 7), (4, 9)])
-        );
-        assert_eq!(
-            protocol.scan(&[0x99, 0, 0]),
-            Scan::NONE,
-            "an unknown code is no key"
-        );
+    fn an_answer_reads_idle_one_code_or_mixed() {
+        assert_eq!(MEASURED.read(&[0; 8]), Read::Idle);
+        assert_eq!(MEASURED.read(&[]), Read::Idle);
+        assert_eq!(MEASURED.read(&[0x6b; 8]), Read::Code(0x6b));
+        assert_eq!(MEASURED.read(&[0x6b]), Read::Code(0x6b));
+        // The positive control: one byte unlike the others is no key.
+        let mut answer = [0x6b; 8];
+        answer[7] = 0x6c;
+        assert_eq!(MEASURED.read(&answer), Read::Mixed);
+        answer = [0; 8];
+        answer[3] = 0x20;
+        assert_eq!(MEASURED.read(&answer), Read::Mixed);
     }
 
     #[test]
-    fn a_capture_replays_through_another_table() {
+    fn a_capture_line_that_does_not_read_is_named_by_number() {
         let capture = "[FW_BUILD] git_sha=x t=1\r\n\
                        KBRAW 10 0000000000000000\r\n\
-                       KB 10 00000000000000\r\n\
-                       KBRAW 20 0080000000000000\r\n\
+                       KEY 20 code=0x6b name=k\r\n\
+                       KBRAW 20 6b6b6b6b6b6b6b6b\r\n\
                        KBRAW 30 zz\r\n";
         let answers: Vec<_> = parse_raw(capture).collect();
         assert_eq!(answers.len(), 3);
         assert_eq!(answers[2], Err(5));
-        let (ms, bytes) = answers[1].clone().expect("the second answer reads");
-        assert_eq!((ms, PROVISIONAL.scan(&bytes)), (20, Scan::of(&[(1, 5)])));
-        // And the scan line the board prints reads as slice three's format.
-        let line = scan_line(ms, PROVISIONAL.scan(&bytes));
-        let read: Vec<_> = parse_recording(&line).collect();
-        assert_eq!(read, [Ok((20, Scan::of(&[(1, 5)])))]);
+        assert_eq!(answers[1], Ok((20, alloc::vec![0x6b; 8])));
     }
 
     #[test]

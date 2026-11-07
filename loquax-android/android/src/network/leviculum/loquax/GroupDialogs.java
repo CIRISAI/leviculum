@@ -29,10 +29,67 @@ final class GroupDialogs {
         }
     }
 
+    /**
+     * One verb of {@link Core#group} on the engine's thread (1446); its
+     * refusal said, then `after` on the UI thread, which reads the sheet
+     * the verb left.
+     */
+    private static void verb(final Activity screen, final String verb, final String group,
+            final String member, final String name, final boolean sure, final Runnable after) {
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.group(verb, group, member, name, sure);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                say(screen, error);
+                if (after != null) {
+                    after.run();
+                }
+            }
+        });
+    }
+
+    /** {@link #verb} for `group`, with no member, name or confirmation. */
+    private static void verb(Activity screen, String verb, String group, Runnable after) {
+        verb(screen, verb, group, "", "", false, after);
+    }
+
+    /**
+     * The group screen as the library has it now, asked on the engine's
+     * thread (1464), to `then` on the UI thread while `screen` lives.
+     */
+    private static void shown(final Activity screen, final Engine.Got<Map<String, Object>> then) {
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.groupScreen();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                if (!screen.isDestroyed()) {
+                    then.got(shown);
+                }
+            }
+        });
+    }
+
+    /** The open sheet closes. */
+    private static void close(Activity screen) {
+        verb(screen, "close", "", null);
+    }
+
     /** "New group": the picker, then {@link #name}. */
     static void newGroup(final Activity screen) {
-        say(screen, Core.group("new", "", "", "", false));
-        picker(screen, false);
+        verb(screen, "new", "", new Runnable() {
+            @Override
+            public void run() {
+                picker(screen, false);
+            }
+        });
     }
 
     /**
@@ -40,13 +97,27 @@ final class GroupDialogs {
      * "Add" and asks the home; the answer closes it.
      */
     static void addMembers(final Activity screen, final String group) {
-        say(screen, Core.group("add", group, "", "", false));
-        picker(screen, true);
+        verb(screen, "add", group, new Runnable() {
+            @Override
+            public void run() {
+                picker(screen, true);
+            }
+        });
     }
 
     /** The friends to tick, then Next (a new group's name step) or Add. */
     private static void picker(final Activity screen, final boolean adding) {
-        final Map<String, Object> shown = Core.groupScreen();
+        shown(screen, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                picker(screen, adding, shown);
+            }
+        });
+    }
+
+    /** {@link #picker} as the library `shown` it. */
+    private static void picker(final Activity screen, final boolean adding,
+            final Map<String, Object> shown) {
         final List<Map<String, Object>> rows = Core.list(shown, "rows");
         String[] names = new String[rows.size()];
         boolean[] picked = new boolean[rows.size()];
@@ -59,29 +130,38 @@ final class GroupDialogs {
                 .setMultiChoiceItems(names, picked, new DialogInterface.OnMultiChoiceClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which, boolean on) {
-                        say(screen, Core.group("pick", Core.str(rows.get(which), "peer"), "", "", false));
+                        verb(screen, "pick", Core.str(rows.get(which), "peer"), null);
                     }
                 })
                 .setPositiveButton(Core.str(shown, "go"), new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        say(screen, Core.group("next", "", "", "", false));
-                        if (adding) {
-                            // The home is asked; its answer closes the
-                            // picker and opens the member sheet.
-                            return;
-                        }
-                        if ("name".equals(Core.str(Core.groupScreen(), "step"))) {
-                            name(screen);
-                        } else {
-                            Core.group("close", "", "", "", false);
-                        }
+                        verb(screen, "next", "", new Runnable() {
+                            @Override
+                            public void run() {
+                                if (adding) {
+                                    // The home is asked; its answer closes the
+                                    // picker and opens the member sheet.
+                                    return;
+                                }
+                                shown(screen, new Engine.Got<Map<String, Object>>() {
+                                    @Override
+                                    public void got(Map<String, Object> now) {
+                                        if ("name".equals(Core.str(now, "step"))) {
+                                            name(screen, now);
+                                        } else {
+                                            close(screen);
+                                        }
+                                    }
+                                });
+                            }
+                        });
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        Core.group("close", "", "", "", false);
+                        close(screen);
                     }
                 })
                 .show();
@@ -89,7 +169,16 @@ final class GroupDialogs {
 
     /** The name step: the field, the trust sentence, Create. */
     private static void name(final Activity screen) {
-        Map<String, Object> shown = Core.groupScreen();
+        shown(screen, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                name(screen, shown);
+            }
+        });
+    }
+
+    /** {@link #name} as the library `shown` it. */
+    private static void name(final Activity screen, Map<String, Object> shown) {
         final EditText field = new EditText(screen);
         field.setHint(Core.str(shown, "hint"));
         // The draft's name: empty for a new group, the old one when it
@@ -103,17 +192,21 @@ final class GroupDialogs {
                 .setPositiveButton(Core.str(shown, "go"), new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        say(screen, Core.group("name", "", "", field.getText().toString(), false));
-                        say(screen, Core.group("create", "", "", "", false));
+                        verb(screen, "name", "", "", field.getText().toString(), false, null);
                         // The home answers; the list shows the group and
                         // the chat opens when it does.
-                        screen.finish();
+                        verb(screen, "create", "", new Runnable() {
+                            @Override
+                            public void run() {
+                                screen.finish();
+                            }
+                        });
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        Core.group("close", "", "", "", false);
+                        close(screen);
                     }
                 })
                 .show();
@@ -128,8 +221,7 @@ final class GroupDialogs {
                 .setPositiveButton(R.string.group_join, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        say(screen, Core.group("join", group, "", "", false));
-                        after.run();
+                        verb(screen, "join", group, after);
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, null)
@@ -138,8 +230,27 @@ final class GroupDialogs {
 
     /** The member sheet of `group`. */
     static void members(final Activity screen, final String group, final Runnable after) {
-        say(screen, Core.group("members", group, "", "", false));
-        final Map<String, Object> shown = Core.groupScreen();
+        verb(screen, "members", group, new Runnable() {
+            @Override
+            public void run() {
+                memberSheet(screen, group, after);
+            }
+        });
+    }
+
+    /** The member sheet the library opened for `group`. */
+    private static void memberSheet(final Activity screen, final String group, final Runnable after) {
+        shown(screen, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                memberSheet(screen, group, after, shown);
+            }
+        });
+    }
+
+    /** {@link #memberSheet} as the library `shown` it. */
+    private static void memberSheet(final Activity screen, final String group, final Runnable after,
+            Map<String, Object> shown) {
         final List<Map<String, Object>> rows = Core.list(shown, "rows");
         // The admin's "Delete group" (1307 pass four) is the list's last
         // line: the dialog's three buttons are taken by Cancel, Add and
@@ -161,24 +272,33 @@ final class GroupDialogs {
                     @Override
                     public void onClick(DialogInterface d, int which) {
                         if (which == rows.size()) {
-                            say(screen, Core.group("delete", group, "", "", false));
-                            ask(screen, "delete", group, "", after);
+                            verb(screen, "delete", group, new Runnable() {
+                                @Override
+                                public void run() {
+                                    ask(screen, "delete", group, "", after);
+                                }
+                            });
                             return;
                         }
                         Map<String, Object> row = rows.get(which);
                         if (Core.str(row, "remove").isEmpty()) {
-                            Core.group("close", "", "", "", false);
+                            close(screen);
                             return;
                         }
-                        String member = Core.str(row, "peer");
-                        say(screen, Core.group("remove", group, member, "", false));
-                        ask(screen, "remove", group, member, after);
+                        final String member = Core.str(row, "peer");
+                        verb(screen, "remove", group, member, "", false,
+                                new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        ask(screen, "remove", group, member, after);
+                                    }
+                                });
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        Core.group("close", "", "", "", false);
+                        close(screen);
                     }
                 });
         String add = Core.str(shown, "add");
@@ -198,8 +318,12 @@ final class GroupDialogs {
             dialog.setNeutralButton(again, new DialogInterface.OnClickListener() {
                 @Override
                 public void onClick(DialogInterface d, int which) {
-                    say(screen, Core.group("again", group, "", "", false));
-                    name(screen);
+                    verb(screen, "again", group, new Runnable() {
+                        @Override
+                        public void run() {
+                            name(screen);
+                        }
+                    });
                 }
             });
         }
@@ -208,8 +332,12 @@ final class GroupDialogs {
             dialog.setPositiveButton(leave, new DialogInterface.OnClickListener() {
                 @Override
                 public void onClick(DialogInterface d, int which) {
-                    say(screen, Core.group("leave", group, "", "", false));
-                    ask(screen, "leave", group, "", after);
+                    verb(screen, "leave", group, new Runnable() {
+                        @Override
+                        public void run() {
+                            ask(screen, "leave", group, "", after);
+                        }
+                    });
                 }
             });
         }
@@ -219,22 +347,31 @@ final class GroupDialogs {
     /** The sheet's question before a Leave or a Remove, in the library's words. */
     private static void ask(final Activity screen, final String verb, final String group,
             final String member, final Runnable after) {
-        Map<String, Object> shown = Core.groupScreen();
+        shown(screen, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                ask(screen, verb, group, member, after, shown);
+            }
+        });
+    }
+
+    /** {@link #ask} as the library `shown` it. */
+    private static void ask(final Activity screen, final String verb, final String group,
+            final String member, final Runnable after, Map<String, Object> shown) {
         new AlertDialog.Builder(screen)
                 .setMessage(Core.str(shown, "ask"))
                 .setPositiveButton(Core.str(shown, "yes"), new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        say(screen, Core.group(verb, group, member, "", true));
-                        Core.group("close", "", "", "", false);
-                        after.run();
+                        GroupDialogs.verb(screen, verb, group, member, "", true, null);
+                        GroupDialogs.verb(screen, "close", "", after);
                     }
                 })
                 .setNegativeButton(Core.str(shown, "no"), new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface d, int which) {
-                        Core.group("close", "", "", "", false);
-                        Core.group("close", "", "", "", false);
+                        close(screen);
+                        close(screen);
                     }
                 })
                 .show();

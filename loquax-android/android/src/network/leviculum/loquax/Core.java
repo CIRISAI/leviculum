@@ -73,6 +73,13 @@ final class Core {
         return strings(map.get(key));
     }
 
+    /** A map inside an answer, empty for none (1443: the profile's words). */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> sub(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        return value instanceof Map ? (Map<String, Object>) value : new java.util.HashMap<String, Object>();
+    }
+
     static boolean bool(Map<String, Object> map, String key) {
         return Boolean.TRUE.equals(map.get(key));
     }
@@ -103,6 +110,7 @@ final class Core {
 
     /** Start; code and server null on a later start. Blocks: not on the UI thread. */
     static Map<String, Object> start(String dir, String server, String code, String name) {
+        Engine.offMain("Native.start");
         Map<String, Object> request = map("dir", dir, "offset", (long) offset(), "lang", lang(),
                 "camera", camera);
         if (server != null) request.put("server", server);
@@ -153,47 +161,65 @@ final class Core {
 
     /** The address's backup line and its paper code, sealed with `passphrase`; `error` when not. */
     static Map<String, Object> backup(String passphrase) {
-        return answer(Native.query(MsgPack.pack(map("t", "backup", "passphrase", passphrase))));
+        return query(map("t", "backup", "passphrase", passphrase));
+    }
+
+    /**
+     * Whether `text` is a code and which kind, never asking the session
+     * (1464): `known` is empty. The UI thread may ask; {@link #lxma} adds
+     * the name the session knows for it.
+     */
+    static Map<String, Object> code(String text) {
+        return look(map("t", "code", "text", text, "lang", lang()));
     }
 
     /** This phone's address, its QR code, its name and whether the mailbox is here. */
     static Map<String, Object> me() {
-        return answer(Native.query(MsgPack.pack(map("t", "me"))));
+        return query(map("t", "me"));
     }
 
     /** The profile behind our avatar (1187): name, address, contact code and its QR, mailbox, advanced facts; `error` when not. */
     static Map<String, Object> profile() {
-        return answer(Native.query(MsgPack.pack(map("t", "profile"))));
+        return query(map("t", "profile"));
     }
 
     /** A fresh join code of the mailbox on this phone for another device (1264): `code`, `qr`, `qr_size`, `hours`; `error` when not. */
     static Map<String, Object> linkDevice() {
-        return answer(Native.query(MsgPack.pack(map("t", "linkdevice"))));
+        return query(map("t", "linkdevice"));
     }
 
     /** Whether a device came with the newest link code: `state` waiting, linked (with `name`), over or none. */
     static Map<String, Object> linked() {
-        return answer(Native.query(MsgPack.pack(map("t", "linked"))));
+        return query(map("t", "linked"));
     }
 
     /** A fresh code for the new phone (1281), as {@link #linkDevice}'s; `error` when not. */
     static Map<String, Object> movePhone() {
-        return answer(Native.query(MsgPack.pack(map("t", "movephone"))));
+        return query(map("t", "movephone"));
     }
 
     /** Where the newest move code stands: `state` waiting, moved (with `name`), over or none. */
     static Map<String, Object> moving() {
-        return answer(Native.query(MsgPack.pack(map("t", "moving"))));
+        return query(map("t", "moving"));
     }
 
     /** Whose contact code `text` is (`address`, `lxma`, `known`); `error` when it is none. */
     static Map<String, Object> lxma(String text) {
-        return answer(Native.query(MsgPack.pack(map("t", "lxma", "text", text, "lang", lang()))));
+        return query(map("t", "lxma", "text", text, "lang", lang()));
     }
 
     /** The contact of `lxma` under `name` (none when empty), its key to the mailbox, its chat open. */
     static String addContact(String lxma, String name) {
         return command(map("t", "addcontact", "lxma", lxma, "name", name));
+    }
+
+    /**
+     * The profile came to the front or left it (1443): a tap on the avatar is the core's
+     * `Intent::Profile` here as in the window and the terminal, and the profile's words are the
+     * core's scene. The error in words, or null.
+     */
+    static String profileShown(boolean open) {
+        return command(map("t", "profile", "open", open));
     }
 
     /** The name recipients see, for the mailbox on this phone. Blocks a moment: not on the UI thread. */
@@ -213,7 +239,7 @@ final class Core {
 
     /** "New group" or the open member sheet (1307), as the library words it. */
     static Map<String, Object> groupScreen() {
-        return answer(Native.query(MsgPack.pack(map("t", "group"))));
+        return query(map("t", "group"));
     }
 
     /**
@@ -233,7 +259,7 @@ final class Core {
 
     /** The Browse tab as the library words and lays it out (1337). */
     static Map<String, Object> browseScreen() {
-        return answer(Native.query(MsgPack.pack(map("t", "browse"))));
+        return query(map("t", "browse"));
     }
 
     /**
@@ -248,11 +274,35 @@ final class Core {
 
     /** The Rooms tab as the library words it (1384). */
     static Map<String, Object> roomsScreen() {
-        return answer(Native.query(MsgPack.pack(map("t", "rooms"))));
+        return query(map("t", "rooms"));
     }
 
-    /** One request; the error in words, or null. */
+    /**
+     * One question; its answer. Waits on the session's lock as a command
+     * does: never on the UI thread, where {@link Engine#offMain} guards it;
+     * screens go through {@link Engine#ask} (1464).
+     */
+    static Map<String, Object> query(Map<String, Object> request) {
+        Engine.offMain("Native.query " + request.get("t"));
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
+    /**
+     * One of the questions the library answers without waiting for the
+     * session's lock (1464): the two lists, from the scene its pump left.
+     * The UI thread may ask these.
+     */
+    static Map<String, Object> look(Map<String, Object> request) {
+        return answer(Native.query(MsgPack.pack(request)));
+    }
+
+    /**
+     * One request; the error in words, or null. Waits on the session's
+     * lock: never on the UI thread, where {@link Engine#offMain} guards it;
+     * screens go through {@link Engine#run} (1446).
+     */
     static String command(Map<String, Object> request) {
+        Engine.offMain("Native.command " + request.get("t"));
         Map<String, Object> done = answer(Native.command(MsgPack.pack(request)));
         return bool(done, "ok") ? null : str(done, "error");
     }
@@ -328,6 +378,7 @@ final class Core {
         for (int i = 0; i + 1 < reals.length; i += 2) {
             request.put((String) reals[i], ((Number) reals[i + 1]).doubleValue());
         }
+        // No session is asked (lib.rs, Query::Zoom): the UI thread's own.
         return answer(Native.query(MsgPack.pack(request)));
     }
 
@@ -375,18 +426,18 @@ final class Core {
 
     /** The running shares: Settings, Privacy and the share notification (1273). */
     static Map<String, Object> shares() {
-        return answer(Native.query(MsgPack.pack(map("t", "shares"))));
+        return query(map("t", "shares"));
     }
 
     /** `peer`'s compose bar alone: its buttons, its staged photo, its sheet (1270). */
     static Map<String, Object> bar(String peer) {
-        return answer(Native.query(MsgPack.pack(map("t", "bar", "peer", peer))));
+        return query(map("t", "bar", "peer", peer));
     }
 
     /** The staged photo's pixels in an `edge` box, or null. Not on the UI thread. */
     static Bitmap stagedBitmap(String peer, int edge) {
-        return pixels(answer(Native.query(MsgPack.pack(
-                map("t", "staged", "peer", peer, "edge", (long) edge)))), null);
+        return pixels(query(
+                map("t", "staged", "peer", peer, "edge", (long) edge)), null);
     }
 
     static Bitmap photoBitmap(String peer, long key, int edge) {
@@ -399,8 +450,8 @@ final class Core {
      * (1269, what the viewer zooms to).
      */
     static Bitmap photoBitmap(String peer, long key, int edge, int[] full) {
-        return pixels(answer(Native.query(MsgPack.pack(
-                map("t", "photo", "peer", peer, "key", key, "edge", (long) edge)))), full);
+        return pixels(query(
+                map("t", "photo", "peer", peer, "key", key, "edge", (long) edge)), full);
     }
 
     /** A PhotoPixels answer as a Bitmap, `full` as in photoBitmap; null for none. */
@@ -431,7 +482,7 @@ final class Core {
     static Map<String, Object> photoSize(String set) {
         Map<String, Object> request = map("t", "photosize");
         if (set != null) request.put("set", set);
-        return answer(Native.query(MsgPack.pack(request)));
+        return query(request);
     }
 
     /**
@@ -449,8 +500,8 @@ final class Core {
      * be. Not on the UI thread.
      */
     static Map<String, Object> saveFile(String peer, long key, int index) {
-        return answer(Native.query(MsgPack.pack(
-                map("t", "savefile", "peer", peer, "key", key, "index", (long) index))));
+        return query(
+                map("t", "savefile", "peer", peer, "key", key, "index", (long) index));
     }
 
     /**
@@ -476,7 +527,7 @@ final class Core {
      * does not play. Not on the UI thread.
      */
     static Map<String, Object> voicePcm(String peer, long key) {
-        return answer(Native.query(MsgPack.pack(map("t", "voice", "peer", peer, "key", key))));
+        return query(map("t", "voice", "peer", peer, "key", key));
     }
 
     /**
@@ -503,7 +554,7 @@ final class Core {
      * distances `cancel_dp` and `lock_dp`.
      */
     static Map<String, Object> recording(String peer) {
-        return answer(Native.query(MsgPack.pack(map("t", "recording", "peer", peer))));
+        return query(map("t", "recording", "peer", peer));
     }
 
     /** Delete the messages `keys`, asked already. */
@@ -521,8 +572,8 @@ final class Core {
      * `advanced`, the terminal's `v` lines; null with the error in `error[0]`.
      */
     static Map<String, Object> info(String peer, long key, String[] error) {
-        Map<String, Object> answer = answer(Native.query(MsgPack.pack(
-                map("t", "info", "peer", peer, "key", key))));
+        Map<String, Object> answer = query(
+                map("t", "info", "peer", peer, "key", key));
         if (!(answer.get("rows") instanceof List)) {
             error[0] = str(answer, "error");
             return null;
@@ -532,7 +583,7 @@ final class Core {
 
     /** The emoji used last, newest first; none without a session. */
     static List<String> recents() {
-        return strings(answer(Native.query(MsgPack.pack(map("t", "recents")))).get("emoji"));
+        return strings(query(map("t", "recents")).get("emoji"));
     }
 
     @SuppressWarnings("unchecked")
@@ -577,13 +628,13 @@ final class Core {
 
     /** Which of `candidates` (Book.candidates) `peer`'s announced name may be, best first. */
     static List<Map<String, Object>> suggest(String peer, List<Map<String, Object>> candidates) {
-        return list(answer(Native.query(MsgPack.pack(
-                map("t", "suggest", "peer", peer, "candidates", candidates)))), "suggestions");
+        return list(query(
+                map("t", "suggest", "peer", peer, "candidates", candidates)), "suggestions");
     }
 
     /** Every address linked to the contact `lookup`. */
     static List<Map<String, Object>> contact(String lookup) {
-        return list(answer(Native.query(MsgPack.pack(map("t", "contact", "lookup", lookup)))),
+        return list(query(map("t", "contact", "lookup", lookup)),
                 "addresses");
     }
 
@@ -592,8 +643,8 @@ final class Core {
      * newest first: key, at, lat_e6, lon_e6, place, accuracy, fix_at.
      */
     static List<Map<String, Object>> run(String peer, long key) {
-        return list(answer(Native.query(MsgPack.pack(
-                map("t", "run", "peer", peer, "key", key)))), "positions");
+        return list(query(
+                map("t", "run", "peer", peer, "key", key)), "positions");
     }
 
     /**
@@ -604,12 +655,12 @@ final class Core {
      * "error" key without a session.
      */
     static Map<String, Object> friends() {
-        return answer(Native.query(MsgPack.pack(map("t", "friends"))));
+        return query(map("t", "friends"));
     }
 
     /** The same, with distances from the phone's own fix (1201), degrees times a million. */
     static Map<String, Object> friends(long latE6, long lonE6) {
-        return answer(Native.query(MsgPack.pack(map("t", "friends", "lat_e6", latE6, "lon_e6", lonE6))));
+        return query(map("t", "friends", "lat_e6", latE6, "lon_e6", lonE6));
     }
 
     /**
@@ -618,7 +669,7 @@ final class Core {
      * "shared"; an "error" key without a session.
      */
     static Map<String, Object> shared() {
-        return answer(Native.query(MsgPack.pack(map("t", "shared"))));
+        return query(map("t", "shared"));
     }
 
     /**
@@ -632,7 +683,7 @@ final class Core {
         Map<String, Object> request = map("t", "mapregions");
         if (delete != null) request.put("delete", delete);
         if (autoload != null) request.put("set_autoload", autoload);
-        return answer(Native.query(MsgPack.pack(request)));
+        return query(request);
     }
 
     /**
@@ -646,7 +697,7 @@ final class Core {
 
     /** Every link: peer, lookup, contact_id, name. */
     static List<Map<String, Object>> links() {
-        return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");
+        return list(query(map("t", "links")), "links");
     }
 
     /** Pin `peer`'s conversation to the top, or loosen it (1146); every device of the home. */
@@ -684,17 +735,24 @@ final class Core {
 
     /** The contact screen of `peer`; an "error" key when there is none. */
     static Map<String, Object> detail(String peer) {
-        return answer(Native.query(MsgPack.pack(map("t", "detail", "peer", peer))));
+        return query(map("t", "detail", "peer", peer));
     }
 
-    /** The archived conversations; with `search` only those the library's search finds (1217). */
-    static Map<String, Object> archived(String search) {
-        return answer(Native.query(MsgPack.pack(search == null
-                ? map("t", "archived") : map("t", "archived", "search", search))));
+    /**
+     * The archived conversations, as the list shows them: never waits for
+     * the session's lock (1464, session.rs `Scene`), so the UI thread may ask.
+     */
+    static Map<String, Object> archived() {
+        return look(map("t", "archived"));
+    }
+
+    /** The archived conversations the library's search finds in `search` (1217). */
+    static Map<String, Object> findArchived(String search) {
+        return query(map("t", "archived", "search", search));
     }
 
     static Map<String, Object> blocked() {
-        return answer(Native.query(MsgPack.pack(map("t", "blocked"))));
+        return query(map("t", "blocked"));
     }
 
     static String pull() {
@@ -715,16 +773,24 @@ final class Core {
     }
 
     /**
-     * The conversation list; with `search` only the rows the library's
-     * search finds, every word in the name or the last line (1217).
+     * The conversation list: never waits for the session's lock (1464):
+     * the library answers from the scene its pump left while the pump
+     * holds the lock (session.rs `Scene`), so the UI thread may ask.
      */
-    static Map<String, Object> conversations(String search) {
-        return answer(Native.query(MsgPack.pack(search == null
-                ? map("t", "conversations") : map("t", "conversations", "search", search))));
+    static Map<String, Object> conversations() {
+        return look(map("t", "conversations"));
+    }
+
+    /**
+     * The rows of the list the library's search finds in `search`, every
+     * word in the name or the last line (1217). Waits on the lock.
+     */
+    static Map<String, Object> findConversations(String search) {
+        return query(map("t", "conversations", "search", search));
     }
 
     static Map<String, Object> messages(String peer) {
-        return answer(Native.query(MsgPack.pack(map("t", "messages", "peer", peer))));
+        return query(map("t", "messages", "peer", peer));
     }
 
     /**
@@ -753,7 +819,7 @@ final class Core {
     static Map<String, Object> mapTheme(String set) {
         Map<String, Object> request = map("t", "maptheme");
         if (set != null) request.put("set", set);
-        return answer(Native.query(MsgPack.pack(request)));
+        return query(request);
     }
 
     /**
@@ -764,7 +830,7 @@ final class Core {
     static Map<String, Object> mapFling(Boolean set) {
         Map<String, Object> request = map("t", "mapfling");
         if (set != null) request.put("set", set);
-        return answer(Native.query(MsgPack.pack(request)));
+        return query(request);
     }
 
     /**
@@ -774,7 +840,7 @@ final class Core {
     static Map<String, Object> receipts(Boolean set) {
         Map<String, Object> request = map("t", "receipts");
         if (set != null) request.put("set", set);
-        return answer(Native.query(MsgPack.pack(request)));
+        return query(request);
     }
 
     /** The next event, or null; blocks up to waitMs. */

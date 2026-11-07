@@ -199,6 +199,7 @@ fn the_group_screens_are_the_golden_scenes() {
         update(
             model,
             UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
                 message_id: [id; 32],
                 source: from,
                 title: Vec::new(),
@@ -382,4 +383,210 @@ fn the_browse_tab_is_the_golden_scene() {
         },
     );
     check("scene-browse-form.json", &model.scene(LayoutClass::Compact));
+}
+
+/// 1443: the profile as every target gets it, the phone's facade too:
+/// the reader of the ugly store with a contact code, a mailbox on a
+/// server reached over the relay and pulling, and two devices. The
+/// avatar of the list's bar raises the profile, and the profile's
+/// scene is the golden; its QR is the code's modules row by row.
+#[test]
+fn the_profile_is_the_golden_scene() {
+    use loquax::ui::intent::Intent;
+    use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
+    use loquax::ui::scene::NodeId;
+
+    let home = tempfile::tempdir().expect("home");
+    let mut model = ugly_model(home.path());
+    model.selected = NONE_OPEN;
+    let list = model.scene(LayoutClass::Compact);
+    assert!(list.profile.is_none(), "control: closed");
+    let open = list.action(NodeId::Me).expect("the avatar opens");
+    assert_eq!(open.intent, Intent::Profile);
+
+    let own = ugly_store::identity(OWN);
+    let code = loquax::lxma::encode(&own.public_key_bytes()).expect("a code");
+    let qr = loquax::home::qr::verbatim_modules(&code).expect("a QR");
+    model.own_code = Some(loquax::ui::OwnCode::of(code, Some(qr)));
+    update(
+        &mut model,
+        UiEvent::ProfileFacts(ProfileFacts {
+            name: "Mia Sander".to_string(),
+            mailbox: Mailbox::Away {
+                host: Some("leviculum.network".to_string()),
+                rung: Some(Rung::Relayed),
+                word: Some(loquax::home::board::Word::Fetched {
+                    taken: 3,
+                    of: Some(10),
+                }),
+            },
+            devices: vec![
+                Device {
+                    name: "Pixel 8".to_string(),
+                    this: true,
+                },
+                Device {
+                    name: "Laptop".to_string(),
+                    this: false,
+                },
+            ],
+        }),
+    );
+    update(&mut model, UiEvent::Profile { open: true });
+    let scene = model.scene(LayoutClass::Compact);
+    assert!(scene.profile.is_some());
+    check("scene-profile.json", &scene);
+    update(&mut model, UiEvent::Profile { open: false });
+    assert!(model.scene(LayoutClass::Compact).profile.is_none());
+}
+
+/// The ladder of `docs/src/concepts/loquax-read-receipts.md`, section 3,
+/// in one chat (1462): waiting, at the mailbox, arrived (the proof, one
+/// tick), on the device (the device's receipt `0x07`, two ticks), read and
+/// not sent, each a bubble of ours with its mark and its words. Every
+/// target draws what this scene says, so one golden pins the rule for all
+/// four.
+#[test]
+fn the_ladder_is_the_golden_scene() {
+    use leviculum_lxmf::lev::{Lev, PropagationReceipt, Receipt};
+    use leviculum_lxmf::router::MessageState;
+    use loquax::outbox::OutboxEvent;
+
+    let peer = ugly_store::peer(1);
+    let mut model = UiModel::<Line>::new(&[peer]);
+    update(&mut model, UiEvent::Clock(now()));
+    let event = |model: &mut UiModel<Line>, event: OutboxEvent| {
+        update(model, UiEvent::Engine(event));
+    };
+    let received = |model: &mut UiModel<Line>, n: u8, lev: Lev| {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
+                message_id: [0xe0 + n; 32],
+                source: peer,
+                title: Vec::new(),
+                body: Vec::new(),
+                fields: lev.fields().to_vec(),
+                verified: true,
+            }),
+        );
+    };
+    let rungs: [(&str, &[MessageState]); 6] = [
+        ("waiting", &[]),
+        ("at the mailbox", &[MessageState::AwaitingCollection]),
+        ("arrived, the proof", &[MessageState::Delivered]),
+        ("on the device", &[MessageState::Delivered]),
+        ("read", &[MessageState::Delivered]),
+        ("not sent", &[MessageState::Failed]),
+    ];
+    for (n, (body, states)) in rungs.iter().enumerate() {
+        let id = [0x10 + n as u8; 32];
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer,
+                body: body.to_string(),
+            },
+        );
+        event(&mut model, OutboxEvent::Queued { message_id: id });
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        for state in *states {
+            event(
+                &mut model,
+                OutboxEvent::State {
+                    message_id: id,
+                    state: *state,
+                },
+            );
+        }
+    }
+    let at = (now().unix_secs - 60) as u32;
+    received(
+        &mut model,
+        1,
+        Lev {
+            propagation_receipt: Some(PropagationReceipt {
+                received_at: at,
+                ids: vec![[0x13; 32], [0x14; 32]],
+            }),
+            ..Lev::default()
+        },
+    );
+    received(
+        &mut model,
+        2,
+        Lev::mark_with(Receipt {
+            read_at: at,
+            ids: vec![[0x14; 32]],
+        }),
+    );
+    model.selected = model
+        .conversations
+        .iter()
+        .position(|c| c.peer == peer)
+        .expect("the chat");
+    let scene = model.scene(LayoutClass::Compact);
+    let marks: Vec<String> = scene
+        .chat
+        .as_ref()
+        .expect("the chat")
+        .groups
+        .iter()
+        .flat_map(|g| &g.bubbles)
+        .filter_map(|b| b.mark.as_ref().map(|m| m.mark.word().to_string()))
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            "sending",
+            "mailbox",
+            "arrived",
+            "delivered",
+            "read",
+            "failed"
+        ]
+    );
+    check("scene-ladder.json", &scene);
+}
+
+mod group_ticks {
+    include!("support/group_ticks.rs");
+}
+
+/// 1466, the group's ticks tell the truth too: a group's chat with a line
+/// of ours every member's device has (two ticks, `delivered`, its words
+/// "On the devices") and one Ben's device has not said yet (one tick,
+/// `arrived`, "Arrived"). Every target draws what this scene says.
+#[test]
+fn a_groups_one_and_two_ticks_are_the_golden_scene() {
+    use loquax::ui::strings::{Lang, StrId, Text};
+
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    group_ticks::group_ticks(&mut model, now().unix_secs, now().offset_secs);
+    let scene = model.scene(LayoutClass::Compact);
+    let marks: Vec<(String, String)> = scene
+        .chat
+        .as_ref()
+        .expect("the chat")
+        .groups
+        .iter()
+        .flat_map(|g| &g.bubbles)
+        .filter_map(|b| {
+            b.mark
+                .as_ref()
+                .map(|m| (m.mark.word().to_string(), m.words.resolve(Lang::De)))
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("delivered".to_string(), "Auf den Geräten".to_string()),
+            ("arrived".to_string(), "Angekommen".to_string()),
+        ]
+    );
+    let words = Text::key(StrId::StateGroupDelivered);
+    assert_eq!(words.resolve(Lang::En), "On the devices");
+    check("scene-group-ticks.json", &scene);
 }

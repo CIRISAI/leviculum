@@ -1,5 +1,5 @@
-//! The scene as styled lines on the M9's cell grid: 53 x 24 cells of
-//! mousefood's 6 x 10 atlas on the 320 x 240 panel. The chats list here,
+//! The scene as styled lines on the M9's cell grid: 32 x 12 cells of the
+//! 10 x 20 atlas ([`crate::font`]) on the 320 x 240 panel. The chats list here,
 //! the open chat under its bar in [`crate::chat`].
 //!
 //! The scene is the one the phone and the window draw (`Scene`,
@@ -30,10 +30,16 @@ use loquax::ui::strings::{Lang, StrId, Text};
 use loquax::ui::{Pane, UiModel};
 use loquax::when::{list_time, WallTime};
 
-/// Cells across: 320 px of a 6 px wide atlas, 2 px left over.
-pub const COLS: usize = 53;
-/// Cell rows: 240 px of a 10 px high atlas.
-pub const ROWS: usize = 24;
+/// Cells across and rows, the atlas's grid ([`crate::font`]).
+pub use crate::font::{COLS, ROWS};
+
+/// Below this many cells a grid is narrow (1428), the M9's 32: the top
+/// bar gives the home's word the room its title does not use, the title
+/// a third at most while a word stands there, and the word runs to the
+/// bar's last cell. The terminal's own narrow class starts at the same
+/// width (`loquax::ui::layout::NARROW`), where its bubbles take the
+/// whole pane, which the M9's chat does through `block_cap`.
+pub const NARROW_COLS: usize = loquax::ui::layout::NARROW;
 
 /// Rows a conversation takes: the name and time, the last line and its
 /// count or mark.
@@ -63,6 +69,10 @@ pub struct Look {
     /// The M9's own cursor over a group's sheet or picker, a row index
     /// ([`crate::group`]); the model has none for them.
     pub row: usize,
+    /// What the top bar says of the board's home at its right end (1415):
+    /// joining, fetched N of M, unreachable. None on a board that is no
+    /// device of a home, which draws the bar as before.
+    pub home: Option<loquax::home::board::Word>,
 }
 
 impl Look {
@@ -75,6 +85,7 @@ impl Look {
             cursor: None,
             caret: None,
             row: 0,
+            home: None,
         }
     }
 
@@ -180,14 +191,39 @@ fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
     push_avatar(&mut bar, avatar);
     let title = top.title.resolve(look.lang);
     let room = cols.saturating_sub(AVATAR + 2);
+    let tight = cols < NARROW_COLS;
+    // The home's word at the right end, the title cut before it. Wide,
+    // the title keeps a third of the bar at least and a cell closes the
+    // bar; narrow, the title takes its own width up to a third and the
+    // word the rest, to the last cell.
+    let budget = match tight {
+        false => (room * 2) / 3,
+        true => room.saturating_sub(fit_width(&narrow(&title)).min(room / 3) + 1),
+    };
+    let word = look
+        .home
+        .map(|word| cut(&word.text().resolve(look.lang), budget))
+        .unwrap_or_default();
+    let words = word.chars().count();
+    let room = match (words, tight) {
+        (0, _) => room,
+        (n, false) => room.saturating_sub(n + 2),
+        (n, true) => room.saturating_sub(n + 1),
+    };
+    let title = cut(&title, room);
     push(
         &mut bar,
-        &format!(" {}", cut(&title, room)),
+        &format!(" {title}"),
         RStyle {
             bold: true,
             ..chrome
         },
     );
+    if words > 0 {
+        let gap = cols.saturating_sub(bar.cells.len() + words + usize::from(!tight));
+        push(&mut bar, &" ".repeat(gap), chrome);
+        push(&mut bar, &word, chrome);
+    }
     fill(bar, cols, chrome)
 }
 
@@ -312,6 +348,7 @@ pub fn state_of(mark: Mark) -> DeliveryState {
         Mark::Sending => DeliveryState::Queued,
         Mark::Unconfirmed => DeliveryState::Sent,
         Mark::Mailbox => DeliveryState::InMailbox,
+        Mark::Arrived => DeliveryState::Arrived,
         Mark::Delivered => DeliveryState::Delivered,
         Mark::Read => DeliveryState::Read { at: 0 },
         Mark::Failed => DeliveryState::Failed,
@@ -414,7 +451,7 @@ mod tests {
     #[test]
     fn every_mark_has_an_ascii_rung_the_atlas_draws() {
         let rungs: Vec<&str> = MARKS.iter().map(|&m| glyph(state_of(m)).ascii).collect();
-        assert_eq!(rungs, [". ", ". ", "v ", "vv", "VV", "! "]);
+        assert_eq!(rungs, [". ", ". ", "v ", "v ", "vv", "VV", "! "]);
         for (mark, rung) in MARKS.iter().zip(&rungs) {
             assert!(rung.is_ascii(), "{mark:?} is {rung:?}");
             assert_eq!(

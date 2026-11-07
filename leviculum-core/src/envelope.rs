@@ -403,6 +403,22 @@ pub const TYPE_POSITION_SHARE: u8 = 0x17;
 /// as an unknown type.
 pub const TYPE_FRAME_DUMP: u8 = 0x18;
 
+/// Host → board (order 1415): make the board a device of a Loquax home.
+/// The payload is the home's admission code as `loquax mailbox admit`
+/// prints it, UTF-8, at most [`HOME_CODE_MAX`] bytes, with or without its
+/// rendezvous list; the board reads it with the code's own parser, makes a
+/// device identity, writes the pending record to flash and acks, after
+/// which it joins the home over its node. A code that does not parse is
+/// refused [`REFUSE_VALUE`], a record flash would not take
+/// [`REFUSE_PERSIST`]. The written form of the code the M9 can also type
+/// on its keys, so the bench never types 140 characters. Only a board
+/// that runs a Loquax client accepts it.
+pub const TYPE_HOME_CODE: u8 = 0x19;
+
+/// The longest [`TYPE_HOME_CODE`] payload: the 140-character code and a
+/// rendezvous list of a few `host:port` entries.
+pub const HOME_CODE_MAX: usize = 512;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -828,6 +844,23 @@ pub fn decode_frame_dump_payload(payload: &[u8]) -> Option<Option<u8>> {
         [screen] => Some(Some(*screen)),
         _ => None,
     }
+}
+
+/// Encode a complete home-code frame (order 1415). `None` when the code is
+/// empty or longer than [`HOME_CODE_MAX`].
+pub fn encode_home_code(code: &str) -> Option<Vec<u8>> {
+    (!code.is_empty() && code.len() <= HOME_CODE_MAX)
+        .then(|| encode_frame(TYPE_HOME_CODE, code.as_bytes()))
+}
+
+/// Decode a [`TYPE_HOME_CODE`] payload: the code's text, `None`
+/// (malformed) when it is empty, too long or not UTF-8. Whether it is a
+/// code is the board's parser's to say.
+pub fn decode_home_code_payload(payload: &[u8]) -> Option<&str> {
+    if payload.is_empty() || payload.len() > HOME_CODE_MAX {
+        return None;
+    }
+    core::str::from_utf8(payload).ok()
 }
 
 /// What one [`TYPE_PN_CONFIG`] asks for (Codeberg #384). A field holding
@@ -4562,6 +4595,35 @@ mod tests {
             classify_control_frame(&encode_frame_dump(None), ACCEPTED),
             ControlAction::Refuse {
                 refused_type: TYPE_FRAME_DUMP,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
+    #[test]
+    fn a_home_code_round_trips_and_no_other_board_takes_it() {
+        let code = "lqxh1abcde fghij@rendezvous";
+        let frame = encode_home_code(code).expect("frame");
+        let decoded = decode_frame(&frame).expect("an envelope");
+        assert_eq!(decoded.frame_type, TYPE_HOME_CODE);
+        assert_eq!(decode_home_code_payload(decoded.payload), Some(code));
+        assert_eq!(encode_home_code(""), None);
+        let long = "a".repeat(HOME_CODE_MAX + 1);
+        assert_eq!(encode_home_code(&long), None);
+        assert!(encode_home_code(&long[1..]).is_some());
+        assert_eq!(decode_home_code_payload(&[]), None);
+        assert_eq!(decode_home_code_payload(long.as_bytes()), None);
+        assert_eq!(decode_home_code_payload(&[0xFF, 0xFE]), None);
+        // A code is base32 and ASCII punctuation: on the M9's one UART the
+        // frame carries none of the mux's flow bytes (0x11, 0x13) for the
+        // 140 characters a code has.
+        let typed = alloc::format!("lqxh1{}", "a".repeat(135));
+        let frame = encode_home_code(&typed).expect("frame");
+        assert!(!frame.iter().any(|b| *b == 0x11 || *b == 0x13));
+        assert_eq!(
+            classify_control_frame(&frame, ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_HOME_CODE,
                 reason: REFUSE_UNKNOWN_TYPE,
             }
         );

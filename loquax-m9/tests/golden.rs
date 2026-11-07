@@ -34,8 +34,10 @@ use loquax::ui::strings::Lang;
 use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel, NONE_OPEN};
 use loquax::when::WallTime;
 use loquax_m9::field::Field;
+use loquax_m9::font::CELL_PX;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
-use loquax_m9::keyboard::{self, Keyboard, Layout};
+use loquax_m9::kbraw::{self, Read, MEASURED};
+use loquax_m9::keyboard::Key;
 use loquax_m9::keys::{event, M9Key};
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ENTRY_ROWS, ROWS};
@@ -179,8 +181,9 @@ fn a_moved_timestamp_moves_its_row_and_nothing_else() {
     when.unix_secs -= 2 * 86_400;
     let (top, bottom) = changed_rows(&draw(&scene), &draw(&moved))
         .unwrap_or_else(|| panic!("moving {at:?}'s time changed no pixel"));
-    // The top bar is one cell row of 10 px, each entry ENTRY_ROWS more.
-    let band = (10 + row * ENTRY_ROWS * 10)..(10 + (row + 1) * ENTRY_ROWS * 10);
+    // The top bar is one cell row, each entry ENTRY_ROWS more.
+    let cell = usize::from(CELL_PX.1);
+    let band = (cell + row * ENTRY_ROWS * cell)..(cell + (row + 1) * ENTRY_ROWS * cell);
     assert!(
         band.contains(&top) && band.contains(&bottom),
         "the change is in pixel rows {top}..={bottom}, the row's band is {band:?}"
@@ -328,29 +331,22 @@ fn typing_with_the_keys_sends_from_the_compose_line() {
     );
 }
 
-/// The layout `tests/keyboard/walk.txt` was written over, not the board's:
-/// the provisional one the board types with until its own is read.
-fn walk_layout() -> Layout {
-    loquax_m9::kbraw::provisional_layout()
-}
-
-/// Slice three (1359): a recording of scan frames, through the keyboard
-/// driver, the key table and the model, opens the chat, types "Hi!" with a
-/// tapped Shift, a bounce and a tapped Sym, and sends it. The recording is
-/// synthetic until the board records its own in the same format.
+/// Slice three (1359), on the protocol the board measured (1427): a walk
+/// of controller answers, through the measured read, the driver, the key
+/// table and the model, opens the chat, types "hi&0" and sends it. Every
+/// code in it is one the bench capture saw.
 #[test]
-fn a_recorded_walk_of_scan_frames_types_and_sends() {
+fn a_recorded_walk_of_key_codes_types_and_sends() {
     let home = tempfile::tempdir().expect("home");
     let mut model = on_the_list(home.path());
-    let layout = walk_layout();
-    let mut keys = Keyboard::new(&layout);
     let recording = include_str!("keyboard/walk.txt");
     let mut effects = Vec::new();
-    for poll in keyboard::parse_recording(recording) {
-        let (ms, scan) = poll.expect("a recorded poll");
-        let mut events = Vec::new();
-        keys.poll(ms, scan, &mut |e| events.push(e));
-        for e in events {
+    for answer in kbraw::parse_raw(recording) {
+        let (_, bytes) = answer.expect("a recorded answer");
+        let Read::Code(code) = MEASURED.read(&bytes) else {
+            continue;
+        };
+        if let Some(e) = Key::of(code).and_then(Key::event) {
             effects.extend(update(&mut model, UiEvent::Key(e)));
         }
     }
@@ -358,9 +354,9 @@ fn a_recorded_walk_of_scan_frames_types_and_sends() {
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            UiEffect::Send { to, body, .. } if *to == peer && body == "Hi!"
+            UiEffect::Send { to, body, .. } if *to == peer && body == "hi&0"
         )),
-        "the walk sends Hi!: {effects:?}"
+        "the walk sends hi&0: {effects:?}"
     );
 }
 
@@ -388,6 +384,7 @@ fn arrive(model: &mut UiModel<Field>, from: [u8; 16], id: u8, body: &str, lev: L
     update(
         model,
         UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
             message_id: [id; 32],
             source: from,
             title: Vec::new(),
@@ -525,6 +522,60 @@ fn group_look(model: &UiModel<Field>) -> Look {
     }
 }
 
+mod group_ticks {
+    include!("../../loquax/tests/support/group_ticks.rs");
+}
+
+/// 1466, the group's ticks tell the truth too: the M9 draws the group's
+/// chat of `scene-group-ticks.json`, our line every member's device has on
+/// the two-tick rung (`vv`) and the one Ben's device has not said yet on
+/// the one-tick rung (`v `). The control: the frame with the second line
+/// at two ticks differs.
+#[test]
+fn a_groups_one_and_two_ticks_are_the_golden_frame() {
+    let mut model = UiModel::<Field>::new(&[]);
+    model.address = Some([0x30; 16]);
+    group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
+    model.focus = Pane::Messages;
+    let scene = model.scene(LayoutClass::Compact);
+    let look = group_look(&model);
+    let rows: Vec<String> = screen::lines(&scene, &look, COLS, ROWS)
+        .iter()
+        .map(row_text)
+        .collect();
+    let row = |words: &str| {
+        rows.iter()
+            .rfind(|r| r.contains(words))
+            .unwrap_or_else(|| panic!("{words:?} is not on the screen: {rows:#?}"))
+            .trim_end()
+            .to_string()
+    };
+    assert!(row("Brot ist da").ends_with("vv"), "{rows:#?}");
+    let one = row("Wer kommt mit?");
+    assert!(one.ends_with('v') && !one.ends_with("vv"), "{rows:#?}");
+    let frame = draw_in(&scene, &look);
+    check("m9-group-ticks.png", &frame);
+
+    let mut both = scene.clone();
+    for node in both
+        .chat
+        .as_mut()
+        .expect("the chat")
+        .groups
+        .iter_mut()
+        .flat_map(|g| g.bubbles.iter_mut())
+    {
+        if let Some(mark) = node.mark.as_mut() {
+            mark.mark = loquax::ui::chat::Mark::Delivered;
+        }
+        node.bubble.mark = Some(loquax::ui::chat::Mark::Delivered);
+    }
+    assert!(
+        changed_rows(&frame, &draw_in(&both, &look)).is_some(),
+        "the one tick is in the frame"
+    );
+}
+
 /// Slice two: a group's chat. The writers' names over their bubbles, the
 /// digest's lines a bubble each, the late line saying so under it, Bob
 /// leaving a centred note, ours flush right on its rung. The positive
@@ -537,17 +588,47 @@ fn a_group_chat_is_the_golden_frame() {
     let lines = screen::lines(&scene, &look, COLS, ROWS);
     let rows: Vec<String> = lines.iter().map(row_text).collect();
     let has = |words: &str| rows.iter().any(|r| r.contains(words));
+    // The last screen, twelve rows: the newest lines from the bottom up.
     for words in [
         "Anna",
         "Bob",
-        "Brot ist alle",
-        "Ich bring welches mit ?",
         "Bis gleich",
         "Wer kommt noch?",
         "arrived late",
         "Ich komme um acht",
     ] {
         assert!(has(words), "{words:?} is not on the screen: {rows:#?}");
+    }
+    // The digest's lines stand above it, where the cursor scrolls: they
+    // are not on the last screen, and with the cursor on the digest, or
+    // on Anna's next line (the digest's lines share one message's key, so
+    // the cursor stands on its first), each is.
+    for (words, body) in [
+        ("Brot ist alle", "Brot ist alle"),
+        ("Ich bring welches mit ?", "Bis gleich"),
+    ] {
+        let key = scene
+            .chat
+            .as_ref()
+            .into_iter()
+            .flat_map(|chat| &chat.groups)
+            .flat_map(|group| &group.bubbles)
+            .find(|node| node.bubble.body.contains(body))
+            .map(|node| node.bubble.key);
+        assert!(key.is_some(), "{body:?} is a bubble");
+        let up = Look {
+            cursor: key,
+            ..look
+        };
+        let above: Vec<String> = screen::lines(&scene, &up, COLS, ROWS)
+            .iter()
+            .map(row_text)
+            .collect();
+        assert!(!has(words), "{words:?} fits the last screen too: {rows:#?}");
+        assert!(
+            above.iter().any(|r| r.contains(words)),
+            "{words:?} is not on the screen at its cursor: {above:#?}"
+        );
     }
     let note = rows
         .iter()

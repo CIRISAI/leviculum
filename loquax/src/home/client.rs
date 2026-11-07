@@ -621,6 +621,101 @@ pub(crate) async fn open(
     Ok(link)
 }
 
+/// Ask the propagation node `pn` what became of `ids` (1409,
+/// `docs/src/concepts/loquax-propagation-receipts.md` section B): a link
+/// of its own to the node's `lxmf.propagation` destination, **never
+/// identified**, so the node cannot tie the asker to the ids; one
+/// `/lev/status` request with the encoded ids; the answer's bytes; the
+/// link closed. The node's key comes from its announce
+/// (`ReticulumNode::get_identity`); a node never heard has none and is not
+/// asked. Shared by the home's sync round and a device that is its own
+/// node.
+pub async fn ask_pn_status(
+    node: &ReticulumNode,
+    pn: [u8; 16],
+    ids: &[[u8; 32]],
+    budget: Duration,
+) -> Result<Vec<u8>, HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let destination = DestinationHash::new(pn);
+    let mut ladder = super::ask::PathLadder::new();
+    let start = tokio::time::Instant::now();
+    while !node.has_path(&destination) {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(HomeError::NoPath);
+        }
+        let since = u64::try_from(now.duration_since(start).as_millis()).unwrap_or(u64::MAX);
+        if ladder.due(since) {
+            node.request_path(&destination)
+                .await
+                .map_err(|e| HomeError::NoLink(e.to_string()))?;
+        }
+        tokio::time::sleep(PATH_POLL).await;
+    }
+    let identity = node
+        .get_identity(&destination)
+        .ok_or_else(|| HomeError::NoLink("the node's key is not known".to_string()))?;
+    let mut signing_key = [0u8; 32];
+    signing_key.copy_from_slice(&identity.public_key_bytes()[32..]);
+    let (handle, established) = node
+        .connect_awaited(&destination, &signing_key)
+        .await
+        .map_err(|e| HomeError::NoLink(e.to_string()))?;
+    let link = *handle.link_id();
+    match tokio::time::timeout_at(deadline, established).await {
+        Err(_) => {
+            let _ = node.close_link(&link).await;
+            return Err(HomeError::Timeout);
+        }
+        Ok(Err(error)) => return Err(HomeError::NoLink(error.to_string())),
+        Ok(Ok(_)) => {}
+    }
+    let data = leviculum_lxmf::lev_status::encode_request(ids);
+    let answer = request(
+        node,
+        &link,
+        leviculum_lxmf::lev_status::LEV_STATUS_PATH,
+        &data,
+        deadline,
+    )
+    .await;
+    let _ = node.close_link(&link).await;
+    answer
+}
+
+/// [`ask_pn_status`], read: the statuses, or `None` when the link failed,
+/// the request went unanswered or the node refused, said in the log. What
+/// a device that is its own node folds as
+/// [`crate::ui::UiEvent::PnAnswered`].
+pub async fn pn_answer(
+    node: &ReticulumNode,
+    pn: [u8; 16],
+    ids: &[[u8; 32]],
+    budget: Duration,
+) -> Option<Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>> {
+    match ask_pn_status(node, pn, ids, budget).await {
+        Ok(bytes) => {
+            let answer = crate::pn_status::read_answer(&bytes);
+            if answer.is_none() {
+                tracing::info!(
+                    "PN_STATUS refused node={} bytes={}",
+                    crate::address::to_hex(&pn),
+                    bytes.len()
+                );
+            }
+            answer
+        }
+        Err(error) => {
+            tracing::info!(
+                "PN_STATUS unanswered node={}: {error}",
+                crate::address::to_hex(&pn)
+            );
+            None
+        }
+    }
+}
+
 /// One request on `link` and its answer's bytes.
 pub(crate) async fn request(
     node: &ReticulumNode,
@@ -690,6 +785,15 @@ pub fn load_cursor(home: &std::path::Path) -> u64 {
         .ok()
         .and_then(|text| text.trim().parse().ok())
         .unwrap_or(0)
+}
+
+/// Whether the next pull is the home's history, not live mail (1429): no
+/// pull has settled here yet, so it starts at cursor 0 and brings the whole
+/// archive, on a device that just joined or a phone the mailbox moved to.
+/// The screen marks none of it read by arriving
+/// ([`crate::ui::UiModel::history`]).
+pub fn history_owed(home: &std::path::Path) -> bool {
+    load_cursor(home) == 0
 }
 
 /// Move the cursor: only once what was pulled up to it is kept where the
@@ -846,6 +950,17 @@ async fn take_in(
         }
         if entry.kind == super::KIND_IMPORTED {
             pull.imported.push(entry.packed.clone());
+            continue;
+        }
+        if entry.kind == super::KIND_PN_STATUS {
+            // What the propagation node said of messages the home sent
+            // (1409): every device folds it as one that asked itself.
+            match wire::read_pn_status_entry(&entry.packed) {
+                Ok(answers) => outbox
+                    .submit(Command::HomePnStatus { answers })
+                    .map_err(gone)?,
+                Err(_) => tracing::warn!("HOME pull: entry {} is no pn status", entry.seq),
+            }
             continue;
         }
         if entry.kind == super::KIND_GROUP {
@@ -1021,6 +1136,19 @@ mod tests {
         assert_eq!(*outbox.commands.borrow(), [Command::Fence { token: 7 }]);
     }
 
+    /// History is owed until a pull settled (1429): a home with no cursor
+    /// file, or one at 0, is a device that never pulled; any saved cursor
+    /// past 0 means live mail from here on.
+    #[test]
+    fn history_is_owed_until_a_pull_settled() {
+        let home = tempfile::tempdir().expect("home");
+        assert!(history_owed(home.path()));
+        save_cursor(home.path(), 0).expect("cursor");
+        assert!(history_owed(home.path()));
+        save_cursor(home.path(), 3611).expect("cursor");
+        assert!(!history_owed(home.path()));
+    }
+
     /// The pull hands everything on in order, fenced, and names the cursor
     /// only once the fence came back: the caller moves it after keeping what
     /// came, so a crash before that pulls the same entries again.
@@ -1029,6 +1157,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         save_cursor(home.path(), 3).expect("cursor");
         let received = OutboxEvent::Received {
+            sent_at: 0,
             message_id: [1; 32],
             source: [2; 16],
             title: Vec::new(),
@@ -1179,6 +1308,37 @@ mod tests {
                     message_id: [7; 32]
                 },
                 Command::Fence { token: 3 },
+            ]
+        );
+    }
+
+    /// 1409: the home's word of what the propagation node answered reaches
+    /// the engine as it was kept; one that does not decode is passed over
+    /// and still counted into the cursor.
+    #[tokio::test]
+    async fn a_pn_status_entry_reaches_the_engine() {
+        use leviculum_lxmf::lev_status::MessageStatus;
+        let answers = vec![([7; 32], MessageStatus::Collected)];
+        let pulled = Pulled {
+            entries: vec![
+                entry(
+                    3,
+                    super::super::KIND_PN_STATUS,
+                    wire::pn_status_entry(&answers),
+                ),
+                entry(4, super::super::KIND_PN_STATUS, vec![0x80]),
+            ],
+            first: 1,
+        };
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 4 }]);
+        let pull = take_in(&mut outbox, 2, pulled).await.expect("pull");
+        assert_eq!(pull.cursor, Some(4));
+        assert_eq!((pull.messages(), pull.states()), (0, 0));
+        assert_eq!(
+            *outbox.commands.borrow(),
+            [
+                Command::HomePnStatus { answers },
+                Command::Fence { token: 4 },
             ]
         );
     }

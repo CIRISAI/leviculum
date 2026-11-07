@@ -10,7 +10,8 @@
 #   STACK_HEADROOM board=thinknode_m9 stack=<bytes> need=<bytes>
 #
 # `used` is the application image espflash writes, `free` what is left of
-# the application partition of espflash's default table for 16 MB, both read
+# the application partition of the M9's table (`leviculum-esp/
+# partitions-m9.csv`, 8 MiB since 1414 made room for the stores), both read
 # off espflash's own "App/part. size: <used>/<partition> bytes" line. The
 # stack is the `.stack` section the linker leaves in internal RAM (the UI
 # heap is PSRAM); `need` is the open chat's scene and draw ceilings of
@@ -128,6 +129,7 @@ build_here() {
     out="$(cargo_target_dir "$ESP")/xtensa-esp32s3-none-elf/release" || return 1
     (cd "$ESP" && cargo build --release --locked --bin thinknode_m9) &&
         espflash save-image --chip esp32s3 --flash-size 16mb \
+            --partition-table "$ESP/partitions-m9.csv" \
             "$out/thinknode_m9" "$out/thinknode_m9.bin"
 }
 

@@ -143,12 +143,28 @@ pub const LORA_LINK_MDU: usize = 431;
 /// response frame's own array header and the request id's `bin8` (1 + 18
 /// bytes). One packet is at most two LoRa frames; a resource is an
 /// advertisement, its parts and a proof.
-pub const LORA_PAGE_BYTES: usize = LORA_LINK_MDU - 1 - 18;
+pub const LORA_PAGE_BYTES: usize = LORA_LINK_MDU - RESPONSE_OVERHEAD;
+
+/// The link MDU on a serial line's link, MTU 564 (`board::SERIAL_LINK_MTU`):
+/// `Link::mdu`'s rule (`compute_link_mdu`, `leviculum-core/src/link/mod.rs`)
+/// at that MTU, 564 less IFAC, header and token (1 + 19 + 48) is 496, cut
+/// to whole AES blocks, less one.
+pub const SERIAL_LINK_MDU: usize = 495;
+
+/// What a response packet takes of a link's MDU besides the answer: the
+/// response frame's array header and the request id's `bin8`.
+pub const RESPONSE_OVERHEAD: usize = 1 + 18;
 
 /// How often a request whose answer was lost is asked, on a fresh link
 /// each time, when asking twice changes nothing (as `client`'s
 /// `answer_retrying`).
 pub const ATTEMPTS: u8 = 3;
+
+/// How often a request whose answer did not come in its time is asked
+/// again on the same link while that link stays up (1440): a frame the
+/// line lost, not a link that broke. Counted per request: a page that
+/// arrives starts the count again.
+pub const REPEATS: u8 = 3;
 
 /// What a client asks its home.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,9 +299,14 @@ pub struct Ask {
     ladder: PathLadder,
     state: State,
     attempts: u8,
+    /// Times the request in flight was asked again on its link.
+    repeats: u8,
     first: u64,
     entries: usize,
     pages: usize,
+    /// What the device folds, said with every `/sync` of a paged pull
+    /// (1439).
+    fold: wire::Fold,
 }
 
 impl Ask {
@@ -308,10 +329,33 @@ impl Ask {
             ladder: PathLadder::new(),
             state: State::Path,
             attempts: 1,
+            repeats: 0,
             first: 0,
             entries: 0,
             pages: 0,
+            fold: wire::Fold::All,
         })
+    }
+
+    /// The same ask from a device that folds as `fold` (1439): a paged
+    /// pull says it, and the home serves only what the device keeps.
+    pub fn folding(mut self, fold: wire::Fold) -> Self {
+        self.fold = fold;
+        self
+    }
+
+    /// Size a pull's pages to the link it got (1439,
+    /// `board::LinkClass::page_bytes`): set before the first `/sync`, so
+    /// unlike [`Self::refit`] it may grow the page. Anything but a paged
+    /// pull is left as it is.
+    pub fn fit_link(&mut self, page_bytes: u64) {
+        if let Verb::Pull {
+            page_bytes: Some(asked),
+            ..
+        } = &mut self.verb
+        {
+            *asked = page_bytes;
+        }
     }
 
     /// A join of `code` as the device called `name`.
@@ -426,6 +470,69 @@ impl Ask {
         }
     }
 
+    /// The answer to the request did not come in its time, on a link that
+    /// is still up (1440): the line lost a frame of it, so the same
+    /// request goes again on the same link, up to [`REPEATS`] times. A
+    /// pull's request asks from its cursor and says its page, so a repeat
+    /// brings the same page and a late first answer is dropped by its
+    /// request id. Past the repeats, or for a verb that must not be asked
+    /// twice, it is what [`Self::answered`] makes of a timeout.
+    pub fn lost(&mut self) -> Step {
+        if self.state == State::Asking && self.verb.idempotent() && self.repeats < REPEATS {
+            self.repeats += 1;
+            return self.request();
+        }
+        self.answered(Err(HomeError::Timeout))
+    }
+
+    /// Whether the request may be asked again on its link
+    /// ([`Self::lost`]): every verb but the join, whose token is spent by
+    /// the first ask that reaches the home.
+    pub fn repeatable(&self) -> bool {
+        self.verb.idempotent()
+    }
+
+    /// The answer to a pull's page came larger than the device takes: ask
+    /// the same page again, at most `page_bytes` (1414). Only a smaller
+    /// page than the one asked; a page that cannot shrink any more ends the
+    /// pull with a [`HomeError::Transfer`], never a request that asks for
+    /// the same answer again.
+    pub fn refit(&mut self, page_bytes: u64) -> Step {
+        if self.state != State::Asking {
+            return self.out_of_turn();
+        }
+        match &mut self.verb {
+            Verb::Pull {
+                page_bytes: Some(asked),
+                ..
+            } if page_bytes < *asked => {
+                *asked = page_bytes;
+                self.request()
+            }
+            Verb::Pull { .. } => self.finish(Err(HomeError::Transfer(String::from(
+                "a page larger than this device takes",
+            )))),
+            _ => self.out_of_turn(),
+        }
+    }
+
+    /// The page a pull asks now, when it asks one.
+    pub fn page_bytes(&self) -> Option<u64> {
+        match &self.verb {
+            Verb::Pull { page_bytes, .. } => *page_bytes,
+            _ => None,
+        }
+    }
+
+    /// Where a pull stands: the newest sequence taken so far, which a
+    /// pull asked again after a broken link starts from.
+    pub fn cursor(&self) -> Option<u64> {
+        match &self.verb {
+            Verb::Pull { cursor, .. } => Some(*cursor),
+            _ => None,
+        }
+    }
+
     /// The request the verb makes; a pull's from where it stands.
     fn request(&self) -> Step {
         let (path, data) = match &self.verb {
@@ -433,7 +540,10 @@ impl Ask {
             Verb::Pull {
                 cursor,
                 page_bytes: Some(page),
-            } => (super::SYNC_PATH, wire::sync_request_paged(*cursor, *page)),
+            } => (
+                super::SYNC_PATH,
+                wire::sync_request_folded(*cursor, *page, self.fold),
+            ),
             Verb::Pull {
                 cursor,
                 page_bytes: None,
@@ -476,6 +586,7 @@ impl Ask {
                     Err(error) => return self.finish(Err(error)),
                 };
                 self.first = page.first;
+                self.repeats = 0;
                 self.entries += page.entries.len();
                 self.pages += 1;
                 let last = page.entries.last().map(|entry| entry.seq);
@@ -673,6 +784,7 @@ mod tests {
             entries,
             more,
             first: 1,
+            left: None,
         };
         let one = page(alloc::vec![entry(4), entry(5)], true);
         assert_eq!(

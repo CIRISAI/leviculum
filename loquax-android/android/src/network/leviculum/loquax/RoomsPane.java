@@ -143,9 +143,9 @@ final class RoomsPane {
         verb("tab", "", 0);
     }
 
-    /** Back: from an open room to the list; false on the list. */
+    /** Back: from an open room to the list; false on the list, as last drawn. */
     boolean back() {
-        if (Core.str(Core.roomsScreen(), "room").isEmpty()) {
+        if (last == null || Core.str(last, "room").isEmpty()) {
             return false;
         }
         verb("show", "", -1);
@@ -154,22 +154,71 @@ final class RoomsPane {
 
     /** The field's line to the library; what it leaves in the field back. */
     private void say() {
-        verb("say", input.getText().toString(), 0);
-        input.setText(Core.str(Core.roomsScreen(), "input"));
-        input.setSelection(input.getText().length());
+        verb("say", input.getText().toString(), 0, new Runnable() {
+            @Override
+            public void run() {
+                input.setText(Core.str(last, "input"));
+                input.setSelection(input.getText().length());
+            }
+        });
     }
 
     private void verb(String verb, String text, int index) {
-        String error = Core.rooms(verb, text, index);
-        if (error != null) {
-            Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
-        }
-        draw();
+        verb(verb, text, index, null);
     }
+
+    /** A verb on the engine's thread (1446); the tab drawn after it, then `after`. */
+    private void verb(final String verb, final String text, final int index, final Runnable after) {
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.rooms(verb, text, index);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (error != null) {
+                    Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
+                }
+                draw(after);
+            }
+        });
+    }
+
+    /** What the tab showed last (1464): Back decides by it. */
+    private Map<String, Object> last;
 
     /** Draw what the library says the tab shows. */
     void draw() {
-        Map<String, Object> shown = Core.roomsScreen();
+        draw(null);
+    }
+
+    /**
+     * Ask the library on the engine's thread (1464), draw its answer, then
+     * `after` (null for nothing).
+     */
+    private void draw(final Runnable after) {
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.roomsScreen();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                if (screen.isDestroyed()) {
+                    return;
+                }
+                show(shown);
+                if (after != null) {
+                    after.run();
+                }
+            }
+        });
+    }
+
+    private void show(Map<String, Object> shown) {
+        last = shown;
         if (!Core.bool(shown, "open")) {
             host.left();
             return;

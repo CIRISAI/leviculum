@@ -57,6 +57,14 @@ import java.util.Map;
  * measured from it. Nothing of it is sent: "Share my position" on the
  * empty map (to a chat the user picks) and "Share mine" on a friend's card
  * send it, once, to one peer.
+ *
+ * The tracks' time window (1419) is a map control, but a hidden one: the
+ * bar's menu has "Time window", a single choice of the windows the frame
+ * lists, and "Fit all"; nothing of it is on the map. A window that is not
+ * the default puts its word after the screen's title, "Map · This week",
+ * so the reader knows why older lines show. The entries, the choice and
+ * the title come from the library's frame; Java draws the menu entry and
+ * the sheet.
  */
 final class MapPane implements MapView.Listener {
     /** How long a chip that tells of an event stays. */
@@ -67,9 +75,12 @@ final class MapPane implements MapView.Listener {
     /** What the crosshair did last: nothing, centred once, following. */
     private enum Locate { NONE, CENTRED, FOLLOWING }
 
-    /** Where the pane goes beyond the map: a friend's chat. */
+    /** Where the pane goes beyond the map: a friend's chat, the screen's title. */
     interface Host {
         void chat(String peer);
+
+        /** The map's title the frame says (1419): "Map", or "Map · This week". */
+        void title(String title);
     }
 
     private final Activity activity;
@@ -87,6 +98,8 @@ final class MapPane implements MapView.Listener {
     /** The phone's own fix, while the map is in front and allowed to read it. */
     private Location fix;
     private final MapView map;
+    /** The title the last frame said (1419), none before the first. */
+    private String title;
     private final Runnable hide = new Runnable() {
         @Override
         public void run() {
@@ -145,12 +158,82 @@ final class MapPane implements MapView.Listener {
     }
 
     /**
+     * The map's entries of the bar's menu (1419): "Time window" and "Fit
+     * all", before the main views' own; their ids are their strings.
+     */
+    static void menu(android.view.Menu menu) {
+        menu.add(0, R.string.scene_track_window, 0, R.string.scene_track_window);
+        menu.add(0, R.string.scene_fit_window, 0, R.string.scene_fit_window);
+    }
+
+    /** A menu entry chosen: whether it was one of the map's. */
+    boolean chosen(int id) {
+        if (id == R.string.scene_track_window) {
+            windowSheet();
+            return true;
+        }
+        if (id == R.string.scene_fit_window) {
+            // "Fit all" (1386): every peer inside the time window in view.
+            map.fitWindow();
+            return true;
+        }
+        return false;
+    }
+
+    /** The title the last frame said, or none before the first (1419). */
+    String title() {
+        return title;
+    }
+
+    /**
+     * The time window's sheet (1419): the frame's entries, the one it drew
+     * marked; a choice goes to the library, which draws the next frame in
+     * it and says the title.
+     */
+    private void windowSheet() {
+        if (lastShown == null) {
+            return;
+        }
+        final List<Map<String, Object>> entries = Core.list(lastShown, "track_windows");
+        if (entries.isEmpty()) {
+            return;
+        }
+        String[] labels = new String[entries.size()];
+        int chosen = -1;
+        for (int i = 0; i < entries.size(); i++) {
+            labels[i] = Core.str(entries.get(i), "label");
+            if (Core.bool(entries.get(i), "chosen")) {
+                chosen = i;
+            }
+        }
+        new android.app.AlertDialog.Builder(activity)
+                .setTitle(R.string.scene_track_window)
+                .setSingleChoiceItems(labels, chosen, new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface dialog, int which) {
+                        map.trackWindow(Core.str(entries.get(which), "word"));
+                        dialog.dismiss();
+                    }
+                })
+                .show();
+    }
+
+    /**
      * Open on `peer`, as a row's pin does (1224): centred on its newest fix
      * at a zoom that shows the pin and its streets, its card opened once
      * the map has drawn there. A friend without a fix says so.
      */
-    void openAt(String peer) {
-        refresh();
+    void openAt(final String peer) {
+        refresh(new Runnable() {
+            @Override
+            public void run() {
+                openedAt(peer);
+            }
+        });
+    }
+
+    /** {@link #openAt} with the friends as the library answered. */
+    private void openedAt(String peer) {
         Map<String, Object> row = people.get(peer);
         if (row == null || row.get("lat_e6") == null || row.get("lon_e6") == null) {
             say(activity.getString(R.string.no_position));
@@ -294,7 +377,7 @@ final class MapPane implements MapView.Listener {
      * the share to the one picked.
      */
     private void pickAndShare() {
-        Map<String, Object> answer = Core.conversations(null);
+        Map<String, Object> answer = Core.conversations();
         final List<Map<String, Object>> rows = Core.list(answer, "conversations");
         if (rows.isEmpty()) {
             say(activity.getString(R.string.share_nobody));
@@ -347,8 +430,38 @@ final class MapPane implements MapView.Listener {
 
     /** The friends again from the library: the pins' faces, the card's words. */
     private void refresh() {
-        Map<String, Object> answer = fix == null ? Core.friends()
-                : Core.friends(Math.round(fix.getLatitude() * 1e6), Math.round(fix.getLongitude() * 1e6));
+        refresh(null);
+    }
+
+    /**
+     * {@link #refresh}, asked on the engine's thread (1464), then `after`
+     * (null for nothing) with the answer in place.
+     */
+    private void refresh(final Runnable after) {
+        final Location at = fix;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return at == null ? Core.friends()
+                        : Core.friends(Math.round(at.getLatitude() * 1e6),
+                                Math.round(at.getLongitude() * 1e6));
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (activity.isDestroyed()) {
+                    return;
+                }
+                friendsAre(answer);
+                if (after != null) {
+                    after.run();
+                }
+            }
+        });
+    }
+
+    /** The friends as the library answered: the pins' faces, the card's words. */
+    private void friendsAre(Map<String, Object> answer) {
         if (answer.containsKey("error")) {
             return;
         }
@@ -389,6 +502,11 @@ final class MapPane implements MapView.Listener {
         }
         lastShown = shown;
         credit.setText(Core.str(shown, "attribution"));
+        String said = Core.str(shown, "title");
+        if (!said.isEmpty() && !said.equals(title)) {
+            title = said;
+            host.title(said);
+        }
         if (shown.get("notice") != null) {
             say(Core.str(shown, "notice"));
         } else if (!eventShown) {
@@ -492,12 +610,22 @@ final class MapPane implements MapView.Listener {
         add.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                String why = Core.addContact(peer, Core.str(row, "announced"));
-                if (why != null && !why.isEmpty()) {
-                    say(why);
-                    return;
-                }
-                host.chat(peer);
+                final String announced = Core.str(row, "announced");
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.addContact(peer, announced);
+                    }
+                }, new Engine.Said() {
+                    @Override
+                    public void said(String why) {
+                        if (why != null && !why.isEmpty()) {
+                            say(why);
+                            return;
+                        }
+                        host.chat(peer);
+                    }
+                });
             }
         });
         View chat = activity.findViewById(R.id.card_chat);
@@ -569,8 +697,17 @@ final class MapPane implements MapView.Listener {
      * cluster no zoom parts); with the search field when `searching`. A
      * tap closes it and flies the map to the friend with the card open.
      */
-    private void showSheet(final List<String> only, boolean searching) {
-        refresh();
+    private void showSheet(final List<String> only, final boolean searching) {
+        refresh(new Runnable() {
+            @Override
+            public void run() {
+                sheet(only, searching);
+            }
+        });
+    }
+
+    /** {@link #showSheet} with the friends as the library answered. */
+    private void sheet(final List<String> only, boolean searching) {
         if (sheet != null) {
             sheet.dismiss();
         }

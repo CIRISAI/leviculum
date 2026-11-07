@@ -548,6 +548,22 @@ impl Engine {
             RouterEvent::PropagationStampPending(request) => {
                 self.dispatch_stamp(StampJob::Propagation(request, Arc::default()));
             }
+            RouterEvent::PropagationUploaded {
+                message_id,
+                transient_id,
+            } => {
+                if self.tracked.contains_key(&message_id) {
+                    let node = ready
+                        .router
+                        .outbound_propagation_node()
+                        .map(|node| *node.as_bytes());
+                    self.emit(OutboxEvent::Uploaded {
+                        message_id,
+                        transient_id,
+                        node,
+                    });
+                }
+            }
             RouterEvent::MessageReceived(message) => {
                 let message = *message;
                 let verified = message.verification == Verification::Valid;
@@ -559,14 +575,20 @@ impl Engine {
                 let packed = self
                     .hands_out_packed
                     .then(|| (message.message_id, message.pack(), message.method.into()));
+                let propagated = (message.method == DeliveryMethod::Propagated)
+                    .then_some((message.message_id, message.source_hash));
                 self.emit(OutboxEvent::Received {
                     message_id: message.message_id,
                     source: message.source_hash,
                     verified,
+                    sent_at: message.timestamp as i64,
                     title: message.title,
                     body: message.content,
                     fields: message.fields,
                 });
+                if let Some((message_id, source)) = propagated {
+                    self.emit(OutboxEvent::Propagated { message_id, source });
+                }
                 if let Some((message_id, source, packed)) = held {
                     self.hold(message_id, source, packed.clone());
                     self.emit(OutboxEvent::Unverified {
@@ -723,6 +745,7 @@ impl Engine {
                 | Command::HomeSent { .. }
                 | Command::HomeMark { .. }
                 | Command::HomeStalled { .. }
+                | Command::HomePnStatus { .. }
                 | Command::HomeName { .. }
                 | Command::HomePetname { .. }
                 | Command::HomePeerState { .. } => {}
@@ -866,6 +889,7 @@ impl Engine {
             message_id,
             source,
             verified,
+            sent_at: message.timestamp as i64,
             title: message.title,
             body: message.content,
             fields: message.fields,
@@ -950,6 +974,9 @@ impl Engine {
                     }
                 }
                 Command::HomeMark { mark } => self.emit(OutboxEvent::HomeMarked { mark }),
+                Command::HomePnStatus { answers } => {
+                    self.emit(OutboxEvent::HomePnStatus { answers });
+                }
                 Command::HomeStalled { message_id } => {
                     self.emit(OutboxEvent::HomeStalled { message_id });
                 }
@@ -1875,6 +1902,12 @@ impl Engine {
             if is_propagation_node(announce.name_hash()) {
                 self.emit(OutboxEvent::NodeAnnounced {
                     destination: *announce.destination_hash().as_bytes(),
+                    status: leviculum_lxmf::propagation::PropagationNodeAnnounce::decode(
+                        announce.app_data(),
+                    )
+                    .ok()
+                    .as_ref()
+                    .and_then(leviculum_lxmf::lev_status::announced_version),
                 });
             }
         }
@@ -2687,6 +2720,7 @@ mod tests {
         let _ = engine.on_tick(&mut core, now_ms);
         let events = drain(&mut engine);
         assert!(events.contains(&OutboxEvent::Received {
+            sent_at: 1_800_000_000,
             message_id: message.message_id,
             source,
             title: Vec::new(),

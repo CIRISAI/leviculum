@@ -39,6 +39,9 @@ pub enum Target {
     Badge(usize),
     /// `/ search` on the list's bottom border: opens the search.
     SearchHint,
+    /// The list's title, the reader's own name and its dot (1443): opens
+    /// the profile, as a tap on the avatar does on the phone.
+    Me,
     /// The open search's field and the blank under it: the cursor goes
     /// there.
     SearchField,
@@ -175,6 +178,13 @@ pub fn target_at<B: InputBuffer>(model: &UiModel<B>, col: u16, row: u16) -> Targ
         let (x, len) = right_title(screen.list, &shown.list_hint);
         if len > 0 && on(col, row, x, screen.list.bottom().saturating_sub(1), len) {
             return Target::SearchHint;
+        }
+        // The title is the reader's own unless a search, the blocked or
+        // the archived hold the list: its dot, a space, its words.
+        let own = model.search.is_none() && !model.show_blocked && !model.show_archived;
+        let title = 2 + shown.conversations_title.chars().count() as u16;
+        if own && on(col, row, screen.list.x + 1, screen.list.y, title) {
+            return Target::Me;
         }
         return list_target(model, screen.list, col, row);
     }

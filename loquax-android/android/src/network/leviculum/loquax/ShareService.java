@@ -50,8 +50,13 @@ public class ShareService extends Service {
     private LocationManager manager;
     private final LocationListener listener = new LocationListener() {
         @Override
-        public void onLocationChanged(Location location) {
-            Locator.tell(location);
+        public void onLocationChanged(final Location location) {
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Locator.tell(location);
+                }
+            });
         }
 
         @Override
@@ -66,16 +71,26 @@ public class ShareService extends Service {
     private final Runnable looking = new Runnable() {
         @Override
         public void run() {
-            if (!check()) {
-                return;
-            }
-            Location seeded = Locator.fixture(ShareService.this);
-            if (seeded != null) {
-                Locator.tell(seeded);
-            }
-            main.postDelayed(this, LOOK_MS);
+            final Runnable again = this;
+            check(new Runnable() {
+                @Override
+                public void run() {
+                    Location seeded = Locator.fixture(ShareService.this);
+                    if (seeded != null) {
+                        Engine.run(new Engine.Call() {
+                            @Override
+                            public String run() {
+                                return Locator.tell(seeded);
+                            }
+                        });
+                    }
+                    main.postDelayed(again, LOOK_MS);
+                }
+            });
         }
     };
+    /** The shares as the library listed them last (1464): the notice before it answers again. */
+    private List<Map<String, Object>> shares = new java.util.ArrayList<>();
 
     /** Start it, or keep it: after a share started, and whenever the list says one runs. */
     static void start(Context context) {
@@ -96,7 +111,7 @@ public class ShareService extends Service {
         if (sharing && running == null) {
             start(context);
         } else if (running != null) {
-            running.check();
+            running.check(null);
         }
     }
 
@@ -122,10 +137,18 @@ public class ShareService extends Service {
         }
         if (stop) {
             // The notification's Stop: every share ends, each with its end
-            // report.
-            for (Map<String, Object> share : Core.list(Core.shares(), "shares")) {
-                Core.stopShare(Core.str(share, "peer"));
-            }
+            // report; the list asked on the engine's thread too (1464).
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    String said = null;
+                    for (Map<String, Object> share : Core.list(Core.shares(), "shares")) {
+                        String error = Core.stopShare(Core.str(share, "peer"));
+                        said = error != null ? error : said;
+                    }
+                    return said;
+                }
+            });
         }
         running = this;
         listen();
@@ -159,15 +182,34 @@ public class ShareService extends Service {
         }
     }
 
-    /** The notification again from the library's list; false and gone once none runs. */
-    private boolean check() {
-        List<Map<String, Object>> shares = Core.list(Core.shares(), "shares");
-        if (shares.isEmpty()) {
-            end();
-            return false;
-        }
-        getSystemService(NotificationManager.class).notify(ID, notification(shares));
-        return true;
+    /**
+     * The notification again from the library's list, asked on the engine's
+     * thread (1464), then `then` (null for nothing); gone once none runs,
+     * and `then` not run.
+     */
+    private void check(final Runnable then) {
+        Engine.ask(new Engine.Ask<List<Map<String, Object>>>() {
+            @Override
+            public List<Map<String, Object>> ask() {
+                return Core.list(Core.shares(), "shares");
+            }
+        }, new Engine.Got<List<Map<String, Object>>>() {
+            @Override
+            public void got(List<Map<String, Object>> now) {
+                if (running != ShareService.this) {
+                    return;
+                }
+                shares = now;
+                if (now.isEmpty()) {
+                    end();
+                    return;
+                }
+                getSystemService(NotificationManager.class).notify(ID, notification(now));
+                if (then != null) {
+                    then.run();
+                }
+            }
+        });
     }
 
     private void end() {
@@ -198,8 +240,9 @@ public class ShareService extends Service {
         return null;
     }
 
+    /** The notice from the shares listed last: the library is asked after it (1464). */
     private Notification notification() {
-        return notification(Core.list(Core.shares(), "shares"));
+        return notification(shares);
     }
 
     /** "Loquax shares your position", with whom and how long, and Stop. */

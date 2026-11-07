@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | `groups` | address, name, admin, epoch, created_at | the group; its key is a file ([`crate::home::group`]) |
 //! | `group_members` | grp, address, name, flags, added_at, left_at | membership, the epoch's content, the stock/Loquax split |
-//! | `group_fanout` | grp, original, member, copy, state, sent_at, proven_at, read_at, digest, propagated | copy id to original (replies, receipts), the ticks; the digest a held copy went out in (schema 12); a node took it (schema 13) |
+//! | `group_fanout` | grp, original, member, copy, state, sent_at, proven_at, read_at, digest, propagated, device_at | copy id to original (replies, receipts), the ticks; the digest a held copy went out in (schema 12); a node took it (schema 13); its member's device said it has it (schema 16) |
 //!
 //! Every row is the owner's (`identity`), as every other table's. The epoch
 //! counts membership changes: each add, leave or removal moves it by one,
@@ -33,6 +33,10 @@ pub const MEMBER_JOINED: i64 = 8;
 /// capability bit 0, it sends read receipts; the writer's "read by N of M"
 /// counts only these.
 pub const MEMBER_RECEIPTS: i64 = 16;
+
+/// A member's flag (1466): its newest message to the group said capability
+/// bit 2, its device says when a copy is on it (`lev` `0x07`).
+pub const MEMBER_DEVICES: i64 = 32;
 
 /// A copy's state: handed to the outbox, no proof yet.
 pub const COPY_SENT: i64 = 0;
@@ -113,6 +117,9 @@ pub struct Copy {
     /// A propagation node took it (1307 pass four): a restart tries it
     /// direct again, and never uploads it twice.
     pub propagated: bool,
+    /// When its member's device said it has it (1466): its `0x07`'s
+    /// clock, or its read receipt's.
+    pub device_at: Option<i64>,
 }
 
 /// What a group's copies of one original say (study 2.3): the `lev` key
@@ -129,6 +136,11 @@ pub struct Counts {
     pub readers: u64,
     /// Copies sent alone (not held, in no digest) and not proven.
     pub waiting_alone: u64,
+    /// Copies whose member's device said it has them (1466).
+    pub on_device: u64,
+    /// Of the members counted, those whose device says so (1466,
+    /// [`MEMBER_DEVICES`]).
+    pub devices: u64,
 }
 
 impl Copy {
@@ -151,6 +163,7 @@ impl Copy {
             read_at: None,
             digest: None,
             propagated: false,
+            device_at: None,
         }
     }
 
@@ -333,8 +346,8 @@ impl Store {
         for copy in copies {
             tx.execute(
                 "INSERT OR IGNORE INTO group_fanout(identity, grp, original, member, copy, \
-                 state, sent_at, proven_at, read_at, digest, propagated) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 state, sent_at, proven_at, read_at, digest, propagated, device_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     &identity[..],
                     &copy.group[..],
@@ -346,7 +359,8 @@ impl Store {
                     copy.proven_at,
                     copy.read_at,
                     copy.digest.as_ref().map(|d| &d[..]),
-                    copy.propagated
+                    copy.propagated,
+                    copy.device_at
                 ],
             )
             .map_err(|e| failed(&path, e))?;
@@ -444,8 +458,32 @@ impl Store {
         let changed = self
             .conn
             .execute(
-                "UPDATE group_fanout SET read_at = ?4 \
+                "UPDATE group_fanout SET read_at = ?4, device_at = COALESCE(device_at, ?4) \
                  WHERE identity = ?1 AND copy = ?2 AND member = ?3 AND read_at IS NULL",
+                params![&self.identity[..], &copy[..], &member[..], at],
+            )
+            .map_err(|e| self.failed(e))?;
+        match changed {
+            0 => Ok(None),
+            _ => self.group_copy(copy),
+        }
+    }
+
+    /// `member`'s device said at `at` it has its copy `copy` (1466): its
+    /// `0x07` named it. The copy as it now is, when this was the first word
+    /// of its device (a read receipt is one too); `None` for an id that is
+    /// no copy of `member`'s, or one said before.
+    pub fn group_copy_on_device(
+        &mut self,
+        copy: &[u8; 32],
+        member: &[u8; 16],
+        at: i64,
+    ) -> Result<Option<Copy>, StoreError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE group_fanout SET device_at = ?4 \
+                 WHERE identity = ?1 AND copy = ?2 AND member = ?3 AND device_at IS NULL",
                 params![&self.identity[..], &copy[..], &member[..], at],
             )
             .map_err(|e| self.failed(e))?;
@@ -479,6 +517,8 @@ impl Store {
             counts.readers += u64::from(reader);
             counts.read += u64::from(reader && copy.read_at.is_some());
             counts.waiting_alone += u64::from(copy.state == COPY_SENT && copy.digest.is_none());
+            counts.on_device += u64::from(copy.device_at.is_some());
+            counts.devices += u64::from(member.flags & MEMBER_DEVICES != 0);
         }
         Ok(counts)
     }
@@ -768,8 +808,10 @@ impl Store {
     }
 
     fn copy_of(&self, row: CopyRow) -> Result<Copy, StoreError> {
-        let (group, original, member, copy, state, sent_at, proven_at, read_at, digest, propagated) =
-            row;
+        let (
+            (group, original, member, copy, state, sent_at, proven_at, read_at, digest, propagated),
+            device_at,
+        ) = row;
         let id = |bytes: Vec<u8>| {
             <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| StoreError::Corrupt {
                 path: self.path.clone(),
@@ -787,6 +829,7 @@ impl Store {
             read_at,
             digest: digest.map(id).transpose()?,
             propagated,
+            device_at,
         })
     }
 }
@@ -794,20 +837,23 @@ impl Store {
 type GroupRow = (Vec<u8>, String, Vec<u8>, i64, i64);
 
 type CopyRow = (
-    Vec<u8>,
-    Vec<u8>,
-    Vec<u8>,
-    Vec<u8>,
-    i64,
-    i64,
+    (
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<Vec<u8>>,
+        bool,
+    ),
     Option<i64>,
-    Option<i64>,
-    Option<Vec<u8>>,
-    bool,
 );
 
 const COPY_SELECT: &str = "SELECT grp, original, member, copy, state, sent_at, proven_at, \
-                           read_at, digest, propagated FROM group_fanout";
+                           read_at, digest, propagated, device_at FROM group_fanout";
 
 fn group_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
     Ok((
@@ -821,16 +867,19 @@ fn group_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GroupRow> {
 
 fn copy_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CopyRow> {
     Ok((
-        row.get(0)?,
-        row.get(1)?,
-        row.get(2)?,
-        row.get(3)?,
-        row.get(4)?,
-        row.get(5)?,
-        row.get(6)?,
-        row.get(7)?,
-        row.get(8)?,
-        row.get(9)?,
+        (
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+        ),
+        row.get(10)?,
     ))
 }
 

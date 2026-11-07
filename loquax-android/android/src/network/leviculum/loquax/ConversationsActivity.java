@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.view.Choreographer;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
@@ -75,6 +76,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private boolean homeClient;
     /** The map tab is selected; its pane is made on first selection. */
     private boolean onMap;
+    /** Between onResume and onPause: an answer from the engine after onPause starts nothing (1446). */
+    private boolean resumed;
     /** The Browse tab is in front (1337), and its pane once built. */
     private boolean onBrowse;
     private BrowsePane browsePane;
@@ -95,7 +98,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            refresh();
+            // Drawn again only when the answer moved (1455).
+            Map<String, Object> answer = ask();
+            if (!Quiet.same(shownAnswer, answer)) {
+                refresh(answer);
+            }
             ticker.postDelayed(this, 30_000);
         }
     };
@@ -247,8 +254,19 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
         // The tab shows where the library has it (1337 pass two): off in the
         // APK until its fetch through the phone's own node was seen on a device.
-        findViewById(R.id.tab_browse).setVisibility(
-                Core.bool(Core.browseScreen(), "enabled") ? View.VISIBLE : View.GONE);
+        // Asked on the engine's thread (1464), hidden until it answers.
+        findViewById(R.id.tab_browse).setVisibility(View.GONE);
+        Engine.ask(new Engine.Ask<Boolean>() {
+            @Override
+            public Boolean ask() {
+                return Core.bool(Core.browseScreen(), "enabled");
+            }
+        }, new Engine.Got<Boolean>() {
+            @Override
+            public void got(Boolean enabled) {
+                findViewById(R.id.tab_browse).setVisibility(enabled ? View.VISIBLE : View.GONE);
+            }
+        });
         findViewById(R.id.tab_rooms).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -257,9 +275,20 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         });
         tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, false);
         // The tab shows where the config names a hub (1384), as on the
-        // terminal and the window: the library says so.
-        findViewById(R.id.tab_rooms).setVisibility(
-                Core.bool(Core.roomsScreen(), "enabled") ? View.VISIBLE : View.GONE);
+        // terminal and the window: the library says so, on the engine's
+        // thread (1464).
+        findViewById(R.id.tab_rooms).setVisibility(View.GONE);
+        Engine.ask(new Engine.Ask<Boolean>() {
+            @Override
+            public Boolean ask() {
+                return Core.bool(Core.roomsScreen(), "enabled");
+            }
+        }, new Engine.Got<Boolean>() {
+            @Override
+            public void got(Boolean enabled) {
+                findViewById(R.id.tab_rooms).setVisibility(enabled ? View.VISIBLE : View.GONE);
+            }
+        });
         select(map);
     }
 
@@ -305,7 +334,12 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private void leaveRooms() {
         if (onRooms) {
             onRooms = false;
-            Core.rooms("chats", "", 0);
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.rooms("chats", "", 0);
+                }
+            });
             findViewById(R.id.pane_rooms).setVisibility(View.GONE);
             tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, false);
             findViewById(R.id.tab_rooms).setSelected(false);
@@ -316,7 +350,12 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private void leaveBrowse() {
         if (onBrowse) {
             onBrowse = false;
-            Core.browse("chats", "", "");
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.browse("chats", "", "");
+                }
+            });
             findViewById(R.id.pane_browse).setVisibility(View.GONE);
             tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
             findViewById(R.id.tab_browse).setSelected(false);
@@ -374,11 +413,23 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 public void chat(String peer) {
                     ConversationsActivity.this.chat(peer);
                 }
+
+                @Override
+                public void title(String said) {
+                    if (onMap) {
+                        title.setText(said);
+                    }
+                }
             });
         }
         findViewById(R.id.pane_chats).setVisibility(map ? View.GONE : View.VISIBLE);
         findViewById(R.id.pane_map).setVisibility(map ? View.VISIBLE : View.GONE);
-        title.setText(map ? R.string.map : R.string.tab_chats);
+        if (map && mapPane.title() != null) {
+            // The time window's word after it when not the default (1419).
+            title.setText(mapPane.title());
+        } else {
+            title.setText(map ? R.string.map : R.string.tab_chats);
+        }
         // On the map the search finds friends, in the Friends sheet (1200).
         search.setImageDrawable(new Glyph(Glyph.Kind.SEARCH, getColor(R.color.text)));
         search.setContentDescription(getString(map ? R.string.friends_search : R.string.search));
@@ -475,19 +526,28 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         state.putBoolean(TAB, onMap);
     }
 
-    /** The bar's menu (1199): Settings and Help, nothing else. */
+    /**
+     * The bar's menu (1199): Settings and Help; on the map its Time
+     * window and Fit all first (1419).
+     */
     private void showMenu(View anchor) {
-        showMenu(this, anchor);
+        showMenu(this, anchor, onMap ? mapPane : null);
     }
 
-    /** The main views' menu, on `screen`'s bar. */
-    static void showMenu(final Activity screen, View anchor) {
+    /** The main views' menu, on `screen`'s bar; with `map`, the map's entries first. */
+    static void showMenu(final Activity screen, View anchor, final MapPane map) {
         PopupMenu popup = new PopupMenu(screen, anchor);
-        popup.getMenu().add(0, R.string.settings, 0, R.string.settings);
-        popup.getMenu().add(0, R.string.help, 1, R.string.help);
+        if (map != null) {
+            MapPane.menu(popup.getMenu());
+        }
+        popup.getMenu().add(0, R.string.settings, 1, R.string.settings);
+        popup.getMenu().add(0, R.string.help, 2, R.string.help);
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
+                if (map != null && map.chosen(item.getItemId())) {
+                    return true;
+                }
                 if (item.getItemId() == R.string.help) {
                     // The user help page in the app's language (walk
                     // finding 18): help_url is /help, /help-de in German.
@@ -546,13 +606,29 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             public boolean onMenuItemClick(MenuItem item) {
                 int id = item.getItemId();
                 if (id == R.string.mark_read) {
-                    say(Core.unread(peer, !unread));
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.unread(peer, !unread);
+                        }
+                    }, said);
                 } else if (id == R.string.pin) {
-                    say(Core.pin(peer, !pinned));
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.pin(peer, !pinned);
+                        }
+                    }, said);
                 } else if (id == R.string.mute) {
                     ContactActivity.muteDialog(ConversationsActivity.this, peer, muted, again);
                 } else if (id == R.string.archive) {
-                    say(Core.archive(peer, !archivedView));
+                    final boolean archive = !archivedView;
+                    Engine.run(new Engine.Call() {
+                        @Override
+                        public String run() {
+                            return Core.archive(peer, archive);
+                        }
+                    }, said);
                 } else if (id == R.string.delete) {
                     ContactActivity.deleteDialog(ConversationsActivity.this, peer, name,
                             homeClient, again);
@@ -638,19 +714,42 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     protected void onResume() {
         super.onResume();
         Events.listen(this);
-        if (Ui.NOT_STARTED.equals(Core.close())) {
-            // Back from the recent apps after the session was stopped: the
-            // first screen starts it again.
-            startActivity(new Intent(this, MainActivity.class));
-            finish();
-            return;
-        }
-        Core.front(true);
-        refresh();
-        if (onMap) {
-            mapPane.ask();
-        }
-        ticker.postDelayed(tick, 30_000);
+        resumed = true;
+        // On the engine's thread, never here (1446): the close waits on the
+        // session's lock, which the pump holds while it folds a first pull.
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.close();
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (Ui.NOT_STARTED.equals(error)) {
+                    // Back from the recent apps after the session was stopped:
+                    // the first screen starts it again.
+                    if (!isFinishing()) {
+                        startActivity(new Intent(ConversationsActivity.this, MainActivity.class));
+                        finish();
+                    }
+                    return;
+                }
+                if (!resumed) {
+                    return;
+                }
+                Engine.run(new Engine.Call() {
+                    @Override
+                    public String run() {
+                        return Core.front(true);
+                    }
+                });
+                refresh();
+                if (onMap) {
+                    mapPane.ask();
+                }
+                ticker.postDelayed(tick, 30_000);
+            }
+        });
     }
 
     @Override
@@ -658,8 +757,17 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         if (mapPane != null) {
             mapPane.pause();
         }
+        resumed = false;
         ticker.removeCallbacks(tick);
-        Core.front(false);
+        Choreographer.getInstance().removeFrameCallback(frame);
+        refreshOwed = false;
+        panesOwed = false;
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.front(false);
+            }
+        });
         Events.listen(null);
         super.onPause();
     }
@@ -670,13 +778,69 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         }
     }
 
+    /** What a command handed to the engine said (1446), and the list after it. */
+    private final Engine.Said said = new Engine.Said() {
+        @Override
+        public void said(String error) {
+            say(error);
+            refresh();
+        }
+    };
+
     /** The line under the bar, shown only while it has something to say. */
     private void line(String text) {
         Ui.showLine(status, text, true);
     }
 
+    /** The answer the list on screen shows (1455). */
+    private Map<String, Object> shownAnswer;
+
+    /**
+     * The list as the library has it: never waits for the session's lock
+     * (1464), so it is asked here, on the UI thread.
+     */
+    private Map<String, Object> ask() {
+        return archivedView ? Core.archived() : Core.conversations();
+    }
+
+    /** A refresh is owed at the next frame, and the open pane's with it. */
+    private boolean refreshOwed;
+    private boolean panesOwed;
+    /**
+     * One refresh per frame (1464), however many events came in it: a first
+     * pull says `changed` hundreds of times, and the Pixel's list asked 341
+     * times in 44 s, once per event.
+     */
+    private final Choreographer.FrameCallback frame = new Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            refreshOwed = false;
+            refresh(ask());
+            if (panesOwed) {
+                panesOwed = false;
+                if (onRooms) {
+                    // A line the hub brought, or how the link stands.
+                    roomsPane.draw();
+                }
+                if (onMap) {
+                    // A position that came moves its pin.
+                    mapPane.ask();
+                }
+            }
+        }
+    };
+
+    /** The list again, at the next frame. */
     private void refresh() {
-        Map<String, Object> answer = archivedView ? Core.archived(null) : Core.conversations(null);
+        if (refreshOwed) {
+            return;
+        }
+        refreshOwed = true;
+        Choreographer.getInstance().postFrameCallback(frame);
+    }
+
+    private void refresh(Map<String, Object> answer) {
+        shownAnswer = answer;
         if (answer.containsKey("error")) {
             line(Core.str(answer, "error"));
             return;
@@ -720,30 +884,41 @@ public class ConversationsActivity extends Activity implements Events.Listener {
      * while the field is empty.
      */
     private void filter() {
-        String needle = query.getText().toString().trim();
-        rows.clear();
+        final String needle = query.getText().toString().trim();
         if (needle.isEmpty()) {
+            rows.clear();
             rows.addAll(all);
-        } else {
-            Map<String, Object> found = archivedView ? Core.archived(needle) : Core.conversations(needle);
-            rows.addAll(Core.list(found, "conversations"));
+            adapter.notifyDataSetChanged();
+            return;
         }
-        adapter.notifyDataSetChanged();
+        // The search waits on the session's lock: the engine's thread asks
+        // (1464), and an answer to a word no longer typed is dropped.
+        final boolean archived = archivedView;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return archived ? Core.findArchived(needle) : Core.findConversations(needle);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> found) {
+                if (isDestroyed() || !needle.equals(query.getText().toString().trim())) {
+                    return;
+                }
+                rows.clear();
+                rows.addAll(Core.list(found, "conversations"));
+                adapter.notifyDataSetChanged();
+            }
+        });
     }
 
     @Override
     public void onEvent(Map<String, Object> event) {
         String kind = Core.str(event, "t");
         if ("changed".equals(kind)) {
+            // The list and the open pane at the next frame (1464).
+            panesOwed = true;
             refresh();
-            if (onRooms) {
-                // A line the hub brought, or how the link stands.
-                roomsPane.draw();
-            }
-            if (onMap) {
-                // A position that came moves its pin.
-                mapPane.ask();
-            }
         } else if ("stopped".equals(kind)) {
             // The notification's stop button, the menu's, or the engine
             // gone: the session is over, and so is the app until it starts

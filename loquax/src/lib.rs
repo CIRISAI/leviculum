@@ -105,6 +105,7 @@ pub mod outbox;
 pub mod photo;
 #[cfg(feature = "picture")]
 pub mod picture;
+pub mod pn_status;
 #[cfg(feature = "std")]
 pub mod rooms_link;
 #[cfg(feature = "scan")]

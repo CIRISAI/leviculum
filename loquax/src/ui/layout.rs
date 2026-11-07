@@ -462,8 +462,16 @@ fn block(
             };
             format!("{}{words}", telemetry::report_line(&read))
         }
-        (false, Some(query)) => super::search::mark_first(&message.body, query),
-        (false, None) => message.body.clone(),
+        (false, mark) => {
+            // A group's copy without words names its writer as every copy
+            // does here, not with the home's sentence (1388).
+            let body = super::groups::stand_in_line(&message.body, &message.fields)
+                .unwrap_or_else(|| message.body.clone());
+            match mark {
+                Some(query) => super::search::mark_first(&body, query),
+                None => body,
+            }
+        }
     };
     // A text that came with a position says so under it, in a report's
     // words: `Enter` on it opens the map there.

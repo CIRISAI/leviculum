@@ -123,6 +123,8 @@ final class MapView extends View {
     private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint label = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint labelGround = new Paint(Paint.ANTI_ALIAS_FLAG);
+    /** The low battery beside an avatar (1386). */
+    private final Paint battery = new Paint(Paint.ANTI_ALIAS_FLAG);
     /** A pin's liveness ring (1209). */
     private final Paint live = new Paint(Paint.ANTI_ALIAS_FLAG);
     /** The layer a stale pin is drawn through: grey, its colours taken. */
@@ -192,8 +194,14 @@ final class MapView extends View {
     private Long y;
     private Long zoomMilli;
     private String selected;
+    /** A time window chosen in the map menu and not yet drawn (1385, 1419). */
+    private String trackPressed;
+    /** The map menu's "fit all" chosen and not yet drawn (1386, 1419). */
+    private boolean fitWindowPressed;
     /** The last frame's marks (1200), in its view's pixels. */
     private List<Map<String, Object>> marks = Collections.emptyList();
+    /** When the last frame's marks came, uptime ms: a live ring pulses from then (1455). */
+    private long marksAt;
     /** The last frame's view size and deepest zoom. */
     private int viewW;
     private int viewH;
@@ -204,6 +212,13 @@ final class MapView extends View {
      * that lands is placed by it.
      */
     private float scale = 1f;
+    /**
+     * The map's ground, as the core says it with each frame (1441): where
+     * the frame the fingers move or shrink does not reach, the view shows
+     * it and not the window's background, which is near black in the dark
+     * theme. Zero from an older core: nothing drawn.
+     */
+    private int ground;
     private float offX;
     private float offY;
     /** A finger is on the map. */
@@ -525,6 +540,31 @@ final class MapView extends View {
         fly.start();
     }
 
+    /**
+     * A time window chosen in the map menu's sheet (1385, 1419): the
+     * library takes the window, and the frame's answer says which it drew
+     * and the title that names it.
+     */
+    void trackWindow(String word) {
+        synchronized (this) {
+            trackPressed = word;
+            owed = true;
+            notifyAll();
+        }
+    }
+
+    /**
+     * The map menu's "fit all" chosen (1386): the library fits the view to
+     * every peer with a position inside the tracks' time window.
+     */
+    void fitWindow() {
+        synchronized (this) {
+            fitWindowPressed = true;
+            owed = true;
+            notifyAll();
+        }
+    }
+
     /** Draw the view anew: the pins changed, or a region is loading. */
     void ask() {
         synchronized (this) {
@@ -670,6 +710,9 @@ final class MapView extends View {
         if (bitmap == null) {
             return;
         }
+        if (ground != 0) {
+            canvas.drawColor(ground);
+        }
         canvas.save();
         canvas.translate(offX, offY);
         canvas.scale(scale, scale);
@@ -706,8 +749,12 @@ final class MapView extends View {
         float edge = 2 * density;
         long now = Ui.nowSecs();
         boolean pulsing = false;
-        double phase = (SystemClock.uptimeMillis() % PULSE_MS) * 2.0 * Math.PI / PULSE_MS;
-        int pulse = (int) (255 * (0.6 + 0.4 * Math.cos(phase)));
+        // A few cycles after the frame came, then the ring stands at full
+        // strength and asks no frame (1455).
+        long uptime = SystemClock.uptimeMillis();
+        boolean pulses = Quiet.pulsing(marksAt, uptime, PULSE_MS);
+        double phase = (uptime % PULSE_MS) * 2.0 * Math.PI / PULSE_MS;
+        int pulse = pulses ? (int) (255 * (0.6 + 0.4 * Math.cos(phase))) : 255;
         for (Map<String, Object> mark : marks) {
             float cx = offX + scale * Core.num(mark, "x");
             float cy = offY + scale * Core.num(mark, "y");
@@ -753,12 +800,35 @@ final class MapView extends View {
                 live.setColor(ringColour);
                 if ("live".equals(liveness)) {
                     live.setAlpha(pulse);
-                    pulsing = true;
+                    pulsing = pulses;
                 }
                 canvas.drawCircle(cx, cy, side / 2f - width / 2f, live);
             }
+            // A battery below a fifth (1386): a small one on the avatar's
+            // top right, where the window's sits over its marker.
+            if (Core.bool(mark, "low_battery")) {
+                float bw = 11 * density;
+                float bh = 6 * density;
+                float bx = cx + side / 2f - bw / 2f;
+                float by = cy - side / 2f - bh / 2f;
+                labelBox.set(bx - density, by - density, bx + bw + 2.5f * density, by + bh + density);
+                canvas.drawRect(labelBox, labelGround);
+                battery.setColor(getContext().getColor(R.color.text));
+                canvas.drawRect(bx, by, bx + bw, by + bh, battery);
+                battery.setColor(getContext().getColor(R.color.background));
+                canvas.drawRect(bx + density, by + density, bx + bw - density, by + bh - density, battery);
+                battery.setColor(0xffd03030);
+                canvas.drawRect(bx + density, by + density, bx + density + Math.max(density, (bw - 2 * density) / 5f), by + bh - density, battery);
+                battery.setColor(getContext().getColor(R.color.text));
+                canvas.drawRect(bx + bw, by + bh / 3f, bx + bw + 1.5f * density, by + bh * 2f / 3f, battery);
+            }
             if (row.containsKey("at")) {
                 String age = Ui.age(getContext(), Core.num(row, "at"), now);
+                // Under the radar (1386): how far and which way, then the age.
+                String way = Core.str(mark, "way");
+                if (!way.isEmpty()) {
+                    age = way + " · " + age;
+                }
                 Paint.FontMetrics m = label.getFontMetrics();
                 float w = label.measureText(age) + 8 * density;
                 float h = m.descent - m.ascent + 2 * density;
@@ -868,6 +938,14 @@ final class MapView extends View {
                     request.put("zoom_milli", zoomMilli);
                 }
                 if (selected != null) request.put("selected", selected);
+                if (fitWindowPressed) {
+                    request.put("fit_window", true);
+                    fitWindowPressed = false;
+                }
+                if (trackPressed != null) {
+                    request.put("track_window", trackPressed);
+                    trackPressed = null;
+                }
                 if (atLat != null) {
                     request.put("at_lat_e6", atLat);
                     request.put("at_lon_e6", atLon);
@@ -894,12 +972,14 @@ final class MapView extends View {
                     retired = bitmap;
                     bitmap = next;
                     bare = moving;
+                    ground = (int) Core.num(shown, "ground");
                     marginX = (int) Core.num(shown, "margin_x");
                     marginY = (int) Core.num(shown, "margin_y");
                     x = Core.num(shown, "x");
                     y = Core.num(shown, "y");
                     zoomMilli = Core.num(shown, "zoom_milli");
                     marks = Core.list(shown, "marks");
+                    marksAt = SystemClock.uptimeMillis();
                     ownX = shown.get("own_x") instanceof Number ? Core.num(shown, "own_x") : null;
                     ownY = shown.get("own_y") instanceof Number ? Core.num(shown, "own_y") : null;
                     viewW = w;

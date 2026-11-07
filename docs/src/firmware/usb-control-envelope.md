@@ -57,6 +57,7 @@ Commands (host → board):
 | 0x16 | PN_LIST          | `[list][count][count × 16]`: replace one propagation-node operator list, `list` 0 static peers, 1 auth allowed, 2 control allowed, at most 16 hashes, `count 0` clears; acked once the store holds it, effective at the next reset (audit 2026-10-12 D4, D18) |
 | 0x17 | POSITION_SHARE   | `[setting]`: whom the `lev.position` announce is readable by, 0 default (sealed to the owner on a tracker, else off), 1 off, 2 owner, 3 everyone; above 3 refused `REFUSE_VALUE`; persisted before the ack, in force at once (order 1301) |
 | 0x18 | FRAME_DUMP       | empty, or `[screen]`: dump the displayed frame as text on the debug stream (`PBM <w> <h>`, `PBR` rows, `PBE <fnv32>`, the format of `loquax-m9/src/dump.rs`); a screen byte first walks the fixture model there (0 chats list, 1 the pinned chat), an unknown one refused `REFUSE_VALUE`; acked before the dump. Only the ThinkNode M9's Loquax image accepts it (order 1361) |
+| 0x19 | HOME_CODE        | the admission code of a Loquax home as `loquax mailbox admit` prints it, UTF-8, at most 512 bytes, with or without its rendezvous list: the board makes a device identity, writes the pending client record and acks, then joins the home over its node; a text that is no code refused `REFUSE_VALUE`, a record flash did not take `REFUSE_PERSIST`. Sent by `lnflash --home <code> --port <tty>`. Only the ThinkNode M9's Loquax image accepts it (order 1415) |
 
 Responses (board → host):
 

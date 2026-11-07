@@ -170,7 +170,7 @@ pub(super) fn mark_sends(effects: &mut [UiEffect], capabilities: u64) {
 /// Whether a received message is a receipt and nothing else: no text, no
 /// field but the namespace's pair.
 pub(super) fn alone(body: &[u8], fields: &[Field], lev: &Lev) -> bool {
-    lev.receipt.is_some()
+    (lev.receipt.is_some() || lev.propagation_receipt.is_some())
         && body.iter().all(u8::is_ascii_whitespace)
         && fields
             .iter()
@@ -186,19 +186,30 @@ impl<B> UiModel<B> {
     /// What a message from `source` with this namespace says: the peer's
     /// mark, and the receipt it carries. The log lines of the ids dropped.
     pub(super) fn take_lev(&mut self, source: [u8; 16], lev: Option<&Lev>) -> Vec<UiEffect> {
+        // A propagation receipt (1395) is not switchable: it moves our
+        // messages whatever the read-receipts switch says.
+        let mut effects = lev
+            .and_then(|lev| lev.propagation_receipt.as_ref())
+            .map(|receipt| self.apply_arrival(source, receipt))
+            .unwrap_or_default();
         let Some(index) = self.conversations.iter().position(|c| c.peer == source) else {
-            return lev
-                .and_then(|lev| lev.receipt.as_ref())
-                .map(|receipt| dropped(source, &receipt.ids))
-                .unwrap_or_default();
+            effects.extend(
+                lev.and_then(|lev| lev.receipt.as_ref())
+                    .map(|receipt| dropped(source, &receipt.ids))
+                    .unwrap_or_default(),
+            );
+            return effects;
         };
+        // A propagation receipt alone carries no mark and says nothing of
+        // read receipts either way.
+        let says = lev.is_none_or(|lev| lev.capabilities.is_some() || lev.receipt.is_some());
         let conversation = &mut self.conversations[index];
         let supported = supports(lev);
-        if conversation.flags.receipts != supported {
+        if says && conversation.flags.receipts != supported {
             conversation.flags.receipts = supported;
             self.changed_peers.insert(source);
         }
-        match lev.and_then(|lev| lev.receipt.as_ref()) {
+        effects.extend(match lev.and_then(|lev| lev.receipt.as_ref()) {
             // Reciprocity (1233): with the switch off none is shown, and
             // none is kept for the switch turned on again.
             Some(receipt) if !self.reading.on => alloc::vec![UiEffect::Log(format!(
@@ -208,7 +219,8 @@ impl<B> UiModel<B> {
             ))],
             Some(receipt) => self.apply_receipt(index, receipt),
             None => Vec::new(),
-        }
+        });
+        effects
     }
 
     /// The reader's switch (1233): off, no mark goes out, no receipt, and
@@ -403,7 +415,7 @@ impl<B> UiModel<B> {
     }
 
     /// Whether receipts go to `peer` at all.
-    fn takes_receipts(&self, peer: &[u8; 16]) -> bool {
+    pub(super) fn takes_receipts(&self, peer: &[u8; 16]) -> bool {
         self.reading.on
             && self.names.trust(peer) != Trust::Blocked
             && self

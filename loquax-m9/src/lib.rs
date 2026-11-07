@@ -9,7 +9,9 @@
 //! frames into [`frame::Frame`] and pins them as PNG goldens
 //! (`tests/golden.rs`); the board will draw them into its panel.
 //!
-//! - [`screen`]: the scene as styled lines, 53 x 24 cells, the chats list
+//! - [`font`]: the 10 x 20 atlas the cells are set in, 32 x 12 of them,
+//!   and what a cell measures on the panel (1428).
+//! - [`screen`]: the scene as styled lines, 32 x 12 cells, the chats list
 //!   and the delivery marks on their ASCII ladder (the atlas has no tick),
 //!   and which scene and cursor a model shows.
 //! - [`chat`]: the open chat under its bar, the bubbles and the compose
@@ -18,12 +20,13 @@
 //! - [`render`]: the lines through ratatui into any `DrawTarget` of
 //!   `Rgb565`, with mousefood as the backend.
 //! - [`frame`]: the panel's frame on the heap, what the host draws into.
-//! - [`keyboard`]: the matrix's scan frames to key events: debounce,
-//!   the Shift and Sym layers, repeat (slice three, 1359).
+//! - [`keyboard`]: the controller's key codes to key events, and the
+//!   `KEY` line that names each press (slice three, 1359; the measured
+//!   protocol, 1427).
 //! - [`keys`]: which M9 key is which key event, the list's rows and the
 //!   chat's.
 //! - [`kbraw`]: the keyboard controller's I2C answer, logged raw and read
-//!   into a scan by a table (slice four, 1361).
+//!   as idle or one key code (slice four, 1361; measured, 1427).
 //! - [`dump`]: the frame as text lines over the debug link, and read back,
 //!   for the rig to compare with the goldens (slice four).
 //! - [`fixture`]: the model the board shows before it has a network.
@@ -46,8 +49,10 @@ pub mod chat;
 pub mod dump;
 pub mod field;
 pub mod fixture;
+pub mod font;
 pub mod frame;
 pub mod group;
+pub mod home;
 pub mod kbraw;
 pub mod keyboard;
 pub mod keys;

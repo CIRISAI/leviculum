@@ -1558,7 +1558,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1590,7 +1590,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2602,7 +2602,8 @@ m9-render-no-std:
 # receipts through the mailbox (`loquax/tests/mailbox_receipts.rs`, 1234)
 # need `history` too; in-process, no sockets. `loquax mailbox setup`
 # (`loquax/tests/mailbox_setup.rs`, 1266) is the terminal build's command;
-# it spawns the binary over a temporary home, no daemon.
+# it spawns the binary over a temporary home, no daemon. The ticks' cells
+# (`loquax/tests/device_receipts.rs`, 1462) need `history`; in-process.
 # The forge runs this recipe and has no reference submodule, so the home node
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
@@ -2610,7 +2611,7 @@ m9-render-no-std:
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh
+    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh loquax/device_receipts -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile
@@ -2688,8 +2689,10 @@ build-m9:
 
 # Write the image `build-m9` made to an M9 through the ROM loader, at the
 # 230400 baud its CH340K holds (lnflash/src/esp.rs, the bench notes of
-# 2026-10-25), with espflash's default partition table for 16 MB. The port
-# is the bridge's tty; espflash resets the board into the loader and back.
+# 2026-10-25), with the M9's partition table (`leviculum-esp/
+# partitions-m9.csv`: the identity and the Loquax client record beside the
+# application, 1414). The port is the bridge's tty; espflash resets the
+# board into the loader and back.
 [doc('Flash the ThinkNode M9 Loquax image over its CH340 (port: the tty)')]
 flash-m9 port:
     #!/usr/bin/env bash
@@ -2698,7 +2701,8 @@ flash-m9 port:
     elf=leviculum-esp/target/xtensa-esp32s3-none-elf/release/thinknode_m9
     test -f "$elf" || { echo "no $elf: run just build-m9 first"; exit 1; }
     espflash flash --chip esp32s3 --port {{port}} --baud 230400 \
-        --non-interactive --flash-size 16mb "$elf"
+        --non-interactive --flash-size 16mb \
+        --partition-table leviculum-esp/partitions-m9.csv "$elf"
 
 # The M9 image is the same bytes from any clone of the same commit (1458,
 # #474): builds it in this tree and in a clone of HEAD under a throwaway path
@@ -2727,3 +2731,130 @@ m9-reproducible:
 nrf-reproducible:
     bash scripts/check-nrf-reproducible.sh --selftest
     bash scripts/check-nrf-reproducible.sh
+
+# 1422, #474: the map's frame budget measured (the eye candy study of
+# 2026-11-04, section 4). `REGION` is the Frankfurt region the study cut
+# (LMR3 with names and buildings, sha256 5022565b...a2b7c7a). One MAP_BENCH
+# line a scene, size and zoom on the host, as an A/B in the same run: the
+# bench of `BASE` (default: the commit that last wrote the baseline,
+# loquax/examples/map_eye_bench.baseline) built in a worktree under target/
+# into its own target directory (1470), and this tree's, in turn, five rounds, one worker thread, the medians compared; a held
+# column more than 5 % and 0.1 ms slower fails. A run against the file alone
+# measured a phone frame's compose 3.2 and 4.8 ms with one binary, which no
+# 5 % rule survives. Then this tree's bench under the weak CPU emulation
+# (12.5 % of one core in 1 ms periods, about ten times slower than the host
+# core; the 100 ms default period lets short frames through and measures
+# bimodal), reported only. The tables land in target/map-bench/. A
+# measuring tool, never in `guards`: a build of BASE, about 1 min host,
+# 1 min emulated.
+[doc('Measure the map frame budget, A/B on the host and on a weak CPU (#474)')]
+map-bench REGION BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=target/map-bench
+    mkdir -p "$out"
+    exe() { python3 -c 'import json,sys
+    for l in sys.stdin:
+        m = json.loads(l)
+        if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "map_eye_bench":
+            print(m["executable"])'; }
+    base="{{BASE}}"
+    [ -n "$base" ] || base="$(git log -1 --format=%H -- loquax/examples/map_eye_bench.baseline)"
+    src="$out/base-src"
+    git worktree remove --force "$src" 2>/dev/null || rm -rf "$src"
+    git worktree add -q --detach "$src" "$base"
+    # BASE into its own target directory (1470): sharing this tree's, cargo
+    # can take BASE's artefacts as fresh for this tree, and the A/B is one
+    # binary against itself. The same bytes when BASE is not this tree is red.
+    target="$(realpath -m "$out/base-target")"
+    built="$(cd "$src" && CARGO_TARGET_DIR="$target" cargo build --release -p loquax --features screenmap --example map_eye_bench --message-format=json-render-diagnostics | exe)"
+    cp "$built" "$out/base-bench"
+    git worktree remove --force "$src"
+    bench="$(cargo build --release -p loquax --features screenmap --example map_eye_bench --message-format=json-render-diagnostics | exe)"
+    mode=ab
+    if [ "$(git rev-parse "$base^{commit}")" = "$(git rev-parse HEAD)" ] && git diff --quiet HEAD; then mode=aa; fi
+    python3 -I scripts/window-bench-compare.py --check-exes "$mode" "$out/base-bench" "$bench"
+    rm -rf "$out/maps" && mkdir -p "$out/maps"
+    ln -s "$(realpath "{{REGION}}")" "$out/maps/$(basename "{{REGION}}")"
+    status=0
+    "$bench" "$out/maps" --label host --against "$out/base-bench" --write "$out/host.txt" > "$out/host.md" || status=$?
+    cat "$out/host.md"
+    systemd-run --user --scope -q -p CPUQuota=12.5% -p CPUQuotaPeriodSec=1ms taskset -c 0 "$bench" "$out/maps" --label weak --write "$out/weak.txt" > "$out/weak.md"
+    cat "$out/weak.md"
+    exit "$status"
+
+# 1422: rewrite the baseline `map-bench` measures against, after a change
+# whose cost was measured and accepted in its commit message; the commit
+# that writes it is the next runs' BASE.
+[doc('Rewrite the map-bench baseline from a host run (#474)')]
+map-bench-baseline REGION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bench="$(cargo build --release -p loquax --features screenmap --example map_eye_bench --message-format=json-render-diagnostics | python3 -c 'import json,sys
+    for l in sys.stdin:
+        m = json.loads(l)
+        if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "map_eye_bench":
+            print(m["executable"])')"
+    out=target/map-bench
+    rm -rf "$out/maps" && mkdir -p "$out/maps"
+    ln -s "$(realpath "{{REGION}}")" "$out/maps/$(basename "{{REGION}}")"
+    "$bench" "$out/maps" --label host --write loquax/examples/map_eye_bench.baseline
+
+# 1441, #474, #232: the window's frames measured as Lew's window draws them
+# (loquax/src/gui/bench.rs): a map drag, five wheel notches, the chat's
+# wheel, its scrollbar dragged, a mouse drag on its body, a touchpad
+# scroll and the compose field's blink, over 3000 one-line messages
+# (`chat-*`) and over a few hundred long ones shaped like Lew's chats
+# (`real-*`, 1456), each in real time through iced's user interface as
+# its loop runs on X11, the frames presented as the software renderer's
+# compositor presents them (damage, no read back), at 900x560, 1280x1190,
+# 1276x2099, 1527x2099 and 1920x1080, headless, and at both tall sizes
+# again with the frame meter's overlay on (`+fps`). One WINDOW_BENCH line a size and
+# gesture. As map-bench: the bench of BASE (default: the commit that last
+# wrote loquax/tests/window_bench.baseline) built in a worktree under
+# target/ into its own target directory (1470: with one, cargo took BASE's
+# artefacts as fresh for this tree and the A/B compared one binary with
+# itself; the exes' sha256 must now differ), and this tree's, in turn for
+# ROUNDS rounds (at least 3), the medians compared; a frame_ms_mean more
+# than 5 % and 0.1 ms slower fails, a row whose rounds spread more than
+# 5 % on a side is "noise" with no verdict, and a 1-minute load above
+# WINDOW_BENCH_MAX_LOAD (default a fifth of the CPUs, 2.0 here) at any round's start is a
+# SKIP, exit 3 (a gesture of fewer than 30 frames is reported, not held;
+# the chat's drag rows, 0 frames, are left out). `just window-bench HEAD`
+# in a clean tree is the A/A selftest: one binary as both sides, every row
+# held or noise. The steps are scripts/window-bench.sh's, which runs one
+# at a time too. The table lands in target/window-bench/table.md. A
+# measuring tool, never in `guards`: two release builds, about 160 s a
+# round and side.
+[doc('Measure window frames at four sizes, A/B against the baseline (#474)')]
+window-bench BASE="" ROUNDS="3":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'bash scripts/window-bench.sh clean' EXIT
+    bash scripts/window-bench.sh prepare "{{BASE}}"
+    for i in $(seq 1 {{ROUNDS}}); do
+        bash scripts/window-bench.sh round "$i"
+    done
+    bash scripts/window-bench.sh compare
+
+# 1470: the window bench's verdicts (regression, noise, load SKIP, too few
+# rounds, the exes' bytes) on synthetic rounds, each with its positive
+# control. ~0.1 s, no build.
+[doc('Check the window-bench verdict rules on synthetic rounds')]
+window-bench-selftest:
+    @python3 -I scripts/window-bench-compare.py --selftest
+
+# 1441: rewrite the baseline `window-bench` measures against, after a change
+# whose cost was measured and accepted in its commit message; the commit
+# that writes it is the next runs' BASE.
+[doc('Rewrite the window-bench baseline from a host run (#474)')]
+window-bench-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    bench="$(cargo test --release -p loquax --features gui --bins --target "$host" --no-run --message-format=json-render-diagnostics | python3 -c 'import json,sys
+    for l in sys.stdin:
+        m = json.loads(l)
+        if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "loquax" and m["profile"]["test"]:
+            print(m["executable"])')"
+    LOQUAX_WINDOW_BENCH="$(realpath loquax/tests/window_bench.baseline)" "$bench" --exact gui::bench::window_bench --nocapture

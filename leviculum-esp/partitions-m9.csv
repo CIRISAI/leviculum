@@ -1,0 +1,24 @@
+# Partition table for the ThinkNode M9's Loquax image (1414).
+#
+# The M9 keeps two records across resets: the node's identity, so the
+# destination a home and the mesh learned is the same one after a power
+# cycle, and the Loquax client record (`loquax::home::record`), which makes
+# the board a device of its home. Under espflash's default table the
+# application partition covers all of the 16 MiB flash up to 0xFB0000, so a
+# store needs an entry of its own here; the firmware finds both by label
+# (`src/flash.rs`) and runs without persistence on a board flashed with any
+# other table, saying `none/no-entry`.
+#
+# nvs and phy_init stay where the default table puts them (nothing here
+# reads either). The application gets 8 MiB: the image is 1.3 MB today and
+# carries its map regions in place, which is what grows. Each store is one
+# 4 KiB sector, the part's erase unit, so a save erases nothing else. The
+# rest of the flash, from 0x812000, is unallocated for the stores that come
+# next (the message store).
+#
+# Name,         Type, SubType,   Offset,   Size,     Flags
+nvs,            data, nvs,       0x9000,   0x6000,
+phy_init,       data, phy,       0xf000,   0x1000,
+factory,        app,  factory,   0x10000,  0x800000,
+identity,       data, undefined, 0x810000, 0x1000,
+loquax_client,  data, undefined, 0x811000, 0x1000,

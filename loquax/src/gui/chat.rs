@@ -81,6 +81,17 @@ pub fn palette(t: Colours) -> Palette {
 }
 
 /// A delivery mark as the shared glyph icon.
+/// A line of the chat's text, in pixels: a wheel's notch scrolls three
+/// (1431).
+pub const LINE: f32 = size::BODY * 1.3;
+
+/// A list whose wheel scrolls softly (1431): a notch three lines eased
+/// over the frames that follow, a touchpad's pixels as they come
+/// ([`leviculum_ui_iced::smooth`]).
+pub fn soft<'a>(list: iced::widget::Scrollable<'a, Message>) -> Element<'a, Message> {
+    leviculum_ui_iced::smooth::smooth(list, LINE).into()
+}
+
 fn mark_icon(mark: Mark) -> Icon {
     Icon::Glyph {
         shape: mark.shape(),
@@ -104,6 +115,11 @@ fn avatar_with_dot<'a>(
         false => t.status_down,
     });
     face::with_dot(avatar(a, diameter, t), diameter, ink, colour(t.bar))
+}
+
+/// [`avatar`] for the window's layers: the profile's (1443).
+pub(super) fn avatar_of<'a>(a: &scene::Avatar, diameter: f32, t: Colours) -> Element<'a, Message> {
+    avatar(a, diameter, t)
 }
 
 /// A scene's avatar: a circle of `diameter` with its initials in its
@@ -217,7 +233,15 @@ impl App {
     fn top_bar<'a>(&'a self, t: Colours) -> Element<'a, Message> {
         let top = &self.scene.top;
         let lead = match &top.lead {
-            Lead::Me { avatar, link } => Some(avatar_with_dot(avatar, size::BAR_AVATAR, *link, t)),
+            // A click on the reader's avatar raises what the scene says
+            // it does: the profile (1443), as a tap does on the phone.
+            Lead::Me { avatar, link, open } => {
+                let face = avatar_with_dot(avatar, size::BAR_AVATAR, *link, t);
+                Some(match open {
+                    Some(open) => flat(face, Message::Intent(open.intent.clone())).into(),
+                    None => face,
+                })
+            }
             Lead::Back { .. } => None,
         };
         let mut actions = Vec::new();
@@ -361,7 +385,11 @@ impl App {
                 self.maps_rows(t),
                 container(
                     column![
-                        link(self.word(StrId::MyCode), Message::Intent(Intent::MyCode), t),
+                        link(
+                            self.word(StrId::ProfileTitle),
+                            Message::Intent(Intent::Profile),
+                            t
+                        ),
                         link(self.word(StrId::Help), Message::Intent(Intent::Help), t),
                     ]
                     .spacing(4)
@@ -517,7 +545,7 @@ impl App {
             )
             .padding(16)
             .into(),
-            false => scrollable(rows).height(Length::Fill).into(),
+            false => soft(scrollable(rows).height(Length::Fill)),
         };
         container(pane.push(body))
             .width(self.list_width())
@@ -633,7 +661,7 @@ impl App {
                     GroupStep::Name => line.into(),
                 });
             }
-            pane = pane.push(scrollable(rows).height(Length::Fill));
+            pane = pane.push(soft(scrollable(rows).height(Length::Fill)));
             let go = match new.step {
                 GroupStep::Pick => &new.next,
                 GroupStep::Name => &new.create,
@@ -680,7 +708,7 @@ impl App {
                 }
                 rows = rows.push(line);
             }
-            pane = pane.push(scrollable(rows).height(Length::Fill));
+            pane = pane.push(soft(scrollable(rows).height(Length::Fill)));
             if let Some(ask) = &sheet.ask {
                 pane = pane.push(text(ask.words.resolve(self.lang)).size(15).color(ink));
                 pane = pane.push(row![
@@ -845,16 +873,17 @@ impl App {
             list = self.group(list, open, group, width, t);
         }
         list = list.push(Space::new().height(size::GAP));
-        scrollable(list)
-            .anchor_bottom()
-            .height(Length::Fill)
-            .width(Length::Fill)
-            .style(move |theme: &Theme, status| {
-                let mut s = scrollable::default(theme, status);
-                s.container.background = Some(Background::Color(colour(t.background)));
-                s
-            })
-            .into()
+        soft(
+            scrollable(list)
+                .anchor_bottom()
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .style(move |theme: &Theme, status| {
+                    let mut s = scrollable::default(theme, status);
+                    s.container.background = Some(Background::Color(colour(t.background)));
+                    s
+                }),
+        )
     }
 
     fn group<'a>(

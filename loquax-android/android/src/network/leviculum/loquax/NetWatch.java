@@ -106,9 +106,20 @@ final class NetWatch extends ConnectivityManager.NetworkCallback {
 
     private void say(String kind, boolean changed) {
         Log.i(PhotoView.TAG, "network " + kind + (changed ? " changed" : ""));
-        String error = Core.network(kind, changed);
-        if (error != null) {
-            Log.i(PhotoView.TAG, "network: " + error);
-        }
+        // Through the engine's thread (1446), in order with the screens'
+        // commands, whichever thread the platform calls back on.
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.network(kind, changed);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (error != null) {
+                    Log.i(PhotoView.TAG, "network: " + error);
+                }
+            }
+        });
     }
 }

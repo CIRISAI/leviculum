@@ -45,7 +45,7 @@ Automatic today:
   the binary, then `/usr/share/lnflash` (`locate`,
   `lnflash/src/manifest.rs:1018`).
 - **The self check**: `--check-bundle` verifies the manifest and every
-  payload checksum (`verify_all`, `lnflash/src/main.rs:1043`).
+  payload checksum (`verify_all`, `lnflash/src/main.rs:1069`).
 - **Entry** by the 1200-baud touch, then waiting for the bootloader
   (`enter_bootloader`, `lnflash/src/flow.rs:3989`).
 - **Identity from the bootloader**, never from the running firmware
@@ -91,8 +91,8 @@ Where it stops, nothing written:
   `lnflash/src/flow.rs:2871`), or a remedy that did not take
   (`RemedyDidNotTake`, `lnflash/src/flow.rs:658`).
 - Not root: said in the first lines (`is_root`,
-  `lnflash/src/main.rs:1050`), the run identifies and then cannot write.
-- An empty bus fails a real run (`lnflash/src/main.rs:1077`).
+  `lnflash/src/main.rs:1076`), the run identifies and then cannot write.
+- An empty bus fails a real run (`lnflash/src/main.rs:1103`).
 
 No estimate yet:
 

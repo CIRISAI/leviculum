@@ -109,3 +109,52 @@ pixel for pixel.
 screens without the picture, drawn by
 `tui::tests::the_browse_tab_is_lnomads_terminal_screen`. Compared as
 text; one that moved is left in the temp dir likewise.
+
+`gui-tracks-hiking.png`, `gui-tracks-park.png`, `gui-tracks-park-dark.png`,
+`gui-tracks-convoy.png`, `gui-tracks-week-old.png`,
+`gui-tracks-outlier.png`, `gui-tracks-handbag.png`: the six track scenes
+of `loquax::ui::tracks::scenes` (1385, `docs/src/concepts/loquax-tracks.md`)
+through the window's own frames over the Florence fixture, 480 x 320,
+`Style::SCREEN`, the pins drawn in, drawn by
+`gui::map::tests::the_track_scenes_are_the_goldens`. Most of each scene
+lies outside the fixture's box, so the ground there is the outline's
+plain land: the tracks are what the pictures pin. OpenStreetMap data as
+above where the box shows.
+
+`tracks-hiking.txt` and the five like it: the same scenes in the
+terminal's braille cells, 72 x 22, the tracks and the pins as the text
+frame draws them, drawn by
+`ui::tracks::scenes::tests::the_track_scenes_in_cells_are_the_goldens`;
+`LOQUAX_WRITE_GOLDEN=1` writes them anew.
+
+`gui-tracks-radar.png`, `gui-tracks-way-back.png`, `gui-tracks-late.png`,
+`gui-tracks-battery.png`, `gui-tracks-fit-all.png`, and
+`tracks-radar.txt` and the four like it: 1386's five scenes
+(`loquax::ui::tracks::scenes::marks`) in the window's pixels over the
+Florence fixture, drawn by `gui::map::tests::the_marks_scenes_are_the_goldens`,
+and in cells, drawn by
+`ui::tracks::scenes::tests::the_marks_scenes_in_cells_are_the_goldens`.
+The radar scene lies on the Seceda ridge, where no region is, so its
+ground is the radar's blank one with its rings.
+
+`gui-map-window.png`, `gui-map-window-menu.png`, `gui-map-window-week.png`:
+the window's map screen (1419) beside the rail, 900 x 560, light, the
+chat fixture's model with no map frame drawn: the bar with no time strip
+and the title "Map"; the map's menu open over the map's corner, "Time
+window" with the six windows, the current movement marked, and "Fit all";
+the bar's title "Map · This week" once that window is chosen. Drawn by
+`gui::tests::the_time_window_is_in_the_maps_menu`.
+
+`scene-group-ticks.json`, `tui-group-ticks.txt`, `gui-group-ticks.png`:
+the group's ticks tell the truth too (1466). "Familie" with Anna and Ben
+and two lines of ours, from one fixture (`tests/support/group_ticks.rs`,
+included by every target): "Brot ist da", which every member's device
+said it has (two ticks, `delivered`, "On the devices"), and "Wer kommt
+mit?", every copy proven but Ben's device silent (one tick, `arrived`).
+Drawn by `scene_golden::a_groups_one_and_two_ticks_are_the_golden_scene`
+(the Compact scene, as JSON),
+`tui::tests::a_groups_one_and_two_ticks_are_the_terminals_golden` (80 x 24,
+as text) and `gui::tests::a_groups_one_and_two_ticks_are_the_windows_golden`
+(900 x 560, light, pixel for pixel). The M9's frame of the same scene is
+`loquax-m9/tests/golden/m9-group-ticks.png`, the phone's rows and Info
+`loquax-android/tests/golden/group-ticks.json`.

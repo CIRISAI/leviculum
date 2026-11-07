@@ -18,6 +18,8 @@
 //!   lines alone, at the line widths of the view's zoom.
 //! - [`outline`]: the world outline, Natural Earth 1:50m land, where no
 //!   region covers the view.
+//! - [`ladder`]: the frame budget, which passes a moving frame runs and
+//!   how a view at rest grows back to the full picture.
 //! - [`cells`]: a view as terminal cells, the text techniques of the
 //!   terminal map, for every terminal frontend.
 //! - [`choice`]: which installed region a view draws, and the zooms a
@@ -38,6 +40,7 @@ pub mod cells;
 pub mod choice;
 pub mod draw;
 pub mod labels;
+pub mod ladder;
 pub mod mercator;
 pub mod outline;
 pub mod pins;

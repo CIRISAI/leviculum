@@ -470,6 +470,26 @@ pub fn send_position_share(fd: &Fd, setting: u8) -> io::Result<ControlOutcome> {
     Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
 }
 
+/// Make the board a device of a Loquax home (order 1415,
+/// `TYPE_HOME_CODE`): the admission code as text. The board writes its
+/// pending client record before the ack, so a positive answer means it
+/// joins the home, at once and after any reset.
+pub fn send_home_code(fd: &Fd, code: &str) -> io::Result<ControlOutcome> {
+    let Some(payload) = leviculum_core::envelope::encode_home_code(code) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the code is empty or longer than a home code frame carries",
+        ));
+    };
+    let outcome = transact(
+        fd,
+        &payload,
+        CONTROL_TIMING,
+        command_answer(leviculum_core::envelope::TYPE_HOME_CODE),
+    )?;
+    Ok(outcome.unwrap_or(ControlOutcome::NoAnswer))
+}
+
 /// Replace one of the propagation node's operator lists (audit 2026-10-12
 /// D4, D18, `TYPE_PN_LIST`). Acked only once the board's store holds it;
 /// the role reads its lists at boot, so a positive answer means a reset

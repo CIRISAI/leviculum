@@ -334,6 +334,20 @@ impl Shell {
                     tracing::info!("SYNC reason={reason}");
                     self.fetch_owed = Some(reason);
                 }
+                // The propagation node asked what became of our uploads
+                // (1409), on a link of its own; the answer comes back on
+                // the pump.
+                UiEffect::AskPn { node, ids } => {
+                    let reticulum = self.attached.node();
+                    let done = self.done_tx.clone();
+                    let budget = self.context.timeout;
+                    self.mark_tasks.push(tokio::spawn(async move {
+                        let answer =
+                            loquax::home::client::pn_answer(&reticulum, node, &ids, budget).await;
+                        let _ = done.send(Finished::Event(UiEvent::PnAnswered { node, answer }));
+                    }));
+                }
+                UiEffect::PnLine(line) => tracing::info!("{line}"),
                 UiEffect::Quit => {}
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
@@ -733,39 +747,54 @@ impl Shell {
         }
     }
 
-    /// Everything that arrived since the last call, without waiting.
-    pub(crate) fn poll(&mut self) {
-        match self.fanout.pump(&mut self.attached.outbox) {
-            Ok(events) => {
-                for event in events {
-                    let named = match &event {
-                        OutboxEvent::Announced {
-                            destination,
-                            name: Some(_),
-                            ..
-                        } => Some(*destination),
-                        _ => None,
-                    };
-                    if runner::already_held(&self.store, &event) {
-                        continue;
-                    }
-                    runner::keep_signature(&mut self.store, &event);
-                    self.apply(UiEvent::Engine(event));
-                    if let Some(destination) = named {
-                        runner::keep_name(
-                            &mut self.store,
-                            &self.model.names,
-                            self.model.address,
-                            destination,
-                        );
-                    }
-                }
+    /// Fold the engine's events the fan-out took into the screen and the
+    /// store.
+    fn fold(&mut self, events: Vec<OutboxEvent>) {
+        for event in events {
+            let named = match &event {
+                OutboxEvent::Announced {
+                    destination,
+                    name: Some(_),
+                    ..
+                } => Some(*destination),
+                _ => None,
+            };
+            if runner::already_held(&self.store, &event) {
+                continue;
             }
-            Err(gone) => {
-                if !self.gone {
-                    self.gone = true;
-                    self.apply(UiEvent::Notice(gone.to_string()));
-                    self.afterwards.push(gone.to_string());
+            runner::keep_signature(&mut self.store, &event);
+            self.apply(UiEvent::Engine(event));
+            if let Some(destination) = named {
+                runner::keep_name(
+                    &mut self.store,
+                    &self.model.names,
+                    self.model.address,
+                    destination,
+                );
+            }
+        }
+    }
+
+    /// What arrived since the last call, without waiting: a slice of it
+    /// (1464, [`loquax::fanout::SLICE`]), the rest at the next pump. Each
+    /// event folded is a store commit, and a first pull of a big mailbox
+    /// queues thousands: drained in one call, as before 1464, the shell
+    /// handled none of the window's or the terminal's input and sent them
+    /// no new state until all of it was folded, 12.8 s on the host for
+    /// 4000 entries, the phone's measure (1446).
+    pub(crate) fn poll(&mut self) {
+        let mut slicing = loquax::fanout::Slicing::new(loquax::fanout::SLICE);
+        loop {
+            match slicing.next(&mut self.fanout, &mut self.attached.outbox, false) {
+                Ok(Some(events)) => self.fold(events),
+                Ok(None) => break,
+                Err(gone) => {
+                    if !self.gone {
+                        self.gone = true;
+                        self.apply(UiEvent::Notice(gone.to_string()));
+                        self.afterwards.push(gone.to_string());
+                    }
+                    break;
                 }
             }
         }
@@ -1053,6 +1082,10 @@ impl Shell {
         // poll that handed the runner its fence; only now may the cursor
         // pass it.
         runner::settle_pull(&self.context.home, end.cursor);
+        // Once a pull settled, what arrives is live mail (1429).
+        if end.cursor.is_some() {
+            self.model.history = false;
+        }
         if end.imported > 0 {
             self.show_imported(end.imported);
         }
@@ -1319,16 +1352,39 @@ async fn drain(outbox: &mut Watched, context: RunContext) -> Result<usize, Fetch
     .map(|fetched| fetched.new)
 }
 
-/// Our contact code for `my code`, with its QR where the build draws one
-/// (the terminal's; the window shows the code alone). `None` when the key
-/// makes no address, which `my code` then says.
+/// Our contact code for the profile (1443), with its QR where the build
+/// encodes one: verbatim in byte mode, the code the phone's profile and a
+/// friend's scanner read. `None` when the key makes no address.
 fn own_code(public_key: &[u8; loquax::lxma::KEY_BYTES]) -> Option<loquax::ui::OwnCode> {
     let code = loquax::lxma::encode(public_key).ok()?;
     #[cfg(feature = "qr")]
-    let qr = loquax::home::qr::lines(&code).unwrap_or_default();
+    let qr = loquax::home::qr::verbatim_modules(&code).ok();
     #[cfg(not(feature = "qr"))]
-    let qr = Vec::new();
-    Some(loquax::ui::OwnCode { code, qr })
+    let qr = None;
+    Some(loquax::ui::OwnCode::of(code, qr))
+}
+
+/// What the profile shows of the reader that the model does not know
+/// (1443): the name the announce carries, the mailbox, this device. A
+/// client's mailbox is another device's, reached over this computer's
+/// node; a messenger without one has none.
+fn profile_facts(name: &str, client: bool) -> loquax::ui::profile::ProfileFacts {
+    use loquax::ui::profile::{Device, Mailbox, ProfileFacts};
+    ProfileFacts {
+        name: name.to_string(),
+        mailbox: match client {
+            true => Mailbox::Away {
+                host: None,
+                rung: None,
+                word: None,
+            },
+            false => Mailbox::Unknown,
+        },
+        devices: vec![Device {
+            name: String::new(),
+            this: true,
+        }],
+    }
 }
 
 /// Everything before the first frame: the log, the identity, the history
@@ -1394,6 +1450,8 @@ pub(crate) async fn start(
                 store.last_key()?,
                 store.positions()?,
                 store.unverified()?,
+                store.fixes_between(None, i64::MIN, i64::MAX)?,
+                store.pn_asks()?,
             ))
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
@@ -1456,9 +1514,13 @@ pub(crate) async fn start(
         loquax::names::load_contacts(&home).map_err(|error| crate::usage(error.to_string()))?;
     let mut model = Model::new(&options.to);
     model.home_client = client.is_some();
+    // A client that never settled a pull is about to be handed the home's
+    // history (1429): none of it is read by arriving.
+    model.history = model.home_client && loquax::home::client::history_owed(&home);
     model.own_code = own_code(&own_key);
+    model.profile = profile_facts(&display_name.name, model.home_client);
     model.names = loquax::names::Names::new(contacts);
-    let (restored, names, last_key, positions, unverified) = history;
+    let (restored, names, last_key, positions, unverified, track_fixes, pn_asks) = history;
     // The messages an earlier run kept unverified: the engine checks each
     // once its sender's key is known, and asks for it until then.
     for (message_id, source, packed) in unverified {
@@ -1485,7 +1547,10 @@ pub(crate) async fn start(
     };
     update(&mut model, UiEvent::Clock(start));
     model.restore(restored);
+    // What the propagation node is still to be asked about (1409).
+    model.pn_asker = loquax::pn_status::Asker::restore(pn_asks);
     model.restore_positions(positions);
+    model.restore_tracks(track_fixes);
     model.activity = model.activity.max(last_key);
     model.ascii = options.ascii;
     model.mouse = !options.no_mouse;

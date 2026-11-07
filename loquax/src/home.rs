@@ -9,6 +9,9 @@
 //! - [`code`]: the admission code `loquax mailbox admit` prints.
 //! - [`ask`]: a client's ask without the waiting, the path ladder and the
 //!   join's steps, which `client` and the M9 drive alike.
+//! - [`board`]: the M9's executor of an ask over a core node, the session
+//!   that backs off between asks, and the pull batch.
+//! - [`record`]: what makes a board a client, one record in flash.
 //! - `admit`: opening one, on a computer's mailbox and a phone's alike.
 //! - [`wire`]: the five requests, `/join`, `/sync`, `/send`, `/mark` and
 //!   `/watch`, their answers, and the wake.
@@ -33,9 +36,11 @@ use leviculum_core::{Destination, DestinationType, Direction, Identity};
 pub mod admit;
 pub mod ask;
 pub mod backup;
+pub mod board;
 pub mod code;
 pub mod keepalive;
 pub mod outgoing;
+pub mod record;
 pub mod relation;
 pub mod wake;
 pub mod wire;
@@ -120,6 +125,15 @@ impl NetworkKind {
 pub const APP_NAME: &str = "loquax";
 /// See [`APP_NAME`].
 pub const ASPECT: &str = "home";
+
+/// Whether the home compresses an answer that travels as a resource.
+/// Never: a board client (the M9, an LNode) links no bz2 decompressor and
+/// refuses a compressed resource with an RCL the moment it is advertised,
+/// so a page past one packet never reached it (1459, the M9 on the bench
+/// of 2026-11-06: 17 asks, 17 advertisements, 17 cancels). Every client
+/// takes an uncompressed one. The cost is the serial page's airtime at
+/// most: a radio page is one packet and never a resource.
+pub const ANSWERS_COMPRESSED: bool = false;
 
 /// The admission request: token and device name in, a status out.
 pub const JOIN_PATH: &str = "/join";
@@ -232,6 +246,15 @@ pub const KIND_STALLED: u8 = 11;
 /// its copies. The owner's devices get the owner's own copy as a received
 /// message, so a client skips this kind.
 pub const KIND_GROUP: u8 = 12;
+/// What a propagation node answered about messages this home sent through
+/// it (1409, `docs/src/concepts/loquax-propagation-receipts.md` section
+/// B): the home asked `/lev/status` and keeps the node's word per message
+/// as a map of message id to word ([`wire::pn_status_entry`]). Every client
+/// folds it into its marks as a device that asked itself does. Like a seen
+/// mark it carries only what moved: `collected`, `delivered`, `expired`
+/// and `evicted`. A client from before it skips it as a kind it cannot
+/// show.
+pub const KIND_PN_STATUS: u8 = 13;
 
 /// The word `loquax mailbox archive` prints for an entry kind (1305); a
 /// kind this program does not know is its number.
@@ -250,6 +273,7 @@ pub fn kind_word(kind: u8) -> alloc::borrow::Cow<'static, str> {
         KIND_PEERSTATE => "peerstate",
         KIND_STALLED => "stalled",
         KIND_GROUP => "group",
+        KIND_PN_STATUS => "pn-status",
         other => return alloc::borrow::Cow::Owned(alloc::format!("{other}")),
     })
 }

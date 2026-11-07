@@ -1,526 +1,364 @@
-//! The M9's keyboard: scan frames to the key events the key table reads
-//! (`handheld-messenger.md`, "The input model"; slice three, 1359).
+//! The M9's keyboard: the controller's key codes to the key events the key
+//! table reads (`handheld-messenger.md`, "The input model"; slice three,
+//! 1359, rebuilt on the measured protocol in 1427).
 //!
-//! What the board's pages say, and only that: 37 keys plus navigation and
-//! function keys behind a controller on its own I2C bus, which ACKs at
-//! 0x6D on our V1.1 unit (`thinknode-m9.md`, "Two hardware revisions"),
-//! reading a 5 x 10 matrix (the wiki, "Keyboard"). Its INT line is a 15 ms
-//! pulse that does not come for every key, so the firmware polls while the
-//! panel is lit (`thinknode-m9.md`, "The keypad"). The controller's
-//! register map, which position is which key, and whether it repeats or
-//! knows a layer itself are unread: the board answers them in slice four,
-//! and nothing here takes them from a foreign header.
+//! What the board has shown (Lew at the device, 2026-11-04 21:03 CET, 13,838
+//! reads of register 0x01 of 0x6D, eight bytes each; `thinknode-m9.md`,
+//! "The keyboard controller, measured"): the controller does not answer
+//! with a matrix. An idle read is all zeros; a key press makes exactly one
+//! read non-zero, and that read carries one code in all eight bytes. The
+//! codes are ASCII for the characters (`0x61`..`0x7a` a to z, `0x20` the
+//! space, `0x30` zero, `0x24` `$`, `0x26` `&`), `0x0d` Enter and `0x08`
+//! Backspace, and `0x81`..`0x86`, `0x90` and `0xb4`..`0xb7` for keys that
+//! are no character. No read in the capture carries a key-up or a state
+//! byte, and the symbols arrive as their own codes: the controller resolves
+//! its layers itself and reports presses, nothing else.
 //!
-//! So the driver starts at a [`Scan`]: which of the 50 matrix positions
-//! read pressed in one poll. Everything after it is the board's own and
-//! testable on the host:
+//! So the driver keeps no state: one non-zero read is one press, its code
+//! is a [`Key`], and a key with a name is the [`KeyEvent`] the shared
+//! resolver reads ([`crate::keys::event`]). Repeat is the controller's: a
+//! code read again is a press again; the driver adds none, because no read
+//! says a key is still down.
 //!
-//! - **Debounce.** A position changes state only after [`DEBOUNCE_POLLS`]
-//!   polls in a row read it the same way, each position on its own, so a
-//!   second key pressed while the first is still down is seen (rollover).
-//! - **Layers.** A [`Cap`] carries a key's plain, shifted and symbol
-//!   character. Shift and Sym held with a key apply to it; tapped alone
-//!   (pressed and released with no key between) they apply to the next key
-//!   only, which is how a thumb keyboard is typed with one thumb.
-//! - **Repeat.** A character, Backspace or an arrow held past
-//!   [`REPEAT_DELAY_MS`] repeats every [`REPEAT_EVERY_MS`]; Enter and Back
-//!   never do, a held Enter sends once.
-//!
-//! Which cell of the matrix is which cap is a [`Layout`]. The board's is
-//! read in slice four with [`parse_recording`]'s line format: the firmware
-//! prints one line per poll over the debug CDC, a person presses each key
-//! once, and the lines become the table and the first recorded fixture.
+//! The keys that are no character (1440) are the M9's own controls above
+//! the QWERTY block, left to right (Lew's photo of 2026-11-06): a key with
+//! two speech bubbles; a house above a square speech bubble; the ring with
+//! four directions and a centre press; a back arrow above a position pin;
+//! a map key. Each has a [`Role`], the one a WhatsApp and Google Maps user
+//! expects ([`SPECIALS`]). Which code is which key is measured (1459,
+//! the reviewer's walk of 2026-11-06 20:17, pressed in the order
+//! bubbles, house, square bubble, back, pin, map, ring left, up, down,
+//! right, centre): `0x81` the bubbles, `0x82` the house, `0x83` the square
+//! bubble, `0x84` the pin, `0x85` the map, `0x86` the back arrow; the ring
+//! `0xb4` left, `0xb5` up, `0xb6` right, `0xb7` down. The ring's centre
+//! sends `0x0d`, ASCII CR, which is Enter already (21:03:13, `KEY
+//! code=0x0d name=enter`). `0x90`, seen once on 2026-11-04, is no key the
+//! walk pressed and stays unnamed. A code nothing
+//! names is [`Key::Special`], printed `special_0x91`, and makes no event.
 
-use leviculum_ui::input::{KeyEvent, KeyEventKind};
+use alloc::string::String;
+use core::fmt::Write;
 
+use alloc::vec::Vec;
+use leviculum_ui::commands::Command;
+use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+use loquax::ui::{update, UiEffect, UiEvent, UiModel};
+
+use crate::field::Field;
 use crate::keys::{event, M9Key};
 
-/// The matrix's rows, from the wiki's 5 x 10 (`thinknode-m9.md`, "Keyboard").
-pub const ROWS: usize = 5;
-/// The matrix's columns.
-pub const COLUMNS: usize = 10;
-/// The matrix's positions.
-pub const POSITIONS: usize = ROWS * COLUMNS;
-/// The bytes of one scan frame: 50 bits, the last six always clear.
-pub const FRAME_BYTES: usize = 7;
-
-/// How often the firmware polls while the panel is lit. Below the 15 ms
-/// INT pulse the community port measured, so a press that raises INT is
-/// read before INT falls; the controller's own scan rate is unread, and
-/// slice four measures whether the polls see every press at this rate.
+/// How often the firmware polls while the panel is lit: below the 15 ms
+/// INT pulse the community port measured. At this rate the capture saw
+/// every press as one non-zero read, the fastest two 10 ms apart
+/// (`0x65` then `0x83` at 9,308,471 and 9,308,481 ms).
 pub const POLL_MS: u32 = 10;
-/// How many polls in a row must read a position the same way before it
-/// changes state: 20 ms at [`POLL_MS`], under the 30 to 50 ms a person
-/// needs between two presses of one key.
-pub const DEBOUNCE_POLLS: u8 = 2;
-/// How long a key is held before it repeats.
-pub const REPEAT_DELAY_MS: u32 = 500;
-/// How often a held key repeats after that.
-pub const REPEAT_EVERY_MS: u32 = 80;
 
-/// Which positions read pressed in one poll: bit `row * COLUMNS + column`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Scan(u64);
-
-impl Scan {
-    /// No key down.
-    pub const NONE: Self = Self(0);
-
-    /// The scan with these `(row, column)` positions down; one outside the
-    /// matrix is dropped.
-    pub fn of(down: &[(usize, usize)]) -> Self {
-        Self(
-            down.iter()
-                .filter(|(row, column)| *row < ROWS && *column < COLUMNS)
-                .fold(0, |bits, (row, column)| {
-                    bits | 1 << (row * COLUMNS + column)
-                }),
-        )
-    }
-
-    /// A frame's bytes as a scan: bit `i` is bit `i % 8` of byte `i / 8`,
-    /// least significant first. The six bits past the matrix are dropped.
-    pub fn from_frame(frame: &[u8; FRAME_BYTES]) -> Self {
-        let bits = frame
-            .iter()
-            .enumerate()
-            .fold(0u64, |bits, (i, byte)| bits | u64::from(*byte) << (8 * i));
-        Self(bits & ((1 << POSITIONS) - 1))
-    }
-
-    /// The scan as a frame, [`Scan::from_frame`] read back.
-    pub fn frame(self) -> [u8; FRAME_BYTES] {
-        let mut frame = [0u8; FRAME_BYTES];
-        for (i, byte) in frame.iter_mut().enumerate() {
-            *byte = (self.0 >> (8 * i)) as u8;
-        }
-        frame
-    }
-
-    /// Whether `position` reads pressed.
-    pub fn is_down(self, position: usize) -> bool {
-        position < POSITIONS && self.0 & 1 << position != 0
-    }
-}
-
-/// What one matrix position is.
+/// What an M9 control does (1440), by the key's symbol: the roles a
+/// user who knows WhatsApp and Google Maps reads off it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Cap {
-    /// No key sits there.
-    None,
-    /// A character key: plain, with Shift, with Sym.
-    Char {
-        plain: char,
-        shifted: char,
-        sym: char,
-    },
-    /// A key that is not a character: the arrows, Enter, Back, Backspace.
-    Key(M9Key),
-    /// The shift layer.
-    Shift,
-    /// The symbol layer, where the digits and punctuation live.
-    Sym,
+pub enum Role {
+    /// Two speech bubbles: the chats list, from anywhere.
+    Chats,
+    /// The house: the start screen, the mailbox's state in its top bar.
+    /// Until the overview screen exists that is the chats list.
+    Home,
+    /// The square speech bubble: a new message, to the contact under the
+    /// list's cursor, in its compose line.
+    NewMessage,
+    /// The back arrow: back one level.
+    Back,
+    /// The position pin: share my location. Named only until the M9 draws
+    /// the position sheet; it does nothing yet, rather than open a question
+    /// the M9 cannot show.
+    Pin,
+    /// The map key: the map tab.
+    Map,
+    /// The ring: move the selection, switch or page. Its centre sends
+    /// Enter (`0x0d`) and needs no role.
+    RingLeft,
+    RingUp,
+    RingDown,
+    RingRight,
 }
 
-impl Cap {
-    /// A letter: its capital with Shift, `sym` on the symbol layer.
-    pub const fn letter(plain: char, sym: char) -> Self {
-        Self::Char {
-            plain,
-            shifted: plain.to_ascii_uppercase(),
-            sym,
-        }
-    }
-
-    /// Whether a held key of this cap repeats.
-    fn repeats(self) -> bool {
+impl Role {
+    /// The name a `KEY` line gives it.
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Char { .. } => true,
-            Self::Key(key) => matches!(
-                key,
-                M9Key::Up | M9Key::Down | M9Key::Left | M9Key::Right | M9Key::Backspace
-            ),
-            Self::None | Self::Shift | Self::Sym => false,
+            Self::Chats => "chats",
+            Self::Home => "home",
+            Self::NewMessage => "new_message",
+            Self::Back => "back",
+            Self::Pin => "pin",
+            Self::Map => "map",
+            Self::RingLeft => "ring_left",
+            Self::RingUp => "ring_up",
+            Self::RingDown => "ring_down",
+            Self::RingRight => "ring_right",
+        }
+    }
+
+    /// The key it is to the shared key table, when it is one: the ring's
+    /// arrows and Back.
+    pub fn key(self) -> Option<M9Key> {
+        Some(match self {
+            Self::Back => M9Key::Back,
+            Self::RingLeft => M9Key::Left,
+            Self::RingUp => M9Key::Up,
+            Self::RingDown => M9Key::Down,
+            Self::RingRight => M9Key::Right,
+            Self::Chats | Self::Home | Self::NewMessage | Self::Pin | Self::Map => return None,
+        })
+    }
+
+    /// The command it runs, as a GUI's menu runs one, when it is no key:
+    /// the terminal's palette verbs for the same roles.
+    pub fn command(self) -> Option<Command> {
+        match self {
+            Self::Chats | Self::Home => Some(Command::FocusConversations),
+            Self::NewMessage => Some(Command::FocusCompose),
+            Self::Map => Some(Command::Map),
+            _ => None,
         }
     }
 }
 
-/// Which cap sits at which position, row by row.
+/// The codes that are no character, and their roles, as the reviewer's
+/// walk of 2026-11-06 measured them (module docs).
+pub const SPECIALS: [(u8, Role); 10] = [
+    (0x81, Role::Chats),
+    (0x82, Role::Home),
+    (0x83, Role::NewMessage),
+    (0x84, Role::Pin),
+    (0x85, Role::Map),
+    (0x86, Role::Back),
+    (0xb4, Role::RingLeft),
+    (0xb5, Role::RingUp),
+    (0xb6, Role::RingRight),
+    (0xb7, Role::RingDown),
+];
+
+/// What one code is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Layout(pub [[Cap; COLUMNS]; ROWS]);
-
-impl Layout {
-    fn cap(&self, position: usize) -> Cap {
-        self.0[position / COLUMNS][position % COLUMNS]
-    }
+pub enum Key {
+    /// A key the M9 screens know.
+    Named(M9Key),
+    /// One of the M9's own controls.
+    Role(Role),
+    /// A code the controller sends that nothing names yet.
+    Special(u8),
 }
 
-/// A layer a tap set for the next key, or held now.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Layers {
-    shift: bool,
-    sym: bool,
-}
-
-/// The driver: one per keyboard, fed one [`Scan`] per poll.
-#[derive(Clone, Debug)]
-pub struct Keyboard<'a> {
-    layout: &'a Layout,
-    debounce: u8,
-    /// The debounced state.
-    stable: Scan,
-    /// Per position, how many polls in a row read it unlike `stable`.
-    against: [u8; POSITIONS],
-    /// The layers a tap left for the next key.
-    latched: Layers,
-    /// A layer key is down and no other key has gone down since it did:
-    /// its release is a tap.
-    tapping: bool,
-    /// The repeating key: its position, the event it repeats, and when
-    /// the next repeat is due.
-    held: Option<(usize, KeyEvent, u32)>,
-}
-
-impl<'a> Keyboard<'a> {
-    /// A driver over `layout`, debouncing over [`DEBOUNCE_POLLS`].
-    pub fn new(layout: &'a Layout) -> Self {
-        Self::with_debounce(layout, DEBOUNCE_POLLS)
+impl Key {
+    /// The key `code` is: printable ASCII a character, `0x0d` Enter,
+    /// `0x08` Backspace, a code of [`SPECIALS`] its role, any other
+    /// [`Key::Special`]. Zero is no key (an idle read).
+    pub fn of(code: u8) -> Option<Self> {
+        Self::of_in(code, &SPECIALS)
     }
 
-    /// A driver that changes a position's state after `polls` alike polls
-    /// (at least one).
-    pub fn with_debounce(layout: &'a Layout, polls: u8) -> Self {
-        Self {
-            layout,
-            debounce: polls.max(1),
-            stable: Scan::NONE,
-            against: [0; POSITIONS],
-            latched: Layers::default(),
-            tapping: false,
-            held: None,
+    fn of_in(code: u8, named: &[(u8, Role)]) -> Option<Self> {
+        Some(match code {
+            0x00 => return None,
+            0x08 => Self::Named(M9Key::Backspace),
+            0x0d => Self::Named(M9Key::Enter),
+            0x20..=0x7e => Self::Named(M9Key::Char(char::from(code))),
+            _ => match named.iter().find(|(c, _)| *c == code) {
+                Some((_, role)) => Self::Role(*role),
+                None => Self::Special(code),
+            },
+        })
+    }
+
+    /// The key event the M9 screens read: a key's, a role's that is a key
+    /// ([`Role::key`]); none for a role that runs a command, nor for a
+    /// code not named yet.
+    pub fn event(self) -> Option<KeyEvent> {
+        match self {
+            Self::Named(key) => Some(event(key)),
+            Self::Role(role) => role.key().map(event),
+            Self::Special(_) => None,
         }
     }
 
-    /// One poll at `now_ms` (any monotonic millisecond clock, wrapping)
-    /// that read `scan`: each key event it makes goes to `emit`, in the
-    /// order the positions settled.
-    pub fn poll(&mut self, now_ms: u32, scan: Scan, emit: &mut dyn FnMut(KeyEvent)) {
-        for position in 0..POSITIONS {
-            if scan.is_down(position) == self.stable.is_down(position) {
-                self.against[position] = 0;
-                continue;
-            }
-            self.against[position] = self.against[position].saturating_add(1);
-            if self.against[position] < self.debounce {
-                continue;
-            }
-            self.against[position] = 0;
-            self.stable.0 ^= 1 << position;
-            match self.stable.is_down(position) {
-                true => self.pressed(position, now_ms, emit),
-                false => self.released(position),
-            }
-        }
-        if let Some((position, key, due)) = self.held {
-            if now_ms.wrapping_sub(due) < u32::MAX / 2 {
-                emit(KeyEvent {
-                    kind: KeyEventKind::Repeat,
-                    ..key
-                });
-                self.held = Some((position, key, due.wrapping_add(REPEAT_EVERY_MS)));
-            }
+    /// The command a role runs ([`Role::command`]), handed to [`run`].
+    pub fn command(self) -> Option<Command> {
+        match self {
+            Self::Role(role) => role.command(),
+            _ => None,
         }
     }
 
-    fn pressed(&mut self, position: usize, now_ms: u32, emit: &mut dyn FnMut(KeyEvent)) {
-        let cap = self.layout.cap(position);
-        let key = match cap {
-            Cap::None => return,
-            Cap::Shift | Cap::Sym => {
-                self.tapping = true;
-                return;
-            }
-            Cap::Key(key) => key,
-            Cap::Char {
-                plain,
-                shifted,
-                sym,
-            } => {
-                let layers = self.layers();
-                M9Key::Char(match (layers.sym, layers.shift) {
-                    (true, _) => sym,
-                    (false, true) => shifted,
-                    (false, false) => plain,
-                })
-            }
+    /// The key's name in a `KEY` line: the character itself, `space`,
+    /// `enter`, `backspace`, the navigation keys by name, `special_0x86`.
+    pub fn name(self) -> String {
+        let mut out = String::new();
+        let _ = match self {
+            Self::Named(M9Key::Char(' ')) => write!(out, "space"),
+            Self::Named(M9Key::Char(c)) => write!(out, "{c}"),
+            Self::Named(M9Key::Enter) => write!(out, "enter"),
+            Self::Named(M9Key::Backspace) => write!(out, "backspace"),
+            Self::Named(M9Key::Back) => write!(out, "back"),
+            Self::Named(M9Key::Up) => write!(out, "up"),
+            Self::Named(M9Key::Down) => write!(out, "down"),
+            Self::Named(M9Key::Left) => write!(out, "left"),
+            Self::Named(M9Key::Right) => write!(out, "right"),
+            Self::Role(role) => write!(out, "{}", role.name()),
+            Self::Special(code) => write!(out, "special_{code:#04x}"),
         };
-        self.tapping = false;
-        self.latched = Layers::default();
-        let key = event(key);
-        emit(key);
-        self.held = cap
-            .repeats()
-            .then(|| (position, key, now_ms.wrapping_add(REPEAT_DELAY_MS)));
-    }
-
-    fn released(&mut self, position: usize) {
-        if self.held.is_some_and(|(held, _, _)| held == position) {
-            self.held = None;
-        }
-        let cap = self.layout.cap(position);
-        if !matches!(cap, Cap::Shift | Cap::Sym) || !self.tapping {
-            return;
-        }
-        self.tapping = false;
-        match cap {
-            Cap::Shift => self.latched.shift = !self.latched.shift,
-            _ => self.latched.sym = !self.latched.sym,
-        }
-    }
-
-    /// The layers in force: a layer key held, or one a tap latched.
-    fn layers(&self) -> Layers {
-        let mut layers = self.latched;
-        for position in 0..POSITIONS {
-            if !self.stable.is_down(position) {
-                continue;
-            }
-            match self.layout.cap(position) {
-                Cap::Shift => layers.shift = true,
-                Cap::Sym => layers.sym = true,
-                _ => {}
-            }
-        }
-        layers
+        out
     }
 }
 
-/// Why a recording line did not read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecordingError {
-    /// The line at this number (from one) is not `KB <ms> <14 hex digits>`.
-    Line(usize),
+/// The line the firmware prints for each press, after its `KBRAW` line:
+/// `KEY <ms> code=0x6b name=k`. The walk is read off these lines.
+pub fn key_line(ms: u32, code: u8, key: Key) -> String {
+    let mut out = String::with_capacity(40);
+    let _ = write!(out, "KEY {ms} code={code:#04x} name={}", key.name());
+    out
 }
 
-/// The polls of a recording: one line per poll, `KB <ms> <frame>`, the
-/// frame [`FRAME_BYTES`] bytes as 14 hex digits, byte 0 first. Blank lines
-/// and lines starting with `#` are comments; any other line not starting
-/// with `KB ` is the firmware's other log and is skipped, so a debug CDC
-/// capture reads as it was taken.
-pub fn parse_recording(
-    text: &str,
-) -> impl Iterator<Item = Result<(u32, Scan), RecordingError>> + '_ {
-    text.lines().enumerate().filter_map(|(number, line)| {
-        let line = line.trim();
-        let rest = line.strip_prefix("KB ")?;
-        Some(parse_line(rest).ok_or(RecordingError::Line(number + 1)))
-    })
-}
-
-fn parse_line(rest: &str) -> Option<(u32, Scan)> {
-    let mut words = rest.split_whitespace();
-    let ms = words.next()?.parse().ok()?;
-    let hex = words.next()?;
-    if words.next().is_some() || hex.len() != 2 * FRAME_BYTES {
-        return None;
+/// Run a role's command on `model`, the M9's cursor `row` back at the
+/// top: the chats list closes the map first, so it is reached from
+/// anywhere.
+pub fn run(model: &mut UiModel<Field>, row: &mut usize, command: Command) -> Vec<UiEffect> {
+    let mut effects = Vec::new();
+    if command == Command::FocusConversations && crate::map::shown(model) {
+        let back = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        effects.extend(update(model, UiEvent::Key(back)));
     }
-    let mut frame = [0u8; FRAME_BYTES];
-    for (i, byte) in frame.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
-    }
-    Some((ms, Scan::from_frame(&frame)))
+    effects.extend(update(model, UiEvent::Run(command)));
+    *row = 0;
+    effects
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
-    use leviculum_ui::input::KeyCode;
+    use leviculum_ui::input::{KeyCode, KeyEventKind};
 
-    /// The test layout the board also types with until its own is read
-    /// ([`crate::kbraw::provisional_layout`]).
-    fn layout() -> Layout {
-        crate::kbraw::provisional_layout()
-    }
-
-    const H: (usize, usize) = (1, 5);
-    const I: (usize, usize) = (0, 7);
-    const SHIFT: (usize, usize) = (2, 0);
-    const SYM: (usize, usize) = (2, 9);
-    const ENTER: (usize, usize) = (3, 4);
-    const BACKSPACE: (usize, usize) = (1, 9);
-
-    /// Feed `polls` (each scan held for one poll, [`POLL_MS`] apart) and
-    /// collect the events.
-    fn run(keyboard: &mut Keyboard<'_>, polls: &[Scan]) -> Vec<KeyEvent> {
-        let mut events = Vec::new();
-        for (i, scan) in polls.iter().enumerate() {
-            keyboard.poll(i as u32 * POLL_MS, *scan, &mut |e| events.push(e));
+    #[test]
+    fn the_captured_characters_are_their_ascii() {
+        for (code, want) in [
+            (0x6b, 'k'),
+            (0x61, 'a'),
+            (0x7a, 'z'),
+            (0x20, ' '),
+            (0x30, '0'),
+            (0x24, '$'),
+            (0x26, '&'),
+        ] {
+            assert_eq!(Key::of(code), Some(Key::Named(M9Key::Char(want))));
         }
-        events
+        assert_eq!(Key::of(0x0d), Some(Key::Named(M9Key::Enter)));
+        assert_eq!(Key::of(0x08), Some(Key::Named(M9Key::Backspace)));
+        assert_eq!(Key::of(0x00), None, "an idle read is no key");
     }
 
-    fn chars(events: &[KeyEvent]) -> alloc::string::String {
-        events
+    /// The measured table (1459): every control the walk pressed has its
+    /// role, in the walk's order; the ring's centre is Enter; a code
+    /// nothing names, `0x90` among them, stays a special that makes no
+    /// event.
+    #[test]
+    fn the_specials_have_their_measured_roles() {
+        let walk: Vec<(u8, &str)> = SPECIALS
             .iter()
-            .filter_map(|e| match e.code {
-                KeyCode::Char(c) => Some(c),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn down(keys: &[(usize, usize)]) -> Scan {
-        Scan::of(keys)
-    }
-
-    /// A key down for two polls is one press; a one-poll bounce is none.
-    /// The positive control: with a debounce of one, the bounce is a press.
-    #[test]
-    fn a_press_settles_and_a_bounce_does_not() {
-        let layout = layout();
-        let press = [down(&[H]), down(&[H]), Scan::NONE, Scan::NONE];
-        assert_eq!(chars(&run(&mut Keyboard::new(&layout), &press)), "h");
-        let bounce = [down(&[H]), Scan::NONE, down(&[H]), Scan::NONE, Scan::NONE];
-        assert_eq!(chars(&run(&mut Keyboard::new(&layout), &bounce)), "");
-        let mut eager = Keyboard::with_debounce(&layout, 1);
-        assert_eq!(chars(&run(&mut eager, &bounce)), "hh");
-    }
-
-    /// A second key down while the first is still held is its own press.
-    #[test]
-    fn rollover_sees_the_second_key() {
-        let layout = layout();
-        let polls = [
-            down(&[H]),
-            down(&[H]),
-            down(&[H, I]),
-            down(&[H, I]),
-            down(&[I]),
-            down(&[I]),
-            Scan::NONE,
-            Scan::NONE,
-        ];
-        assert_eq!(chars(&run(&mut Keyboard::new(&layout), &polls)), "hi");
-    }
-
-    /// Shift held with a key shifts it; Shift tapped alone shifts the next
-    /// key only; Sym tapped gives the symbol layer once.
-    #[test]
-    fn shift_held_or_tapped_and_sym_tapped() {
-        let layout = layout();
-        let held = [
-            down(&[SHIFT]),
-            down(&[SHIFT]),
-            down(&[SHIFT, H]),
-            down(&[SHIFT, H]),
-            Scan::NONE,
-            Scan::NONE,
-            down(&[H]),
-            down(&[H]),
-            Scan::NONE,
-            Scan::NONE,
-        ];
-        assert_eq!(chars(&run(&mut Keyboard::new(&layout), &held)), "Hh");
-        let tapped = [
-            down(&[SHIFT]),
-            down(&[SHIFT]),
-            Scan::NONE,
-            Scan::NONE,
-            down(&[H]),
-            down(&[H]),
-            Scan::NONE,
-            Scan::NONE,
-            down(&[I]),
-            down(&[I]),
-            Scan::NONE,
-            Scan::NONE,
-            down(&[SYM]),
-            down(&[SYM]),
-            Scan::NONE,
-            Scan::NONE,
-            down(&[I]),
-            down(&[I]),
-            Scan::NONE,
-            Scan::NONE,
-            down(&[I]),
-            down(&[I]),
-            Scan::NONE,
-            Scan::NONE,
-        ];
-        assert_eq!(chars(&run(&mut Keyboard::new(&layout), &tapped)), "Hi8i");
-    }
-
-    /// Shift held across a key is no tap: its release latches nothing.
-    #[test]
-    fn a_shift_used_as_a_chord_latches_nothing() {
-        let layout = layout();
-        let polls = [
-            down(&[SHIFT]),
-            down(&[SHIFT]),
-            down(&[SHIFT, H]),
-            down(&[SHIFT, H]),
-            down(&[SHIFT]),
-            down(&[SHIFT]),
-            Scan::NONE,
-            Scan::NONE,
-            down(&[I]),
-            down(&[I]),
-            Scan::NONE,
-            Scan::NONE,
-        ];
-        assert_eq!(chars(&run(&mut Keyboard::new(&layout), &polls)), "Hi");
-    }
-
-    /// A held letter repeats after the delay at the interval; a held
-    /// Enter sends once.
-    #[test]
-    fn a_held_letter_repeats_and_enter_does_not() {
-        let layout = layout();
-        let mut keyboard = Keyboard::new(&layout);
-        let mut events = Vec::new();
-        // 1000 ms held: down at 10 ms, repeats due at 510, 590, ..., 990.
-        for i in 0..=100u32 {
-            keyboard.poll(i * POLL_MS, down(&[BACKSPACE]), &mut |e| events.push(e));
+            .map(|(code, role)| (*code, role.name()))
+            .collect();
+        assert_eq!(
+            walk,
+            [
+                (0x81, "chats"),
+                (0x82, "home"),
+                (0x83, "new_message"),
+                (0x84, "pin"),
+                (0x85, "map"),
+                (0x86, "back"),
+                (0xb4, "ring_left"),
+                (0xb5, "ring_up"),
+                (0xb6, "ring_right"),
+                (0xb7, "ring_down"),
+            ]
+        );
+        let code_of = |key: KeyEvent| key.code;
+        let ring = |code: u8| Key::of(code).and_then(Key::event).map(code_of);
+        assert_eq!(ring(0xb4), Some(KeyCode::Left));
+        assert_eq!(ring(0xb5), Some(KeyCode::Up));
+        assert_eq!(ring(0xb6), Some(KeyCode::Right));
+        assert_eq!(ring(0xb7), Some(KeyCode::Down));
+        assert_eq!(ring(0x0d), Some(KeyCode::Enter), "the centre");
+        assert_eq!(ring(0x86), Some(KeyCode::Esc));
+        let command = |code: u8| Key::of(code).and_then(Key::command);
+        assert_eq!(command(0x81), Some(Command::FocusConversations));
+        assert_eq!(command(0x82), Some(Command::FocusConversations));
+        assert_eq!(command(0x83), Some(Command::FocusCompose));
+        assert_eq!(command(0x85), Some(Command::Map));
+        let pin = Key::of(0x84).expect("a key");
+        assert_eq!((pin.event(), pin.command()), (None, None));
+        for code in [0x90, 0x91, 0x80, 0xff] {
+            let key = Key::of(code).expect("a non-zero code is a key");
+            assert_eq!(key, Key::Special(code));
+            assert_eq!((key.event(), key.command()), (None, None));
         }
-        let presses = events
-            .iter()
-            .filter(|e| e.kind == KeyEventKind::Press)
-            .count();
-        let repeats = events
-            .iter()
-            .filter(|e| e.kind == KeyEventKind::Repeat)
-            .count();
-        assert_eq!((presses, repeats), (1, 7));
-        assert!(events.iter().all(|e| e.code == KeyCode::Backspace));
-
-        let mut keyboard = Keyboard::new(&layout);
-        let mut events = Vec::new();
-        for i in 0..=100u32 {
-            keyboard.poll(i * POLL_MS, down(&[ENTER]), &mut |e| events.push(e));
-        }
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].code, KeyCode::Enter);
+        let up = Key::of(0xb5).and_then(Key::event).expect("an event");
+        assert_eq!(up.kind, KeyEventKind::Press);
     }
 
-    /// A frame reads back to the scan it was made of, and the six bits
-    /// past the matrix are dropped.
+    /// Each role moves the M9's screen as its symbol says, on the fixture
+    /// the board opens on: the ring down moves the list's cursor, its
+    /// centre opens the chat, the chats key and the house bring the list
+    /// back from the chat and from the map, the square bubble opens the
+    /// compose line of the contact under the cursor, the map key the map,
+    /// the back arrow leaves the chat.
     #[test]
-    fn a_frame_reads_back_and_drops_the_bits_past_the_matrix() {
-        let scan = down(&[(0, 0), H, (4, 9)]);
-        assert_eq!(Scan::from_frame(&scan.frame()), scan);
-        assert_eq!(scan.frame(), [0x01, 0x80, 0x00, 0x00, 0x00, 0x00, 0x02]);
-        assert_eq!(Scan::from_frame(&[0, 0, 0, 0, 0, 0, 0xfc]), Scan::NONE);
+    fn every_role_moves_the_screen_from_the_list() {
+        use loquax::ui::Pane;
+        let press = |model: &mut UiModel<Field>, row: &mut usize, code: u8| {
+            let key = Key::of(code).expect("a key");
+            if let Some(event) = key.event() {
+                crate::group::press(model, row, &event);
+            }
+            if let Some(command) = key.command() {
+                run(model, row, command);
+            }
+        };
+        let mut row = 0;
+        let mut model = crate::fixture::model();
+        assert_eq!(model.focus, Pane::Conversations);
+        let at = model.selected;
+        press(&mut model, &mut row, 0xb7);
+        assert_ne!(model.selected, at, "ring down moves the list's cursor");
+        press(&mut model, &mut row, 0xb5);
+        assert_eq!(model.selected, at, "ring up moves it back");
+        press(&mut model, &mut row, 0x0d);
+        assert_eq!(model.focus, Pane::Messages, "the centre opens the chat");
+        press(&mut model, &mut row, 0x86);
+        assert_eq!(model.focus, Pane::Conversations, "back leaves it");
+        press(&mut model, &mut row, 0x0d);
+        press(&mut model, &mut row, 0x81);
+        assert_eq!(model.focus, Pane::Conversations, "the bubbles: the list");
+        press(&mut model, &mut row, 0x83);
+        assert_eq!(model.focus, Pane::Compose, "the square bubble: compose");
+        press(&mut model, &mut row, 0x82);
+        assert_eq!(model.focus, Pane::Conversations, "the house: the list");
+        press(&mut model, &mut row, 0x85);
+        assert!(crate::map::shown(&model), "the map key: the map");
+        press(&mut model, &mut row, 0x81);
+        assert!(!crate::map::shown(&model), "the bubbles close the map");
+        assert_eq!(model.focus, Pane::Conversations);
     }
 
-    /// The recording format: comments and the firmware's other lines are
-    /// skipped, a malformed `KB` line is named by its number.
     #[test]
-    fn a_recording_reads_and_names_its_bad_line() {
-        let text = "# test\n[FW_BUILD] x\nKB 10 00800000000000\n\nKB 20 0080000000000\n";
-        let read: Vec<_> = parse_recording(text).collect();
-        assert_eq!(read[0], Ok((10, down(&[H]))));
-        assert_eq!(read[1], Err(RecordingError::Line(5)));
-        assert_eq!(read.len(), 2);
+    fn a_key_line_names_the_code() {
+        let line = |code| key_line(9308251, code, Key::of(code).expect("a key"));
+        assert_eq!(line(0x6b), "KEY 9308251 code=0x6b name=k");
+        assert_eq!(line(0x20), "KEY 9308251 code=0x20 name=space");
+        assert_eq!(line(0x0d), "KEY 9308251 code=0x0d name=enter");
+        assert_eq!(line(0x08), "KEY 9308251 code=0x08 name=backspace");
+        assert_eq!(line(0xb7), "KEY 9308251 code=0xb7 name=ring_down");
+        assert_eq!(line(0xb6), "KEY 9308251 code=0xb6 name=ring_right");
+        assert_eq!(line(0x90), "KEY 9308251 code=0x90 name=special_0x90");
+        assert_eq!(line(0x81), "KEY 9308251 code=0x81 name=chats");
+        assert_eq!(line(0x91), "KEY 9308251 code=0x91 name=special_0x91");
     }
 }

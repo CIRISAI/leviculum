@@ -365,22 +365,38 @@ final class RecordingBar {
     }
 
     /** One input to the library, then its answer. */
-    private void input(String input, long now, int dx, int dy, int rms) {
-        String error = Core.record(host.peer(), input, now, dx, dy, rms);
-        if (error != null) {
-            host.line(error);
-        }
-        answer();
+    private void input(final String input, final long now, final int dx, final int dy,
+            final int rms) {
+        final String peer = host.peer();
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.record(peer, input, now, dx, dy, rms);
+            }
+        }, said);
     }
 
     /** One button of the bar, then the library's answer. */
-    void verb(String verb) {
-        String error = Core.recordingVerb(host.peer(), verb);
-        if (error != null) {
-            host.line(error);
-        }
-        answer();
+    void verb(final String verb) {
+        final String peer = host.peer();
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.recordingVerb(peer, verb);
+            }
+        }, said);
     }
+
+    /** What an input or a button handed to the engine said (1446), then the library's answer. */
+    private final Engine.Said said = new Engine.Said() {
+        @Override
+        public void said(String error) {
+            if (error != null) {
+                host.line(error);
+            }
+            answer();
+        }
+    };
 
     /** The screen goes: a recording in any state goes nowhere. */
     void leave() {
@@ -402,8 +418,28 @@ final class RecordingBar {
         preview.shutdownNow();
     }
 
+    /**
+     * The library's answer, asked on the engine's thread (1464) right
+     * behind the command it follows, so its effects come in their order.
+     */
     private void answer() {
-        Map<String, Object> answer = Core.recording(host.peer());
+        final String peer = host.peer();
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.recording(peer);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (!screen.isDestroyed()) {
+                    answered(answer);
+                }
+            }
+        });
+    }
+
+    private void answered(Map<String, Object> answer) {
         if (!Core.bool(answer, "ok")) {
             host.line(Core.str(answer, "error"));
             return;

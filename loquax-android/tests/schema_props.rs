@@ -302,6 +302,7 @@ fn query() -> impl Strategy<Value = Query> {
         Just(Query::MovePhone),
         Just(Query::Moving),
         (text(), opt_text()).prop_map(|(text, lang)| Query::Lxma { text, lang }),
+        (text(), opt_text()).prop_map(|(text, lang)| Query::Code { text, lang }),
         (opt_text(), prop::option::of(any::<bool>())).prop_map(|(delete, set_autoload)| {
             Query::MapRegions {
                 delete,
@@ -327,7 +328,7 @@ fn query() -> impl Strategy<Value = Query> {
 
 fn event() -> impl Strategy<Value = Event> {
     prop_oneof![
-        u32s().prop_map(|v| Event::Changed { v }),
+        (u32s(), any::<u64>()).prop_map(|(v, counts)| Event::Changed { v, counts }),
         (u32s(), text()).prop_map(|(v, text)| Event::Notice { v, text }),
         (u32s(), text(), text()).prop_map(|(v, state, detail)| Event::Sync { v, state, detail }),
         (u32s(), any::<bool>()).prop_map(|(v, up)| Event::Link { v, up }),
@@ -1042,14 +1043,32 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
         )
             .boxed(),
         (any::<bool>(), u32s(), u32s(), any::<bool>()).boxed(),
-        any::<bool>(),
+        // 1441: the ground beside `filling`.
+        (any::<bool>(), u32s()),
+        // 1419: the map's title and the time window sheet.
+        (
+            text(),
+            text(),
+            prop::collection::vec(
+                (text(), text(), any::<bool>()).prop_map(|(word, label, chosen)| {
+                    schema::TrackChoice {
+                        word,
+                        label,
+                        chosen,
+                    }
+                }),
+                0..7,
+            ),
+        )
+            .boxed(),
     )
         .prop_map(
             |(
                 shown,
                 (own_x, own_y, autoload),
                 (fling, room_north, room_south, loading_here),
-                filling,
+                (filling, ground),
+                (track_window, title, track_windows),
             )| {
                 MapShown {
                     own_x,
@@ -1060,6 +1079,10 @@ fn map_shown() -> impl Strategy<Value = MapShown> {
                     room_south,
                     loading_here,
                     filling,
+                    ground,
+                    track_window,
+                    title,
+                    track_windows,
                     ..shown
                 }
             },
@@ -1090,14 +1113,22 @@ fn regions() -> impl Strategy<Value = Vec<RegionRow>> {
 
 fn marks() -> impl Strategy<Value = Vec<MapMark>> {
     prop::collection::vec(
-        (i32s(), i32s(), texts(), prop::option::of(u32s())).prop_map(
-            |(x, y, peers, split_milli)| MapMark {
+        (
+            i32s(),
+            i32s(),
+            texts(),
+            prop::option::of(u32s()),
+            opt_text(),
+            any::<bool>(),
+        )
+            .prop_map(|(x, y, peers, split_milli, way, low_battery)| MapMark {
                 x,
                 y,
                 peers,
                 split_milli,
-            },
-        ),
+                way,
+                low_battery,
+            }),
         0..4,
     )
 }

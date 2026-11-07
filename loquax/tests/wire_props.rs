@@ -218,8 +218,9 @@ proptest! {
         entries in prop::collection::vec(entry(), 0..8),
         more in any::<bool>(),
         first in u64s(),
+        left in prop::option::of(u64s()),
     ) {
-        let page = Page { entries, more, first };
+        let page = Page { entries, more, first, left };
         prop_assert_eq!(wire::read_sync_answer(&wire::sync_answer(&page)), Ok(Ok(page)));
     }
 

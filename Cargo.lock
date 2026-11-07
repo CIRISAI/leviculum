@@ -2469,8 +2469,6 @@ dependencies = [
 [[package]]
 name = "iced_debug"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25035ab0215a620e53f4103e36fc4e59a1fb2817e4bfc38a30ad27b4202ea0be"
 dependencies = [
  "iced_core",
  "iced_futures",
@@ -2552,8 +2550,6 @@ dependencies = [
 [[package]]
 name = "iced_tiny_skia"
 version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c267596d742714b1853cc10c3983a367762816fc4836bd3b79f76ce76787d6f8"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -3221,9 +3217,13 @@ name = "leviculum-ui-iced"
 version = "0.10.0-dev.6"
 dependencies = [
  "iced",
+ "iced_debug",
+ "iced_runtime",
+ "iced_tiny_skia",
  "leviculum-ui",
  "mundy",
  "png",
+ "tiny-skia",
 ]
 
 [[package]]
@@ -3387,7 +3387,7 @@ dependencies = [
 
 [[package]]
 name = "lnomad"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "crossterm",
@@ -3498,7 +3498,7 @@ dependencies = [
 
 [[package]]
 name = "loquax-android"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "embedded-graphics",
  "hex",
@@ -3509,9 +3509,11 @@ dependencies = [
  "leviculum-mapcut",
  "leviculum-mapfill",
  "leviculum-rrc",
+ "leviculum-serial-mux",
  "leviculum-std",
  "leviculum-ui",
  "lnomad",
+ "lnpnd",
  "loquax",
  "loquax-m9",
  "png",
@@ -3530,6 +3532,7 @@ name = "loquax-m9"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
+ "leviculum-core",
  "leviculum-lxmf",
  "leviculum-map",
  "leviculum-mapfill",
@@ -3539,6 +3542,7 @@ dependencies = [
  "loquax",
  "mousefood",
  "png",
+ "rand_core 0.6.4",
  "ratatui",
  "tempfile",
 ]

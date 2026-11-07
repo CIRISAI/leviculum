@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use leviculum_ui::delivery::DeliveryState;
 
+use super::arrival::{witness, Witness};
 use super::strings::{Arg, Lang, StrId, Text};
 use super::{detail_view, shown_delivery, Signature, UiModel};
 use crate::when::WallTime;
@@ -56,27 +57,80 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     let message = &conversation.messages[m];
     let who = model.names.label(&conversation.peer);
     let name = || Arg::Str(who.clone());
+    let group = model.groups.contains_key(&conversation.peer);
     let mut rows = Vec::new();
     rows.push(match message.outbound {
         true => InfoRow::new(StrId::InfoTo, Text::Raw(who.clone())),
         false => InfoRow::new(StrId::InfoFrom, Text::Raw(who.clone())),
     });
+    // Sent is when it was written, ours or theirs; Received is when this
+    // device took it, the first line of its ledger (1445): a history pulled
+    // at once shows its writers' days and says when it came here.
     if let Some(at) = message.at {
-        let label = match message.outbound {
-            true => StrId::InfoSent,
-            false => StrId::InfoReceived,
+        rows.push(InfoRow::new(StrId::InfoSent, when(&at, model.now.as_ref())));
+    }
+    // The ladder's times of ours (1462): when its proof came (the
+    // recipient's mailbox or device), when the device said it has it, when
+    // it was read; each once known, read only where receipts are shown.
+    if message.outbound {
+        let (arrived, on_device) = super::arrival::rung_times(message);
+        let read = match message
+            .delivery
+            .map(|state| shown_delivery(state, model.home_client, model.reading.on))
+        {
+            Some(DeliveryState::Read { at }) if at > 0 => Some(WallTime {
+                unix_secs: i64::from(at),
+                offset_secs: message.at.or(model.now).map_or(0, |n| n.offset_secs),
+            }),
+            _ => None,
         };
-        rows.push(InfoRow::new(label, when(&at, model.now.as_ref())));
+        // In a group each member has its own rungs (1466), its rows below.
+        let (arrived, on_device) = match group {
+            true => (None, None),
+            false => (arrived, on_device),
+        };
+        for (label, at) in [
+            (StrId::InfoArrived, arrived),
+            (StrId::InfoOnDevice, on_device),
+            (StrId::InfoReadAt, read),
+        ] {
+            if let Some(at) = at {
+                rows.push(InfoRow::new(label, when(&at, model.now.as_ref())));
+            }
+        }
+    }
+    let taken = message.ledger.first().and_then(|entry| entry.at);
+    if let (false, Some(at)) = (message.outbound, taken) {
+        rows.push(InfoRow::new(
+            StrId::InfoReceived,
+            when(&at, model.now.as_ref()),
+        ));
     }
     match (message.delivery, message.signature) {
         (Some(state), _) => {
             let state = shown_delivery(state, model.home_client, model.reading.on);
+            // What the propagation network said of it (1395): the words
+            // beside the ticks, which are the proof's.
+            let witness = witness(message);
+            let not_collected = matches!(witness, Some((Witness::NotCollected, _)));
+            let hh_mm =
+                |at: Option<WallTime>| Arg::Str(at.map(|at| at.hh_mm()).unwrap_or_default());
             let value = match state {
                 DeliveryState::Queued => Text::key(StrId::InfoWaiting),
                 DeliveryState::Stamping => Text::key(StrId::InfoPreparing),
                 DeliveryState::InFlight => Text::key(StrId::InfoSending),
+                DeliveryState::Sent | DeliveryState::InMailbox if not_collected => {
+                    Text::key(StrId::InfoNotCollected)
+                }
                 DeliveryState::Sent => Text::key(StrId::StateUnconfirmed),
                 DeliveryState::InMailbox => Text::Key(StrId::InfoMailbox, Vec::from([name()])),
+                DeliveryState::Arrived => match witness {
+                    Some((Witness::Collected, at)) => {
+                        Text::Key(StrId::InfoCollected, Vec::from([hh_mm(at)]))
+                    }
+                    _ => Text::key(StrId::StateArrived),
+                },
+                DeliveryState::Delivered if group => Text::key(StrId::StateGroupDelivered),
                 DeliveryState::Delivered => Text::Key(StrId::InfoDelivered, Vec::from([name()])),
                 DeliveryState::Read { at } => {
                     let at = WallTime {
@@ -89,7 +143,9 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
                 DeliveryState::Failed => Text::key(StrId::StateFailed),
             };
             rows.push(InfoRow::new(StrId::InfoState, value));
-            if message.outbound && state == DeliveryState::Delivered {
+            if message.outbound
+                && matches!(state, DeliveryState::Arrived | DeliveryState::Delivered)
+            {
                 let why = match (model.reading.on, conversation.flags.receipts) {
                     (false, _) => Some(Text::key(StrId::InfoReceiptsOff)),
                     (true, false) => Some(Text::Key(StrId::InfoNoReceipts, Vec::from([name()]))),
@@ -117,7 +173,9 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     })
 }
 
-/// The group's counts of our message `id`: none where `peer` is no group.
+/// The group's counts of our message `id`, and since 1466 a row per member
+/// with its rung and since when (proof, device, read): none where `peer` is
+/// no group.
 fn group_rows<B>(model: &UiModel<B>, peer: &[u8; 16], id: &[u8; 32]) -> Vec<InfoRow> {
     if !model.groups.contains_key(peer) {
         return Vec::new();
@@ -153,6 +211,32 @@ fn group_rows<B>(model: &UiModel<B>, peer: &[u8; 16], id: &[u8; 32]) -> Vec<Info
         }
     };
     rows.push(InfoRow::new(StrId::InfoRead, read));
+    let offset = model.now.map_or(0, |n| n.offset_secs);
+    for (name, rung) in model.group_rungs(peer, id) {
+        let at = |t: u32| WallTime {
+            unix_secs: i64::from(t),
+            offset_secs: offset,
+        };
+        let value = match (rung.read_at, rung.on_device_at, rung.proven_at) {
+            (r, _, _) if r > 0 => Text::Join(Vec::from([
+                Text::key(StrId::InfoReadAt),
+                when(&at(r), model.now.as_ref()),
+            ])),
+            (_, d, _) if d > 0 => Text::Join(Vec::from([
+                Text::key(StrId::InfoOnDevice),
+                when(&at(d), model.now.as_ref()),
+            ])),
+            (_, _, p) if p > 0 => Text::Join(Vec::from([
+                Text::key(StrId::InfoArrived),
+                when(&at(p), model.now.as_ref()),
+            ])),
+            _ => Text::key(StrId::InfoMemberWaiting),
+        };
+        rows.push(InfoRow {
+            label: Text::Raw(name),
+            value,
+        });
+    }
     rows
 }
 

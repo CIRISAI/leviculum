@@ -11,6 +11,9 @@
 //! for fills, strokes and casings, per profile. A change that draws more
 //! shows as a number here and states its delta in its commit.
 //!
+//! The RGBA path with its span ends blended by their coverage (1422) is
+//! integer too, so its goldens are as exact.
+//!
 //! A picture that moved is written to `$TMPDIR/leviculum-golden/` under
 //! its golden's name; look at it, and copy it over the golden when the
 //! change is the one intended.
@@ -24,7 +27,7 @@ use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::region::Region;
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, FillStats, Scratch};
-use leviculum_mapfill::frame::{rgb888, Frame};
+use leviculum_mapfill::frame::{rgb888, Frame, RgbaFrame};
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
 use leviculum_mapfill::style::{MapTheme, Profile, Style};
 
@@ -97,6 +100,75 @@ fn draw_from(
     let frame = Frame::new(&mut fb, w, h).expect("frame");
     frame.rgb888_into(&mut rgb);
     (rgb, st)
+}
+
+/// [`draw_from`] into an RGBA frame with the span ends blended by their
+/// coverage (1422): its pixels as RGB.
+fn draw_smooth(bytes: &[u8], view: &Viewport, style: Style, percent: u32) -> Vec<u8> {
+    let r = Region::from_bytes(bytes).expect("open");
+    let mut tiles = r.view(view).expect("tiles");
+    if draws_buildings(style, Ink::Colour, view.zoom()) {
+        r.with_buildings(&mut tiles).expect("buildings");
+    }
+    let (w, h) = view.size();
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let mut edges = vec![Edge::default(); 8192];
+    let mut active = vec![0u16; 8192];
+    let mut heads = vec![0u16; h as usize];
+    let mut points = vec![Point::zero(); 8192];
+    let mut ring_ends = vec![0u16; 2048];
+    let mut frame = RgbaFrame::new(&mut px, w, h).expect("frame").smoothed(true);
+    let Ok(()) = frame.clear(style.theme.palette().background);
+    let mut scratch = Scratch {
+        edges: &mut edges,
+        heads: &mut heads,
+        active: &mut active,
+    };
+    let mut work = Work {
+        points: &mut points,
+        ring_ends: &mut ring_ends,
+    };
+    let Ok(_) = draw_in_scaled(
+        &tiles,
+        r.area(view),
+        Profile::Full,
+        Ink::Colour,
+        style,
+        percent,
+        &mut frame,
+        &mut scratch,
+        &mut work,
+        &mut NoClock,
+    );
+    px.chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect()
+}
+
+/// 1422: the edges smoothed, at z13, z15 and z17 (with the buildings),
+/// in the screens' finish at 480x320, each its golden; and against the
+/// integer picture of the same view only pixels at an edge differ, a
+/// few per cent of them, never the whole picture.
+#[test]
+fn smoothed_edges_draw_their_goldens_at_three_zooms() {
+    let at = project(centre());
+    let (w, h) = (480, 320);
+    for z in [13u8, 15, 17] {
+        let view = Viewport::new(at, z, w, h);
+        let smooth = draw_smooth(BUILDINGS, &view, Style::SCREEN, 100);
+        let (hard, _) = draw_from(BUILDINGS, &view, Ink::Colour, Style::SCREEN, 100);
+        let differ = smooth
+            .chunks(3)
+            .zip(hard.chunks(3))
+            .filter(|(a, b)| a != b)
+            .count();
+        let share = differ as f64 / f64::from(w * h);
+        assert!(
+            share > 0.005 && share < 0.25,
+            "z{z}: {differ} pixels differ"
+        );
+        same_as(&format!("screen-smooth-480x320-z{z}.png"), &smooth, w, h);
+    }
 }
 
 fn golden(name: &str) -> PathBuf {

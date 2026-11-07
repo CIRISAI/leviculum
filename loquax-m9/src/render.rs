@@ -17,7 +17,9 @@ use leviculum_ui::style::RLine;
 use leviculum_ui_ratatui::style::to_ratatui_text;
 use loquax::ui::scene::Scene;
 use loquax::ui::UiModel;
-use mousefood::{EmbeddedBackend, EmbeddedBackendConfig};
+use mousefood::{
+    ColorTheme, CursorConfig, EmbeddedBackend, EmbeddedBackendConfig, TerminalAlignment,
+};
 use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 
@@ -45,10 +47,21 @@ impl<'d, D> Renderer<'d, D>
 where
     D: DrawTarget<Color = Rgb565> + 'static,
 {
-    /// A renderer over `panel`, in mousefood's Unicode 6 x 10 atlas: 53 x 24
-    /// cells on the M9's 320 x 240.
+    /// A renderer over `panel`, in the 10 x 20 atlas ([`crate::font`]):
+    /// 32 x 12 cells on the M9's 320 x 240.
     pub fn new(panel: &'d mut D) -> Result<Self, DrawError> {
-        let config = EmbeddedBackendConfig::default();
+        // Every field named: the config's `Default` would build (and leak)
+        // mousefood's own 6 x 10 atlas and keep its glyphs in the image.
+        let config = EmbeddedBackendConfig {
+            flush_callback: alloc::boxed::Box::new(|_| {}),
+            font_regular: crate::font::atlas(),
+            font_bold: None,
+            font_italic: None,
+            vertical_alignment: TerminalAlignment::Start,
+            horizontal_alignment: TerminalAlignment::Start,
+            color_theme: ColorTheme::default(),
+            cursor: CursorConfig::default(),
+        };
         // The atlas leaks each time it is made; the config's is the one.
         let font = config.font_regular;
         let backend = EmbeddedBackend::new(panel, config);
@@ -86,6 +99,16 @@ where
         map::pins(&pins, look, &self.font, panel).map_err(|_| DrawError)?;
         self.map_drawn = true;
         Ok(())
+    }
+
+    /// Draw `lines`, made for the grid's size: a screen of the M9's own
+    /// that is no scene, the pairing (1415).
+    pub fn text(
+        &mut self,
+        lines: impl FnOnce(usize, usize) -> alloc::vec::Vec<RLine>,
+    ) -> Result<(), DrawError> {
+        self.leave_map()?;
+        self.cells(lines)
     }
 
     /// Cells drawn after the map's pixels must all be drawn, not only those

@@ -1799,6 +1799,17 @@ impl Link {
             .map(|r| r.progress())
     }
 
+    /// The progress of the incoming resource `resource_hash` (0.0 to 1.0),
+    /// while it is under way: the share of its parts that arrived. A
+    /// requester watching its answer for silence reads it (1461).
+    pub fn incoming_resource_progress_of(&self, resource_hash: &[u8; 32]) -> Option<f32> {
+        self.incoming_resources
+            .as_slice()
+            .iter()
+            .find(|r| r.resource_hash() == resource_hash)
+            .map(|r| r.progress())
+    }
+
     /// Get a reference to the outgoing resource.
     pub(crate) fn outgoing_resource(&self) -> Option<&crate::resource::outgoing::OutgoingResource> {
         self.outgoing_resource.as_ref()

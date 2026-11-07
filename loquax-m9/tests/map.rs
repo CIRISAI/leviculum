@@ -80,7 +80,7 @@ fn the_map_pins_come_from_shares_an_announce_and_the_gnss_fix() {
     assert!(without.map_pins().iter().all(|p| p.peer != OWN));
 }
 
-/// The model's view is the picture's pixels: 53 x 21 cells of 6 x 10.
+/// The model's view is the picture's pixels: 32 x 9 cells of 10 x 20.
 #[test]
 fn the_view_is_the_picture_in_pixels() {
     let model = Screen::Map.model();
@@ -165,4 +165,38 @@ fn a_map_redraw_is_the_frame_a_fresh_draw_gives() {
         assert_eq!(shown.pixels(), drawn(&model).pixels(), "after {key:?}");
     }
     assert!(!map::shown(&model), "the walk ends off the map");
+}
+
+/// A redraw that changes nothing flushes nothing (1455): the board
+/// redraws on every pulled entry, ended send and word of its home, and
+/// the map's picture and the cells are drawn whole each time; the panel
+/// is sent only the rows whose pixels moved, which for the same model
+/// is none, on the list and on the map. The control: `+` zooms the map,
+/// and that redraw has rows to send.
+#[test]
+fn an_unchanged_redraw_flushes_nothing() {
+    let mut model = fixture::model();
+    let mut panel = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    let mut renderer = Renderer::new(&mut panel).expect("renderer");
+    let mut row = 0;
+    for (key, name) in [(None, "list"), (Some(M9Key::Char('M')), "map")] {
+        if let Some(key) = key {
+            group::press(&mut model, &mut row, &event(key));
+        }
+        renderer
+            .show(&model, &Look::of(&model), &mut map)
+            .expect("draw");
+        assert!(renderer.panel().take_dirty().is_some(), "{name}: drawn");
+        renderer
+            .show(&model, &Look::of(&model), &mut map)
+            .expect("draw");
+        assert_eq!(renderer.panel().take_dirty(), None, "{name}: drawn again");
+    }
+    assert!(map::shown(&model));
+    group::press(&mut model, &mut row, &event(M9Key::Char('+')));
+    renderer
+        .show(&model, &Look::of(&model), &mut map)
+        .expect("draw");
+    assert!(renderer.panel().take_dirty().is_some(), "the zoom");
 }

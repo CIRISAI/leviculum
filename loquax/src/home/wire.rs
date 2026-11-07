@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! /join  [token: bin16, name: str]           -> [status]
-//! /sync  [cursor: uint, (page: uint)]         -> [status, first: uint, more: bool,
+//! /sync  [cursor: uint, (page: uint, (fold: str))]
+//!                                             -> [status, first: uint, more: bool,
 //!                                                 [[seq: uint, kind: uint, at: int, packed: bin], ...]]
 //! /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
 //!         [[key: int, value: bin], ...]]      -> [status, id: bin32]
@@ -55,6 +56,11 @@
 //! least one entry, and says `more`; a home from before reads the cursor
 //! alone and answers its own page.
 //!
+//! Its third element is optional too (1439): the device's capability word,
+//! what it folds ([`Fold`]). A board says `board` and is served only the
+//! entries `board::fold` keeps, with `left` counting only those; a home
+//! from before reads the first two and serves everything.
+//!
 //! The status is the first element of every answer, so a refusal decodes
 //! the same way whatever was asked. `first` is the oldest sequence the
 //! archive still holds: a client whose cursor is older than `first - 1`
@@ -99,10 +105,20 @@ pub enum MarkFlag {
     /// On a device's screen (1234): the home node owes their senders a
     /// read receipt, at the reader's clock `at`, unix seconds.
     Seen { at: u32 },
+    /// On a device (1462): the home node owes their senders a device
+    /// receipt (`lev` `0x07`) at the device's clock `at`, unix seconds,
+    /// when the message took it. The first device's mark wins.
+    Arrived { at: u32 },
 }
 
 /// The code of [`MarkFlag::Seen`].
 const SEEN_CODE: u64 = 2;
+
+/// The code of [`MarkFlag::Arrived`].
+const ARRIVED_CODE: u64 = 3;
+
+/// The bytes every arrived mark begins with, request or archive entry.
+pub const ARRIVED_MARK_PREFIX: [u8; 2] = [0x93, ARRIVED_CODE as u8];
 
 /// The bytes every seen mark begins with, request or archive entry: an
 /// array of three and the flag. The store finds the seen marks by them.
@@ -114,6 +130,7 @@ impl MarkFlag {
             Self::Read => 0,
             Self::Deleted => 1,
             Self::Seen { .. } => SEEN_CODE,
+            Self::Arrived { .. } => ARRIVED_CODE,
         }
     }
 
@@ -123,6 +140,7 @@ impl MarkFlag {
             Self::Read => "read",
             Self::Deleted => "deleted",
             Self::Seen { .. } => "seen",
+            Self::Arrived { .. } => "arrived",
         }
     }
 }
@@ -147,7 +165,17 @@ pub struct Page {
     pub more: bool,
     /// The oldest sequence the archive holds; 0 when it is empty.
     pub first: u64,
+    /// How many entries wait after this page (1415): a fifth element the
+    /// home sends only to a client that asked a page bound, which is a
+    /// client from 1363 on that reads it; one that asked none gets the
+    /// four elements it always read. What makes "pulled N of M" on the
+    /// board's screen.
+    pub left: Option<u64>,
 }
+
+/// What `left` is while the home cuts a page to its bound: the longest
+/// number msgpack writes, so the cut leaves room for the real count.
+pub const LEFT_UNCOUNTED: u64 = u64::MAX;
 
 /// How a request went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +320,100 @@ pub fn read_sync_paged(data: &[u8]) -> Result<(u64, Option<u64>), Malformed> {
     Ok((cursor, page))
 }
 
+/// What a device folds, said as the third element of its `/sync` (1439):
+/// the home serves it only the entries it keeps and counts only those in
+/// `left`, so "Fetched N of M" is M entries this device will get. A
+/// client that says nothing, or a word this home does not know, gets the
+/// whole archive, as every client from before 1439 does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fold {
+    /// Every entry: the phone and the desktop keep the whole archive.
+    All,
+    /// What `board::fold` keeps: a message received or sent, a mark, a
+    /// name; nothing imported, no state the board draws no bubble for,
+    /// and no entry over [`BOARD_ENTRY_MAX`], which is a photo or a file
+    /// the board neither shows nor holds.
+    Board,
+}
+
+/// The kinds a [`Fold::Board`] device keeps: the ones `board::fold` reads
+/// (`loquax/src/home/board.rs`).
+pub const BOARD_KINDS: [u8; 4] = [
+    super::KIND_RECEIVED,
+    super::KIND_SENT,
+    super::KIND_MARK,
+    super::KIND_NAME,
+];
+
+/// The longest entry a [`Fold::Board`] device is served, in packed bytes:
+/// a text with its signature, fields and a small picture fits; a photo
+/// the board has no screen for does not.
+pub const BOARD_ENTRY_MAX: usize = 16 * 1024;
+
+/// The capability word of [`Fold::Board`] on the wire.
+pub const FOLD_BOARD: &str = "board";
+
+impl Fold {
+    /// The word on the wire, `None` for [`Fold::All`], which says nothing.
+    pub fn word(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Board => Some(FOLD_BOARD),
+        }
+    }
+
+    /// The fold a word names; an unknown word folds nothing away.
+    pub fn from_word(word: &str) -> Self {
+        match word {
+            FOLD_BOARD => Self::Board,
+            _ => Self::All,
+        }
+    }
+
+    /// Whether a device that folds so is served an entry of `kind` whose
+    /// packed bytes are `len` long.
+    pub fn keeps(self, kind: u8, len: usize) -> bool {
+        match self {
+            Self::All => true,
+            Self::Board => BOARD_KINDS.contains(&kind) && len <= BOARD_ENTRY_MAX,
+        }
+    }
+}
+
+/// A `/sync` as a device that folds asks it (1439): the cursor, the page
+/// bound, and the capability word when the fold has one.
+pub fn sync_request_folded(cursor: u64, page_bytes: u64, fold: Fold) -> Vec<u8> {
+    let Some(word) = fold.word() else {
+        return sync_request_paged(cursor, page_bytes);
+    };
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 3);
+    msgpack::uint(&mut out, cursor);
+    msgpack::uint(&mut out, page_bytes);
+    msgpack::string(&mut out, word);
+    out
+}
+
+/// A `/sync` as the home reads it from 1439 on: the cursor, the page bound
+/// when asked, and the device's fold, [`Fold::All`] when it said none.
+pub fn read_sync_asked(data: &[u8]) -> Result<(u64, Option<u64>, Fold), Malformed> {
+    let mut p = 0;
+    let len = msgpack::array_len(data, &mut p)?;
+    if len < 1 {
+        return Err(Malformed);
+    }
+    let cursor = msgpack::read_uint(data, &mut p)?;
+    let page = match len {
+        1 => None,
+        _ => Some(msgpack::read_uint(data, &mut p)?),
+    };
+    let fold = match len {
+        0..=2 => Fold::All,
+        _ => Fold::from_word(msgpack::read_str(data, &mut p)?),
+    };
+    Ok((cursor, page, fold))
+}
+
 /// Cut `page` from its end until its answer takes at most `bytes`, one
 /// entry always kept, `more` set when one went: what a client that asked
 /// a bound gets.
@@ -374,13 +496,16 @@ pub fn read_wake(data: &[u8]) -> Result<u64, Malformed> {
 
 pub fn sync_answer(page: &Page) -> Vec<u8> {
     let mut out = Vec::new();
-    msgpack::array(&mut out, 4);
+    msgpack::array(&mut out, 4 + usize::from(page.left.is_some()));
     msgpack::uint(&mut out, Status::Ok.code());
     msgpack::uint(&mut out, page.first);
     msgpack::bool(&mut out, page.more);
     msgpack::array(&mut out, page.entries.len());
     for entry in &page.entries {
         entry_out(&mut out, entry);
+    }
+    if let Some(left) = page.left {
+        msgpack::uint(&mut out, left);
     }
     out
 }
@@ -442,7 +567,7 @@ pub fn send_answer(id: &[u8; 32]) -> Vec<u8> {
 pub fn mark_request(mark: &Mark) -> Vec<u8> {
     let mut out = Vec::new();
     let seen_at = match mark.flag {
-        MarkFlag::Seen { at } => Some(at),
+        MarkFlag::Seen { at } | MarkFlag::Arrived { at } => Some(at),
         MarkFlag::Read | MarkFlag::Deleted => None,
     };
     msgpack::array(&mut out, if seen_at.is_some() { 3 } else { 2 });
@@ -465,7 +590,7 @@ pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
     let len = msgpack::array_len(data, &mut p)?;
     let code = msgpack::read_uint(data, &mut p)?;
     match (code, len) {
-        (0 | 1, 2) | (SEEN_CODE, 3) => {}
+        (0 | 1, 2) | (SEEN_CODE | ARRIVED_CODE, 3) => {}
         _ => return Err(Malformed),
     }
     let count = msgpack::array_len(data, &mut p)?;
@@ -479,11 +604,42 @@ pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
     let flag = match code {
         0 => MarkFlag::Read,
         1 => MarkFlag::Deleted,
-        _ => MarkFlag::Seen {
-            at: u32::try_from(msgpack::read_uint(data, &mut p)?).map_err(|_| Malformed)?,
-        },
+        _ => {
+            let at = u32::try_from(msgpack::read_uint(data, &mut p)?).map_err(|_| Malformed)?;
+            match code {
+                SEEN_CODE => MarkFlag::Seen { at },
+                _ => MarkFlag::Arrived { at },
+            }
+        }
     };
     Ok(Mark { flag, ids })
+}
+
+/// A [`super::KIND_PN_STATUS`] entry's bytes: the propagation node's word
+/// per message id, `{ bin32 message id: str word, ... }`, in the shape of
+/// the node's `/lev/status` answer but keyed by the message id every
+/// device knows, not the `transient_id` only the sender's router saw.
+pub fn pn_status_entry(
+    answers: &[([u8; 32], leviculum_lxmf::lev_status::MessageStatus)],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::map(&mut out, answers.len());
+    for (id, status) in answers {
+        msgpack::bin(&mut out, id);
+        msgpack::string(&mut out, status.word());
+    }
+    out
+}
+
+/// A [`super::KIND_PN_STATUS`] entry: none, or more than [`MARK_IDS_MAX`],
+/// is malformed; a word this loquax does not know reads as `unknown`.
+pub fn read_pn_status_entry(
+    data: &[u8],
+) -> Result<Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>, Malformed> {
+    match leviculum_lxmf::lev_status::decode_answer(data) {
+        Ok(Ok(entries)) if !entries.is_empty() && entries.len() <= MARK_IDS_MAX => Ok(entries),
+        _ => Err(Malformed),
+    }
 }
 
 /// A name entry's bytes: the peer's address and the display name it
@@ -809,7 +965,8 @@ pub fn read_sync_answer(data: &[u8]) -> Result<Result<Page, Status>, Malformed> 
         return Ok(Err(status));
     }
     let mut p = 0;
-    if msgpack::array_len(data, &mut p)? != 4 {
+    let len = msgpack::array_len(data, &mut p)?;
+    if !(4..=5).contains(&len) {
         return Err(Malformed);
     }
     msgpack::read_uint(data, &mut p)?;
@@ -832,10 +989,15 @@ pub fn read_sync_answer(data: &[u8]) -> Result<Result<Page, Status>, Malformed> 
             packed,
         });
     }
+    let left = match len {
+        5 => Some(msgpack::read_uint(data, &mut p)?),
+        _ => None,
+    };
     Ok(Ok(Page {
         entries,
         more,
         first,
+        left,
     }))
 }
 
@@ -1026,8 +1188,27 @@ mod tests {
             ],
             more: true,
             first: 2,
+            left: None,
         };
-        assert_eq!(read_sync_answer(&sync_answer(&page)), Ok(Ok(page)));
+        assert_eq!(read_sync_answer(&sync_answer(&page)), Ok(Ok(page.clone())));
+        // A paged answer says how many wait (1415); a home that says none
+        // is read as before.
+        let counted = Page {
+            left: Some(41),
+            ..page.clone()
+        };
+        let answer = sync_answer(&counted);
+        assert_eq!(answer.len(), sync_answer(&page).len() + 1);
+        assert_eq!(read_sync_answer(&answer), Ok(Ok(counted)));
+        // The placeholder the cut counts with is the longest a count gets.
+        let placeholder = Page {
+            left: Some(LEFT_UNCOUNTED),
+            ..page.clone()
+        };
+        assert_eq!(
+            sync_answer(&placeholder).len(),
+            sync_answer(&page).len() + 9
+        );
     }
 
     #[test]
@@ -1195,6 +1376,30 @@ mod tests {
         assert_eq!(read_mark(&unknown), Err(Malformed));
     }
 
+    /// 1409: the home's word of what the node answered is the node's
+    /// answer keyed by message id; none, too many or no map is malformed.
+    #[test]
+    fn a_pn_status_entry_round_trips_and_is_the_answers_shape() {
+        use leviculum_lxmf::lev_status::MessageStatus;
+        let answers = [
+            ([0x61; 32], MessageStatus::Collected),
+            ([0x62; 32], MessageStatus::Expired),
+        ];
+        let data = pn_status_entry(&answers);
+        assert_eq!(&data[..3], &[0x82, 0xc4, 0x20]);
+        assert_eq!(&data[35..45], b"\xa9collected");
+        assert_eq!(read_pn_status_entry(&data), Ok(answers.to_vec()));
+        assert_eq!(read_pn_status_entry(&pn_status_entry(&[])), Err(Malformed));
+        let many: Vec<_> = (0..=MARK_IDS_MAX)
+            .map(|i| ([i as u8; 32], MessageStatus::Collected))
+            .collect();
+        assert_eq!(
+            read_pn_status_entry(&pn_status_entry(&many)),
+            Err(Malformed)
+        );
+        assert_eq!(read_pn_status_entry(&[0x90]), Err(Malformed));
+    }
+
     /// 1234: a seen mark carries the read time, begins with the prefix the
     /// store looks for, and without its time it is malformed.
     #[test]
@@ -1224,6 +1429,33 @@ mod tests {
         msgpack::bin(&mut read_with_time, &[1; 32]);
         msgpack::uint(&mut read_with_time, 5);
         assert_eq!(read_mark(&read_with_time), Err(Malformed));
+    }
+
+    /// 1462: an arrived mark carries the device's time, begins with its
+    /// own prefix, is no seen mark, and without its time it is malformed.
+    #[test]
+    fn an_arrived_mark_round_trips_with_its_time() {
+        let arrived = Mark {
+            flag: MarkFlag::Arrived { at: 1_800_000_000 },
+            ids: alloc::vec![[1; 32], [2; 32]],
+        };
+        let data = mark_request(&arrived);
+        assert!(data.starts_with(&ARRIVED_MARK_PREFIX));
+        assert!(!data.starts_with(&SEEN_MARK_PREFIX));
+        assert_eq!(read_mark(&data), Ok(arrived));
+        let mut timeless = Vec::new();
+        msgpack::array(&mut timeless, 2);
+        msgpack::uint(&mut timeless, ARRIVED_CODE);
+        msgpack::array(&mut timeless, 1);
+        msgpack::bin(&mut timeless, &[1; 32]);
+        assert_eq!(read_mark(&timeless), Err(Malformed));
+        let mut unknown = Vec::new();
+        msgpack::array(&mut unknown, 3);
+        msgpack::uint(&mut unknown, ARRIVED_CODE + 1);
+        msgpack::array(&mut unknown, 1);
+        msgpack::bin(&mut unknown, &[1; 32]);
+        msgpack::uint(&mut unknown, 5);
+        assert_eq!(read_mark(&unknown), Err(Malformed));
     }
 
     #[test]

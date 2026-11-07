@@ -343,6 +343,71 @@ and `leviculum-esp/README.md` on that branch.
 - According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), `KB_LED` (GPIO46) lights nothing at either level
   on a version-2 board.
 
+### The keyboard controller, measured
+
+Read on 2026-11-04 21:03 CET by Lew at the device, keys pressed at random
+under our image `thinknode_m9` at 2621fd18, which read register 0x01 of
+0x6D eight bytes every 10 ms and printed each answer as a `KBRAW <ms>
+<hex>` line (the reviewer's capture; its first 60 presses and its 42
+distinct answers are in `loquax-m9/tests/keyboard/capture-20261104.txt`
+and `distinct-20261104.txt`):
+
+- **It is not a matrix.** 13,838 reads, 139 non-zero. An idle read is all
+  zeros; a press makes exactly one read non-zero, and that read carries
+  one code in all eight bytes (`6b6b6b6b6b6b6b6b`). Two presses 10 ms
+  apart came as two reads (`0x65`, then `0x83`), so the 10 ms poll saw
+  every press. So the controller is read one code per press, and the
+  same code in every byte says the read does not advance through
+  registers: one byte would do. Whether a one- or two-byte read, or
+  register 0x00 or 0x02, answers the same is not yet asked of the board;
+  the image keeps the eight-byte read the capture proved and refuses an
+  answer whose bytes disagree (`[KB] answer=mixed`).
+- **The codes are ASCII for the characters:** `0x61`..`0x7a` a to z,
+  `0x20` the space, `0x30` zero, `0x24` `$`, `0x26` `&`; `0x0d` Enter,
+  `0x08` Backspace. The symbols arrive as their own codes, so the
+  controller resolves its layers itself. No upper-case letter was
+  pressed in the capture.
+- **The keys that are no character** sent `0x81`..`0x86`, `0x90` and
+  `0xb4`..`0xb7`. Their roles (`SPECIALS`, `loquax-m9/src/keyboard.rs`)
+  are measured since 1459, by the reviewer's walk of 2026-11-06 20:17:
+
+  | Code   | Key            | Role                                        |
+  |--------|----------------|---------------------------------------------|
+  | `0x81` | two bubbles    | the chats list                              |
+  | `0x82` | house          | the start screen                            |
+  | `0x83` | square bubble  | a new message to the contact under the cursor |
+  | `0x84` | position pin   | named, no action until the position sheet   |
+  | `0x85` | map            | the map tab                                 |
+  | `0x86` | back arrow     | back                                        |
+  | `0xb4` | ring left      | left                                        |
+  | `0xb5` | ring up        | up                                          |
+  | `0xb6` | ring right     | right                                       |
+  | `0xb7` | ring down      | down                                        |
+  | `0x0d` | ring centre    | Enter (ASCII CR, 21:03:13)                  |
+
+  1440's provisional table had `0x84`..`0x86` rotated (back, pin, map)
+  and the ring's right and down swapped. `0x90`, once seen on
+  2026-11-04, is no key the walk pressed and stays unnamed
+  (`special_0x90`) until a capture shows it.
+- **No key-up, no state byte.** No read carries a release. The last byte
+  of the `KB` line the provisional matrix decoder printed beside each
+  answer (`86868686868602`) looked like a state byte; it is the code's
+  two low bits, the two matrix positions the bitmap table read from the
+  answer's byte 6 (`every_captured_answer_is_one_code_and_the_kb_state_byte_was_its_low_bits`).
+  Whether the controller repeats a held key, and what the long-press
+  time of register 0x03 makes it send, is read in the walk.
+
+**The walk** (for the reviewer, one flash of the current image): attach
+the reader, press each key once in layout order, row by row from the top
+left, then the controls in the fixed order bubbles, house, square bubble,
+back, pin, map, ring left, up, down, right, centre, then hold one letter
+for two seconds and press one letter with Shift and one with Sym. Each
+press prints `KBRAW <ms> <code x8>` and then `KEY <ms> code=0x6b name=k`;
+a control prints its role (`name=chats`, `name=ring_up`),
+which the walk checks against the order pressed, and a `special_0x..`
+name is a code `SPECIALS` (`loquax-m9/src/keyboard.rs`) does not know
+yet. A held letter's lines tell whether the controller repeats.
+
 ### GNSS
 
 - According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), an AG3352 answered the Airoha `$PAIR` boot init on
@@ -419,14 +484,15 @@ another firmware's header.
   "Two hardware revisions") is the whole input: no touch, no encoder.
   The INT line does not fire per key, so the firmware polls while the
   panel is lit, and the keyboard light does nothing on a version-2 board
-  (both: "The keypad"). Key-repeat and layers (where `!` and umlauts
-  live) are unread; the first keyboard slice documents the controller's
-  register map as far as the port and our own probing carry it.
+  (both: "The keypad"). The controller sends one ASCII code per press
+  and resolves its layers itself ("The keyboard controller, measured");
+  which code each navigation and side key sends, and whether a held key
+  repeats, is the walk's.
 - **Memory.** 512 KB SRAM, 8 MB PSRAM (came up with 8,388,608 bytes in
   the map measurement), 16 MB flash. How much SRAM is free beside the
   radio stack — and later WiFi or BLE — is unmeasured ("Open"). The
   `leviculum-esp` heap is a 64 KiB placeholder today (`HEAP_SIZE`,
-  `leviculum-esp/src/lib.rs:151`); the UI budgets on the messenger page
+  `leviculum-esp/src/lib.rs:158`); the UI budgets on the messenger page
   say what has to replace it.
 - **Radio.** The LR1110 through `leviculum-lr11xx`, usable ceiling about
   +17 dBm ("What the community port measured"). For the UI it is the
@@ -640,9 +706,11 @@ compared with the T1000-E's numbers.
 - **SRAM after WiFi and BLE:** how much of the 512 KB is left once both
   stacks are up.
 - **WiFi as a TCP interface** without a host attached.
-- **The keyboard:** which controller it is (ESP32-S2 or STC8H), its
-  I2C protocol beyond the one command the Meshtastic variant writes,
-  and the input model on top of it.
+- **The keyboard:** which controller it is (ESP32-S2 or STC8H). Its
+  protocol is measured (one code per press, "The keyboard controller,
+  measured"); open are the names of the eleven codes that are no
+  character, repeat, and what Shift, Sym and the long press send, all
+  read by the walk.
 
 ## Not yet built
 

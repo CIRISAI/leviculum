@@ -174,6 +174,11 @@ pub enum MapCmd {
     Drawing(bool),
     /// The glyph test pattern over the map, or away again.
     GlyphTest,
+    /// The tracks' next time window (`true`) or the previous one (1385).
+    TrackWindow(bool),
+    /// Every peer with a position inside the tracks' time window in view
+    /// (1386).
+    FitWindow,
 }
 
 const fn key(code: KeyCode, mods: Mods, action: Action, panes: Panes) -> Chord<Action> {
@@ -309,9 +314,16 @@ pub const ROWS: &[Row<Action>] = {
         Row::new("add a contact", CONVERSATIONS, &[])
             .palette("add contact")
             .note("a friend's code, then a name"),
-        Row::new("show your code and its QR", CONVERSATIONS, &[])
-            .palette("my code")
-            .note("for a friend to scan or paste"),
+        // The profile (1443): what a tap on the avatar opens on the phone
+        // and a click on it in the window; here `P`, and a click on the
+        // list's title, which is the reader's own name.
+        Row::new(
+            "your profile: name, address, code and QR",
+            CONVERSATIONS,
+            &[&[key(Char('P'), Mods::Plain, run(C::MyCode), COMMAND_PANES)]],
+        )
+        .palette("my code")
+        .note("for a friend to scan or paste"),
         Row::new("import from another messenger", CONVERSATIONS, &[])
             .palette("import")
             .note("contacts and history; the identity: loquax import"),
@@ -687,6 +699,16 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("map drawing"),
+        // 1385: the tracks' time window, a map control: now (the current
+        // episode), today, yesterday, this week, this month, all.
+        Row::new(
+            "next / previous time window of the tracks",
+            MAP_GROUP,
+            &[&[
+                key(Char('w'), Mods::Plain, Map(MapCmd::TrackWindow(true)), MAP),
+                key(Char('W'), Mods::Plain, Map(MapCmd::TrackWindow(false)), MAP),
+            ]],
+        ),
         Row::new(
             "the glyph test: which glyph sets the font draws",
             MAP_GROUP,
@@ -698,6 +720,14 @@ pub const ROWS: &[Row<Action>] = {
             &[&[key(Char('0'), Mods::Plain, Map(MapCmd::Fit), MAP)]],
         )
         .footer_droppable("fit", 4),
+        // 1386: "fit all", every peer with a position inside the tracks'
+        // time window; the window's strip and the phone's chips have it
+        // as a button.
+        Row::new(
+            "every peer inside the time window in view",
+            MAP_GROUP,
+            &[&[key(Char('f'), Mods::Plain, Map(MapCmd::FitWindow), MAP)]],
+        ),
         Row::new(
             "next / previous pin",
             MAP_GROUP,

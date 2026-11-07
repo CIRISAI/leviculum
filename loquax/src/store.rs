@@ -26,9 +26,11 @@
 //!   are one more, so a peer keeps its name across a restart.
 //! - **`fields` is filled, `title` and `timestamp` stay empty for now**:
 //!   the engine's `Received` event carries the fields, which the store keeps
-//!   whole as one raw msgpack map; it does not carry the sender's time, and
-//!   the screen drops the title. The columns are there so filling them is no
-//!   migration.
+//!   whole as one raw msgpack map, and the screen drops the title. The
+//!   column `received_at` holds the time a message shows, which since 1445
+//!   is when its writer wrote it (the event's `sent_at`, a group copy's
+//!   writer's); when this device took it is the first line of its ledger.
+//!   The columns are there so filling them is no migration.
 //! - **Positions are a table** (`positions`, schema 2): every position a
 //!   telemetry field carried, keyed by who measured and the fix time, so the
 //!   same fix arriving directly and again in a collector's stream is one row
@@ -127,7 +129,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 16;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -385,6 +387,44 @@ const SCHEMA_V13: &str = "
 ALTER TABLE group_fanout ADD COLUMN propagated INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// What schema 14 adds to schema 13 (1385): how a position came
+/// (`positions.source`, 0 in a message's telemetry, 1 announced to the
+/// mesh), so the track keeps the announced fixes too and a restart gives
+/// them back as such.
+const SCHEMA_V14: &str = "
+ALTER TABLE positions ADD COLUMN source INTEGER NOT NULL DEFAULT 0;
+";
+
+/// What schema 15 adds to schema 14 (1409): what the propagation node is
+/// still to be asked about (`pn_asks`, one row per open `transient_id`:
+/// our message id, the node it was uploaded to and when, unix seconds),
+/// and the nodes whose announce said they answer `/lev/status`
+/// (`pn_nodes`, with the version they said), so a restart asks about the
+/// uploads before it ([`crate::pn_status::Asker::restore`]).
+const SCHEMA_V15: &str = "
+CREATE TABLE pn_asks(
+    identity BLOB NOT NULL,
+    transient BLOB NOT NULL,
+    message BLOB NOT NULL,
+    node BLOB NOT NULL,
+    uploaded_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, transient));
+CREATE TABLE pn_nodes(
+    identity BLOB NOT NULL,
+    node BLOB NOT NULL,
+    version INTEGER NOT NULL,
+    PRIMARY KEY (identity, node));
+";
+
+/// What schema 16 adds to schema 15 (1466): when a group copy's member's
+/// device said it has it (`group_fanout.device_at`, unix seconds, null
+/// until then): its `0x07`, or its read receipt, which includes it. The
+/// writer's two ticks count these, not the proofs, which a member's
+/// mailbox signs too.
+const SCHEMA_V16: &str = "
+ALTER TABLE group_fanout ADD COLUMN device_at INTEGER;
+";
+
 pub mod groups;
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -435,6 +475,9 @@ const TABLES_V11: [&str; 3] = ["groups", "group_members", "group_fanout"];
 
 /// The table schema 12 adds.
 const TABLES_V12: [&str; 1] = ["client_groups"];
+
+/// The tables schema 15 adds.
+const TABLES_V15: [&str; 2] = ["pn_asks", "pn_nodes"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -563,7 +606,8 @@ impl Store {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
-             {SCHEMA_V12} {SCHEMA_V13} PRAGMA user_version = {SCHEMA_VERSION}; \
+             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} \
+             PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
         self.conn
@@ -655,6 +699,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 15 {
+            if let Some(missing) = missing(&TABLES_V15) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate(version);
         }
@@ -713,7 +762,16 @@ impl Store {
                 if version < 12 {
                     batch.push_str(SCHEMA_V12);
                 }
-                batch.push_str(SCHEMA_V13);
+                if version < 13 {
+                    batch.push_str(SCHEMA_V13);
+                }
+                if version < 14 {
+                    batch.push_str(SCHEMA_V14);
+                }
+                if version < 15 {
+                    batch.push_str(SCHEMA_V15);
+                }
+                batch.push_str(SCHEMA_V16);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -967,6 +1025,8 @@ impl Store {
                 })
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
                 .map_err(|e| self.failed(e))?;
+            crate::ui::arrival::before_1462(message);
+            crate::ui::groups::before_1466(message);
         }
         let first = messages.first().map_or(before, |m| seq_of(m.activity));
         let earlier: i64 = self
@@ -996,6 +1056,18 @@ impl Store {
             apply(&tx, &identity, write).map_err(|e| failed(&path, e))?;
         }
         tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// What the propagation node is still to be asked about (1409), as
+    /// [`Store::save_pn_asks`] kept it.
+    pub fn pn_asks(&self) -> Result<crate::pn_status::AskerState, StoreError> {
+        read_pn_asks(&self.conn, &self.identity).map_err(|e| self.failed(e))
+    }
+
+    /// Keep what the propagation node is still to be asked about, all of
+    /// it in place of what was kept.
+    pub fn save_pn_asks(&mut self, state: &crate::pn_status::AskerState) -> Result<(), StoreError> {
+        self.write(&[StoreWrite::PnAsks(state.clone())])
     }
 
     /// Whether a message received with this id is already held: the
@@ -1113,17 +1185,30 @@ impl Store {
 
     /// Every position the store holds, or `peer`'s only.
     fn fixes(&self, peer: Option<[u8; 16]>) -> Result<Vec<Fix>, StoreError> {
+        self.fixes_between(peer, i64::MIN, i64::MAX)
+    }
+
+    /// The positions whose fix time is in `[from, to)`, `peer`'s or every
+    /// peer's, by fix time: the track's reader (1385). The table's key
+    /// starts with the peer and the fix time, so a window is a range.
+    pub fn fixes_between(
+        &self,
+        peer: Option<[u8; 16]>,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<Fix>, StoreError> {
         let mut statement = self
             .conn
             .prepare(
                 "SELECT peer, via, message, fix_time, received_at, lat_e6, lon_e6, alt_e2, \
-                 speed_e2, bearing_e2, accuracy_e2, telemetry FROM positions \
-                 WHERE identity = ?1 AND (?2 IS NULL OR peer = ?2)",
+                 speed_e2, bearing_e2, accuracy_e2, telemetry, source FROM positions \
+                 WHERE identity = ?1 AND (?2 IS NULL OR peer = ?2) \
+                 AND fix_time >= ?3 AND fix_time < ?4 ORDER BY fix_time",
             )
             .map_err(|e| self.failed(e))?;
         let peer = peer.map(|peer| peer.to_vec());
         let rows = statement
-            .query_map(params![&self.identity[..], peer], |row| {
+            .query_map(params![&self.identity[..], peer, from, to], |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, Vec<u8>>(1)?,
@@ -1139,22 +1224,25 @@ impl Store {
                     },
                     row.get::<_, Option<i64>>(4)?,
                     row.get::<_, Vec<u8>>(11)?,
+                    row.get::<_, i64>(12)?,
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
-            .map(|(peer, via, message, location, received_at, telemetry)| {
-                Ok(Fix {
-                    peer: self.address(&peer)?,
-                    via: self.address(&via)?,
-                    message: message.map(key_of),
-                    received_at,
-                    location,
-                    telemetry,
-                    source: crate::telemetry::Source::Telemetry,
-                })
-            })
+            .map(
+                |(peer, via, message, location, received_at, telemetry, source)| {
+                    Ok(Fix {
+                        peer: self.address(&peer)?,
+                        via: self.address(&via)?,
+                        message: message.map(key_of),
+                        received_at,
+                        location,
+                        telemetry,
+                        source: source_of(source),
+                    })
+                },
+            )
             .collect()
     }
 
@@ -1654,7 +1742,17 @@ impl Store {
     /// Whether a seen mark in the archive names the message `id` (1234):
     /// some device saw it already, and its read receipt went then.
     pub fn archive_seen(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
-        let prefix = crate::home::wire::SEEN_MARK_PREFIX;
+        self.archive_marked(&crate::home::wire::SEEN_MARK_PREFIX, id)
+    }
+
+    /// Whether an arrived mark in the archive names `id` (1462): a device
+    /// said it has it, so its sender's device receipt went.
+    pub fn archive_arrived(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
+        self.archive_marked(&crate::home::wire::ARRIVED_MARK_PREFIX, id)
+    }
+
+    /// Whether a mark beginning with `prefix` in the archive names `id`.
+    fn archive_marked(&self, prefix: &[u8; 2], id: &[u8; 32]) -> Result<bool, StoreError> {
         let found: Option<i64> = self
             .conn
             .query_row(
@@ -1770,13 +1868,26 @@ impl Store {
         cursor: u64,
         max_bytes: usize,
     ) -> Result<crate::home::wire::Page, StoreError> {
+        self.archive_since_folded(cursor, max_bytes, crate::home::wire::Fold::All)
+    }
+
+    /// [`Self::archive_since`] for a device that folds (1439): only the
+    /// entries `fold` keeps, skipped in the query, so a board past an
+    /// archive's imported head gets its first page of names at once.
+    pub fn archive_since_folded(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+        fold: crate::home::wire::Fold,
+    ) -> Result<crate::home::wire::Page, StoreError> {
         let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
         let mut statement = self
             .conn
-            .prepare(
-                "SELECT seq, kind, at, packed FROM archive WHERE identity = ?1 AND seq > ?2 \
+            .prepare(&format!(
+                "SELECT seq, kind, at, packed FROM archive WHERE identity = ?1 AND seq > ?2{} \
                  ORDER BY seq",
-            )
+                fold_clause(fold)
+            ))
             .map_err(|e| self.failed(e))?;
         let mut rows = statement
             .query(params![&self.identity[..], cursor])
@@ -1812,7 +1923,36 @@ impl Store {
             entries,
             more,
             first: first.map_or(0, |seq| seq as u64),
+            left: None,
         })
+    }
+
+    /// How many archive entries come after `seq` (1415): what a paged
+    /// `/sync` answer says still waits.
+    pub fn archive_count_after(&self, seq: u64) -> Result<u64, StoreError> {
+        self.archive_count_after_folded(seq, crate::home::wire::Fold::All)
+    }
+
+    /// How many entries a device that folds as `fold` still gets after
+    /// `seq` (1439): `left` as that device will see it arrive.
+    pub fn archive_count_after_folded(
+        &self,
+        seq: u64,
+        fold: crate::home::wire::Fold,
+    ) -> Result<u64, StoreError> {
+        let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+        let count: i64 = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM archive WHERE identity = ?1 AND seq > ?2{}",
+                    fold_clause(fold)
+                ),
+                params![&self.identity[..], seq],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(u64::try_from(count).unwrap_or(0))
     }
 
     /// The archive's newest sequence, 0 when it is empty: what a wake
@@ -2850,6 +2990,23 @@ fn append_in(
     Ok(Some(seq as u64))
 }
 
+/// The archive query's condition for a device that folds as `fold`
+/// (1439), built from the wire's own constants so the home serves exactly
+/// what `Fold::keeps` says; empty for a device that keeps everything.
+fn fold_clause(fold: crate::home::wire::Fold) -> String {
+    use crate::home::wire::{Fold, BOARD_ENTRY_MAX, BOARD_KINDS};
+    match fold {
+        Fold::All => String::new(),
+        Fold::Board => {
+            let kinds: Vec<String> = BOARD_KINDS.iter().map(u8::to_string).collect();
+            format!(
+                " AND kind IN ({}) AND length(packed) <= {BOARD_ENTRY_MAX}",
+                kinds.join(",")
+            )
+        }
+    }
+}
+
 fn failed(path: &Path, error: impl fmt::Display) -> StoreError {
     let detail = error.to_string();
     // SQLite's words for a file that is not whole, wherever they surface.
@@ -2864,6 +3021,94 @@ fn failed(path: &Path, error: impl fmt::Display) -> StoreError {
             detail,
         },
     }
+}
+
+fn read_pn_asks(
+    conn: &Connection,
+    identity: &[u8; 16],
+) -> rusqlite::Result<crate::pn_status::AskerState> {
+    let mut state = crate::pn_status::AskerState::default();
+    let mut asks = conn.prepare(
+        "SELECT transient, message, node, uploaded_at FROM pn_asks WHERE identity = ?1 \
+         ORDER BY uploaded_at, transient",
+    )?;
+    let rows = asks.query_map(params![&identity[..]], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (transient, message, node, uploaded_at) = row?;
+        // A row of another length is no id: passed over.
+        if let (Ok(transient_id), Ok(message_id), Ok(node)) = (
+            <[u8; 32]>::try_from(transient.as_slice()),
+            <[u8; 32]>::try_from(message.as_slice()),
+            <[u8; 16]>::try_from(node.as_slice()),
+        ) {
+            state.open.push(crate::pn_status::Open {
+                transient_id,
+                message_id,
+                node,
+                uploaded_at,
+            });
+        }
+    }
+    let mut nodes =
+        conn.prepare("SELECT node, version FROM pn_nodes WHERE identity = ?1 ORDER BY node")?;
+    let rows = nodes.query_map(params![&identity[..]], |row| {
+        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (node, version) = row?;
+        if let Ok(node) = <[u8; 16]>::try_from(node.as_slice()) {
+            state
+                .answering
+                .push((node, u64::try_from(version).unwrap_or(0)));
+        }
+    }
+    Ok(state)
+}
+
+fn write_pn_asks(
+    tx: &rusqlite::Transaction<'_>,
+    identity: &[u8; 16],
+    state: &crate::pn_status::AskerState,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM pn_asks WHERE identity = ?1",
+        params![&identity[..]],
+    )?;
+    tx.execute(
+        "DELETE FROM pn_nodes WHERE identity = ?1",
+        params![&identity[..]],
+    )?;
+    for open in &state.open {
+        tx.execute(
+            "INSERT OR REPLACE INTO pn_asks(identity, transient, message, node, uploaded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &identity[..],
+                &open.transient_id[..],
+                &open.message_id[..],
+                &open.node[..],
+                open.uploaded_at
+            ],
+        )?;
+    }
+    for (node, version) in &state.answering {
+        tx.execute(
+            "INSERT OR REPLACE INTO pn_nodes(identity, node, version) VALUES (?1, ?2, ?3)",
+            params![
+                &identity[..],
+                &node[..],
+                i64::try_from(*version).unwrap_or(i64::MAX)
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn apply(
@@ -2991,6 +3236,7 @@ fn apply(
                 params![&identity[..], &peer[..]],
             )?;
         }
+        StoreWrite::PnAsks(state) => write_pn_asks(tx, identity, state)?,
         StoreWrite::Group(group) => {
             tx.execute(
                 "INSERT INTO client_groups(identity, address, name, admin_name, inviter, ours, \
@@ -3087,12 +3333,20 @@ fn apply(
         StoreWrite::Position(fix) => {
             let l = &fix.location;
             tx.execute(
-                "INSERT OR IGNORE INTO positions(identity, peer, via, message, fix_time, \
+                // One row a peer and fix time: the first to arrive stays,
+                // except that a fix a message carried takes the place of
+                // the same fix announced, so the row names its message.
+                "INSERT INTO positions(identity, peer, via, message, fix_time, \
                  received_at, lat_e6, lon_e6, alt_e2, speed_e2, bearing_e2, accuracy_e2, \
-                 telemetry) \
+                 telemetry, source) \
                  VALUES (?1, ?2, ?3, \
                  (SELECT seq FROM messages WHERE seq = ?4 AND identity = ?1), \
-                 ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 ON CONFLICT(identity, peer, fix_time) DO UPDATE SET \
+                 via = excluded.via, message = excluded.message, \
+                 received_at = excluded.received_at, telemetry = excluded.telemetry, \
+                 source = excluded.source \
+                 WHERE positions.source = 1 AND excluded.source = 0",
                 params![
                     &identity[..],
                     &fix.peer[..],
@@ -3107,11 +3361,29 @@ fn apply(
                     l.bearing_e2,
                     i64::from(l.accuracy_e2),
                     fix.telemetry,
+                    source_code(fix.source),
                 ],
             )?;
         }
     }
     Ok(())
+}
+
+/// `positions.source` of a fix's source (schema 14).
+fn source_code(source: crate::telemetry::Source) -> i64 {
+    match source {
+        crate::telemetry::Source::Telemetry => 0,
+        crate::telemetry::Source::Mesh => 1,
+    }
+}
+
+/// The source `positions.source` names; an unknown code reads as a
+/// message's, the column's default.
+fn source_of(code: i64) -> crate::telemetry::Source {
+    match code {
+        1 => crate::telemetry::Source::Mesh,
+        _ => crate::telemetry::Source::Telemetry,
+    }
 }
 
 /// The key of the received message with this id, other than `except`.
@@ -3204,6 +3476,7 @@ pub(crate) fn state_code(state: DeliveryState) -> i64 {
         DeliveryState::Rejected => 6,
         DeliveryState::Failed => 7,
         DeliveryState::Read { .. } => 8,
+        DeliveryState::Arrived => 9,
     }
 }
 
@@ -3237,6 +3510,7 @@ pub(crate) fn state_of(code: i64) -> Option<DeliveryState> {
         6 => DeliveryState::Rejected,
         7 => DeliveryState::Failed,
         8 => DeliveryState::Read { at: 0 },
+        9 => DeliveryState::Arrived,
         _ => return None,
     })
 }
@@ -3832,6 +4106,105 @@ mod tests {
         assert!(other.positions().expect("positions").is_empty());
     }
 
+    /// 1385: an announced fix is kept and comes back as announced; the
+    /// same fix in a message takes its row and names the message; the
+    /// reader gives a peer's window in fix-time order.
+    #[test]
+    fn announced_fixes_are_kept_and_a_message_takes_their_row() {
+        use crate::telemetry::Source;
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, BOB, message(1, false, ""));
+        let mesh = |t: i64| Fix {
+            message: None,
+            telemetry: Vec::new(),
+            source: Source::Mesh,
+            ..fix(BOB, BOB, None, t)
+        };
+        store
+            .write(&[
+                StoreWrite::Position(mesh(3_000)),
+                StoreWrite::Position(mesh(5_000)),
+                StoreWrite::Position(mesh(5_000)),
+                StoreWrite::Position(mesh(4_000)),
+            ])
+            .expect("write");
+        assert_eq!(
+            store.track_len(BOB).expect("track"),
+            3,
+            "one row a fix time"
+        );
+        let told = fix(BOB, BOB, Some(key_of(1)), 5_000);
+        store
+            .write(&[StoreWrite::Position(told.clone())])
+            .expect("write");
+        // Announced again after the message: the message's row stays.
+        store
+            .write(&[StoreWrite::Position(mesh(5_000))])
+            .expect("write");
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        let window = store
+            .fixes_between(Some(BOB), 3_500, 6_000)
+            .expect("window");
+        assert_eq!(window, vec![mesh(4_000), told], "in fix-time order");
+        let all = store.fixes_between(None, i64::MIN, i64::MAX).expect("all");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].source, Source::Mesh);
+    }
+
+    /// 1385's store numbers: a day at a 5 min cadence is 288 rows; a year
+    /// of one peer is 105 120 rows, and the file it takes is printed for
+    /// the report (`-- --nocapture`). A stored announced fix carries no
+    /// Telemeter, so a row is the key, the integers and the column heads.
+    #[test]
+    fn a_year_of_one_peer_at_five_minutes() {
+        use crate::telemetry::Source;
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let per_day = 86_400 / 300;
+        assert_eq!(per_day, 288);
+        let start = 1_700_000_000i64;
+        let rows: Vec<StoreWrite> = (0..365 * per_day)
+            .map(|i| {
+                let t = start + i * 300;
+                let mut f = fix(BOB, BOB, None, t);
+                f.source = Source::Mesh;
+                f.telemetry = Vec::new();
+                f.location.latitude_e6 += (i % 977) as i32 * 13;
+                f.location.longitude_e6 += (i % 1009) as i32 * 17;
+                f.location.speed_e2 = (i % 300) as u32;
+                f.location.bearing_e2 = (i % 36_000) as i32;
+                f.location.accuracy_e2 = 800;
+                StoreWrite::Position(f)
+            })
+            .collect();
+        for chunk in rows.chunks(10_000) {
+            store.write(chunk).expect("write");
+        }
+        assert_eq!(store.track_len(BOB).expect("track"), 105_120);
+        store
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+            .expect("vacuum");
+        let size = std::fs::metadata(home.path().join(STORE_FILE))
+            .expect("file")
+            .len();
+        let empty = {
+            let other = tempfile::tempdir().expect("other");
+            let s = Store::open_in(other.path(), US).expect("open");
+            s.conn.execute_batch("VACUUM;").expect("vacuum");
+            std::fs::metadata(other.path().join(STORE_FILE))
+                .expect("file")
+                .len()
+        };
+        let per_row = (size - empty) as f64 / 105_120.0;
+        std::println!(
+            "TRACK-STORE rows=105120 file={size} empty={empty} per_row={per_row:.1} bytes"
+        );
+        assert!(size - empty < 16 * 1024 * 1024, "{size}");
+    }
+
     /// 1201: the positions we shared, newest first, each with whom and
     /// when; a text of ours and a report we received are none of them.
     #[test]
@@ -4210,6 +4583,47 @@ mod tests {
         drop(conn);
         let text = refused(home.path());
         assert!(text.contains("table shares is missing"), "{text}");
+    }
+
+    /// 1409: what the propagation node is still to be asked about comes
+    /// back after a restart as it was kept, a write replaces all of it, and
+    /// another identity sees none.
+    #[test]
+    fn what_the_node_is_to_be_asked_survives_a_restart() {
+        use crate::pn_status::{AskerState, Open};
+        let home = tempfile::tempdir().expect("home");
+        let state = AskerState {
+            open: vec![
+                Open {
+                    transient_id: [0x81; 32],
+                    message_id: [0x61; 32],
+                    node: [0x9c; 16],
+                    uploaded_at: 1_800_000_000,
+                },
+                Open {
+                    transient_id: [0x82; 32],
+                    message_id: [0x62; 32],
+                    node: [0x9d; 16],
+                    uploaded_at: 1_800_000_100,
+                },
+            ],
+            answering: vec![([0x9c; 16], 1)],
+        };
+        {
+            let mut store = Store::open_in(home.path(), US).expect("open");
+            assert_eq!(store.pn_asks().expect("read"), AskerState::default());
+            store.save_pn_asks(&state).expect("kept");
+        }
+        let mut store = Store::open_in(home.path(), US).expect("again");
+        assert_eq!(store.pn_asks().expect("read"), state);
+        let fewer = AskerState {
+            open: state.open[1..].to_vec(),
+            answering: Vec::new(),
+        };
+        store.save_pn_asks(&fewer).expect("replaced");
+        assert_eq!(store.pn_asks().expect("read"), fewer);
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert_eq!(other.pn_asks().expect("read"), AskerState::default());
     }
 
     /// 1307 G2, item 2: a group the model wrote comes back with every

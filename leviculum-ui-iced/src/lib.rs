@@ -13,7 +13,8 @@
 //! fills from its own tokens. A key as the keymap's ([`key`]). And a view without a window ([`headless`]):
 //! drawn into pixels for the goldens, clicked for the tests. The desktop's
 //! light or dark, which iced alone does not read on Linux ([`desktop`]).
-//! The suite's window icon ([`window_icon`]).
+//! The suite's window icon ([`window_icon`]). A list whose wheel scrolls
+//! softly ([`smooth`]). The window's frame meter ([`fps`]).
 //!
 //! Generic over the program's message: a press is the `M` it was given.
 //!
@@ -29,13 +30,18 @@ pub mod avatar;
 pub mod chrome;
 pub mod control;
 pub mod desktop;
+pub mod fps;
 pub mod headless;
 pub mod help;
 pub mod icon;
 pub mod key;
 pub mod paint;
+pub mod smooth;
 pub mod wave;
 pub mod window_icon;
+
+#[cfg(test)]
+mod fast_paths;
 
 pub use icon::{drawing, Icon};
 pub use paint::{colour, rgb, Palette};

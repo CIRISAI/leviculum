@@ -284,6 +284,7 @@ fn pulled(mailbox: &Mailbox, model: &mut UiModel<Line>) {
         let body = message.content.clone();
         let event = match entry.kind {
             KIND_RECEIVED => OutboxEvent::Received {
+                sent_at: 0,
                 message_id: message.message_id,
                 source: message.source_hash,
                 title: message.title,

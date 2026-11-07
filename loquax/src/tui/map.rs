@@ -36,6 +36,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use leviculum_map::cells::{self, Encoding, Sets};
 use leviculum_map::draw::Ink;
 use leviculum_map::labels::{LabelKind, ViewLabel};
+use leviculum_map::ladder::{Ladder, Pass};
 use leviculum_map::viewport::{Viewport, MAX_VIEW_ZOOM};
 use leviculum_mapfill::frame::{rgb888, Frame};
 use leviculum_mapfill::style::{MapTheme, Style as MapStyle};
@@ -665,6 +666,8 @@ struct Painted {
     glyphs: Vec<cells::Cell>,
     /// The names of the view, placed in cells at render time.
     names: Vec<ViewLabel>,
+    /// Microseconds the paint took: the frame budget's ground (1422).
+    paint_us: u32,
 }
 
 /// One paint asked for: the view, the cells its picture covers, and the
@@ -708,6 +711,14 @@ impl Canvas {
     /// Draw `ask`'s view, and encode it under kitty or sixel or as a text
     /// technique's cells.
     fn paint(&mut self, ask: Ask) -> Painted {
+        let started = Instant::now();
+        let mut painted = self.paint_view(ask);
+        painted.paint_us = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+        painted
+    }
+
+    /// [`paint`](Self::paint), untimed.
+    fn paint_view(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
         // Places, waters and parks, and the streets and rivers, which the
         // cells name where they run level.
@@ -724,6 +735,7 @@ impl Canvas {
                 picture: None,
                 glyphs: cells::encode(&source, encoding, &self.sets),
                 names,
+                paint_us: 0,
             };
         }
         let (w, h) = view.size();
@@ -746,6 +758,7 @@ impl Canvas {
             picture,
             glyphs: Vec::new(),
             names,
+            paint_us: 0,
         }
     }
 
@@ -1015,6 +1028,10 @@ pub struct MapPainter {
     tier: Tier,
     /// The map's colour table.
     theme: MapTheme,
+    /// The frame budget (1422): a drag is the gesture, the paint the
+    /// ground, the names placed in cells a pass the minimal rung leaves
+    /// to the frame at rest.
+    ladder: Ladder,
 }
 
 impl MapPainter {
@@ -1045,7 +1062,9 @@ impl MapPainter {
         let painter = Painter::new(maps.clone());
         let setup = MapSetup {
             cell_px: graphics.cell_px(font),
-            zooms: painter.zooms(),
+            // Deeper than the outline where no region is: the radar's
+            // zooms (1386).
+            zooms: loquax::ui::radar::zooms(painter.zooms()),
             regions: painter.headers(),
             ..MapSetup::default()
         };
@@ -1068,7 +1087,14 @@ impl MapPainter {
             nudge: false,
             tier: Tier::Truecolor,
             theme: MapTheme::Light,
+            ladder: Ladder::new(),
         }
+    }
+
+    /// Hold drags at `rung` whatever they cost: a test's.
+    #[cfg(test)]
+    fn hold_rung(&mut self, rung: Option<u8>) {
+        self.ladder.hold(rung);
     }
 
     /// Draw for a screen in `tier` from the next frame on.
@@ -1196,7 +1222,39 @@ impl MapPainter {
             epoch: self.maps.epoch(),
             style: self.style(),
         };
-        self.paint(ask, Instant::now());
+        let started = Instant::now();
+        match shown.moving {
+            true => self.ladder.gesture_start(),
+            false => self.ladder.gesture_end(),
+        }
+        let paints = self.paints;
+        self.paint(ask, started);
+        // A new picture's paint is the ground's time; a frame that only
+        // places labels over the last one has none.
+        let ground_us = (self.paints != paints)
+            .then(|| self.painted.as_ref().map(|p| p.paint_us))
+            .flatten();
+        if let Some(us) = ground_us {
+            self.ladder.observe(Pass::Ground, us);
+        }
+        let place = !shown.moving || self.ladder.motion_layers().has(Pass::Labels);
+        self.render_painted(frame, shown, muted, ask, place);
+        if let Some(us) = ground_us.filter(|_| shown.moving) {
+            let own = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+            self.ladder.motion_frame(us.saturating_add(own));
+        }
+    }
+
+    /// [`render`](Self::render) once `ask` is asked of the painter: the
+    /// map's names placed only with `place`.
+    fn render_painted(
+        &mut self,
+        frame: &mut TermFrame,
+        shown: &MapView,
+        muted: Style,
+        ask: Ask,
+        place: bool,
+    ) {
         let graphics = self.graphics;
         // The view is the model's, laid out for the size it last heard of;
         // the frame is the terminal's now. Between a shrink and its resize
@@ -1224,7 +1282,21 @@ impl MapPainter {
         // A picture painted for another pane size is not drawn over this
         // one: its cells would not cover the pane.
         let fits = painted.cells == ask.cells && (area.width, area.height) == ask.cells;
+        // No region here (1386): the radar's blank ground, whatever the
+        // technique; its rings are drawn with the tracks below.
+        let radar = shown.radar.as_ref();
         match graphics {
+            _ if radar.is_some() => {
+                let buf = frame.buffer_mut();
+                for row in 0..area.height {
+                    for col in 0..area.width {
+                        if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                            cell.reset();
+                            cell.set_char(' ');
+                        }
+                    }
+                }
+            }
             _ if !fits => {}
             Graphics::Halfblocks => {
                 let buf = frame.buffer_mut();
@@ -1311,10 +1383,14 @@ impl MapPainter {
                 Some((col, row, l.text.chars().count() as u16))
             })
             .collect();
-        let names = match fits {
+        let names = match fits && radar.is_none() && place {
             true => {
                 let at = leviculum_ui::Rect::new(area.x, area.y, area.width, area.height);
-                place_names(&painted.names, at, self.setup.cell_px, &taken)
+                let started = Instant::now();
+                let names = place_names(&painted.names, at, self.setup.cell_px, &taken);
+                let us = u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX);
+                self.ladder.observe(Pass::Labels, us);
+                names
             }
             false => Vec::new(),
         };
@@ -1329,6 +1405,26 @@ impl MapPainter {
                 name: true,
             })
             .collect();
+        // The tracks under the pins and over the map's names (1385).
+        let dark = matches!(painted.style.theme, MapTheme::Dark);
+        if let Some(r) = radar {
+            labels.extend(r.cells.iter().map(|t| Label {
+                col: t.col,
+                row: t.row,
+                style: track_style(self.tier, dark, t.hue, t.level),
+                text: t.text.clone(),
+                name: false,
+            }));
+        }
+        if fits || radar.is_some() {
+            labels.extend(shown.tracks.iter().map(|t| Label {
+                col: t.col,
+                row: t.row,
+                style: track_style(self.tier, dark, t.hue, t.level),
+                text: t.text.clone(),
+                name: false,
+            }));
+        }
         labels.extend(pins);
         let buf = frame.buffer_mut();
         if matches!(graphics, Graphics::Kitty | Graphics::Sixel) {
@@ -1371,8 +1467,16 @@ impl MapPainter {
         }
         self.labels = labels;
         // The region's own line, "© OpenStreetMap contributors", or the
-        // outline's; always on the view.
-        let credit = format!("{} ", painted.attribution);
+        // outline's; always on the view. A time window that is not the
+        // default goes before it (1419): the reason older lines show.
+        let line = match radar {
+            Some(r) => r.note.as_str(),
+            None => painted.attribution.as_str(),
+        };
+        let credit = match &shown.window_word {
+            Some(word) => format!("{word} · {line} "),
+            None => format!("{line} "),
+        };
         let len = credit.chars().count() as u16;
         let x = (area.x + area.width).saturating_sub(len).max(area.x);
         if area.y + area.height >= bounds.bottom() {
@@ -1385,6 +1489,44 @@ impl MapPainter {
             usize::from(area.width),
             muted,
         );
+    }
+}
+
+/// A track cell's style: the hue, brighter or fainter by its level of
+/// four ([`loquax::ui::tracks::Age::level`]): full, the hue blended a
+/// third, two thirds and three quarters into the map's ground; at sixteen
+/// colours the hue's ANSI colour, dim below the top two levels; no colour
+/// at all on a mono terminal, dim below the top two.
+fn track_style(tier: Tier, dark: bool, hue: Option<u8>, level: u8) -> Style {
+    use loquax::ui::tracks;
+    let style = Style::default();
+    match tier {
+        Tier::Mono => match level {
+            2..=3 => style,
+            _ => style.add_modifier(Modifier::DIM),
+        },
+        Tier::Ansi16 => {
+            let style = style.fg(Color::Indexed(tracks::ansi16(hue, dark)));
+            match level {
+                2..=3 => style,
+                _ => style.add_modifier(Modifier::DIM),
+            }
+        }
+        _ => {
+            let [r, g, b] = tracks::colour(hue, dark);
+            let ground: [u8; 3] = match dark {
+                true => [0x16, 0x16, 0x16],
+                false => [0xf2, 0xef, 0xe9],
+            };
+            let keep = [1.0, 0.65, 0.4, 0.25][usize::from(3 - level.min(3))];
+            let mix =
+                |c: u8, g: u8| (f32::from(c) * keep + f32::from(g) * (1.0 - keep)).round() as u8;
+            style.fg(Color::Rgb(
+                mix(r, ground[0]),
+                mix(g, ground[1]),
+                mix(b, ground[2]),
+            ))
+        }
     }
 }
 
@@ -1943,6 +2085,10 @@ mod tests {
             area,
             viewport: Viewport::new(at, 1, 30 * u32::from(cell_px.0), 8 * u32::from(cell_px.1)),
             cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 16,
@@ -2004,6 +2150,24 @@ mod tests {
         assert!(text.contains("● bob · 4 min"));
     }
 
+    /// The time window (1419): no strip, no word with the default; another
+    /// window's word on the credit's row, before the credit.
+    #[test]
+    fn a_window_not_the_default_says_its_word_on_the_credit_row() {
+        let (_, plain) = drawn(Graphics::Halfblocks, None);
+        assert!(!plain.contains("This week"));
+        let mut painter = MapPainter::new(Maps::default(), Graphics::Halfblocks, None);
+        let mut view = shown(painter.setup().cell_px);
+        view.window_word = Some("This week".to_string());
+        let mut terminal = Terminal::new(TestBackend::new(32, 10)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| painter.render(f, &view, Style::default()));
+        let row: String = (0..32)
+            .filter_map(|x| terminal.backend().buffer().cell((x, 9)))
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(row.contains("This week · "), "{row:?}");
+    }
+
     /// The smallest shift by which every column of `cols` repeats, the
     /// copies of the world side by side; `None` where none does.
     fn period<T: PartialEq>(cols: &[T]) -> Option<usize> {
@@ -2017,6 +2181,10 @@ mod tests {
         let (w, h) = view.size();
         let (cols, rows) = (w as u16, (h / 2) as u16);
         let shown = MapView {
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             area: leviculum_ui::Rect::new(1, 1, cols, rows),
             viewport: view,
             cell_px: (1, 2),
@@ -2082,6 +2250,10 @@ mod tests {
                 u32::from(rows) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2121,6 +2293,51 @@ mod tests {
         assert_eq!(frame, PINNED_NAMES, "{frame}");
     }
 
+    /// 1422: a drag is the frame budget's gesture. At the minimal rung a
+    /// frame while the pointer drags leaves the map's names out, as the
+    /// pixel screens let them ride; the frame as the button comes up puts
+    /// them back. At the full rung the drag keeps them.
+    #[test]
+    fn a_drag_at_the_minimal_rung_leaves_the_names_to_the_rest() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        let mut painter = MapPainter::new(Maps::new(Some(dir)), Graphics::Braille, None);
+        let cell_px = painter.setup().cell_px;
+        let (cols, rows) = (60u16, 20u16);
+        let at = project(LatLon::from_degrees(43.7755, 11.2672));
+        let shown = |moving: bool| MapView {
+            area: leviculum_ui::Rect::new(0, 0, cols, rows),
+            viewport: Viewport::new(
+                at,
+                15,
+                u32::from(cols) * u32::from(cell_px.0),
+                u32::from(rows) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving,
+            pins: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
+        let mut text = |painter: &mut MapPainter, moving: bool| {
+            let Ok(_) = terminal.draw(|f| painter.render(f, &shown(moving), Style::default()));
+            let buffer = terminal.backend().buffer().clone();
+            (0..rows)
+                .flat_map(|y| (0..cols).map(move |x| (x, y)))
+                .filter_map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect::<String>()
+        };
+        painter.hold_rung(Some(2));
+        assert!(!text(&mut painter, true).contains("Piazza"), "riding");
+        assert!(painter.ladder.moving());
+        assert!(text(&mut painter, false).contains("Piazza"), "at rest");
+        assert!(!painter.ladder.moving());
+        painter.hold_rung(Some(0));
+        assert!(text(&mut painter, true).contains("Piazza"), "the full rung");
+    }
+
     /// 1302: a node the mesh shows that is no contact is drawn beside a
     /// friend's pin in the muted grey, its announced name beside it, the
     /// friend's in the plain text colour; the frame pinned as text.
@@ -2145,6 +2362,10 @@ mod tests {
             selected: false,
         };
         let shown = MapView {
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             area,
             viewport: Viewport::new(
                 at,
@@ -2203,6 +2424,10 @@ mod tests {
                 u32::from(rows) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 2,
@@ -2900,6 +3125,7 @@ mod tests {
             picture: None,
             glyphs: Vec::new(),
             names: Vec::new(),
+            paint_us: 0,
         }
     }
 
@@ -2964,6 +3190,10 @@ mod tests {
                 u32::from(area.height) * u32::from(cell_px.1),
             ),
             cell_px,
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             pins: vec![PinCell {
                 peer: [1; 16],
                 col: 39,
@@ -3082,6 +3312,10 @@ mod tests {
         let cell_px = painter.setup().cell_px;
         let (cols, rows) = (60u16, 20u16);
         MapView {
+            tracks: Vec::new(),
+            radar: None,
+            window_word: None,
+            moving: false,
             area: leviculum_ui::Rect::new(0, 0, cols, rows),
             viewport: Viewport::new(
                 centre,

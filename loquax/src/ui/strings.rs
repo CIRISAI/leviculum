@@ -131,8 +131,16 @@ leviculum_ui::catalogue! {
     StateSending = "state_sending", "Sending", "Wird gesendet";
     StateUnconfirmed = "state_unconfirmed", "Sent, not confirmed yet", "Gesendet, noch nicht bestätigt";
     StateMailbox = "state_mailbox", "Waiting in the mailbox", "Wartet im Postfach";
-    StateDelivered = "state_delivered", "Delivered", "Zugestellt";
+    // One tick from the recipient's proof (1462): its mailbox or its
+    // device, the word is neutral; two ticks are the device's own word.
+    StateArrived = "state_arrived", "Arrived", "Angekommen";
+    StateDelivered = "state_delivered", "On the recipient's device", "Auf dem Gerät";
+    // A group's two ticks (1466): every member's device said it has it.
+    StateGroupDelivered = "state_group_delivered", "On the devices", "Auf den Geräten";
     StateRead = "state_read", "Read at %1$s", "Gelesen um %1$s";
+    // The arrived rung's words when the propagation node, not a proof,
+    // witnessed it (1395, 1462, loquax-propagation-receipts.md).
+    StateCollected = "state_collected", "Collected from the propagation network", "Aus dem Propagation-Netz abgeholt";
     StateFailed = "state_failed", "Not sent. Double tap to send again", "Nicht gesendet. Doppeltippen, um es erneut zu senden";
     SendAgain = "scene_send_again", "Send again", "Erneut senden";
     ActionReply = "action_reply", "Reply", "Antworten";
@@ -153,7 +161,14 @@ leviculum_ui::catalogue! {
     InfoPreparing = "info_preparing", "Being prepared for sending", "Wird zum Senden vorbereitet";
     InfoSending = "info_sending", "Being sent now", "Wird gerade gesendet";
     InfoMailbox = "info_mailbox", "In the mailbox, delivered once %1$s is online", "Im Postfach, wird zugestellt, sobald %1$s online ist";
-    InfoDelivered = "info_delivered", "Arrived on %1$s's device", "Auf dem Gerät von %1$s angekommen";
+    InfoDelivered = "info_delivered", "On %1$s's device", "Auf dem Gerät von %1$s";
+    // The times of the ladder (1462): when the proof came, when the device
+    // said it has it, when it was read.
+    InfoArrived = "info_arrived", "Arrived", "Angekommen";
+    InfoOnDevice = "info_on_device", "On the device", "Auf dem Gerät";
+    InfoReadAt = "info_read_at", "Read", "Gelesen";
+    InfoCollected = "info_collected", "Collected from the propagation network at %1$s", "Um %1$s aus dem Propagation-Netz abgeholt";
+    InfoNotCollected = "info_not_collected", "Not collected at the propagation node; perhaps delivered via another", "Am Propagation-Knoten nicht abgeholt; vielleicht über einen anderen zugestellt";
     InfoRefused = "info_refused", "Not sent: it was refused. Double tap to send again", "Nicht gesendet: es wurde abgelehnt. Doppeltippen, um es erneut zu senden";
     InfoSender = "info_sender", "Sender", "Absender";
     InfoSignatureOk = "info_signature_ok", "Confirmed by its signature", "Durch die Signatur bestätigt";
@@ -168,6 +183,9 @@ leviculum_ui::catalogue! {
     InfoGroupRead = "info_group_read", "Read by %1$d of %2$d", "Von %1$d von %2$d gelesen";
     InfoGroupNoReaders = "info_group_no_readers", "Nobody in it sends read receipts", "Niemand darin sendet Lesebestätigungen";
     InfoGroupQuiet = "info_group_quiet", "%1$d send no read receipts and are not counted", "%1$d senden keine Lesebestätigungen und zählen nicht mit";
+    // A member's row in a group line's Info (1466): its rung and since
+    // when; a copy nobody proved yet says so.
+    InfoMemberWaiting = "info_member_waiting", "Not arrived yet", "Noch nicht angekommen";
     InfoSize = "info_size", "Size", "Größe";
     InfoKb = "info_kb", "%1$d.%2$d KB", "%1$d,%2$d KB";
     // The verbs no Android string named yet: each intent's label
@@ -270,8 +288,32 @@ leviculum_ui::catalogue! {
     GroupLeftOutFile = "group_left_out_file", "sent a file (too large for the radio)", "hat eine Datei geschickt (zu groß für die Funkstrecke)";
     GroupLeftOutGone = "group_left_out_gone", "a message (no longer here)", "eine Nachricht (nicht mehr da)";
     // A group's status of our message in its ledger (1381): kept as numbers, said in the reader's language.
+    GroupStatusDevicesNote = "group_status_devices_note", "Group: arrived at %1$d of %2$d, on the devices of %3$d, read by %4$d of %5$d", "Gruppe: bei %1$d von %2$d angekommen, auf den Geräten von %3$d, von %4$d von %5$d gelesen";
     GroupStatusNote = "group_status_note", "Group: delivered to %1$d of %2$d, read by %3$d of %4$d", "Gruppe: bei %1$d von %2$d angekommen, von %3$d von %4$d gelesen";
     MyCode = "scene_my_code", "My code", "Mein Code";
+    // The profile behind the avatar (1443): one scene on every target; the keys are the phone's as they were.
+    ProfileTitle = "profile_title", "Your profile", "Dein Profil";
+    ProfileNameElsewhere = "profile_name_elsewhere", "Your name is set where your mailbox runs.", "Dein Name wird dort festgelegt, wo dein Postfach läuft.";
+    ProfileAddress = "profile_address", "Your address", "Deine Adresse";
+    ProfileQrCaption = "profile_qr_caption", "Scan this code to add me as a contact", "Scanne diesen Code, um mich als Kontakt hinzuzufügen";
+    ProfileMailboxHere = "profile_mailbox_here", "Mailbox: on this device", "Postfach: auf diesem Gerät";
+    ProfileMailboxAway = "profile_mailbox_away_undated", "Mailbox: on %1$s", "Postfach: auf %1$s";
+    ProfileMailboxElsewhere = "profile_mailbox_elsewhere", "Mailbox: on another device", "Postfach: auf einem anderen Gerät";
+    ProfileThisDeviceUnnamed = "profile_this_device_unnamed", "This device", "Dieses Gerät";
+    ProfileDeviceUnnamed = "profile_device_unnamed", "A device without a name", "Ein Gerät ohne Namen";
+    ProfileMailboxUnknown = "profile_mailbox_unknown", "Mailbox: not set up yet", "Postfach: noch nicht eingerichtet";
+    ProfileVia = "profile_via", "Connected over %1$s", "Verbunden über %1$s";
+    ProfileDevices = "profile_devices", "Your devices", "Deine Geräte";
+    ProfileThisDevice = "profile_this_device", "%1$s (this device)", "%1$s (dieses Gerät)";
+    ProfileShare = "profile_share", "Share my address", "Meine Adresse teilen";
+    ProfileCopied = "profile_copied", "Your address is on the clipboard", "Deine Adresse ist in der Zwischenablage";
+    // The ladder's header words (loquax-reachability.md), as "Connected over %1$s" names them.
+    RungLocal = "rung_local", "this computer", "diesen Rechner";
+    RungBluetooth = "rung_bluetooth", "Bluetooth", "Bluetooth";
+    RungHomeWifi = "rung_home_wifi", "the home WiFi", "das Heim-WLAN";
+    RungDirect = "rung_direct", "a direct connection", "eine direkte Verbindung";
+    RungRelayed = "rung_relayed", "a relay server", "einen Vermittlungsserver";
+    RungMesh = "rung_mesh", "the mesh", "das Mesh";
     Name = "scene_name", "Your name", "Dein Name";
     Pull = "scene_pull", "Fetch messages", "Nachrichten abholen";
     Front = "scene_front", "App in front", "App im Vordergrund";
@@ -400,6 +442,14 @@ leviculum_ui::catalogue! {
     JoinBadWhere = "join_bad_where", "Loquax cannot read where the mailbox is. It looks like 192.168.1.20:4242.", "Loquax kann nicht lesen, wo das Postfach ist. Das sieht so aus: 192.168.1.20:4242.";
     JoinFailed = "join_failed", "Joining the mailbox did not work.", "Das Postfach ließ sich nicht verbinden.";
     JoinOtherMailbox = "join_other_mailbox", "This phone already reads another mailbox.", "Dieses Handy liest schon ein anderes Postfach.";
+    // A device of a home that has no window to say more (1415, the M9's
+    // top bar): joining with its code, the archive coming in, and the
+    // home out of reach. The pull counts entries of the archive, which
+    // are messages and what became of them.
+    HomeJoining = "home_joining", "Joining your mailbox", "Verbinde mit deinem Postfach";
+    HomeFetched = "home_fetched", "Fetched %1$d of %2$d", "%1$d von %2$d abgeholt";
+    HomeFetchedSome = "home_fetched_some", "Fetched %1$d", "%1$d abgeholt";
+    HomeUnreachable = "home_unreachable", "Mailbox unreachable", "Postfach nicht erreichbar";
     // Linking a device (1264): the phone holds no mailbox to link to.
     LinkOnComputer = "link_on_computer", "Your mailbox is on a computer. Link the other device there.", "Dein Postfach ist auf einem Computer. Verbinde das andere Gerät dort.";
     // Moving to a new phone (1281, walk finding 24).
@@ -417,6 +467,17 @@ leviculum_ui::catalogue! {
     SelectPin = "scene_select_pin", "Select pin", "Stecknadel wählen";
     MapDrawing = "scene_map_drawing", "Map drawing", "Kartendarstellung";
     GlyphTest = "scene_glyph_test", "Glyph test", "Zeichentest";
+    // 1385, 1419: the tracks' time window, an entry of the map's menu and
+    // the single choice it opens; the default is the current movement.
+    TrackWindow = "scene_track_window", "Time window", "Zeitraum";
+    TracksNow = "scene_tracks_now", "Current movement", "Aktuelle Bewegung";
+    TracksToday = "scene_tracks_today", "Today", "Heute";
+    TracksYesterday = "scene_tracks_yesterday", "Yesterday", "Gestern";
+    TracksWeek = "scene_tracks_week", "This week", "Diese Woche";
+    TracksMonth = "scene_tracks_month", "This month", "Dieser Monat";
+    TracksAll = "scene_tracks_all", "All", "Alles";
+    // 1386: every peer with a position inside the time window in view.
+    FitWindow = "scene_fit_window", "Fit all", "Alle zeigen";
     LoadMapArea = "scene_load_map_area", "Load this map area", "Diesen Kartenausschnitt laden";
     // The day line: the weekday, the day and the month, the year when it
     // is not this one.

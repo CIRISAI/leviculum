@@ -367,6 +367,12 @@ struct GuiArgs {
     /// to a daemon: the check that the window starts on this display.
     #[arg(long)]
     exit_after_first_frame: bool,
+
+    /// Measure the window's frames: frames per second and a frame's time
+    /// with its parts in the top right corner, and a WINDOW_FRAME line a
+    /// second in the log while it draws. `LOQUAX_FPS=1` does the same.
+    #[arg(long)]
+    fps: bool,
 }
 
 #[cfg(feature = "tui")]
@@ -894,6 +900,7 @@ fn gui_args(args: &Args) -> GuiArgs {
             timeout: tui.timeout,
             sync_interval: tui.sync_interval.clone(),
             exit_after_first_frame: false,
+            fps: false,
         }
     }
     #[cfg(not(feature = "tui"))]
@@ -906,6 +913,7 @@ fn gui_args(args: &Args) -> GuiArgs {
             timeout: DEFAULT_TIMEOUT_SECS,
             sync_interval: None,
             exit_after_first_frame: false,
+            fps: false,
         }
     }
 }
@@ -1000,6 +1008,9 @@ async fn main() -> ExitCode {
 /// `loquax gui`: parse what the shell needs, then hand over.
 #[cfg(feature = "gui")]
 async fn run_gui(args: GuiArgs) -> ExitCode {
+    if args.fps || std::env::var_os("LOQUAX_FPS").is_some_and(|v| v == "1") {
+        gui::measure_frames();
+    }
     if args.exit_after_first_frame {
         return gui::probe();
     }

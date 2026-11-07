@@ -156,6 +156,9 @@ struct Entry {
     /// Drawn while a region in it was still arriving (1291): dropped on
     /// the next progress.
     provisional: bool,
+    /// Drawn without its edges smoothed, while the view moved at a rung
+    /// that leaves them out (1422): a frame that smooths draws it again.
+    draft: bool,
 }
 
 /// What the cache did since it was made.
@@ -167,6 +170,8 @@ pub struct Stats {
     pub misses: u64,
     /// Tiles a frame drew.
     pub rendered: u64,
+    /// Draft tiles a smoothing frame drew again (1422).
+    pub smoothed: u64,
     /// Tiles drawn ahead by [`TileCache::prefetch`].
     pub prefetched: u64,
     /// Hits on a prefetched tile no frame had used before.
@@ -207,6 +212,13 @@ pub struct Frame {
     /// not all of them: a tile wholly outside that is not held is neither
     /// drawn nor owed, its pixels water (1163).
     pub asked: Option<[u32; 4]>,
+    /// Tiles missing drawn with their edges smoothed
+    /// ([`Painter::draw_rgba`]); without, as drafts (1422).
+    pub smooth: bool,
+    /// The drafts held drawn again, smoothed, as far as the render limit
+    /// leaves room; the others shown as they are and owed. Asks
+    /// [`smooth`](Self::smooth) too.
+    pub resmooth: bool,
 }
 
 impl Frame {
@@ -425,12 +437,30 @@ impl TileCache {
         }
         let limit = frame.render_limit.unwrap_or(usize::MAX).min(missing.len());
         let (draw, left) = missing.split_at(limit);
-        let wanted: Vec<TileKey> = draw.iter().filter_map(|&i| keys[i]).collect();
-        let drawn = self.render(&wanted);
-        self.stats.rendered += drawn.len() as u64;
-        for (&i, (key, rgba, attribution, provisional)) in draw.iter().zip(drawn) {
+        // The drafts a smoothing frame draws again, within what the limit
+        // leaves; the others are shown as they are and owed (1422).
+        let drafts: Vec<usize> = match frame.resmooth {
+            true => keys
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| k.is_some_and(|k| self.entries.get(&k).is_some_and(|e| e.draft)))
+                .map(|(i, _)| i)
+                .collect(),
+            false => Vec::new(),
+        };
+        let room = frame
+            .render_limit
+            .unwrap_or(usize::MAX)
+            .saturating_sub(draw.len());
+        let (redraw, drafts_left) = drafts.split_at(room.min(drafts.len()));
+        let wanted: Vec<TileKey> = draw.iter().chain(redraw).filter_map(|&i| keys[i]).collect();
+        let smooth = frame.smooth || frame.resmooth;
+        let drawn = self.render(&wanted, smooth);
+        self.stats.rendered += draw.len() as u64;
+        self.stats.smoothed += redraw.len() as u64;
+        for (&i, (key, rgba, attribution, provisional)) in draw.iter().chain(redraw).zip(drawn) {
             let tile = (Arc::new(rgba), Arc::<str>::from(attribution));
-            self.put(key, tile.0.clone(), tile.1.clone(), provisional);
+            self.put(key, tile.0.clone(), tile.1.clone(), provisional, !smooth);
             got[i] = Some(tile);
         }
         self.filling = keys
@@ -455,7 +485,7 @@ impl TileCache {
             .map(|(_, a)| a)
             .find(|a| a.as_ref() != outline::ATTRIBUTION)
             .map_or_else(|| outline::ATTRIBUTION.to_string(), |a| a.to_string());
-        Some((attribution, left.len()))
+        Some((attribution, left.len() + drafts_left.len()))
     }
 
     /// The tiles `got` over `rgba`, the stand ins and the outline where
@@ -613,7 +643,14 @@ impl TileCache {
         Some((entry.rgba.clone(), entry.attribution.clone()))
     }
 
-    fn put(&mut self, key: TileKey, rgba: Arc<Vec<u8>>, attribution: Arc<str>, provisional: bool) {
+    fn put(
+        &mut self,
+        key: TileKey,
+        rgba: Arc<Vec<u8>>,
+        attribution: Arc<str>,
+        provisional: bool,
+        draft: bool,
+    ) {
         self.tick += 1;
         self.bytes += rgba.len();
         let old = self.entries.insert(
@@ -624,6 +661,7 @@ impl TileCache {
                 used: self.tick,
                 prefetched: false,
                 provisional,
+                draft,
             },
         );
         if let Some(old) = old {
@@ -680,6 +718,7 @@ impl TileCache {
                 used: self.tick,
                 prefetched: true,
                 provisional,
+                draft: false,
             },
         );
         if let Some(old) = old {
@@ -715,7 +754,7 @@ impl TileCache {
             batch.push(want.key);
         }
         let mut stored = 0;
-        for (key, rgba, attribution, provisional) in self.render(&batch) {
+        for (key, rgba, attribution, provisional) in self.render(&batch, true) {
             if !self.put_prefetched(key, rgba, attribution, provisional) {
                 plan.next = plan.wants.len();
                 break;
@@ -731,7 +770,7 @@ impl TileCache {
     }
 
     /// Draw `keys`, split over the workers, each with its own painter.
-    fn render(&mut self, keys: &[TileKey]) -> Vec<Rendered> {
+    fn render(&mut self, keys: &[TileKey], smooth: bool) -> Vec<Rendered> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -742,7 +781,10 @@ impl TileCache {
         // Each worker's own time drawing: its share of the CPU.
         let timed = |painter: &mut Painter, chunk: &[TileKey]| {
             let started = Instant::now();
-            let drawn: Vec<_> = chunk.iter().map(|k| draw_tile(painter, k)).collect();
+            let drawn: Vec<_> = chunk
+                .iter()
+                .map(|k| draw_tile(painter, k, smooth))
+                .collect();
             let us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
             (drawn, us)
         };
@@ -912,7 +954,7 @@ type Rendered = (TileKey, Vec<u8>, String, bool);
 
 /// The tile of `key` drawn: RGBA, its credit, and whether a region in it
 /// was still arriving (1291).
-fn draw_tile(painter: &mut Painter, key: &TileKey) -> Rendered {
+fn draw_tile(painter: &mut Painter, key: &TileKey, smooth: bool) -> Rendered {
     let shift = 24 - u32::from(key.zoom);
     let mid = |t: u32| ((u64::from(t) * u64::from(TILE) + u64::from(TILE / 2)) << shift) as u32;
     let view = Viewport::new(
@@ -924,32 +966,9 @@ fn draw_tile(painter: &mut Painter, key: &TileKey) -> Rendered {
         TILE,
         TILE,
     );
-    let drawn = painter.draw(&view, Ink::Colour, key.style, key.percent);
-    (
-        *key,
-        to_rgba(&drawn.fb),
-        drawn.attribution,
-        drawn.pending > 0,
-    )
-}
-
-/// A drawn tile's big endian Rgb565 pixels as opaque RGBA, the bytes
-/// [`opaque`] gives each, in one pass over a buffer of the final size: a
-/// pixel pushed at a time through the colour types cost about a fifth of
-/// a cold frame's tile time (the render study of 2026-10-30).
-fn to_rgba(fb: &[u16]) -> Vec<u8> {
-    let mut rgba = vec![0u8; fb.len() * 4];
-    for (out, &px) in rgba.chunks_exact_mut(4).zip(fb) {
-        let v = u16::from_be(px);
-        let (r, g, b) = ((v >> 11) & 31, (v >> 5) & 63, v & 31);
-        out.copy_from_slice(&[
-            ((r << 3) | (r >> 2)) as u8,
-            ((g << 2) | (g >> 4)) as u8,
-            ((b << 3) | (b >> 2)) as u8,
-            0xff,
-        ]);
-    }
-    rgba
+    // Straight into RGBA (1422): no Rgb565 buffer, no pass to widen it.
+    let drawn = painter.draw_rgba(&view, Ink::Colour, key.style, key.percent, smooth);
+    (*key, drawn.rgba, drawn.attribution, drawn.pending > 0)
 }
 
 /// The pan's velocity, a moving average in screen pixels a second that
@@ -1490,6 +1509,8 @@ mod tests {
             fallback: None,
             moving: false,
             asked: None,
+            smooth: true,
+            resmooth: true,
         }
     }
 
@@ -1504,7 +1525,8 @@ mod tests {
     }
 
     /// At a whole step the composed frame is the view drawn whole, pixel
-    /// for pixel but where a line's antialiased end meets a seam.
+    /// for pixel but where a line's antialiased end meets a seam; the
+    /// edges smoothed in both (1422).
     #[test]
     fn a_composed_frame_is_the_view_drawn_whole() {
         let (_dir, maps) = maps();
@@ -1516,10 +1538,17 @@ mod tests {
         let composed = cache.compose(&frame(view, z));
         assert_eq!(composed.missing, 0);
         let mut painter = Painter::new(maps);
-        let whole = painter.draw(&Viewport::new(centre, z, w, h), Ink::Colour, Style::PC, 100);
+        let whole = painter.draw_rgba(
+            &Viewport::new(centre, z, w, h),
+            Ink::Colour,
+            Style::PC,
+            100,
+            true,
+        );
         let mut differ = 0usize;
-        for (i, &px) in whole.fb.iter().enumerate() {
-            let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
+        let pixels = whole.rgba.len() / 4;
+        for (i, px) in whole.rgba.chunks_exact(4).enumerate() {
+            let [r, g, b] = [px[0], px[1], px[2]];
             let got = &composed.rgba[i * 4..i * 4 + 3];
             let d = got
                 .iter()
@@ -1531,12 +1560,8 @@ mod tests {
                 differ += 1;
             }
         }
-        let share = differ as f64 / whole.fb.len() as f64;
-        assert!(
-            share < 0.002,
-            "{differ} pixels of {} differ",
-            whole.fb.len()
-        );
+        let share = differ as f64 / pixels as f64;
+        assert!(share < 0.002, "{differ} pixels of {pixels} differ");
         assert_eq!(composed.attribution, whole.attribution);
     }
 
@@ -1816,6 +1841,8 @@ mod tests {
         let asked = Frame {
             moving: true,
             asked: Some([400, 400, 500, 500]),
+            smooth: true,
+            resmooth: true,
             ..frame(view, 15)
         };
         let grid = Grid::of(&view, 15);
@@ -2091,12 +2118,33 @@ mod tests {
         assert!(cache.bytes() <= room * TILE_BYTES);
     }
 
-    /// The one pass to RGBA is [`opaque`]'s bytes for every colour.
+    /// 1422: a tile drawn straight into RGBA is the Rgb565 picture of the
+    /// same view, every pixel [`opaque`]'s bytes for it, at three zooms
+    /// and both themes, the buildings' fill and edge included.
     #[test]
-    fn the_direct_rgba_loop_gives_every_colour_as_opaque_does() {
-        let all: Vec<u16> = (0..=u16::MAX).collect();
-        let want: Vec<u8> = all.iter().flat_map(|&p| opaque(p)).collect();
-        assert!(to_rgba(&all) == want, "a colour differs");
+    fn a_tile_drawn_in_rgba_is_the_rgb565_tile_widened() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../leviculum-map/fixtures/buildings/firenze.lmr");
+        std::fs::copy(fixture, dir.path().join("firenze.lmr")).expect("the region");
+        let mut painter = Painter::new(Maps::new(Some(dir.path().to_path_buf())));
+        for z in [13u8, 15, 17] {
+            for style in [
+                Style::PC,
+                Style {
+                    theme: MapTheme::Dark,
+                    ..Style::PC
+                },
+            ] {
+                let view = Viewport::new(duomo(), z, TILE, TILE);
+                let fb = painter.draw(&view, Ink::Colour, style, 100).fb;
+                let want: Vec<u8> = fb.iter().flat_map(|&p| opaque(p)).collect();
+                let got = painter
+                    .draw_rgba(&view, Ink::Colour, style, 100, false)
+                    .rgba;
+                assert!(got == want, "z{z} {:?}: a pixel differs", style.theme);
+            }
+        }
     }
 
     /// A painter that kept its filler's storage from tile to tile, after a
@@ -2116,8 +2164,8 @@ mod tests {
         }
         assert!(keys.len() > 20, "{} tiles", keys.len());
         for key in &keys {
-            let again = draw_tile(&mut kept, key);
-            let fresh = draw_tile(&mut Painter::new(maps.clone()), key);
+            let again = draw_tile(&mut kept, key, true);
+            let fresh = draw_tile(&mut Painter::new(maps.clone()), key, true);
             assert!(again == fresh, "tile {key:?} differs");
         }
     }

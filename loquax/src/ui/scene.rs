@@ -156,6 +156,11 @@ pub enum NodeId {
     Join([u8; 16]),
     Members,
     Member([u8; 16]),
+    /// The reader's avatar in the top bar, which opens the profile, and
+    /// the profile and its "Share my address" (1443).
+    Me,
+    Profile,
+    ProfileShare,
 }
 
 impl NodeId {
@@ -207,6 +212,9 @@ impl NodeId {
             NodeId::Join(group) => format!("join_{}", to_hex(group)),
             NodeId::Members => "members".to_string(),
             NodeId::Member(peer) => format!("member_{}", to_hex(peer)),
+            NodeId::Me => "me".to_string(),
+            NodeId::Profile => "profile".to_string(),
+            NodeId::ProfileShare => "profile_share".to_string(),
         }
     }
 }
@@ -543,11 +551,25 @@ pub struct VoiceNode {
 
 /// The screen reader's words for `mark`; `read_at` is the reader's time
 /// for [`chat::Mark::Read`], shown in the zone `now` is in.
-pub fn mark_words(mark: chat::Mark, read_at: Option<u32>, now: Option<WallTime>) -> Text {
+///
+/// `witness` says who confirmed [`chat::Mark::Arrived`] when it was not
+/// a proof (1395, 1462): the same one tick, the words of the propagation
+/// network.
+pub fn mark_words(
+    mark: chat::Mark,
+    read_at: Option<u32>,
+    witness: Option<super::arrival::Witness>,
+    now: Option<WallTime>,
+) -> Text {
+    use super::arrival::Witness;
     match mark {
         chat::Mark::Sending => Text::key(StrId::StateSending),
         chat::Mark::Unconfirmed => Text::key(StrId::StateUnconfirmed),
         chat::Mark::Mailbox => Text::key(StrId::StateMailbox),
+        chat::Mark::Arrived => match witness {
+            Some(Witness::Collected) => Text::key(StrId::StateCollected),
+            _ => Text::key(StrId::StateArrived),
+        },
         chat::Mark::Delivered => Text::key(StrId::StateDelivered),
         chat::Mark::Read => {
             let at = WallTime {
@@ -987,11 +1009,20 @@ pub struct Scene {
     pub browse: Option<lnomad::app::scene::Scene>,
     /// The Rooms surface while its tab is in front (1379).
     pub rooms: Option<super::rooms::RoomsNode>,
+    /// The profile over the screen while it is open (1443).
+    pub profile: Option<super::profile::ProfileScreen>,
 }
 
 impl<B> UiModel<B> {
     /// The scene of the list and the open chat for `class`.
     pub fn scene(&self, class: LayoutClass) -> Scene {
+        let mut scene = self.content_scene(class);
+        scene.profile = self.profile_screen();
+        scene
+    }
+
+    /// [`UiModel::scene`] without what lies over it.
+    fn content_scene(&self, class: LayoutClass) -> Scene {
         if self.browse.enabled && self.browse.open {
             return browse_scene(self).in_class(class);
         }
@@ -1023,6 +1054,7 @@ impl<B> UiModel<B> {
             members: super::group_scene::member_sheet(self),
             browse: None,
             rooms: None,
+            profile: None,
         }
         .in_class(class)
     }
@@ -1051,6 +1083,7 @@ fn browse_scene<B>(model: &UiModel<B>) -> Scene {
         members: None,
         browse: Some(model.browse.model.scene()),
         rooms: None,
+        profile: None,
     }
 }
 
@@ -1077,6 +1110,7 @@ fn rooms_scene<B>(model: &UiModel<B>) -> Scene {
         members: None,
         browse: None,
         rooms: Some(super::rooms::node(model)),
+        profile: None,
     }
 }
 
@@ -1110,6 +1144,12 @@ impl Scene {
             }
         }
         match id {
+            NodeId::Me => match &self.top.lead {
+                Lead::Me { open, .. } => open.as_ref(),
+                Lead::Back { .. } => None,
+            },
+            NodeId::Profile => self.profile.as_ref().map(|p| &p.back),
+            NodeId::ProfileShare => self.profile.as_ref().map(|p| &p.share),
             NodeId::Row(_) => self
                 .list
                 .as_ref()
@@ -1240,7 +1280,11 @@ fn me_bar<B>(model: &UiModel<B>) -> TopBar {
     };
     TopBar {
         id: NodeId::TopBar,
-        lead: Lead::Me { avatar, link: None },
+        lead: Lead::Me {
+            avatar,
+            link: None,
+            open: Some(Action::of(Intent::Profile)),
+        },
         title: Text::key(StrId::TabChats),
         actions: Vec::from([
             Action::of(Intent::Search),
@@ -1512,6 +1556,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
     let bubbles = chat::bubbles(model, c);
     let places = chat::placements(&bubbles);
     let now = model.now;
+    let in_group = model.groups.contains_key(&peer);
     let mut groups: Vec<Group> = Vec::new();
     for (bubble, place) in bubbles.into_iter().zip(places) {
         let playing = model.playing
@@ -1523,7 +1568,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
         let invite = bubble
             .invite
             .and_then(|group| super::group_scene::invite(model, &group, bubble.ours));
-        let mut node = bubble_node(peer, bubble, place, now, playing, track);
+        let mut node = bubble_node(peer, bubble, place, now, playing, track, in_group);
         node.invite = invite;
         match groups.last_mut() {
             Some(group) if place.joins_before => group.bubbles.push(node),
@@ -1746,6 +1791,7 @@ fn bubble_node(
     now: Option<WallTime>,
     playing: bool,
     track: Option<&LevelTrack>,
+    in_group: bool,
 ) -> BubbleNode {
     let id = NodeId::Bubble(bubble.key);
     let now_secs = now.map(|now| now.unix_secs);
@@ -1837,7 +1883,12 @@ fn bubble_node(
     };
     let mark = bubble.mark.map(|mark| MarkNode {
         mark,
-        words: mark_words(mark, bubble.read_at, now),
+        // A group's two ticks are every member's device (1466): the
+        // devices, not one recipient's.
+        words: match (in_group, mark) {
+            (true, chat::Mark::Delivered) => Text::key(StrId::StateGroupDelivered),
+            _ => mark_words(mark, bubble.read_at, bubble.witness, now),
+        },
         activate: (mark == chat::Mark::Failed).then(|| {
             Action::of(Intent::SendAgain {
                 peer,
@@ -2265,6 +2316,9 @@ impl Scene {
         }
         if let Some(rooms) = &self.rooms {
             map.insert("rooms".into(), rooms.to_json());
+        }
+        if let Some(profile) = &self.profile {
+            map.insert("profile".into(), profile.to_json());
         }
         Value::Object(map)
     }
@@ -2823,6 +2877,7 @@ mod tests {
             DeliveryState::Queued,
             DeliveryState::Sent,
             DeliveryState::InMailbox,
+            DeliveryState::Arrived,
             DeliveryState::Delivered,
             DeliveryState::Read {
                 at: (t + 600) as u32,
@@ -2864,7 +2919,14 @@ mod tests {
                 "Waiting in the mailbox",
                 "Wartet im Postfach",
             ),
-            (chat::Mark::Delivered, "Delivered", "Zugestellt"),
+            // 1462: the proof is one tick and neutral, the device's own
+            // word is two.
+            (chat::Mark::Arrived, "Arrived", "Angekommen"),
+            (
+                chat::Mark::Delivered,
+                "On the recipient's device",
+                "Auf dem Gerät",
+            ),
             // 10:10 at the clock's +1 h.
             (chat::Mark::Read, "Read at 10:10", "Gelesen um 10:10"),
             (

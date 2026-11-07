@@ -64,7 +64,10 @@
   <!-- The jackdaw (1289, 1336): an adaptive icon in mipmap-anydpi-v26 and
        a PNG per density, written by scripts/render-icon.py. It is round
        already, so the round icon is the same one. -->
-  <application a:label='@string/app_name'
+  <!-- LoquaxApp arms the guard against blocking library calls on the UI
+       thread in a debuggable build (1446, Engine.java). -->
+  <application a:name='network.leviculum.loquax.LoquaxApp'
+               a:label='@string/app_name'
                a:icon='@mipmap/ic_launcher'
                a:roundIcon='@mipmap/ic_launcher'
                a:theme='@style/Loquax'>
