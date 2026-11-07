@@ -184,6 +184,11 @@ impl Clip {
     }
 }
 
+/// How far past its box a text's glyphs may put ink, logical pixels
+/// (1468): an accent over a capital, a descender, an italic's overhang.
+/// A text whose box is further than this from a clip draws nothing in it.
+pub const TEXT_INK: f32 = 8.0;
+
 /// tiny-skia's rounding of a whole-pixel coordinate (`Rect::round`,
 /// `saturate_round`: a half added, then truncated toward zero): a
 /// negative one moves a pixel toward zero.

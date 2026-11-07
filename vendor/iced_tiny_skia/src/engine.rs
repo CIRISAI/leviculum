@@ -320,6 +320,24 @@ impl Engine {
         }
     }
 
+    /// Leviculum's patch (1468): the clip a text is drawn with: always
+    /// `clip_bounds`. Upstream drew a text whose box lies within the
+    /// clip without one, and a glyph's ink reaches past its box (an
+    /// accent, a descender, a stroke's overhang): a paragraph at the top
+    /// of a scrolled list painted a few pixels into the bar above it,
+    /// and whether it did depended on the damage rectangle the frame
+    /// was drawn in, not on the text. Where the glyph blend clips by
+    /// rectangle ([`crate::fast::BLEND_EXACT`]) the clip costs nothing;
+    /// elsewhere it is the mask.
+    fn text_clip<'a>(
+        &mut self,
+        clip_bounds: Rectangle,
+        clip_mask: &'a mut tiny_skia::Mask,
+    ) -> crate::fast::Clipping<'a> {
+        self.clip.set(clip_bounds);
+        self.clip.clipping(clip_mask)
+    }
+
     pub fn draw_text(
         &mut self,
         text: &Text,
@@ -347,17 +365,19 @@ impl Engine {
                     Rectangle::new(*position, paragraph.min_bounds)
                         * transformation;
 
-                if !clip_bounds.intersects(&physical_bounds) {
+                // Leviculum's patch (1468): skipped only when no ink of
+                // it can reach the clip, not when its box does not.
+                let ink = physical_bounds.expand(
+                    crate::fast::TEXT_INK * transformation.scale_factor(),
+                );
+
+                if !clip_bounds.intersects(&ink) {
                     return;
                 }
 
-                let clip_mask = match physical_bounds.is_within(&clip_bounds) {
-                    true => crate::fast::Clipping::Unclipped,
-                    false => {
-                        self.clip.set(clip_bounds);
-                        self.clip.clipping(clip_mask)
-                    }
-                };
+                // Leviculum's patch (1468): text is clipped even when
+                // its box lies within the clip (see `text_clip`).
+                let clip_mask = self.text_clip(clip_bounds, clip_mask);
 
                 self.text_pipeline.draw_paragraph(
                     paragraph,
@@ -385,17 +405,19 @@ impl Engine {
                 let physical_bounds =
                     Rectangle::new(*position, editor.bounds) * transformation;
 
-                if !clip_bounds.intersects(&physical_bounds) {
+                // Leviculum's patch (1468): skipped only when no ink of
+                // it can reach the clip, not when its box does not.
+                let ink = physical_bounds.expand(
+                    crate::fast::TEXT_INK * transformation.scale_factor(),
+                );
+
+                if !clip_bounds.intersects(&ink) {
                     return;
                 }
 
-                let clip_mask = match physical_bounds.is_within(&clip_bounds) {
-                    true => crate::fast::Clipping::Unclipped,
-                    false => {
-                        self.clip.set(clip_bounds);
-                        self.clip.clipping(clip_mask)
-                    }
-                };
+                // Leviculum's patch (1468): text is clipped even when
+                // its box lies within the clip (see `text_clip`).
+                let clip_mask = self.text_clip(clip_bounds, clip_mask);
 
                 self.text_pipeline.draw_editor(
                     editor,
@@ -424,13 +446,9 @@ impl Engine {
                     return;
                 }
 
-                let clip_mask = match physical_bounds.is_within(&clip_bounds) {
-                    true => crate::fast::Clipping::Unclipped,
-                    false => {
-                        self.clip.set(clip_bounds);
-                        self.clip.clipping(clip_mask)
-                    }
-                };
+                // Leviculum's patch (1468): text is clipped even when
+                // its box lies within the clip (see `text_clip`).
+                let clip_mask = self.text_clip(clip_bounds, clip_mask);
 
                 self.text_pipeline.draw_cached(
                     content,
@@ -470,10 +488,9 @@ impl Engine {
                     return;
                 }
 
-                let clip_mask = match physical_bounds.is_within(&clip_bounds) {
-                    true => crate::fast::Clipping::Unclipped,
-                    false => self.clip.clipping(clip_mask),
-                };
+                // Leviculum's patch (1468): text is clipped even when
+                // its box lies within the clip (see `text_clip`).
+                let clip_mask = self.text_clip(clip_bounds, clip_mask);
 
                 self.text_pipeline.draw_raw(
                     &buffer,
