@@ -230,6 +230,29 @@ fn pre_erase_leaves_erased_flash_and_the_tail_alone() {
     assert_eq!((restored.torn, got.len()), (0, 1));
 }
 
+/// A closed tail (1540, the M9 bench's owe): the next write opens the
+/// next sector with an erase, even one a quiet moment found erased, and
+/// what both sectors hold reads back whole.
+#[test]
+fn a_closed_tail_makes_the_next_write_erase_and_loses_nothing() {
+    let mut flash = MemFlash::new(4);
+    let (mut store, ..) = reopen(&mut flash, TAG);
+    store.append(&mut flash, &[entry(1, 50)], 1).expect("page");
+    assert!(!store.pre_erase(&mut flash).expect("next is erased"));
+    let erases = flash.erases;
+    store.close();
+    let done = store.append(&mut flash, &[entry(2, 50)], 2).expect("page");
+    assert_eq!((done.erased, done.writes), (1, 1));
+    assert_eq!(flash.erases, erases + 1);
+    // Without the close the same write goes into the open sector.
+    let done = store.append(&mut flash, &[entry(3, 50)], 3).expect("page");
+    assert_eq!(done.erased, 0);
+    let (reopened, restored, got) = reopen(&mut flash, TAG);
+    assert_eq!((restored.torn, got.len()), (0, 3));
+    assert_eq!(reopened.cursor(), 3);
+    assert_eq!(reopened.used(), 2);
+}
+
 /// Asks kept with the pages (1493): queued asks come back at boot oldest
 /// first, a done one does not, and entries around them still read.
 #[test]

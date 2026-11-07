@@ -682,6 +682,17 @@ impl Store {
         Ok(done)
     }
 
+    /// Take nothing more into the open sector (1540, the M9's bench): the
+    /// next write opens the next sector, and erases it, as a full sector
+    /// would. What the closed sector holds stays and reads back; its
+    /// erased rest is never written. A quiet moment before the write may
+    /// still erase ahead ([`Store::pre_erase`]), so the bench closes the
+    /// tail right before the write it means to make erase.
+    pub fn close(&mut self) {
+        self.tail = None;
+        self.ready = None;
+    }
+
     /// Erase the ring's next sector while the line is quiet (1493): the
     /// page path then writes into erased flash and never holds the
     /// interrupts for an erase (esp-storage runs every flash op inside a

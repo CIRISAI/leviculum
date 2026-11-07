@@ -41,6 +41,33 @@ fn state(cursor: u64) -> State {
     }
 }
 
+/// Owing everything again (1540, the M9 bench's owe): a written index
+/// owes nothing, `owe_all` owes every row and name, the write carries
+/// them, and a closed log's write opens its next sector with an erase.
+#[test]
+fn owe_all_writes_every_row_again_and_a_closed_log_erases() {
+    let mut flash = MemFlash::new(16);
+    let (mut log, _) = RowLog::open(&mut flash, TAG).expect("open");
+    let mut index = Index::default();
+    index.row(row(1, "one"));
+    index.row(row(2, "two"));
+    index.names.insert([1; 16], String::from("Anna"));
+    log.write(&mut flash, &mut index, Some(&state(5)))
+        .expect("write");
+    assert!(!index.owes());
+    let done = log.write(&mut flash, &mut index, None).expect("nothing");
+    assert_eq!(done.writes, 0);
+    index.owe_all();
+    assert!(index.owes());
+    log.close();
+    let done = log.write(&mut flash, &mut index, None).expect("again");
+    assert_eq!((done.entries, done.writes, done.erased), (3, 1, 1));
+    assert!(!index.owes());
+    let (_, replayed) = RowLog::open(&mut flash, TAG).expect("reopen");
+    assert_eq!(replayed.index.kept.len(), 2);
+    assert_eq!(replayed.state, Some(state(5)));
+}
+
 /// Rows, a gone conversation, a name and the state come back as written,
 /// the newest record of a peer winning.
 #[test]

@@ -332,6 +332,14 @@ impl Index {
         self.marks.retain(|&seq| ring.holds(seq));
     }
 
+    /// Owe the log every conversation's record and every name again
+    /// (1540, the M9's bench): the next write carries them all, as the
+    /// first write after a boot that rebuilt the index does.
+    pub fn owe_all(&mut self) {
+        self.owed.extend(self.kept.keys().copied());
+        self.names_owed.extend(self.names.keys().copied());
+    }
+
     /// Whether records are owed the log.
     pub fn owes(&self) -> bool {
         !self.owed.is_empty() || !self.names_owed.is_empty()
@@ -671,6 +679,11 @@ impl RowLog {
         let done = self.store.append(dev, &records, cursor)?;
         self.snap = Some(at);
         Ok(done)
+    }
+
+    /// Take nothing more into the log's open sector ([`Store::close`]).
+    pub fn close(&mut self) {
+        self.store.close();
     }
 
     /// Erase the log's next sector in a quiet moment ([`Store::pre_erase`]).
