@@ -3641,7 +3641,7 @@ mod tests {
         ProfileFacts {
             name: "Mia Sander".to_string(),
             mailbox: Mailbox::Away {
-                host: Some("leviculum.network".to_string()),
+                name: Some("Mia's computer".to_string()),
                 rung: Some(Rung::Relayed),
                 word: Some(loquax::home::board::Word::Connected),
             },

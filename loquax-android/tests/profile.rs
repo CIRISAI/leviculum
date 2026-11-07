@@ -41,7 +41,7 @@ fn phone() -> (tempfile::TempDir, UiModel<session::Line>) {
         UiEvent::ProfileFacts(ProfileFacts {
             name: String::new(),
             mailbox: Mailbox::Away {
-                host: Some("leviculum.network".to_string()),
+                name: Some("Lews Rechner".to_string()),
                 rung: Some(Rung::Relayed),
                 word: Some(loquax::home::board::Word::Connected),
             },

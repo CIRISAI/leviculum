@@ -1351,9 +1351,9 @@
     "id": "profile",
     "mailbox": {
       "args": [
-        "leviculum.network"
+        "Mia's computer"
       ],
-      "key": "profile_mailbox_away_undated"
+      "key": "profile_mailbox_named"
     },
     "name": {
       "raw": "Mia Sander"

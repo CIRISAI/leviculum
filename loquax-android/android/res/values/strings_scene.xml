@@ -227,7 +227,8 @@
     <string name="profile_address">Your address</string>
     <string name="profile_qr_caption">Scan this code to add me as a contact</string>
     <string name="profile_mailbox_here">Mailbox: on this device</string>
-    <string name="profile_mailbox_away_undated">Mailbox: on %1$s</string>
+    <string name="profile_mailbox_named">Mailbox: %1$s</string>
+    <string name="profile_mailbox_connected">%1$s (connected)</string>
     <string name="profile_mailbox_elsewhere">Mailbox: on another device</string>
     <string name="profile_this_device_unnamed">This device</string>
     <string name="profile_device_unnamed">A device without a name</string>

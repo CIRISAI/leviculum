@@ -71,13 +71,15 @@ pub enum Mailbox {
     Unknown,
     /// On this device: it is the home.
     Here,
-    /// On another device, `host` the server the client talks to where
-    /// there is one (never a hash, `feedback_no_hashes_on_screen`);
-    /// `rung` how the link runs, `word` how the last ask went (the
-    /// board's word, `loquax::home::board::Word`: connected, fetched N of
-    /// M, unreachable).
+    /// On another device, `name` the name the mailbox announces where the
+    /// shell has heard it (never a hash, `feedback_no_hashes_on_screen`,
+    /// and never the server it is reached through: that is the
+    /// rendezvous, not where the mailbox is, 1447); `rung` how the link
+    /// runs, `word` how the last ask went (the board's word,
+    /// `loquax::home::board::Word`: connected, fetched N of M,
+    /// unreachable).
     Away {
-        host: Option<String>,
+        name: Option<String>,
         rung: Option<Rung>,
         word: Option<Word>,
     },
@@ -195,18 +197,27 @@ pub fn fours(address: &[u8; 16]) -> String {
     out
 }
 
-/// The mailbox's line and its state line.
+/// The mailbox's line and its state line: "Postfach: Lews Rechner
+/// (verbunden)" by the name it announces, the rung it is reached over only
+/// in the state line under it (1447, walk 1 finding 13).
 pub fn mailbox_words(mailbox: &Mailbox) -> (Text, Option<Text>) {
     match mailbox {
         Mailbox::Unknown => (Text::key(StrId::ProfileMailboxUnknown), None),
         Mailbox::Here => (Text::key(StrId::ProfileMailboxHere), None),
-        Mailbox::Away { host, rung, word } => {
-            let line = match host {
-                Some(host) => Text::Key(
+        Mailbox::Away { name, rung, word } => {
+            let line = match name.as_deref().map(str::trim) {
+                Some(name) if !name.is_empty() => Text::Key(
                     StrId::ProfileMailboxAway,
-                    Vec::from([Arg::Str(host.clone())]),
+                    Vec::from([Arg::Str(String::from(name))]),
                 ),
-                None => Text::key(StrId::ProfileMailboxElsewhere),
+                _ => Text::key(StrId::ProfileMailboxElsewhere),
+            };
+            let line = match word {
+                Some(Word::Connected) => Text::Key(
+                    StrId::ProfileMailboxConnected,
+                    Vec::from([Arg::Text(alloc::boxed::Box::new(line))]),
+                ),
+                _ => line,
             };
             let state = match (word, rung) {
                 // A pull under way says how far it came, whatever the rung.
@@ -268,7 +279,16 @@ pub fn profile<B>(model: &UiModel<B>) -> ProfileScreen {
         },
         name => Text::Raw(String::from(name)),
     };
-    let (mailbox, state) = mailbox_words(&model.profile.mailbox);
+    // A shell that has not heard the mailbox's name takes the one this
+    // identity's announce carries: the mailbox announces it (1447).
+    let mut facts = model.profile.mailbox.clone();
+    if let Mailbox::Away {
+        name: name @ None, ..
+    } = &mut facts
+    {
+        *name = model.names.announced(&own).map(String::from);
+    }
+    let (mailbox, state) = mailbox_words(&facts);
     let devices = model
         .profile
         .devices
@@ -370,7 +390,7 @@ mod tests {
     #[test]
     fn the_mailbox_says_its_rung_its_pull_or_that_it_is_unreachable() {
         let away = |rung, word| Mailbox::Away {
-            host: Some(String::from("leviculum.network")),
+            name: Some(String::from("Lews Rechner")),
             rung,
             word,
         };
@@ -381,7 +401,7 @@ mod tests {
         assert_eq!(
             said(&away(Some(Rung::Relayed), Some(Word::Connected)), Lang::De),
             (
-                String::from("Postfach: auf leviculum.network"),
+                String::from("Postfach: Lews Rechner (verbunden)"),
                 Some(String::from("Verbunden über einen Vermittlungsserver"))
             )
         );
@@ -404,6 +424,20 @@ mod tests {
         );
         assert_eq!(said(&away(None, None), Lang::En).1, None);
         assert_eq!(said(&Mailbox::Here, Lang::En).0, "Mailbox: on this device");
+        // Without a name heard, another device; never the rendezvous.
+        let nameless = Mailbox::Away {
+            name: None,
+            rung: Some(Rung::Relayed),
+            word: Some(Word::Connected),
+        };
+        assert_eq!(
+            said(&nameless, Lang::De).0,
+            "Postfach: auf einem anderen Gerät (verbunden)"
+        );
+        assert_eq!(
+            said(&away(Some(Rung::Mesh), Some(Word::Unreachable)), Lang::En).0,
+            "Mailbox: Lews Rechner"
+        );
     }
 
     /// The half blocks of a 1x1 code with a quiet zone of one: light

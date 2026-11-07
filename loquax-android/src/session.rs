@@ -872,9 +872,20 @@ impl Session {
             true => Mailbox::Here,
             false => {
                 let relayed = self.rendezvous().iter().any(|(_, up)| *up);
-                let link = self.lock().link;
+                let (link, heard) = {
+                    let inner = self.lock();
+                    // The mailbox announces this identity under the name
+                    // it keeps (1447): what the profile calls it, never
+                    // the server the phone reaches it through.
+                    let heard = inner
+                        .model
+                        .names
+                        .announced(&self.address)
+                        .map(str::to_string);
+                    (inner.link, heard)
+                };
                 Mailbox::Away {
-                    host: Some(server_host(&self.server).to_string()),
+                    name: heard,
                     rung: relayed.then_some(Rung::Relayed),
                     word: link.map(|up| match up {
                         true => loquax::home::board::Word::Connected,

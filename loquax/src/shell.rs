@@ -1374,7 +1374,7 @@ fn profile_facts(name: &str, client: bool) -> loquax::ui::profile::ProfileFacts 
         name: name.to_string(),
         mailbox: match client {
             true => Mailbox::Away {
-                host: None,
+                name: None,
                 rung: None,
                 word: None,
             },

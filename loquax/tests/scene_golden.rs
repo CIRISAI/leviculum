@@ -415,7 +415,7 @@ fn the_profile_is_the_golden_scene() {
         UiEvent::ProfileFacts(ProfileFacts {
             name: "Mia Sander".to_string(),
             mailbox: Mailbox::Away {
-                host: Some("leviculum.network".to_string()),
+                name: Some("Mia's computer".to_string()),
                 rung: Some(Rung::Relayed),
                 word: Some(loquax::home::board::Word::Fetched {
                     taken: 3,

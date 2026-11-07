@@ -227,7 +227,8 @@
     <string name="profile_address">Deine Adresse</string>
     <string name="profile_qr_caption">Scanne diesen Code, um mich als Kontakt hinzuzufügen</string>
     <string name="profile_mailbox_here">Postfach: auf diesem Gerät</string>
-    <string name="profile_mailbox_away_undated">Postfach: auf %1$s</string>
+    <string name="profile_mailbox_named">Postfach: %1$s</string>
+    <string name="profile_mailbox_connected">%1$s (verbunden)</string>
     <string name="profile_mailbox_elsewhere">Postfach: auf einem anderen Gerät</string>
     <string name="profile_this_device_unnamed">Dieses Gerät</string>
     <string name="profile_device_unnamed">Ein Gerät ohne Namen</string>

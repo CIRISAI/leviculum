@@ -2952,7 +2952,7 @@ mod tests {
         model.profile = ProfileFacts {
             name: "Mia Sander".to_string(),
             mailbox: Mailbox::Away {
-                host: Some("leviculum.network".to_string()),
+                name: Some("Mia's computer".to_string()),
                 rung: Some(Rung::Relayed),
                 word: Some(loquax::home::board::Word::Connected),
             },
@@ -2975,7 +2975,7 @@ mod tests {
         for words in [
             "Mia Sander",
             "4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c",
-            "Mailbox: on leviculum.network",
+            "Mailbox: Mia's computer (connected)",
             "Connected over a relay server",
             "Laptop (this device)",
             "Pixel 8",

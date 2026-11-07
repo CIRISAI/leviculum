@@ -297,7 +297,9 @@ leviculum_ui::catalogue! {
     ProfileAddress = "profile_address", "Your address", "Deine Adresse";
     ProfileQrCaption = "profile_qr_caption", "Scan this code to add me as a contact", "Scanne diesen Code, um mich als Kontakt hinzuzufügen";
     ProfileMailboxHere = "profile_mailbox_here", "Mailbox: on this device", "Postfach: auf diesem Gerät";
-    ProfileMailboxAway = "profile_mailbox_away_undated", "Mailbox: on %1$s", "Postfach: auf %1$s";
+    // 1447 (walk 1 finding 13): the mailbox by the name it announces, never the server it is reached through.
+    ProfileMailboxAway = "profile_mailbox_named", "Mailbox: %1$s", "Postfach: %1$s";
+    ProfileMailboxConnected = "profile_mailbox_connected", "%1$s (connected)", "%1$s (verbunden)";
     ProfileMailboxElsewhere = "profile_mailbox_elsewhere", "Mailbox: on another device", "Postfach: auf einem anderen Gerät";
     ProfileThisDeviceUnnamed = "profile_this_device_unnamed", "This device", "Dieses Gerät";
     ProfileDeviceUnnamed = "profile_device_unnamed", "A device without a name", "Ein Gerät ohne Namen";
