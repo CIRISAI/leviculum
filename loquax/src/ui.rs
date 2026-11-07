@@ -1286,7 +1286,7 @@ pub struct UiModel<B> {
     ops: counters::Ops,
     /// Moves when a fold changed something a screen shows (1490, 1491):
     /// every event but the clock's three ([`UiEvent::is_clock`]), and
-    /// those only when they moved what is shown ([`UiModel::clock_marks`]).
+    /// those only when they moved what is shown (`UiModel::clock_marks`).
     /// A cache that outlives one fold keys on it, and a target's loop
     /// builds its view only when it moved ([`Presented`]), so a screen
     /// left alone builds nothing while the clock runs.
@@ -2014,7 +2014,7 @@ impl<B> UiModel<B> {
     /// the store holds for it, and the names heard: no message read, the conversations listed
     /// as their rows say, the list ordered and the scene's window built
     /// once. A conversation's messages load when it opens
-    /// ([`UiModel::ask_page`]). The counters are the restore's.
+    /// (`UiModel::ask_page`). The counters are the restore's.
     pub fn restore_rows(
         &mut self,
         rows: Vec<(listing::Row, usize)>,

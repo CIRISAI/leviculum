@@ -17,7 +17,7 @@
 //!
 //! A message's id is the one field that changes in place: a send is named
 //! when the router or the home takes it. The two places that name one
-//! ([`super::on_engine`]'s `Queued`, `home_sent`'s running send) call
+//! (`on_engine`'s `Queued`, `home_sent`'s running send) call
 //! [`Summary::forget`], and the next refresh reads the conversation anew.
 
 use alloc::collections::BTreeMap;
