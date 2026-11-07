@@ -281,6 +281,16 @@ impl InProcessOutbox {
         self.commands = std::sync::mpsc::channel().0;
         self.events = std::sync::mpsc::channel().1;
     }
+
+    /// An end attached to no engine: what a frontend holds in the outbox's
+    /// place while a reader on another thread has the real one (1492).
+    #[doc(hidden)]
+    pub fn severed() -> Self {
+        Self {
+            commands: std::sync::mpsc::channel().0,
+            events: std::sync::mpsc::channel().1,
+        }
+    }
 }
 
 impl Outbox for InProcessOutbox {
