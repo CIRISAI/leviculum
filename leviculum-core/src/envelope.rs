@@ -437,6 +437,43 @@ pub const TYPE_KEY_INJECT: u8 = 0x1A;
 /// not leave a key down for a minute.
 pub const KEY_INJECT_HOLD_MAX_MS: u16 = 10_000;
 
+/// Host → board (order 1540): owe the summary log every conversation's
+/// row again, and the ring's state with its marks, so the next open of a
+/// chat writes the flash while the UI core folds the page: the window the
+/// hang of 2026-11-07 was in, re-armed on demand. A test hook for the
+/// bench walk (`scripts/m9-walks/hang.walk`); without it every open after
+/// the first wrote nothing and the race was never under load. The board
+/// arms it and fires it at the next open, after the page read, so a quiet
+/// turn in between cannot use it up.
+///
+/// Payload is empty or one byte of flags: [`BENCH_OWE_ERASE_LOG`] closes
+/// the summary log's open sector first, so the write opens the next one
+/// with an erase; [`BENCH_OWE_ERASE_RING`] does the same to the message
+/// ring, which the open's read mark goes to. A flag outside
+/// [`BENCH_OWE_FLAGS`] is refused [`REFUSE_VALUE`], a longer payload
+/// [`REFUSE_MALFORMED`], a board without a message store
+/// [`REFUSE_UNSUPPORTED`]. Only the M9's bench image accepts it, as
+/// [`TYPE_KEY_INJECT`].
+pub const TYPE_BENCH_OWE: u8 = 0x1B;
+
+/// [`TYPE_BENCH_OWE`]: the summary log's write erases a sector.
+pub const BENCH_OWE_ERASE_LOG: u8 = 0x01;
+/// [`TYPE_BENCH_OWE`]: the ring's next write erases a sector.
+pub const BENCH_OWE_ERASE_RING: u8 = 0x02;
+/// Every flag [`TYPE_BENCH_OWE`] knows.
+pub const BENCH_OWE_FLAGS: u8 = BENCH_OWE_ERASE_LOG | BENCH_OWE_ERASE_RING;
+
+/// Host → board (order 1540): a message arrives in a conversation, with
+/// no network and no mailbox, so the next open has an unread to mark:
+/// Lew's case (an unread chat, Enter, the read mark and the rows written
+/// while the UI core folds). Payload is one byte, the conversation's row
+/// in the list as shown, counted modulo the rows there are, so a walk can
+/// cycle through every chat without knowing how many there are. The board
+/// keeps the message in its ring as a pulled page is kept and folds it the
+/// same way, and selects its chat. Any other length is refused
+/// [`REFUSE_MALFORMED`]. Only the M9's bench image accepts it.
+pub const TYPE_BENCH_ARRIVE: u8 = 0x1C;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -912,6 +949,26 @@ impl KeyInject {
     /// most [`KEY_INJECT_HOLD_MAX_MS`].
     pub fn valid(&self) -> bool {
         self.code != 0 && self.hold_ms.is_none_or(|ms| ms <= KEY_INJECT_HOLD_MAX_MS)
+    }
+}
+
+/// Decode a [`TYPE_BENCH_OWE`] payload (order 1540): the flags, 0 for
+/// an empty payload; `None` (malformed) for more than one byte. Whether
+/// the flags are known is [`BENCH_OWE_FLAGS`]' to say.
+pub fn decode_bench_owe_payload(payload: &[u8]) -> Option<u8> {
+    match payload {
+        [] => Some(0),
+        [flags] => Some(*flags),
+        _ => None,
+    }
+}
+
+/// Decode a [`TYPE_BENCH_ARRIVE`] payload (order 1540): the row; `None`
+/// (malformed) for any length but one byte.
+pub fn decode_bench_arrive_payload(payload: &[u8]) -> Option<u8> {
+    match payload {
+        [row] => Some(*row),
+        _ => None,
     }
 }
 
@@ -4739,6 +4796,40 @@ mod tests {
                 reason: REFUSE_UNKNOWN_TYPE,
             }
         );
+    }
+
+    /// 1540: the bench's owe and arrive frames read their payloads, and
+    /// no board that lists its types here takes them.
+    #[test]
+    fn the_bench_owe_and_arrive_frames_read_and_no_other_board_takes_them() {
+        assert_eq!(decode_bench_owe_payload(&[]), Some(0));
+        assert_eq!(
+            decode_bench_owe_payload(&[BENCH_OWE_ERASE_LOG]),
+            Some(BENCH_OWE_ERASE_LOG)
+        );
+        assert_eq!(decode_bench_owe_payload(&[1, 2]), None);
+        assert_eq!(BENCH_OWE_FLAGS & !0x03, 0);
+        assert_eq!(decode_bench_arrive_payload(&[7]), Some(7));
+        assert_eq!(decode_bench_arrive_payload(&[]), None);
+        assert_eq!(decode_bench_arrive_payload(&[1, 2]), None);
+        assert_eq!(
+            encode_frame(TYPE_BENCH_OWE, &[BENCH_OWE_ERASE_LOG]),
+            [0xA4, 0xA5, 0x1B, 0, 1, 0x01]
+        );
+        assert_eq!(
+            encode_frame(TYPE_BENCH_ARRIVE, &[3]),
+            [0xA4, 0xA5, 0x1C, 0, 1, 3]
+        );
+        for frame_type in [TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE] {
+            assert!(!CAPABILITY_FACT_RANGE.contains(&frame_type));
+            assert_eq!(
+                classify_control_frame(&encode_frame(frame_type, &[0]), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: frame_type,
+                    reason: REFUSE_UNKNOWN_TYPE,
+                }
+            );
+        }
     }
 
     #[test]
