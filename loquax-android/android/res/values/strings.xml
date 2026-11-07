@@ -30,14 +30,14 @@
     <string name="battery_yes">Allow</string>
     <string name="battery_no">Not now</string>
     <string name="map_loading">Loading the map of this area…</string>
-    <!-- 1200: the map's state chips, its people, the card and the Friends sheet. -->
+    <!-- 1200: the map's state chips, its people, the card and the people sheet (1447: never "friends" for who sends a position). -->
     <string name="map_offline">Offline</string>
     <string name="map_no_map">No map here yet</string>
-    <string name="friends">Friends</string>
-    <string name="friends_search">Find a friend</string>
+    <string name="friends">People on the map</string>
+    <string name="friends_search">Find a person</string>
     <string name="friends_older">Older than a day</string>
-    <string name="friends_none">No friends on the map yet. When a friend shares their position with you, they appear here.</string>
-    <string name="friends_no_match">No friend by that name.</string>
+    <string name="friends_none">Nobody shares a position with you yet. When someone does, they appear here.</string>
+    <string name="friends_no_match">Nobody by that name.</string>
     <string name="card_chat">Chat</string>
     <string name="card_navigate">Navigate</string>
     <string name="card_ago">%1$s ago</string>
@@ -256,7 +256,7 @@
     <string name="location_off">Location is off</string>
     <string name="location_finding">Finding your position…</string>
     <string name="location_none">The phone does not know where you are yet. Try again outside.</string>
-    <string name="map_empty">No friends on the map yet</string>
+    <string name="map_empty">Nobody shares a position with you yet</string>
     <string name="share_position">Share my position</string>
     <string name="card_share">Share mine</string>
     <string name="share_with">Share your position with</string>

@@ -38,10 +38,10 @@
     <string name="map_loading">Die Karte dieser Gegend lädt…</string>
     <string name="map_offline">Offline</string>
     <string name="map_no_map">Hier gibt es noch keine Karte</string>
-    <string name="friends">Freunde</string>
-    <string name="friends_search">Freund suchen</string>
+    <string name="friends">Personen auf der Karte</string>
+    <string name="friends_search">Person suchen</string>
     <string name="friends_older">Älter als ein Tag</string>
-    <string name="friends_none">Noch keine Freunde auf der Karte. Sobald dir jemand den eigenen Standort schickt, erscheint die Person hier.</string>
+    <string name="friends_none">Noch niemand teilt eine Position mit dir. Sobald es jemand tut, erscheint die Person hier.</string>
     <string name="friends_no_match">Niemand mit diesem Namen.</string>
     <string name="card_chat">Chat</string>
     <string name="card_navigate">Navigieren</string>
@@ -250,7 +250,7 @@
     <string name="location_off">Standort ist aus</string>
     <string name="location_finding">Suche deine Position…</string>
     <string name="location_none">Das Handy weiß noch nicht, wo du bist. Versuch es draußen noch einmal.</string>
-    <string name="map_empty">Noch keine Freunde auf der Karte</string>
+    <string name="map_empty">Noch niemand teilt eine Position mit dir</string>
     <string name="share_position">Meine Position teilen</string>
     <string name="card_share">Meine teilen</string>
     <string name="share_with">Deine Position teilen mit</string>

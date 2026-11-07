@@ -59,7 +59,7 @@
     <string name="last_position">last position %1$s</string>
     <string name="position_of">Position of %1$s, %2$s</string>
     <string name="position_marker">⌖</string>
-    <string name="no_position">No position from this friend yet</string>
+    <string name="no_position">No position from this person yet</string>
     <string name="nearby_card">Nearby, not in your contacts</string>
     <string name="nearby_add">Add</string>
     <string name="nearby_enter_adds">Enter adds</string>
