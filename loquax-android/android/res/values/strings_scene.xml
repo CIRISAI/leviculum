@@ -411,4 +411,7 @@
     <string name="scene_november">November</string>
     <string name="scene_december">December</string>
     <string name="needs_service">Loquax needs its network service. Start it with: %1$s</string>
+    <string name="m9_not_saved">Not saved: memory error</string>
+    <string name="m9_join_not_saved">Connected, but not saved: pair again after a restart</string>
+    <string name="m9_no_identity">Memory error: this device cannot read its identity and cannot start. Restart it; if this stays, it needs service.</string>
 </resources>

@@ -236,4 +236,20 @@ mod tests {
         draw(&mut frame, Rgb565::RED);
         assert_eq!(frame.take_dirty(), None, "drawn back to what was flushed");
     }
+
+    /// A flush that failed left the panel unknown (1493): `take_dirty`
+    /// hands the hashes in before the SPI write, so the board calls
+    /// `forget_flushed` on an error and the next flush is whole — without
+    /// it, the failed band stays stale for ever.
+    #[test]
+    fn a_failed_flush_owes_the_whole_frame() {
+        let mut frame = Frame::new();
+        let _ = frame.take_dirty();
+        let _ = frame.draw_iter([Pixel(Point::new(5, 30), Rgb565::WHITE)]);
+        assert_eq!(frame.take_dirty(), Some((30, 30)));
+        // The SPI refused; without forget_flushed the row is never sent.
+        assert_eq!(frame.take_dirty(), None, "the finding: nothing owed");
+        frame.forget_flushed();
+        assert_eq!(frame.take_dirty(), Some((0, HEIGHT - 1)));
+    }
 }

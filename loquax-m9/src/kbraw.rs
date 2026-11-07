@@ -40,6 +40,28 @@ pub const MEASURED: Protocol = Protocol {
     len: 8,
 };
 
+/// The V1.0 controller's address: the same protocol at 0x6C
+/// (`thinknode-m9.md`, "The keyboard controller, measured": the probe
+/// asks both; 1493 made the probe's answer the address used — before,
+/// [`MEASURED`]'s 0x6D was polled even when only 0x6C answered, and a
+/// V1.0 keyboard was dead).
+pub const ADDRESS_V10: u8 = 0x6C;
+
+/// The protocol at the address the probe found: [`MEASURED`] where its
+/// own address answered (or nothing answered: a controller can sleep
+/// through one probe, and polling the measured address stays the bench's
+/// behaviour), and the same reads at [`ADDRESS_V10`] where only the V1.0
+/// address did.
+pub fn probed(v11: bool, v10: bool) -> Protocol {
+    match (v11, v10) {
+        (false, true) => Protocol {
+            address: ADDRESS_V10,
+            ..MEASURED
+        },
+        _ => MEASURED,
+    }
+}
+
 /// What one answer says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Read {
@@ -345,5 +367,26 @@ mod tests {
     #[test]
     fn a_raw_line_is_the_answer_in_hex() {
         assert_eq!(raw_line(7, &[0xab, 0x01]), "KBRAW 7 ab01");
+    }
+
+    /// 1493: the probe's answer is the address polled. A V1.0 board
+    /// (only 0x6C answers) gets its keyboard; the measured 0x6D stays
+    /// the default everywhere else, the rest of the protocol unchanged.
+    #[test]
+    fn the_probe_picks_the_keyboard_address() {
+        assert_eq!(probed(true, false), MEASURED);
+        assert_eq!(
+            probed(true, true),
+            MEASURED,
+            "both answer: the measured one"
+        );
+        assert_eq!(
+            probed(false, false),
+            MEASURED,
+            "a sleeping controller is polled as before"
+        );
+        let v10 = probed(false, true);
+        assert_eq!(v10.address, ADDRESS_V10);
+        assert_eq!((v10.register, v10.len), (MEASURED.register, MEASURED.len));
     }
 }

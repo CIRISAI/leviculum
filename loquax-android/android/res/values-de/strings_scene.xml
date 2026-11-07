@@ -411,4 +411,7 @@
     <string name="scene_november">November</string>
     <string name="scene_december">Dezember</string>
     <string name="needs_service">Loquax braucht seinen Netzwerkdienst. Starte ihn mit: %1$s</string>
+    <string name="m9_not_saved">Nicht gespeichert: Speicherfehler</string>
+    <string name="m9_join_not_saved">Verbunden, aber nicht gespeichert: nach einem Neustart neu koppeln</string>
+    <string name="m9_no_identity">Speicherfehler: Dieses Gerät kann seine Identität nicht lesen und nicht starten. Starte es neu; bleibt das so, braucht es Service.</string>
 </resources>

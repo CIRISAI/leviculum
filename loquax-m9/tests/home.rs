@@ -6,12 +6,14 @@
 use leviculum_core::Identity;
 use leviculum_lxmf::{DeliveryMethod, Message};
 use leviculum_ui::style::RLine;
+use loquax::home::ask::Verb;
 use loquax::home::board::Word;
 use loquax::home::code::HomeCode;
 use loquax::home::wire::Entry;
 use loquax::home::{lxmf_address, KIND_RECEIVED, KIND_SENT};
 use loquax::ui::strings::Lang;
 use loquax::ui::{update, Pane, UiEvent};
+use loquax_m9::group;
 use loquax_m9::home::{self, Outgoing};
 use loquax_m9::keys::{event, M9Key};
 use loquax_m9::pair::{self, Pairing};
@@ -147,8 +149,8 @@ fn pulled_pages_become_the_chats_list_and_a_chat() {
     ];
     let mut model = home::model(address);
     assert!(model.conversations.is_empty());
-    assert_eq!(home::take(&mut model, &page, &address), 2);
-    assert_eq!(home::take(&mut model, &page[..2], &address), 2);
+    assert_eq!(home::take(&mut model, &page, &address).0, 2);
+    assert_eq!(home::take(&mut model, &page[..2], &address).0, 2);
     assert_eq!(model.conversations.len(), 1);
     let chat = &model.conversations[0];
     assert_eq!(chat.peer, theirs);
@@ -205,21 +207,32 @@ fn a_line_typed_on_the_board_is_a_send_to_the_home() {
         n += 1;
         [n; 16]
     };
-    let sends = home::sends(effects, &mut ids);
-    assert_eq!(sends.len(), 1, "{sends:?}");
+    let routed = home::route(&mut model, effects, &mut ids);
+    let sends: Vec<&loquax::home::wire::Submission> = routed
+        .verbs
+        .iter()
+        .filter_map(|verb| match verb {
+            Verb::Send(submission) => Some(submission),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sends.len(), 1, "{:?}", routed.verbs);
     assert_eq!(sends[0].destination, theirs);
     assert_eq!(sends[0].content, b"vom M9");
-    assert_eq!(sends[0].client_id, [1; 16]);
     let mut outgoing = Outgoing::default();
-    outgoing.push(sends);
+    for verb in routed.verbs {
+        if matches!(verb, Verb::Send(_)) {
+            outgoing.push([0x11; 16], verb);
+        }
+    }
     assert_eq!(outgoing.len(), 1);
-    assert_eq!(
-        outgoing.next().map(|s| s.content.as_slice()),
-        Some(&b"vom M9"[..])
-    );
+    assert!(matches!(
+        outgoing.next(),
+        Some(([0x11, ..], Verb::Send(s))) if s.content == b"vom M9"
+    ));
     assert!(outgoing.done().is_some());
     assert!(outgoing.is_empty());
-    home::sent(&mut model, Ok([9; 32]));
+    home::answered(&mut model, home::Answer::Sent(Ok([9; 32])));
     // The pulled sent entry of that message names the same bubble: one
     // line on the board, not two.
     let ours = pack(&me, theirs, "vom M9", 5.0);
@@ -234,7 +247,7 @@ fn a_line_typed_on_the_board_is_a_send_to_the_home() {
         update(&mut model2, UiEvent::Key(event(M9Key::Char(c))));
     }
     update(&mut model2, UiEvent::Key(event(M9Key::Enter)));
-    home::sent(&mut model2, Ok(id));
+    home::answered(&mut model2, home::Answer::Sent(Ok(id)));
     let sent = Entry {
         seq: 2,
         kind: KIND_SENT,
@@ -309,7 +322,7 @@ fn the_chats_come_back_from_the_flash_store_after_a_reboot() {
 
     // The pull: pages of 25, each into the model and the store.
     let mut flash = MemFlash::new(64);
-    let (mut model, mut store, restored) = home::restore(&mut flash, address).expect("boot");
+    let (mut model, mut store, restored, _) = home::restore(&mut flash, address).expect("boot");
     assert_eq!(restored.entries, 0);
     let mut writes = 0;
     for page in all.chunks(25) {
@@ -345,7 +358,7 @@ fn the_chats_come_back_from_the_flash_store_after_a_reboot() {
     let mut booted = ClientRecord::decode(&flash_record)
         .expect("record")
         .expect("some");
-    let (model, store, restored) = home::restore(&mut flash, address).expect("reboot");
+    let (model, store, restored, _) = home::restore(&mut flash, address).expect("reboot");
     assert_eq!(restored.entries, 120);
     assert_eq!(agree(&mut booted, store.cursor()), Agreement::Agrees);
     assert_eq!(booted.cursor, 120);
@@ -360,7 +373,7 @@ fn the_chats_come_back_from_the_flash_store_after_a_reboot() {
     // The control: the store erased, the list is empty and the cursor
     // resets, so the next pull fills it.
     let mut erased = MemFlash::new(64);
-    let (model, store, _) = home::restore(&mut erased, address).expect("erased");
+    let (model, store, _, _) = home::restore(&mut erased, address).expect("erased");
     assert!(model.conversations.is_empty());
     let mut lost = ClientRecord::decode(&flash_record)
         .expect("record")
@@ -399,11 +412,11 @@ fn the_store_keeps_what_the_fold_keeps() {
         entry(5, KIND_IMPORTED, pack(&friend, address, "importiert", 4.0)),
     ];
     let mut flash = MemFlash::new(8);
-    let (_, mut store, _) = home::restore(&mut flash, address).expect("boot");
+    let (_, mut store, _, _) = home::restore(&mut flash, address).expect("boot");
     let done = home::keep(&mut store, &mut flash, &page, &address).expect("keep");
     assert_eq!(done.entries, 2);
     let mut kept = Vec::new();
-    let (store, _) = loquax::home::board::store::Store::open(
+    let (store, _, _) = loquax::home::board::store::Store::open(
         &mut flash,
         loquax::home::board::store::tag(&address),
         |e| kept.push(e.seq),
@@ -431,13 +444,13 @@ fn a_restore_of_4058_entries_is_timed() {
     let all = archive(&me, address, &friends, 4058);
     let bytes: usize = all.iter().map(|e| e.packed.len()).sum();
     let mut flash = MemFlash::new(1024);
-    let (_, mut store, _) = home::restore(&mut flash, address).expect("boot");
+    let (_, mut store, _, _) = home::restore(&mut flash, address).expect("boot");
     for page in all.chunks(67) {
         home::keep(&mut store, &mut flash, page, &address).expect("keep");
     }
     let used = store.used();
     let start = std::time::Instant::now();
-    let (model, store, restored) = home::restore(&mut flash, address).expect("restore");
+    let (model, store, restored, _) = home::restore(&mut flash, address).expect("restore");
     let took = start.elapsed();
     assert_eq!(restored.entries, 4058);
     assert_eq!(store.cursor(), 4058);
@@ -447,4 +460,184 @@ fn a_restore_of_4058_entries_is_timed() {
         used as usize * SECTOR,
         took.as_millis()
     );
+}
+
+/// 1493, the effect router: every verb of the home protocol the model
+/// asks for reaches the ask queue. A group made on the M9 becomes
+/// `/group` (the cell behind "a group made on the M9 appears on the
+/// phone": the ask is what the home fans out), members become
+/// `/groupadd`, a delete `/groupdelete`, and a read mark `/mark` — none
+/// of them is dropped on the floor as `home::take` dropped them before.
+#[test]
+fn every_group_verb_and_mark_reaches_the_ask_queue() {
+    use loquax::home::ask::GroupVerb;
+    use loquax::home::wire::{Mark, MarkFlag};
+    use loquax::ui::UiEffect;
+
+    let me = Identity::generate(&mut OsRng);
+    let friend = Identity::generate(&mut OsRng);
+    let address = lxmf_address(&me.public_key_bytes()).expect("address");
+    let mut model = home::model(address);
+    let mut n = 0u8;
+    let mut ids = || {
+        n += 1;
+        [n; 16]
+    };
+    // The mark comes the reader's way: a message arrives, the chat is
+    // opened, the model queues the read mark (`read_out`; it queued
+    // nothing before 1493, when the board was no `home_client`).
+    let packed = pack(&friend, address, "gelesen gleich", 1.0);
+    let id = Message::unpack(&packed, None, None, DeliveryMethod::Direct)
+        .expect("unpack")
+        .message_id;
+    let page = vec![Entry {
+        seq: 1,
+        kind: KIND_RECEIVED,
+        at: 1_762_000_000,
+        packed,
+    }];
+    home::take(&mut model, &page, &address);
+    let mut row = 0;
+    let opened = group::press(&mut model, &mut row, &event(M9Key::Enter));
+    assert!(opened.is_empty(), "{opened:?}");
+    let effects = vec![
+        UiEffect::CreateGroup {
+            name: "Band".into(),
+            members: vec![([4; 16], "Anna".into())],
+        },
+        UiEffect::AddMembers {
+            group: [6; 16],
+            members: vec![([7; 16], "Ben".into())],
+        },
+        UiEffect::DeleteGroup { group: [6; 16] },
+    ];
+    let routed = home::route(&mut model, effects, &mut ids);
+    let kinds: Vec<&str> = routed
+        .verbs
+        .iter()
+        .map(|verb| match verb {
+            Verb::Mark(_) => "mark",
+            Verb::Group(GroupVerb::Create(_)) => "group",
+            Verb::Group(GroupVerb::Add(_)) => "groupadd",
+            Verb::Group(GroupVerb::Delete(_)) => "groupdelete",
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(kinds, ["mark", "group", "groupadd", "groupdelete"]);
+    assert_eq!(
+        routed.marks,
+        [Mark {
+            flag: MarkFlag::Read,
+            ids: vec![id],
+        }]
+    );
+    // The queues the desktop drains each fold are drained here too: a
+    // second route hands out nothing again.
+    let routed = home::route(&mut model, Vec::new(), &mut ids);
+    assert!(routed.verbs.is_empty() && routed.marks.is_empty());
+}
+
+/// 1493: read on the board is read after a reboot, home heard from or
+/// not. The board's own mark is kept in the message store and folds back
+/// at restore exactly as a pulled mark folds. The control: without
+/// `keep_marks` the reboot shows the message unread again (the finding).
+#[test]
+fn read_on_the_board_survives_a_reboot() {
+    use loquax::home::board::store::MemFlash;
+
+    let me = Identity::generate(&mut OsRng);
+    let friend = Identity::generate(&mut OsRng);
+    let address = lxmf_address(&me.public_key_bytes()).expect("address");
+    let page = vec![Entry {
+        seq: 1,
+        kind: KIND_RECEIVED,
+        at: 1_762_000_000,
+        packed: pack(&friend, address, "ungelesen?", 1.0),
+    }];
+
+    let mut flash = MemFlash::new(16);
+    let (mut model, mut store, _, _) = home::restore(&mut flash, address).expect("boot");
+    home::take(&mut model, &page, &address);
+    home::keep(&mut store, &mut flash, &page, &address).expect("keep");
+    assert_eq!(model.conversations[0].unread_rows(), 1);
+
+    // The control first: a reboot without the kept mark is the finding.
+    let (unfixed, _, _, _) = home::restore(&mut flash, address).expect("control reboot");
+    assert_eq!(
+        unfixed.conversations[0].unread_rows(),
+        1,
+        "without keep_marks the reboot forgets the read"
+    );
+
+    // The board reads it: the fold's own mark goes into the store.
+    let mut row = 0;
+    let effects = group::press(&mut model, &mut row, &event(M9Key::Enter));
+    let routed = home::route(&mut model, effects, &mut || [1; 16]);
+    assert_eq!(routed.marks.len(), 1, "the open chat marks its unread read");
+    home::keep_marks(&mut store, &mut flash, &routed.marks).expect("kept");
+    let cursor = store.cursor();
+    let (model, store, _, _) = home::restore(&mut flash, address).expect("reboot");
+    assert_eq!(model.conversations[0].unread_rows(), 0, "read stays read");
+    assert_eq!(store.cursor(), cursor, "a local mark moves no cursor");
+}
+
+/// 1493: an ask queued when the power goes is asked again at the next
+/// boot — the send still reaches the home.
+#[test]
+fn a_queued_send_survives_a_reboot() {
+    use loquax::home::board::store::MemFlash;
+    use loquax::home::board::{ask_bytes, ask_verb};
+    use loquax::home::wire::Submission;
+
+    let me = Identity::generate(&mut OsRng);
+    let address = lxmf_address(&me.public_key_bytes()).expect("address");
+    let mut flash = MemFlash::new(16);
+    let (_, mut store, _, pending) = home::restore(&mut flash, address).expect("boot");
+    assert!(pending.is_empty());
+    let send = Verb::Send(Submission {
+        client_id: [0xAA; 16],
+        destination: [2; 16],
+        title: Vec::new(),
+        content: b"vom M9".to_vec(),
+        fields: Vec::new(),
+    });
+    let (tag, bytes) = ask_bytes(&send).expect("persistable");
+    store
+        .keep_ask(&mut flash, &[0xAA; 16], tag, &bytes)
+        .expect("kept");
+
+    // The power goes; the boot queues it again.
+    let (_, mut store, _, pending) = home::restore(&mut flash, address).expect("reboot");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, [0xAA; 16]);
+    assert_eq!(ask_verb(pending[0].tag, &pending[0].request), Some(send));
+
+    // Answered and marked done: the next boot owes nothing.
+    store.ask_done(&mut flash, &[0xAA; 16]).expect("done");
+    let (_, _, _, pending) = home::restore(&mut flash, address).expect("third boot");
+    assert!(pending.is_empty());
+}
+
+/// 1493: a write that did not land is a word on the screen. The fault
+/// takes the bar's right end, over the home's word.
+#[test]
+fn a_fault_is_a_word_in_the_top_bar() {
+    let me = Identity::generate(&mut OsRng);
+    let model = home::model(lxmf_address(&me.public_key_bytes()).expect("address"));
+    let scene = screen::scene(&model);
+    let look = Look {
+        fault: Some(loquax::ui::strings::StrId::M9NotSaved),
+        lang: Lang::En,
+        ..Look::of(&model)
+    };
+    let lines = screen::lines(&scene, &look, COLS, ROWS);
+    let top = row_text(&lines[0]);
+    assert!(top.contains("Not saved"), "{top:?}");
+    let clear = Look {
+        fault: None,
+        lang: Lang::En,
+        ..Look::of(&model)
+    };
+    let top = row_text(&screen::lines(&scene, &clear, COLS, ROWS)[0]);
+    assert!(!top.contains("Not saved"), "{top:?}");
 }

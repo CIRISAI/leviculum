@@ -533,6 +533,11 @@ leviculum_ui::catalogue! {
     // A start with no daemon to attach to (1265, walk finding 5): one
     // sentence and the one command, the stack's detail behind --verbose.
     NeedsService = "needs_service", "Loquax needs its network service. Start it with: %1$s", "Loquax braucht seinen Netzwerkdienst. Starte ihn mit: %1$s";
+    // The M9's error states (1493): a failed write is a word on the
+    // screen, never only a log line.
+    M9NotSaved = "m9_not_saved", "Not saved: memory error", "Nicht gespeichert: Speicherfehler";
+    M9JoinNotSaved = "m9_join_not_saved", "Connected, but not saved: pair again after a restart", "Verbunden, aber nicht gespeichert: nach einem Neustart neu koppeln";
+    M9NoIdentity = "m9_no_identity", "Memory error: this device cannot read its identity and cannot start. Restart it; if this stays, it needs service.", "Speicherfehler: Dieses Gerät kann seine Identität nicht lesen und nicht starten. Starte es neu; bleibt das so, braucht es Service.";
 }
 
 /// [`leviculum_ui::strings::format`] over Loquax's catalogue.

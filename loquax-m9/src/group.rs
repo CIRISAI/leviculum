@@ -264,7 +264,7 @@ pub fn press(model: &mut UiModel<Field>, row: &mut usize, key: &KeyEvent) -> Vec
         }
         false => None,
     };
-    let effects = match found {
+    let mut effects = match found {
         Some(Hit::Run(Intent::Group(verb))) => update(model, UiEvent::Group(verb)),
         Some(Hit::Run(_)) | Some(Hit::Stay) => Vec::new(),
         Some(Hit::Move(to)) => {
@@ -273,6 +273,14 @@ pub fn press(model: &mut UiModel<Field>, row: &mut usize, key: &KeyEvent) -> Vec
         }
         None => update(model, UiEvent::Key(crate::map::key(model, *key))),
     };
+    // The key brought the chat onto the panel (1493): only now is it
+    // read. Moving the list's cursor selects without reading
+    // (`list_apart`), so the open is said as a phone's tap says it.
+    if before == Place::List && Place::of(model) == Place::Chat {
+        if let Some(peer) = model.conversations.get(model.selected).map(|c| c.peer) {
+            effects.extend(update(model, UiEvent::Open { peer }));
+        }
+    }
     // The question is the sheet's: answering it keeps the cursor where it
     // was.
     let sheet = |place| match place {

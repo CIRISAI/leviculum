@@ -118,6 +118,10 @@ pub struct Look {
     /// joining, fetched N of M, unreachable. None on a board that is no
     /// device of a home, which draws the bar as before.
     pub home: Option<loquax::home::board::Word>,
+    /// An error that is a state, not a log line (1493): a write that did
+    /// not reach the flash, a join the record could not keep. It takes
+    /// the home word's place at the bar's right end until it clears.
+    pub fault: Option<loquax::ui::strings::StrId>,
 }
 
 impl Look {
@@ -131,6 +135,7 @@ impl Look {
             caret: None,
             row: 0,
             home: None,
+            fault: None,
         }
     }
 
@@ -243,9 +248,20 @@ fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
         false => (room * 2) / 3,
         true => room.saturating_sub(fit_width(&narrow(&title)).min(room / 3) + 1),
     };
+    // A fault outranks the home's word (1493): a write that did not
+    // land matters more than the fetch count.
     let word = look
-        .home
-        .map(|word| cut(&word.text().resolve(look.lang), budget))
+        .fault
+        .map(|fault| {
+            cut(
+                &loquax::ui::strings::Text::Key(fault, alloc::vec::Vec::new()).resolve(look.lang),
+                budget,
+            )
+        })
+        .or_else(|| {
+            look.home
+                .map(|word| cut(&word.text().resolve(look.lang), budget))
+        })
         .unwrap_or_default();
     let words = word.chars().count();
     let room = match (words, tight) {
@@ -468,7 +484,7 @@ pub(crate) fn cut(text: &str, cols: usize) -> String {
 
 /// `line` cut or padded to `cols` cells, the padding in `style`, one cell
 /// a character as [`narrow`] makes them.
-pub(crate) fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
+pub fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
     let mut out = RLine::default();
     for mut cell in line.cells {
         match fit_width(cell.ch.encode_utf8(&mut [0; 4])) {
@@ -486,7 +502,7 @@ pub(crate) fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
     out
 }
 
-pub(crate) fn push(line: &mut RLine, text: &str, st: RStyle) {
+pub fn push(line: &mut RLine, text: &str, st: RStyle) {
     line.cells.extend(text.chars().map(|ch| StyledChar {
         ch,
         st,

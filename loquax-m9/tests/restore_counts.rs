@@ -101,7 +101,7 @@ impl Archive {
 /// The archive kept in a flash store as the pull keeps it, page by page.
 fn kept(archive: &Archive) -> MemFlash {
     let mut flash = MemFlash::new(2048);
-    let (_, mut store, _) = home::restore(&mut flash, archive.address).expect("boot");
+    let (_, mut store, _, _) = home::restore(&mut flash, archive.address).expect("boot");
     for page in archive.entries().chunks(72) {
         home::keep(&mut store, &mut flash, page, &archive.address).expect("keep");
     }
@@ -151,7 +151,7 @@ fn a_restore_sorts_and_builds_once() {
     let archive = Archive::new();
     let mut flash = kept(&archive);
 
-    let (model, _, restored) = home::restore(&mut flash, archive.address).expect("restore");
+    let (model, _, restored, _) = home::restore(&mut flash, archive.address).expect("restore");
     assert_eq!(restored.entries, MESSAGES);
     assert_eq!(model.conversations.len(), CONVERSATIONS);
     // The whole restore's count, every event in it: a model's count of
@@ -169,13 +169,17 @@ fn a_restore_sorts_and_builds_once() {
     );
 
     // The control: per entry, the cost is a sort and a window each.
+    // Folded with no chat open, as the restore folds (1493): the boot
+    // reads nothing "where it arrived".
     let mut each = home::model(archive.address);
+    each.selected = loquax::ui::NONE_OPEN;
     Store::open(&mut flash, tag(&archive.address), |entry| {
         if let Some(event) = board::fold(&entry, &archive.address) {
             update(&mut each, UiEvent::Engine(event));
         }
     })
     .expect("open");
+    each.selected = 0;
     let sum = each.total_counters().expect("this build counts");
     println!("COUNTS m9.restore_per_entry {sum}");
     assert!(
@@ -200,7 +204,7 @@ fn a_new_message_moves_one_conversation() {
     }
     let archive = Archive::new();
     let mut flash = kept(&archive);
-    let (mut model, _, _) = home::restore(&mut flash, archive.address).expect("restore");
+    let (mut model, _, _, _) = home::restore(&mut flash, archive.address).expect("restore");
     let friend = &archive.friends[CONVERSATIONS - 1];
     let entry = Entry {
         seq: MESSAGES + 1,
@@ -209,7 +213,7 @@ fn a_new_message_moves_one_conversation() {
         packed: pack(friend, archive.address, "Bist du da?", 1_762_100_000.0),
     };
     let before = model.total_counters().expect("this build counts");
-    assert_eq!(home::take(&mut model, &[entry], &archive.address), 1);
+    assert_eq!(home::take(&mut model, &[entry], &archive.address).0, 1);
     let counts = since(before, &model);
     println!("COUNTS m9.one_new_message {counts}");
     assert!(
@@ -239,7 +243,7 @@ fn a_pulled_page_sorts_and_builds_once() {
     let mut model = home::model(archive.address);
     home::take(&mut model, page, &archive.address);
     let before = model.total_counters().expect("this build counts");
-    assert_eq!(home::take(&mut model, rest, &archive.address), 72);
+    assert_eq!(home::take(&mut model, rest, &archive.address).0, 72);
     let counts = since(before, &model);
     println!("COUNTS m9.pulled_page {counts}");
     assert!(
