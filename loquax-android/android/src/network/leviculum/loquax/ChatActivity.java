@@ -2755,6 +2755,16 @@ public class ChatActivity extends Activity implements Events.Listener {
                     refresh();
                 }
             }
+        }, new Runnable() {
+            @Override
+            public void run() {
+                // The question threw (1496): the next event asks again.
+                asking = false;
+                if (askOwed && !isDestroyed()) {
+                    askOwed = false;
+                    refresh();
+                }
+            }
         });
     }
 

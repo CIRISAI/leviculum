@@ -13,6 +13,11 @@
 //! The service notice's rules (1345), `Notice.java`, run with
 //! `tests/java/NoticeTest.java`: which change posts the notice again and
 //! when a reboot starts the service.
+//!
+//! The engine's questions (1496), `Engine.java`, run with
+//! `tests/java/EngineTest.java` and stand-ins for Android's `Handler`,
+//! `Looper` and `Log` (`tests/java/stubs`): a question that throws reaches
+//! its failure path.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -232,6 +237,48 @@ fn the_phone_draws_nothing_while_nothing_changes() {
         .arg("-cp")
         .arg(&classes)
         .arg("network.leviculum.loquax.QuietTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
+/// A question that throws reaches its failure path (1496): `Engine.java`
+/// run on the host with `tests/java/EngineTest.java` over stand-ins for
+/// Android's `Handler`, `Looper` and `Log`. Before, a throw in `Engine.ask`
+/// left `got` unsaid, and `ChatActivity.asking` stayed set for good.
+#[test]
+fn a_question_that_throws_reaches_its_failure_path() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("engine-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let stubs = manifest.join("tests/java/stubs/android");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(stubs.join("os/Looper.java"))
+        .arg(stubs.join("os/Handler.java"))
+        .arg(stubs.join("util/Log.java"))
+        .arg(manifest.join("android/src/network/leviculum/loquax/Engine.java"))
+        .arg(manifest.join("tests/java/EngineTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.EngineTest")
         .output()
         .expect("java runs (the same JDK)");
     let out = String::from_utf8_lossy(&ran.stdout);

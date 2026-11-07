@@ -212,3 +212,8 @@ command:java loquax-android/fling the_phone_draws_nothing_while_nothing_changes
 # test.
 command:javac loquax-android/fling the_server_field_follows_a_typed_code
 command:java loquax-android/fling the_server_field_follows_a_typed_code
+
+# The engine's questions (1496): Engine.java over host stand-ins for
+# Handler, Looper and Log, run with its host test.
+command:javac loquax-android/fling a_question_that_throws_reaches_its_failure_path
+command:java loquax-android/fling a_question_that_throws_reaches_its_failure_path
