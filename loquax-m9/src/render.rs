@@ -65,7 +65,13 @@ where
         // The atlas leaks each time it is made; the config's is the one.
         let font = config.font_regular;
         let backend = EmbeddedBackend::new(panel, config);
-        let terminal = Terminal::new(backend).map_err(|_| DrawError)?;
+        let mut terminal = Terminal::new(backend).map_err(|_| DrawError)?;
+        // ratatui draws only the cells that differ from its last frame,
+        // which starts blank: whatever the panel's frame held (the
+        // power-on splash, 1485) would stay under every blank cell. The
+        // frame is cleared to the ground here, in memory; the panel keeps
+        // the splash until the first redraw flushes.
+        terminal.clear().map_err(|_| DrawError)?;
         Ok(Self {
             terminal,
             font,

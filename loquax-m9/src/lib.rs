@@ -38,6 +38,8 @@
 //! - [`map`]: the model's map drawn in pixels under the bar, its pins and
 //!   legend in the atlas, and the keys the M9 has none for (slice seven,
 //!   1375).
+//! - [`splash`]: the logo from power-on until the UI's first frame, and
+//!   the order that lights the backlight only over a written panel (1485).
 //! - [`census`]: what a screen costs where it is drawn, and its budget.
 
 #![no_std]
@@ -60,6 +62,7 @@ pub mod map;
 pub mod pair;
 pub mod render;
 pub mod screen;
+pub mod splash;
 
 /// The language the board speaks (1447, walk 1 finding 23): German unless
 /// the build says otherwise with `LOQUAX_M9_LANG=en`. The board has no

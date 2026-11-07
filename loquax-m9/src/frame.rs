@@ -98,6 +98,14 @@ impl Frame {
         band
     }
 
+    /// Every row still to be written, as after [`Frame::new`]: a write
+    /// that did not reach the panel leaves the panel's memory unknown
+    /// (1485), so the next flush is whole.
+    pub fn forget_flushed(&self) {
+        self.dirty.set(Some((0, HEIGHT - 1)));
+        self.flushed.borrow_mut().fill(None);
+    }
+
     /// The frame as 8-bit RGB, three bytes a pixel, each channel widened by
     /// repeating its high bits, so white stays 255: what a PNG holds.
     pub fn to_rgb888(&self) -> Vec<u8> {
