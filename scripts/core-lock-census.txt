@@ -27,7 +27,7 @@
 #
 # Baseline measured 2026-09-17 (Codeberg #199).
 
-TOTAL 80
+TOTAL 83
 
 driver::ReticulumNode::accept_direct_link
 driver::ReticulumNode::accept_resource
@@ -49,6 +49,9 @@ driver::ReticulumNode::heap_census
 driver::ReticulumNode::hops_to
 driver::ReticulumNode::identify_link
 driver::ReticulumNode::identity_hash
+driver::ReticulumNode::ifac_activate_next
+driver::ReticulumNode::ifac_install_next
+driver::ReticulumNode::ifac_seal_rotation
 driver::ReticulumNode::interface_stats
 driver::ReticulumNode::is_transport_enabled
 driver::ReticulumNode::known_destination_evictions

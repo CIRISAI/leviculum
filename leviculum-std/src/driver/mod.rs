@@ -3635,7 +3635,7 @@ impl ReticulumNode {
     /// Outbound keeps masking with the current key, so stragglers keep
     /// full bidirectional service; distribute the new key over the still-
     /// working fabric, then [`ifac_activate_next`](Self::ifac_activate_next).
-    /// Returns how many interfaces were updated.
+    /// Returns how many interfaces were updated. Takes the core lock.
     pub fn ifac_install_next(
         &self,
         netname: Option<&str>,
@@ -3649,44 +3649,35 @@ impl ReticulumNode {
             let n = core.ifac_install_next(&next);
             (n, core.clone_ifac_configs().into_values().next())
         };
-        *self.ifac_rotation.child_override.lock_recover() = snapshot;
-        self.ifac_rotation
-            .generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.ifac_rotation.publish(snapshot);
         Ok(n)
     }
 
     /// Rotation phase 2: swap the alternate into primary — outbound now
     /// masks with the NEW key; the old key stays accept-only, so a
     /// straggler's outbound still lands while its inbound degrades until
-    /// it upgrades. Call once the new key is distributed.
+    /// it upgrades. Call once the new key is distributed. Takes the core lock.
     pub fn ifac_activate_next(&self) -> usize {
         let (n, snapshot) = {
             let mut core = self.inner.lock_recover();
             let n = core.ifac_activate_next();
             (n, core.clone_ifac_configs().into_values().next())
         };
-        *self.ifac_rotation.child_override.lock_recover() = snapshot;
-        self.ifac_rotation
-            .generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.ifac_rotation.publish(snapshot);
         n
     }
 
     /// Rotation phase 3: seal the window — only the new key is accepted
     /// from here on. Members still on the old key are out until they
     /// re-key. The child override is kept (new connections get the
-    /// sealed single-key state).
+    /// sealed single-key state). Takes the core lock.
     pub fn ifac_seal_rotation(&self) -> usize {
         let (n, snapshot) = {
             let mut core = self.inner.lock_recover();
             let n = core.ifac_seal_rotation();
             (n, core.clone_ifac_configs().into_values().next())
         };
-        *self.ifac_rotation.child_override.lock_recover() = snapshot;
-        self.ifac_rotation
-            .generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.ifac_rotation.publish(snapshot);
         n
     }
 
@@ -5037,6 +5028,16 @@ fn precompute_single_dest(
 pub(crate) struct IfacRotation {
     generation: Arc<std::sync::atomic::AtomicU64>,
     child_override: Arc<Mutex<Option<leviculum_core::ifac::IfacConfig>>>,
+}
+
+impl IfacRotation {
+    /// A rotation phase ran: carry its key state to new connections and tell
+    /// the event loop to re-clone its IFAC map.
+    fn publish(&self, snapshot: Option<leviculum_core::ifac::IfacConfig>) {
+        *self.child_override.lock_recover() = snapshot;
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Run the internal event loop (sans-I/O architecture)
