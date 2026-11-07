@@ -11,8 +11,11 @@ use alloc::vec::Vec;
 
 use loquax::home::ask::{GroupVerb, HomeError, Outcome, Verb};
 use loquax::home::board;
+use loquax::home::board::rows::{self, Index, RowLog, State, Window};
 use loquax::home::board::store::{self, Appended, PendingAsk, Restored, Sectors, Store};
 use loquax::home::wire::{Entry, Mark, Submission};
+use loquax::ui::history::{StoreRead, StoreWrite};
+use loquax::ui::listing::Row;
 use loquax::ui::{groups, update, Batch, Pane, UiEffect, UiEvent, UiModel};
 
 use crate::field::Field;
@@ -79,45 +82,380 @@ pub fn take(
     (taken, effects)
 }
 
-/// What a board that is a device of the home at `address` shows at boot
-/// (1476): its model with every entry its message store on `dev` holds
-/// folded in, the store, and what the store found. The client's cursor
-/// then agrees with [`Store::cursor`] (`board::agree`). One batch
-/// (1514): every entry folded, the list ordered and the screen's rows
-/// built once at the end; per entry that cost O(conversations) and a
-/// 4067-entry store 17 minutes on the board.
-/// What a boot's restore hands back (1493): the model, the store, what
-/// the store found, and the asks still owed the home.
-pub type Booted = (UiModel<Field>, Store, Restored, Vec<PendingAsk>);
+/// How a boot read the message store (1521).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum How {
+    /// From the summary log alone: the rows listed, no message read.
+    Resumed {
+        /// Records the summary log replayed.
+        records: u64,
+    },
+    /// The ring folded whole, and the summary log written anew from it:
+    /// a store from before 1521, or one whose ring went on past its
+    /// last summary (a power cut between a page and its records).
+    Rebuilt { why: &'static str },
+    /// A partition too small to split: the ring folded whole, no
+    /// summary log.
+    Whole,
+}
 
-pub fn restore<S: Sectors>(dev: &mut S, address: [u8; 16]) -> Result<Booted, S::Error> {
+/// Where a boot's time went, in the units of the clock it was handed
+/// (1521): the ring's flash reads, CRCs and decodes, the entries'
+/// unpacking (`board::fold`), the model's steps, the batch's note, and
+/// the summary log's read and write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Breakdown {
+    pub read: u64,
+    pub crc: u64,
+    pub decode: u64,
+    pub unpack: u64,
+    pub step: u64,
+    pub finish: u64,
+    pub rows: u64,
+}
+
+/// What a board that is a device of the home at `address` shows at boot
+/// (1476), and what it keeps: the model, the store's shelf, what the
+/// store found, the asks still owed the home (1493), how the boot read
+/// the store and where its time went.
+pub struct Boot {
+    pub model: UiModel<Field>,
+    pub shelf: Shelf,
+    pub restored: Restored,
+    pub asks: Vec<PendingAsk>,
+    pub how: How,
+    pub spent: Breakdown,
+    /// Entries the boot decoded from the ring: none when it resumed.
+    pub decoded: u64,
+}
+
+/// The board's message store (1521): the ring of entries, the summary
+/// log beside it, and the index between them.
+pub struct Shelf {
+    pub ring: Store,
+    pub log: Option<RowLog>,
+    pub index: Index,
+    /// The ring's sectors; the summary log's follow.
+    ring_count: u32,
+    /// Pages kept whose rows the model has not said yet: the summary's
+    /// state waits for them, so a state never says a ring end whose
+    /// rows are not written.
+    pub pages_owed: u32,
+    /// The ring moved since the last state written.
+    pub dirty: bool,
+}
+
+impl Shelf {
+    fn new(ring: Store, log: Option<RowLog>, index: Index, ring_count: u32) -> Self {
+        Self {
+            ring,
+            log,
+            index,
+            ring_count,
+            pages_owed: 0,
+            dirty: false,
+        }
+    }
+
+    /// The newest sequence the ring holds.
+    pub fn cursor(&self) -> u64 {
+        self.ring.cursor()
+    }
+
+    /// Sectors of this home the ring holds.
+    pub fn used(&self) -> u32 {
+        self.ring.used()
+    }
+
+    /// Keep an ask the board owes its home ([`Store::keep_ask`]).
+    pub fn keep_ask<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        id: &[u8; 16],
+        tag: u8,
+        request: &[u8],
+    ) -> Result<Appended, S::Error> {
+        let ring_count = self.ring_count;
+        self.dirty = true;
+        self.ring
+            .keep_ask(&mut Window::new(dev, 0, ring_count), id, tag, request)
+    }
+
+    /// The ask under `id` ended ([`Store::ask_done`]).
+    pub fn ask_done<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        id: &[u8; 16],
+    ) -> Result<Appended, S::Error> {
+        let ring_count = self.ring_count;
+        self.dirty = true;
+        self.ring.ask_done(&mut Window::new(dev, 0, ring_count), id)
+    }
+
+    /// The ring's sectors as a [`Sectors`] of their own on `dev`, the
+    /// whole `messages` partition.
+    pub fn ring_on<'a, S: Sectors>(&self, dev: &'a mut S) -> Window<'a, S> {
+        Window::new(dev, 0, self.ring_count)
+    }
+
+    /// The model said these rows anew, and deleted these conversations.
+    pub fn said(&mut self, rows: Vec<Row>, gone: Vec<[u8; 16]>) {
+        for row in rows {
+            self.index.row(row);
+        }
+        for peer in gone {
+            self.index.gone(peer);
+        }
+    }
+
+    /// Write the records owed and, once the model said the rows of every
+    /// page kept, the state of the ring with `asks`: one flash write per
+    /// sector of the summary log they touch. Nothing on a partition
+    /// without a summary log.
+    pub fn flush<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        asks: impl FnOnce() -> Vec<PendingAsk>,
+    ) -> Result<Appended, S::Error> {
+        let Some(log) = self.log.as_mut() else {
+            return Ok(Appended::default());
+        };
+        let state_due = self.dirty && self.pages_owed == 0;
+        if !state_due && !self.index.owes() {
+            return Ok(Appended::default());
+        }
+        self.index.prune(&self.ring);
+        let state = state_due.then(|| State {
+            end: self.ring.end(),
+            cursor: self.ring.cursor(),
+            entries: self.ring.entries(),
+            marks: self.index.marks.clone(),
+            asks: asks(),
+        });
+        let (first, count) = (self.ring_count, dev.count() - self.ring_count);
+        let done = log.write(
+            &mut Window::new(dev, first, count),
+            &mut self.index,
+            state.as_ref(),
+        )?;
+        if state.is_some() {
+            self.dirty = false;
+        }
+        Ok(done)
+    }
+
+    /// The idle moment's flash work: erase ahead in the ring, then in
+    /// the summary log, then a snapshot when one is due. At most one of
+    /// them per call; whether one was made.
+    pub fn quiet<S: Sectors>(&mut self, dev: &mut S) -> Result<bool, S::Error> {
+        if self
+            .ring
+            .pre_erase(&mut Window::new(&mut *dev, 0, self.ring_count))?
+        {
+            return Ok(true);
+        }
+        let (first, count) = (self.ring_count, dev.count() - self.ring_count);
+        let Some(log) = self.log.as_mut() else {
+            return Ok(false);
+        };
+        let mut window = Window::new(dev, first, count);
+        if log.pre_erase(&mut window)? {
+            return Ok(true);
+        }
+        if log.snapshot_due() && !self.dirty && self.pages_owed == 0 {
+            log.snapshot(&mut window, &mut self.index)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// The next page of conversation `peer` the model has not loaded
+    /// ([`Index::page`]): at most `want` entries and the marks behind
+    /// them, and how many older wait.
+    pub fn page<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        peer: [u8; 16],
+        want: usize,
+    ) -> Result<(Vec<Entry>, usize), S::Error> {
+        let ring_count = self.ring_count;
+        self.index
+            .page(&self.ring, &mut Window::new(dev, 0, ring_count), peer, want)
+    }
+}
+
+/// The entries a conversation's first page loads when it opens (1521,
+/// 1490's rule): the chat's viewport twice over, as the scene builds it.
+pub fn page_entries() -> usize {
+    2 * crate::screen::viewing().chat_rows.max(1)
+}
+
+/// [`restore_timed`] without a clock.
+pub fn restore<S: Sectors>(dev: &mut S, address: [u8; 16]) -> Result<Boot, S::Error> {
+    restore_timed(dev, address, &|| 0)
+}
+
+/// What a board that is a device of the home at `address` shows at boot
+/// (1476, 1521). From the summary log when its state says the ring ends
+/// where it does: the rows listed, no message read, each conversation's
+/// messages loaded when it opens ([`Shelf::page`]). Otherwise the ring is
+/// folded whole as one batch (1514), the summary log written anew from
+/// the model it made (`[STORE] index=rebuilt`), and the next boot
+/// resumes. `clock` times the phases ([`Breakdown`]).
+pub fn restore_timed<S: Sectors>(
+    dev: &mut S,
+    address: [u8; 16],
+    clock: &dyn Fn() -> u64,
+) -> Result<Boot, S::Error> {
+    let tag = store::tag(&address);
+    let Some((ring_count, rows_count)) = rows::split(dev.count()) else {
+        let count = dev.count();
+        return rebuild(dev, address, clock, count, None, How::Whole);
+    };
+    let t0 = clock();
+    let (log, replayed) = RowLog::open(&mut Window::new(&mut *dev, ring_count, rows_count), tag)?;
+    let how = match replayed.state.as_ref() {
+        None => How::Rebuilt { why: "no-state" },
+        Some(state) => {
+            let mut ring = Store::resume(&mut Window::new(&mut *dev, 0, ring_count), tag)?;
+            if ring.end() == state.end {
+                ring.resume_counts(state.cursor, state.entries);
+                let mut index = replayed.index;
+                index.marks = state.marks.clone();
+                index.prune(&ring);
+                let mut shown = model(address);
+                shown.restore_rows(index.rows(), index.names());
+                shown.selected = top(&shown);
+                shown.keys_above(rows::live_floor(state.cursor));
+                let _ = shown.take_marks();
+                let _ = shown.take_writes();
+                let restored = Restored {
+                    entries: state.entries,
+                    sectors: ring.used(),
+                    torn: 0,
+                    foreign: 0,
+                };
+                let asks = state.asks.clone();
+                let spent = Breakdown {
+                    rows: clock().saturating_sub(t0),
+                    ..Breakdown::default()
+                };
+                return Ok(Boot {
+                    model: shown,
+                    shelf: Shelf::new(ring, Some(log), index, ring_count),
+                    restored,
+                    asks,
+                    how: How::Resumed {
+                        records: replayed.records,
+                    },
+                    spent,
+                    decoded: 0,
+                });
+            }
+            How::Rebuilt { why: "ring-moved" }
+        }
+    };
+    let rows_read = clock().saturating_sub(t0);
+    let mut boot = rebuild(dev, address, clock, ring_count, Some(log), how)?;
+    boot.spent.rows += rows_read;
+    Ok(boot)
+}
+
+/// The conversation a boot selects: the list's first, where the cursor
+/// stands when the list shows (1521; before, the first conversation the
+/// store held, wherever the list put it).
+fn top(model: &UiModel<Field>) -> usize {
+    model.order().first().copied().unwrap_or(0)
+}
+
+/// The ring folded whole (1476, 1514), its index built on the way, and
+/// the summary log written anew from the model when there is one.
+fn rebuild<S: Sectors>(
+    dev: &mut S,
+    address: [u8; 16],
+    clock: &dyn Fn() -> u64,
+    ring_count: u32,
+    log: Option<RowLog>,
+    how: How,
+) -> Result<Boot, S::Error> {
     let mut shown = model(address);
     // No chat is on the panel at boot: the fold must not read anything
     // "where it arrived" ([`take`]'s rule; the restored read state is the
     // kept marks', nothing else's).
     shown.selected = loquax::ui::NONE_OPEN;
+    let mut index = Index::default();
+    let mut unpack = 0u64;
+    let mut step = 0u64;
     let mut batch = Batch::new(&mut shown);
-    let opened = Store::open(dev, store::tag(&address), |entry| {
-        if let Some(event) = board::fold(&entry, &address) {
-            batch.fold(UiEvent::Engine(event));
-        }
-    });
+    let opened = Store::open_with(
+        &mut Window::new(&mut *dev, 0, ring_count),
+        store::tag(&address),
+        clock,
+        |entry, span| {
+            index.take(&entry, span, true);
+            let t0 = clock();
+            let event = board::fold(&entry, &address);
+            let t1 = clock();
+            unpack += t1.saturating_sub(t0);
+            if let Some(event) = event {
+                batch.fold(UiEvent::Engine(event));
+                step += clock().saturating_sub(t1);
+            }
+        },
+    );
+    let t0 = clock();
     batch.finish();
-    shown.selected = 0;
-    let (store, restored, asks) = opened?;
+    let finish = clock().saturating_sub(t0);
+    shown.selected = top(&shown);
+    let (ring, restored, asks, spent) = opened?;
     // The fold just said marks for what it restored as read; they are the
     // store's own entries played back, nothing the home still owes.
     let _ = shown.take_marks();
     let _ = shown.take_writes();
-    Ok((shown, store, restored, asks))
+    shown.keys_above(rows::live_floor(ring.cursor()));
+    let peers: Vec<[u8; 16]> = shown.conversations.iter().map(|c| c.peer).collect();
+    for peer in peers {
+        if let Some(row) = shown.row(&peer) {
+            index.row(row);
+        }
+    }
+    index.all_loaded();
+    let mut shelf = Shelf::new(ring, log, index, ring_count);
+    let t0 = clock();
+    if shelf.log.is_some() {
+        shelf.dirty = true;
+        let pending = asks.clone();
+        shelf.flush(dev, || pending)?;
+    }
+    let rows = clock().saturating_sub(t0);
+    // What the open counted as the caller's work holds the unpack and
+    // the step, counted apart; the rest is the index's.
+    let each = spent.each.saturating_sub(unpack + step);
+    Ok(Boot {
+        model: shown,
+        shelf,
+        decoded: restored.entries,
+        restored,
+        asks,
+        how,
+        spent: Breakdown {
+            read: spent.read,
+            crc: spent.crc,
+            decode: spent.decode + each,
+            unpack,
+            step,
+            finish,
+            rows,
+        },
+    })
 }
 
-/// Keep a pulled page in `store`: the entries the board's fold keeps
+/// Keep a pulled page in `shelf`: the entries the board's fold keeps
 /// (`board::fold`, what the list and a chat show), and the page's newest
-/// sequence as the store's end, in one write per sector it touches. An
-/// empty page writes nothing.
+/// sequence as the store's end, in one write per sector it touches, each
+/// entry in the index of its conversation. An empty page writes nothing.
 pub fn keep<S: Sectors>(
-    store: &mut Store,
+    shelf: &mut Shelf,
     dev: &mut S,
     entries: &[Entry],
     address: &[u8; 16],
@@ -130,7 +468,39 @@ pub fn keep<S: Sectors>(
         .filter(|entry| board::fold(entry, address).is_some())
         .cloned()
         .collect();
-    store.append(dev, &kept, last)
+    let ring_count = shelf.ring_count;
+    let (done, spans) =
+        shelf
+            .ring
+            .append_spans(&mut Window::new(dev, 0, ring_count), &kept, last)?;
+    for (entry, span) in kept.iter().zip(spans) {
+        shelf.index.take(entry, span, true);
+    }
+    shelf.dirty = true;
+    Ok(done)
+}
+
+/// A conversation's page as the model takes it (1521): the entries
+/// [`Shelf::page`] read, folded into messages as a restore folds them
+/// (`board::rows::messages`), and handed to the model as the store's
+/// answer to its page read. What the model asks back goes through
+/// [`route`].
+pub fn page_in(
+    model: &mut UiModel<Field>,
+    peer: [u8; 16],
+    entries: &[Entry],
+    earlier: usize,
+    address: &[u8; 16],
+) -> Vec<UiEffect> {
+    let messages = rows::messages::<Field>(entries, address, peer);
+    update(
+        model,
+        UiEvent::Earlier {
+            peer,
+            messages,
+            earlier,
+        },
+    )
 }
 
 /// What a fold's output becomes on the board (1493): the verbs for the
@@ -151,6 +521,14 @@ pub struct Routed {
     pub unrouted: Vec<&'static str>,
     /// The screen owes a full redraw (`Ctrl-l`).
     pub redraw: bool,
+    /// The rows of the conversations the fold changed (1521), for the
+    /// summary log.
+    pub rows: Vec<Row>,
+    /// The conversations the fold deleted.
+    pub gone: Vec<[u8; 16]>,
+    /// The conversations whose next page the model asks (1521, the
+    /// store's page read): the I/O core reads it from the ring.
+    pub loads: Vec<[u8; 16]>,
 }
 
 /// Route everything a fold left behind (1493): `effects` as [`update`]
@@ -172,7 +550,25 @@ pub fn route(
         out.verbs.push(Verb::Mark(mark.clone()));
         out.marks.push(mark);
     }
-    let _ = model.take_writes();
+    // What the store would write (1521): the conversations the fold
+    // changed, each as its row, for the summary log; the messages
+    // themselves are in the ring already, entry by entry.
+    let mut changed: alloc::collections::BTreeSet<[u8; 16]> = alloc::collections::BTreeSet::new();
+    for write in model.take_writes() {
+        match write {
+            StoreWrite::Listing { peer, .. }
+            | StoreWrite::Conversation { peer, .. }
+            | StoreWrite::Message { peer, .. } => {
+                changed.insert(peer);
+            }
+            StoreWrite::ForgetConversation { peer } => {
+                changed.remove(&peer);
+                out.gone.push(peer);
+            }
+            _ => {}
+        }
+    }
+    out.rows = changed.iter().filter_map(|peer| model.row(peer)).collect();
     if !model.take_petnames().is_empty() {
         out.unrouted.push("petnames");
     }
@@ -209,6 +605,11 @@ pub fn route(
             UiEffect::Notice(line) | UiEffect::Log(line) => out.notices.push(line),
             UiEffect::PnLine(line) => out.notices.push(line),
             UiEffect::Redraw => out.redraw = true,
+            UiEffect::Store(StoreRead::Earlier { peer, .. }) => {
+                if !out.loads.contains(&peer) {
+                    out.loads.push(peer);
+                }
+            }
             other => out.unrouted.push(effect_name(&other)),
         }
     }
@@ -259,7 +660,7 @@ fn effect_name(effect: &UiEffect) -> &'static str {
 /// move. Folding the home's archived copy of the same mark later is
 /// idempotent.
 pub fn keep_marks<S: Sectors>(
-    store: &mut Store,
+    shelf: &mut Shelf,
     dev: &mut S,
     marks: &[Mark],
 ) -> Result<Appended, S::Error> {
@@ -275,8 +676,17 @@ pub fn keep_marks<S: Sectors>(
             packed: loquax::home::wire::mark_request(mark),
         })
         .collect();
-    let cursor = store.cursor();
-    store.append(dev, &entries, cursor)
+    let cursor = shelf.ring.cursor();
+    let ring_count = shelf.ring_count;
+    let (done, spans) =
+        shelf
+            .ring
+            .append_spans(&mut Window::new(dev, 0, ring_count), &entries, cursor)?;
+    for (entry, span) in entries.iter().zip(spans) {
+        shelf.index.take(entry, span, false);
+    }
+    shelf.dirty = true;
+    Ok(done)
 }
 
 /// The verbs waiting for the home, oldest first, asked one at a time,
@@ -307,6 +717,21 @@ impl Outgoing {
 
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
+    }
+
+    /// The queue as the summary log keeps it (1521): every verb that has
+    /// an ask frame, oldest first.
+    pub fn pending(&self) -> Vec<PendingAsk> {
+        self.queue
+            .iter()
+            .filter_map(|(id, verb)| {
+                board::ask_bytes(verb).map(|(tag, request)| PendingAsk {
+                    id: *id,
+                    tag,
+                    request,
+                })
+            })
+            .collect()
     }
 }
 

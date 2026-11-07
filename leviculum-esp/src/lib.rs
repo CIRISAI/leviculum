@@ -216,6 +216,12 @@ pub fn uptime_ms() -> u64 {
     Instant::now().duration_since_epoch().as_millis()
 }
 
+/// [`uptime_ms`] in microseconds: what the M9's boot times its phases
+/// by (1521).
+pub fn uptime_us() -> u64 {
+    Instant::now().duration_since_epoch().as_micros()
+}
+
 /// The node's clock: [`uptime_ms`], monotonic from boot. No wall time: the
 /// board has not learned one, and the core says so itself.
 #[derive(Debug, Clone, Copy, Default)]

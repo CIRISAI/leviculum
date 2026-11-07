@@ -39,11 +39,11 @@ use loquax::home::record::{Admission, ClientRecord};
 use loquax::home::wire::{Entry, Mark};
 use rand_core::CryptoRngCore;
 
-use loquax::home::board::store::Store;
+use loquax::ui::listing::Row;
 use loquax::ui::UiModel;
 use loquax_m9::field::Field;
 use loquax_m9::home as m9home;
-use loquax_m9::home::{Answer, Outgoing};
+use loquax_m9::home::{Answer, How, Outgoing, Shelf};
 
 use crate::flash::Stores;
 use crate::serial_iface::{SerialIface, SERIAL_HW_MTU, SERIAL_IFACE, SERIAL_NAME};
@@ -123,8 +123,9 @@ struct Client {
     pulled: usize,
     /// How far the latest pull came, for the screen's word.
     progress: Option<Progress>,
-    /// The message store, when the board's table has one (1476).
-    store: Option<Store>,
+    /// The message store, when the board's table has one (1476), with
+    /// its summary log (1521).
+    store: Option<Shelf>,
     /// The verbs the model asked for, oldest first, each under the id
     /// its store frame carries (1493).
     outgoing: Outgoing,
@@ -274,13 +275,20 @@ impl Handheld {
                 );
                 (m9home::model(address), None)
             }
-            Some(mut dev) => match m9home::restore(&mut dev, address) {
-                Ok((model, store, restored, pending)) => {
+            Some(mut dev) => match m9home::restore_timed(&mut dev, address, &crate::uptime_us) {
+                Ok(boot) => {
+                    let (model, store, restored, pending) =
+                        (boot.model, boot.shelf, boot.restored, boot.asks);
+                    let how = match boot.how {
+                        How::Resumed { .. } => "resumed",
+                        How::Rebuilt { .. } => "rebuilt",
+                        How::Whole => "whole",
+                    };
                     log.line(
                         "[STORE] ",
                         format_args!(
-                            "sectors={} used={} entries={} cursor={} torn={} foreign={} asks={} restore_ms={}",
-                            store.sectors(),
+                            "sectors={} used={} entries={} cursor={} torn={} foreign={} asks={} restore={how} restore_ms={}",
+                            store.ring.sectors(),
                             store.used(),
                             restored.entries,
                             store.cursor(),
@@ -290,6 +298,46 @@ impl Handheld {
                             crate::uptime_ms().saturating_sub(t0)
                         ),
                     );
+                    // Where the boot's time went (1521): per phase, in
+                    // microseconds, and per 1000 entries decoded.
+                    let spent = boot.spent;
+                    let per_k = |us: u64| us.saturating_mul(1000) / boot.decoded.max(1) / 1000;
+                    log.line(
+                        "[STORE] ",
+                        format_args!(
+                            "restore {how} decoded={} read_us={} crc_us={} decode_us={} unpack_us={} step_us={} finish_us={} rows_us={} per_1000_ms read={} crc={} decode={} unpack={} step={}",
+                            boot.decoded,
+                            spent.read,
+                            spent.crc,
+                            spent.decode,
+                            spent.unpack,
+                            spent.step,
+                            spent.finish,
+                            spent.rows,
+                            per_k(spent.read),
+                            per_k(spent.crc),
+                            per_k(spent.decode),
+                            per_k(spent.unpack),
+                            per_k(spent.step),
+                        ),
+                    );
+                    match boot.how {
+                        How::Resumed { records } => log.line(
+                            "[STORE] ",
+                            format_args!(
+                                "index=summaries records={records} conversations={}",
+                                model.conversations.len()
+                            ),
+                        ),
+                        How::Rebuilt { why } => log.line(
+                            "[STORE] ",
+                            format_args!(
+                                "index=rebuilt why={why} conversations={}",
+                                model.conversations.len()
+                            ),
+                        ),
+                        How::Whole => {}
+                    }
                     // The asks the power cut off (1493): queued again,
                     // oldest first; their requests carry their own ids,
                     // so one that was answered goes without harm.
@@ -307,7 +355,7 @@ impl Handheld {
                 }
             },
         };
-        let stored = store.as_ref().map_or(0, Store::cursor);
+        let stored = store.as_ref().map_or(0, Shelf::cursor);
         let agreement = board::agree(&mut record, stored);
         if agreement != board::Agreement::Agrees {
             log.line(
@@ -366,7 +414,7 @@ impl Handheld {
         self.client
             .as_ref()
             .and_then(|client| client.store.as_ref())
-            .map_or(0, Store::entries)
+            .map_or(0, |shelf| shelf.ring.entries())
     }
 
     /// What the screen's top bar says of the home.
@@ -428,18 +476,24 @@ impl Handheld {
         let Some(client) = self.client.as_mut() else {
             return false;
         };
+        client.flush(stores, log);
         let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) else {
             return false;
         };
-        match store.pre_erase(&mut dev) {
-            Ok(erased) => {
-                if erased {
+        let erases = store.ring.erases();
+        match store.quiet(&mut dev) {
+            Ok(worked) => {
+                if worked {
                     log.line(
                         "[STORE] ",
-                        format_args!("pre_erased=1 erases={}", store.erases()),
+                        format_args!(
+                            "pre_erased={} erases={}",
+                            store.ring.erases() - erases,
+                            store.ring.erases()
+                        ),
                     );
                 }
-                erased
+                worked
             }
             Err(error) => {
                 log.line("[STORE] ", format_args!("pre_erase=failed error={error}"));
@@ -448,12 +502,76 @@ impl Handheld {
         }
     }
 
+    /// The rows the model said anew, the conversations it deleted, and
+    /// how many pulled pages it folded since (1521): into the summary
+    /// log, and its state once every page kept has its rows.
+    pub fn said(
+        &mut self,
+        rows: Vec<Row>,
+        gone: Vec<[u8; 16]>,
+        pages: u32,
+        stores: &mut Stores<'_>,
+        log: &mut UartLog<'_>,
+    ) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        if let Some(store) = client.store.as_mut() {
+            store.said(rows, gone);
+            store.pages_owed = store.pages_owed.saturating_sub(pages);
+        }
+        client.flush(stores, log);
+    }
+
+    /// The next page of conversation `peer` the model has not loaded
+    /// (1521): `want` entries at most from the conversation's own ring
+    /// sectors, and how many older wait; `None` on a board without a
+    /// store.
+    pub fn load(
+        &mut self,
+        peer: [u8; 16],
+        want: usize,
+        stores: &mut Stores<'_>,
+        log: &mut UartLog<'_>,
+    ) -> Option<(Vec<Entry>, usize)> {
+        let client = self.client.as_mut()?;
+        let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) else {
+            return None;
+        };
+        let t0 = crate::uptime_ms();
+        match store.page(&mut dev, peer, want) {
+            Ok((entries, earlier)) => {
+                log.line(
+                    "[STORE] ",
+                    format_args!(
+                        "page_read entries={} earlier={earlier} ms={}",
+                        entries.len(),
+                        crate::uptime_ms().saturating_sub(t0)
+                    ),
+                );
+                Some((entries, earlier))
+            }
+            Err(error) => {
+                log.line("[STORE] ", format_args!("page_read=failed error={error}"));
+                None
+            }
+        }
+    }
+
     /// What the client has for the loop since the last call.
     pub fn drain(&mut self) -> Drained {
-        self.client
-            .as_mut()
-            .map(|client| core::mem::take(&mut client.drained))
-            .unwrap_or_default()
+        let Some(client) = self.client.as_mut() else {
+            return Drained::default();
+        };
+        let drained = core::mem::take(&mut client.drained);
+        // The entries go to the model as one message; the summary's
+        // state waits for the rows it says back (1521).
+        if !drained.entries.is_empty() {
+            if let Some(store) = client.store.as_mut() {
+                store.pages_owed += 1;
+            }
+        }
+        drained
     }
 
     /// Whether the home answers, for the screen; `None` on a board that
@@ -595,7 +713,7 @@ impl Handheld {
                                 done.erased,
                                 store.cursor(),
                                 store.used(),
-                                store.entries()
+                                store.ring.entries()
                             ),
                         ),
                         Err(error) => {
@@ -619,6 +737,33 @@ impl Handheld {
 }
 
 impl Client {
+    /// Write what the summary log is owed (1521): the rows the model
+    /// said, and the ring's state once every page kept has its rows.
+    fn flush(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>) {
+        let (Some(store), Some(mut dev)) = (self.store.as_mut(), stores.messages()) else {
+            return;
+        };
+        let outgoing = &self.outgoing;
+        match store.flush(&mut dev, || outgoing.pending()) {
+            Ok(done) => {
+                if done.writes > 0 {
+                    log.line(
+                        "[STORE] ",
+                        format_args!(
+                            "summary records={} writes={} erased={}",
+                            done.entries, done.writes, done.erased
+                        ),
+                    );
+                }
+            }
+            Err(error) => {
+                // The next boot finds the ring past its summary and reads
+                // it whole: slow, never wrong.
+                log.line("[STORE] ", format_args!("summary=unsaved error={error}"));
+            }
+        }
+    }
+
     /// Begin the ask the record owes: its join while pending; once
     /// admitted the oldest queued verb, else a pull.
     fn start(&mut self, now_ms: u64, log: &mut UartLog<'_>) {

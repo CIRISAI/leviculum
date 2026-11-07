@@ -322,7 +322,12 @@ fn the_chats_come_back_from_the_flash_store_after_a_reboot() {
 
     // The pull: pages of 25, each into the model and the store.
     let mut flash = MemFlash::new(64);
-    let (mut model, mut store, restored, _) = home::restore(&mut flash, address).expect("boot");
+    let home::Boot {
+        mut model,
+        shelf: mut store,
+        restored,
+        ..
+    } = home::restore(&mut flash, address).expect("boot");
     assert_eq!(restored.entries, 0);
     let mut writes = 0;
     for page in all.chunks(25) {
@@ -358,11 +363,25 @@ fn the_chats_come_back_from_the_flash_store_after_a_reboot() {
     let mut booted = ClientRecord::decode(&flash_record)
         .expect("record")
         .expect("some");
-    let (model, store, restored, _) = home::restore(&mut flash, address).expect("reboot");
+    let home::Boot {
+        model,
+        shelf: store,
+        restored,
+        ..
+    } = home::restore(&mut flash, address).expect("reboot");
     assert_eq!(restored.entries, 120);
     assert_eq!(agree(&mut booted, store.cursor()), Agreement::Agrees);
     assert_eq!(booted.cursor, 120);
-    assert_eq!(list_text(&model), before, "the same list as before");
+    // The same list; the cursor stands on its first row after a boot
+    // (1521), wherever the pull left it.
+    let bare = |lines: Vec<String>| -> Vec<String> {
+        lines.into_iter().map(|l| l.replace('▌', " ")).collect()
+    };
+    assert_eq!(
+        bare(list_text(&model)),
+        bare(before.clone()),
+        "the same list as before"
+    );
     let again: Vec<_> = model
         .conversations
         .iter()
@@ -373,7 +392,11 @@ fn the_chats_come_back_from_the_flash_store_after_a_reboot() {
     // The control: the store erased, the list is empty and the cursor
     // resets, so the next pull fills it.
     let mut erased = MemFlash::new(64);
-    let (model, store, _, _) = home::restore(&mut erased, address).expect("erased");
+    let home::Boot {
+        model,
+        shelf: store,
+        ..
+    } = home::restore(&mut erased, address).expect("erased");
     assert!(model.conversations.is_empty());
     let mut lost = ClientRecord::decode(&flash_record)
         .expect("record")
@@ -412,21 +435,22 @@ fn the_store_keeps_what_the_fold_keeps() {
         entry(5, KIND_IMPORTED, pack(&friend, address, "importiert", 4.0)),
     ];
     let mut flash = MemFlash::new(8);
-    let (_, mut store, _, _) = home::restore(&mut flash, address).expect("boot");
+    let home::Boot {
+        shelf: mut store, ..
+    } = home::restore(&mut flash, address).expect("boot");
     let done = home::keep(&mut store, &mut flash, &page, &address).expect("keep");
     assert_eq!(done.entries, 2);
     let mut kept = Vec::new();
-    let (store, _, _) = loquax::home::board::store::Store::open(
+    let (opened, _, _) = loquax::home::board::store::Store::open(
         &mut flash,
         loquax::home::board::store::tag(&address),
         |e| kept.push(e.seq),
     )
     .expect("open");
     assert_eq!(kept, [1, 2]);
-    assert_eq!(store.cursor(), 5, "the page's end, past what was not kept");
+    assert_eq!(opened.cursor(), 5, "the page's end, past what was not kept");
     // An empty page writes nothing.
     let writes = flash.writes;
-    let mut store = store;
     let done = home::keep(&mut store, &mut flash, &[], &address).expect("empty");
     assert_eq!(done, Default::default());
     assert_eq!(flash.writes, writes);
@@ -444,13 +468,20 @@ fn a_restore_of_4058_entries_is_timed() {
     let all = archive(&me, address, &friends, 4058);
     let bytes: usize = all.iter().map(|e| e.packed.len()).sum();
     let mut flash = MemFlash::new(1024);
-    let (_, mut store, _, _) = home::restore(&mut flash, address).expect("boot");
+    let home::Boot {
+        shelf: mut store, ..
+    } = home::restore(&mut flash, address).expect("boot");
     for page in all.chunks(67) {
         home::keep(&mut store, &mut flash, page, &address).expect("keep");
     }
     let used = store.used();
     let start = std::time::Instant::now();
-    let (model, store, restored, _) = home::restore(&mut flash, address).expect("restore");
+    let home::Boot {
+        model,
+        shelf: store,
+        restored,
+        ..
+    } = home::restore(&mut flash, address).expect("restore");
     let took = start.elapsed();
     assert_eq!(restored.entries, 4058);
     assert_eq!(store.cursor(), 4058);
@@ -556,13 +587,18 @@ fn read_on_the_board_survives_a_reboot() {
     }];
 
     let mut flash = MemFlash::new(16);
-    let (mut model, mut store, _, _) = home::restore(&mut flash, address).expect("boot");
+    let home::Boot {
+        mut model,
+        shelf: mut store,
+        ..
+    } = home::restore(&mut flash, address).expect("boot");
     home::take(&mut model, &page, &address);
     home::keep(&mut store, &mut flash, &page, &address).expect("keep");
     assert_eq!(model.conversations[0].unread_rows(), 1);
 
     // The control first: a reboot without the kept mark is the finding.
-    let (unfixed, _, _, _) = home::restore(&mut flash, address).expect("control reboot");
+    let home::Boot { model: unfixed, .. } =
+        home::restore(&mut flash, address).expect("control reboot");
     assert_eq!(
         unfixed.conversations[0].unread_rows(),
         1,
@@ -576,7 +612,11 @@ fn read_on_the_board_survives_a_reboot() {
     assert_eq!(routed.marks.len(), 1, "the open chat marks its unread read");
     home::keep_marks(&mut store, &mut flash, &routed.marks).expect("kept");
     let cursor = store.cursor();
-    let (model, store, _, _) = home::restore(&mut flash, address).expect("reboot");
+    let home::Boot {
+        model,
+        shelf: store,
+        ..
+    } = home::restore(&mut flash, address).expect("reboot");
     assert_eq!(model.conversations[0].unread_rows(), 0, "read stays read");
     assert_eq!(store.cursor(), cursor, "a local mark moves no cursor");
 }
@@ -592,7 +632,11 @@ fn a_queued_send_survives_a_reboot() {
     let me = Identity::generate(&mut OsRng);
     let address = lxmf_address(&me.public_key_bytes()).expect("address");
     let mut flash = MemFlash::new(16);
-    let (_, mut store, _, pending) = home::restore(&mut flash, address).expect("boot");
+    let home::Boot {
+        shelf: mut store,
+        asks: pending,
+        ..
+    } = home::restore(&mut flash, address).expect("boot");
     assert!(pending.is_empty());
     let send = Verb::Send(Submission {
         client_id: [0xAA; 16],
@@ -607,14 +651,18 @@ fn a_queued_send_survives_a_reboot() {
         .expect("kept");
 
     // The power goes; the boot queues it again.
-    let (_, mut store, _, pending) = home::restore(&mut flash, address).expect("reboot");
+    let home::Boot {
+        shelf: mut store,
+        asks: pending,
+        ..
+    } = home::restore(&mut flash, address).expect("reboot");
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, [0xAA; 16]);
     assert_eq!(ask_verb(pending[0].tag, &pending[0].request), Some(send));
 
     // Answered and marked done: the next boot owes nothing.
     store.ask_done(&mut flash, &[0xAA; 16]).expect("done");
-    let (_, _, _, pending) = home::restore(&mut flash, address).expect("third boot");
+    let home::Boot { asks: pending, .. } = home::restore(&mut flash, address).expect("third boot");
     assert!(pending.is_empty());
 }
 

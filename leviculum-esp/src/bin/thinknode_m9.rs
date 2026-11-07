@@ -57,11 +57,15 @@
 //! [CENSUS] screen=<map|pan> ... verdict=ok t=<ms>               (1375)
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
-//! [STORE] sectors=1024 used=<n> entries=<n> cursor=<seq> torn=<n> foreign=<n> restore_ms=<ms>  (1476)
+//! [STORE] sectors=896 used=<n> entries=<n> cursor=<seq> torn=<n> foreign=<n> asks=<n> restore=<resumed|rebuilt|whole> restore_ms=<ms>  (1476, 1521)
+//! [STORE] restore <how> decoded=<n> read_us=.. crc_us=.. decode_us=.. unpack_us=.. step_us=.. finish_us=.. rows_us=.. per_1000_ms ...  (1521, where the boot's time went)
+//! [STORE] index=summaries records=<n> conversations=<n>   or index=rebuilt why=<no-state|ring-moved> ...  (1521)
 //! [HOME] store=empty cursor=reset was=<n> cursor=0   (1476, a record whose store is gone; or store=behind/ahead)
 //! [HOME] page ... taken=<n> of=<m> / pulled ... saved=store / joined=yes ... / failed ...   (as the client asks; the record is not written for a pull, 1463)
 //! [HOME] code=typed / code=taken saved=yes / code=refused ...   (1415, a code taken in)
 //! [STORE] kept=<n> writes=<n> erased=<n> cursor=<seq> used=<n> entries=<n>   (1476, every page pulled)
+//! [STORE] summary records=<n> writes=<n> erased=<n>   (1521, the rows the folds changed, and the ring's state)
+//! [STORE] page_read entries=<n> earlier=<n> ms=<ms>   (1521, a conversation opened or scrolled to its top)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
 //! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> t=<ms>
@@ -128,6 +132,7 @@ use leviculum_ui::input::{KeyCode, KeyEventKind};
 use loquax::home::ask::Verb;
 use loquax::home::board::Word;
 use loquax::home::wire::{Entry, Mark};
+use loquax::ui::listing::Row;
 use loquax::ui::strings::{StrId, Text};
 use loquax::ui::UiModel;
 use loquax_m9::census::{self, Probe, Step};
@@ -252,6 +257,14 @@ enum ToUi {
     /// A `FRAME_DUMP` for the renderer: the screen byte, as the control
     /// frame carried it.
     Dump(Option<u8>),
+    /// A conversation's page read from the ring (1521): its entries, how
+    /// many older wait, and the home's address they fold under.
+    Page {
+        peer: [u8; 16],
+        entries: Vec<Entry>,
+        earlier: usize,
+        address: [u8; 16],
+    },
 }
 
 /// What the UI core hands the I/O core.
@@ -266,6 +279,16 @@ enum FromUi {
     Raw(String),
     /// A complete home code typed on the pairing screen.
     Code(String),
+    /// The rows of the conversations the folds changed, those deleted,
+    /// and how many pulled pages the UI folded since (1521): for the
+    /// summary log.
+    Rows {
+        rows: Vec<Row>,
+        gone: Vec<[u8; 16]>,
+        pages: u32,
+    },
+    /// The model asks a conversation's next page (1521).
+    Load([u8; 16]),
 }
 
 static TO_UI: Mutex<RefCell<VecDeque<ToUi>>> = Mutex::new(RefCell::new(VecDeque::new()));
@@ -1089,6 +1112,23 @@ fn main() -> ! {
                     };
                     node.ask(verbs, &marks, &mut ids, uptime_ms(), &mut stores, &mut log);
                 }
+                FromUi::Rows { rows, gone, pages } => {
+                    node.said(rows, gone, pages, &mut stores, &mut log);
+                }
+                FromUi::Load(peer) => {
+                    busy = true;
+                    let want = home::page_entries();
+                    if let (Some(address), Some((entries, earlier))) =
+                        (node.address(), node.load(peer, want, &mut stores, &mut log))
+                    {
+                        to_ui(ToUi::Page {
+                            peer,
+                            entries,
+                            earlier,
+                            address,
+                        });
+                    }
+                }
                 FromUi::Line(prefix, body) => log.line(prefix, format_args!("{body}")),
                 FromUi::Raw(body) => log.raw(&body),
                 FromUi::Code(text) => {
@@ -1145,6 +1185,18 @@ fn to_ui_word(word: Option<Word>) {
             TO_UI.borrow_ref_mut(cs).push_back(ToUi::Word(word));
         }
     });
+}
+
+/// What a turn of the UI core's folds owe the I/O core (1493, 1521).
+#[derive(Default)]
+struct Wants {
+    verbs: Vec<Verb>,
+    marks: Vec<Mark>,
+    rows: Vec<Row>,
+    gone: Vec<[u8; 16]>,
+    loads: Vec<[u8; 16]>,
+    /// Pulled pages folded this turn.
+    pages: u32,
 }
 
 /// The pairing screen's words are English (1363); so is this state.
@@ -1271,14 +1323,12 @@ fn ui_main(
 
     loop {
         let mut dirty = false;
-        let mut wants_verbs: Vec<Verb> = Vec::new();
-        let mut wants_marks: Vec<Mark> = Vec::new();
+        let mut wants = Wants::default();
         let route_out = |model: &mut UiModel<Field>,
                          effects: Vec<loquax::ui::UiEffect>,
                          mut ids: &mut dyn FnMut() -> [u8; 16],
                          log: &mut UiLog,
-                         verbs: &mut Vec<Verb>,
-                         marks: &mut Vec<Mark>|
+                         wants: &mut Wants|
          -> bool {
             let routed = home::route(model, effects, &mut ids);
             for line in routed.notices {
@@ -1287,8 +1337,18 @@ fn ui_main(
             for name in routed.unrouted {
                 log.line("[UI] ", alloc::format!("unrouted={name}"));
             }
-            verbs.extend(routed.verbs);
-            marks.extend(routed.marks);
+            wants.verbs.extend(routed.verbs);
+            wants.marks.extend(routed.marks);
+            wants
+                .rows
+                .retain(|row| !routed.rows.iter().any(|new| new.peer == row.peer));
+            wants.rows.extend(routed.rows);
+            wants.gone.extend(routed.gone);
+            for peer in routed.loads {
+                if !wants.loads.contains(&peer) {
+                    wants.loads.push(peer);
+                }
+            }
             routed.redraw
         };
 
@@ -1302,30 +1362,28 @@ fn ui_main(
                     dirty = true;
                 }
                 ToUi::Entries(entries, address) => {
+                    wants.pages += 1;
                     let (_, effects) = home::take(&mut model, &entries, &address);
-                    if route_out(
-                        &mut model,
-                        effects,
-                        &mut ids,
-                        &mut log,
-                        &mut wants_verbs,
-                        &mut wants_marks,
-                    ) {
+                    if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
                         dirty = true;
                     }
                 }
                 ToUi::Answer(answer) => {
                     let effects = home::answered(&mut model, answer);
-                    if route_out(
-                        &mut model,
-                        effects,
-                        &mut ids,
-                        &mut log,
-                        &mut wants_verbs,
-                        &mut wants_marks,
-                    ) {
+                    if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
                         dirty = true;
                     }
+                }
+                ToUi::Page {
+                    peer,
+                    entries,
+                    earlier,
+                    address,
+                } => {
+                    let effects = home::page_in(&mut model, peer, &entries, earlier, &address);
+                    route_out(&mut model, effects, &mut ids, &mut log, &mut wants);
+                    // The page is on the chat now, whatever it asked.
+                    dirty = true;
                 }
                 ToUi::Word(word) => {
                     if word != shown.word {
@@ -1429,25 +1487,30 @@ fn ui_main(
                     continue;
                 }
                 let effects = group::press(&mut model, &mut row, &event);
-                if route_out(
-                    &mut model,
-                    effects,
-                    &mut ids,
-                    &mut log,
-                    &mut wants_verbs,
-                    &mut wants_marks,
-                ) {
+                if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
                     frame_whole(&renderer);
                     dirty = true;
                 }
             }
         }
 
-        if !wants_verbs.is_empty() || !wants_marks.is_empty() {
+        if !wants.verbs.is_empty() || !wants.marks.is_empty() {
             log.send(FromUi::Asks {
-                verbs: core::mem::take(&mut wants_verbs),
-                marks: core::mem::take(&mut wants_marks),
+                verbs: core::mem::take(&mut wants.verbs),
+                marks: core::mem::take(&mut wants.marks),
             });
+        }
+        // The rows after the asks: the marks they keep move the ring the
+        // summary's state then says (1521).
+        if !wants.rows.is_empty() || !wants.gone.is_empty() || wants.pages > 0 {
+            log.send(FromUi::Rows {
+                rows: core::mem::take(&mut wants.rows),
+                gone: core::mem::take(&mut wants.gone),
+                pages: core::mem::take(&mut wants.pages),
+            });
+        }
+        for peer in core::mem::take(&mut wants.loads) {
+            log.send(FromUi::Load(peer));
         }
 
         dirty |= drawn.due(&model);
