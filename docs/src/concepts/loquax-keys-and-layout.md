@@ -1300,6 +1300,24 @@ sees. Where it differs from the table:
   `lnomad`.
 - **`--no-mouse`** starts without capture and the palette's `mouse`
   switches it; without capture the terminal's own selection works.
+- **Shift+drag is the terminal's own selection, capture or not** (1444):
+  xterm, VTE terminals (GNOME Terminal, Tilix), Konsole, kitty, Alacritty,
+  foot and WezTerm hand a drag with Shift held to their own selection and
+  never report it, so the text lands in the PRIMARY selection and the
+  terminal's copy as it does in any other program. Loquax asks nothing
+  that would stop it.
+- **The window selects as a desktop program does** (1444): a double
+  click on a bubble's words selects the word, a triple click its line, a
+  press and a drag a range across bubbles in reading order, a Shift+click
+  moves the end, a plain click or `Escape` clears it, `Ctrl-A` selects the
+  whole conversation. Every change is put on the PRIMARY selection (a
+  middle click elsewhere pastes it), `Ctrl-C` puts it on the clipboard.
+  Within one bubble the copy is its words; across bubbles one line each,
+  `Name, 14:05: text`. A middle click on the compose field pastes the
+  PRIMARY selection at its cursor; the field keeps its own selection,
+  `Ctrl-C` and `Ctrl-V`. The rules are the core's
+  (`loquax/src/ui/selection.rs`), the pointer's place in a text the
+  shared widget's (`leviculum-ui-iced/src/select.rs`).
 - **A key script** says `click`, `wheel` and `drag` at cells counted from
   1, and writes each copy's OSC 52 sequence into its frames
   (`loquax/tests/fixtures/tui_mouse.frames`).

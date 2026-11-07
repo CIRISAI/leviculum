@@ -41,6 +41,7 @@ pub mod chat;
 #[cfg(test)]
 mod idle;
 pub mod map;
+mod select;
 #[cfg(test)]
 mod smooth;
 pub mod trace;
@@ -559,6 +560,14 @@ pub enum Message {
     /// The Rooms tab said this (1379): the input's text, its Enter, a
     /// room chosen.
     Rooms(loquax::ui::rooms::RoomsEvent),
+    /// The left button on the words of the bubble of this message key
+    /// (1444): a press, a drag over them, the release.
+    PickText(u64, leviculum_ui_iced::select::Pick),
+    /// A middle click on the compose field (1444): paste the PRIMARY
+    /// selection.
+    PastePrimary,
+    /// What the PRIMARY selection held, for the compose field.
+    PrimaryText(Option<String>),
 }
 
 impl Message {
@@ -872,6 +881,13 @@ struct App {
     /// delete was asked once.
     menu: Option<NodeId>,
     deleting: Option<NodeId>,
+    /// The text selected in the open chat (1444), and whether the left
+    /// button that began it is still held.
+    picked: Option<loquax::ui::selection::TextSelection>,
+    picking: bool,
+    /// The test clipboard (1444): what went onto which buffer.
+    #[cfg(test)]
+    clips: Vec<(select::Buffer, String)>,
     /// The settings' Maps rows (1290): how many regions and their bytes,
     /// read as the page opens and after a delete, and whether "Delete
     /// all downloaded maps" was asked once.
@@ -982,6 +998,10 @@ impl App {
             emoji: false,
             menu: None,
             deleting: None,
+            picked: None,
+            picking: false,
+            #[cfg(test)]
+            clips: Vec::new(),
             maps_usage: (0, 0),
             maps_asked: false,
             lang: Lang::En,
@@ -1129,6 +1149,9 @@ impl App {
             | Message::RecCursor(_)
             | Message::RecRelease
             | Message::RecOverLock(_) => self.rec_mouse(message),
+            Message::PickText(key, pick) => return self.pick_text(key, pick),
+            Message::PastePrimary => return self.paste_primary(),
+            Message::PrimaryText(text) => self.primary_text(text),
             Message::Compose(action) => {
                 let edit = action.is_edit();
                 self.compose.perform(action);
@@ -1163,6 +1186,9 @@ impl App {
             return;
         }
         self.compose_for = open;
+        // A selection is the open chat's (1444).
+        self.picked = None;
+        self.picking = false;
         let Some(chat) = self.seen.scene.chat.as_ref() else {
             self.compose = text_editor::Content::new();
             self.reply = None;
@@ -1943,10 +1969,13 @@ impl App {
                 return Task::none();
             }
             Message::Key(event) => {
+                if let Some(task) = self.selection_key(&event) {
+                    return task;
+                }
                 return match self.key(&event) {
                     Some(intent) => self.intent(intent),
                     None => Task::none(),
-                }
+                };
             }
             _ => {}
         }
@@ -3385,6 +3414,7 @@ mod tests {
         );
     }
 
+    use leviculum_ui_iced::select::Pick;
     use loquax::outbox::OutboxEvent;
     use loquax::ui::update;
 
@@ -4186,6 +4216,229 @@ mod tests {
         assert_eq!(px(&dark, ground.0, ground.1), [0x17, 0x18, 0x1b]);
         map::tests::same_as("gui-chat-light.png", &light, w, h);
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
+    }
+
+    /// A key pressed with Ctrl, or alone (1444).
+    fn chord(key: keyboard::Key, ctrl: bool) -> Message {
+        Message::Key(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: match ctrl {
+                true => keyboard::Modifiers::CTRL,
+                false => keyboard::Modifiers::empty(),
+            },
+            text: None,
+            repeat: false,
+        })
+    }
+
+    /// The presses `n` clicks at `at` on the window's view made, as the
+    /// bubble's key and the press.
+    fn presses(app: &App, at: Point, n: usize, w: u32, h: u32) -> Vec<(u64, Pick)> {
+        leviculum_ui_iced::headless::clicks(app.view(), at, n, w, h)
+            .expect("a renderer")
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::PickText(key, pick) => Some((key, pick)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where on the 900 x 560 window a single click lands in Anna's
+    /// "Good morning!" on the word `word`: her bubbles are at the chat's
+    /// left, so a column just inside them is walked down to the bubble,
+    /// then its line to the right to the word.
+    fn spot_of(app: &App, word: &str) -> Point {
+        let (w, h) = (900, 560);
+        let runs = app.text_runs();
+        let text_of = |key: u64| {
+            runs.iter()
+                .find(|r| r.key == key)
+                .map(|r| r.text.clone())
+                .unwrap_or_default()
+        };
+        let x0 = chat::RAIL + chat::LIST_WIDTH + 30.0;
+        for y in (60..h - 60).step_by(3) {
+            let y = y as f32;
+            let Some((key, Pick::Press { .. })) =
+                presses(app, Point::new(x0, y), 1, w, h).first().copied()
+            else {
+                continue;
+            };
+            if text_of(key) != "Good morning!" {
+                continue;
+            }
+            for x in (0..300).step_by(3) {
+                let at = Point::new(x0 + x as f32, y);
+                if let Some((key, Pick::Press { at: byte, .. })) =
+                    presses(app, at, 1, w, h).first().copied()
+                {
+                    let text = text_of(key);
+                    if &text[loquax::ui::selection::word_at(&text, byte)] == word {
+                        return at;
+                    }
+                }
+            }
+        }
+        panic!("no \"{word}\" in Anna's bubble");
+    }
+
+    /// A double click on a word of a bubble selects the word (1444): the
+    /// word goes onto the PRIMARY selection at once, Ctrl+C puts it on the
+    /// clipboard, both read from the test clipboard. A triple click is the
+    /// bubble's line; a plain click clears, and Ctrl+C then copies
+    /// nothing; Escape clears too.
+    #[test]
+    fn a_double_click_on_a_word_selects_it_and_ctrl_c_copies_it() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        app.rescene();
+        let at = spot_of(&app, "morning");
+        for (key, pick) in presses(&app, at, 2, w, h) {
+            let _ = app.update(Message::PickText(key, pick));
+        }
+        assert_eq!(
+            app.clips,
+            vec![(select::Buffer::Primary, "morning".to_string())]
+        );
+        assert!(!app.picking, "the release ended the press");
+        let _ = app.update(chord(keyboard::Key::Character("c".into()), true));
+        assert_eq!(
+            app.clips.last(),
+            Some(&(select::Buffer::Clipboard, "morning".to_string()))
+        );
+        // A triple click: the whole line.
+        app.clips.clear();
+        for (key, pick) in presses(&app, at, 3, w, h) {
+            let _ = app.update(Message::PickText(key, pick));
+        }
+        assert_eq!(
+            app.clips.last(),
+            Some(&(select::Buffer::Primary, "Good morning!".to_string()))
+        );
+        // A plain click clears: Ctrl+C has nothing to copy, and the key
+        // goes on to the keymap.
+        for (key, pick) in presses(&app, at, 1, w, h) {
+            let _ = app.update(Message::PickText(key, pick));
+        }
+        app.clips.clear();
+        let _ = app.update(chord(keyboard::Key::Character("c".into()), true));
+        assert!(app.clips.is_empty(), "{:?}", app.clips);
+        // Escape clears a selection and is spent on it; without one it
+        // goes on.
+        let _ = app.update(chord(keyboard::Key::Character("a".into()), true));
+        assert!(app.picked.is_some());
+        let escape = keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        assert!(app.selection_key(&escape).is_some());
+        assert_eq!(app.picked, None);
+        assert!(app.selection_key(&escape).is_none());
+    }
+
+    /// A press in one bubble and a drag into a later one selects across
+    /// them in reading order (1444); the PRIMARY selection follows each
+    /// change, and the copy names the writer and the time on each line.
+    /// Shift+click moves the end; Ctrl+A is the whole conversation.
+    #[test]
+    fn a_drag_across_bubbles_copies_one_line_per_bubble() {
+        let (mut app, _rx) = chat_window();
+        let runs = app.text_runs();
+        let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Are you coming to the market tomorrow?",
+                "Good morning!",
+                "We meet at the fountain at ten, the stall with the apples.",
+                "Yes, see you there",
+            ]
+        );
+        let (first, second, third) = (runs[0].key, runs[1].key, runs[2].key);
+        let _ = app.update(Message::PickText(
+            first,
+            Pick::Press {
+                at: 22,
+                clicks: 1,
+                shift: false,
+            },
+        ));
+        assert!(app.clips.is_empty(), "a caret selects nothing");
+        let _ = app.update(Message::PickText(second, Pick::Drag { at: 4 }));
+        let _ = app.update(Message::PickText(third, Pick::Drag { at: 7 }));
+        let _ = app.update(Message::PickText(first, Pick::Release));
+        let (_, last) = app.clips.last().cloned().expect("a primary write");
+        let anna = &runs[0].who;
+        let line = |n: usize| format!("{anna}, {}", runs[n].at.clone().unwrap_or_default());
+        assert_eq!(
+            last,
+            format!(
+                "{}: market tomorrow?\n{}: Good morning!\n{}: We meet",
+                line(0),
+                line(1),
+                line(2)
+            )
+        );
+        assert_eq!(app.clips.len(), 2, "one write per change: {:?}", app.clips);
+        // After the release a drag no longer moves it.
+        let _ = app.update(Message::PickText(third, Pick::Drag { at: 20 }));
+        assert_eq!(app.clips.len(), 2);
+        // Shift+click moves the end back into the first bubble.
+        let _ = app.update(Message::PickText(
+            first,
+            Pick::Press {
+                at: 28,
+                clicks: 1,
+                shift: true,
+            },
+        ));
+        assert_eq!(app.clips.last().map(|c| c.1.as_str()), Some("market"));
+        // Ctrl+A: every bubble.
+        let _ = app.update(chord(keyboard::Key::Character("a".into()), true));
+        let (_, all) = app.clips.last().cloned().expect("a write");
+        assert_eq!(all.lines().count(), 4, "{all}");
+        assert!(all.ends_with("Yes, see you there"), "{all}");
+    }
+
+    /// The chat with a selection drawn (1444), pixel for pixel the golden,
+    /// light: "morning" picked in Anna's bubble, the drag from "market"
+    /// into the next. Without a selection it is the chat's own golden.
+    #[test]
+    fn a_selection_is_drawn_under_the_words_as_the_golden() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        app.rescene();
+        let plain = shoot(&app, w, h);
+        map::tests::same_as("gui-chat-light.png", &plain, w, h);
+        let runs = app.text_runs();
+        let _ = app.update(Message::PickText(
+            runs[0].key,
+            Pick::Press {
+                at: 22,
+                clicks: 1,
+                shift: false,
+            },
+        ));
+        let _ = app.update(Message::PickText(runs[1].key, Pick::Drag { at: 12 }));
+        let _ = app.update(Message::PickText(runs[0].key, Pick::Release));
+        let picked = shoot(&app, w, h);
+        assert_ne!(picked, plain);
+        map::tests::same_as("gui-chat-selected-light.png", &picked, w, h);
     }
 
     /// The window over Anna's chat with `chat_model`'s messages and 3000

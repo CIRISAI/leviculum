@@ -28,8 +28,12 @@ use iced::widget::{
     Space,
 };
 use iced::{border, mouse, Alignment, Background, Border, Color, Element, Length, Theme};
+use std::collections::HashMap;
+use std::ops::Range;
+
 use leviculum_ui_iced::chrome;
 pub use leviculum_ui_iced::chrome::RAIL;
+use leviculum_ui_iced::select::selectable;
 use leviculum_ui_iced::{avatar as face, control, drawing, Palette};
 pub use leviculum_ui_iced::{colour, rgb, Icon};
 
@@ -868,9 +872,10 @@ impl App {
     /// opened.
     fn groups<'a>(&'a self, open: &'a Chat, t: Colours) -> Element<'a, Message> {
         let width = self.chat_width();
+        let picked = self.picked_ranges();
         let mut list = column![].padding([0, 12]);
         for group in &open.groups {
-            list = self.group(list, open, group, width, t);
+            list = self.group(list, open, group, width, &picked, t);
         }
         list = list.push(Space::new().height(size::GAP));
         soft(
@@ -892,6 +897,7 @@ impl App {
         open: &'a Chat,
         group: &'a Group,
         width: f32,
+        picked: &HashMap<u64, Range<usize>>,
         t: Colours,
     ) -> iced::widget::Column<'a, Message> {
         if let Some(day) = &group.day {
@@ -939,7 +945,7 @@ impl App {
                 false => size::GAP,
             };
             list = list.push(Space::new().height(gap));
-            list = list.push(self.bubble(open, node, width, t));
+            list = list.push(self.bubble(open, node, width, picked, t));
             // A line that came after newer ones (1307 pass four).
             if node.bubble.late {
                 list = list.push(
@@ -969,6 +975,7 @@ impl App {
         open: &'a Chat,
         node: &'a BubbleNode,
         width: f32,
+        picked: &HashMap<u64, Range<usize>>,
         t: Colours,
     ) -> Element<'a, Message> {
         let (bubble, place) = (&node.bubble, &node.place);
@@ -1049,7 +1056,17 @@ impl App {
         if let Some(invite) = &node.invite {
             inside = inside.push(self.invite_card(invite, !ours, t));
         } else if let Some(words) = &node.text {
-            inside = inside.push(text(words.clone()).size(size::BODY).color(ink));
+            // The words can be selected (1444): the selection under them
+            // in the ink, faint, which shows on either bubble's ground.
+            let key = bubble.key;
+            inside = inside.push(selectable(
+                text(words.as_str()).size(size::BODY).color(ink),
+                words,
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..ink },
+                self.picking,
+                move |pick| Message::PickText(key, pick),
+            ));
         }
         if let Some(fix) = &bubble.fix {
             let mut words = loquax::telemetry::coordinates(&fix.location);
@@ -1503,6 +1520,8 @@ impl App {
                 value: colour(t.text),
                 selection: colour(t.selected_row),
             });
+        // A middle click on the field pastes the PRIMARY selection (1444).
+        let editor = mouse_area(editor).on_middle_press(Message::PastePrimary);
         let pill = container(row![face, editor, tail].align_y(Alignment::Center))
             .width(Length::Fill)
             .padding([0, 6])
