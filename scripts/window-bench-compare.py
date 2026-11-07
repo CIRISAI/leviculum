@@ -14,10 +14,21 @@ schneckenschreck: one binary against itself, three rounds at load 0.4 to
   (`--max-load`): the whole run is SKIP, exit 3, the table still printed;
 - fewer than three rounds on a side: SKIP, exit 3, a median of two is a
   mean and one round is an anecdote;
-- a row whose rounds on either side spread (max - min over the median)
-  more than the 5 % threshold: that row is "noise", no verdict, because a
-  rule that cannot tell one binary from itself at that row cannot tell two
-  apart there either.
+- a row whose two sides' round ranges (min to max) overlap: no verdict.
+  It is "noise" where the medians differ by less than 5 %, and
+  "unsettled" where they differ by more: the rounds do not tell the two
+  apart, more rounds might.
+
+A row whose ranges do NOT overlap gets its verdict however much each side
+spreads (1469, the reviewer's rule after 1442): every round of one side
+beats every round of the other, which no spread explains away. 1442's
+map-drag at -84 % was called "noise" for a 22 % spread on a side under the
+old rule, which judged the spread alone. Separated, more than 5 % and
+0.1 ms slower is a REGRESSION, more than 5 % and 0.1 ms faster is "faster",
+anything else held. The A/A selftest must never report a regression: one
+binary's rounds overlap with themselves unless the host moved between them,
+which the load bound is for. A SKIP still prints the table and the verdict
+it withholds, so a reviewer can read it.
 
 A gesture that drew fewer than 30 frames on either side holds nothing. The
 chat's mouse drag rows (`chat-drag`, `real-drag`, with or without `+fps`)
@@ -89,6 +100,11 @@ def spread(rows, name):
     return (max(values) - min(values)) / mid if mid > 0 else 0.0
 
 
+def span(rows, name):
+    values = [float(r[name]) for r in rows]
+    return min(values), max(values)
+
+
 def dropped(case):
     return case.split("+", 1)[0] in DROPPED
 
@@ -97,7 +113,7 @@ def compare(base, this, loads, max_load, mode, out):
     """The table and the verdict to `out`; the exit status."""
     print("| size | case | fps base | fps this | ms base | ms this | p95 base | p95 this | present this | damage | spread base | spread this | change |", file=out)
     print("|---|---|---|---|---|---|---|---|---|---|---|---|---|", file=out)
-    regressions, noise, gone = [], [], set()
+    regressions, noise, unsettled, gone = [], [], [], set()
     for key in sorted(this, key=lambda k: (int(k[0].split("x")[0]), k[1])):
         if dropped(key[1]):
             gone.add(key[1])
@@ -112,13 +128,24 @@ def compare(base, this, loads, max_load, mode, out):
         change = (ms - was) / was * 100 if was > 0 else 0.0
         enough = min(median(now, "frames"), median(then, "frames")) >= MIN_FRAMES
         sb, st = spread(then, "frame_ms_mean"), spread(now, "frame_ms_mean")
-        noisy = enough and max(sb, st) > SHARE
-        held = enough and not noisy and ms > was * (1 + SHARE) and ms - was > FLOOR_MS
+        lo_b, hi_b = span(then, "frame_ms_mean")
+        lo_t, hi_t = span(now, "frame_ms_mean")
+        apart = lo_t > hi_b or hi_t < lo_b
+        slower = ms > was * (1 + SHARE) and ms - was > FLOOR_MS
+        faster = ms < was * (1 - SHARE) and was - ms > FLOOR_MS
+        held = enough and apart and slower
         if held:
             regressions.append(f"{key[0]} {key[1]}: {was:.2f} -> {ms:.2f} ms ({change:+.1f} %)")
-        if noisy:
+        if not enough:
+            verdict = " (not held)"
+        elif apart:
+            verdict = " REGRESSION" if slower else " faster" if faster else ""
+        elif abs(change) < SHARE * 100:
+            verdict = " noise"
             noise.append(key)
-        verdict = " REGRESSION" if held else " noise" if noisy else "" if enough else " (not held)"
+        else:
+            verdict = " unsettled"
+            unsettled.append(key)
         print(
             f"| {key[0]} | {key[1]} | {median(then, 'fps'):.0f} | {median(now, 'fps'):.0f} "
             f"| {was:.2f} | {ms:.2f} | {median(then, 'p95'):.2f} | {median(now, 'p95'):.2f} "
@@ -129,7 +156,9 @@ def compare(base, this, loads, max_load, mode, out):
     if gone:
         print(f"\nLeft out: {', '.join(sorted(gone))} (iced 0.14 does not scroll on a mouse drag, 0 frames; 1444).", file=out)
     if noise:
-        print(f"\n{len(noise)} rows noise: their rounds spread more than {SHARE * 100:.0f} % on a side, no verdict.", file=out)
+        print(f"\n{len(noise)} rows noise: the two sides' rounds overlap and the medians differ by less than {SHARE * 100:.0f} %, no verdict.", file=out)
+    if unsettled:
+        print(f"\n{len(unsettled)} rows unsettled: the medians differ by {SHARE * 100:.0f} % or more but the two sides' rounds overlap, no verdict; more rounds may settle them.", file=out)
     if loads:
         shown = ", ".join(f"{side} {i}: {load:.2f}" for side, i, load in loads)
         print(f"\nLoad (1 min) at each start, bound {max_load:.2f}: {shown}", file=out)
@@ -143,12 +172,18 @@ def compare(base, this, loads, max_load, mode, out):
         skip.append(f"load {load:.2f} at the start of {side} round {i} is above the bound {max_load:.2f}")
     if skip:
         print(f"\nwindow-bench: SKIP, no verdict: {'; '.join(skip)}.", file=out)
+        if regressions:
+            print("window-bench: the verdict withheld, for a reviewer to read: frame time regressions (more than 5 % and 0.1 ms, the rounds apart):", file=out)
+            for r in regressions:
+                print(f"  {r}", file=out)
+        else:
+            print("window-bench: the verdict withheld, for a reviewer to read: green, no row regressed.", file=out)
         return SKIP
     if regressions:
         if mode == "aa":
             print("\nwindow-bench: A/A, one binary against itself, and the rule still called regressions; the noise rule is wrong:", file=out)
         else:
-            print("\nwindow-bench: frame time regressions (more than 5 % and 0.1 ms):", file=out)
+            print("\nwindow-bench: frame time regressions (more than 5 % and 0.1 ms, the rounds apart):", file=out)
         for r in regressions:
             print(f"  {r}", file=out)
         return 1
@@ -204,11 +239,36 @@ def selftest():
         run("aa regression", 1, rounds("b", [10.0, 10.1, 10.0]), rounds("t", [12.0, 12.1, 12.0]), mode="aa", says="noise rule is wrong")
         # One binary, tight rounds: green.
         run("aa green", 0, rounds("b", [10.0, 10.2, 10.1]), rounds("t", [10.1, 10.0, 10.2]), mode="aa", says="A/A green")
-        # 2026-11-07's shape: a side whose rounds spread 25 % is noise, not a regression.
-        run("noise", 0, rounds("b", [10.0, 12.6, 10.2]), rounds("t", [11.5, 10.1, 12.0]), says=" noise")
-        # Load above the bound at one start: SKIP even with a real regression.
+        # 2026-11-07's shape: rounds that spread 25 % and overlap, medians
+        # 12.7 % apart: unsettled, not a regression.
+        run("unsettled", 0, rounds("b", [10.0, 12.6, 10.2]), rounds("t", [11.5, 10.1, 12.0]), says=" unsettled")
+        # Overlapping, medians under 5 % apart: noise.
+        run("noise", 0, rounds("b", [10.0, 10.4, 10.2]), rounds("t", [10.3, 10.1, 10.5]), says=" noise")
+        # 1442's map-drag: a 22 % spread, but every round of this tree under
+        # every round of BASE: a verdict, faster.
+        run("apart faster", 0, rounds("b", [10.0, 12.2, 11.0]), rounds("t", [1.6, 1.9, 1.7]), says=" faster")
+        # The same spread the other way round is a regression, spread or not
+        # (positive control of the rule that replaced the spread rule).
+        run("apart slower", 1, rounds("b", [10.0, 12.2, 11.0]), rounds("t", [14.0, 17.0, 15.0]), says="REGRESSION")
+        # Apart but under 5 %: held, no word.
+        run("apart held", 0, rounds("b", [10.0, 10.05, 10.02]), rounds("t", [10.2, 10.25, 10.22]), says="+2.0 % |")
+        # Load above the bound at one start: SKIP even with a real
+        # regression, and the withheld verdict is printed.
         run("load", SKIP, rounds("b", [10.0, 10.0, 10.0]), rounds("t", [12.0, 12.0, 12.0]),
             loads=[("base", 1, 0.4), ("this", 1, 0.5), ("base", 2, 4.9)], says="above the bound")
+        run("load withheld", SKIP, rounds("b", [10.0, 10.0, 10.0]), rounds("t", [12.0, 12.0, 12.0]),
+            loads=[("base", 2, 4.9)], says="verdict withheld, for a reviewer to read: frame time regressions")
+        run("load withheld green", SKIP, rounds("b", [10.0, 10.0, 10.0]), rounds("t", [10.0, 10.0, 10.0]),
+            loads=[("base", 2, 4.9)], says="verdict withheld, for a reviewer to read: green")
+        # The A/A of 2026-11-07 on schneckenschreck, one binary against
+        # itself at loads 0.4 to 4.5 (scripts/window-bench-fixtures/): the
+        # rule must call no regression on it, SKIP for its load or not.
+        fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window-bench-fixtures", "aa-2026-11-07")
+        aa_b = read([os.path.join(fixture, f"base-{i}.txt") for i in (1, 2, 3)])
+        aa_t = read([os.path.join(fixture, f"this-{i}.txt") for i in (1, 2, 3)])
+        run("aa fixture", 0, aa_b, aa_t, mode="aa", says="A/A green")
+        run("aa fixture loaded", SKIP, aa_b, aa_t, loads=read_loads(os.path.join(fixture, "load.txt")), mode="aa",
+            says="verdict withheld, for a reviewer to read: green")
         # Under the bound: the verdict stands.
         run("load ok", 1, rounds("b", [10.0, 10.0, 10.0]), rounds("t", [12.0, 12.0, 12.0]),
             loads=[("base", 1, 0.4), ("this", 1, 1.9)])
@@ -245,7 +305,7 @@ def selftest():
         print(f"window-bench-compare selftest: FAIL {f}", file=sys.stderr)
     if failures:
         return 1
-    print("window-bench-compare selftest: 11 verdicts as expected")
+    print("window-bench-compare selftest: 20 verdicts as expected")
     return 0
 
 
