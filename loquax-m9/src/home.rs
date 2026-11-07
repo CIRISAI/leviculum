@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use loquax::home::board;
 use loquax::home::board::store::{self, Appended, Restored, Sectors, Store};
 use loquax::home::wire::{Entry, Submission};
-use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel};
+use loquax::ui::{update, Batch, Pane, UiEffect, UiEvent, UiModel};
 
 use crate::field::Field;
 
@@ -32,32 +32,45 @@ pub fn model(address: [u8; 16]) -> UiModel<Field> {
     model
 }
 
-/// Fold a page's entries into `model`; how many it took. Whatever the
+/// Fold a page's entries into `model` as one batch (1514,
+/// [`Batch`]): the list is ordered and the screen's rows built once
+/// for the page, not once per entry. How many it took. Whatever the
 /// model asks back (a receipt, a mark) is dropped: the board answers
 /// nothing on its own yet.
 pub fn take(model: &mut UiModel<Field>, entries: &[Entry], address: &[u8; 16]) -> usize {
     let mut taken = 0;
-    for entry in entries {
-        if let Some(event) = board::fold(entry, address) {
-            update(model, UiEvent::Engine(event));
-            taken += 1;
-        }
+    let mut batch = Batch::new(model);
+    for event in entries
+        .iter()
+        .filter_map(|entry| board::fold(entry, address))
+    {
+        batch.fold(UiEvent::Engine(event));
+        taken += 1;
     }
+    batch.finish();
     taken
 }
 
 /// What a board that is a device of the home at `address` shows at boot
 /// (1476): its model with every entry its message store on `dev` holds
 /// folded in, the store, and what the store found. The client's cursor
-/// then agrees with [`Store::cursor`] (`board::agree`).
+/// then agrees with [`Store::cursor`] (`board::agree`). One batch
+/// (1514): every entry folded, the list ordered and the screen's rows
+/// built once at the end; per entry that cost O(conversations) and a
+/// 4067-entry store 17 minutes on the board.
 pub fn restore<S: Sectors>(
     dev: &mut S,
     address: [u8; 16],
 ) -> Result<(UiModel<Field>, Store, Restored), S::Error> {
     let mut shown = model(address);
-    let (store, restored) = Store::open(dev, store::tag(&address), |entry| {
-        take(&mut shown, core::slice::from_ref(&entry), &address);
-    })?;
+    let mut batch = Batch::new(&mut shown);
+    let opened = Store::open(dev, store::tag(&address), |entry| {
+        if let Some(event) = board::fold(&entry, &address) {
+            batch.fold(UiEvent::Engine(event));
+        }
+    });
+    batch.finish();
+    let (store, restored) = opened?;
     Ok((shown, store, restored))
 }
 

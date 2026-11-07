@@ -1721,8 +1721,8 @@ impl<B> UiModel<B> {
 
     /// What the presentation built since the model was made, across every
     /// event's fresh count (1514): what a batch of events cost together,
-    /// a restore or a page folded one [`update`] each. `None` where
-    /// [`UiModel::counters`] is.
+    /// a restore or a page folded one [`update`] each or as one
+    /// [`Batch`]. `None` where [`UiModel::counters`] is.
     pub fn total_counters(&self) -> Option<counters::Counters> {
         self.ops.read_total()
     }
@@ -2929,6 +2929,89 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // every loop built its whole view for each.
     let clock = event.is_clock();
     let marks = clock.then(|| model.clock_marks());
+    let mut effects = step(model, event);
+    let noted = model.note_changes();
+    if !clock || noted || !effects.is_empty() || marks != Some(model.clock_marks()) {
+        model.revision = model.revision.wrapping_add(1);
+    }
+    model.ask_page(&mut effects);
+    effects
+}
+
+/// Fold many events as one (1514): a restore, a pulled page. Each event
+/// takes every step [`update`] takes but the note: the changes of all of
+/// them are noted once at the end, so the list is ordered and the scene's
+/// window built once for the batch, not once per event (O(conversations)
+/// each, a restore of 4067 entries 17 minutes on the M9). The counters
+/// are the batch's. An empty batch changes nothing.
+pub fn update_all<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    events: impl IntoIterator<Item = UiEvent>,
+) -> Vec<UiEffect> {
+    let mut batch = Batch::new(model);
+    for event in events {
+        batch.fold(event);
+    }
+    batch.finish()
+}
+
+/// [`update_all`] fed one event at a time (1514): for a source that hands
+/// its events out by a callback, a store's restore, without holding them
+/// all first. Noted at [`Batch::finish`]; a batch dropped unfinished is
+/// noted then, so the model's caches never stand on an unnoted fold.
+pub struct Batch<'a, B: InputBuffer + Default> {
+    model: &'a mut UiModel<B>,
+    effects: Vec<UiEffect>,
+    folded: bool,
+}
+
+impl<'a, B: InputBuffer + Default> Batch<'a, B> {
+    /// A batch over `model`; its count starts afresh with its first
+    /// event, so an empty batch leaves the model as it was.
+    pub fn new(model: &'a mut UiModel<B>) -> Self {
+        Self {
+            model,
+            effects: Vec::new(),
+            folded: false,
+        }
+    }
+
+    /// Fold `event`, its note owed to the end.
+    pub fn fold(&mut self, event: UiEvent) {
+        if !core::mem::replace(&mut self.folded, true) {
+            self.model.ops.reset();
+        }
+        let effects = step(self.model, event);
+        self.effects.extend(effects);
+    }
+
+    /// Note what the batch changed, once, and hand back what its events
+    /// asked for.
+    pub fn finish(mut self) -> Vec<UiEffect> {
+        self.note();
+        core::mem::take(&mut self.effects)
+    }
+
+    fn note(&mut self) {
+        if !core::mem::take(&mut self.folded) {
+            return;
+        }
+        self.model.note_changes();
+        self.model.revision = self.model.revision.wrapping_add(1);
+        self.model.ask_page(&mut self.effects);
+    }
+}
+
+impl<B: InputBuffer + Default> Drop for Batch<'_, B> {
+    fn drop(&mut self) {
+        self.note();
+    }
+}
+
+/// One event folded with what follows every fold, short of the note
+/// ([`UiModel::note_changes`]): the half [`update`] and [`update_all`]
+/// share.
+fn step<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     // Until the fold is noted, revision-keyed caches stand aside (1490).
     model.folding = true;
     let mut effects = fold(model, event);
@@ -2961,28 +3044,30 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // And names this device as the map's writer (1482).
     receipts::name_writer(&mut effects, model.address);
     // The list's summaries up to what the event did (1463), and the
-    // revisions over them (1490): every change the fold made is noted
-    // here, so the caches keyed by a revision reuse everything else.
-    let noted = model.note_changes();
-    if !clock || noted || !effects.is_empty() || marks != Some(model.clock_marks()) {
-        model.revision = model.revision.wrapping_add(1);
-    }
-    // A selected conversation whose messages a restart deferred (1490):
-    // its newest page, asked once, whatever event selected it.
-    if let Some(conversation) = model.conversations.get(model.selected) {
-        if conversation.messages.is_empty()
-            && conversation.earlier > 0
-            && model.page_asked != Some(conversation.peer)
-        {
-            model.page_asked = Some(conversation.peer);
-            effects.push(UiEffect::Store(history::StoreRead::Earlier {
-                peer: conversation.peer,
-                before: u64::MAX,
-                through: None,
-            }));
+    // revisions over them (1490), are the caller's note: every change
+    // the fold made is noted there, so the caches keyed by a revision
+    // reuse everything else.
+    effects
+}
+
+impl<B: InputBuffer + Default> UiModel<B> {
+    /// A selected conversation whose messages a restart deferred (1490):
+    /// its newest page, asked once, whatever event selected it.
+    fn ask_page(&mut self, effects: &mut Vec<UiEffect>) {
+        if let Some(conversation) = self.conversations.get(self.selected) {
+            if conversation.messages.is_empty()
+                && conversation.earlier > 0
+                && self.page_asked != Some(conversation.peer)
+            {
+                self.page_asked = Some(conversation.peer);
+                effects.push(UiEffect::Store(history::StoreRead::Earlier {
+                    peer: conversation.peer,
+                    before: u64::MAX,
+                    through: None,
+                }));
+            }
         }
     }
-    effects
 }
 
 fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
