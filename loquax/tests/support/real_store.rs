@@ -95,8 +95,6 @@ pub const VOICE: &[u8] = include_bytes!("../fixtures/real-voice.ogg");
 pub const KNOWN_REDS: &[&str] = &[
     // B: the scene is built only for what is on screen.
     "core.a_restart_reads_the_summaries",
-    "terminal.a_key_in_the_messages_lays_the_rows_on_screen",
-    "terminal.a_pass_without_a_change_lays_nothing",
     "phone.a_key_in_compose_builds_no_list",
     // C: nothing is built when nothing changed.
     "core.a_frame_without_a_change_builds_nothing",

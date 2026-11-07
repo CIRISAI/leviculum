@@ -105,6 +105,10 @@ pub struct Span {
     /// The delivery mark's cells, a click target: the row, the first column
     /// and how many columns.
     pub mark: Option<(usize, usize, usize)>,
+    /// The block's own rows among them, absolute: where they start and
+    /// how many, without the separators above and the reaction row
+    /// under. What a selection change re-lays ([`respan`], 1490).
+    pub block: (usize, usize),
 }
 
 /// Which cells of a row are a message's text: what a drag copies, without
@@ -124,6 +128,7 @@ pub struct RowText {
 
 /// A conversation laid out: every row from the top of what the device holds,
 /// and each message's span among them.
+#[derive(Clone, Debug)]
 pub struct Laid {
     pub rows: Vec<RLine>,
     /// Each row's text, beside `rows`: `None` on a separator, a blank and the
@@ -197,6 +202,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
                 start,
                 end: start,
                 mark: None,
+                block: (start, 0),
             });
             continue;
         }
@@ -223,6 +229,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
                 start,
                 end: laid.rows.len(),
                 mark: None,
+                block: (start, 0),
             });
             last = Last::Separator;
             continue;
@@ -256,6 +263,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
             relayed,
             &mut laid.links,
         );
+        let block_rows = drawn.rows.len();
         laid.rows.extend(drawn.rows);
         laid.texts.extend(drawn.texts);
         let chips = message.id.and_then(|id| reactions.get(&id));
@@ -268,6 +276,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
             start,
             end: laid.rows.len(),
             mark: drawn.mark.map(|(row, col, len)| (first + row, col, len)),
+            block: (first, block_rows),
         });
         last = Last::Block;
     }
@@ -280,6 +289,51 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
         last = Last::Separator;
     }
     laid
+}
+
+/// Re-lay message `index`'s block inside `laid` after only the
+/// selection changed (1490): the same rows in place, restyled, the
+/// separators and the reaction row untouched. True when the splice
+/// held; false (a block whose row count moved with the selection, which
+/// none does today) asks the caller for a fresh layout. New link cells
+/// point at entries appended to `laid.links`; the old entries stay, so
+/// every index that was handed out keeps its meaning.
+pub fn respan(
+    laid: &mut Laid,
+    conversation: &Conversation,
+    index: usize,
+    width: usize,
+    draw: &Draw<'_>,
+    selected: bool,
+) -> bool {
+    let width = width.max(1);
+    let Some(span) = laid.spans.get(index).copied() else {
+        return false;
+    };
+    if span.block.1 == 0 {
+        // A folded report or a note line: nothing a selection restyles.
+        return true;
+    }
+    let relayed = draw
+        .names
+        .filter(|_| super::relayed::is_relayed(conversation));
+    let drawn = block(
+        conversation,
+        index,
+        width,
+        draw,
+        selected,
+        relayed,
+        &mut laid.links,
+    );
+    let (at, n) = span.block;
+    if drawn.rows.len() != n {
+        return false;
+    }
+    laid.rows.splice(at..at + n, drawn.rows);
+    laid.texts.splice(at..at + n, drawn.texts);
+    laid.spans[index].mark = drawn.mark.map(|(row, col, len)| (at + row, col, len));
+    true
 }
 
 /// Whether message `index` has no block of its own: a reaction, drawn
@@ -687,7 +741,10 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
         .rposition(|&i| model.conversations[i].pinned)
         .filter(|&at| at + 1 < order.len())
         .map(|at| order[at]);
-    for &index in &order[first..] {
+    // Only what the pane shows is laid (1490): the entries on screen and
+    // the one the bottom may cut.
+    let until = (first + entries_shown(height) + 1).min(order.len());
+    for &index in &order[first..until] {
         let conversation = &model.conversations[index];
         let here = index == model.selected;
         let [top, bottom] = entry(model, conversation, width, here);

@@ -583,6 +583,15 @@ struct BuiltList {
     rows: Vec<scene::Row>,
 }
 
+/// The open conversation laid out, as the laid cache keeps it (1490).
+#[derive(Clone, Debug)]
+struct LaidCache {
+    key: u64,
+    /// The message the cursor was on when these rows were styled.
+    selected: Option<usize>,
+    laid: alloc::sync::Arc<layout::Laid>,
+}
+
 /// The open chat's window as the last fold built it (1490).
 #[derive(Clone, Debug)]
 struct BuiltChat {
@@ -1244,6 +1253,15 @@ pub struct UiModel<B> {
     /// around the newest, or around the cursor while the keys are in the
     /// chat.
     built_chat: Option<BuiltChat>,
+    /// The open conversation laid out as the terminal had it last
+    /// (1490), keyed by [`UiModel::laid_key`]: a key that only moved the
+    /// cursor restyles two blocks in place instead of laying thousands
+    /// of rows. Interior-mutable: a read warms it.
+    laid_cache: core::cell::RefCell<Option<LaidCache>>,
+    /// The whole terminal view of one turn ([`view`]), keyed by its
+    /// stamp: the viewport ask and the draw of one turn share a build,
+    /// and a turn in which nothing changed builds nothing.
+    view_cache: core::cell::RefCell<Option<(u64, View)>>,
     /// The fingerprint of the model-wide look the last [`update`] saw
     /// ([`UiModel::look_fingerprint`]), and how often it changed: part of
     /// every conversation-keyed cache's key, so a name heard, a day
@@ -1376,6 +1394,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             viewing: Viewing::default(),
             built_list: None,
             built_chat: None,
+            laid_cache: core::cell::RefCell::new(None),
+            view_cache: core::cell::RefCell::new(None),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -2052,41 +2072,124 @@ impl<B> UiModel<B> {
     }
 
     /// The open conversation laid out at the pane's width.
-    fn laid(&self) -> layout::Laid
-    where
-        B: InputBuffer,
-    {
-        let laid = self.laid_uncounted();
-        self.count(counters::Op::RowsLaid, laid.rows.len());
-        laid
-    }
-
-    /// [`UiModel::laid`], uncounted.
-    fn laid_uncounted(&self) -> layout::Laid
+    fn laid(&self) -> alloc::sync::Arc<layout::Laid>
     where
         B: InputBuffer,
     {
         let selected = (self.focus == Pane::Messages).then_some(self.message_cursor);
-        match self.conversations.get(self.selected) {
-            Some(conversation) => layout::conversation(
-                conversation,
-                self.sizes().messages.0,
-                &layout::Draw {
-                    now: self.now,
-                    tick: self.tick,
-                    ascii: self.ascii,
-                    selected,
-                    tokens: self.tokens(),
-                    mark: self.query(),
-                    home_client: self.home_client,
-                    receipts: self.reading.on,
-                    tracks: Some(&self.voice_tracks),
-                    lang: self.lang,
-                    names: Some(&self.names),
-                },
-            ),
-            None => layout::Laid::empty(self.sizes().messages.0, self.tokens(), self.lang),
+        let width = self.sizes().messages.0;
+        let Some(conversation) = self.conversations.get(self.selected) else {
+            let laid = alloc::sync::Arc::new(layout::Laid::empty(width, self.tokens(), self.lang));
+            self.count(counters::Op::RowsLaid, laid.rows.len());
+            return laid;
+        };
+        let key = self.laid_key(conversation, width);
+        let mut slot = self.laid_cache.borrow_mut();
+        if let Some(entry) = slot.as_mut().filter(|entry| entry.key == key) {
+            if entry.selected == selected {
+                return alloc::sync::Arc::clone(&entry.laid);
+            }
+            // Only the cursor moved (1490): the two blocks it left and
+            // took are restyled in place, nothing else is laid.
+            let draw = self.draw_context(selected);
+            let laid = alloc::sync::Arc::make_mut(&mut entry.laid);
+            let mut held = true;
+            let mut spliced = 0;
+            for (at, on) in [(entry.selected, false), (selected, true)] {
+                let Some(index) = at.filter(|&i| i < conversation.messages.len()) else {
+                    continue;
+                };
+                held &= layout::respan(laid, conversation, index, width, &draw, on);
+                spliced += laid.spans.get(index).map_or(0, |span| span.block.1);
+            }
+            if held {
+                entry.selected = selected;
+                self.count(counters::Op::RowsLaid, spliced);
+                return alloc::sync::Arc::clone(&entry.laid);
+            }
         }
+        let laid = alloc::sync::Arc::new(layout::conversation(
+            conversation,
+            width,
+            &self.draw_context(selected),
+        ));
+        self.count(counters::Op::RowsLaid, laid.rows.len());
+        *slot = Some(LaidCache {
+            key,
+            selected,
+            laid: alloc::sync::Arc::clone(&laid),
+        });
+        laid
+    }
+
+    /// What [`layout::conversation`] draws with, besides the
+    /// conversation: everything here is in the laid cache's key, or is
+    /// the selection the splice restyles.
+    fn draw_context(&self, selected: Option<usize>) -> layout::Draw<'_>
+    where
+        B: InputBuffer,
+    {
+        layout::Draw {
+            now: self.now,
+            tick: self.tick,
+            ascii: self.ascii,
+            selected,
+            tokens: self.tokens(),
+            mark: self.query(),
+            home_client: self.home_client,
+            receipts: self.reading.on,
+            tracks: Some(&self.voice_tracks),
+            lang: self.lang,
+            names: Some(&self.names),
+        }
+    }
+
+    /// The laid cache's key (1490): the conversation's identity and
+    /// revision, its content's cheap ends (so a fold that is still
+    /// running misses rather than answers stale), the pane's width and
+    /// the look. The cursor is not here: it is spliced.
+    fn laid_key(&self, conversation: &Conversation, width: usize) -> u64
+    where
+        B: InputBuffer,
+    {
+        let mut hash = Fnv::new();
+        hash.bytes(&conversation.peer);
+        hash.word(conversation.revision());
+        hash.word(conversation.messages.len() as u64);
+        for message in [conversation.messages.first(), conversation.messages.last()]
+            .into_iter()
+            .flatten()
+        {
+            hash.word(message.activity);
+            hash.word(message.at.map_or(0, |at| at.unix_secs as u64));
+        }
+        hash.word(conversation.notes.len() as u64);
+        hash.word(conversation.earlier as u64);
+        if let Some(rule) = conversation.new_rule {
+            hash.word(rule.at as u64);
+            hash.word(rule.count as u64);
+        }
+        // The suffix glyphs change in place: a sweep of words, far
+        // cheaper than a row, as insurance for a delivery set outside
+        // any fold.
+        for message in &conversation.messages {
+            hash.word(delivery_word(message.delivery));
+        }
+        hash.word(width as u64);
+        hash.word(self.look_stamp);
+        hash.word(u64::from(self.ascii));
+        hash.word(self.lang as u64);
+        hash.word(self.tier as u64);
+        hash.word(self.theme as u64);
+        if let Some(query) = self.query() {
+            hash.bytes(query.as_bytes());
+        }
+        // The delivery spinner and a playing waveform move with the
+        // tick; a still pane does not re-lay for it.
+        if !self.sending.is_empty() || self.fetching || self.playing.is_some() {
+            hash.word(self.tick);
+        }
+        hash.done()
     }
 
     /// The first row on screen of `total` laid-out rows.
@@ -6359,6 +6462,90 @@ fn no_read_words<B>(
 
 /// The screen.
 pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
+    // One turn's builds are shared and an unchanged turn's reused
+    // (1490): the stamp covers every update (the revision moves with
+    // each) and the fields a shell or a test sets directly.
+    let stamp = view_stamp(model);
+    if let Some((at, view)) = model.view_cache.borrow().as_ref() {
+        if *at == stamp {
+            return view.clone();
+        }
+    }
+    let view = view_fresh(model);
+    *model.view_cache.borrow_mut() = Some((stamp, view.clone()));
+    view
+}
+
+/// The fingerprint of everything [`view_fresh`] reads that an update
+/// does not stamp by itself: the model's revision covers every fold,
+/// the rest covers direct mutation between folds.
+fn view_stamp<B: InputBuffer>(model: &UiModel<B>) -> u64 {
+    let mut hash = Fnv::new();
+    hash.word(model.revision);
+    hash.word(model.look_stamp);
+    hash.word(model.screen.0 as u64);
+    hash.word(model.screen.1 as u64);
+    hash.word(model.focus as u64);
+    hash.word(model.selected as u64);
+    hash.word(model.message_cursor as u64);
+    hash.word(model.scroll_top.map_or(u64::MAX, |at| at as u64));
+    hash.word(model.help_scroll as u64);
+    hash.word(u64::from(model.help));
+    hash.word(
+        model
+            .detail
+            .map_or(u64::MAX, |(c, m)| ((c as u64) << 24) ^ m as u64),
+    );
+    hash.word(model.detail_scroll as u64);
+    hash.word(model.footer_hover.map_or(u64::MAX, |at| at as u64));
+    hash.word(model.tick);
+    hash.word(model.tier as u64);
+    hash.word(model.theme as u64);
+    hash.word(u64::from(model.mouse));
+    hash.word(u64::from(model.ascii));
+    hash.word(u64::from(model.show_blocked));
+    hash.word(u64::from(model.show_archived));
+    hash.word(u64::from(model.fetching));
+    hash.word(u64::from(model.palette.is_some()));
+    hash.word(u64::from(model.search.is_some()));
+    hash.word(u64::from(model.map.is_some()));
+    hash.word(model.toasts.len() as u64);
+    hash.word(model.lang as u64);
+    hash.word(u64::from(model.debug_overlay));
+    hash.word(u64::from(model.enhanced));
+    hash.word(u64::from(model.send_on_enter));
+    hash.word(model.sending.len() as u64);
+    hash.word(model.map_named_until.unwrap_or(u64::MAX));
+    // The panes' content, swept cheaply: the folds bump the revision,
+    // this covers a model mutated directly (tests do).
+    for conversation in &model.conversations {
+        hash.word(conversation.revision());
+        hash.word(conversation.messages.len() as u64);
+        hash.word(conversation.unread as u64);
+        hash.word(u64::from(conversation.pinned));
+        if let Some(last) = conversation.messages.last() {
+            hash.word(last.activity);
+            hash.word(delivery_word(last.delivery));
+        }
+    }
+    if let Some(open) = model.conversations.get(model.selected) {
+        hash.word(model.laid_key(open, model.sizes().messages.0));
+    }
+    hash.bytes(model.compose.value().as_bytes());
+    if let Some(query) = model.query() {
+        hash.bytes(query.as_bytes());
+    }
+    if let Some(selection) = model.selection {
+        hash.word(selection.anchor.0 as u64);
+        hash.word(selection.anchor.1 as u64);
+        hash.word(selection.head.0 as u64);
+        hash.word(selection.head.1 as u64);
+    }
+    hash.done()
+}
+
+/// [`view`] built fresh.
+fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
     let sizes = model.sizes();
     let (conversations, search_cursor) = match (&model.search, model.order().is_empty()) {
         (Some(open), _) => {
@@ -6432,8 +6619,8 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         }
         _ => 0,
     };
-    let mut laid = model.laid();
-    let texts = core::mem::take(&mut laid.texts);
+    let laid = model.laid();
+    let texts = laid.texts.clone();
     let rows = model.message_rows();
     let top = model.top_of(laid.rows.len());
     let mut messages = Vec::with_capacity(sizes.messages.1);
@@ -6491,7 +6678,8 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let shown = laid.rows.len().saturating_sub(top).min(rows);
     messages.extend((shown..rows).map(|_| RLine::default()));
     let range = model.selection.map(|s| hit::ordered(&s));
-    for (at, mut row) in laid.rows.into_iter().enumerate().skip(top).take(shown) {
+    for (at, row) in laid.rows.iter().enumerate().skip(top).take(shown) {
+        let mut row = row.clone();
         // The selected text in inverse video, against whatever it was drawn
         // in: the selected block is reversed already.
         if let (Some((from, to)), Some(Some(text))) = (range, texts.get(at)) {
@@ -8678,6 +8866,55 @@ pub(crate) mod tests {
             body: body.as_bytes().to_vec(),
             fields: Vec::new(),
             verified: true,
+        }
+    }
+
+    /// 1490: the laid cache's splice. Moving the cursor across every
+    /// message yields, row for row and cell for cell, the layout a fresh
+    /// pass draws with that cursor; the spliced rows count, the rest do
+    /// not.
+    #[test]
+    fn a_cursor_move_splices_the_same_rows_a_fresh_layout_draws() {
+        let mut model = UiModel::<Field>::new(&[]);
+        for n in 0..9u8 {
+            let mut id = [0x40; 32];
+            id[0] = n;
+            match n % 3 {
+                0 => engine(
+                    &mut model,
+                    received_from(OTHER, id, &"word ".repeat(n as usize * 7 + 1)),
+                ),
+                1 => {
+                    update(
+                        &mut model,
+                        UiEvent::Write {
+                            peer: OTHER,
+                            body: format!("reply {n}"),
+                        },
+                    );
+                }
+                _ => engine(&mut model, received_from(OTHER, id, "short")),
+            }
+        }
+        model.focus = Pane::Messages;
+        let len = model.conversations[model.selected].messages.len();
+        for cursor in (0..len).rev() {
+            model.message_cursor = cursor;
+            let cached = model.laid();
+            let fresh = layout::conversation(
+                &model.conversations[model.selected],
+                model.sizes().messages.0,
+                &model.draw_context(Some(cursor)),
+            );
+            assert_eq!(cached.rows.len(), fresh.rows.len(), "cursor {cursor}");
+            for (at, (a, b)) in cached.rows.iter().zip(&fresh.rows).enumerate() {
+                assert_eq!(
+                    format!("{:?}", a.cells),
+                    format!("{:?}", b.cells),
+                    "cursor {cursor}, row {at}"
+                );
+            }
+            assert_eq!(cached.spans, fresh.spans, "cursor {cursor}");
         }
     }
 
