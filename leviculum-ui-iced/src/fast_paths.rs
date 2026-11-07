@@ -377,3 +377,24 @@ fn a_glyphs_empty_and_full_pixels_are_what_the_arithmetic_gives() {
         }
     }
 }
+
+/// The blend's rounding without libm (1468) is `round_ties_even` on
+/// every value a channel takes: every half from 0 to 255 and its two
+/// neighbours, and every 97th float in between.
+#[test]
+fn the_blends_rounding_is_round_ties_even() {
+    let top = 255.0f32.to_bits();
+    let mut values: Vec<f32> = (0..top).step_by(97).map(f32::from_bits).collect();
+    for half in 0..=510u32 {
+        let v = half as f32 / 2.0;
+        values.extend([v, f32::from_bits(v.to_bits() + 1), v.next_down()]);
+    }
+    values.push(255.0);
+    for v in values.into_iter().filter(|v| (0.0..=255.0).contains(v)) {
+        assert_eq!(
+            fast::ties_even(v).to_bits(),
+            v.round_ties_even().to_bits(),
+            "{v}"
+        );
+    }
+}

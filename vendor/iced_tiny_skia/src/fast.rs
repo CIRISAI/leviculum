@@ -284,8 +284,22 @@ pub const BLEND_EXACT: bool = cfg!(any(
 
 /// tiny-skia's high-precision store of one channel (`unnorm`).
 #[inline(always)]
-fn unnorm(v: f32) -> u8 {
-    (v.max(0.0).min(1.0) * 255.0).round_ties_even() as u8
+pub fn unnorm(v: f32) -> u8 {
+    ties_even(v.max(0.0).min(1.0) * 255.0) as u8
+}
+
+/// `v` in `0.0..=255.0` rounded to the nearest integer, a tie to the
+/// even one (1468): the sum with 2^23 has no bits below the units, so
+/// the addition rounds in the FPU's mode, which is to nearest even, and
+/// the subtraction is exact. `f32::round_ties_even` is the same number,
+/// but without SSE4.1's `roundss` (x86-64's baseline lacks it) a call
+/// to libm's `rintf` per channel: 5 to 9 % of a chat frame's present in
+/// callgrind. `fast_paths` holds it to `round_ties_even` over every
+/// value a channel can take.
+#[inline(always)]
+pub fn ties_even(v: f32) -> f32 {
+    const SHIFT: f32 = 8_388_608.0;
+    (v + SHIFT) - SHIFT
 }
 
 /// The premultiplied `src` (a glyph) drawn source-over at whole pixels
