@@ -574,9 +574,8 @@ impl Job {
         // Under its own name from the first byte (1291): a painter draws
         // what has arrived, a version 4 file says what that is.
         let path = self.dir.join(&name);
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |n| n.get() / 2)
-            .max(1);
+        // As wide as the tile painters (1473): one core count for the map.
+        let threads = crate::picture::cores();
         let maps = self.maps.clone();
         let mut bumped: Option<Instant> = None;
         let mut progress = |p: Progress| {
