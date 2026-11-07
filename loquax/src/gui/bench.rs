@@ -455,18 +455,27 @@ impl Measured {
 /// `case` at `w` by `h`, run; with the frame meter's overlay over the
 /// window when `overlay`, as `loquax --fps` draws it.
 fn measure(case: Case, w: u32, h: u32, overlay: bool) -> Measured {
+    measure_slowed(case, w, h, overlay, 1)
+}
+
+/// [`measure`] with the gesture's clock `slow` times slower: its events
+/// that much further apart, for a profiler that runs the program that
+/// much slower (1468).
+fn measure_slowed(case: Case, w: u32, h: u32, overlay: bool, slow: u32) -> Measured {
     let (app, events) = case.setup(w, h);
+    let events = events.into_iter().map(|(t, e)| (t * slow, e)).collect();
     let mut window = Window::new(app);
     let mut script = script(events);
     if overlay {
         leviculum_ui_iced::fps::enable(|_| {});
     }
-    let run = headless::drive(&mut window, w, h, &mut script, SETTLE);
+    let run = headless::drive(&mut window, w, h, &mut script, SETTLE * slow);
     if overlay {
         leviculum_ui_iced::fps::disable();
     }
     let run = run.expect("the software renderer");
     let (from, until) = case.span();
+    let (from, until) = (from * slow, until.map(|u| u * slow));
     let at = from.as_secs_f64();
     let until = until.map_or(f64::INFINITY, |u| u.as_secs_f64());
     let frames: Vec<&DrawnFrame> = run
@@ -542,6 +551,38 @@ fn window_bench() {
         lines.push(line);
     }
     std::fs::write(&out, lines.join("\n") + "\n").expect("the bench's file");
+}
+
+/// One gesture of the bench alone, for a profiler (1468): the case
+/// `LOQUAX_PROFILE_CASE` names (`chat-touchpad`, `+fps` for the overlay)
+/// at `LOQUAX_PROFILE_SIZE` (`1527x2099` without), its clock slowed
+/// `LOQUAX_PROFILE_SLOW` times (a profiler's own slowness), its line
+/// printed.
+/// Under callgrind, `--dump-after='*headless*Surface*present*'` writes a
+/// profile per frame. Without the variable the test returns at once.
+#[test]
+fn one_gesture_for_a_profiler() {
+    let Some(name) = std::env::var("LOQUAX_PROFILE_CASE").ok() else {
+        return;
+    };
+    let (w, h) = std::env::var("LOQUAX_PROFILE_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or((1527, 2099));
+    let overlay = name.ends_with("+fps");
+    let bare = name.trim_end_matches("+fps");
+    let case = Case::ALL
+        .into_iter()
+        .find(|c| c.name() == bare)
+        .expect("a case of the bench");
+    let slow = std::env::var("LOQUAX_PROFILE_SLOW")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    println!("{}", measure_slowed(case, w, h, overlay, slow).line());
 }
 
 /// The bench's gestures do what they say (1441), at the small size: the
