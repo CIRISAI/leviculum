@@ -202,15 +202,19 @@ public class MainActivity extends Activity {
 
     /** The address behind a combined code, into an empty address field. */
     private void fillServer(String text) {
-        int at = text.indexOf('@');
-        if (at < 0 || !server.getText().toString().trim().isEmpty()) {
-            return;
-        }
-        String address = text.substring(at + 1).trim();
-        if (!address.isEmpty()) {
-            server.setText(address);
+        // The field follows the code's tail while it holds what the code
+        // gave it (1464, ServerField): typed one character at a time, the
+        // code used to leave the first character after its `@` there.
+        String field = server.getText().toString();
+        String next = ServerField.follow(text, field, serverGiven);
+        if (!next.equals(field)) {
+            server.setText(next);
+            serverGiven = next.trim();
         }
     }
+
+    /** What the code gave the server field last (1464). */
+    private String serverGiven = "";
 
     private String home() {
         return getFilesDir().getAbsolutePath();
