@@ -105,6 +105,9 @@ pub struct Handheld {
     pub serial: SerialIface,
     ifac: BTreeMap<usize, IfacConfig>,
     client: Option<Client>,
+    /// The bench's owe, armed and not fired yet (1540): its flags.
+    #[cfg(m9_bench)]
+    owe: Option<u8>,
 }
 
 /// A device of a home: its record, the identity it was admitted as, the
@@ -203,6 +206,8 @@ impl Handheld {
             serial: SerialIface::new(),
             ifac: BTreeMap::new(),
             client: None,
+            #[cfg(m9_bench)]
+            owe: None,
         };
         let up = handheld.node.handle_interface_up(SERIAL_IFACE.0);
         handheld.dispatch(up.actions);
@@ -733,6 +738,122 @@ impl Handheld {
                 client.done(&result, now_ms, stores, log);
             }
         }
+    }
+}
+
+/// The bench's hooks into the store (1540), only in an image built for
+/// the bench (`cfg(m9_bench)`): the race of 2026-11-07 needs a flash write
+/// while the UI core folds an opened chat, and after the first open the
+/// board owed the flash nothing, so the window was used up.
+#[cfg(m9_bench)]
+impl Handheld {
+    /// Arm the owe with `flags` (`envelope::BENCH_OWE_*`); false on a
+    /// board without a message store, which has nothing to owe.
+    pub fn bench_owe(&mut self, flags: u8, log: &mut UartLog<'_>) -> bool {
+        let stored = self
+            .client
+            .as_ref()
+            .is_some_and(|client| client.store.is_some());
+        if stored {
+            self.owe = Some(flags);
+        }
+        log.line(
+            "[BENCH] ",
+            format_args!(
+                "owe={} flags={flags:#04x}",
+                if stored { "armed" } else { "refused" }
+            ),
+        );
+        stored
+    }
+
+    /// Before the asks a fold sent are kept (the open's read mark among
+    /// them): an armed owe that erases the ring closes its tail now, so
+    /// the mark's write opens the next sector with an erase.
+    pub fn bench_before_ask(&mut self, log: &mut UartLog<'_>) {
+        let Some(flags) = self.owe else {
+            return;
+        };
+        if flags & leviculum_core::envelope::BENCH_OWE_ERASE_RING == 0 {
+            return;
+        }
+        if let Some(store) = self.client.as_mut().and_then(|c| c.store.as_mut()) {
+            store.ring.close();
+            self.owe = Some(flags & !leviculum_core::envelope::BENCH_OWE_ERASE_RING);
+            log.line("[BENCH] ", format_args!("owe=ring-closed"));
+        }
+    }
+
+    /// An open's page went to the UI core, which folds it now: an armed
+    /// owe fires. Every conversation's row and the ring's state with its
+    /// marks are owed the summary log, the log's tail closed when asked,
+    /// and written at once, while the other core allocates.
+    pub fn bench_fire(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>) {
+        let Some(flags) = self.owe.take() else {
+            return;
+        };
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        if let Some(store) = client.store.as_mut() {
+            store.index.owe_all();
+            store.dirty = true;
+            if flags & leviculum_core::envelope::BENCH_OWE_ERASE_LOG != 0 {
+                if let Some(rows) = store.log.as_mut() {
+                    rows.close();
+                }
+            }
+            // No ask came between the arm and the open: the ring's next
+            // write erases, whichever it is.
+            if flags & leviculum_core::envelope::BENCH_OWE_ERASE_RING != 0 {
+                store.ring.close();
+            }
+        }
+        log.line("[BENCH] ", format_args!("owe=fired flags={flags:#04x}"));
+        client.flush(stores, log);
+    }
+
+    /// A message from `peer` arrives (`TYPE_BENCH_ARRIVE`), the `n`th:
+    /// kept in the ring and handed to the model as a pulled page is
+    /// ([`Handheld::drain`]). False on a board that is no device of a
+    /// home.
+    pub fn bench_arrive(
+        &mut self,
+        peer: [u8; 16],
+        at: i64,
+        n: u32,
+        stores: &mut Stores<'_>,
+        log: &mut UartLog<'_>,
+    ) -> bool {
+        let Some(client) = self.client.as_mut() else {
+            return false;
+        };
+        let seq = client.store.as_ref().map_or(0, |store| store.cursor());
+        let entry = loquax_m9::bench::entry(peer, client.address, at, n, seq);
+        let entries = [entry];
+        if let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) {
+            match m9home::keep(store, &mut dev, &entries, &client.address) {
+                Ok(done) => log.line(
+                    "[STORE] ",
+                    format_args!(
+                        "kept={} writes={} erased={} cursor={} used={} entries={}",
+                        done.entries,
+                        done.writes,
+                        done.erased,
+                        store.cursor(),
+                        store.used(),
+                        store.ring.entries()
+                    ),
+                ),
+                Err(error) => {
+                    client.drained.unsaved += 1;
+                    log.line("[STORE] ", format_args!("kept=no error={error}"));
+                }
+            }
+        }
+        let [entry] = entries;
+        client.drained.entries.push(entry);
+        true
     }
 }
 

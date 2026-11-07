@@ -86,6 +86,19 @@
 //!                           image (`LEVICULUM_M9_BENCH=1`, 1533): a
 //!                           `TYPE_KEY_INJECT` frame presses a key, the
 //!                           module `bench` at the end of this file
+//! [BENCH] owe=<armed|refused|ring-closed|fired> flags=<0x..>
+//!                           the bench image's `TYPE_BENCH_OWE` (1540): the
+//!                           next open writes every row again, `flags` says
+//!                           which store's write erases a sector first
+//! [BENCH] arrive=<sent|refused|folded> row=<n> of=<n> peer=<8 hex> [unread=<n>]
+//!                           `TYPE_BENCH_ARRIVE` (1540): a message came into
+//!                           the chat at that row, kept and folded as a
+//!                           pulled one, its chat selected
+//! [OPEN] peer=<8 hex> entries=<n> wait_ms=.. page_read_ms=.. decode_ms=.. fold_ms=.. scene_ms=.. draw_ms=.. flush_ms=..
+//!                           bench image only (1540): where an opened
+//!                           chat's page went, from the load asked to the
+//!                           frame flushed; wait is the load's way through
+//!                           core 0, page_read the ring read inside it
 //! [CORES] census=done waited_ms=<n>   core 0 held still while the UI
 //!                           core's census ran (1521b), or census=late
 //! KBRAW <ms> <hex>          one per answer that is no idle one: a timer
@@ -313,6 +326,9 @@ enum ToUi {
         earlier: usize,
         address: [u8; 16],
     },
+    /// The bench's arrival (1540): the row of the list it goes to.
+    #[cfg(m9_bench)]
+    BenchArrive(u8),
 }
 
 /// What the UI core hands the I/O core.
@@ -340,6 +356,10 @@ enum FromUi {
     },
     /// The model asks a conversation's next page (1521).
     Load([u8; 16]),
+    /// The bench's arrival (1540): the chat's peer and the time it is
+    /// written at, for the I/O core to keep and hand back.
+    #[cfg(m9_bench)]
+    BenchArrive { peer: [u8; 16], at: i64 },
 }
 
 static TO_UI: Mutex<RefCell<VecDeque<ToUi>>> = Mutex::new(RefCell::new(VecDeque::new()));
@@ -694,10 +714,19 @@ fn redraw(
         fault: shown.fault,
         ..screen::Look::of(model)
     };
+    #[cfg(not(m9_bench))]
     let drawn = match &shown.pairing {
         Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
         None => renderer.show(model, &look, map),
     };
+    // The bench times the scene and the draw apart (1540).
+    #[cfg(m9_bench)]
+    let drawn = match &shown.pairing {
+        Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
+        None => bench::show(renderer, model, &look, map),
+    };
+    #[cfg(m9_bench)]
+    bench::FLUSH_US.store(0, Ordering::Relaxed);
     if drawn.is_err() {
         log.line("[DISP] ", alloc::string::String::from("draw=failed"));
         return;
@@ -714,6 +743,8 @@ fn redraw(
     let t0 = esp_hal::time::Instant::now();
     let flushed = panel.flush(frame, first, last);
     let us = t0.elapsed().as_micros();
+    #[cfg(m9_bench)]
+    bench::FLUSH_US.store(us as u32, Ordering::Relaxed);
     match flushed {
         Ok(()) => {
             log.line(
@@ -1117,6 +1148,9 @@ fn main() -> ! {
     // The bench's keys (1533), only in an image built for it.
     #[cfg(m9_bench)]
     let mut inject = loquax_m9::kbraw::Inject::new();
+    // The bench's arrivals so far (1540): each says its number.
+    #[cfg(m9_bench)]
+    let mut arrivals: u32 = 0;
     #[cfg(m9_bench)]
     log.line("[BENCH] ", format_args!("inject=on"));
     // From here core 0's loop feeds its watchdog every turn, and between
@@ -1216,6 +1250,29 @@ fn main() -> ! {
                     log.frame(&answer);
                     continue;
                 }
+                #[cfg(m9_bench)]
+                if frame.frame_type == envelope::TYPE_BENCH_OWE {
+                    stall::stage(Core::Io, Stage::Line);
+                    let answer = bench::owe(frame.payload, &mut node, &mut log);
+                    log.frame(&answer);
+                    continue;
+                }
+                #[cfg(m9_bench)]
+                if frame.frame_type == envelope::TYPE_BENCH_ARRIVE {
+                    stall::stage(Core::Io, Stage::Line);
+                    let answer = match envelope::decode_bench_arrive_payload(frame.payload) {
+                        None => envelope::encode_refusal(
+                            envelope::TYPE_BENCH_ARRIVE,
+                            envelope::REFUSE_MALFORMED,
+                        ),
+                        Some(row) => {
+                            to_ui(ToUi::BenchArrive(row));
+                            envelope::encode_ack(envelope::TYPE_BENCH_ARRIVE)
+                        }
+                    };
+                    log.frame(&answer);
+                    continue;
+                }
                 if frame.frame_type == envelope::TYPE_FRAME_DUMP {
                     match envelope::decode_frame_dump_payload(frame.payload) {
                         None => log.frame(&envelope::encode_refusal(
@@ -1281,6 +1338,8 @@ fn main() -> ! {
                 FromUi::Asks { verbs, marks } => {
                     stall::stage(Core::Io, Stage::Asks);
                     busy = true;
+                    #[cfg(m9_bench)]
+                    node.bench_before_ask(&mut log);
                     let mut ids = || {
                         let mut id = [0u8; 16];
                         rand_core::RngCore::fill_bytes(&mut rng, &mut id);
@@ -1297,15 +1356,32 @@ fn main() -> ! {
                     stall::peer(&peer);
                     busy = true;
                     let want = home::page_entries();
+                    #[cfg(m9_bench)]
+                    let t_read = esp_hal::time::Instant::now();
                     if let (Some(address), Some((entries, earlier))) =
                         (node.address(), node.load(peer, want, &mut stores, &mut log))
                     {
+                        #[cfg(m9_bench)]
+                        bench::READ_US
+                            .store(t_read.elapsed().as_micros() as u32, Ordering::Relaxed);
                         to_ui(ToUi::Page {
                             peer,
                             entries,
                             earlier,
                             address,
                         });
+                    }
+                    // The owe the bench armed fires while the UI core
+                    // folds the page (1540).
+                    #[cfg(m9_bench)]
+                    node.bench_fire(&mut stores, &mut log);
+                }
+                #[cfg(m9_bench)]
+                FromUi::BenchArrive { peer, at } => {
+                    stall::stage(Core::Io, Stage::Line);
+                    arrivals += 1;
+                    if !node.bench_arrive(peer, at, arrivals, &mut stores, &mut log) {
+                        log.line("[BENCH] ", format_args!("arrive=refused reason=no-home"));
                     }
                 }
                 // Whole, however long (1521b): the census's screen lines
@@ -1531,6 +1607,13 @@ fn ui_main(
     let mut drawn = screen::Drawn::default();
     drawn.drawn(&model);
 
+    // An opened chat's page on its way, for the `[OPEN]` line (1540).
+    #[cfg(m9_bench)]
+    let mut open = bench::Open::default();
+    // The peer of the bench's arrival on its way to the fold (1540).
+    #[cfg(m9_bench)]
+    let mut arriving: Option<[u8; 16]> = None;
+
     // From here the UI core's loop feeds its own watchdog (1534).
     let mut wdt = Watchdog::arm(wdt);
     loop {
@@ -1582,6 +1665,14 @@ fn ui_main(
                     if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
                         dirty = true;
                     }
+                    #[cfg(m9_bench)]
+                    if let Some(peer) = arriving {
+                        if bench::carries(&entries, &peer) {
+                            arriving = None;
+                            bench::folded(&model, &peer, &mut log);
+                            dirty = true;
+                        }
+                    }
                 }
                 ToUi::Answer(answer) => {
                     let effects = home::answered(&mut model, answer);
@@ -1595,10 +1686,20 @@ fn ui_main(
                     earlier,
                     address,
                 } => {
+                    #[cfg(not(m9_bench))]
                     let effects = home::page_in(&mut model, peer, &entries, earlier, &address);
+                    #[cfg(m9_bench)]
+                    let effects = open.page_in(&mut model, peer, &entries, earlier, &address);
                     route_out(&mut model, effects, &mut ids, &mut log, &mut wants);
                     // The page is on the chat now, whatever it asked.
                     dirty = true;
+                }
+                #[cfg(m9_bench)]
+                ToUi::BenchArrive(row) => {
+                    if let Some(peer) = bench::arrive(&mut model, row, &mut log) {
+                        arriving = Some(peer);
+                        dirty = true;
+                    }
                 }
                 ToUi::Word(word) => {
                     if word != shown.word {
@@ -1731,6 +1832,8 @@ fn ui_main(
             });
         }
         for peer in core::mem::take(&mut wants.loads) {
+            #[cfg(m9_bench)]
+            open.asked(peer);
             log.send(FromUi::Load(peer));
         }
 
@@ -1748,6 +1851,8 @@ fn ui_main(
                 &mut log,
             );
             drawn.drawn(&model);
+            #[cfg(m9_bench)]
+            open.say(&mut log);
         }
         core::hint::spin_loop();
     }
@@ -1819,6 +1924,10 @@ fn control(data: &[u8], log: &mut UartLog<'_>) {
                     envelope::TYPE_HOME_CODE,
                     #[cfg(m9_bench)]
                     envelope::TYPE_KEY_INJECT,
+                    #[cfg(m9_bench)]
+                    envelope::TYPE_BENCH_OWE,
+                    #[cfg(m9_bench)]
+                    envelope::TYPE_BENCH_ARRIVE,
                 ],
                 &[envelope::FACT_SERIAL_MUX],
             ));
@@ -1843,9 +1952,26 @@ fn control(data: &[u8], log: &mut UartLog<'_>) {
 /// the `[PAGE]` line are the real path's.
 #[cfg(m9_bench)]
 mod bench {
-    use super::{envelope, kbraw, stall, uptime_ms, Core, Lock, Protocol, KB_PRESSES};
+    use super::{
+        envelope, kbraw, map, screen, stall, uptime_ms, Core, Entry, Field, FromUi, Handheld, Lock,
+        Map, Protocol, Renderer, UartLog, UiLog, UiModel, KB_PRESSES,
+    };
+    use alloc::format;
     use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    use esp_hal::time::Instant;
+    use loquax::home::board::rows;
+    use loquax::ui::{update, Pane, UiEffect, UiEvent};
+    use loquax_m9::frame::Frame;
     use loquax_m9::kbraw::Inject;
+
+    /// The last open's ring read on core 0, microseconds (1540).
+    pub static READ_US: AtomicU32 = AtomicU32::new(0);
+    /// The last draw's scene build, its cells drawn, and its flush, each
+    /// on the UI core, microseconds.
+    static SCENE_US: AtomicU32 = AtomicU32::new(0);
+    static DRAW_US: AtomicU32 = AtomicU32::new(0);
+    pub static FLUSH_US: AtomicU32 = AtomicU32::new(0);
 
     /// One answer for `code` into the keyboard's queue, at the uptime now.
     fn queue(kb: Protocol, code: u8) {
@@ -1879,6 +2005,179 @@ mod bench {
     pub fn held(kb: Protocol, inject: &mut Inject) {
         if let Some(code) = inject.due(uptime_ms() as u32) {
             queue(kb, code);
+        }
+    }
+
+    /// A `TYPE_BENCH_OWE` payload taken (1540): the owe armed for the
+    /// next open, and the frame that answers it.
+    pub fn owe(payload: &[u8], node: &mut Handheld, log: &mut UartLog<'_>) -> Vec<u8> {
+        let refuse = |reason| envelope::encode_refusal(envelope::TYPE_BENCH_OWE, reason);
+        match envelope::decode_bench_owe_payload(payload) {
+            None => refuse(envelope::REFUSE_MALFORMED),
+            Some(flags) if flags & !envelope::BENCH_OWE_FLAGS != 0 => {
+                refuse(envelope::REFUSE_VALUE)
+            }
+            Some(flags) => {
+                if node.bench_owe(flags, log) {
+                    envelope::encode_ack(envelope::TYPE_BENCH_OWE)
+                } else {
+                    refuse(envelope::REFUSE_UNSUPPORTED)
+                }
+            }
+        }
+    }
+
+    /// The first four bytes of a peer, as the stall record says one.
+    fn short(peer: &[u8; 16]) -> alloc::string::String {
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            peer[0], peer[1], peer[2], peer[3]
+        )
+    }
+
+    /// A `TYPE_BENCH_ARRIVE` on the UI core (1540): the chat at `row`
+    /// selected while the list shows, and its peer and time sent to the
+    /// I/O core, which keeps the message and hands it back as a page.
+    pub fn arrive(model: &mut UiModel<Field>, row: u8, log: &mut UiLog) -> Option<[u8; 16]> {
+        let Some(arrival) = loquax_m9::bench::arrival(model, row) else {
+            log.line(
+                "[BENCH] ",
+                format!("arrive=refused row={row} of=0 reason=no-chats"),
+            );
+            return None;
+        };
+        if model.focus == Pane::Conversations {
+            model.selected = arrival.index;
+        }
+        log.line(
+            "[BENCH] ",
+            format!(
+                "arrive=sent row={} of={} peer={}",
+                arrival.row,
+                arrival.of,
+                short(&arrival.peer)
+            ),
+        );
+        log.send(FromUi::BenchArrive {
+            peer: arrival.peer,
+            at: arrival.at,
+        });
+        Some(arrival.peer)
+    }
+
+    /// Whether a pulled page carries a message from `peer`: the packed
+    /// LXMF message's source, bytes 16 to 32.
+    pub fn carries(entries: &[Entry], peer: &[u8; 16]) -> bool {
+        entries
+            .iter()
+            .any(|entry| entry.packed.get(16..32) == Some(&peer[..]))
+    }
+
+    /// The arrival folded: its chat's unread, which the walk's open marks.
+    pub fn folded(model: &UiModel<Field>, peer: &[u8; 16], log: &mut UiLog) {
+        let unread = model
+            .conversations
+            .iter()
+            .find(|c| c.peer == *peer)
+            .map_or(0, |c| c.unread);
+        log.line(
+            "[BENCH] ",
+            format!("arrive=folded peer={} unread={unread}", short(peer)),
+        );
+    }
+
+    /// [`Renderer::show`], the scene's build and its cells' draw timed
+    /// apart where the screen is a scene (the map is drawn whole).
+    pub fn show(
+        renderer: &mut Renderer<'_, Frame>,
+        model: &UiModel<Field>,
+        look: &screen::Look,
+        map: &mut Map<'_>,
+    ) -> Result<(), loquax_m9::render::DrawError> {
+        if map::shown(model) {
+            SCENE_US.store(0, Ordering::Relaxed);
+            let t0 = Instant::now();
+            let drawn = renderer.show(model, look, map);
+            DRAW_US.store(t0.elapsed().as_micros() as u32, Ordering::Relaxed);
+            return drawn;
+        }
+        let t0 = Instant::now();
+        let scene = screen::scene(model);
+        let t1 = Instant::now();
+        let drawn = renderer.draw(&scene, look);
+        SCENE_US.store((t1 - t0).as_micros() as u32, Ordering::Relaxed);
+        DRAW_US.store(t1.elapsed().as_micros() as u32, Ordering::Relaxed);
+        drawn
+    }
+
+    /// An opened chat's page on its way (1540): asked when, folded how
+    /// long, said once the frame after it is flushed.
+    #[derive(Default)]
+    pub struct Open {
+        asked: Option<([u8; 16], Instant)>,
+        /// The page folded and not said yet: peer, entries, wait,
+        /// decode and fold, microseconds.
+        folded: Option<([u8; 16], usize, u64, u64, u64)>,
+    }
+
+    impl Open {
+        /// The UI core asked `peer`'s page.
+        pub fn asked(&mut self, peer: [u8; 16]) {
+            self.asked = Some((peer, Instant::now()));
+        }
+
+        /// `home::page_in`, its two halves timed: the entries decoded
+        /// into messages (`rows::messages`) and the model's fold of them.
+        pub fn page_in(
+            &mut self,
+            model: &mut UiModel<Field>,
+            peer: [u8; 16],
+            entries: &[Entry],
+            earlier: usize,
+            address: &[u8; 16],
+        ) -> Vec<UiEffect> {
+            let wait = match self.asked.take() {
+                Some((asked, at)) if asked == peer => at.elapsed().as_micros(),
+                _ => 0,
+            };
+            let t0 = Instant::now();
+            let messages = rows::messages::<Field>(entries, address, peer);
+            let t1 = Instant::now();
+            let effects = update(
+                model,
+                UiEvent::Earlier {
+                    peer,
+                    messages,
+                    earlier,
+                },
+            );
+            let decode = (t1 - t0).as_micros();
+            let fold = t1.elapsed().as_micros();
+            self.folded = Some((peer, entries.len(), wait, decode, fold));
+            effects
+        }
+
+        /// The `[OPEN]` line, after the draw that showed the page.
+        pub fn say(&mut self, log: &mut UiLog) {
+            let Some((peer, entries, wait, decode, fold)) = self.folded.take() else {
+                return;
+            };
+            let ms = |us: u64| format!("{}.{:03}", us / 1000, us % 1000);
+            let load = |at: &AtomicU32| u64::from(at.load(Ordering::Relaxed));
+            log.line(
+                "[OPEN] ",
+                format!(
+                    "peer={} entries={entries} wait_ms={} page_read_ms={} decode_ms={} fold_ms={} scene_ms={} draw_ms={} flush_ms={}",
+                    short(&peer),
+                    ms(wait),
+                    ms(load(&READ_US)),
+                    ms(decode),
+                    ms(fold),
+                    ms(load(&SCENE_US)),
+                    ms(load(&DRAW_US)),
+                    ms(load(&FLUSH_US)),
+                ),
+            );
         }
     }
 }
