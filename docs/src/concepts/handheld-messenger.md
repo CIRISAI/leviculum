@@ -1351,8 +1351,10 @@ than a LoRa interface carries and less than a TCP one.
 **The stores need a table.** espflash's default table gives the
 application all of the flash, so the M9 ships its own,
 `leviculum-esp/partitions-m9.csv`: an 8 MiB application, then `identity`
-and `loquax_client`, one 4 KiB sector each. `just build-m9` and `just
-flash-m9` pass it to espflash; the firmware finds both by label
+and `loquax_client`, one 4 KiB sector each, and since 1476 `messages`,
+4 MiB from 0x812000 (see "The board keeps what it pulled" below); the
+3.93 MiB after it are the map region's. `just build-m9` and `just
+flash-m9` pass it to espflash; the firmware finds every store by label
 (`leviculum-esp/src/flash.rs`) and says `[FLASH] identity=none/no-entry`
 under any other table, running without persistence. Every buffer the
 flash routines touch is on the stack, because the heap is PSRAM behind
@@ -1602,6 +1604,125 @@ word against `board::fold`.
 sets any mode for a serial board yet. When it lands, a serial LNode
 or M9 it attaches gets `interface_mode = gateway`, as the bench's lnsd
 needs by hand today.
+
+### An answer that goes silent is cancelled and asked again (1461)
+
+**The silence rule.** A `/sync` page that comes as a resource is
+watched from its advertisement on (`Executor::watch_answer`,
+`loquax/src/home/board.rs`). When its progress has not moved for the
+request bound Reticulum gives every request on the link (six round
+trips plus 11.25 s, `request_timeout_ms`; about 12 s on the serial
+line), the board cancels it with an RCL
+(`NodeCore::cancel_incoming_resource`, `leviculum-core`) and asks the
+same page again on the same link. Before 1461 only the resource
+watchdog was left: 16 part requests with a growing wait, about 67 s,
+past a pull's budget.
+
+**The busy sender.** The RCL is not politeness. A home whose sender
+still holds an abandoned answer refuses every new one on that link as a
+transfer in progress: without the RCL the board's ask after its
+watchdog gave up was refused, and the cell's control timed out at
+120 s; with it the page came on the second ask in 11.6 s
+(`loquax-android/tests`, the M9 cells that lose a resource answer
+whole; `a_resource_answer_lost_whole_is_cancelled_and_asked_again_within_the_rtt_bound`
+in `loquax/src/home/board/tests.rs`).
+
+### The board keeps what it pulled (1476)
+
+**The store.** `loquax::home::board::store` (`no_std`) is an
+append-only log in the `messages` partition's 1024 erase sectors of
+4 KiB, used as a ring. A sector opens with a 24-byte header (magic
+`LQXM`, version 1, the sector's sequence, the home's tag, the first
+eight bytes of its LXMF address, a CRC-32), then frames written into
+erased flash and never rewritten: a length, flags (an entry's first
+part, its last, a cursor mark), a CRC-32, the payload padded to four
+bytes. An entry is its sequence, kind, time and packed message; one
+too long for the sector's room goes on in the next. The board keeps
+what `board::fold` keeps of each page, written before the model takes
+it, one flash write per sector the page touches, and a cursor mark of
+the page's newest sequence, so a page of nothing the fold keeps still
+moves the store's end.
+
+**The ring.** A full sector closes; the next one in the ring is erased
+and opened under a sequence one past the newest; once the ring is round
+the oldest sector is the one erased, and its entries leave the count.
+4058 short texts took 152 sectors on the host, so 4 MiB holds about
+27,000 of them. A sector of another home's tag is not shown and is
+erased in its turn.
+
+**The restore.** At boot `Store::open` reads every header, sorts this
+home's sectors by sequence and hands each whole entry to the model
+(`loquax_m9::home::restore`), said as `[STORE] sectors= used= entries=
+cursor= torn= foreign= restore_ms=`. A power loss leaves at most a
+frame that does not check: the scan stops there, the sector is closed,
+and the next page opens a fresh one.
+
+**The agree rule.** The store carries the cursor; the client record's
+is only what the board believed when it last wrote it. `board::agree`
+sets the record's cursor to the store's end at boot and says how they
+differed: `store=empty cursor=reset` (a store lost under a cursor that
+says everything was fetched: the board pulls again from the start),
+`store=behind`, `store=ahead` (a power loss before the record was
+written). Since 1463 the record is written only when a code makes it
+and when the board joins (`Handheld::take_code` and the `Joined` arm of
+`Client::done`, `leviculum-esp/src/handheld.rs`), never for a pull: its
+cursor is never read, and the sector at 0x811000 was erased at the end
+of every pull that moved it, up to 288 times a day. Tests:
+`the_chats_come_back_from_the_flash_store_after_a_reboot` and
+`the_store_keeps_what_the_fold_keeps` (`loquax-m9/tests/home.rs`).
+
+### A turn of the loop in bounded time (1463)
+
+**Measured.** The board of 2026-11-07 (image `1d6527e0`, 4067 entries):
+`restore_ms=46760`, a key on the chats list 3.15 s to its flush
+(`loop_gap_max_ms=3235`) where the flush itself is 56 ms, page gaps
+growing from 1.3 to 8 s over the pull, and ring presses made during the
+stalls never read.
+
+**Where the time went.** Host profile (callgrind, 2880 entries): of a
+list scene, 41 % the tab badge (`order()` and the unread count), 45 %
+the list (`order()` again: `Conversation::last_written`, a walk over
+the conversation once per comparison of the sort), 14 % the open
+chat's bubbles, built and thrown away by the M9's list screen. Every
+arrival, pulled sent entry and read mark looked for its id by walking
+every message of every conversation. The board runs this code from
+flash at about sixty cycles an instruction: the bootloader said DIO at
+40 MHz, half the clock the vendor's image runs this flash at.
+
+**What changed.**
+
+- Each conversation carries a summary (`loquax::ui::summary`) that
+  `update` brings up to its messages after every event, reading only
+  the new tail: the newest times, the unread rows as prefix counts, the
+  avatar's appearance, the newest reports for the liveness, and an id
+  index. A reader checks the summary was made over exactly the messages
+  it sees and walks them as before otherwise. On the host the list's
+  scene at 4000 entries went from 1410 to 26 µs, and a page's take is
+  flat between 400 and 4000 entries.
+- The M9's list screen builds the list scene alone
+  (`UiModel::list_scene`), no chat.
+- The image is written and flashed for DIO at 80 MHz, as the vendor's
+  header on this unit's ZD25Q128 has it (`0x4f`).
+- The keyboard is read by a TIMG0 interrupt every 10 ms into a queue
+  (`kbraw::Presses`) the loop drains, so a press is never lost to a
+  long turn. A timer and not the second core: the poll is a 1 ms I2C
+  read every 10 ms, which an interrupt serves without a second stack,
+  a second heap user or a core to start.
+- A turn longer than 100 ms says `[LOOP] turn_ms= stage=` with each
+  stage's share.
+
+**Tests.** `a_turn_costs_the_same_at_4000_entries_as_at_400`
+(`loquax-m9/tests/turn.rs`, the full scene as its control),
+`the_summary_agrees_with_a_walk_over_every_message` and
+`a_summary_behind_its_messages_is_not_trusted`
+(`loquax/src/ui/summary.rs`), `a_press_inside_a_three_second_stall_is_kept`
+(`loquax-m9/src/kbraw.rs`, the read per turn as its control).
+
+**Open.** The open chat still builds every bubble of its conversation
+(about 0.9 ms for 339 messages on the host); a chat body of only its
+visible bubbles is the next step. The board numbers (restore, KEY to
+flush, page gaps, `overrun` during the store's erase, which runs with
+interrupts off) are the reviewer's window.
 
 ### Tracks on the M9 (1385, not built)
 
