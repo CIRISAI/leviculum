@@ -419,6 +419,23 @@ pub const TYPE_HOME_CODE: u8 = 0x19;
 /// rendezvous list of a few `host:port` entries.
 pub const HOME_CODE_MAX: usize = 512;
 
+/// Host → board (order 1533): press a key on the board's keyboard, a test
+/// hook for the bench walk. The payload is the controller's key code, one
+/// byte, and optionally how long the key is held, milliseconds, two bytes
+/// big-endian: a held key answers again at the controller's repeat
+/// interval for that long. The board enqueues the code where its keyboard
+/// interrupt enqueues a polled answer, so everything from the queue to the
+/// panel is the path a finger takes. Code 0 (an idle answer) is refused
+/// [`REFUSE_VALUE`]. Only an image built for the bench accepts it (the
+/// M9's `bench` feature, banner `[BENCH] inject=on`); every release image
+/// refuses it as an unknown type.
+pub const TYPE_KEY_INJECT: u8 = 0x1A;
+
+/// The longest hold a [`TYPE_KEY_INJECT`] asks for: ten seconds, longer
+/// than any walk holds a key and short enough that a garbled length does
+/// not leave a key down for a minute.
+pub const KEY_INJECT_HOLD_MAX_MS: u16 = 10_000;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -851,6 +868,50 @@ pub fn decode_frame_dump_payload(payload: &[u8]) -> Option<Option<u8>> {
 pub fn encode_home_code(code: &str) -> Option<Vec<u8>> {
     (!code.is_empty() && code.len() <= HOME_CODE_MAX)
         .then(|| encode_frame(TYPE_HOME_CODE, code.as_bytes()))
+}
+
+/// What one [`TYPE_KEY_INJECT`] asks (order 1533): the key code, and how
+/// long it is held; none is one press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyInject {
+    pub code: u8,
+    pub hold_ms: Option<u16>,
+}
+
+/// Encode a complete key-injection frame (order 1533).
+pub fn encode_key_inject(inject: KeyInject) -> Vec<u8> {
+    match inject.hold_ms {
+        None => encode_frame(TYPE_KEY_INJECT, &[inject.code]),
+        Some(ms) => {
+            let [hi, lo] = ms.to_be_bytes();
+            encode_frame(TYPE_KEY_INJECT, &[inject.code, hi, lo])
+        }
+    }
+}
+
+/// Decode a [`TYPE_KEY_INJECT`] payload: `None` (malformed) for any
+/// length but one or three bytes. Whether the code and the hold are
+/// values the board takes is [`KeyInject::valid`]'s to say.
+pub fn decode_key_inject_payload(payload: &[u8]) -> Option<KeyInject> {
+    match payload {
+        [code] => Some(KeyInject {
+            code: *code,
+            hold_ms: None,
+        }),
+        [code, hi, lo] => Some(KeyInject {
+            code: *code,
+            hold_ms: Some(u16::from_be_bytes([*hi, *lo])),
+        }),
+        _ => None,
+    }
+}
+
+impl KeyInject {
+    /// A key code that is a key (not 0, the idle answer) and a hold of at
+    /// most [`KEY_INJECT_HOLD_MAX_MS`].
+    pub fn valid(&self) -> bool {
+        self.code != 0 && self.hold_ms.is_none_or(|ms| ms <= KEY_INJECT_HOLD_MAX_MS)
+    }
 }
 
 /// Decode a [`TYPE_HOME_CODE`] payload: the code's text, `None`
@@ -4624,6 +4685,56 @@ mod tests {
             classify_control_frame(&frame, ACCEPTED),
             ControlAction::Refuse {
                 refused_type: TYPE_HOME_CODE,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
+    /// 1533: a press and a hold round-trip; one byte, three bytes, nothing
+    /// else; code 0 and a hold over the cap are no values; and no board
+    /// that lists its types here takes it (only the M9's bench image does).
+    #[test]
+    fn a_key_injection_round_trips_and_no_other_board_takes_it() {
+        let press = KeyInject {
+            code: 0xb7,
+            hold_ms: None,
+        };
+        let hold = KeyInject {
+            code: 0xb5,
+            hold_ms: Some(500),
+        };
+        assert_eq!(
+            encode_key_inject(press),
+            [0xA4, 0xA5, TYPE_KEY_INJECT, 0, 1, 0xb7]
+        );
+        assert_eq!(
+            encode_key_inject(hold),
+            [0xA4, 0xA5, TYPE_KEY_INJECT, 0, 3, 0xb5, 0x01, 0xF4]
+        );
+        for inject in [press, hold] {
+            let frame = encode_key_inject(inject);
+            let decoded = decode_frame(&frame).expect("an envelope");
+            assert_eq!(decoded.frame_type, TYPE_KEY_INJECT);
+            assert_eq!(decode_key_inject_payload(decoded.payload), Some(inject));
+            assert!(inject.valid());
+        }
+        assert_eq!(decode_key_inject_payload(&[]), None);
+        assert_eq!(decode_key_inject_payload(&[1, 2]), None);
+        assert_eq!(decode_key_inject_payload(&[1, 2, 3, 4]), None);
+        let idle = KeyInject {
+            code: 0,
+            hold_ms: None,
+        };
+        assert!(!idle.valid(), "an idle answer is no key");
+        let long = KeyInject {
+            code: 0xb5,
+            hold_ms: Some(KEY_INJECT_HOLD_MAX_MS + 1),
+        };
+        assert!(!long.valid());
+        assert_eq!(
+            classify_control_frame(&encode_key_inject(press), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_KEY_INJECT,
                 reason: REFUSE_UNKNOWN_TYPE,
             }
         );
