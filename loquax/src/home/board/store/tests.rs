@@ -23,7 +23,7 @@ fn entry(seq: u64, len: usize) -> Entry {
 
 fn reopen(flash: &mut MemFlash, tag: [u8; 8]) -> (Store, Restored, Vec<Entry>) {
     let mut got = Vec::new();
-    let (store, restored) = Store::open(flash, tag, |e| got.push(e)).expect("open");
+    let (store, restored, _asks) = Store::open(flash, tag, |e| got.push(e)).expect("open");
     (store, restored, got)
 }
 
@@ -174,4 +174,101 @@ fn erased_zero_and_noise_open_empty() {
 #[test]
 fn the_crc_is_crc32() {
     assert_eq!(crc32_parts(b"1234", b"56789"), 0xCBF4_3926);
+}
+
+/// The idle-time erase (1493): with the ring's next sector pre-erased,
+/// a page that rolls into it erases nothing on the page path, the counts
+/// agree with a boot's, and the oldest sector's entries are paid at the
+/// pre-erase, not later.
+#[test]
+fn a_pre_erased_sector_costs_the_page_path_no_erase() {
+    // One entry fills one sector to 8 spare bytes: 4023 payload + 17
+    // entry head + 8 frame + the 16-byte cursor mark = 4064 of the 4072
+    // a sector has after its header, and 8 is under a frame's worth, so
+    // every append opens exactly one sector.
+    let full = 4023;
+    let mut flash = MemFlash::new(4);
+    let (mut store, ..) = reopen(&mut flash, TAG);
+    for seq in 1..=4u64 {
+        store
+            .append(&mut flash, &[entry(seq, full)], seq)
+            .expect("append");
+    }
+    assert_eq!((store.used(), flash.erases), (4, 4));
+    // The quiet moment: one call erases ahead, the second finds it done.
+    assert!(store.pre_erase(&mut flash).expect("pre-erase"));
+    assert!(!store.pre_erase(&mut flash).expect("again"));
+    assert_eq!(
+        (store.entries(), flash.erases),
+        (3, 5),
+        "the erased sector's entries are paid at the pre-erase"
+    );
+    // The page that rolls into the pre-erased sector: writes, no erase.
+    let done = store
+        .append(&mut flash, &[entry(5, full)], 5)
+        .expect("page");
+    assert_eq!((done.erased, flash.erases), (0, 5));
+    let (reopened, restored, _) = reopen(&mut flash, TAG);
+    assert_eq!(restored.torn, 0);
+    assert_eq!(reopened.cursor(), 5);
+    assert_eq!(reopened.entries(), store.entries());
+    assert_eq!(reopened.used(), store.used());
+}
+
+/// A fresh store: pre-erase finds erased flash, costs no erase, and never
+/// touches the open tail sector.
+#[test]
+fn pre_erase_leaves_erased_flash_and_the_tail_alone() {
+    let mut flash = MemFlash::new(4);
+    let (mut store, ..) = reopen(&mut flash, TAG);
+    assert!(!store.pre_erase(&mut flash).expect("erased already"));
+    assert_eq!(flash.erases, 0);
+    store.append(&mut flash, &[entry(1, 50)], 1).expect("page");
+    // The next sector is erased flash; the tail holds frames and stays.
+    assert!(!store.pre_erase(&mut flash).expect("next is erased"));
+    let (_, restored, got) = reopen(&mut flash, TAG);
+    assert_eq!((restored.torn, got.len()), (0, 1));
+}
+
+/// Asks kept with the pages (1493): queued asks come back at boot oldest
+/// first, a done one does not, and entries around them still read.
+#[test]
+fn asks_come_back_at_boot_unless_done() {
+    let mut flash = MemFlash::new(8);
+    let (mut store, ..) = reopen(&mut flash, TAG);
+    store.append(&mut flash, &[entry(1, 100)], 1).expect("page");
+    store
+        .keep_ask(&mut flash, &[0xA1; 16], 2, b"mark-bytes")
+        .expect("ask one");
+    store
+        .keep_ask(&mut flash, &[0xB2; 16], 1, &vec![7u8; 5000])
+        .expect("ask two, split across sectors");
+    store.append(&mut flash, &[entry(2, 100)], 2).expect("page");
+    store.ask_done(&mut flash, &[0xA1; 16]).expect("done one");
+    let mut got = Vec::new();
+    let (store, restored, asks) = Store::open(&mut flash, TAG, |e| got.push(e)).expect("open");
+    assert_eq!(restored.torn, 0);
+    assert_eq!(got.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(store.entries(), 2, "asks and dones are no entries");
+    assert_eq!(asks.len(), 1, "the done ask stays done");
+    assert_eq!((asks[0].id, asks[0].tag), ([0xB2; 16], 1));
+    assert_eq!(asks[0].request, vec![7u8; 5000]);
+}
+
+/// A power loss inside an ask's write: the boot queues it again or not at
+/// all, and never hands back half a request.
+#[test]
+fn a_cut_ask_is_whole_or_gone() {
+    let mut flash = MemFlash::new(8);
+    let (mut store, ..) = reopen(&mut flash, TAG);
+    store.append(&mut flash, &[entry(1, 100)], 1).expect("page");
+    flash.cut_at = Some(flash.writes + 1);
+    let cut = store.keep_ask(&mut flash, &[0xC3; 16], 1, &vec![9u8; 600]);
+    assert_eq!(cut, Err(MemError::Cut));
+    flash.cut_at = None;
+    let mut got = Vec::new();
+    let (_, restored, asks) = Store::open(&mut flash, TAG, |e| got.push(e.seq)).expect("open");
+    assert_eq!(restored.torn, 1);
+    assert_eq!(got, [1], "the entry before the cut still reads");
+    assert!(asks.is_empty(), "half an ask is no ask");
 }

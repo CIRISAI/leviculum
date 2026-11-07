@@ -1385,3 +1385,64 @@ fn the_cursor_follows_the_store_both_ways() {
         assert_eq!(record.cursor, after, "{cursor} {stored}");
     }
 }
+
+/// Every queued verb survives the store round trip (1493): its tag and
+/// wire bytes come back as the same verb; a join and a pull are never
+/// persisted; an unknown tag reads as nothing.
+#[test]
+fn a_persisted_ask_replays_as_the_verb_it_was() {
+    use crate::home::ask::GroupVerb;
+    use crate::home::wire::{GroupAddRequest, GroupDeleteRequest, GroupRequest, Mark, MarkFlag};
+    let submission = wire::Submission {
+        client_id: [1; 16],
+        destination: [2; 16],
+        title: Vec::new(),
+        content: b"hallo".to_vec(),
+        fields: Vec::new(),
+    };
+    let verbs = [
+        Verb::Send(submission.clone()),
+        Verb::Mark(Mark {
+            flag: MarkFlag::Seen { at: 123 },
+            ids: std::vec![[7; 32], [8; 32]],
+        }),
+        Verb::Group(GroupVerb::Create(GroupRequest {
+            client_id: [3; 16],
+            name: "Band".into(),
+            members: std::vec![([4; 16], "Anna".into())],
+        })),
+        Verb::Group(GroupVerb::Add(GroupAddRequest {
+            client_id: [5; 16],
+            group: [6; 16],
+            members: std::vec![([7; 16], "Ben".into())],
+        })),
+        Verb::Group(GroupVerb::Delete(GroupDeleteRequest {
+            client_id: [8; 16],
+            group: [9; 16],
+        })),
+    ];
+    for verb in &verbs {
+        let (tag, bytes) = ask_bytes(verb).expect("persistable");
+        let back = ask_verb(tag, &bytes).expect("replays");
+        assert_eq!(&back, verb);
+    }
+    // A group state message goes as a send and comes back one.
+    let state = Verb::Group(GroupVerb::State(submission.clone()));
+    let (tag, bytes) = ask_bytes(&state).expect("persistable");
+    assert_eq!(ask_verb(tag, &bytes), Some(Verb::Send(submission)));
+    assert_eq!(
+        ask_bytes(&Verb::Join {
+            token: [0; 16],
+            name: "M9".into()
+        }),
+        None
+    );
+    assert_eq!(
+        ask_bytes(&Verb::Pull {
+            cursor: 0,
+            page_bytes: None
+        }),
+        None
+    );
+    assert_eq!(ask_verb(99, b"whatever"), None);
+}

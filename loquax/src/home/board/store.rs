@@ -24,7 +24,8 @@
 //!
 //! ```text
 //!      0    2  the payload's length, little end first
-//!      2    1  flags: 1 an entry's first part, 2 its last, 4 a cursor mark
+//!      2    1  flags: 1 an entry's first part, 2 its last, 4 a cursor mark,
+//!             8 a pending ask, 16 an ask that ended (1493)
 //!      3    1  zero
 //!      4    4  CRC-32 over bytes 0..4 and the payload
 //!      8    n  the payload, zero padded to a multiple of four
@@ -35,6 +36,15 @@
 //! the next sector. A cursor mark is the newest sequence of a page (8):
 //! a page whose entries the fold kept none of still moves the store's
 //! end, so the cursor does not pull it again.
+//!
+//! An ask frame (1493) is a request the board owes its home — a send, a
+//! mark, a group's verb — kept when it is queued so a power cycle loses
+//! none: its id (16), the verb's tag (1) and the request's wire bytes,
+//! split across sectors as an entry is. A done frame is the id (16) of an
+//! ask that ended. At boot the asks without a done are handed back
+//! oldest first ([`PendingAsk`]), and the board queues them again; every
+//! request carries a client id or marks idempotently, so one that was
+//! answered while its done was lost is asked again without harm.
 //!
 //! A power loss leaves at most a frame that does not check: the scan
 //! stops at it, the sector is closed, and the next page opens a fresh
@@ -60,6 +70,12 @@ const VERSION: u8 = 1;
 const FIRST: u8 = 1;
 const LAST: u8 = 2;
 const MARK: u8 = 4;
+/// A pending ask (1493): a request the board owes its home.
+const ASK: u8 = 8;
+/// An ask that ended: its id, so the boot does not queue it again.
+const DONE: u8 = 16;
+/// The flags that say a frame is no entry part.
+const SPECIAL: u8 = MARK | ASK | DONE;
 /// An entry's fixed fields before its packed bytes.
 const ENTRY_HEAD: usize = 17;
 /// Below this much room a sector is closed rather than split into: a part
@@ -105,6 +121,18 @@ pub struct Appended {
     pub erased: u32,
 }
 
+/// An ask restored at boot (1493): queued before the power went, no done
+/// frame behind it. The board queues it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAsk {
+    /// The id its done frame will carry.
+    pub id: [u8; 16],
+    /// The verb's tag, as the board gave it ([`Store::keep_ask`]).
+    pub tag: u8,
+    /// The request's wire bytes.
+    pub request: Vec<u8>,
+}
+
 /// The log: where it ends, how far it reaches, and where the next frame
 /// goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +152,10 @@ pub struct Store {
     used: u32,
     /// Sectors erased since boot.
     erases: u64,
+    /// The ring's next sector, when it is known erased (1493): the
+    /// idle-time job ([`Store::pre_erase`]) erased it, or found it so, and
+    /// the page path writes into it without holding the line for an erase.
+    ready: Option<u32>,
 }
 
 /// The tag of the home whose LXMF address is `address`.
@@ -135,12 +167,14 @@ pub fn tag(address: &[u8; 16]) -> [u8; 8] {
 
 impl Store {
     /// Open the store of the home tagged `tag` on `dev`, and hand every
-    /// entry it holds to `each`, oldest first.
+    /// entry it holds to `each`, oldest first. The third of the answer is
+    /// the asks still owed the home (1493): kept when they were queued,
+    /// no done frame behind them, oldest first.
     pub fn open<S: Sectors>(
         dev: &mut S,
         tag: [u8; 8],
         mut each: impl FnMut(Entry),
-    ) -> Result<(Self, Restored), S::Error> {
+    ) -> Result<(Self, Restored, Vec<PendingAsk>), S::Error> {
         let count = dev.count();
         let mut store = Self {
             tag,
@@ -151,8 +185,11 @@ impl Store {
             entries: 0,
             used: 0,
             erases: 0,
+            ready: None,
         };
         let mut restored = Restored::default();
+        let mut asks: Vec<PendingAsk> = Vec::new();
+        let mut done: Vec<[u8; 16]> = Vec::new();
         let mut ours: Vec<(u32, u32)> = Vec::new();
         let mut head = [0u8; HEADER];
         for index in 0..count {
@@ -171,7 +208,7 @@ impl Store {
         ours.sort_unstable();
         store.used = ours.len() as u32;
         let mut buf = vec![0u8; SECTOR];
-        let mut part: Option<Vec<u8>> = None;
+        let mut part: Option<(Vec<u8>, bool)> = None;
         let mut previous: Option<u32> = None;
         for &(seq, index) in &ours {
             // A sector missing between two: an entry cannot run across it.
@@ -212,15 +249,35 @@ impl Store {
                     }
                     continue;
                 }
+                if flags & DONE != 0 {
+                    if let Ok(id) = <[u8; 16]>::try_from(payload) {
+                        done.push(id);
+                    }
+                    continue;
+                }
+                let is_ask = flags & ASK != 0;
                 let mut whole = match (flags & FIRST != 0, part.take()) {
                     (true, _) => Vec::new(),
-                    (false, Some(started)) => started,
-                    // A part whose start went with an older sector.
-                    (false, None) => continue,
+                    (false, Some((started, started_ask))) if started_ask == is_ask => started,
+                    // A part whose start went with an older sector, or
+                    // whose start was another kind.
+                    (false, _) => continue,
                 };
                 whole.extend_from_slice(payload);
                 if flags & LAST == 0 {
-                    part = Some(whole);
+                    part = Some((whole, is_ask));
+                    continue;
+                }
+                if is_ask {
+                    if whole.len() >= 17 {
+                        let mut id = [0u8; 16];
+                        id.copy_from_slice(&whole[..16]);
+                        asks.push(PendingAsk {
+                            id,
+                            tag: whole[16],
+                            request: whole[17..].to_vec(),
+                        });
+                    }
                     continue;
                 }
                 if let Some(entry) = decode(&whole) {
@@ -234,7 +291,8 @@ impl Store {
                 store.tail = Some((index, at));
             }
         }
-        Ok((store, restored))
+        asks.retain(|ask| !done.contains(&ask.id));
+        Ok((store, restored, asks))
     }
 
     /// The newest sequence the store holds: where its cursor stands.
@@ -271,15 +329,57 @@ impl Store {
         entries: &[Entry],
         last: u64,
     ) -> Result<Appended, S::Error> {
+        let mut mark = [0u8; 8];
+        mark.copy_from_slice(&last.max(self.cursor).to_le_bytes());
+        let mut items: Vec<(Vec<u8>, u8)> = entries.iter().map(|e| (encode(e), 0)).collect();
+        items.push((mark.to_vec(), MARK));
+        let done = self.put(dev, &items)?;
+        self.entries += done.entries;
+        self.cursor = self.cursor.max(last);
+        Ok(done)
+    }
+
+    /// Keep an ask the board owes its home (1493): `request`'s wire bytes
+    /// under the verb's `tag`, so a reboot queues it again until
+    /// [`Store::ask_done`] writes `id` behind it.
+    pub fn keep_ask<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        id: &[u8; 16],
+        tag: u8,
+        request: &[u8],
+    ) -> Result<Appended, S::Error> {
+        let mut bytes = Vec::with_capacity(17 + request.len());
+        bytes.extend_from_slice(id);
+        bytes.push(tag);
+        bytes.extend_from_slice(request);
+        self.put(dev, &[(bytes, ASK)])
+    }
+
+    /// The ask under `id` ended: taken by the home, or refused for good.
+    /// The next boot does not queue it again.
+    pub fn ask_done<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        id: &[u8; 16],
+    ) -> Result<Appended, S::Error> {
+        self.put(dev, &[(id.to_vec(), DONE)])
+    }
+
+    /// Write `items` as frames, each under its base flags: 0 an entry,
+    /// [`MARK`], [`ASK`], [`DONE`]. Entries and asks split across sectors;
+    /// a mark and a done never do.
+    fn put<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        items: &[(Vec<u8>, u8)],
+    ) -> Result<Appended, S::Error> {
         let mut done = Appended::default();
         // The bytes owed the current sector from `start` on.
         let mut pending: Vec<u8> = Vec::new();
         let mut start = 0;
-        let mut mark = [0u8; 8];
-        mark.copy_from_slice(&last.max(self.cursor).to_le_bytes());
-        let mut items: Vec<(Vec<u8>, bool)> = entries.iter().map(|e| (encode(e), false)).collect();
-        items.push((mark.to_vec(), true));
-        for (bytes, is_mark) in &items {
+        for (bytes, base) in items {
+            let whole_only = *base & (MARK | DONE) != 0;
             let mut rest: &[u8] = bytes;
             let mut first = true;
             while first || !rest.is_empty() {
@@ -287,9 +387,10 @@ impl Store {
                     Some((_, at)) => (SECTOR - at - pending.len()).saturating_sub(FRAME),
                     None => 0,
                 };
-                // A mark is never split; nor is a part made smaller than
-                // is worth a header when the entry has more than that.
-                if room < LEAST_PART.min(rest.len().max(1)) || (*is_mark && room < rest.len()) {
+                // A mark and a done are never split; nor is a part made
+                // smaller than is worth a header when the item has more
+                // than that.
+                if room < LEAST_PART.min(rest.len().max(1)) || (whole_only && room < rest.len()) {
                     self.flush(dev, &mut pending, start, &mut done)?;
                     self.next_sector(dev, &mut done)?;
                     start = self.tail.map_or(HEADER, |(_, at)| at);
@@ -299,7 +400,7 @@ impl Store {
                     start = self.tail.map_or(HEADER, |(_, at)| at);
                 }
                 let take = rest.len().min(room);
-                let mut flags = if *is_mark { MARK } else { 0 };
+                let mut flags = *base;
                 if first {
                     flags |= FIRST;
                 }
@@ -314,15 +415,50 @@ impl Store {
                 pending.resize(pending.len() + pad4(take) - take, 0);
                 rest = &rest[take..];
                 first = false;
-                if flags & LAST != 0 && !*is_mark {
+                if flags & LAST != 0 && *base == 0 {
                     done.entries += 1;
                 }
             }
         }
         self.flush(dev, &mut pending, start, &mut done)?;
-        self.entries += done.entries;
-        self.cursor = self.cursor.max(last);
         Ok(done)
+    }
+
+    /// Erase the ring's next sector while the line is quiet (1493): the
+    /// page path then writes into erased flash and never holds the
+    /// interrupts for an erase (esp-storage runs every flash op inside a
+    /// critical section, and an erase of tens of milliseconds overflows
+    /// the 128-byte UART FIFO, 11 ms at 115200). At most one erase per
+    /// call; whether one was made. A call that finds the sector already
+    /// erased, or already known so, costs one read.
+    pub fn pre_erase<S: Sectors>(&mut self, dev: &mut S) -> Result<bool, S::Error> {
+        let index = match self.newest {
+            Some((index, _)) => (index + 1) % self.count,
+            None => 0,
+        };
+        // The open tail is never erased under its own frames.
+        if self.ready == Some(index) || self.tail.is_some_and(|(tail, _)| tail == index) {
+            return Ok(false);
+        }
+        let mut buf = vec![0u8; SECTOR];
+        dev.read(index, 0, &mut buf)?;
+        if buf.iter().all(|&b| b == 0xFF) {
+            self.ready = Some(index);
+            return Ok(false);
+        }
+        // What the ring takes back, counted before the erase, as
+        // `next_sector` counts it.
+        let mut head = [0u8; HEADER];
+        head.copy_from_slice(&buf[..HEADER]);
+        if header(&head).is_some_and(|(_, theirs)| theirs == self.tag) {
+            let lost = count_entries(dev, index)?;
+            self.entries = self.entries.saturating_sub(lost);
+            self.used = self.used.saturating_sub(1);
+        }
+        dev.erase(index)?;
+        self.erases += 1;
+        self.ready = Some(index);
+        Ok(true)
     }
 
     /// Write what is owed the tail sector from `start`, and move the tail.
@@ -360,19 +496,29 @@ impl Store {
             Some((index, seq)) => ((index + 1) % self.count, seq.wrapping_add(1)),
             None => (0, 1),
         };
-        // What the ring takes back: the sector's entries, when they were
-        // this home's.
-        let mut head = [0u8; HEADER];
-        dev.read(index, 0, &mut head)?;
-        if header(&head).is_some_and(|(_, theirs)| theirs == self.tag) {
-            let lost = count_entries(dev, index)?;
-            self.entries = self.entries.saturating_sub(lost);
-            self.used = self.used.saturating_sub(1);
+        // Pre-erased in a quiet moment (1493): the page path skips the
+        // erase and only writes.
+        let ready = self.ready == Some(index);
+        if ready {
+            self.ready = None;
+        }
+        if !ready {
+            // What the ring takes back: the sector's entries, when they
+            // were this home's.
+            let mut head = [0u8; HEADER];
+            dev.read(index, 0, &mut head)?;
+            if header(&head).is_some_and(|(_, theirs)| theirs == self.tag) {
+                let lost = count_entries(dev, index)?;
+                self.entries = self.entries.saturating_sub(lost);
+                self.used = self.used.saturating_sub(1);
+            }
         }
         self.tail = None;
-        dev.erase(index)?;
-        self.erases += 1;
-        done.erased += 1;
+        if !ready {
+            dev.erase(index)?;
+            self.erases += 1;
+            done.erased += 1;
+        }
         self.newest = Some((index, seq));
         let mut head = [0u8; HEADER];
         head[..4].copy_from_slice(MAGIC);
@@ -419,7 +565,7 @@ fn count_entries<S: Sectors>(dev: &mut S, index: u32) -> Result<u64, S::Error> {
         if at + FRAME + len > SECTOR {
             break;
         }
-        if frame[2] & MARK == 0 && frame[2] & FIRST != 0 {
+        if frame[2] & SPECIAL == 0 && frame[2] & FIRST != 0 {
             n += 1;
         }
         at += FRAME + pad4(len);

@@ -803,6 +803,51 @@ impl core::fmt::Display for Agreement {
     }
 }
 
+/// The tags an ask is persisted under in the board's message store
+/// (1493, [`store::Store::keep_ask`]). The payload is the request's wire
+/// bytes, which the home's own readers parse back ([`ask_verb`]), so the
+/// store needs no codec of its own.
+pub const ASK_SEND: u8 = 1;
+pub const ASK_MARK: u8 = 2;
+pub const ASK_GROUP: u8 = 3;
+pub const ASK_GROUP_ADD: u8 = 4;
+pub const ASK_GROUP_DELETE: u8 = 5;
+
+/// A verb as the store keeps it (1493): its tag and its request's wire
+/// bytes. `None` for a join and a pull, which are never queued: the
+/// record owes the join, and the session asks pulls on its own.
+pub fn ask_bytes(verb: &ask::Verb) -> Option<(u8, alloc::vec::Vec<u8>)> {
+    use super::ask::{GroupVerb, Verb};
+    Some(match verb {
+        Verb::Send(submission) => (ASK_SEND, wire::send_request(submission)),
+        Verb::Mark(mark) => (ASK_MARK, wire::mark_request(mark)),
+        Verb::Group(GroupVerb::Create(group)) => (ASK_GROUP, wire::group_request(group)),
+        Verb::Group(GroupVerb::Add(add)) => (ASK_GROUP_ADD, wire::group_add_request(add)),
+        Verb::Group(GroupVerb::Delete(delete)) => {
+            (ASK_GROUP_DELETE, wire::group_delete_request(delete))
+        }
+        // A group state message is a send on the wire and comes back one.
+        Verb::Group(GroupVerb::State(state)) => (ASK_SEND, wire::send_request(state)),
+        Verb::Join { .. } | Verb::Pull { .. } => return None,
+    })
+}
+
+/// The verb a kept ask replays as at boot (1493). `None` for a tag or
+/// bytes this build cannot read: said in the log, never asked blindly.
+pub fn ask_verb(tag: u8, request: &[u8]) -> Option<ask::Verb> {
+    use super::ask::{GroupVerb, Verb};
+    Some(match tag {
+        ASK_SEND => Verb::Send(wire::read_send_request(request).ok()?),
+        ASK_MARK => Verb::Mark(wire::read_mark(request).ok()?),
+        ASK_GROUP => Verb::Group(GroupVerb::Create(wire::read_group_request(request).ok()?)),
+        ASK_GROUP_ADD => Verb::Group(GroupVerb::Add(wire::read_group_add_request(request).ok()?)),
+        ASK_GROUP_DELETE => Verb::Group(GroupVerb::Delete(
+            wire::read_group_delete_request(request).ok()?,
+        )),
+        _ => return None,
+    })
+}
+
 /// What one archive entry is for the board's model (1415), the board's
 /// form of `client::take_in` without an engine: a message the home took
 /// in for `address` (the home's LXMF address, which the board shows as
