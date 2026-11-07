@@ -235,6 +235,7 @@ skip  loquax           send_cli                   # spawns the loquax binary
 skip  loquax           stamp_timing               # tokio runtime around the stamp solver
 skip  loquax           tui_snapshot               # spawns loquax tui against an in-process daemon over sockets
 skip  loquax           scene_golden               # a golden of the scene built from the ugly store; subject is the code; loquax-tui
+skip  loquax           operation_counts           # the core and the terminal pass counted over the real fixture against their bars (1489); subject is the code; loquax-tui
 skip  loquax           mailbox_receipts           # read receipts through the mailbox, in process with signed LXMF; subject is the code; loquax-tui
 skip  loquax           device_receipts            # the ticks across writer, recipient and mailbox, in process with signed LXMF; subject is the code; loquax-tui
 skip  loquax           relay_group                # a relay bot's copies to Loquax members, in process with signed LXMF; subject is the code; loquax-tui
@@ -250,6 +251,7 @@ skip  loquax-android   glyph                      # Glyph.java against the core'
 skip  loquax-android   home_reach                 # phone and mailbox through in-process relays over loopback TCP sockets (1196); subject is the code
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   m9_scene_census            # counts the M9 screens' scene heap with a global allocator (1343); subject is the code
+skip  loquax-android   operation_counts           # a phone session over the real fixture, a key in compose counted against its bar (1489); subject is the code, starts a node
 skip  loquax-android   m9_fixture_census          # counts the M9 image's fixture screens (the group's since 1366) and the client session's pull against the census budgets with a global allocator (1361, 1363); subject is the code
 skip  loquax-android   m9_client                  # the M9's no_std client against in-process mailboxes and a transport over loopback TCP, through a counting proxy (1363), and the group verbs from the board's keys (1366); subject is the code
 skip  loquax-android   m9_board_client            # the M9's core-node executor against an in-process mailbox and transport node over loopback TCP, the line written as the board writes its UART (1414); subject is the code
@@ -270,6 +272,7 @@ skip  loquax-m9        map                        # the M9's map screen, its key
 skip  loquax-m9        home                       # the M9 as a device of its home: the top bar's word, the pairing screen, pulled pages folded into the chats and a typed line become a send (1415); subject is the code
 skip  loquax-m9        splash                     # the M9's power-on splash drawn against its PNG golden and the backlight order checked on a recording panel (1485); subject is the code
 skip  loquax-m9        turn                       # a list draw and a page take at 4000 entries held to their cost at 400, the full scene as control (1463); subject is the code, and it times
+skip  loquax-m9        operation_counts           # a key down the M9 list counted over the real fixture against its bar (1489); subject is the code
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer
