@@ -83,6 +83,28 @@ assets = [
 changelog = "../target/deb-changelog/loquax"
 maintainer-scripts = "../packaging/loquax/"
 
+# amd64 (1469, #474): the base's files and the same program built with
+# `-C target-cpu=x86-64-v3`, which plain `loquax` hands itself over to on a
+# CPU that runs it (loquax/src/cpu.rs). A variant rather than a step after
+# cargo-deb, so the file is in the package's md5sums and its list like every
+# other; arm64 keeps the base, NEON is its baseline. scripts/build-deb.sh
+# builds the second binary into its own target directory, pinned under this
+# repository's target/ as the manual pages are, because an asset path is
+# read relative to this manifest. Named explicitly, as the terminal variant
+# is, since cargo-deb would call it loquax-amd64.
+[package.metadata.deb.variants.amd64]
+name = "loquax"
+assets = [
+    ["target/release/loquax", "usr/bin/", "755"],
+    ["../target/x86-64-v3/x86_64-unknown-linux-gnu/release/loquax", "usr/lib/loquax/loquax-v3", "755"],
+    ["../target/man/loquax.1", "usr/share/man/man1/loquax.1", "644"],
+    ["../packaging/loquax/loquax.desktop", "usr/share/applications/loquax.desktop", "644"],
+    ["../packaging/loquax/loquax.png", "usr/share/icons/hicolor/256x256/apps/loquax.png", "644"],
+    ["README.md", "usr/share/doc/loquax/README.md", "644"],
+    ["../packaging/lintian/loquax", "usr/share/lintian/overrides/loquax", "644"],
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/loquax/THIRD-PARTY-NOTICES", "644"],
+]
+
 # armhf (1342): the musl-static build with the terminal alone, as before;
 # no desktop runs there. Named explicitly, since cargo-deb 3.7 would call it
 # loquax-terminal; only one of the two is built per architecture, so the

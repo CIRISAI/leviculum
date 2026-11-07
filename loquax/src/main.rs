@@ -22,6 +22,7 @@
 
 #[cfg(any(feature = "tui", feature = "gui"))]
 mod browsing;
+mod cpu;
 #[cfg(any(feature = "tui", feature = "gui"))]
 mod desktop;
 mod front;
@@ -69,10 +70,25 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// the send budget before it is called stuck.
 const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
 
+/// `--version` names the v3 build (1469), so a person, a test and
+/// scripts/verify-deb-packaging.sh can tell which of the two answered.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+macro_rules! cpu_suffix {
+    () => {
+        " (x86-64-v3)"
+    };
+}
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+macro_rules! cpu_suffix {
+    () => {
+        ""
+    };
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "loquax",
-    version = env!("LEVICULUM_VERSION"),
+    version = concat!(env!("LEVICULUM_VERSION"), cpu_suffix!()),
     about = "the Leviculum messenger; with no arguments it opens the window, or the terminal view \
              where there is no display",
     long_about = "the Leviculum messenger; with no arguments it opens the window, or the terminal view \
@@ -918,8 +934,16 @@ fn gui_args(args: &Args) -> GuiArgs {
     }
 }
 
+/// The starter first (1469): on an x86-64-v3 CPU the packaged baseline
+/// build hands the process to the v3 build before a thread or a runtime
+/// exists ([`cpu`]); everything else is [`messenger`].
+fn main() -> ExitCode {
+    cpu::start();
+    messenger()
+}
+
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn messenger() -> ExitCode {
     let (mut args, ask) = parse_args();
     VERBOSE.store(args.verbose, std::sync::atomic::Ordering::Relaxed);
     // Once, before any subcommand resolves the state directory: a first

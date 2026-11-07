@@ -2815,6 +2815,23 @@ window-bench BASE="" ROUNDS="3":
     done
     bash scripts/window-bench.sh compare
 
+# 1469, #474: the amd64 package's two loquax builds measured against each
+# other, as window-bench measures two commits: this tree's bench as BASE,
+# and the same built with -C target-cpu=x86-64-v3 (build-deb.sh's v3 target
+# directory) as this tree; the verdict rules are window-bench's, so a v3 row
+# slower than the baseline is a REGRESSION. The table lands in
+# target/window-bench/table.md. A measuring tool, never in `guards`.
+[doc('Measure the window frames of the baseline and the x86-64-v3 build (#474)')]
+window-bench-v3 ROUNDS="3":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'bash scripts/window-bench.sh clean' EXIT
+    bash scripts/window-bench.sh prepare-v3
+    for i in $(seq 1 {{ROUNDS}}); do
+        bash scripts/window-bench.sh round "$i"
+    done
+    bash scripts/window-bench.sh compare
+
 # 1470: the window bench's verdicts (regression, noise, load SKIP, too few
 # rounds, the exes' bytes) on synthetic rounds, each with its positive
 # control. ~0.1 s, no build.

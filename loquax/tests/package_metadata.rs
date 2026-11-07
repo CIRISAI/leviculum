@@ -71,3 +71,34 @@ fn the_daemon_package_enables_and_starts_lnsd() {
         assert!(units.contains(&key), "{key} missing: {units:?}");
     }
 }
+
+/// The asset lines of one table: the `[source, dest, mode]` rows.
+fn assets<'a>(section: &[&'a str]) -> Vec<&'a str> {
+    section
+        .iter()
+        .copied()
+        .filter(|line| line.starts_with("[\""))
+        .collect()
+}
+
+/// 1469, #474: the amd64 package is the base's files and the v3 build
+/// beside them, which the starter (loquax/src/cpu.rs) finds at
+/// `/usr/lib/loquax/loquax-v3`; arm64 (the base) and armhf (terminal)
+/// carry no second binary.
+#[test]
+fn only_the_amd64_package_carries_the_v3_build() {
+    let own = manifest(".");
+    let base = assets(&section(&own, "[package.metadata.deb]"));
+    let amd64 = assets(&section(&own, "[package.metadata.deb.variants.amd64]"));
+    let terminal = assets(&section(&own, "[package.metadata.deb.variants.terminal]"));
+    let v3 = "[\"../target/x86-64-v3/x86_64-unknown-linux-gnu/release/loquax\", \"usr/lib/loquax/loquax-v3\", \"755\"],";
+    assert!(amd64.contains(&v3), "{amd64:?}");
+    let mut rest: Vec<&str> = amd64.iter().copied().filter(|a| *a != v3).collect();
+    let mut want = base.clone();
+    rest.sort_unstable();
+    want.sort_unstable();
+    assert_eq!(rest, want, "amd64 is the base's files and the v3 build");
+    for other in [&base, &terminal] {
+        assert!(!other.iter().any(|a| a.contains("loquax-v3")), "{other:?}");
+    }
+}

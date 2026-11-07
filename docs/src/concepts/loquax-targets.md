@@ -40,7 +40,13 @@ Window and terminal are one binary in the amd64 and arm64 packages
 X11 and Wayland by dlopen, which a musl-static binary cannot. Plain
 `loquax` picks by `WAYLAND_DISPLAY` and `DISPLAY` (`loquax/src/front.rs`);
 the armhf package and the static tarballs stay musl with the terminal
-alone.
+alone. The amd64 package carries the window's binary a second time,
+built for x86-64-v3, as `/usr/lib/loquax/loquax-v3`, and the baseline
+binary hands itself over to it on a CPU that runs it
+(`loquax/src/cpu.rs`, 1469): tiny-skia picks its wide paths at compile
+time, and 1442 measured the map's wheel 23 to 29 % faster with them.
+The static tarballs stay baseline; `LOQUAX_CPU=baseline` keeps the
+baseline binary on a v3 CPU.
 - **M9**: see "The M9" below; the firmware has no messenger screen yet.
 
 "CLI" means the target has it as a `loquax` subcommand
@@ -89,8 +95,8 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 34 | Add a contact by code, typed or pasted | `AddContact.java:92` | `loquax/src/gui.rs:1109` | `loquax/src/ui.rs:3926` |
 | 35 | A contact code from a QR | `loquax-android/src/lib.rs:328` (the scanner screen's decoder) | `loquax/src/gui.rs:1499`, `loquax/src/gui/chat.rs:469`, `loquax/src/scan.rs:39` (1341) | `loquax/src/ui.rs:3870` (palette `code in a picture`, a typed path), `loquax/src/shell.rs:397` (1371) |
 | 36 | My code | `ProfileActivity.java:289` | `loquax/src/gui.rs:1273`, `loquax/src/gui.rs:2478` (settings row, QR) (1371) | `loquax/src/ui.rs:3926` |
-| 37 | Home setup | `WelcomeActivity.java:528` | CLI (`loquax/src/main.rs:195`) | CLI (`loquax/src/main.rs:193`) |
-| 38 | Link a device | `ProfileActivity.java:392` | CLI (`loquax/src/main.rs:209`, `loquax/src/main.rs:225`) | CLI (`loquax/src/main.rs:207`, `loquax/src/main.rs:223`) |
+| 37 | Home setup | `WelcomeActivity.java:528` | CLI (`loquax/src/main.rs:211`) | CLI (`loquax/src/main.rs:209`) |
+| 38 | Link a device | `ProfileActivity.java:392` | CLI (`loquax/src/main.rs:225`, `loquax/src/main.rs:241`) | CLI (`loquax/src/main.rs:223`, `loquax/src/main.rs:239`) |
 | 39 | Move the phone | `ProfileActivity.java:440` | MISSING | MISSING |
 | 40 | Backup | `BackupActivity.java:130` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:551` | `loquax/src/gui.rs:1262`, `loquax/src/gui.rs:2572` (the shared overlay) (1371) | `loquax/src/ui.rs:3696` |

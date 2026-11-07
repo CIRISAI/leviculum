@@ -44,7 +44,7 @@ loquax -- LXMF messenger for Reticulum, in a window or the terminal
 
 ## WINDOW OR TERMINAL
 
-The packages for amd64 and arm64 carry both frontends in one binary; the armhf package and the static tarballs carry the terminal alone. **loquax** without a subcommand opens the window when a graphical session is there, `WAYLAND_DISPLAY` or `DISPLAY` set and not empty, and the binary carries the window. Without a session it starts the terminal view and says on standard error why: `no display, starting the terminal view; "loquax gui" to insist`. A binary without the window always starts the terminal view and says nothing about it. One of the terminal's own options (**--to**, **--ascii**, **--no-color**, **--color**, **--theme**, **--no-mouse**, **--graphics**, **--script**) asks for the terminal view too; **--pn**, **--instance**, **--config**, **--timeout** and **--sync-interval** go to whichever opens.
+The packages for amd64 and arm64 carry both frontends in one binary; the armhf package and the static tarballs carry the terminal alone. The amd64 package carries that binary twice: `/usr/bin/loquax` for every amd64 CPU, and `/usr/lib/loquax/loquax-v3` built for x86-64-v3 (AVX2, BMI2, FMA), whose window draws faster; on a CPU that runs it, `/usr/bin/loquax` hands itself over to it before anything else, and `loquax --version` ends in `(x86-64-v3)` (see **LOQUAX_CPU**). The static tarballs are the baseline build alone. **loquax** without a subcommand opens the window when a graphical session is there, `WAYLAND_DISPLAY` or `DISPLAY` set and not empty, and the binary carries the window. Without a session it starts the terminal view and says on standard error why: `no display, starting the terminal view; "loquax gui" to insist`. A binary without the window always starts the terminal view and says nothing about it. One of the terminal's own options (**--to**, **--ascii**, **--no-color**, **--color**, **--theme**, **--no-mouse**, **--graphics**, **--script**) asks for the terminal view too; **--pn**, **--instance**, **--config**, **--timeout** and **--sync-interval** go to whichever opens.
 
 **loquax tui** insists on the terminal view. **loquax gui** insists on the window and, with no display, says so in one sentence and exits 1. **loquax mailbox** and the script commands are the same in every case.
 
@@ -326,6 +326,9 @@ Without capture the terminal's own selection works as before: drag to select, an
 
 **LOQUAX_FPS**
 :   `1`: **gui** measures its frames, as **--fps**.
+
+**LOQUAX_CPU**
+:   `baseline`: the amd64 package runs `/usr/bin/loquax` itself on a CPU with x86-64-v3 instead of handing over to `/usr/lib/loquax/loquax-v3`, for a comparison of the two or a picture that differs between them. Unset or empty, the hand-over happens where the CPU runs it; any other value is named on stderr and ignored.
 
 **LOQUAX_RECORDER**
 :   The command line that records a voice message in **tui** and **gui**, split at white space: a program that writes raw mono 16-bit little-endian PCM at 16 kHz to its standard output until it is stopped, for instance `arecord -q -D hw:1 -t raw -f S16_LE -r 16000 -c 1`. Unset, the first found on `PATH` of `pw-record --rate 16000 --channels 1 --format s16 -`, `parecord --raw --format=s16le --rate=16000 --channels=1` and `arecord -q -t raw -f S16_LE -r 16000 -c 1`.
