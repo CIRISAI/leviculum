@@ -129,6 +129,7 @@ build_here() {
     out="$(cargo_target_dir "$ESP")/xtensa-esp32s3-none-elf/release" || return 1
     (cd "$ESP" && cargo build --release --locked --bin thinknode_m9) &&
         espflash save-image --chip esp32s3 --flash-size 16mb \
+            --flash-mode dio --flash-freq 80mhz \
             --partition-table "$ESP/partitions-m9.csv" \
             "$out/thinknode_m9" "$out/thinknode_m9.bin"
 }

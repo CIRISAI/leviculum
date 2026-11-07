@@ -2710,8 +2710,12 @@ flash-m9 port:
     export PATH="$HOME/.cargo/bin:$PATH"
     elf=leviculum-esp/target/xtensa-esp32s3-none-elf/release/thinknode_m9
     test -f "$elf" || { echo "no $elf: run just build-m9 first"; exit 1; }
+    # DIO at 80 MHz, as the vendor's image on this flash (ZD25Q128) has it
+    # in its header: espflash's default is 40 MHz, and the M9 runs its code
+    # from flash through a 32 KB cache, so every miss took twice as long
+    # (1463; build-m9-image.sh writes the same into the image).
     espflash flash --chip esp32s3 --port {{port}} --baud 230400 \
-        --non-interactive --flash-size 16mb \
+        --non-interactive --flash-size 16mb --flash-mode dio --flash-freq 80mhz \
         --partition-table leviculum-esp/partitions-m9.csv "$elf"
 
 # The M9 image is the same bytes from any clone of the same commit (1458,
