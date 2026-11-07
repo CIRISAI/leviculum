@@ -1098,8 +1098,9 @@ async fn wake_run(wake: bool) -> Woken {
             }
             match (archived, woken) {
                 (Some(_), Some(_)) => break,
-                // The wait the client grants a wake: 2 s past the archive.
-                (Some(at), None) if at.elapsed() > Duration::from_secs(2) => break,
+                // The wait for a wake past the archive: the 2 s the
+                // client grants it, and room for a loaded host (1489).
+                (Some(at), None) if at.elapsed() > WAKE_WAIT => break,
                 _ => tokio::time::sleep(Duration::from_millis(10)).await,
             }
         }
@@ -1297,12 +1298,23 @@ async fn strangers_names_wake_nobody_and_a_conversation_peers_rename_rides_the_n
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 
+/// How long [`wake_run`] waits for a wake past the archive: the 2 s the
+/// client grants, and room for a loaded host, whose lateness is no wake
+/// lost (1489).
+const WAKE_WAIT: Duration = Duration::from_secs(10);
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_watching_client_hears_new_mail_within_two_seconds_and_the_old_way_still_fetches_it() {
+    // The host's load over the run (1473): the 2 s are judged only on a
+    // quiet one (review 2026-11-07 finding 14, 1489); the wake must come
+    // on any.
+    let host = loquax::host_load::HostLoad::start();
     let woken = wake_run(true).await;
-    let latency = woken.latency.expect("a wake within 2 s of the archive");
+    let latency = woken.latency.expect("a wake after the archive");
     eprintln!("WAKE latency_ms={}", latency.as_millis());
-    assert!(latency <= Duration::from_secs(2), "{latency:?}");
+    if host.measured("the wake's latency") {
+        assert!(latency <= Duration::from_secs(2), "{latency:?}");
+    }
 
     // Positive control: the push off, the same wait runs out.
     let control = wake_run(false).await;

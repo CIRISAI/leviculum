@@ -2071,6 +2071,9 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_terminal_sends_one_receipt_six_seconds_after_the_focus_came() {
+    // The host's load over the run (1473, 1489): the receipt's lateness
+    // is judged only on a quiet one.
+    let host = loquax::host_load::HostLoad::start();
     let messages = |_: [u8; 16]| {
         let mark = leviculum_lxmf::lev::Lev::mark().fields().to_vec();
         vec![
@@ -2101,9 +2104,14 @@ async fn the_terminal_sends_one_receipt_six_seconds_after_the_focus_came() {
     assert_eq!(focus.len(), 1, "{log}");
     assert_eq!(sent.len(), 1, "one receipt for the visit\n{log}");
     let took = sent[0] - focus[0];
-    // Seen one second after the focus, sent five after that; the script
-    // pumps every 20 ms, a loaded host somewhat later.
-    assert!((6_000..7_000).contains(&took), "{took} ms\n{log}");
+    // Seen one second after the focus, sent five after that: never
+    // sooner. The script pumps every 20 ms; how much later a loaded host
+    // makes it is the host's, so that bar counts only on a quiet one
+    // (finding 14 of the 2026-11-07 review, 1489).
+    assert!(took >= 6_000, "{took} ms\n{log}");
+    if host.measured("the receipt's lateness") {
+        assert!(took < 7_000, "{took} ms\n{log}");
+    }
     let line = log
         .lines()
         .find(|line| line.contains("RECEIPT send"))
@@ -3060,6 +3068,8 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_fetch_leaves_its_end_in_the_log() {
+    // The host's load over the run (1473, 1489).
+    let host = loquax::host_load::HostLoad::start();
     let daemon = daemon("tui-fail", |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     std::fs::write(
@@ -3125,7 +3135,13 @@ async fn a_failed_fetch_leaves_its_end_in_the_log() {
         .next()
         .and_then(|ms| ms.trim().parse().ok())
         .unwrap_or_else(|| panic!("no elapsed_ms: {done}"));
-    assert!((2_000..7_000).contains(&elapsed), "{done}");
+    // The fetch's own timeout is 2 s: never sooner. How much later a
+    // loaded host ends it is the host's, so that bar counts only on a
+    // quiet one (1489).
+    assert!(elapsed >= 2_000, "{done}");
+    if host.measured("the failed fetch's end") {
+        assert!(elapsed < 7_000, "{done}");
+    }
 }
 
 /// A sender loquax has never heard (leviculum 1079): it attaches and
