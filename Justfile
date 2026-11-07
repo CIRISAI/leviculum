@@ -2613,7 +2613,10 @@ m9-render-no-std:
 # (`loquax/tests/mailbox_setup.rs`, 1266) is the terminal build's command;
 # it spawns the binary over a temporary home, no daemon. The ticks' cells
 # (`loquax/tests/device_receipts.rs`, 1462) need `history`; in-process. So
-# do the relay's cells (`loquax/tests/relay_group.rs`, 1482).
+# do the relay's cells (`loquax/tests/relay_group.rs`, 1482). The bars of
+# "only what is visible" and "O(1) per event" over the real fixture
+# (`loquax/tests/operation_counts.rs`, 1489) need `history` for the
+# store's restart; counted, in-process, 4 s.
 # The forge runs this recipe and has no reference submodule, so the home node
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
@@ -2621,7 +2624,7 @@ m9-render-no-std:
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh loquax/device_receipts loquax/relay_group -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts --test relay_group
+    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh loquax/device_receipts loquax/relay_group loquax/operation_counts -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts --test relay_group --test operation_counts
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile

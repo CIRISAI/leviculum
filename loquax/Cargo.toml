@@ -445,6 +445,12 @@ required-features = ["history"]
 name = "scene_golden"
 required-features = ["history"]
 
+# The bars of "only what is visible" and "O(1) per event" over the real
+# fixture (1489): the store's restart reads need the store.
+[[test]]
+name = "operation_counts"
+required-features = ["history"]
+
 # 1234: read receipts through the mailbox, over its store and its answers.
 [[test]]
 name = "mailbox_receipts"
