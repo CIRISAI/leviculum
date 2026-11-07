@@ -41,11 +41,14 @@
 //! - [`splash`]: the logo from power-on until the UI's first frame, and
 //!   the order that lights the backlight only over a written panel (1485).
 //! - [`census`]: what a screen costs where it is drawn, and its budget.
+//! - [`bench`]: a message that arrives with no network, for the bench
+//!   image's walks (1540).
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod bench;
 pub mod census;
 pub mod chat;
 pub mod dump;
