@@ -477,6 +477,62 @@ impl Fnv {
     }
 }
 
+/// A conversation's place in the list, total over its parts: pinned
+/// first, the newest write first, then the activity, the index last so a
+/// re-placed mover lands exactly where the stable full sort puts it among
+/// equals.
+type OrderKey = (
+    core::cmp::Reverse<bool>,
+    core::cmp::Reverse<Option<i64>>,
+    core::cmp::Reverse<u64>,
+    usize,
+);
+
+/// The list's order as the last fold left it (1490): what
+/// [`UiModel::order`] answers from, what [`UiModel::note_changes`]
+/// maintains. Its truth is checked, never assumed: a read recomputes the
+/// cheap keys and compares ([`OrderCache::current`]), so a model changed
+/// outside [`update`] gets a fresh sort, never a stale list.
+#[derive(Clone, Debug)]
+struct OrderCache {
+    show_blocked: bool,
+    show_archived: bool,
+    look_rev: u64,
+    /// By conversation index: its key while the list shows it.
+    keys: Vec<Option<OrderKey>>,
+    /// The listed conversations, sorted by their keys.
+    order: Vec<usize>,
+}
+
+impl OrderCache {
+    fn fresh<B>(model: &UiModel<B>) -> Self {
+        let order = model.order_cold();
+        let mut keys: Vec<Option<OrderKey>> = vec![None; model.conversations.len()];
+        for &i in &order {
+            keys[i] = Some(model.order_key(i));
+        }
+        Self {
+            show_blocked: model.show_blocked,
+            show_archived: model.show_archived,
+            look_rev: model.look_rev,
+            keys,
+            order,
+        }
+    }
+
+    /// Whether the cache still describes `model`: the same conversations,
+    /// each listed as it would be and keyed as it would be. O(list), all
+    /// of it cheap reads ([`Conversation::last_written`] is O(1) while
+    /// the summary is fresh).
+    fn current<B>(&self, model: &UiModel<B>) -> bool {
+        self.keys.len() == model.conversations.len()
+            && self.show_blocked == model.show_blocked
+            && self.show_archived == model.show_archived
+            && (0..self.keys.len())
+                .all(|i| self.keys[i] == model.lists(i).then(|| model.order_key(i)))
+    }
+}
+
 /// A delivery state as one fingerprint word.
 fn delivery_word(state: Option<DeliveryState>) -> u64 {
     match state {
@@ -1101,6 +1157,14 @@ pub struct UiModel<B> {
     /// Bumped by every [`update`] (1490): a cache that outlives one fold
     /// keys on it, so two reads in the same turn share one build.
     pub revision: u64,
+    /// The list's order as the last [`update`] left it (1490):
+    /// [`UiModel::order`] reads it, [`UiModel::note_changes`] moves only
+    /// the conversations whose revision moved. `None` until the first
+    /// fold, and unused while one runs ([`UiModel::folding`]).
+    order_cache: Option<OrderCache>,
+    /// A fold is running: what it mutated is not yet noted, so caches
+    /// keyed by revisions stand aside until [`UiModel::note_changes`].
+    folding: bool,
     /// The fingerprint of the model-wide look the last [`update`] saw
     /// ([`UiModel::look_fingerprint`]), and how often it changed: part of
     /// every conversation-keyed cache's key, so a name heard, a day
@@ -1225,6 +1289,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             revision: 0,
             look_stamp: 0,
             look_rev: 0,
+            order_cache: None,
+            folding: false,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1540,7 +1606,8 @@ impl<B> UiModel<B> {
                 .filter(|peer| !pending.2.contains(*peer))
                 .copied(),
         );
-        for conversation in &mut self.conversations {
+        let mut bumped: Vec<usize> = Vec::new();
+        for (index, conversation) in self.conversations.iter_mut().enumerate() {
             let refreshed = conversation
                 .summary
                 .refresh(conversation.peer, &conversation.messages);
@@ -1549,6 +1616,7 @@ impl<B> UiModel<B> {
             {
                 conversation.stamp = Rev::at(stamp);
                 conversation.revision = Rev::at(conversation.revision.get().wrapping_add(1));
+                bumped.push(index);
             }
         }
         let look = self.look_fingerprint();
@@ -1556,6 +1624,9 @@ impl<B> UiModel<B> {
             self.look_stamp = look;
             self.look_rev = self.look_rev.wrapping_add(1);
         }
+        // The fold is noted: the caches may stand on it again.
+        self.folding = false;
+        self.refresh_order(&bumped);
     }
 
     /// How often the model-wide look changed (1490): the names, the
@@ -1600,21 +1671,94 @@ impl<B> UiModel<B> {
     /// once keeps its order), then by when it came here; those without one
     /// after, in the order they came. Only those the list shows
     /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
+    ///
+    /// The last fold's cache answers when it is current (1490): a sort is
+    /// paid only when something moved, and only for what moved. A model
+    /// changed outside [`update`], or read during a fold, sorts afresh.
     pub fn order(&self) -> Vec<usize> {
+        if !self.folding {
+            if let Some(cache) = self.order_cache.as_ref().filter(|c| c.current(self)) {
+                return cache.order.clone();
+            }
+        }
+        self.order_cold()
+    }
+
+    /// [`UiModel::order`] sorted afresh, the whole list counted.
+    fn order_cold(&self) -> Vec<usize> {
         let mut order: Vec<usize> = self.listed().collect();
         self.count(counters::Op::Sorts, 1);
         self.count(counters::Op::Sorted, order.len());
         // Each key once (1463): `last_written` is a walk when the summary
         // is behind.
-        order.sort_by_cached_key(|&i| {
-            let c = &self.conversations[i];
-            (
-                core::cmp::Reverse(c.pinned),
-                core::cmp::Reverse(c.last_written()),
-                core::cmp::Reverse(c.activity),
-            )
-        });
+        order.sort_by_cached_key(|&i| self.order_key(i));
         order
+    }
+
+    /// Conversation `i`'s place in the list, total over the keys: the
+    /// index last, so the incremental insert lands exactly where the
+    /// stable full sort puts a mover among equals.
+    fn order_key(&self, i: usize) -> OrderKey {
+        let c = &self.conversations[i];
+        (
+            core::cmp::Reverse(c.pinned),
+            core::cmp::Reverse(c.last_written()),
+            core::cmp::Reverse(c.activity),
+            i,
+        )
+    }
+
+    /// Whether conversation `i` is in the list [`UiModel::order`] shows.
+    fn lists(&self, i: usize) -> bool {
+        let c = &self.conversations[i];
+        self.shows(&c.peer) && (self.show_blocked || c.flags.archived == self.show_archived)
+    }
+
+    /// Bring the order cache up to this fold (1490), `bumped` naming the
+    /// conversations whose revision moved: their keys are recomputed and
+    /// only they are re-placed, so a pull's page costs the page, not the
+    /// list. Anything structural (another count of conversations, a view
+    /// switched, the look moved — a block lives in the look) rebuilds
+    /// whole, counted as one full sort.
+    fn refresh_order(&mut self, bumped: &[usize]) {
+        let keep = self.order_cache.take().filter(|cache| {
+            cache.keys.len() == self.conversations.len()
+                && cache.show_blocked == self.show_blocked
+                && cache.show_archived == self.show_archived
+                && cache.look_rev == self.look_rev
+        });
+        let mut cache = match keep {
+            Some(cache) => cache,
+            None => {
+                self.order_cache = Some(OrderCache::fresh(self));
+                return;
+            }
+        };
+        let mut moved = 0usize;
+        for &i in bumped {
+            let key = self.lists(i).then(|| self.order_key(i));
+            if cache.keys[i] == key {
+                continue;
+            }
+            if cache.keys[i].is_some() {
+                if let Some(at) = cache.order.iter().position(|&o| o == i) {
+                    cache.order.remove(at);
+                }
+            }
+            if let Some(key) = key {
+                let to = cache
+                    .order
+                    .partition_point(|&o| cache.keys[o].is_some_and(|k| k < key));
+                cache.order.insert(to, i);
+            }
+            cache.keys[i] = key;
+            moved += 1;
+        }
+        if moved > 0 {
+            self.count(counters::Op::Sorts, 1);
+            self.count(counters::Op::Sorted, moved);
+        }
+        self.order_cache = Some(cache);
     }
 
     /// The conversations the list shows, in no order: [`UiModel::order`]
@@ -2210,6 +2354,8 @@ pub enum UiEffect {
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     // Each event's work is counted on its own (1489).
     model.ops.reset();
+    // Until the fold is noted, revision-keyed caches stand aside (1490).
+    model.folding = true;
     // What the store is already owed, so this fold's own changes stand
     // out even while nothing drains them (1490).
     let pending = (

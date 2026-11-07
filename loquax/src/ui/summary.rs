@@ -350,6 +350,39 @@ mod tests {
         assert!(model.look_rev() > look, "the minute moved the look");
     }
 
+    /// 1490: the fold-maintained order is the full sort's, after every
+    /// arrival, after a pin, an archive and a block, and even when the
+    /// model was changed behind `update`'s back (the cache checks its
+    /// keys before it answers; a stale cache sorts afresh).
+    #[test]
+    fn the_cached_order_is_the_full_sorts() {
+        let mut model = UiModel::<Field>::new(&[]);
+        for n in 0..60 {
+            received(&mut model, n);
+            assert_eq!(model.order(), model.order_cold(), "after arrival {n}");
+        }
+        model.conversations[1].pinned = true;
+        update(&mut model, UiEvent::Tick);
+        assert_eq!(model.order(), model.order_cold(), "after the pin");
+        assert_eq!(model.order().first(), Some(&1), "the pinned leads");
+        model.conversations[2].flags.archived = true;
+        update(&mut model, UiEvent::Tick);
+        assert_eq!(model.order(), model.order_cold(), "after the archive");
+        assert_eq!(model.order().len(), 2, "the archived left the list");
+        let blocked = model.conversations[0].peer;
+        model.names.contacts.blocked.insert(blocked);
+        update(&mut model, UiEvent::Tick);
+        assert_eq!(model.order(), model.order_cold(), "after the block");
+        assert_eq!(model.order(), [1], "only the pinned remains");
+        // The positive control: a change update() never saw. The read
+        // checks the keys and sorts afresh instead of answering stale.
+        model.conversations[1].pinned = false;
+        model.names.contacts.blocked.remove(&blocked);
+        assert_eq!(model.order(), model.order_cold(), "behind update's back");
+        // Peer 1 heard arrival 58, peer 0 arrival 57: newest first.
+        assert_eq!(model.order(), [1, 0]);
+    }
+
     /// The positive control: a summary left behind its messages (an
     /// arrival `update` did not see) is not trusted, and the walk answers.
     #[test]
