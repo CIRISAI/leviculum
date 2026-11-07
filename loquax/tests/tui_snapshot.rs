@@ -2354,7 +2354,8 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         // zoom, the sender's pin selected; Esc brings the conversation back.
         let reported = frame(&frames, "from the report");
         assert!(reported.contains("● map"), "{reported}");
-        assert!(reported.contains("z15 ·"), "{reported}");
+        // No zoom number on screen (1447): the debug overlay alone has it.
+        assert!(!reported.contains("z15"), "{reported}");
         assert!(reported.contains("◉ them"), "{reported}");
         assert_eq!(frame(&frames, "report closed"), back);
         all.push_str(&format!("=== {graphics} ===\n{frames}"));
@@ -2462,15 +2463,21 @@ async fn the_map_drawing_cycles_through_the_text_techniques() {
         ("back to mosaic", "mosaic"),
     ] {
         let top = frame(&frames, label).lines().next().unwrap_or_default();
-        assert!(top.contains(&format!("{name} · z14")), "{label}: {top}");
+        assert!(top.contains(name), "{label}: {top}");
+        assert!(!top.contains("z14"), "no zoom number (1447): {top}");
     }
+    let named = |top: &str| {
+        ["octant", "blocks", "braille", "mosaic"]
+            .iter()
+            .any(|n| top.contains(n))
+    };
     let top = frame(&frames, "octant").lines().next().unwrap_or_default();
-    assert!(top.contains("─ z14 ·"), "named only after a change: {top}");
+    assert!(!named(top), "named only after a change: {top}");
     let top = frame(&frames, "the name gone")
         .lines()
         .next()
         .unwrap_or_default();
-    assert!(top.contains("─ z14 ·"), "{top}");
+    assert!(!named(top) && !top.contains("z14"), "{top}");
     // Every frame keeps the pins and the credit.
     for label in ["octant", "blocks", "braille-thin", "mosaic", "braille"] {
         let shown = frame(&frames, label);
@@ -2562,17 +2569,17 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     )
     .await;
     let before = frame(&frames, "before the load");
-    assert!(before.contains("· loading map"), "{before}");
+    assert!(before.contains("loading map"), "{before}");
     // No region holds the place yet: the radar meanwhile (1386), centred
     // on the one pin, which it says, at the fit's zoom the region keeps.
     assert!(
-        before.contains("radar on them") && before.contains("z15"),
+        before.contains("radar on them") && !before.contains("z15"),
         "the radar meanwhile\n{before}"
     );
     let after = frame(&frames, "after the load");
     assert!(
-        after.contains("z15 · 1 in view"),
-        "fitted to the region\n{after}"
+        !after.contains("z15") && !after.contains("in view"),
+        "no zoom number and no count (1447)\n{after}"
     );
     assert!(after.contains("© OpenStreetMap contributors"), "{after}");
     assert!(!after.contains("loading map"), "{after}");
@@ -2581,7 +2588,7 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     assert!(held.contains("the map here is loaded already"), "{held}");
     let loading = frame(&frames, "loading the area");
     assert!(
-        loading.contains("z9 · 1 in view · loading map"),
+        loading.contains("─ loading map") && !loading.contains("z9"),
         "{loading}"
     );
     let lines: Vec<&str> = log

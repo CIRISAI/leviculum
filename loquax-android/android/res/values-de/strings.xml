@@ -250,7 +250,6 @@
     <string name="location_off">Standort ist aus</string>
     <string name="location_finding">Suche deine Position…</string>
     <string name="location_none">Das Handy weiß noch nicht, wo du bist. Versuch es draußen noch einmal.</string>
-    <string name="map_empty">Noch niemand teilt eine Position mit dir</string>
     <string name="share_position">Meine Position teilen</string>
     <string name="card_share">Meine teilen</string>
     <string name="share_with">Deine Position teilen mit</string>

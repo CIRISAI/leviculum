@@ -934,6 +934,10 @@ pub struct UiModel<B> {
     /// in ([`strings::StrId`]): English unless the shell knows better, as
     /// the phone does.
     pub lang: strings::Lang,
+    /// The debug overlay (1447): the map's zoom and its count of pins in
+    /// view, which no user reads; `LOQUAX_FPS=1` turns it on with the
+    /// frame counter.
+    pub debug_overlay: bool,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -1047,6 +1051,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             browse: browse::Browse::default(),
             rooms: rooms::Rooms::default(),
             lang: strings::Lang::En,
+            debug_overlay: false,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -5838,17 +5843,21 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let (messages_title, messages_title_right) = match &map {
         Some(shown) => (
             format!("{MAP_TITLE}{card}"),
-            match &model.map_loading {
-                Some(word) => format!(
+            // No zoom number and no count on screen (1447, walk 1 finding
+            // 22): the debug overlay alone shows them.
+            match (&model.map_loading, model.debug_overlay) {
+                (Some(word), true) => format!(
                     "{named}z{} · {} in view · {word}",
                     shown.viewport.zoom(),
                     shown.pins.len()
                 ),
-                None => format!(
+                (None, true) => format!(
                     "{named}z{} · {} in view",
                     shown.viewport.zoom(),
                     shown.pins.len()
                 ),
+                (Some(word), false) => format!("{named}{word}"),
+                (None, false) => named.trim_end_matches(" · ").to_string(),
             },
         ),
         None => (messages_title, messages_title_right),
@@ -11829,8 +11838,8 @@ pub(crate) mod tests {
         offered(&mut model, 0);
         update(&mut model, key(KeyCode::Char('M')));
         assert!(
-            view(&model).messages_title_right.starts_with("z"),
-            "named at start"
+            view(&model).messages_title_right.is_empty(),
+            "named at start, and no zoom number (1447)"
         );
         assert_eq!(
             update(&mut model, key(KeyCode::Char('t'))),
@@ -11852,12 +11861,17 @@ pub(crate) mod tests {
             "on from the last wraps to the first"
         );
         let title = view(&model).messages_title_right;
+        assert_eq!(title, "braille");
+        // The debug overlay (LOQUAX_FPS=1) adds the zoom and the count.
+        model.debug_overlay = true;
+        let title = view(&model).messages_title_right;
         assert!(title.starts_with("braille · z"), "{title}");
+        model.debug_overlay = false;
         for _ in 0..MAP_NAMED_TICKS {
             update(&mut model, UiEvent::Tick);
         }
         let title = view(&model).messages_title_right;
-        assert!(title.starts_with("z"), "{title}");
+        assert!(title.is_empty(), "{title}");
         // A shell with one way has nothing to cycle.
         let mut plain = mapped();
         update(&mut plain, key(KeyCode::Char('M')));
@@ -12512,7 +12526,7 @@ pub(crate) mod tests {
         assert!((b.north - b.south - 1_078_000).abs() < 2_000, "{b:?}");
         update(&mut model, UiEvent::MapLoad(MapLoad::Started(want.clone())));
         assert!(
-            view(&model).messages_title_right.ends_with("· loading map"),
+            view(&model).messages_title_right.ends_with("loading map"),
             "{}",
             view(&model).messages_title_right
         );

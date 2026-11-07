@@ -157,8 +157,15 @@ pub fn lines<B: InputBuffer>(
     rows: usize,
 ) -> Vec<RLine> {
     let chrome = painted(look.tokens.chrome);
-    let zoom = model.map.as_ref().map_or(0, |s| s.zoom);
-    let title = format!(" {} z{zoom} ", Words::key(StrId::Map).resolve(look.lang));
+    // The zoom only under the debug overlay (1447, walk 1 finding 23).
+    let title = match (model.debug_overlay, model.map.as_ref()) {
+        (true, Some(state)) => format!(
+            " {} z{} ",
+            Words::key(StrId::Map).resolve(look.lang),
+            state.zoom
+        ),
+        _ => format!(" {} ", Words::key(StrId::Map).resolve(look.lang)),
+    };
     let credit = format!(
         "{} ",
         cut(attribution, cols.saturating_sub(fit_width(&title) + 1))

@@ -100,6 +100,8 @@ leviculum_ui::catalogue! {
     LastPosition = "last_position", "last position %1$s", "letzte Position %1$s";
     PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
     PositionMarker = "position_marker", "⌖", "⌖";
+    // The map with nobody else's position (1447): the window, the phone and the terminal.
+    MapEmpty = "map_empty", "Nobody shares a position with you yet", "Noch niemand teilt eine Position mit dir";
     NoPosition = "no_position", "No position from this person yet", "Noch keine Position von dieser Person";
     // A node the mesh shows on the map that is no contact (1302).
     NearbyCard = "nearby_card", "Nearby, not in your contacts", "In der Nähe, nicht in deinen Kontakten";

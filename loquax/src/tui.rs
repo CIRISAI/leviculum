@@ -121,6 +121,8 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         shell.model.tier = resolve_tier_from_env(options.no_color, options.color);
         shell.model.lang = loquax::engine::locale();
     }
+    // The zoom and the pins in view only under the debug overlay (1447).
+    shell.model.debug_overlay = std::env::var_os("LOQUAX_FPS").is_some_and(|v| v == "1");
     let outcome = match &options.script {
         Some(script) => {
             let frames = options

@@ -256,7 +256,6 @@
     <string name="location_off">Location is off</string>
     <string name="location_finding">Finding your position…</string>
     <string name="location_none">The phone does not know where you are yet. Try again outside.</string>
-    <string name="map_empty">Nobody shares a position with you yet</string>
     <string name="share_position">Share my position</string>
     <string name="card_share">Share mine</string>
     <string name="share_with">Share your position with</string>

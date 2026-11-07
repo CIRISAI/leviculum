@@ -2760,7 +2760,7 @@ impl App {
                 list.push(button)
             });
         let list: Element<'_, Message> = match self.seen.pins.is_empty() {
-            true => text("no positions yet").size(14).into(),
+            true => Space::new().into(),
             false => chat::soft(scrollable(list)),
         };
         let credit = self
@@ -2793,7 +2793,11 @@ impl App {
             .width(Length::Fill)
             .align_right(Length::Fill)
             .clip(true),
-            line(format!("  z{:.1}", self.view.zoom())),
+            // The zoom is a debug overlay's, with the frame counter (1447).
+            line(match leviculum_ui_iced::fps::enabled() {
+                true => format!("  z{:.1}", self.view.zoom()),
+                false => String::new(),
+            }),
             // The map's menu (1419): the time window, rarely needed, is
             // in it and not on the map.
             button(text(StrId::Menu.text(self.lang)).size(13))
@@ -2820,8 +2824,21 @@ impl App {
             true => self.map_menu(),
             false => Space::new().into(),
         };
+        // Nobody else's position (1447, walk 1 finding 18): one sentence
+        // in the middle of the map, which shows the own area where there
+        // is an own position and the theme's ground where there is none.
+        let empty: Element<'_, Message> = match self.seen.pins.iter().all(|p| p.own) {
+            true => container(
+                text(StrId::MapEmpty.text(self.lang))
+                    .size(16)
+                    .color(chat::colour(self.tokens().text_secondary)),
+            )
+            .center(Length::Fill)
+            .into(),
+            false => Space::new().into(),
+        };
         let map = container(
-            stack![picture, canvas, menu]
+            stack![picture, canvas, empty, menu]
                 .width(Length::Fill)
                 .height(Length::Fill),
         )

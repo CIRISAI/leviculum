@@ -25,7 +25,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: map ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
 │▌◎ position · live   ⌖  ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: next pin ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
 │▌◎ position · live   ⌖  ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
@@ -75,7 +75,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: dragged ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 2 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││    ⠐⢅⢀⠞⠁⣰⠗⠉⠙⢷⣄⡀ ⠈⠙⢦⣄               ⠙⠻⣶⣏            │
 │▌◎ position · live   ⌖  ││    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶<33333333…> · 3 h ago ●⢷⣦⣄        ⣰│
 │                        ││⠶⣤⣀⣴⠏ ⡴⠋         ⠉⠻⢦⣄  ⠈⠳⣦⣀        ⢠⡾⠁   ⠈⠙⠿⣦⣄   ⢀⣴⡟│
@@ -100,7 +100,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: outline ---
-┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z5 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││                                     ⡠⢄⠼⠁           │
 │▌◎ position · live   ⌖  ││                                     ⡇              │
 │                        ││                                     ⢣              │
@@ -175,7 +175,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 8: from the report ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││⠻⢷⣤⣀          ⢀⣼⠟⠁  ⢹⡟               ⠈⠛⢷⣦⣀       ⠈⠛⢶│
 │▌◎ position · live   ⌖  ││  ⠈⠛⠿⣦⣄⡀    ⢀⣴⡿⠃   ⣴⠏                   ⠈⠻⢷⣤⡀       │
 │                        ││     ⠈⠙⠻⢶⣤⡀⣠⣿⠋   ⢠⡾⠁                       ⠉⠻⢷⣤⡀    │
@@ -251,7 +251,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: map ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -276,7 +276,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: next pin ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -301,7 +301,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: dragged ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 2 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀<33333333…> · 3 h ago ●▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -326,7 +326,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: outline ---
-┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z4 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -401,7 +401,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 8: from the report ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────────────────────────────────┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
