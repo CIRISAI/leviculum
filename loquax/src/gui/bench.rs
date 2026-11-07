@@ -24,7 +24,7 @@ use super::tests::{long_chat, real_chat, real_chat_grown, seen_of, window_over_f
 use super::*;
 use iced::advanced::Layout;
 use leviculum_ui_iced::headless::{self, DrawnFrame, Program};
-use std::cell::Cell;
+use loquax::host_load::HostLoad;
 use std::sync::mpsc;
 
 /// The window sizes: the one the goldens use, Lew's three (2026-11-06,
@@ -718,73 +718,6 @@ const EDGE: u8 = 64;
 
 /// How many pixels of a frame may lie more than one step from the twin's.
 const EDGE_PIXELS: usize = 4;
-
-/// Whether the host was quiet enough over a measurement for a time to
-/// measure the window and not the host (1473): the 1-minute load average
-/// at its start within the window bench's bound (`scripts/window-bench.sh`:
-/// `WINDOW_BENCH_MAX_LOAD`, else a fifth of the CPUs), and the tasks
-/// running or waiting for a CPU, sampled whenever the drive pumps
-/// ([`Watched`]), never more than the drive itself and that bound. The
-/// load average trails a burst by a minute (the tests beside this one in
-/// the same run start together); the runnable count does not.
-pub(super) struct HostLoad {
-    load: Option<f64>,
-    bound: f64,
-    most: Cell<u32>,
-    unread: Cell<bool>,
-}
-
-impl HostLoad {
-    pub(super) fn start() -> Self {
-        let load = std::fs::read_to_string("/proc/loadavg")
-            .ok()
-            .and_then(|s| s.split_whitespace().next()?.parse().ok());
-        let bound = std::env::var("WINDOW_BENCH_MAX_LOAD")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| loquax::picture::cores() as f64 / 5.0);
-        let host = Self {
-            load,
-            bound,
-            most: Cell::new(0),
-            unread: Cell::new(false),
-        };
-        host.sample();
-        host
-    }
-
-    /// The tasks running or waiting for a CPU now, the drive's own one
-    /// among them (`/proc/loadavg`'s fourth field).
-    pub(super) fn sample(&self) {
-        let runnable = std::fs::read_to_string("/proc/loadavg").ok().and_then(|s| {
-            let field = s.split_whitespace().nth(3)?;
-            field.split('/').next()?.parse::<u32>().ok()
-        });
-        match runnable {
-            Some(n) => self.most.set(self.most.get().max(n)),
-            None => self.unread.set(true),
-        }
-    }
-
-    /// Whether the measurement counts; printed when it does not, so a
-    /// run says what it did not measure.
-    pub(super) fn measured(&self, what: &str) -> bool {
-        self.sample();
-        let quiet = !self.unread.get()
-            && self.load.is_some_and(|l| l <= self.bound)
-            && f64::from(self.most.get()) <= self.bound + 1.0;
-        if !quiet {
-            println!(
-                "NOT MEASURED: {what}: load {:?} against {:.1}, at most {} runnable{}",
-                self.load,
-                self.bound,
-                self.most.get(),
-                if self.unread.get() { ", unread" } else { "" }
-            );
-        }
-        quiet
-    }
-}
 
 /// A program driven with the host's load sampled at every pump.
 pub(super) struct Watched<'a, P> {

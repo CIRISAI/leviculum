@@ -2216,8 +2216,9 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
 /// 16 ms, as `ConversationsActivity.ask` does once per frame (1464: the
 /// Pixel spent 83.6 % of 44 s in that query, 79 to 100 ms a call while
 /// the pull ran). The list's longest block must stay under [`UI_BAR`], a
-/// few frames, so no tap is lost; the engine's under [`ENGINE_BAR`]. The
-/// history must arrive whole.
+/// few frames, so no tap is lost; the engine's under [`ENGINE_BAR`]; both
+/// only on a quiet host ([`loquax::host_load::HostLoad`], 1486), else the
+/// run prints `NOT MEASURED`. The history must arrive whole, always.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
     let _facade = facade_turn().await;
@@ -2259,8 +2260,11 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
 
         // The engine's thread with onResume's commands, every 50 ms, and
         // the UI thread with the list, once a frame, while the pull runs.
+        // The host's load over the pull (1486): both probes sample it.
+        let host = std::sync::Arc::new(loquax::host_load::HostLoad::start());
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let probing = std::sync::Arc::clone(&done);
+        let probe_host = std::sync::Arc::clone(&host);
         let probe = std::thread::spawn(move || {
             let close = schema::encode(&Request::Close);
             let front = schema::encode(&Request::Front { front: true });
@@ -2270,11 +2274,13 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
                 let _ = loquax_android::command(&close);
                 let _ = loquax_android::command(&front);
                 blocks.push(began.elapsed());
+                probe_host.sample();
                 std::thread::sleep(Duration::from_millis(50));
             }
             blocks
         });
         let looking = std::sync::Arc::clone(&done);
+        let look_host = std::sync::Arc::clone(&host);
         let look = std::thread::spawn(move || {
             let list = schema::encode(&schema::Query::Conversations { search: None });
             let mut blocks = Vec::new();
@@ -2284,6 +2290,7 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
                 let answer: schema::Conversations =
                     rmp_serde::from_slice(&loquax_android::query(&list)).expect("the list");
                 blocks.push(began.elapsed());
+                look_host.sample();
                 rows = rows.max(answer.conversations.len());
                 std::thread::sleep(Duration::from_millis(16));
             }
@@ -2347,6 +2354,14 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
         );
         loquax_android::stop();
         assert!(whole, "the history not whole in {BIG_PULL_SECS} s");
+        // The bars are waits on the session's lock, so wall clock: the
+        // waiting thread's own CPU time is near nothing however long the
+        // pump holds the lock, and would pass 1446's freeze too. A loaded
+        // host stretches the holder's turn instead (359 ms at load 17.5,
+        // 63 ms alone, 1486), so they count only on a quiet host.
+        if !host.measured("the first pull's blocks") {
+            return;
+        }
         assert!(
             longest_look < UI_BAR,
             "the list's query blocked the UI thread {} ms during the first pull (bar {} ms)",

@@ -84,6 +84,8 @@ pub mod fetch;
 pub mod file_save;
 pub mod home;
 #[cfg(feature = "std")]
+pub mod host_load;
+#[cfg(feature = "std")]
 pub mod identity;
 #[cfg(feature = "history")]
 pub mod import;
