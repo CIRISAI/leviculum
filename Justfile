@@ -2399,6 +2399,20 @@ site-check:
 site-unpack-docs-selftest:
     @bash scripts/test-site-unpack-docs.sh
 
+# 1515 (LV-1000): lnpnd's growth soak, the minimal test for "what keeps
+# growing". The release daemon on a store prefilled to `messages` (the field's
+# 300 000 by default, cached under the soak directory so a rerun skips the
+# fill), 14 in-process peers syncing with it, a PN_CENSUS every minute, and a
+# PN_GROWTH line per table at the end; red when a table still grows once the
+# store is full. 20 minutes by default, longer than a coder command may run:
+# a pass shortens it with `secs`, the reviewer runs the default. Never under
+# /tmp: the soak directory is the target dir's tmp unless LNPND_SOAK_DIR says
+# otherwise (lnpnd/tests/pn_growth_soak.rs).
+[doc('lnpnd growth soak: does a table grow once the store is full (20 min)')]
+pn-growth-soak secs="1200" messages="300000" peers="14":
+    LNPND_SOAK_SECS={{secs}} LNPND_SOAK_MESSAGES={{messages}} LNPND_SOAK_PEERS={{peers}} \
+        cargo test --release -p lnpnd --test pn_growth_soak -- --ignored --nocapture
+
 # The forge runner is a shared machine, and a test whose pass depends on the
 # host being fast is a red waiting for a slow day (672: lnpnd's stamp worker
 # against a ten second wall budget lost the first landing in three days). This

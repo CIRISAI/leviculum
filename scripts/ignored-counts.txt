@@ -230,3 +230,9 @@
 # in the same file, which runs in the suite. Run by hand with
 # LNPND_START_BENCH_STORE naming the fixture, after the bench above.
 1    -p lnpnd --test store_index_at_start
+# 0 -> 1 (2026-11-07, order 1515, LV-1000): pn_tables_stay_flat_once_the_store_is_full
+# is a 20-minute soak of the release daemon on a 300 000-message store with 14
+# peers, longer than any tier spends on one test; the census it reads is pinned
+# by sigusr1_census and census::tests, which run in the suite. Run it with
+# `just pn-growth-soak`.
+1    -p lnpnd --test pn_growth_soak
