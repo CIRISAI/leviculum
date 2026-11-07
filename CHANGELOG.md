@@ -62,6 +62,19 @@ git tag, not the version string. -->
 - `send_resource: transfer in progress` is logged with the link id
   (leviculum#98).
 
+### Consumer notes
+
+- `direct_link::Failure` gained `Glare`, `InterfaceLost`, `HeldTooLong` and
+  `PeerFellBack`; an exhaustive match must add them.
+- `REJECT_GLARE` and `REJECT_HOLDING` are new wire reasons. Older peers read
+  the first as a refusal and ignore the second. The Resource fix across a move
+  works between 0.34 peers only, so an older peer that already moved can still
+  wedge a large-MTU Resource: keep edge's guard while such peers remain.
+- A frame over the Channel limit now returns `SendError::TooLarge`, not
+  `LinkFailed`.
+- `WindowPolicy` gained `ByMedium`.
+- RUSTSEC-2026-0441 (`pin-utils` unmaintained, no fix) is ignored in `deny.toml`.
+
 ## [0.33.0+ciris.1] — CIRIS fork
 
 Steering, metering and live-media asks from CIRISEdge for the CIRIS mesh
