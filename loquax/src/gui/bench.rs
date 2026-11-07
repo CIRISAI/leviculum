@@ -56,6 +56,9 @@ pub(super) struct Window {
     done: mpsc::Receiver<Arc<Shown>>,
     /// A frame from the worker came since the last frame presented.
     fresh: std::cell::Cell<bool>,
+    /// How many times the loop drew, as [`Program::pump`] is told; what
+    /// [`paced`] steps its clock by.
+    pub(super) drawn: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 impl Window {
@@ -75,6 +78,7 @@ impl Window {
             jobs,
             done,
             fresh: std::cell::Cell::new(false),
+            drawn: std::rc::Rc::default(),
         }
     }
 
@@ -127,6 +131,9 @@ impl Program for Window {
     }
 
     fn pump(&self, drawn: bool) -> Vec<Message> {
+        if drawn {
+            self.drawn.set(self.drawn.get() + 1);
+        }
         let mut out: Vec<Message> = self.done.try_iter().map(Message::Painted).collect();
         if self
             .app
@@ -202,6 +209,53 @@ fn script(
         Some(timed[from..next].iter().map(|(_, e)| e.clone()).collect())
     }
 }
+
+/// How many turns of the loop with no frame drawn count as idle in
+/// [`paced`]: the loop sleeps 200 us a turn when it waits, so at least
+/// 100 ms of waiting, and a turn that builds a view is one turn however
+/// long the build takes.
+const IDLE_TURNS: u32 = 500;
+
+/// [`script`] on a clock that the window's frames move rather than the
+/// wall's (1472): each frame drawn moves it `step` on, and a stretch with
+/// no event in it is skipped, so a frame sees the gesture's events of one
+/// step whatever the machine's speed. A window that draws nothing for
+/// [`IDLE_TURNS`] turns moves it on too, so an event that changes nothing
+/// cannot stall the script.
+fn paced(
+    mut timed: Vec<(Duration, iced::Event)>,
+    drawn: std::rc::Rc<std::cell::Cell<usize>>,
+    step: Duration,
+) -> impl FnMut(Duration) -> Option<Vec<iced::Event>> {
+    timed.sort_by_key(|(t, _)| *t);
+    let mut next = 0;
+    let mut clock = Duration::ZERO;
+    let mut seen = drawn.get();
+    let mut idle = 0;
+    move |_| {
+        if next >= timed.len() {
+            return None;
+        }
+        let now = drawn.get();
+        idle += 1;
+        if now > seen || idle >= IDLE_TURNS {
+            seen = now;
+            idle = 0;
+            clock += step;
+            clock = clock.max(timed[next].0);
+        }
+        let from = next;
+        while next < timed.len() && timed[next].0 <= clock {
+            next += 1;
+        }
+        Some(timed[from..next].iter().map(|(_, e)| e.clone()).collect())
+    }
+}
+
+/// The step [`paced`] moves the clock by a frame in
+/// [`a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole`]: the chat
+/// wheel's notch interval, so a frame sees one notch.
+const PACE: Duration = Duration::from_millis(50);
 
 fn moved(p: Point) -> iced::Event {
     iced::Event::Mouse(mouse::Event::CursorMoved { position: p })
@@ -649,6 +703,13 @@ fn the_benchs_gestures_move_the_window() {
 /// comparison held nothing. At the small size in every build; the
 /// real-shaped chat and Lew's tall window where the build is optimised
 /// (its first view is slow unoptimised, as above).
+///
+/// The gestures run on [`paced`]'s clock, not the wall's (1472): a frame
+/// can only be a shift when the chat moved less than its pane since the
+/// last one, and on the wall's clock an unoptimised build under load
+/// drew the wheel's 40 notches in 2 frames, 20 notches past a 560-pixel
+/// pane, so nothing shifted and the control failed on the machine's
+/// speed, not on the renderer.
 /// How far a channel of an anti-aliased edge's pixel may lie from the
 /// twin's: a quarter of full coverage, one of the four rows tiny-skia
 /// samples a pixel's row in.
@@ -676,7 +737,7 @@ fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
         ] {
             let (app, events) = case.setup(w, h);
             let mut window = Window::new(app);
-            let mut script = script(events);
+            let mut script = paced(events, window.drawn.clone(), PACE);
             let run = headless::drive_twinned(&mut window, w, h, &mut script, SETTLE)
                 .expect("the software renderer");
             let what = format!(
