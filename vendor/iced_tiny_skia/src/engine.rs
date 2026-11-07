@@ -572,8 +572,7 @@ impl Engine {
                     return;
                 }
 
-                let clip_mask = (!physical_bounds.is_within(&_clip_bounds))
-                    .then(|| self.clip.mask(_clip_mask));
+                let clipped = !physical_bounds.is_within(&_clip_bounds);
 
                 let center = physical_bounds.center();
                 let radians = f32::from(image.rotation);
@@ -583,6 +582,23 @@ impl Engine {
                     center.x,
                     center.y,
                 );
+
+                // Leviculum's patch (1442): an opaque picture at its own
+                // size and a whole-pixel offset is copied, row by row.
+                let clip = clipped
+                    .then(|| self.clip.rect(_pixels.width(), _pixels.height()));
+                if self.raster_pipeline.blit(
+                    &image.handle,
+                    *bounds,
+                    image.opacity,
+                    _pixels,
+                    transform,
+                    clip,
+                ) {
+                    return;
+                }
+
+                let clip_mask = clipped.then(|| self.clip.mask(_clip_mask));
 
                 self.raster_pipeline.draw(
                     &image.handle,

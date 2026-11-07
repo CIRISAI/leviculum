@@ -78,6 +78,48 @@ impl Pipeline {
         );
     }
 
+    /// Leviculum's patch (1442): `handle` drawn as a row copy when that
+    /// is what `draw` would draw: the picture opaque, at full opacity,
+    /// at its own size and an identity transform, so tiny-skia's pattern
+    /// samples each pixel at itself and source-over keeps the source;
+    /// `clip` the clip's pixels when the draw is clipped (`Some(None)`
+    /// for a clip that covers none). Whether it drew.
+    pub fn blit(
+        &mut self,
+        handle: &raster::Handle,
+        bounds: Rectangle,
+        opacity: f32,
+        pixels: &mut tiny_skia::PixmapMut<'_>,
+        transform: tiny_skia::Transform,
+        clip: Option<Option<crate::fast::Px>>,
+    ) -> bool {
+        if opacity != 1.0 || !transform.is_identity() {
+            return false;
+        }
+        let mut cache = self.cache.borrow_mut();
+        let Ok((image, opaque)) = cache.allocate_opaque(handle) else {
+            return false;
+        };
+        if !opaque
+            || bounds.width / image.width() as f32 != 1.0
+            || bounds.height / image.height() as f32 != 1.0
+        {
+            return false;
+        }
+        match clip {
+            // Clipped by a clip that covers nothing: nothing to draw.
+            Some(None) => {}
+            clip => crate::fast::blit_opaque(
+                pixels,
+                image,
+                bounds.x as i32,
+                bounds.y as i32,
+                clip.flatten(),
+            ),
+        }
+        true
+    }
+
     pub fn trim_cache(&mut self) {
         self.cache.borrow_mut().trim();
     }
@@ -94,6 +136,14 @@ impl Cache {
         &mut self,
         handle: &raster::Handle,
     ) -> Result<tiny_skia::PixmapRef<'_>, raster::Error> {
+        self.allocate_opaque(handle).map(|(image, _)| image)
+    }
+
+    /// The picture, and whether every pixel of it is opaque (1442).
+    pub fn allocate_opaque(
+        &mut self,
+        handle: &raster::Handle,
+    ) -> Result<(tiny_skia::PixmapRef<'_>, bool), raster::Error> {
         let id = handle.id();
 
         if let hash_map::Entry::Vacant(entry) = self.entries.entry(id) {
@@ -110,21 +160,37 @@ impl Cache {
                 return Err(raster::Error::Empty);
             }
 
-            let mut buffer =
-                vec![0u32; image.width() as usize * image.height() as usize];
+            // Leviculum's patch (1442): an opaque picture only swaps red
+            // and blue, premultiplying by 255 keeps every channel; the
+            // conversion of a map frame was 17.5 % of its present. Two
+            // passes without a branch per pixel, which vectorise.
+            let raw = image.as_raw();
+            let opaque = raw
+                .chunks_exact(4)
+                .fold(true, |opaque, pixel| opaque & (pixel[3] == 255));
 
-            for (i, pixel) in image.pixels().enumerate() {
-                let [r, g, b, a] = pixel.0;
-
-                buffer[i] = bytemuck::cast(
-                    tiny_skia::ColorU8::from_rgba(b, g, r, a).premultiply(),
-                );
-            }
+            let buffer: Vec<u32> = if opaque {
+                raw.chunks_exact(4)
+                    .map(|p| u32::from_ne_bytes([p[2], p[1], p[0], 255]))
+                    .collect()
+            } else {
+                raw.chunks_exact(4)
+                    .map(|p| {
+                        bytemuck::cast(
+                            tiny_skia::ColorU8::from_rgba(
+                                p[2], p[1], p[0], p[3],
+                            )
+                            .premultiply(),
+                        )
+                    })
+                    .collect()
+            };
 
             let _ = entry.insert(Some(Entry {
                 width: image.width(),
                 height: image.height(),
                 pixels: buffer,
+                opaque,
             }));
         }
 
@@ -136,12 +202,15 @@ impl Cache {
             .unwrap()
             .as_ref()
             .map(|entry| {
-                tiny_skia::PixmapRef::from_bytes(
-                    bytemuck::cast_slice(&entry.pixels),
-                    entry.width,
-                    entry.height,
+                (
+                    tiny_skia::PixmapRef::from_bytes(
+                        bytemuck::cast_slice(&entry.pixels),
+                        entry.width,
+                        entry.height,
+                    )
+                    .expect("Build pixmap from image bytes"),
+                    entry.opaque,
                 )
-                .expect("Build pixmap from image bytes")
             })
             .expect("Image should be allocated"))
     }
@@ -157,4 +226,5 @@ struct Entry {
     width: u32,
     height: u32,
     pixels: Vec<u32>,
+    opaque: bool,
 }
