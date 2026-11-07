@@ -51,6 +51,7 @@
 //! sector. A sector whose header does not check is not read. Sectors of
 //! another home's tag are not shown and are erased in their turn.
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -133,6 +134,29 @@ pub struct PendingAsk {
     pub request: Vec<u8>,
 }
 
+/// The sectors an entry's frames lie in (1521): the sequence of the
+/// sector its first part is in and of the one its last part is in, the
+/// same for an entry that did not split. What the per-conversation index
+/// keeps, so a conversation's entries are read from its sectors alone.
+pub type Span = (u32, u32);
+
+/// Where a restore's time went (1521), in the units of the clock the
+/// caller handed [`Store::open_with`]: the flash reads, the CRC checks,
+/// the entries decoded, and the caller's own work per entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spent {
+    pub read: u64,
+    pub crc: u64,
+    pub decode: u64,
+    pub each: u64,
+}
+
+/// Where the log ends (1521): the newest sector's sequence and the offset
+/// after its last frame. A summary written with it is current exactly
+/// when the boot finds the log ending at the same place
+/// ([`Store::resume`]).
+pub type End = (u32, u32);
+
 /// The log: where it ends, how far it reaches, and where the next frame
 /// goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +180,14 @@ pub struct Store {
     /// idle-time job ([`Store::pre_erase`]) erased it, or found it so, and
     /// the page path writes into it without holding the line for an erase.
     ready: Option<u32>,
+    /// This home's sectors, by their sequence (1521): what a
+    /// conversation's index of sequences is read through.
+    seqs: BTreeMap<u32, u32>,
+    /// Where the log ends ([`End`]).
+    end: End,
+    /// Sectors opened since boot (1521): what a summary log counts its
+    /// snapshots by.
+    opened: u64,
 }
 
 /// The tag of the home whose LXMF address is `address`.
@@ -175,18 +207,28 @@ impl Store {
         tag: [u8; 8],
         mut each: impl FnMut(Entry),
     ) -> Result<(Self, Restored, Vec<PendingAsk>), S::Error> {
-        let count = dev.count();
-        let mut store = Self {
-            tag,
-            count,
-            newest: None,
-            tail: None,
-            cursor: 0,
-            entries: 0,
-            used: 0,
-            erases: 0,
-            ready: None,
+        let opened = Self::open_with(dev, tag, &|| 0, |entry, _| each(entry))?;
+        Ok((opened.0, opened.1, opened.2))
+    }
+
+    /// [`Store::open`], each entry handed with its [`Span`], and the time
+    /// the open spent by `clock` (1521): the flash reads, the CRCs, the
+    /// decode and the caller's `each`.
+    pub fn open_with<S: Sectors>(
+        dev: &mut S,
+        tag: [u8; 8],
+        clock: &dyn Fn() -> u64,
+        mut each: impl FnMut(Entry, Span),
+    ) -> Result<(Self, Restored, Vec<PendingAsk>, Spent), S::Error> {
+        let mut spent = Spent::default();
+        let mut t = clock();
+        let mut lap = |into: &mut u64| {
+            let now = clock();
+            *into += now.saturating_sub(t);
+            t = now;
         };
+        let count = dev.count();
+        let mut store = Self::empty(tag, count);
         let mut restored = Restored::default();
         let mut asks: Vec<PendingAsk> = Vec::new();
         let mut done: Vec<[u8; 16]> = Vec::new();
@@ -207,9 +249,14 @@ impl Store {
         }
         ours.sort_unstable();
         store.used = ours.len() as u32;
+        store.seqs = ours.iter().copied().collect();
+        if let Some((_, seq)) = store.newest {
+            store.end = (seq, 0);
+        }
         let mut buf = vec![0u8; SECTOR];
-        let mut part: Option<(Vec<u8>, bool)> = None;
+        let mut part: Option<(Vec<u8>, bool, u32)> = None;
         let mut previous: Option<u32> = None;
+        lap(&mut spent.read);
         for &(seq, index) in &ours {
             // A sector missing between two: an entry cannot run across it.
             if previous.is_some_and(|p| p.wrapping_add(1) != seq) {
@@ -217,6 +264,7 @@ impl Store {
             }
             previous = Some(seq);
             dev.read(index, 0, &mut buf)?;
+            lap(&mut spent.read);
             restored.sectors += 1;
             let mut at = HEADER;
             let mut open = false;
@@ -238,7 +286,9 @@ impl Store {
                 }
                 let payload = &buf[at + FRAME..end];
                 let sum = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-                if crc32_parts(&frame[..4], payload) != sum {
+                let checks = crc32_parts(&frame[..4], payload) == sum;
+                lap(&mut spent.crc);
+                if !checks {
                     restored.torn += 1;
                     break;
                 }
@@ -256,16 +306,18 @@ impl Store {
                     continue;
                 }
                 let is_ask = flags & ASK != 0;
-                let mut whole = match (flags & FIRST != 0, part.take()) {
-                    (true, _) => Vec::new(),
-                    (false, Some((started, started_ask))) if started_ask == is_ask => started,
+                let (mut whole, from) = match (flags & FIRST != 0, part.take()) {
+                    (true, _) => (Vec::new(), seq),
+                    (false, Some((started, started_ask, from))) if started_ask == is_ask => {
+                        (started, from)
+                    }
                     // A part whose start went with an older sector, or
                     // whose start was another kind.
                     (false, _) => continue,
                 };
                 whole.extend_from_slice(payload);
                 if flags & LAST == 0 {
-                    part = Some((whole, is_ask));
+                    part = Some((whole, is_ask, from));
                     continue;
                 }
                 if is_ask {
@@ -280,19 +332,196 @@ impl Store {
                     }
                     continue;
                 }
-                if let Some(entry) = decode(&whole) {
+                let decoded = decode(&whole);
+                lap(&mut spent.decode);
+                if let Some(entry) = decoded {
                     store.cursor = store.cursor.max(entry.seq);
                     store.entries += 1;
                     restored.entries += 1;
-                    each(entry);
+                    each(entry, (from, seq));
+                    lap(&mut spent.each);
                 }
             }
-            if open && store.newest == Some((index, seq)) {
-                store.tail = Some((index, at));
+            if store.newest == Some((index, seq)) {
+                store.end = (seq, at as u32);
+                if open {
+                    store.tail = Some((index, at));
+                }
             }
         }
         asks.retain(|ask| !done.contains(&ask.id));
-        Ok((store, restored, asks))
+        Ok((store, restored, asks, spent))
+    }
+
+    fn empty(tag: [u8; 8], count: u32) -> Self {
+        Self {
+            tag,
+            count,
+            newest: None,
+            tail: None,
+            cursor: 0,
+            entries: 0,
+            used: 0,
+            erases: 0,
+            ready: None,
+            seqs: BTreeMap::new(),
+            end: (0, 0),
+            opened: 0,
+        }
+    }
+
+    /// Open the log of the home tagged `tag` on `dev` without reading its
+    /// entries (1521): every sector's header and the newest sector, which
+    /// is where the log ends ([`Store::end`]). The cursor and the entry
+    /// count are the caller's to set ([`Store::resume_counts`]) from the
+    /// summary that said the same end; a caller whose summary says
+    /// another end opens with [`Store::open`] instead.
+    pub fn resume<S: Sectors>(dev: &mut S, tag: [u8; 8]) -> Result<Self, S::Error> {
+        let count = dev.count();
+        let mut store = Self::empty(tag, count);
+        let mut head = [0u8; HEADER];
+        for index in 0..count {
+            dev.read(index, 0, &mut head)?;
+            let Some((seq, theirs)) = header(&head) else {
+                continue;
+            };
+            if store.newest.is_none_or(|(_, newest)| seq > newest) {
+                store.newest = Some((index, seq));
+            }
+            if theirs == tag {
+                store.seqs.insert(seq, index);
+            }
+        }
+        store.used = store.seqs.len() as u32;
+        let Some((index, seq)) = store.newest else {
+            return Ok(store);
+        };
+        store.end = (seq, 0);
+        if store.seqs.get(&seq) != Some(&index) {
+            return Ok(store);
+        }
+        let mut buf = vec![0u8; SECTOR];
+        dev.read(index, 0, &mut buf)?;
+        let mut at = HEADER;
+        let mut open = false;
+        while at + FRAME <= SECTOR {
+            let frame = &buf[at..at + FRAME];
+            if frame.iter().all(|&b| b == 0xFF) {
+                open = buf[at..].iter().all(|&b| b == 0xFF);
+                break;
+            }
+            let len = usize::from(u16::from_le_bytes([frame[0], frame[1]]));
+            let end = at + FRAME + len;
+            if end > SECTOR || frame[3] != 0 {
+                break;
+            }
+            let sum = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+            if crc32_parts(&frame[..4], &buf[at + FRAME..end]) != sum {
+                break;
+            }
+            at = at + FRAME + pad4(len);
+        }
+        store.end = (seq, at as u32);
+        if open {
+            store.tail = Some((index, at));
+        }
+        Ok(store)
+    }
+
+    /// The cursor and the entry count a resumed log stands at, as the
+    /// summary written at its end said them.
+    pub fn resume_counts(&mut self, cursor: u64, entries: u64) {
+        self.cursor = cursor;
+        self.entries = entries;
+    }
+
+    /// Where the log ends ([`End`]).
+    pub fn end(&self) -> End {
+        self.end
+    }
+
+    /// Sectors opened since boot.
+    pub fn opened(&self) -> u64 {
+        self.opened
+    }
+
+    /// The oldest sequence of this home's sectors still in the log.
+    pub fn oldest_seq(&self) -> Option<u32> {
+        self.seqs.keys().next().copied()
+    }
+
+    /// Whether the sector of sequence `seq` is still in the log.
+    pub fn holds(&self, seq: u32) -> bool {
+        self.seqs.contains_key(&seq)
+    }
+
+    /// Read the entries that start in the sectors of `seqs`, ascending,
+    /// oldest first, each with its span (1521, a conversation's page):
+    /// an entry that runs on into the next sector is read whole when that
+    /// sector is the next of `seqs`. Sequences the ring took back are
+    /// skipped. Marks, asks and dones are no entries.
+    pub fn read_seqs<S: Sectors>(
+        &self,
+        dev: &mut S,
+        seqs: &[u32],
+        mut each: impl FnMut(Entry, Span),
+    ) -> Result<(), S::Error> {
+        let mut buf = vec![0u8; SECTOR];
+        let mut part: Option<(Vec<u8>, u32)> = None;
+        let mut previous: Option<u32> = None;
+        for &seq in seqs {
+            let Some(&index) = self.seqs.get(&seq) else {
+                part = None;
+                continue;
+            };
+            if previous.is_some_and(|p| p.wrapping_add(1) != seq) {
+                part = None;
+            }
+            previous = Some(seq);
+            dev.read(index, 0, &mut buf)?;
+            let mut head = [0u8; HEADER];
+            head.copy_from_slice(&buf[..HEADER]);
+            if header(&head) != Some((seq, self.tag)) {
+                part = None;
+                continue;
+            }
+            let mut at = HEADER;
+            while at + FRAME <= SECTOR {
+                let frame = &buf[at..at + FRAME];
+                if frame.iter().all(|&b| b == 0xFF) {
+                    break;
+                }
+                let len = usize::from(u16::from_le_bytes([frame[0], frame[1]]));
+                let flags = frame[2];
+                let end = at + FRAME + len;
+                if end > SECTOR || frame[3] != 0 {
+                    break;
+                }
+                let payload = &buf[at + FRAME..end];
+                let sum = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+                if crc32_parts(&frame[..4], payload) != sum {
+                    break;
+                }
+                at = at + FRAME + pad4(len);
+                if flags & SPECIAL != 0 {
+                    continue;
+                }
+                let (mut whole, from) = match (flags & FIRST != 0, part.take()) {
+                    (true, _) => (Vec::new(), seq),
+                    (false, Some(started)) => started,
+                    (false, None) => continue,
+                };
+                whole.extend_from_slice(payload);
+                if flags & LAST == 0 {
+                    part = Some((whole, from));
+                    continue;
+                }
+                if let Some(entry) = decode(&whole) {
+                    each(entry, (from, seq));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The newest sequence the store holds: where its cursor stands.
@@ -329,14 +558,27 @@ impl Store {
         entries: &[Entry],
         last: u64,
     ) -> Result<Appended, S::Error> {
+        self.append_spans(dev, entries, last).map(|(done, _)| done)
+    }
+
+    /// [`Store::append`], and each entry's [`Span`] in `entries`' order
+    /// (1521): what the per-conversation index takes in.
+    pub fn append_spans<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        entries: &[Entry],
+        last: u64,
+    ) -> Result<(Appended, Vec<Span>), S::Error> {
         let mut mark = [0u8; 8];
         mark.copy_from_slice(&last.max(self.cursor).to_le_bytes());
         let mut items: Vec<(Vec<u8>, u8)> = entries.iter().map(|e| (encode(e), 0)).collect();
         items.push((mark.to_vec(), MARK));
-        let done = self.put(dev, &items)?;
+        let mut spans = Vec::with_capacity(items.len());
+        let done = self.put_spans(dev, &items, &mut spans)?;
+        spans.truncate(entries.len());
         self.entries += done.entries;
         self.cursor = self.cursor.max(last);
-        Ok(done)
+        Ok((done, spans))
     }
 
     /// Keep an ask the board owes its home (1493): `request`'s wire bytes
@@ -374,7 +616,18 @@ impl Store {
         dev: &mut S,
         items: &[(Vec<u8>, u8)],
     ) -> Result<Appended, S::Error> {
+        self.put_spans(dev, items, &mut Vec::new())
+    }
+
+    /// [`Store::put`], each item's [`Span`] pushed onto `spans`.
+    fn put_spans<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        items: &[(Vec<u8>, u8)],
+        spans: &mut Vec<Span>,
+    ) -> Result<Appended, S::Error> {
         let mut done = Appended::default();
+        let here = |store: &Self| store.newest.map_or(0, |(_, seq)| seq);
         // The bytes owed the current sector from `start` on.
         let mut pending: Vec<u8> = Vec::new();
         let mut start = 0;
@@ -382,6 +635,7 @@ impl Store {
             let whole_only = *base & (MARK | DONE) != 0;
             let mut rest: &[u8] = bytes;
             let mut first = true;
+            let mut from = 0;
             while first || !rest.is_empty() {
                 let room = match self.tail {
                     Some((_, at)) => (SECTOR - at - pending.len()).saturating_sub(FRAME),
@@ -403,6 +657,7 @@ impl Store {
                 let mut flags = *base;
                 if first {
                     flags |= FIRST;
+                    from = here(self);
                 }
                 if take == rest.len() {
                     flags |= LAST;
@@ -417,6 +672,9 @@ impl Store {
                 first = false;
                 if flags & LAST != 0 && *base == 0 {
                     done.entries += 1;
+                }
+                if flags & LAST != 0 {
+                    spans.push((from, here(self)));
                 }
             }
         }
@@ -450,10 +708,13 @@ impl Store {
         // `next_sector` counts it.
         let mut head = [0u8; HEADER];
         head.copy_from_slice(&buf[..HEADER]);
-        if header(&head).is_some_and(|(_, theirs)| theirs == self.tag) {
-            let lost = count_entries(dev, index)?;
-            self.entries = self.entries.saturating_sub(lost);
-            self.used = self.used.saturating_sub(1);
+        if let Some((seq, theirs)) = header(&head) {
+            if theirs == self.tag {
+                let lost = count_entries(dev, index)?;
+                self.entries = self.entries.saturating_sub(lost);
+                self.used = self.used.saturating_sub(1);
+                self.seqs.remove(&seq);
+            }
         }
         dev.erase(index)?;
         self.erases += 1;
@@ -481,6 +742,9 @@ impl Store {
         self.tail = None;
         dev.write(index, start, pending)?;
         self.tail = Some((index, start + pending.len()));
+        if let Some((_, seq)) = self.newest {
+            self.end = (seq, (start + pending.len()) as u32);
+        }
         done.writes += 1;
         pending.clear();
         Ok(())
@@ -507,10 +771,13 @@ impl Store {
             // were this home's.
             let mut head = [0u8; HEADER];
             dev.read(index, 0, &mut head)?;
-            if header(&head).is_some_and(|(_, theirs)| theirs == self.tag) {
-                let lost = count_entries(dev, index)?;
-                self.entries = self.entries.saturating_sub(lost);
-                self.used = self.used.saturating_sub(1);
+            if let Some((old, theirs)) = header(&head) {
+                if theirs == self.tag {
+                    let lost = count_entries(dev, index)?;
+                    self.entries = self.entries.saturating_sub(lost);
+                    self.used = self.used.saturating_sub(1);
+                    self.seqs.remove(&old);
+                }
             }
         }
         self.tail = None;
@@ -527,8 +794,14 @@ impl Store {
         head[12..20].copy_from_slice(&self.tag);
         let sum = crc32_parts(&head[..20], &[]);
         head[20..24].copy_from_slice(&sum.to_le_bytes());
+        // The sector the ring took back by the pre-erase may have been
+        // this home's: its sequence goes with it.
+        self.seqs.retain(|_, &mut at| at != index);
         dev.write(index, 0, &head)?;
         self.used += 1;
+        self.seqs.insert(seq, index);
+        self.end = (seq, HEADER as u32);
+        self.opened += 1;
         self.tail = Some((index, HEADER));
         Ok(())
     }
