@@ -2775,43 +2775,30 @@ map-bench-baseline REGION:
 # again with the frame meter's overlay on (`+fps`). One WINDOW_BENCH line a size and
 # gesture. As map-bench: the bench of BASE (default: the commit that last
 # wrote loquax/tests/window_bench.baseline) built in a worktree under
-# target/, and this tree's, in turn for ROUNDS rounds, the medians
-# compared; a frame_ms_mean more than 5 % and 0.1 ms slower fails (a
-# gesture of fewer than 30 frames is reported, not held). The
-# table lands in target/window-bench/table.md. A measuring tool, never in
-# `guards`: two release builds, about 160 s a round and side.
+# target/ into its own target directory (1470: with one, cargo took BASE's
+# artefacts as fresh for this tree and the A/B compared one binary with
+# itself; the exes' sha256 must now differ), and this tree's, in turn for
+# ROUNDS rounds (at least 3), the medians compared; a frame_ms_mean more
+# than 5 % and 0.1 ms slower fails, a row whose rounds spread more than
+# 5 % on a side is "noise" with no verdict, and a 1-minute load above
+# WINDOW_BENCH_MAX_LOAD (default half the cores) at any round's start is a
+# SKIP, exit 3 (a gesture of fewer than 30 frames is reported, not held;
+# the chat's drag rows, 0 frames, are left out). `just window-bench HEAD`
+# in a clean tree is the A/A selftest: one binary as both sides, every row
+# held or noise. The steps are scripts/window-bench.sh's, which runs one
+# at a time too. The table lands in target/window-bench/table.md. A
+# measuring tool, never in `guards`: two release builds, about 160 s a
+# round and side.
 [doc('Measure window frames at four sizes, A/B against the baseline (#474)')]
 window-bench BASE="" ROUNDS="3":
     #!/usr/bin/env bash
     set -euo pipefail
-    out="$(realpath -m target/window-bench)"
-    mkdir -p "$out"
-    rm -f "$out"/base-*.txt "$out"/this-*.txt
-    host="$(rustc -vV | sed -n 's/^host: //p')"
-    exe() { python3 -c 'import json,sys
-    for l in sys.stdin:
-        m = json.loads(l)
-        if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "loquax" and m["profile"]["test"]:
-            print(m["executable"])'; }
-    base="{{BASE}}"
-    [ -n "$base" ] || base="$(git log -1 --format=%H -- loquax/tests/window_bench.baseline)"
-    src="$out/base-src"
-    git worktree remove --force "$src" 2>/dev/null || rm -rf "$src"
-    git worktree add -q --detach "$src" "$base"
-    # The base's bench reads its fixture from its own tree: removed last.
-    trap 'git worktree remove --force "$src"' EXIT
-    target="$(realpath target)"
-    based="$(cd "$src" && CARGO_TARGET_DIR="$target" cargo test --release -p loquax --features gui --bins --target "$host" --no-run --message-format=json-render-diagnostics | exe)"
-    cp "$based" "$out/base-bench"
-    bench="$(cargo test --release -p loquax --features gui --bins --target "$host" --no-run --message-format=json-render-diagnostics | exe)"
+    trap 'bash scripts/window-bench.sh clean' EXIT
+    bash scripts/window-bench.sh prepare "{{BASE}}"
     for i in $(seq 1 {{ROUNDS}}); do
-        LOQUAX_WINDOW_BENCH="$out/base-$i.txt" "$out/base-bench" --exact gui::bench::window_bench --nocapture > "$out/base-$i.log" 2>&1
-        LOQUAX_WINDOW_BENCH="$out/this-$i.txt" "$bench" --exact gui::bench::window_bench --nocapture > "$out/this-$i.log" 2>&1
+        bash scripts/window-bench.sh round "$i"
     done
-    status=0
-    python3 scripts/window-bench-compare.py --base "$out"/base-*.txt --this "$out"/this-*.txt > "$out/table.md" || status=$?
-    cat "$out/table.md"
-    exit "$status"
+    bash scripts/window-bench.sh compare
 
 # 1470: the window bench's verdicts (regression, noise, load SKIP, too few
 # rounds, the exes' bytes) on synthetic rounds, each with its positive
