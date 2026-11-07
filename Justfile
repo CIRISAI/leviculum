@@ -2123,10 +2123,19 @@ _require-cargo-sweep:
 # What this must never touch is the sccache directory: that cache is what
 # makes the rebuild after a sweep cheap, and it bounds itself
 # (SCCACHE_CACHE_SIZE).
-[doc('Trim both target directories to a budget, keeping the newest')]
-sweep budget="30GB" fw_budget="4GB": _require-cargo-sweep
+#
+# Three more target directories nest under the root's and are not the root
+# workspace's to cargo-sweep, which sweeps by `cargo metadata` and so only the
+# directory cargo names: the benches' BASE builds (window-bench, map-bench;
+# 1.3 GB measured 2026-11-07, 1470) and the x86-64-v3 loquax build-deb.sh
+# packages for amd64 (1469). Each is swept as the root workspace's under
+# CARGO_TARGET_DIR, which `cargo metadata` honours (dry run verified
+# 2026-11-07); one that does not exist is a warning, not a failure.
+[doc('Trim the target directories to a budget, keeping the newest')]
+sweep budget="30GB" fw_budget="4GB" side_budget="2GB": _require-cargo-sweep
     cargo sweep --maxsize {{budget}} .
     cargo sweep --maxsize {{fw_budget}} leviculum-nrf
+    for dir in target/window-bench/base-target target/map-bench/base-target target/x86-64-v3; do CARGO_TARGET_DIR="{{justfile_directory()}}/$dir" cargo sweep --maxsize {{side_budget}} . || exit 1; done
 
 # Runs the recipe above against a stub cargo, so the assertion costs no
 # build and deletes nothing. ~1 s.
