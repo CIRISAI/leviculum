@@ -56,6 +56,7 @@
 //! [CENSUS] screen=<map|pan> ... verdict=ok t=<ms>               (1375)
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
+//! [HOME] store=empty cursor=reset was=<n> cursor=0   (1476, a record whose store is gone; or store=behind/ahead)
 //! [HOME] page ... taken=<n> of=<m> / pulled ... / joined=yes ... / failed ...   (as the client asks)
 //! [HOME] code=typed / code=taken saved=yes / code=refused ...   (1415, a code taken in)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
@@ -614,7 +615,9 @@ fn main() -> ! {
     drop(answers);
     drop(archive);
     match stores.load_client() {
-        Ok(Some(record)) => node.client(record, batch, &mut log),
+        // The messages are in PSRAM, which came up empty: the store ends
+        // at zero, and a record that pulled before pulls again (1476).
+        Ok(Some(record)) => node.client(record, 0, batch, &mut log),
         Ok(None) => log.line(
             "[HOME] ",
             format_args!("client=none page={}", batch.page_bytes),

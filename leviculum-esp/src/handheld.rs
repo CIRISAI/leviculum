@@ -15,9 +15,11 @@
 //! the keys or written over the control link (`TYPE_HOME_CODE`, 1415)
 //! makes the record ([`Handheld::take_code`]). A page's entries are handed
 //! to the board's loop ([`Handheld::drain`]), which folds them into the
-//! model the screen draws (`loquax_m9::home`); the board has no message
-//! store in flash yet, so after a reset the model is empty and the cursor
-//! has moved past what it showed: the store is the step that keeps them.
+//! model the screen draws (`loquax_m9::home`). The messages live in
+//! PSRAM and go with the power; at boot the record's cursor is made to
+//! agree with what the board still holds ([`Handheld::client`], 1476), so
+//! a board that lost them pulls them again instead of trusting a cursor
+//! that says everything was fetched.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -209,13 +211,35 @@ impl Handheld {
             return Err(CodeRefusal::Persist);
         }
         log.line("[HOME] ", format_args!("code=taken saved=yes"));
-        self.client(record, batch, log);
+        self.client(record, 0, batch, log);
         Ok(())
     }
 
-    /// Become a device of the home `record` names, pulling in `batch`;
+    /// Become a device of the home `record` names, pulling in `batch`,
+    /// with a message store that ends at sequence `stored` (zero: empty);
     /// says why not when the record's identity does not read.
-    pub fn client(&mut self, record: ClientRecord, batch: Batch, log: &mut UartLog<'_>) {
+    ///
+    /// The record's cursor is first made to agree with the store
+    /// (`board::agree`, 1476): a cursor past zero over an empty store
+    /// means the store was lost, and the board pulls again from the start
+    /// rather than showing an empty list under a cursor that says
+    /// everything was fetched. The record in flash keeps its old cursor
+    /// until the next pull ends and writes the new one.
+    pub fn client(
+        &mut self,
+        mut record: ClientRecord,
+        stored: u64,
+        batch: Batch,
+        log: &mut UartLog<'_>,
+    ) {
+        let saved_cursor = record.cursor;
+        let agreement = board::agree(&mut record, stored);
+        if agreement != board::Agreement::Agrees {
+            log.line(
+                "[HOME] ",
+                format_args!("{agreement} cursor={}", record.cursor),
+            );
+        }
         let address = loquax::home::lxmf_address(&record.home);
         match (record.device_identity(), address) {
             (Ok(device), Ok(address)) => {
@@ -230,7 +254,7 @@ impl Handheld {
                     ),
                 );
                 self.client = Some(Client {
-                    saved_cursor: record.cursor,
+                    saved_cursor,
                     record,
                     device,
                     address,

@@ -750,6 +750,57 @@ pub enum AdmitError {
     Record(super::record::RecordError),
 }
 
+/// How a board's record and its message store stood at boot (1476): the
+/// cursor says how far the device pulled, the store how far what it
+/// pulled is still there to show. They part when the store went (a board
+/// whose messages lived in RAM and lost power, a store partition erased or
+/// written over by another table), or when a power loss fell between a
+/// page the store took and the record's write at the pull's end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agreement {
+    /// The record's cursor is the store's.
+    Agrees,
+    /// The store holds nothing while the record had pulled up to `was`:
+    /// the store was lost, the cursor is reset and the board pulls again
+    /// from the start.
+    Lost { was: u64 },
+    /// The store ends before the record's cursor `was`: the cursor goes
+    /// back to the store's end and the board pulls the rest again.
+    Behind { was: u64 },
+    /// The store holds pages after the record's cursor `was`: a power loss
+    /// before the record was written. The store's end is the cursor.
+    Ahead { was: u64 },
+}
+
+/// Make `record`'s cursor agree with a store that ends at `stored` (the
+/// newest sequence the store took, zero for an empty store or a board
+/// without one), and say how they stood. The rule of 1476: a client
+/// record with a cursor past zero and an empty store means the store was
+/// lost, and the cursor resets, so the list fills again as soon as the
+/// home is reachable instead of the cursor saying everything was fetched.
+pub fn agree(record: &mut super::record::ClientRecord, stored: u64) -> Agreement {
+    let was = record.cursor;
+    record.cursor = stored;
+    match (was, stored) {
+        (was, stored) if was == stored => Agreement::Agrees,
+        (was, 0) => Agreement::Lost { was },
+        (was, stored) if stored < was => Agreement::Behind { was },
+        (was, _) => Agreement::Ahead { was },
+    }
+}
+
+impl core::fmt::Display for Agreement {
+    /// The words of the `[HOME]` line: `store=empty cursor=reset was=5625`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Agrees => f.write_str("store=agrees"),
+            Self::Lost { was } => write!(f, "store=empty cursor=reset was={was}"),
+            Self::Behind { was } => write!(f, "store=behind cursor=back was={was}"),
+            Self::Ahead { was } => write!(f, "store=ahead cursor=forward was={was}"),
+        }
+    }
+}
+
 /// What one archive entry is for the board's model (1415), the board's
 /// form of `client::take_in` without an engine: a message the home took
 /// in for `address` (the home's LXMF address, which the board shows as
