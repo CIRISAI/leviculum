@@ -28,6 +28,7 @@ use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
 use loquax::ui::browse::BrowseEvent;
+use loquax::ui::history::StoreRead;
 use loquax::ui::intent::{Intent, Messages, Switch, Target};
 use loquax::ui::liveness::Liveness;
 use loquax::ui::map::MapPin;
@@ -2531,8 +2532,15 @@ impl Inner {
         }
         self.dirty |= shown || !effects.is_empty();
         self.persist();
+        let mut answers = Vec::new();
         for effect in effects {
             match effect {
+                // The store's answer at once (1496), as the terminal's shell
+                // gives it: the older page the viewport reached, a
+                // restart's deferred newest page, a stored search. Before,
+                // this fell into the catch-all and the phone's chat ended
+                // after its first page.
+                UiEffect::Store(read) => answers.push(self.read(read)),
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
                 UiEffect::Browse(effect) => self.browse_owed.push(effect),
@@ -2615,7 +2623,34 @@ impl Inner {
                 _ => {}
             }
         }
+        for answer in answers {
+            self.apply(answer);
+        }
         self.start_next();
+    }
+
+    /// What the screen asked the store, answered as the event the model
+    /// waits for; a store that fails says so as a notice.
+    fn read(&mut self, read: StoreRead) -> UiEvent {
+        let answer = match read {
+            StoreRead::Earlier {
+                peer,
+                before,
+                through,
+            } => self
+                .store
+                .earlier(peer, before, through)
+                .map(|(messages, earlier)| UiEvent::Earlier {
+                    peer,
+                    messages,
+                    earlier,
+                }),
+            StoreRead::Search(query) => self
+                .store
+                .search(&query, &self.model.loaded_from())
+                .map(|hits| UiEvent::StoredHits { query, hits }),
+        };
+        answer.unwrap_or_else(|error| UiEvent::Notice(format!("history: {error}")))
     }
 
     /// The fold's store writes, and its marks to the home node.

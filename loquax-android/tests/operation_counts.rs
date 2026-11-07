@@ -147,3 +147,95 @@ fn an_idle_phone_builds_no_list() {
         ),
     );
 }
+
+/// The open chat's rows as `Core.messages` asks for them.
+fn rows(session: &Session, peer: &str) -> Vec<loquax_android::schema::MessageRow> {
+    let answer = session
+        .query(Query::Messages {
+            peer: peer.to_string(),
+        })
+        .expect("the chat");
+    let messages: loquax_android::schema::Messages =
+        loquax_android::schema::decode(&answer).expect("decode");
+    messages.messages
+}
+
+/// The phone's chat goes past its first page (1496, structure review
+/// 2026-11-07 finding 10): the long chat of the fixture (1200 messages)
+/// opens with its newest page, and a viewport that shows the first loaded
+/// bubble, as `ChatActivity` says it when its list reaches the top, loads
+/// the page above it, until the store has no more. Before, the phone
+/// dropped `UiEffect::Store` in its catch-all: a restart's deferred chat
+/// opened empty and no viewport ever loaded more. Negative: a viewport
+/// below the first bubble loads nothing.
+#[test]
+fn the_phones_chat_loads_older_pages_as_its_viewport_reaches_the_top() {
+    let dir = tempfile::tempdir().expect("app dir");
+    let session = fixture_session(dir.path());
+    let anna = loquax::address::to_hex(&real_store::peer(real_store::ANNA));
+    session
+        .request(Request::Open { peer: anna.clone() })
+        .expect("open");
+    let first = rows(&session, &anna);
+    println!("COUNTS phone.earlier opened={}", first.len());
+    assert!(!first.is_empty(), "the chat opened empty");
+    assert!(
+        first.len() < real_store::ANNA_MESSAGES,
+        "the whole chat at once: {}",
+        first.len()
+    );
+    // A viewport of the newest bubbles only: nothing more.
+    let newest: Vec<i64> = first.iter().rev().take(5).map(|row| row.key).collect();
+    session
+        .request(Request::Viewport {
+            peer: anna.clone(),
+            keys: newest,
+        })
+        .expect("viewport");
+    assert_eq!(
+        rows(&session, &anna).len(),
+        first.len(),
+        "loaded below the top"
+    );
+    // Up to the top, page after page, as the list scrolls.
+    let mut shown = first;
+    let mut pages = 0;
+    loop {
+        let top: Vec<i64> = shown.iter().take(3).map(|row| row.key).collect();
+        session
+            .request(Request::Viewport {
+                peer: anna.clone(),
+                keys: top,
+            })
+            .expect("viewport");
+        let now = rows(&session, &anna);
+        if now.len() == shown.len() {
+            break;
+        }
+        assert!(
+            now.len() > shown.len(),
+            "{} after {}",
+            now.len(),
+            shown.len()
+        );
+        // The bubbles shown before are still there, below the new page.
+        assert_eq!(
+            now[now.len() - shown.len()].key,
+            shown[0].key,
+            "the page went somewhere else than above"
+        );
+        shown = now;
+        pages += 1;
+        assert!(pages < 100, "never at the end");
+    }
+    session.stop();
+    println!("COUNTS phone.earlier pages={pages} rows={}", shown.len());
+    assert!(pages >= 1, "no older page loaded");
+    let bodies = shown.iter().filter(|row| !row.body.is_empty()).count();
+    assert!(
+        shown.len() >= real_store::ANNA_MESSAGES * 9 / 10,
+        "the top came at {} rows of {} messages ({bodies} with words)",
+        shown.len(),
+        real_store::ANNA_MESSAGES
+    );
+}

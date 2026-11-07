@@ -3064,8 +3064,9 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             effects
         }
         UiEvent::Viewport { peer, keys } => {
+            let earlier = model.earlier_shown(peer, &keys);
             model.set_viewport(peer, keys);
-            Vec::new()
+            earlier
         }
         UiEvent::Front(front) => {
             model.set_front(front);
@@ -12194,6 +12195,73 @@ pub(crate) mod tests {
         update(&mut model, UiEvent::Run(PaletteCommand::Pin));
         let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
         assert!(list.iter().all(|row| !row.contains(layout::PIN_RULE)));
+    }
+
+    /// A viewport that shows the open chat's first loaded bubble asks for
+    /// the page above it (1496): the phone's only word that its list
+    /// reached the top. Negative: a viewport without that bubble, another
+    /// peer's, and a chat the store holds no more of ask nothing.
+    #[test]
+    fn a_viewport_at_the_first_loaded_bubble_loads_the_earlier_page() {
+        let mut model = UiModel::<Field>::new(&[]);
+        clock(&mut model, 26, 12, 0);
+        model.restore(vec![restored(
+            PEER,
+            vec![
+                stored(10, false, "ten", None),
+                stored(11, false, "eleven", None),
+            ],
+            9,
+        )]);
+        let below = update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![11],
+            },
+        );
+        assert!(below.is_empty(), "{below:?}");
+        let other = update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: [0x77; 16],
+                keys: vec![10, 11],
+            },
+        );
+        assert!(other.is_empty(), "{other:?}");
+        let effects = update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![10, 11],
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Store(StoreRead::Earlier {
+                peer: PEER,
+                before: 10,
+                through: None
+            })]
+        );
+        let older: Vec<Message> = (1..=9).map(|k| stored(k, false, "old", None)).collect();
+        update(
+            &mut model,
+            UiEvent::Earlier {
+                peer: PEER,
+                messages: older,
+                earlier: 0,
+            },
+        );
+        assert_eq!(model.messages_of_selected().len(), 11);
+        let all = update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![1, 2],
+            },
+        );
+        assert!(all.is_empty(), "the store holds no more: {all:?}");
     }
 
     /// The top of what is loaded says how much more the store holds;

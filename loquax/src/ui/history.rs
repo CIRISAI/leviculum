@@ -599,6 +599,30 @@ impl<B> UiModel<B> {
         }
     }
 
+    /// The page above the open chat's first loaded bubble, when a
+    /// frontend's viewport shows that bubble and the store holds more
+    /// (1496). The phone scrolls in a list of its own, so its viewport is
+    /// its only word that the reader reached the top of what is loaded;
+    /// before, the phone's chat ended after one page.
+    pub(super) fn earlier_shown(&self, peer: [u8; 16], keys: &[u64]) -> Vec<UiEffect> {
+        let Some(conversation) = self.conversations.get(self.selected) else {
+            return Vec::new();
+        };
+        if conversation.peer != peer || conversation.earlier == 0 {
+            return Vec::new();
+        }
+        match conversation.messages.first() {
+            Some(first) if keys.contains(&first.activity) => {
+                vec![UiEffect::Store(StoreRead::Earlier {
+                    peer,
+                    before: first.activity,
+                    through: None,
+                })]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// `d`, or the palette's `delete message`: ask first.
     pub(super) fn ask_delete_message(&mut self) {
         let Some(conversation) = self.conversations.get(self.selected) else {
