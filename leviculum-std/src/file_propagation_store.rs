@@ -86,6 +86,19 @@
 //! 20 peers on the coder host (order 1370). All four indexes change
 //! together, through `index_insert` and `index_remove` only.
 //!
+//! # What the index costs
+//!
+//! The index is the store's whole RAM, and it grows with every message the
+//! store holds, up to the store limit. An entry held its file's full path
+//! until LV-1000 (order 1515): 457 bytes resident a message at 326 000
+//! messages, 149 MB, and the largest table by far in lnpnd's growth soak
+//! at that size (miauhaus holds 326 000, and the OOM killer took lnpnd
+//! there at 398 MB). The path is the entry's name under the store's
+//! directory (`entry_name`, the module docs' first section), so it is now
+//! derived where a file is opened, renamed or removed, and only a file under
+//! another name keeps its path, in `odd_names`: a legacy name whose rename
+//! at open failed. 289 bytes resident a message at the same count, 94 MB.
+//!
 //! # The index file, and why a start reads no message
 //!
 //! The reference re-indexes its store at every start by listing the
@@ -146,6 +159,12 @@ pub struct FilePropagationStore {
     capacity: u64,
     used: u64,
     index: BTreeMap<TransientId, IndexEntry>,
+    /// The files whose name is not the one [`Self::entry_name`] gives their
+    /// entry: a legacy name whose rename at open failed, or a name in
+    /// another spelling. Every other file's path is derived from its entry
+    /// ([`Self::path_of`]), so the index holds no path of its own (module
+    /// docs, "What the index costs").
+    odd_names: BTreeMap<TransientId, PathBuf>,
     /// `index` ordered by `(sequence, transient_id)` (module docs, "The
     /// sequence index").
     by_sequence: BTreeSet<(u64, TransientId)>,
@@ -233,7 +252,6 @@ impl IndexFileState {
 #[derive(Debug, Clone)]
 struct IndexEntry {
     meta: StoredMessage,
-    path: PathBuf,
 }
 
 /// How far the writer has got, as [`FilePropagationStore::settle_writes`]
@@ -344,6 +362,7 @@ impl FilePropagationStore {
         let listed = Instant::now();
         let mut file_us = 0u64;
         let mut index = BTreeMap::new();
+        let mut odd_names: BTreeMap<TransientId, PathBuf> = BTreeMap::new();
         let mut used = 0u64;
         let entries = std::fs::read_dir(&dir).map_err(|_| StorageError::Io)?;
         for entry in entries.flatten() {
@@ -361,6 +380,14 @@ impl FilePropagationStore {
                 continue;
             };
             let path = entry.path();
+            // Whether the file has a name other than the one this store
+            // writes for it.
+            let odd = match sequence {
+                Some(sequence) => {
+                    name != Self::entry_name(&transient_id, received_at, stamp_value, sequence)
+                }
+                None => true,
+            };
             // The record for this very name, if the index file has one: a
             // legacy name has no sequence and is never recorded under it.
             let record = recorded.get(&transient_id).filter(|record| {
@@ -419,9 +446,15 @@ impl FilePropagationStore {
                         // reference's) get a real one after the scan, below.
                         sequence: sequence.unwrap_or(0),
                     },
-                    path,
                 },
             );
+            // The last file listed for an id is the one indexed, so its
+            // name decides whether the id has an odd one.
+            if odd {
+                odd_names.insert(transient_id, path);
+            } else {
+                odd_names.remove(&transient_id);
+            }
         }
         opened.list_us = micros(listed).saturating_sub(file_us);
         let built = Instant::now();
@@ -454,8 +487,13 @@ impl FilePropagationStore {
                     entry.meta.stamp_value,
                     last_sequence,
                 ));
-                if std::fs::rename(&entry.path, &renamed).is_ok() {
-                    entry.path = renamed;
+                // A failed rename leaves the old name in `odd_names`, where
+                // the scan put it; the next open tries again.
+                let renamed_ok = odd_names
+                    .get(&id)
+                    .is_some_and(|old| std::fs::rename(old, &renamed).is_ok());
+                if renamed_ok {
+                    odd_names.remove(&id);
                 }
             }
         }
@@ -478,6 +516,7 @@ impl FilePropagationStore {
             capacity,
             used,
             index,
+            odd_names,
             by_sequence,
             by_received,
             counts: SequenceCounts::new(u64::MAX),
@@ -505,9 +544,10 @@ impl FilePropagationStore {
     /// it is a census call, not a per-hook one.
     pub fn heap_census(&self) -> StoreHeapCensus {
         use leviculum_core::heap_census::{btree_map_bytes, btree_set_bytes};
-        let paths: usize = self.index.values().map(|entry| entry.path.capacity()).sum();
+        let odd_paths: usize = self.odd_names.values().map(PathBuf::capacity).sum();
         let index_bytes = btree_map_bytes(&self.index)
-            + paths
+            + btree_map_bytes(&self.odd_names)
+            + odd_paths
             + btree_set_bytes(&self.by_sequence)
             + btree_set_bytes(&self.by_received)
             + self.counts.heap_bytes();
@@ -517,7 +557,7 @@ impl FilePropagationStore {
                 + writer
                     .queued
                     .values()
-                    .map(|queued| queued.body.len() + queued.entry.path.capacity())
+                    .map(|queued| queued.body.len())
                     .sum::<usize>()
                 + writer.failed.capacity() * std::mem::size_of::<TransientId>()
         });
@@ -702,6 +742,9 @@ impl FilePropagationStore {
         let size = entry.meta.size;
         let mut rebuild = false;
         self.index_dirty = true;
+        // Every entry inserted after the open is under the name this store
+        // writes; an odd name it replaces is gone with the old file.
+        self.odd_names.remove(&transient_id);
         if let Some(previous) = self.index.insert(transient_id, entry) {
             self.by_sequence
                 .remove(&(previous.meta.sequence, transient_id));
@@ -720,6 +763,7 @@ impl FilePropagationStore {
     /// Take one entry out of all four indexes.
     fn index_remove(&mut self, transient_id: &TransientId) -> Option<IndexEntry> {
         let entry = self.index.remove(transient_id)?;
+        self.odd_names.remove(transient_id);
         self.index_dirty = true;
         self.by_sequence
             .remove(&(entry.meta.sequence, *transient_id));
@@ -797,20 +841,23 @@ impl FilePropagationStore {
     ) -> Result<bool, StorageError> {
         // A rename of a file the writer has not placed yet would fail.
         let _ = self.flush_writes();
-        let Some(entry) = self.index.get_mut(transient_id) else {
+        let Some(meta) = self.index.get(transient_id).map(|entry| entry.meta) else {
             return Ok(false);
         };
         let renamed = self.dir.join(Self::entry_name(
             transient_id,
-            entry.meta.received_at,
+            meta.received_at,
             stamp_value,
-            entry.meta.sequence,
+            meta.sequence,
         ));
-        std::fs::rename(&entry.path, &renamed).map_err(|_| StorageError::Io)?;
+        std::fs::rename(self.path_of(&meta), &renamed).map_err(|_| StorageError::Io)?;
         if let Ok(dir_handle) = std::fs::File::open(&self.dir) {
             let _ = self.fsync.sync(&dir_handle);
         }
-        entry.path = renamed;
+        self.odd_names.remove(transient_id);
+        let Some(entry) = self.index.get_mut(transient_id) else {
+            return Ok(false);
+        };
         entry.meta.stamp_value = stamp_value;
         self.index_dirty = true;
         Ok(true)
@@ -823,6 +870,25 @@ impl FilePropagationStore {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Where the file of an indexed message is: its odd name if it has one,
+    /// else the name its entry gives it ([`Self::entry_name`]).
+    fn path_of(&self, meta: &StoredMessage) -> PathBuf {
+        match self.odd_names.get(&meta.transient_id) {
+            Some(path) => path.clone(),
+            None => self.canonical_path(meta),
+        }
+    }
+
+    /// The path this store writes `meta` under.
+    fn canonical_path(&self, meta: &StoredMessage) -> PathBuf {
+        self.dir.join(Self::entry_name(
+            &meta.transient_id,
+            meta.received_at,
+            meta.stamp_value,
+            meta.sequence,
+        ))
     }
 
     fn entry_name(
@@ -1042,14 +1108,19 @@ impl PropagationStore for FilePropagationStore {
         // Free what the writer finished, so the queued bodies held in memory
         // stay bounded by what is actually outstanding.
         self.collect(false);
-        let previous = self
+        let queued_previous = self
             .writer
             .as_ref()
             .and_then(|writer| writer.queued.get(transient_id))
-            .map(|queued| &queued.entry)
-            .or_else(|| self.index.get(transient_id));
-        let replaced = previous.map_or(0, |entry| entry.meta.size as u64);
-        let supersedes = previous.map(|entry| entry.path.clone());
+            .map(|queued| queued.entry.meta);
+        let (replaced, supersedes) = match queued_previous {
+            // A queued append is always under the name this store writes.
+            Some(meta) => (meta.size as u64, Some(self.canonical_path(&meta))),
+            None => match self.index.get(transient_id) {
+                Some(entry) => (entry.meta.size as u64, Some(self.path_of(&entry.meta))),
+                None => (0, None),
+            },
+        };
         let next = self.used - replaced + body.len() as u64;
         if next > self.capacity {
             return Err(StorageError::Full);
@@ -1072,7 +1143,6 @@ impl PropagationStore for FilePropagationStore {
                 stamp_value,
                 sequence,
             },
-            path: path.clone(),
         };
         if let Some(writer) = self.writer.as_mut() {
             let Some(jobs) = writer.jobs.as_ref() else {
@@ -1080,11 +1150,12 @@ impl PropagationStore for FilePropagationStore {
             };
             let ticket = writer.issued + 1;
             let body: Arc<[u8]> = Arc::from(body);
+            let supersedes = supersedes.filter(|previous| previous != &path);
             jobs.send(Job::Write {
                 ticket,
                 path,
                 body: Arc::clone(&body),
-                supersedes: supersedes.filter(|previous| previous != &entry.path),
+                supersedes,
             })
             .map_err(|_| StorageError::Io)?;
             writer.issued = ticket;
@@ -1106,10 +1177,8 @@ impl PropagationStore for FilePropagationStore {
         self.last_sequence = sequence;
         // Replacing an entry under a different timestamp leaves the old
         // file behind; remove it after the new one is durable.
-        if let Some(previous) = self.index.get(transient_id) {
-            if previous.path != path {
-                let _ = std::fs::remove_file(&previous.path);
-            }
+        if let Some(previous) = supersedes.filter(|previous| previous != &path) {
+            let _ = std::fs::remove_file(previous);
         }
         self.index_insert(*transient_id, entry);
         self.used = next;
@@ -1206,12 +1275,20 @@ impl PropagationStore for FilePropagationStore {
             .writer
             .as_mut()
             .and_then(|writer| writer.queued.remove(transient_id))
-            .map(|queued| queued.entry);
-        let Some(entry) = queued.or_else(|| self.index_remove(transient_id)) else {
-            return Ok(false);
+            .map(|queued| queued.entry.meta);
+        let (meta, path) = match queued {
+            Some(meta) => (meta, self.canonical_path(&meta)),
+            None => {
+                let Some(meta) = self.index.get(transient_id).map(|entry| entry.meta) else {
+                    return Ok(false);
+                };
+                let path = self.path_of(&meta);
+                self.index_remove(transient_id);
+                (meta, path)
+            }
         };
-        self.used -= entry.meta.size as u64;
-        match self.remove_file(entry.path) {
+        self.used -= meta.size as u64;
+        match self.remove_file(path) {
             Ok(()) => Ok(true),
             // Already gone is still gone.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
@@ -1257,7 +1334,7 @@ impl PropagationBodyStore for FilePropagationStore {
         let Some(entry) = self.index.get(transient_id) else {
             return Ok(None);
         };
-        match std::fs::read(&entry.path) {
+        match std::fs::read(self.path_of(&entry.meta)) {
             Ok(body) => Ok(Some(body)),
             Err(_) => Err(StorageError::Io),
         }
@@ -1279,7 +1356,8 @@ impl PropagationBodyStore for FilePropagationStore {
         let Some(entry) = self.index.get(transient_id) else {
             return Ok(None);
         };
-        let mut file = std::fs::File::open(&entry.path).map_err(|_| StorageError::Io)?;
+        let mut file =
+            std::fs::File::open(self.path_of(&entry.meta)).map_err(|_| StorageError::Io)?;
         let len = file.metadata().map_err(|_| StorageError::Io)?.len();
         let offset = offset as u64;
         if offset >= len || buf.is_empty() {
@@ -1661,7 +1739,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut store = FilePropagationStore::open(dir.path(), 4096).expect("open");
         store.append(&[1; 32], 1234, 0, &body_for(7, 100)).unwrap();
-        std::fs::remove_file(&store.index.get(&[1; 32]).unwrap().path).unwrap();
+        let meta = store.index.get(&[1; 32]).unwrap().meta;
+        std::fs::remove_file(store.path_of(&meta)).unwrap();
 
         assert_eq!(store.read_body(&[1; 32]), Err(StorageError::Io));
         assert_eq!(
@@ -1733,6 +1812,74 @@ mod tests {
         assert!(store.contains(&[1; 32]).unwrap());
         assert!(!store.contains(&[2; 32]).unwrap());
         assert!(!store.contains(&[3; 32]).unwrap());
+    }
+
+    /// LV-1000 (order 1515): the index held each message's full path, so
+    /// a store under a longer directory cost more RAM a message, and the
+    /// path was most of an entry (630 B a message at 304 000 messages in
+    /// the growth soak, `lnpnd/tests/pn_growth_soak.rs`). A path is derived
+    /// from the entry now, so the index costs the same under any directory.
+    #[test]
+    fn the_index_holds_no_path_per_message() {
+        let short = tempfile::tempdir().expect("temp dir");
+        let long_base = tempfile::tempdir().expect("temp dir");
+        let long = long_base.path().join("a".repeat(200)).join("b".repeat(200));
+        std::fs::create_dir_all(&long).expect("long dir");
+        let census = |dir: &Path| {
+            let mut store = FilePropagationStore::open(dir, 1_000_000).expect("open");
+            for n in 1..=40u8 {
+                store
+                    .append(&[n; 32], 1_789_000_000, 13, &body_for(n, 100))
+                    .unwrap();
+            }
+            store.heap_census()
+        };
+        let (short, long) = (census(short.path()), census(&long));
+        assert_eq!(short.messages, 40);
+        assert_eq!(
+            short.index_bytes, long.index_bytes,
+            "the index must not cost more under a longer directory"
+        );
+    }
+
+    /// A legacy name the open cannot rename stays the file's name, and the
+    /// store still finds the file under it: the one case where a path is
+    /// not derived from the entry.
+    #[cfg(unix)]
+    #[test]
+    fn a_legacy_name_the_open_cannot_rename_is_still_served_and_purged() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let legacy = dir.path().join(format!("{}_50_0", hex_encode(&[3u8; 32])));
+        std::fs::write(&legacy, body_for(9, 100)).unwrap();
+        let read_only = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(dir.path(), read_only).unwrap();
+        let store = FilePropagationStore::open(dir.path(), 8192).expect("open");
+        // Root renames anyway; then there is no odd name to test.
+        let renamed = !legacy.exists();
+        assert_eq!(
+            store.odd_names.contains_key(&[3; 32]),
+            !renamed,
+            "a failed rename keeps the old name"
+        );
+        assert_eq!(
+            store.read_body(&[3; 32]).unwrap(),
+            Some(body_for(9, 100)),
+            "the file is served under the name it has"
+        );
+        drop(store);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut store = FilePropagationStore::open(dir.path(), 8192).expect("reopen");
+        assert!(store.odd_names.is_empty(), "the next open renames it");
+        assert_eq!(store.read_body(&[3; 32]).unwrap(), Some(body_for(9, 100)));
+        assert!(store.purge(&[3; 32]).unwrap());
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(&hex_encode(&[3u8; 32])))
+            .collect();
+        assert!(left.is_empty(), "the purge removed the file: {left:?}");
     }
 
     #[test]
