@@ -59,6 +59,7 @@
     <string name="last_position">letzte Position %1$s</string>
     <string name="position_of">Position von %1$s, %2$s</string>
     <string name="position_marker">⌖</string>
+    <string name="map_you">du</string>
     <string name="radar_note">Keine Karte für diese Gegend geladen · Ringe %1$s</string>
     <string name="radar_note_on">Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s</string>
     <string name="no_messages_yet">Noch keine Nachrichten</string>
@@ -68,8 +69,9 @@
     <string name="nearby_card">In der Nähe, nicht in deinen Kontakten</string>
     <string name="nearby_add">Hinzufügen</string>
     <string name="nearby_enter_adds">Enter fügt hinzu</string>
-    <string name="map_legend">* Person  @ gewählt  grau: alt oder in der Nähe</string>
-    <string name="map_keys">Pfeile schieben  +- Zoom  Leer Pin  Enter öffnen</string>
+    <string name="map_legend">* Person  @ gewählt  grau: alt</string>
+    <string name="map_keys">Pfeile schieben  +- Zoom</string>
+    <string name="map_keys_pin">Leer nächster Pin  Enter öffnen</string>
     <string name="draft_row">Entwurf: %1$s</string>
     <string name="row_you">du: %1$s</string>
     <string name="reacted">hat mit %1$s reagiert</string>

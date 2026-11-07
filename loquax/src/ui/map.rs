@@ -494,7 +494,7 @@ pub fn pins_of(
                 peer: *peer,
                 at,
                 label: match Some(*peer) == own {
-                    true => "you".to_string(),
+                    true => super::strings::StrId::MapYou.text(lang).to_string(),
                     false => label(peer),
                 },
                 age,

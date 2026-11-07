@@ -177,7 +177,10 @@ fn the_last_key_of_every_group_walk_is_in_its_frame() {
 #[test]
 fn the_group_screens_say_what_the_scene_carries() {
     let text = |shown: Screen| -> Vec<String> {
-        let (model, row) = shown.walk();
+        // The words held here are the catalogue's English; the board
+        // speaks German by default (1447), the goldens show it.
+        let (mut model, row) = shown.walk();
+        model.lang = loquax::ui::strings::Lang::En;
         screen::lines(
             &screen::scene(&model),
             &look(&model, row),

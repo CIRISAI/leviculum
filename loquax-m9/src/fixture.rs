@@ -241,6 +241,7 @@ pub fn restored() -> Vec<Restored> {
 /// pinned conversation under the cursor.
 pub fn model() -> UiModel<Field> {
     let mut model = UiModel::<Field>::new(&[]);
+    model.lang = crate::LANG;
     model.address = Some(OWN);
     for c in &CONVERSATIONS {
         model.names.remember(peer(c.seed), c.name);

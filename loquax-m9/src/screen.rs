@@ -268,7 +268,7 @@ fn entry(row: &Row, look: &Look, cols: usize) -> [RLine; 2] {
         (_, Some(mark)) => {
             let row = glyph(state_of(mark));
             (
-                String::from(row.ascii.trim_end()),
+                mark_glyph(row),
                 RStyle {
                     fg: look.tokens.tones.of(row.tone),
                     bold: row.bold,
@@ -409,6 +409,15 @@ pub fn narrow(text: &str) -> String {
         .collect()
 }
 
+/// A delivery mark as the board draws it (1447, walk 1 finding 23): the
+/// ladder's own glyphs, which the 10 x 20 atlas has (◷, ✓, the braille
+/// spinner, !), but ✔, which it lacks: read is ✓✓ in the read tone and
+/// bold, as on every other target the tone tells it from delivered. Never
+/// the ASCII rung's "v" and "VV".
+pub(crate) fn mark_glyph(row: &leviculum_ui::delivery::DeliveryGlyph) -> String {
+    row.symbol(0, false).trim_end().replace('✔', "✓")
+}
+
 /// `text` [`narrow`]ed and cut to `cols` cells, an ellipsis where it was cut.
 pub(crate) fn cut(text: &str, cols: usize) -> String {
     truncate_to_cols(&narrow(text), cols)
@@ -452,6 +461,30 @@ mod tests {
     fn every_mark_has_an_ascii_rung_the_atlas_draws() {
         let rungs: Vec<&str> = MARKS.iter().map(|&m| glyph(state_of(m)).ascii).collect();
         assert_eq!(rungs, [". ", ". ", "v ", "v ", "vv", "VV", "! "]);
+        // The board draws the glyphs, the atlas's (1447).
+        let drawn: Vec<String> = MARKS
+            .iter()
+            .map(|&m| mark_glyph(glyph(state_of(m))))
+            .collect();
+        assert_eq!(drawn, ["◷", "◷", "✓", "✓", "✓✓", "✓✓", "!"]);
+        // ✔ is the atlas's missing glyph, the control: whatever it maps
+        // to, every drawn mark maps elsewhere.
+        let atlas = crate::font::atlas();
+        let missing = atlas.glyph_mapping.index('✔');
+        assert_eq!(
+            missing,
+            atlas.glyph_mapping.index('\u{e000}'),
+            "the control"
+        );
+        for d in &drawn {
+            for ch in d.chars() {
+                assert_ne!(
+                    atlas.glyph_mapping.index(ch),
+                    missing,
+                    "{ch} is in the atlas"
+                );
+            }
+        }
         for (mark, rung) in MARKS.iter().zip(&rungs) {
             assert!(rung.is_ascii(), "{mark:?} is {rung:?}");
             assert_eq!(

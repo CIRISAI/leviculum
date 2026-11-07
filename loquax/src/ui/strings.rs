@@ -100,6 +100,8 @@ leviculum_ui::catalogue! {
     LastPosition = "last_position", "last position %1$s", "letzte Position %1$s";
     PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
     PositionMarker = "position_marker", "⌖", "⌖";
+    // Our own pin on the map (1447): "you" was English on every screen.
+    MapYou = "map_you", "you", "du";
     // The radar's line where no map is loaded (1447, walk 1 finding 19).
     RadarNote = "radar_note", "No map loaded for this area · Rings %1$s", "Keine Karte für diese Gegend geladen · Ringe %1$s";
     RadarNoteOn = "radar_note_on", "No map loaded for this area · Rings %1$s around %2$s", "Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s";
@@ -116,8 +118,10 @@ leviculum_ui::catalogue! {
     NearbyEnterAdds = "nearby_enter_adds", "Enter adds", "Enter fügt hinzu";
     // The map on the M9 (1375): its pins in ASCII, the atlas has no ◉, and
     // the keys a board without a palette or a pointer works it with.
-    MapLegend = "map_legend", "* person  @ chosen  grey: old or nearby", "* Person  @ gewählt  grau: alt oder in der Nähe";
-    MapKeys = "map_keys", "arrows pan  +- zoom  space pin  enter open", "Pfeile schieben  +- Zoom  Leer Pin  Enter öffnen";
+    // 1447 (walk 1 finding 23): each fits the M9's 31 cells; the keys come in two pages.
+    MapLegend = "map_legend", "* person  @ chosen  grey: old", "* Person  @ gewählt  grau: alt";
+    MapKeys = "map_keys", "arrows pan  +- zoom", "Pfeile schieben  +- Zoom";
+    MapKeysPin = "map_keys_pin", "space next pin  enter open", "Leer nächster Pin  Enter öffnen";
     // A row's last line while a message is typed there and not sent (1219).
     DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";
     // The terminal's list line of our own last message (1381).

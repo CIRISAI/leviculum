@@ -19,6 +19,7 @@ use crate::field::Field;
 /// in is the board's own post. Empty until the first pull.
 pub fn model(address: [u8; 16]) -> UiModel<Field> {
     let mut model = UiModel::<Field>::new(&[]);
+    model.lang = crate::LANG;
     model.address = Some(address);
     model.focus = Pane::Conversations;
     model

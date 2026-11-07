@@ -313,7 +313,7 @@ fn typing_with_the_keys_sends_from_the_compose_line() {
         .find(|r| r.contains("Bis gleich in Köln!"))
         .unwrap_or_else(|| panic!("the sent message is drawn: {rows:#?}"));
     assert!(
-        sent.trim_end().ends_with(" ."),
+        sent.trim_end().ends_with(" ◷"),
         "on its sending rung: {sent:?}"
     );
     check("m9-sent.png", &shown(&model));
@@ -550,9 +550,10 @@ fn a_groups_one_and_two_ticks_are_the_golden_frame() {
             .trim_end()
             .to_string()
     };
-    assert!(row("Brot ist da").ends_with("vv"), "{rows:#?}");
+    // The atlas's glyphs, never the ASCII rung (1447).
+    assert!(row("Brot ist da").ends_with("✓✓"), "{rows:#?}");
     let one = row("Wer kommt mit?");
-    assert!(one.ends_with('v') && !one.ends_with("vv"), "{rows:#?}");
+    assert!(one.ends_with('✓') && !one.ends_with("✓✓"), "{rows:#?}");
     let frame = draw_in(&scene, &look);
     check("m9-group-ticks.png", &frame);
 

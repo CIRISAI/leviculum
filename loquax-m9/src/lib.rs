@@ -60,3 +60,14 @@ pub mod map;
 pub mod pair;
 pub mod render;
 pub mod screen;
+
+/// The language the board speaks (1447, walk 1 finding 23): German unless
+/// the build says otherwise with `LOQUAX_M9_LANG=en`. The board has no
+/// locale to read, and an English "You:" over a German message is what a
+/// German reader saw.
+pub const LANG: loquax::ui::strings::Lang = match option_env!("LOQUAX_M9_LANG") {
+    Some(tag) if tag.len() >= 2 && tag.as_bytes()[0] == b'e' && tag.as_bytes()[1] == b'n' => {
+        loquax::ui::strings::Lang::En
+    }
+    _ => loquax::ui::strings::Lang::De,
+};

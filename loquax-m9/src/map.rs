@@ -168,7 +168,10 @@ pub fn lines<B: InputBuffer>(
     };
     let credit = format!(
         "{} ",
-        cut(attribution, cols.saturating_sub(fit_width(&title) + 1))
+        cut(
+            short_credit(attribution),
+            cols.saturating_sub(fit_width(&title) + 1)
+        )
     );
     let gap = cols.saturating_sub(fit_width(&title) + fit_width(&credit));
     let mut bar = RLine::default();
@@ -190,7 +193,13 @@ pub fn lines<B: InputBuffer>(
     for _ in 0..PICTURE.height {
         out.push(fill(RLine::default(), cols, ground));
     }
-    for (id, style) in [(StrId::MapLegend, muted(look)), (StrId::MapKeys, chrome)] {
+    // The keys in two pages that each fit (1447): the board turns the
+    // page every KEYS_PAGE_TICKS ticks.
+    let keys = match (model.tick / KEYS_PAGE_TICKS) % 2 {
+        0 => StrId::MapKeys,
+        _ => StrId::MapKeysPin,
+    };
+    for (id, style) in [(StrId::MapLegend, muted(look)), (keys, chrome)] {
         let mut line = RLine::default();
         push(
             &mut line,
@@ -204,6 +213,19 @@ pub fn lines<B: InputBuffer>(
         out.push(fill(RLine::default(), cols, RStyle::default()));
     }
     out
+}
+
+/// The ticks one page of the map's key help stays (1447).
+pub const KEYS_PAGE_TICKS: u64 = 8;
+
+/// The data's credit as the M9's bar has room for it (1447, walk 1
+/// finding 23): "© OSM" for OpenStreetMap's, which the bar cut to
+/// "© OpenStreetMap contr…"; any other credit whole, cut where it must be.
+pub fn short_credit(attribution: &str) -> &str {
+    match attribution.contains("OpenStreetMap") {
+        true => "© OSM",
+        false => attribution,
+    }
 }
 
 /// Why the map was not drawn.
@@ -323,6 +345,23 @@ where
     let chrome = look.tokens.chrome;
     let (fg, bg) = (rgb565(chrome.fg), rgb565(chrome.bg));
     let dim = rgb565(look.tokens.muted.fg);
+    // Where every text starts, so a text is cut before the next one on
+    // its row (1447): two names never overprint each other.
+    let starts: Vec<(u16, u16)> = pins
+        .iter()
+        .flat_map(|p| {
+            core::iter::once((p.row, p.col)).chain(p.apart.as_ref().map(|a| (a.row, a.col)))
+        })
+        .collect();
+    let room = |col: u16, row: u16| -> usize {
+        let next = starts
+            .iter()
+            .filter(|(r, c)| *r == row && *c > col)
+            .map(|(_, c)| *c)
+            .min()
+            .unwrap_or(crate::screen::COLS as u16);
+        usize::from(next.min(crate::screen::COLS as u16).saturating_sub(col))
+    };
     for pin in pins {
         let (fg, bg) = match (pin.selected, pin.stale || pin.nearby) {
             (true, _) => (bg, fg),
@@ -341,12 +380,22 @@ where
                 .map(|_| ())
                 .map_err(|_| MapError::Draw)
         };
-        text(pin.col, pin.row, &pin.text)?;
+        text(pin.col, pin.row, &clip(&pin.text, room(pin.col, pin.row)))?;
         if let Some(apart) = &pin.apart {
-            text(apart.col, apart.row, &apart.text)?;
+            text(
+                apart.col,
+                apart.row,
+                &clip(&apart.text, room(apart.col, apart.row)),
+            )?;
         }
     }
     Ok(())
+}
+
+/// `words` cut to `cols` cells with an ellipsis where they do not fit; a
+/// text that fits is drawn as it is.
+pub fn clip(words: &str, cols: usize) -> String {
+    crate::screen::cut(words, cols.max(1))
 }
 
 /// A token's colour on the panel; white where the token has none.
@@ -382,5 +431,28 @@ impl<'r> Map<'r> {
     /// The credit the region carries, which the top bar shows.
     pub fn credit(&self) -> String {
         String::from(self.region.attribution())
+    }
+}
+
+#[cfg(test)]
+mod words_1447 {
+    use super::*;
+    use loquax::ui::strings::Lang;
+
+    /// 1447: the legend and both pages of the keys fit the board's line
+    /// after its leading space in either language, and OSM's credit is
+    /// the short one.
+    #[test]
+    fn the_map_lines_fit_the_board_and_the_credit_is_short() {
+        for lang in [Lang::En, Lang::De] {
+            for id in [StrId::MapLegend, StrId::MapKeys, StrId::MapKeysPin] {
+                let words = Words::key(id).resolve(lang);
+                assert!(fit_width(&words) < crate::screen::COLS, "{lang:?} {words}");
+            }
+        }
+        assert_eq!(short_credit("© OpenStreetMap contributors"), "© OSM");
+        assert_eq!(short_credit("© Natural Earth"), "© Natural Earth");
+        assert_eq!(clip("Jürgen ·4242 · vor 5 Min.", 8), "Jürgen …");
+        assert_eq!(clip("Mum", 8), "Mum");
     }
 }

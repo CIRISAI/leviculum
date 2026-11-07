@@ -310,7 +310,7 @@ fn block(node: &BubbleNode, look: &Look, cols: usize, selected: bool) -> (usize,
             push(&mut suffix, " ", RStyle::default());
             push(
                 &mut suffix,
-                rung.ascii.trim_end(),
+                &crate::screen::mark_glyph(rung),
                 RStyle {
                     fg: look.tokens.tones.of(rung.tone),
                     bold: rung.bold,

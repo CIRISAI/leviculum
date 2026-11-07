@@ -61,7 +61,10 @@ fn the_map_pins_come_from_shares_an_announce_and_the_gnss_fix() {
     let labels: Vec<&str> = pins.iter().map(|p| p.label.as_str()).collect();
     assert_eq!(pins.len(), 5, "{labels:?}");
     let own = pins.iter().find(|p| p.peer == OWN).expect("our pin");
-    assert_eq!(own.label, "you");
+    assert_eq!(
+        own.label, "du",
+        "the catalogue's, in the board's German (1447)"
+    );
     assert!(pins
         .iter()
         .any(|p| p.nearby && p.label.starts_with("Rifugio")));
