@@ -11,8 +11,9 @@ fn main() {
 // Best-effort: a source tree with no reachable git (release tarball) yields
 // sha "unknown" and dirty=false.
 //
-// Byte-identical in behaviour to `leviculum-nrf/build.rs`, because the thing
-// that reads the result is the same host-side tooling.
+// The same stamp as `leviculum-nrf/build.rs`, because the thing that reads
+// the result is the same host-side tooling; this one also re-runs when the
+// branch's ref moves (1521b), which the nRF script does not watch yet.
 fn emit_build_sha() {
     let sha = run_git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
 
@@ -35,6 +36,23 @@ fn emit_build_sha() {
     if let Some(git_dir) = run_git(&["rev-parse", "--git-dir"]) {
         println!("cargo:rerun-if-changed={git_dir}/HEAD");
         println!("cargo:rerun-if-changed={git_dir}/index");
+    }
+    // A commit on a branch moves the branch's ref, not HEAD, which still
+    // names the branch (1521b): window 7's image, built just before its
+    // commit, kept the parent's sha. The ref's own file, and packed-refs
+    // where a ref may live instead, in the common git dir (a worktree's
+    // refs live there).
+    if let (Some(common), Some(name)) = (
+        run_git(&["rev-parse", "--git-common-dir"]),
+        run_git(&["symbolic-ref", "-q", "HEAD"]),
+    ) {
+        // Only files that exist: cargo re-runs a script on every build
+        // while a path it watches is missing.
+        for path in [format!("{common}/{name}"), format!("{common}/packed-refs")] {
+            if std::path::Path::new(&path).exists() {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
     }
     // Emitting ANY rerun-if-changed replaces cargo's default "rerun on any
     // package file change", so the sources have to be listed explicitly.
