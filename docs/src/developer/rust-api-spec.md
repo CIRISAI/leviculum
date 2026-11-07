@@ -184,9 +184,9 @@ caller must dispatch.
 | `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:319` | Build a link request |
 | `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:810` | Send on an established link |
 | `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:677` | Close a link |
-| `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2593` | Feed received bytes from an interface |
-| `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2866` | Run periodic maintenance (call at the next deadline) |
-| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2896` | Earliest timer deadline (ms); when to call `handle_timeout` |
+| `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2637` | Feed received bytes from an interface |
+| `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2910` | Run periodic maintenance (call at the next deadline) |
+| `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:2940` | Earliest timer deadline (ms); when to call `handle_timeout` |
 
 A node is more often built with `NodeCoreBuilder` (`node/builder.rs:40`), whose
 `fn build<R, Clk, S>(self, rng: R, clock: Clk, storage: S) -> NodeCore<R, Clk, S>`

@@ -212,7 +212,7 @@ same tree without and with the `photos` feature.
   went as resources.
 - **The mailbox** keeps the message packed as it came, like any other, and
   its archive cap counts it by its bytes
-  (`SUM(LENGTH(packed))`, `loquax/src/store.rs:2956`).
+  (`SUM(LENGTH(packed))`, `loquax/src/store.rs:2970`).
 
 ## 5. Android
 

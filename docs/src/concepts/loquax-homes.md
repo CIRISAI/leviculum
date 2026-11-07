@@ -56,8 +56,8 @@ Invariants (the study's 2.7):
 What exists today for one home and carries over:
 
 - The move to a new device, with each archive entry's kind, id and time:
-  `archive_moving` (`loquax/src/store.rs:2143`) and `archive_moved_in`
-  (`loquax/src/store.rs:2194`), which adds nothing on a second take-in.
+  `archive_moving` (`loquax/src/store.rs:2157`) and `archive_moved_in`
+  (`loquax/src/store.rs:2208`), which adds nothing on a second take-in.
   The sync generalises it to both directions and to paging from a cursor.
 - The rule that authority lives with the key, not with an admission:
   `may_move` (`loquax/src/home/server.rs:1128`). Two homes recognise each
@@ -139,7 +139,7 @@ fresh random ratchet when it announces after its interval
 every 30 minutes, and keeps 512 (`reference/Reticulum/RNS/Destination.py:85`,
 `:90`). A sender keeps one ratchet per destination, the last it heard
 (`reference/Reticulum/RNS/Identity.py:440`); ours does the same
-(`known_remote_ratchet`, `leviculum-core/src/node/mod.rs:4049`). The
+(`known_remote_ratchet`, `leviculum-core/src/node/mod.rs:4093`). The
 receiver tries its ring and then the identity key
 (`reference/Reticulum/RNS/Identity.py:910-912`), which cannot open a
 packet sealed to a ratchet. A packet routed to the home without the
@@ -166,7 +166,7 @@ lost phone is no longer a lost identity, since another home still holds
 the key and a new phone takes a copy by code.
 
 What exists: revoking an admitted client device, `revoke`
-(`loquax/src/store.rs:2587`), checked again on every request. What is
+(`loquax/src/store.rs:2601`), checked again on every request. What is
 new: revoking a device that was itself a home, from any other device, and
 the re-seed of (b). The honest limit stays: Reticulum has no revocation
 of an identity key, the key is the address. The finder can no longer read

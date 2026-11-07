@@ -128,28 +128,28 @@ fields[0xFC] = map {
   would. Waiting for the first device to pull it, as the study proposed,
   would make the receipt depend on a phone being online, which a
   transport proof does not. A client of a home node acknowledges nothing
-  (`loquax/src/ui/arrival.rs:278`, `arrival_step`, returns at
+  (`loquax/src/ui/arrival.rs:279`, `arrival_step`, returns at
   `home_client`); the devices take the receipt that comes back from the
   peer as any device does.
 
 ### Where it is built (1395)
 
 - **Bit 2 on every send**: `groups::client_caps`
-  (`loquax/src/ui/groups.rs:72`), which `mark_sends` puts on every
+  (`loquax/src/ui/groups.rs:77`), which `mark_sends` puts on every
   message (`loquax/src/ui.rs:1927-1931`); not switchable.
 - **The arrival**: the router hands a collected message on as
   `DeliveryMethod::Propagated`; the engine says so after the message
   with `OutboxEvent::Propagated` (`loquax/src/engine.rs:590`).
-- **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:175`):
+- **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:177`):
   bit 2 in the message's own mark (since 1462 however it came), no
   receipt of either kind, no group copy.
 - **On a device that is its own node**: `arrived_here`
-  (`loquax/src/ui/arrival.rs:222`) owes it, once per message (the ledger
+  (`loquax/src/ui/arrival.rs:223`) owes it, once per message (the ledger
   line `arrival acknowledged to the sender`); `arrival_step`
-  (`loquax/src/ui/arrival.rs:268`) sends it after the read receipt's
+  (`loquax/src/ui/arrival.rs:269`) sends it after the read receipt's
   batch window, 5 s after the first arrival, alone or riding on the next
   message to that sender. Read wins: an id seen while read receipts go to
-  that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:384`).
+  that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:385`).
 - **On a home node** (since 1462): the home acknowledges nothing on its
   own; archiving is no device. A device that pulled the message hands the
   home an arrived mark (`MarkFlag::Arrived`), and the home's `arrived`
@@ -163,7 +163,7 @@ fields[0xFC] = map {
   holds, so only this receipt says the device has it
   ([the read-receipts page](loquax-read-receipts.md), section 6).
 - **Taking it**: `take_lev` (`loquax/src/ui/receipts.rs:192`) hands a
-  `0x07` to `apply_arrival` (`loquax/src/ui/arrival.rs:412`) before the
+  `0x07` to `apply_arrival` (`loquax/src/ui/arrival.rs:413`) before the
   read-receipts switch is looked at. A `0x07` alone carries no mark and
   does not change what the peer is believed to say about read receipts.
 
@@ -364,7 +364,7 @@ other key in either map (`lev_status::announced_version`).
   and `unknown` leave it open; each answer logs
   `PN_STATUS_ASKED ids=N answered=N`, where answered counts the ids the
   node named with a word other than `unknown`. The answers fold into the
-  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:440`).
+  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:441`).
 
 ### Asking, as built (1409)
 
