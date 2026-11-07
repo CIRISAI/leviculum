@@ -674,11 +674,11 @@ impl<B> UiModel<B> {
     /// message up to it in its conversation is read, as opening the
     /// conversation there read them.
     pub(super) fn read_through(&mut self, id: &[u8; 32]) {
-        let Some(conversation) = self
-            .conversations
-            .iter_mut()
-            .find(|c| c.messages.iter().any(|m| !m.outbound && m.id == Some(*id)))
-        else {
+        let Some(conversation) = self.conversations.iter_mut().find(|c| {
+            // By the summary's index (1463): a read mark per entry of a
+            // pull walked every message of every conversation.
+            c.with_id(id).into_iter().any(|m| !c.messages[m].outbound)
+        }) else {
             return;
         };
         let after = conversation

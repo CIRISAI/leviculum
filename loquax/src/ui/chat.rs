@@ -22,7 +22,7 @@ use super::liveness::Liveness;
 use super::reactions;
 use super::replies::Quoted;
 use super::strings::{Arg, Lang, StrId, Text};
-use super::{Message, UiModel};
+use super::{Conversation, Message, UiModel};
 use crate::telemetry::Fix;
 use crate::when::WallTime;
 
@@ -481,7 +481,7 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         unread: conversation.map_or(0, |c| c.unread_rows()),
         updates,
         initials: initials(model.names.shown(peer), peer),
-        icon: latest_appearance(messages),
+        icon: conversation.and_then(Conversation::appearance),
         kind: last.map_or("", kind),
         reaction: last
             .filter(|m| m.is_reaction())

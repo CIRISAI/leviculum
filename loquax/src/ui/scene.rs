@@ -1021,15 +1021,36 @@ impl<B> UiModel<B> {
         scene
     }
 
+    /// The scene of the chats list alone (1463): [`UiModel::scene`] as a
+    /// screen that shows the list without the open conversation sees it,
+    /// with no chat, sheet or whereabouts, and none of them built. The
+    /// M9's list screen: a chat of 4000 bubbles built and thrown away on
+    /// every key was most of its draw.
+    pub fn list_scene(&self, class: LayoutClass) -> Scene {
+        let mut scene = self.content_scene_of(class, false);
+        scene.profile = self.profile_screen();
+        scene
+    }
+
     /// [`UiModel::scene`] without what lies over it.
     fn content_scene(&self, class: LayoutClass) -> Scene {
+        self.content_scene_of(class, true)
+    }
+
+    /// The content scene, its chat built when `chat_open` and one is
+    /// selected.
+    fn content_scene_of(&self, class: LayoutClass, chat_open: bool) -> Scene {
         if self.browse.enabled && self.browse.open {
             return browse_scene(self).in_class(class);
         }
         if self.rooms.showing() {
             return rooms_scene(self).in_class(class);
         }
-        let open = self.conversations.get(self.selected).map(|_| self.selected);
+        let open = self
+            .conversations
+            .get(self.selected)
+            .filter(|_| chat_open)
+            .map(|_| self.selected);
         let chat = open.map(|c| chat(self, c));
         let screen = match &chat {
             Some(chat) => ScreenId::Chat { peer: chat.peer },
@@ -1298,8 +1319,7 @@ fn me_bar<B>(model: &UiModel<B>) -> TopBar {
 /// and the map.
 fn tabs<B>(model: &UiModel<B>) -> Tabs {
     let unread = model
-        .order()
-        .into_iter()
+        .listed()
         .filter(|&c| model.conversations[c].unread_rows() > 0)
         .count();
     let unread = u32::try_from(unread).unwrap_or(u32::MAX);
@@ -1531,10 +1551,6 @@ pub fn peer_title(bar: &TopBar) -> Text {
 pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
     let peer = model.conversations.get(c).map_or([0; 16], |c| c.peer);
     let name = model.names.label(&peer);
-    let messages = model
-        .conversations
-        .get(c)
-        .map_or(&[][..], |c| c.messages.as_slice());
     let liveness = model.liveness(&peer);
     let badge = super::group_scene::badge(model, &peer);
     let avatar = Avatar::of(
@@ -1543,7 +1559,11 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
             None => chat::initials(model.names.shown(&peer), &peer),
         },
         &peer,
-        chat::latest_appearance(messages).as_ref(),
+        model
+            .conversations
+            .get(c)
+            .and_then(super::Conversation::appearance)
+            .as_ref(),
         Ring::of(liveness.state),
     );
     // A group's bar opens its member sheet (1307), where the map would be.

@@ -164,6 +164,7 @@ pub mod selection;
 pub mod share;
 pub mod state;
 pub mod strings;
+pub mod summary;
 pub mod tracks;
 pub mod verbs;
 pub mod viewload;
@@ -456,6 +457,9 @@ pub struct Conversation {
     pub earlier: usize,
     /// What was typed here and not sent (1219), kept in the store.
     pub draft: history::Draft,
+    /// What the chats list asks of it, kept up to its messages by
+    /// [`update`] (1463): a cache the readers check before they trust it.
+    pub summary: summary::Summary,
 }
 
 /// A line the conversation says between its messages, centred.
@@ -474,6 +478,9 @@ impl Conversation {
     /// counts by when it came ([`Conversation::touched`]). `None` while
     /// nothing has a time.
     pub fn last_written(&self) -> Option<i64> {
+        if let Some(newest) = self.summary.newest(&self.messages) {
+            return newest.max(self.touched);
+        }
         let newest = |moves: bool| {
             self.messages
                 .iter()
@@ -497,7 +504,30 @@ impl Conversation {
             flags: history::Flags::default(),
             earlier: 0,
             draft: history::Draft::default(),
+            summary: summary::Summary::default(),
         }
+    }
+
+    /// The messages that carry `id`, oldest first: the summary's index
+    /// (1463), or a walk when it is behind. Each one checked, so an index
+    /// that missed a rename finds nothing wrong, only nothing.
+    pub fn with_id(&self, id: &[u8; 32]) -> Vec<usize> {
+        let found: Vec<usize> = match self.summary.with_id(&self.messages, id) {
+            Some(indices) => indices.to_vec(),
+            None => (0..self.messages.len()).collect(),
+        };
+        found
+            .into_iter()
+            .filter(|&m| self.messages[m].id == Some(*id))
+            .collect()
+    }
+
+    /// The newest received icon appearance, foreground and background: the
+    /// avatar's colours (`chat::latest_appearance`).
+    pub fn appearance(&self) -> Option<(String, String)> {
+        self.summary
+            .appearance(&self.messages)
+            .unwrap_or_else(|| chat::latest_appearance(&self.messages))
     }
 
     /// Note one more unread message, the newest.
@@ -556,7 +586,9 @@ impl Conversation {
     /// nothing (1209), it is a state and no message. [`Conversation::unread`]
     /// stays the messages, which the home's read marks name one by one.
     pub fn unread_rows(&self) -> usize {
-        self.unread_messages().len()
+        self.summary
+            .unread_rows(&self.messages, self.unread)
+            .unwrap_or_else(|| self.unread_messages().len())
     }
 
     /// The unread messages that ask for attention, oldest first: the raw
@@ -595,15 +627,21 @@ impl Conversation {
     /// with a position: each at its fix's time (the receive time where the
     /// sender's clock claims the future), judged at `now`.
     pub fn liveness(&self, now: Option<i64>) -> liveness::Liveness {
-        // The newest few teach the cadence; older ones say nothing.
-        let fixes: Vec<Fix> = self
-            .messages
-            .iter()
-            .rev()
-            .filter(|m| m.is_report())
-            .filter_map(|m| message_fix(self.peer, m))
-            .take(liveness::CADENCE_GAPS + 1)
-            .collect();
+        // The newest few teach the cadence; older ones say nothing. The
+        // summary knows where they are (1463); a walk finds them otherwise.
+        let fixes: Vec<Fix> = match self.summary.reports(&self.messages) {
+            Some(newest) => newest
+                .filter_map(|i| message_fix(self.peer, &self.messages[i]))
+                .collect(),
+            None => self
+                .messages
+                .iter()
+                .rev()
+                .filter(|m| m.is_report())
+                .filter_map(|m| message_fix(self.peer, m))
+                .take(liveness::CADENCE_GAPS + 1)
+                .collect(),
+        };
         let times: Vec<i64> = fixes.iter().map(Fix::order_time).collect();
         // The newest report's share mark (1273): its promise, or its end.
         let mark = fixes
@@ -1322,14 +1360,10 @@ impl<B> UiModel<B> {
     /// after, in the order they came. Only those the list shows
     /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
     pub fn order(&self) -> Vec<usize> {
-        // The blocked view lists the blocked, archived or not.
-        let mut order: Vec<usize> = (0..self.conversations.len())
-            .filter(|&i| {
-                let c = &self.conversations[i];
-                self.shows(&c.peer) && (self.show_blocked || c.flags.archived == self.show_archived)
-            })
-            .collect();
-        order.sort_by_key(|&i| {
+        let mut order: Vec<usize> = self.listed().collect();
+        // Each key once (1463): `last_written` is a walk when the summary
+        // is behind.
+        order.sort_by_cached_key(|&i| {
             let c = &self.conversations[i];
             (
                 core::cmp::Reverse(c.pinned),
@@ -1338,6 +1372,16 @@ impl<B> UiModel<B> {
             )
         });
         order
+    }
+
+    /// The conversations the list shows, in no order: [`UiModel::order`]
+    /// before its sort.
+    pub fn listed(&self) -> impl Iterator<Item = usize> + '_ {
+        // The blocked view lists the blocked, archived or not.
+        (0..self.conversations.len()).filter(|&i| {
+            let c = &self.conversations[i];
+            self.shows(&c.peer) && (self.show_blocked || c.flags.archived == self.show_archived)
+        })
     }
 
     fn bump(&mut self) -> u64 {
@@ -1912,6 +1956,13 @@ pub enum UiEffect {
 /// Fold one event into the model.
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     let mut effects = fold(model, event);
+    // The list's summaries up to what the event did (1463): the new tail of
+    // each conversation, read once here instead of whole on every draw.
+    for conversation in &mut model.conversations {
+        conversation
+            .summary
+            .refresh(conversation.peer, &conversation.messages);
+    }
     effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
     // Whatever hid the open conversation, a block, the `blocked` view or a
     // restore, another the list shows takes its place.
@@ -4195,6 +4246,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                     let id = to_hex(&message_id[..4]);
                     message.note(now, &format!("queued by the router as {id}"));
                 }
+                // Named in place: the summary's ids start over (1463).
+                if let Some(conversation) = model.conversations.get_mut(c) {
+                    conversation.summary.forget();
+                }
             }
         }
         OutboxEvent::State { message_id, state } => {
@@ -4326,10 +4381,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             }
             let open = index == model.selected && shown;
             let follow = model.scroll_top.is_none();
-            if model.conversations[index]
-                .messages
-                .iter()
-                .any(|m| !m.outbound && m.id == Some(message_id))
+            let conversation = &model.conversations[index];
+            if conversation
+                .with_id(&message_id)
+                .into_iter()
+                .any(|m| !conversation.messages[m].outbound)
             {
                 return Vec::new();
             }
@@ -4904,8 +4960,10 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
             DeliveryState::Arrived if group => DeliveryState::InMailbox,
             other => other,
         };
-        for (m, message) in conversation.messages.iter_mut().enumerate() {
-            if !message.outbound || message.id != Some(id) {
+        // By the summary's index, not a walk over every message (1463).
+        for m in conversation.with_id(&id) {
+            let message = &mut conversation.messages[m];
+            if !message.outbound {
                 continue;
             }
             if group
@@ -5016,7 +5074,9 @@ fn home_sent<B>(
     let now = model.now;
     let mut found = false;
     for conversation in &mut model.conversations {
-        for message in &mut conversation.messages {
+        // The messages that carry the id, by the summary's index (1463).
+        for m in conversation.with_id(&message_id) {
+            let message = &mut conversation.messages[m];
             if !message.outbound || message.id != Some(message_id) {
                 continue;
             }
@@ -5052,6 +5112,10 @@ fn home_sent<B>(
                 message.id = Some(message_id);
                 message.delivery = Some(DeliveryState::Sent);
                 message.note(now, "taken by the mailbox");
+            }
+            // Named in place: the summary's ids start over (1463).
+            if let Some(conversation) = model.conversations.get_mut(c) {
+                conversation.summary.forget();
             }
             return;
         }
