@@ -45,6 +45,38 @@ pub const NARROW_COLS: usize = loquax::ui::layout::NARROW;
 /// count or mark.
 pub const ENTRY_ROWS: usize = 2;
 
+/// What the board's loop drew last (1491): a turn whose pull brought
+/// nothing, or nothing new, draws nothing. The loop asks [`Drawn::due`]
+/// after it folded what the client drained, and says [`Drawn::drawn`]
+/// at the end of every turn: every other path of a turn that changes the
+/// model (a key, a control, the pairing) draws it there and then.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Drawn {
+    presented: loquax::ui::Presented,
+}
+
+impl Drawn {
+    /// Whether the turn draws: the model's revision moved since the last
+    /// frame.
+    pub fn due<B>(&mut self, model: &UiModel<B>) -> bool {
+        self.presented.due(Self::stamp(model))
+    }
+
+    /// The frame on the panel shows `model` as it is.
+    pub fn drawn<B>(&mut self, model: &UiModel<B>) {
+        self.presented.drawn(Self::stamp(model));
+    }
+
+    /// How many draws [`Drawn::due`] allowed.
+    pub fn builds(&self) -> u64 {
+        self.presented.builds()
+    }
+
+    fn stamp<B>(model: &UiModel<B>) -> u64 {
+        loquax::ui::Presented::stamp(model.revision, &[])
+    }
+}
+
 /// What the M9's screen shows (1490): the list's entries between the
 /// top bar and the tab bar, and in a chat at most one bubble row a cell
 /// row. The scene is built for this window and its margin, never for

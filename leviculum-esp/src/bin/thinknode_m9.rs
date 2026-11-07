@@ -836,6 +836,10 @@ fn main() -> ! {
         &shown,
         &mut log,
     );
+    // What the panel shows (1491): a pull that brought nothing new draws
+    // nothing.
+    let mut drawn = screen::Drawn::default();
+    drawn.drawn(&model);
 
     let mut deframer = Deframer::new();
     // The keyboard's losses as the last `[KB]` line said them.
@@ -937,24 +941,22 @@ fn main() -> ! {
         let t_take = uptime_ms();
 
         // What the client brought: pulled entries into the model, ended
-        // sends to their bubbles, and the top bar's word when it moved.
+        // sends to their bubbles, and the top bar's word when it moved. The
+        // panel is drawn when the model's revision or the word moved
+        // (1491), not for a page the model already held.
         let drained = node.drain();
-        let mut dirty = false;
         if let Some(address) = node.address() {
             if !drained.entries.is_empty() {
                 home::take(&mut model, &drained.entries, &address);
-                dirty = true;
             }
             for result in drained.sent {
                 home::sent(&mut model, result);
-                dirty = true;
             }
         }
         let word = node.word();
-        if word != shown.word {
-            shown.word = word;
-            dirty = true;
-        }
+        let mut dirty = word != shown.word;
+        shown.word = word;
+        dirty |= drawn.due(&model);
         if dirty {
             let t_draw = uptime_ms();
             redraw(
@@ -1060,6 +1062,8 @@ fn main() -> ! {
             }
         }
         turn.keys = uptime_ms().saturating_sub(t_keys);
+        // Every path of the turn that changed the model drew it.
+        drawn.drawn(&model);
         turn.say(&mut log, node.entries());
     }
 }
