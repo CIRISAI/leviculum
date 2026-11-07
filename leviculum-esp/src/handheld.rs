@@ -90,9 +90,13 @@ pub struct Drained {
     /// model (`m9home::answered`).
     pub answers: Vec<Answer>,
     /// Writes that did not reach the flash since the last drain (1493):
-    /// a kept page, an ask frame, a mark, the join's record. The screen
-    /// says it as a fault word, never only the log.
+    /// a kept page, an ask frame, a mark. The screen says it as a fault
+    /// word, never only the log.
     pub unsaved: u32,
+    /// The join went through but its record did not reach the flash
+    /// (1493): a reboot lands on the pairing screen with a used token,
+    /// and the screen must say so before that happens.
+    pub join_unsaved: bool,
 }
 
 /// The node, its serial interface and its client.
@@ -700,7 +704,7 @@ impl Client {
                     // flash: a reboot lands on the pairing screen with a
                     // used token. A word on the screen, not only here
                     // (1493).
-                    self.drained.unsaved += 1;
+                    self.drained.join_unsaved = true;
                 }
                 log.line(
                     "[HOME] ",

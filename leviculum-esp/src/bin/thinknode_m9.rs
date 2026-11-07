@@ -1068,7 +1068,10 @@ fn main() -> ! {
                 to_ui(ToUi::Answer(answer));
             }
         }
-        if drained.unsaved > 0 && !faulted {
+        if drained.join_unsaved {
+            faulted = true;
+            to_ui(ToUi::Fault(Some(StrId::M9JoinNotSaved)));
+        } else if drained.unsaved > 0 && !faulted {
             faulted = true;
             to_ui(ToUi::Fault(Some(StrId::M9NotSaved)));
         }
