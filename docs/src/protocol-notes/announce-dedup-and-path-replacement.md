@@ -300,3 +300,32 @@ losing more than ~29 % of announces. Three properties bound it:
   exactly, which pins the replay to the gate. The companion
   `mvr_pathchoice_direct_vs_route` holds the norelay control: with no
   competing route the penalty can never unroute the only path.
+
+## 7. A local client's own announce in the same second
+
+Since order 1488 the equal-or-fewer-hops arm (§3) takes one more copy:
+an announce from a local shared-instance client, its random blob unseen,
+whose emission second equals the newest one recorded
+(`reason="local_client_same_second"` on `PATH_ADD`, in `handle_announce`
+in `leviculum-core/src/transport.rs`). §3's rule refuses it, and since a
+refused announce is not rebroadcast, no peer ever hears it.
+
+The case is ordinary on a shared instance. An emission has one-second
+resolution, so a client that announces twice inside one second, or two
+short-lived clients of one identity back to back (two `loquax send` runs,
+the second with `--from`), reach the instance in the same second. The
+first client's hops-0 path stands until the instance has handled its IPC
+disconnect, and the second announce, with the new display name or a new
+ratchet, met the strict `>` and was dropped. The land gate on 058c8878
+showed it: Python heard the first name and never the second in 40 s.
+The test is `a_clients_second_announce_in_one_second_reaches_the_network`
+in `transport.rs`, beside its replay partner
+`a_clients_repeated_announce_is_not_forwarded_twice`.
+
+Only the holder of the destination's key signs a fresh blob, and a
+local client is on our side of the IPC hop, so the copy is news and not
+an echo. A seen blob still dies at the replay gate, and an announce from
+a network interface is untouched. Deviation rule: the wire is unchanged,
+a Python peer stores whatever valid announce it is sent
+(`Identity.validate_announce` runs before its path rule), and the change
+delivers the client's newest app data, which §3's rule would lose.

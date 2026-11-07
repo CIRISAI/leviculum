@@ -7537,6 +7537,24 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 } else if announce_emitted == path_timebase && same_emission_wins {
                     self.mark_path_unknown_state(&dest_hash);
                     Some(same_emission_reason)
+                } else if announce_emitted == path_timebase && from_local {
+                    // Order 1488: a local client's own announce, its blob
+                    // unseen (the replay gate above dropped a seen one), in
+                    // the second of the emission we hold. An emission has
+                    // one-second resolution (`Destination.py:282`), so a
+                    // client that announces twice in one second, or a second
+                    // client of the same identity while the first one's
+                    // hops-0 path still stands (its IPC disconnect not yet
+                    // handled), would lose the newer app data, a rename or
+                    // a new ratchet, and no peer would ever hear it. Only
+                    // the holder of the key signs a fresh blob, so this is
+                    // news and not a copy. Python refuses it
+                    // (Transport.py:1772); deviation rule: the wire is the
+                    // same, a Python peer stores what it is sent
+                    // (`Identity.validate_announce` runs before its path
+                    // rule), and a renamed sender reaches it.
+                    self.mark_path_unknown_state(&dest_hash);
+                    Some("local_client_same_second")
                 } else {
                     None
                 }
@@ -18960,7 +18978,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:8059), a deliberate anti-replay
+            // `random_blobs` (transport.rs:8077), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -30509,6 +30527,172 @@ mod tests {
                 .filter(|p| p.flags.packet_type == PacketType::Announce)
                 .map(|p| p.destination_hash)
                 .collect()
+        }
+
+        /// An announce for `dest` with the given random blob and app data, as
+        /// a client puts it on the IPC socket (hops 0).
+        fn make_client_announce(
+            dest: &Destination,
+            random_hash: [u8; crate::constants::RANDOM_HASHBYTES],
+            app_data: &[u8],
+        ) -> Vec<u8> {
+            let id = dest
+                .identity()
+                .expect("a single destination has an identity");
+            let mut signed = Vec::new();
+            signed.extend_from_slice(dest.hash().as_bytes());
+            signed.extend_from_slice(&id.public_key_bytes());
+            signed.extend_from_slice(dest.name_hash());
+            signed.extend_from_slice(&random_hash);
+            signed.extend_from_slice(app_data);
+            let signature = id.sign(&signed).expect("sign");
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&id.public_key_bytes());
+            payload.extend_from_slice(dest.name_hash());
+            payload.extend_from_slice(&random_hash);
+            payload.extend_from_slice(&signature);
+            payload.extend_from_slice(app_data);
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: DestinationType::Single,
+                    packet_type: PacketType::Announce,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: dest.hash().into_bytes(),
+                context: PacketContext::None,
+                data: PacketData::Owned(payload),
+            };
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).expect("pack");
+            buf[..len].to_vec()
+        }
+
+        /// A random blob whose emission is `secs` (its last five bytes,
+        /// big-endian) and whose random half is `tag`.
+        fn blob(tag: u8, secs: u64) -> [u8; crate::constants::RANDOM_HASHBYTES] {
+            let mut b = [tag; crate::constants::RANDOM_HASHBYTES];
+            b[5..].copy_from_slice(&secs.to_be_bytes()[3..]);
+            b
+        }
+
+        /// Order 1488: two `loquax send` runs back to back, one identity, the
+        /// second with `--from`. Each is a client of the instance and
+        /// announces once; both announces fall in one second, which is the
+        /// whole resolution of an emission (`Destination.py:282`), and the
+        /// first client's IPC disconnect has not been handled yet, so its
+        /// hops-0 path still stands. The second announce is a fresh
+        /// emission by the destination's own holder (an unseen blob, new
+        /// app data) and must reach the network, or a Python peer keeps the
+        /// old name: land gate on 058c8878, Python heard one announce in
+        /// 40 s.
+        #[test]
+        fn a_clients_second_announce_in_one_second_reaches_the_network() {
+            const SECOND_CLIENT_IFACE: usize = 11;
+            let mut transport = make_transport_with_local_client();
+            transport.set_interface_name(SECOND_CLIENT_IFACE, "Local[rns/default]/1".into());
+            transport.set_local_client(SECOND_CLIENT_IFACE, true);
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "lxmf",
+                &["delivery"],
+            )
+            .expect("destination");
+            let dest_hash = dest.hash().into_bytes();
+            let secs = TEST_TIME_MS / 1000;
+
+            let first = make_client_announce(&dest, blob(0x11, secs), b"lew");
+            transport
+                .process_incoming(LOCAL_CLIENT_IFACE, &first)
+                .expect("process_incoming");
+            transport.poll();
+            assert!(
+                announces_reaching(&transport.drain_actions(), NETWORK_IFACE).contains(&dest_hash),
+                "the first announce leaves at once"
+            );
+            // Past one fresh-interface spacing, inside the same second.
+            transport.clock().advance(FRESH_ANNOUNCE_SPACING_MS + 100);
+
+            let second = make_client_announce(&dest, blob(0x22, secs), b"lew@schneckenschreck");
+            transport
+                .process_incoming(SECOND_CLIENT_IFACE, &second)
+                .expect("process_incoming");
+            let mut reached = Vec::new();
+            for _ in 0..20 {
+                transport.poll();
+                for action in transport.drain_actions() {
+                    if let Action::Broadcast {
+                        data,
+                        exclude_iface,
+                        exclude_ifaces,
+                        ..
+                    } = &action
+                    {
+                        if *exclude_iface != Some(InterfaceId(NETWORK_IFACE))
+                            && !exclude_ifaces.contains(&InterfaceId(NETWORK_IFACE))
+                        {
+                            reached.push(data.clone());
+                        }
+                    }
+                    if let Action::SendPacket { iface, data, .. } = &action {
+                        if iface.0 == NETWORK_IFACE {
+                            reached.push(data.clone());
+                        }
+                    }
+                }
+                transport.clock().advance(100);
+            }
+            assert!(
+                reached
+                    .iter()
+                    .any(|raw| raw.windows(20).any(|w| w == b"lew@schneckenschreck")),
+                "the renamed announce never left for the network ({} announces did)",
+                reached.len()
+            );
+        }
+
+        /// The other half: a client sending the very same announce again
+        /// (a seen blob) is a replay and is not forwarded a second time.
+        #[test]
+        fn a_clients_repeated_announce_is_not_forwarded_twice() {
+            let mut transport = make_transport_with_local_client();
+            let dest = Destination::new(
+                Some(Identity::generate(&mut OsRng)),
+                Direction::In,
+                DestinationType::Single,
+                "lxmf",
+                &["delivery"],
+            )
+            .expect("destination");
+            let dest_hash = dest.hash().into_bytes();
+            let raw = make_client_announce(&dest, blob(0x11, TEST_TIME_MS / 1000), b"lew");
+            transport
+                .process_incoming(LOCAL_CLIENT_IFACE, &raw)
+                .expect("process_incoming");
+            transport.poll();
+            assert!(
+                announces_reaching(&transport.drain_actions(), NETWORK_IFACE).contains(&dest_hash)
+            );
+            transport.clock().advance(FRESH_ANNOUNCE_SPACING_MS + 100);
+            transport
+                .process_incoming(LOCAL_CLIENT_IFACE, &raw)
+                .expect("process_incoming");
+            let mut again = 0;
+            for _ in 0..20 {
+                transport.poll();
+                again += announces_reaching(&transport.drain_actions(), NETWORK_IFACE)
+                    .iter()
+                    .filter(|d| **d == dest_hash)
+                    .count();
+                transport.clock().advance(100);
+            }
+            assert_eq!(again, 0, "a replayed client announce left again");
         }
 
         /// Order 1358: a Python peer counts every announce on its interface,
