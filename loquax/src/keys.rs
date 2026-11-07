@@ -242,6 +242,16 @@ pub const ROWS: &[Row<Action>] = {
                 key(PageUp, Mods::Any, ScrollMessages(PgUp), COMPOSE),
             ]],
         ),
+        // The chat is read by the line (1529): Up and Down a line, Left
+        // and Right a screen less a line, the ring's four on the M9.
+        Row::new(
+            "page the chat (left / right)",
+            MOVE,
+            &[&[
+                key(Left, NONE, Scroll(PgUp), MESSAGES),
+                key(Right, NONE, Scroll(PgDn), MESSAGES),
+            ]],
+        ),
         // Conversations.
         Row::new(
             "open the selected conversation",

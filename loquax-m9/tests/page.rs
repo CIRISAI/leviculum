@@ -99,18 +99,23 @@ fn a_walk_says_its_page_cursor_and_top_after_every_key() {
     let open = board.draw(&mut renderer, &mut map).expect("the chat");
     let chat = page::of(&board.model, 0, false, &renderer.window());
     assert_eq!(chat.name, "chat", "{open}");
-    // Up through the chat: the cursor walks back, and the top follows it
-    // once it passes the screen's first bubble.
+    // Up through the chat: the view climbs a line a press (1529), the
+    // cursor following the lines, until the first message is on top.
     // The pinned chat is longer than a screen: the newest at the bottom,
     // the topmost shown some messages above it.
     assert!(chat.top > 0 && chat.top < chat.cursor, "{open}");
     let mut tops = vec![chat.top];
-    for _ in 0..chat.cursor {
+    let mut at = chat;
+    // A line a press: no more presses than ten lines a message.
+    for _ in 0..10 * chat.cursor {
+        if (at.cursor, at.top) == (0, 0) {
+            break;
+        }
         board.key(0xb5);
         board.draw(&mut renderer, &mut map);
-        tops.push(page::of(&board.model, 0, false, &renderer.window()).top);
+        at = page::of(&board.model, 0, false, &renderer.window());
+        tops.push(at.top);
     }
-    let at = page::of(&board.model, 0, false, &renderer.window());
     assert_eq!((at.cursor, at.top), (0, 0), "at the chat's first message");
     assert!(tops.windows(2).all(|w| w[1] <= w[0]), "{tops:?}");
     assert!(

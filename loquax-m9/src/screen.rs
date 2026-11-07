@@ -108,6 +108,10 @@ pub struct Look {
     /// (`BubbleNode::bubble.key`), while the chat has the keys; none draws
     /// no bubble selected and the newest at the bottom.
     pub cursor: Option<u64>,
+    /// Where the chat's view stands when the reader scrolled it by the
+    /// line (1529, the model's `chat_anchor`); none draws the newest at
+    /// the bottom, or the cursor's bubble there when it stands above.
+    pub anchor: Option<loquax::ui::pager::Anchor>,
     /// The compose field's cursor, in characters, while it has the keys;
     /// none draws no caret, and the hint on an empty field.
     pub caret: Option<usize>,
@@ -132,6 +136,7 @@ impl Look {
             lang,
             now,
             cursor: None,
+            anchor: None,
             caret: None,
             row: 0,
             home: None,
@@ -152,6 +157,7 @@ impl Look {
         };
         Self {
             cursor,
+            anchor: model.chat_anchor.filter(|_| model.focus == Pane::Messages),
             caret: (model.focus == Pane::Compose).then(|| model.compose.cursor()),
             ..Self::m9(model.lang, model.now)
         }

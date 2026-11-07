@@ -24,6 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use leviculum_ui::input::{KeyCode, KeyEvent};
+use leviculum_ui::keymap::ScrollCmd;
 use leviculum_ui::style::{RLine, RStyle};
 use leviculum_ui::text::fit_width;
 use loquax::home::ask::GroupVerb;
@@ -241,6 +242,19 @@ fn new_hit(node: &NewGroupNode, row: usize, code: KeyCode) -> Hit {
     }
 }
 
+/// The scroll command `key` is in the open chat (1529): the shared table's
+/// (the ring's up and down a line, its left and right a page), which the
+/// M9's own lines carry out ([`crate::chat::page`]).
+fn chat_scroll<B>(model: &UiModel<B>, place: Place, key: &KeyEvent) -> Option<ScrollCmd> {
+    if place != Place::Chat {
+        return None;
+    }
+    match loquax::keys::resolve(key, loquax::keys::panes_of(Pane::Messages), model.ctx())? {
+        loquax::keys::Action::Scroll(cmd) => Some(cmd),
+        _ => None,
+    }
+}
+
 /// One key on the M9: a group's key runs its node's action or moves the
 /// cursor `row`; any other goes to the model as the terminal's key, the
 /// map's own keys first made the terminal's ([`crate::map::key`]). The
@@ -271,7 +285,10 @@ pub fn press(model: &mut UiModel<Field>, row: &mut usize, key: &KeyEvent) -> Vec
             *row = to;
             Vec::new()
         }
-        None => update(model, UiEvent::Key(crate::map::key(model, *key))),
+        None => match chat_scroll(model, before, key) {
+            Some(cmd) => crate::chat::page(model, cmd),
+            None => update(model, UiEvent::Key(crate::map::key(model, *key))),
+        },
     };
     // The key brought the chat onto the panel (1493): only now is it
     // read. Moving the list's cursor selects without reading

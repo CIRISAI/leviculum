@@ -151,6 +151,7 @@ pub mod layout;
 pub mod listing;
 pub mod liveness;
 pub mod map;
+pub mod pager;
 pub mod photos;
 pub mod profile;
 pub mod radar;
@@ -1087,6 +1088,10 @@ pub struct UiModel<B> {
     /// The conversation's first row on screen when the reader scrolled up;
     /// `None` keeps the newest at the bottom.
     pub scroll_top: Option<usize>,
+    /// The same for a target that lays only a window of the chat (the M9,
+    /// 1529): the view's first row by the message it is in, so a window
+    /// that moves keeps the line. `None` keeps the newest at the bottom.
+    pub chat_anchor: Option<pager::Anchor>,
     /// The message whose detail view is up, as (conversation, message).
     pub detail: Option<(usize, usize)>,
     /// The detail view's first row on screen, back to the top whenever one
@@ -1383,6 +1388,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             now: None,
             screen: (80, 24),
             scroll_top: None,
+            chat_anchor: None,
             detail: None,
             own_code: None,
             profile_open: false,
@@ -1682,6 +1688,7 @@ impl<B> UiModel<B> {
         }
         self.selected = index;
         self.scroll_top = None;
+        self.chat_anchor = None;
         self.selection = None;
         // Where the list stands beside the chat, selecting is seeing.
         // Where the list is a screen of its own (1493: the phone, the
@@ -2693,10 +2700,18 @@ pub enum UiEvent {
         text: String,
         reply: Option<[u8; 32]>,
     },
-    /// These bubbles of `peer`'s chat are on screen now, at least half of
-    /// each, by their keys ([`Message::activity`]): a frontend says it on
-    /// every change (1231, [`receipts`]).
+    /// These bubbles of `peer`'s chat are on screen now, by their keys
+    /// ([`Message::activity`]), by the frontend's rule (the terminal's
+    /// since 1529: a bubble whose last line is on screen): a frontend says
+    /// it on every change (1231, [`receipts`]).
     Viewport { peer: [u8; 16], keys: Vec<u64> },
+    /// A scroll key in the open chat on a target that lays its own window
+    /// of it (the M9, 1529): `cmd` over the target's lines, by the one
+    /// rule the terminal's keys take ([`pager::step`]).
+    Lines {
+        cmd: ScrollCmd,
+        window: pager::Window,
+    },
     /// The app is in front with the screen on, or went behind: an
     /// Android activity resumed or paused, a terminal's focus.
     Front(bool),
@@ -3256,6 +3271,11 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             let earlier = model.earlier_shown(peer, &keys);
             model.set_viewport(peer, keys);
             earlier
+        }
+        UiEvent::Lines { cmd, window } => {
+            model.touched();
+            page_window(model, cmd, &window);
+            model.earlier_wanted()
         }
         UiEvent::Front(front) => {
             model.set_front(front);
@@ -4763,9 +4783,10 @@ fn scroll_list<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
     }
 }
 
-/// The cursor moves a message at a time, a page a pane's height of rows, and
-/// the view follows it just far enough to show its block. Back on the newest
-/// message with the bottom in view, the pane follows the newest again.
+/// The open chat read by the line (1529, [`pager`]): the terminal hands
+/// the rule its laid rows, each message's lines without the separators
+/// above it. Back on the newest message with the bottom in view, the pane
+/// follows the newest again.
 fn scroll_messages<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
     let count = model.messages_of_selected().len();
     if count == 0 {
@@ -4774,80 +4795,72 @@ fn scroll_messages<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
     let laid = model.laid();
     let rows = model.message_rows().max(1);
     let total = laid.rows.len();
+    let lines = lines_of(&laid);
+    let view = pager::View {
+        top: model.top_of(total),
+        selected: model.message_cursor.min(count - 1),
+    };
+    let to = pager::step(&lines, total, rows, view, cmd);
+    model.message_cursor = to.selected;
     let bottom = total.saturating_sub(rows);
-    let mut top = model.top_of(total);
-    let last = count - 1;
-    let at = model.message_cursor.min(last);
-    let step = match cmd {
-        ScrollCmd::HalfPageDown | ScrollCmd::HalfPageUp => (rows / 2).max(1),
-        _ => rows,
-    };
-    let cursor = match cmd {
-        ScrollCmd::LineDown => (at + 1).min(last),
-        ScrollCmd::LineUp => at.saturating_sub(1),
-        ScrollCmd::Top => 0,
-        ScrollCmd::Bottom => last,
-        ScrollCmd::PageDown | ScrollCmd::HalfPageDown => {
-            top = (top + step).min(bottom);
-            // The lowest block that starts in the new view.
-            laid.spans
-                .iter()
-                .rposition(|span| span.start < top + rows)
-                .unwrap_or(at)
-                .max(at)
-        }
-        ScrollCmd::PageUp | ScrollCmd::HalfPageUp => {
-            top = top.saturating_sub(step);
-            // The highest block that ends in the new view.
-            laid.spans
-                .iter()
-                .position(|span| span.end > top)
-                .unwrap_or(0)
-                .min(at)
-        }
-    };
-    // A report folded into the next one has no rows: the cursor goes on
-    // past it the way it moved, or back where nothing is drawn that way.
-    let forward = !matches!(
-        cmd,
-        ScrollCmd::LineUp | ScrollCmd::PageUp | ScrollCmd::HalfPageUp | ScrollCmd::Bottom
-    );
-    let cursor = drawn_near(&laid.spans, cursor, forward);
-    if let Some(span) = laid.spans.get(cursor) {
-        if span.end > top + rows {
-            top = span.end - rows;
-        }
-        // A block taller than the pane shows its start.
-        if span.start < top {
-            top = span.start;
-        }
-    }
-    model.message_cursor = cursor;
     // The newest drawn message: reactions after it have no rows.
-    let newest = laid.spans[cursor.min(laid.spans.len())..]
+    let newest = lines[to.selected.min(lines.len())..]
         .iter()
         .skip(1)
-        .all(|span| span.start == span.end);
-    model.scroll_top = match (cursor == last || newest) && top >= bottom {
+        .all(|l| !l.drawn());
+    model.scroll_top = match newest && to.top >= bottom {
         true => None,
-        false => Some(top),
+        false => Some(to.top),
     };
 }
 
-/// The message nearest `at` that has rows on screen, looking `forward`
-/// first and the other way after.
-fn drawn_near(spans: &[layout::Span], at: usize, forward: bool) -> usize {
-    let drawn = |i: &usize| spans.get(*i).is_some_and(|s| s.start < s.end);
-    if spans.get(at).is_none() || drawn(&at) {
-        return at;
-    }
-    let after = (at + 1..spans.len()).find(drawn);
-    let before = (0..at).rev().find(drawn);
-    match forward {
-        true => after.or(before),
-        false => before.or(after),
-    }
-    .unwrap_or(at)
+/// A scroll key over a target's own window of the open chat (1529, the
+/// M9): the rule is [`pager::step`], as the terminal's; the cursor goes to
+/// the message it selects and the view is kept by the message its first
+/// row is in. Back on the newest with the bottom in view, the chat follows
+/// the newest again.
+fn page_window<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd, window: &pager::Window) {
+    let c = model.selected;
+    let Some(conversation) = model.conversations.get(c) else {
+        return;
+    };
+    let cursor = conversation.messages.get(model.message_cursor);
+    let selected = cursor
+        .and_then(|m| window.keys.iter().position(|&k| k == m.activity))
+        .unwrap_or(window.keys.len());
+    let view = pager::View {
+        top: window.top,
+        selected,
+    };
+    let to = pager::step(&window.lines, window.total, window.rows, view, cmd);
+    let Some(&key) = window.keys.get(to.selected) else {
+        return;
+    };
+    let Some(index) = conversation.messages.iter().position(|m| m.activity == key) else {
+        return;
+    };
+    let newest = !(index + 1..conversation.messages.len()).any(|i| model.bubble_row(c, i));
+    model.message_cursor = index;
+    let bottom = window.total.saturating_sub(window.rows);
+    model.chat_anchor = match newest && to.top >= bottom {
+        true => None,
+        false => window.anchor(to.top),
+    };
+}
+
+/// The lines of each message among the laid rows (1529): its block and
+/// what hangs under it, the separators above it left out.
+fn lines_of(laid: &layout::Laid) -> Vec<pager::Lines> {
+    laid.spans
+        .iter()
+        .map(|span| match span.start < span.end {
+            true => pager::Lines {
+                start: span.block.0.clamp(span.start, span.end),
+                end: span.end,
+            },
+            false => pager::Lines::default(),
+        })
+        .collect()
 }
 
 /// Select the conversation `step` away in the list's order, or the next one
@@ -6953,6 +6966,10 @@ fn view_stamp<B: InputBuffer>(model: &UiModel<B>) -> u64 {
     hash.word(model.selected as u64);
     hash.word(model.message_cursor as u64);
     hash.word(model.scroll_top.map_or(u64::MAX, |at| at as u64));
+    if let Some(anchor) = model.chat_anchor {
+        hash.word(anchor.key);
+        hash.word(anchor.offset as u64);
+    }
     hash.word(model.help_scroll as u64);
     hash.word(u64::from(model.help));
     hash.word(
@@ -10551,7 +10568,176 @@ pub(crate) mod tests {
         assert_eq!(now.iter().filter(|r| r.contains(" new ")).count(), 1);
     }
 
-    /// A page is the pane's height now that the model knows it.
+    /// The chat 1529 reads by the line: a short message, one over three
+    /// screens long, a short one, the long one's lines its own rows.
+    fn long_between_short() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        receive(&mut model, PEER, 1, "short before");
+        let lines = 3 * model.message_rows() + 5;
+        let long: Vec<String> = (1..=lines).map(|n| format!("line {n}")).collect();
+        receive(&mut model, PEER, 2, &long.join("\n"));
+        receive(&mut model, PEER, 3, "short after");
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Messages);
+        model
+    }
+
+    /// The view's first row of the open chat's `total` laid rows.
+    fn top_now(model: &UiModel<Field>) -> usize {
+        model.top_of(model.laid().rows.len())
+    }
+
+    /// 1529: Down from the top shows every laid row exactly once, never
+    /// more than one new a press; the selection stays on the long message
+    /// until its last line is on screen and moves to the short one under
+    /// it at the press that brings that one's first line on; the way back
+    /// up enters the long message at its end, a line a press, and a walk
+    /// into its middle and back lands on the line it left. Before 1529
+    /// Down jumped a message a press and skipped the long one's middle.
+    #[test]
+    fn a_chat_scrolls_by_the_line_and_the_selection_follows_the_lines() {
+        let mut model = long_between_short();
+        let laid = model.laid();
+        let total = laid.rows.len();
+        let rows = model.message_rows();
+        let long = laid.spans[1];
+        let after = laid.spans[2];
+        assert!(long.end - long.start > 3 * rows, "{long:?} over {rows}");
+        update(&mut model, key(KeyCode::Home));
+        assert_eq!((top_now(&model), model.message_cursor), (0, 0));
+        let mut seen = vec![0usize; total];
+        seen[..rows].iter_mut().for_each(|n| *n += 1);
+        let (mut moved_at, mut ready) = (None, None);
+        for press in 1..=total + 5 {
+            let (before, on) = (top_now(&model), model.message_cursor);
+            update(&mut model, key(KeyCode::Down));
+            let top = top_now(&model);
+            assert!(top - before <= 1, "press {press}: {before} to {top}");
+            seen[before + rows..top + rows]
+                .iter_mut()
+                .for_each(|n| *n += 1);
+            if on == 1 && before + rows < long.end {
+                assert_eq!(
+                    model.message_cursor, 1,
+                    "press {press}: its end not shown yet"
+                );
+            }
+            // The first press that finds the long one ended and the short
+            // one's first line on screen is the one that selects it.
+            if on == 1
+                && ready.is_none()
+                && before + rows >= long.end
+                && before + rows > after.block.0
+            {
+                ready = Some(press);
+            }
+            if model.message_cursor == 2 && moved_at.is_none() {
+                moved_at = Some(press);
+            }
+        }
+        assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
+        assert!(moved_at.is_some());
+        assert_eq!(moved_at, ready, "the selection moved at the right press");
+        assert!(
+            model.scroll_top.is_none(),
+            "following the newest at the end"
+        );
+        // Back up: the long one's end, not its start.
+        update(&mut model, key(KeyCode::Up));
+        let bottom = total - rows;
+        assert_eq!((top_now(&model), model.message_cursor), (bottom, 1));
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!((top_now(&model), model.message_cursor), (bottom - 1, 1));
+        // Into the middle, on, and back: the same line.
+        update(&mut model, key(KeyCode::Home));
+        for _ in 0..rows + 3 {
+            update(&mut model, key(KeyCode::Down));
+        }
+        let left = top_now(&model);
+        assert!(left > long.start && left + rows < long.end, "mid: {left}");
+        for _ in 0..4 {
+            update(&mut model, key(KeyCode::Down));
+        }
+        for _ in 0..4 {
+            update(&mut model, key(KeyCode::Up));
+        }
+        assert_eq!((top_now(&model), model.message_cursor), (left, 1));
+    }
+
+    /// 1529: Left and Right in the chat page a screen less a line, as the
+    /// page keys do; at the top the first message is selected, at the
+    /// bottom the newest and the pane follows. The list is untouched by
+    /// the rule: there Down is the next entry.
+    #[test]
+    fn left_and_right_page_the_chat_and_the_list_stays_by_entry() {
+        let mut model = long_between_short();
+        let total = model.laid().rows.len();
+        let rows = model.message_rows();
+        update(&mut model, key(KeyCode::Home));
+        update(&mut model, key(KeyCode::Right));
+        assert_eq!((top_now(&model), model.message_cursor), (rows - 1, 1));
+        update(&mut model, key(KeyCode::PageDown));
+        assert_eq!(top_now(&model), 2 * (rows - 1), "the page key the same");
+        update(&mut model, key(KeyCode::Left));
+        assert_eq!((top_now(&model), model.message_cursor), (rows - 1, 1));
+        update(&mut model, key(KeyCode::Left));
+        assert_eq!((top_now(&model), model.message_cursor), (0, 0));
+        for _ in 0..total / (rows - 1) + 1 {
+            update(&mut model, key(KeyCode::Right));
+        }
+        assert_eq!(model.message_cursor, 2);
+        assert!(model.scroll_top.is_none(), "following again");
+        // The list: an entry a press, Left and Right no page.
+        let mut list = UiModel::<Field>::new(&[PEER, OTHER, [0x5a; 16]]);
+        for (i, peer) in [PEER, OTHER, [0x5a; 16]].into_iter().enumerate() {
+            receive(&mut list, peer, 10 + i as u8, "hello");
+        }
+        list.focus = Pane::Conversations;
+        let order = list.order();
+        let at = order
+            .iter()
+            .position(|&c| c == list.selected)
+            .expect("in order");
+        update(&mut list, key(KeyCode::Down));
+        let next = order
+            .iter()
+            .position(|&c| c == list.selected)
+            .expect("in order");
+        assert_eq!(next, (at + 1).min(order.len() - 1));
+    }
+
+    /// 1529: a message is read when its last line was on screen, not when
+    /// half of it or a third of the pane showed: at the top of the long
+    /// message the viewport does not name it, with its end on screen it
+    /// does.
+    #[test]
+    fn the_long_message_is_read_when_its_last_line_is_on_screen() {
+        let mut model = long_between_short();
+        let key_of = |model: &UiModel<Field>, m: usize| {
+            model.conversations[model.selected].messages[m].activity
+        };
+        let long = key_of(&model, 1);
+        update(&mut model, key(KeyCode::Home));
+        let shown = hit::viewport(&model).expect("a chat").1;
+        assert!(shown.contains(&key_of(&model, 0)), "{shown:?}");
+        assert!(!shown.contains(&long), "its start only: {shown:?}");
+        let end = model.laid().spans[1].end;
+        while top_now(&model) + model.message_rows() < end {
+            update(&mut model, key(KeyCode::Down));
+        }
+        let shown = hit::viewport(&model).expect("a chat").1;
+        assert!(shown.contains(&long), "its last line: {shown:?}");
+    }
+
+    /// A page is the pane's height less a line of overlap (1529) now that
+    /// the model knows it.
     #[test]
     fn a_page_moves_the_view_by_the_panes_height() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -10562,7 +10748,7 @@ pub(crate) mod tests {
         let height = model.message_rows();
         let total = model.laid().rows.len();
         update(&mut model, key(KeyCode::PageUp));
-        assert_eq!(model.scroll_top, Some(total - 2 * height));
+        assert_eq!(model.scroll_top, Some(total - 2 * height + 1));
         update(&mut model, key(KeyCode::PageDown));
         assert_eq!(model.scroll_top, None, "back at the bottom");
         update(

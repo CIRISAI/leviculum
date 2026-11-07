@@ -3703,6 +3703,80 @@ mod tests {
         }
     }
 
+    /// 1529 drawn: a short message, one over three screens long, a short
+    /// one, at 80 x 24 and the messages pane focused. At the top the long
+    /// one's start; twenty Downs later its middle, the selection's bar on
+    /// it; one Right a screen less a line further; the way back up from the
+    /// newest in its end. Pinned in `tests/fixtures/tui_long_message.frames`.
+    #[test]
+    fn a_long_message_is_read_by_the_line() {
+        let alice = [0x4f; 16];
+        let mut model = Model::new(&[alice]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        update(
+            &mut model,
+            UiEvent::Clock(WallTime::from_civil(2026, 10, 26, 9, 0, 3600)),
+        );
+        let long: Vec<String> = (1..=70)
+            .map(|n| format!("line {n} of the long one"))
+            .collect();
+        for (n, body) in ["short before", &long.join("\n"), "short after"]
+            .into_iter()
+            .enumerate()
+        {
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: 0,
+                    message_id: [n as u8 + 1; 32],
+                    source: alice,
+                    title: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                    fields: Vec::new(),
+                    verified: true,
+                }),
+            );
+        }
+        model.toasts.clear();
+        let press = |model: &mut Model, name: &str, times: usize| {
+            for _ in 0..times {
+                update(model, UiEvent::Key(parse_key(name).expect("key")));
+            }
+        };
+        press(&mut model, "tab", 1);
+        let mut frames = String::new();
+        press(&mut model, "home", 1);
+        frames.push_str(&format!("--- top ---\n{}", screen(&model, 80, 24)));
+        press(&mut model, "down", 20);
+        let mid = screen(&model, 80, 24);
+        assert!(mid.contains("line 20 of the long one"), "{mid}");
+        assert!(!mid.contains("short before"), "{mid}");
+        frames.push_str(&format!("--- twenty down ---\n{mid}"));
+        press(&mut model, "right", 1);
+        frames.push_str(&format!("--- right ---\n{}", screen(&model, 80, 24)));
+        press(&mut model, "end", 1);
+        press(&mut model, "up", 3);
+        let back = screen(&model, 80, 24);
+        assert!(back.contains("line 70 of the long one"), "{back}");
+        frames.push_str(&format!("--- back up ---\n{back}"));
+        let expected = include_str!("../tests/fixtures/tui_long_message.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-long-message.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_long_message.frames\n{frames}",
+                kept.display()
+            );
+        }
+    }
+
     /// Reactions (1104), drawn from the model at 80 x 24: a bubble of ours
     /// with two reactions under it, one sent as Columba sends it and one as
     /// Ratspeak 1.0.25 did, its fallback text drawn nowhere; then the

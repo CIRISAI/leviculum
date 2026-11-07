@@ -110,13 +110,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │  g / G   Home / End                            top / bottom                  ║
 │  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         ║
 │  PageDown / PageUp                             page the messages (compose)   ║
+│  ← / →                                         page the chat (left / right)  ║
 │                                                                              ║
 │Conversations                                                                 ║
 │  Enter                                         open the selected conversation║
 │  Enter                                         open the selected result      ║
 │  : delete conversation                         delete the conversation       ║
 │                                                on this device; y confirms    ║
-│  : pin                                         pin or unpin the conversation ║
 └──────────────────────────────────────────────────────────────────────────────┘
 --- frame 8: closed ---
 ┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
@@ -247,13 +247,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │  g / G   Home / End                            top / bottom                  ║
 │  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         ║
 │  PageDown / PageUp                             page the messages (compose)   ║
+│  ← / →                                         page the chat (left / right)  ║
 │                                                                              ║
 │Conversations                                                                 ║
 │  Enter                                         open the selected conversation║
 │  Enter                                         open the selected result      ║
 │  : delete conversation                         delete the conversation       ║
 │                                                on this device; y confirms    ║
-│  : pin                                         pin or unpin the conversation ║
 └──────────────────────────────────────────────────────────────────────────────┘
 --- frame 8: closed ---
 ┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐

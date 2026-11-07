@@ -132,6 +132,13 @@ fn press(model: &mut UiModel<Field>, key: M9Key) -> Vec<UiEffect> {
     update(model, UiEvent::Key(event(key)))
 }
 
+/// Press `key` as the board does ([`loquax_m9::group::press`]): the
+/// chat's scroll keys go by the M9's own lines (1529).
+fn on_the_board(model: &mut UiModel<Field>, key: M9Key) -> Vec<UiEffect> {
+    let mut row = 0;
+    loquax_m9::group::press(model, &mut row, &event(key))
+}
+
 fn type_in(model: &mut UiModel<Field>, text: &str) {
     for c in text.chars() {
         press(model, M9Key::Char(c));
@@ -247,11 +254,13 @@ fn the_open_chat_is_the_golden_frame() {
         "the store's emoji drawn as the stand-in: {rows:#?}"
     );
     check("m9-chat.png", &shown(&model));
+    // As the board presses them (1529): twelve lines up, the selection
+    // following the lines.
     for _ in 0..12 {
-        press(&mut model, M9Key::Up);
+        on_the_board(&mut model, M9Key::Up);
     }
     let moved = text_of(&model);
-    assert_ne!(moved[1], rows[1], "twelve bubbles up, the window moved");
+    assert_ne!(moved, rows, "twelve lines up, the window moved");
     assert!(
         moved.iter().any(|r| r.contains(screen::BAR)),
         "the cursor's bubble behind the bar: {moved:#?}"
@@ -261,6 +270,138 @@ fn the_open_chat_is_the_golden_frame() {
     press(&mut model, M9Key::Back);
     assert_eq!(model.focus, Pane::Conversations);
     assert!(screen::scene(&model).list.is_some());
+}
+
+/// 1529 on the M9: a short message, one over three screens long, a short
+/// one, pressed as the board presses. From the top the ring's down shows
+/// one new line a press and keeps the long one selected while its lines
+/// come; the frame twenty presses in is its middle (pinned,
+/// `m9-chat-long-mid.png`); right pages a screen less a line; back from
+/// the newest the ring's up enters it at its end (pinned,
+/// `m9-chat-long-back.png`), not at its start.
+#[test]
+fn a_long_message_is_read_by_the_line_on_the_m9() {
+    let peer = [0x4f; 16];
+    let mut model = UiModel::<Field>::new(&[peer]);
+    update(&mut model, UiEvent::Viewing(screen::viewing()));
+    update(&mut model, UiEvent::Clock(now()));
+    let long: Vec<String> = (1..=40).map(|n| format!("line {n}")).collect();
+    for (n, body) in ["short before", &long.join("\n"), "short after"]
+        .into_iter()
+        .enumerate()
+    {
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
+                message_id: [n as u8 + 1; 32],
+                source: peer,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            }),
+        );
+    }
+    model.toasts.clear();
+    model.focus = Pane::Conversations;
+    on_the_board(&mut model, M9Key::Enter);
+    assert_eq!(model.focus, Pane::Messages);
+    let at_end = text_of(&model);
+    assert!(
+        at_end.iter().any(|r| r.contains("short after")),
+        "{at_end:#?}"
+    );
+    // To the top: up until the first message is selected and its line on.
+    for _ in 0..80 {
+        on_the_board(&mut model, M9Key::Up);
+    }
+    assert_eq!(model.message_cursor, 0);
+    let top = text_of(&model);
+    assert!(top.iter().any(|r| r.contains("short before")), "{top:#?}");
+    // Down a line a press: every line of the long one shows, none skipped.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut last_line = |rows: &[String]| {
+        for r in rows {
+            if let Some(n) = r.trim().strip_prefix("line ").or_else(|| {
+                r.trim()
+                    .strip_prefix(screen::BAR)
+                    .and_then(|t| t.trim().strip_prefix("line "))
+            }) {
+                let n: usize = n
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+                seen.insert(n);
+            }
+        }
+    };
+    last_line(&top);
+    let mut mid = None;
+    for press in 1..=60 {
+        on_the_board(&mut model, M9Key::Down);
+        let rows = text_of(&model);
+        last_line(&rows);
+        if press == 20 {
+            assert_eq!(model.message_cursor, 1, "the long one, its end not on yet");
+            mid = Some(shown(&model));
+        }
+    }
+    assert_eq!(
+        seen,
+        (1..=40).collect(),
+        "every line of the long one showed"
+    );
+    assert_eq!(model.message_cursor, 2, "the short one under it at the end");
+    check("m9-chat-long-mid.png", &mid.expect("twenty presses in"));
+    // Back up from the newest: the long one's end, a line a press.
+    on_the_board(&mut model, M9Key::Up);
+    on_the_board(&mut model, M9Key::Up);
+    assert_eq!(model.message_cursor, 1);
+    let back = text_of(&model);
+    assert!(back.iter().any(|r| r.contains("line 40")), "{back:#?}");
+    assert!(!back.iter().any(|r| r.contains("line 1 ")), "{back:#?}");
+    check("m9-chat-long-back.png", &shown(&model));
+    // Left pages up a screen less a line: the line that was on top is at
+    // the bottom of the bubbles now.
+    let first = back
+        .iter()
+        .find(|r| r.contains("line "))
+        .cloned()
+        .expect("a line on screen");
+    on_the_board(&mut model, M9Key::Left);
+    let paged = text_of(&model);
+    let at = paged
+        .iter()
+        .position(|r| *r == first)
+        .expect("still on screen");
+    assert!(
+        paged[at + 1..].iter().all(|r| !r.contains("line ")),
+        "the overlap line is the last line shown: {paged:#?}"
+    );
+    // A held ring key: the controller answers its code again on the polls
+    // it holds (1463), and each answer is a press, so a hold scrolls a
+    // line an answer; the board keeps no timer of its own for it.
+    let line = paged
+        .iter()
+        .position(|r| r.contains("line "))
+        .expect("a line");
+    let held = paged[line].clone();
+    for _ in 0..3 {
+        let Read::Code(code) = MEASURED.read(&[0xb5; 8]) else {
+            panic!("a ring answer is a code");
+        };
+        let event = Key::of(code).and_then(Key::event).expect("the ring's up");
+        let mut row = 0;
+        loquax_m9::group::press(&mut model, &mut row, &event);
+    }
+    let after = text_of(&model);
+    assert_eq!(
+        after[line + 3],
+        held,
+        "three answers, three lines: {after:#?}"
+    );
 }
 
 /// Slice two: the compose line typed into with the M9's keys. `i` writes,

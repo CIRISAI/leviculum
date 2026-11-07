@@ -183,6 +183,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │  g / G   Home / End                            top / bottom                  ║
 │  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         ║
 │  PageDown / PageUp                             page the messages (compose)   ║
+│  ← / →                                         page the chat (left / right)  ║
 │                                                                              ║
 │Conversations                                                                 ║
 │  Enter                                         open the selected conversation║
@@ -197,7 +198,6 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │  : unblock                                     unblock the peer              ║
 │  : blocked                                     list the blocked, or the rest ║
 │  : archive                                     archive, or bring back        ║
-│                                                a message brings it back      ║
 └──────────────────────────────────────────────────────────────────────────────┘
 === wheel ===
 --- frame 1: list focused ---
