@@ -62,6 +62,10 @@ pub struct Flags {
 /// moves the write on by this much (1219).
 pub const DRAFT_DEBOUNCE_MS: u64 = 500;
 
+/// The most read marks held for pages still to load (1490): older ones
+/// are the store's to apply, which it already did.
+pub const READ_PENDING_MOST: usize = 256;
+
 /// A message typed and not sent, one a conversation (1219): kept in the
 /// store beside its conversation, put back into compose when it opens
 /// again, gone once sent.
@@ -105,6 +109,10 @@ pub struct Restored {
     /// The group this conversation is, as the store kept it (1307 G2):
     /// listed with its members before any of its messages is loaded.
     pub group: Option<super::groups::GroupInfo>,
+    /// The row as the store kept it (1490, schema 17): present when the
+    /// start read hands summaries instead of messages, so the list
+    /// shows without a body loaded.
+    pub listing: Option<super::listing::Listing>,
 }
 
 /// One change for the store to make.
@@ -144,6 +152,17 @@ pub enum StoreWrite {
     /// Keep what the propagation node is still to be asked about, all of
     /// it in place of what was kept (1409).
     PnAsks(crate::pn_status::AskerState),
+    /// Keep the conversation's row as the list shows it (1490, schema
+    /// 17): written beside the fold that changed it, read back by the
+    /// start's summary read.
+    Listing {
+        peer: [u8; 16],
+        listing: super::listing::Listing,
+    },
+    /// Another device read through message `id` and the screen does not
+    /// hold it (1490, the lazy start): the store applies the mark to
+    /// its own rows, so the count a restart reads is the read one.
+    ReadThrough { id: [u8; 32] },
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -229,6 +248,7 @@ impl<B> UiModel<B> {
             && stored.flags == Flags::default()
             && stored.draft.is_empty()
             && stored.group.is_none()
+            && stored.listing.is_none()
         {
             return;
         }
@@ -245,6 +265,7 @@ impl<B> UiModel<B> {
         let now = self.now;
         let index = self.conversation(stored.peer);
         let conversation = &mut self.conversations[index];
+        conversation.listing = stored.listing;
         conversation.messages = stored.messages;
         conversation.pinned = stored.pinned;
         conversation.flags = stored.flags;
@@ -261,6 +282,13 @@ impl<B> UiModel<B> {
             }
             message.leg = None;
         }
+        // The summary and the change stamp start fresh over what was
+        // restored (1490): the first fold after a start bumps nothing
+        // and re-writes no row the store just handed out.
+        conversation
+            .summary
+            .refresh(conversation.peer, &conversation.messages);
+        conversation.stamp = super::Rev::at(conversation.row_fingerprint());
         self.activity = self.activity.max(conversation.activity);
     }
 
@@ -313,6 +341,13 @@ impl<B> UiModel<B> {
     /// deletions. A message deleted after it changed is only deleted.
     pub fn take_writes(&mut self) -> Vec<StoreWrite> {
         let mut writes = Vec::new();
+        // Every peer this batch writes a message or a conversation row
+        // for owes a fresh listing in the same batch (1490): the store
+        // nulls a conversation's row when a message touches it without
+        // one, so an owed row must ride with its own writes, never a
+        // fold later.
+        let mut touched: alloc::collections::BTreeSet<[u8; 16]> =
+            core::mem::take(&mut self.listing_owed);
         let mut changed = core::mem::take(&mut self.owed_changed);
         changed.extend(core::mem::take(&mut self.changed));
         for (peer, key) in changed {
@@ -322,6 +357,7 @@ impl<B> UiModel<B> {
                 .find(|c| c.peer == peer)
                 .and_then(|c| c.messages.iter().find(|m| m.activity == key));
             if let Some(message) = found {
+                touched.insert(peer);
                 writes.push(StoreWrite::Message {
                     peer,
                     message: message.clone(),
@@ -332,6 +368,7 @@ impl<B> UiModel<B> {
         peers.extend(core::mem::take(&mut self.changed_peers));
         for peer in peers {
             if let Some(c) = self.conversations.iter().find(|c| c.peer == peer) {
+                touched.insert(peer);
                 writes.push(StoreWrite::Conversation {
                     peer,
                     pinned: c.pinned,
@@ -379,6 +416,14 @@ impl<B> UiModel<B> {
         if let Some(state) = self.pn_asker.take_changed() {
             writes.push(StoreWrite::PnAsks(state));
         }
+        // The rows the list shows, re-derived beside what changed them
+        // (1490): a conversation with nothing loaded writes none, and
+        // the store heals its own from a page then.
+        for peer in touched {
+            if let Some(listing) = self.listing_for(&peer) {
+                writes.push(StoreWrite::Listing { peer, listing });
+            }
+        }
         writes.append(&mut self.forgotten);
         writes
     }
@@ -423,6 +468,7 @@ impl<B> UiModel<B> {
         };
         let n = older.len();
         let open = c == self.selected;
+        let first_fill = self.conversations[c].messages.is_empty();
         let rows_before = match open {
             true => self.laid().rows.len(),
             false => 0,
@@ -445,6 +491,47 @@ impl<B> UiModel<B> {
             if *dc == c {
                 *dm += n;
             }
+        }
+        // Read marks that came before their messages (1490): the page
+        // that holds their conversation applies them now.
+        if !self.read_pending.is_empty() {
+            for id in core::mem::take(&mut self.read_pending) {
+                let applies = self.conversations[c]
+                    .with_id(&id)
+                    .into_iter()
+                    .any(|m| !self.conversations[c].messages[m].outbound);
+                match applies {
+                    true => self.read_through(&id),
+                    false => self.read_pending.push(id),
+                }
+            }
+        }
+        if first_fill {
+            // The page a restart deferred (1490): the conversation lands
+            // as a restore lands it, its rule where the unread begin
+            // and a send the restart cut off back to `○` with its
+            // ledger line, exactly as `restore` landed it.
+            let now = self.now;
+            let conversation = &mut self.conversations[c];
+            let peer = conversation.peer;
+            for message in &mut conversation.messages {
+                if cut_off(message) {
+                    message.delivery = Some(DeliveryState::Queued);
+                    message.note(now, RESTARTED);
+                    self.changed.insert((peer, message.activity));
+                }
+                message.leg = None;
+            }
+            let conversation = &mut self.conversations[c];
+            conversation.new_rule = conversation.rule_from_unread();
+            if open {
+                self.read_out(c);
+                self.message_cursor = self.conversations[c].messages.len().saturating_sub(1);
+                self.scroll_top = None;
+                self.selection = None;
+                self.press = None;
+            }
+            return;
         }
         if open {
             self.message_cursor += n;
@@ -496,7 +583,13 @@ impl<B> UiModel<B> {
         };
         let at_top = self.message_cursor == 0 || self.scroll_top == Some(0);
         match (conversation.earlier, conversation.messages.first()) {
-            (0, _) | (_, None) => Vec::new(),
+            (0, _) => Vec::new(),
+            // Nothing loaded yet (1490): the newest page.
+            (_, None) => vec![UiEffect::Store(StoreRead::Earlier {
+                peer: conversation.peer,
+                before: u64::MAX,
+                through: None,
+            })],
             (_, Some(first)) if at_top => vec![UiEffect::Store(StoreRead::Earlier {
                 peer: conversation.peer,
                 before: first.activity,
@@ -685,6 +778,13 @@ impl<B> UiModel<B> {
             // pull walked every message of every conversation.
             c.with_id(id).into_iter().any(|m| !c.messages[m].outbound)
         }) else {
+            // The screen does not hold the message (1490, the lazy
+            // start): the store applies the mark to its own rows, and
+            // the page that loads it here replays it.
+            self.forgotten.push(StoreWrite::ReadThrough { id: *id });
+            if self.read_pending.len() < READ_PENDING_MOST {
+                self.read_pending.push(*id);
+            }
             return;
         };
         let after = conversation

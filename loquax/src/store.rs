@@ -121,6 +121,7 @@ use crate::telemetry::{pack_fields, unpack_fields, Fix};
 use crate::ui::counters::{Counters, Op, Ops};
 use crate::ui::groups::{GroupInfo, Standing};
 use crate::ui::history::{Draft, Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
+use crate::ui::listing::Listing;
 use crate::ui::share::{Report, Share, Span};
 use crate::ui::{LedgerEntry, Message, Signature};
 use crate::when::WallTime;
@@ -130,7 +131,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -426,6 +427,16 @@ const SCHEMA_V16: &str = "
 ALTER TABLE group_fanout ADD COLUMN device_at INTEGER;
 ";
 
+/// What schema 17 adds to schema 16 (1490): the conversation's row as
+/// the list shows it ([`crate::ui::listing::Listing`]), written beside
+/// the fold that changed it, read whole by [`Store::start`] so a
+/// restart reads summaries, not bodies. NULL where unknown or where a
+/// write touched messages without handing a fresh row; the start read
+/// falls back to a page for those and the next fold heals the column.
+const SCHEMA_V17: &str = "
+ALTER TABLE conversations ADD COLUMN listing BLOB;
+";
+
 pub mod groups;
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
@@ -650,7 +661,7 @@ impl Store {
         let batch = format!(
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
-             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} \
+             {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} {SCHEMA_V17} \
              PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
@@ -815,7 +826,10 @@ impl Store {
                 if version < 15 {
                     batch.push_str(SCHEMA_V15);
                 }
-                batch.push_str(SCHEMA_V16);
+                if version < 16 {
+                    batch.push_str(SCHEMA_V16);
+                }
+                batch.push_str(SCHEMA_V17);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -922,6 +936,7 @@ impl Store {
                 earlier,
                 draft,
                 group,
+                listing: None,
             });
         }
         // A group with no conversation row yet (only its state came) is
@@ -936,6 +951,89 @@ impl Store {
                 earlier: 0,
                 draft: Draft::default(),
                 group: Some(group),
+                listing: None,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The conversations as a restart reads them (1490, schema 17): the
+    /// summaries alone, no body. A conversation whose `listing` column
+    /// is missing or does not decode (an older store, an import, a
+    /// write that touched messages without a fresh row) is handed its
+    /// newest page instead, as [`Store::restore`] hands every one, and
+    /// the next fold writes the column. The open conversation's page
+    /// follows through the same [`StoreWrite`] reads the scrollback
+    /// uses.
+    pub fn start(&self) -> Result<Vec<Restored>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT c.peer, c.pinned, c.unread, c.muted_until, c.archived, c.verified, \
+                 c.receipts, c.listing, (SELECT MAX(seq) FROM messages m \
+                  WHERE m.identity = c.identity AND m.conversation = c.peer) AS last, \
+                 (SELECT COUNT(*) FROM messages m \
+                  WHERE m.identity = c.identity AND m.conversation = c.peer) AS held \
+                 FROM conversations c WHERE c.identity = ?1 \
+                 ORDER BY last DESC",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, i64>(2)?,
+                    Flags {
+                        muted_until: row.get::<_, Option<i64>>(3)?,
+                        archived: row.get::<_, bool>(4)?,
+                        verified: row.get::<_, bool>(5)?,
+                        receipts: row.get::<_, bool>(6)?,
+                    },
+                    row.get::<_, Option<Vec<u8>>>(7)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
+            .map_err(|e| self.failed(e))?;
+        let mut groups = self.client_groups()?;
+        let mut drafts = self.drafts()?;
+        let mut out = Vec::new();
+        for (peer, pinned, unread, flags, listing, held) in rows {
+            let peer = self.address(&peer)?;
+            let listing = listing.as_deref().and_then(Listing::decode);
+            let (messages, earlier) = match listing.is_some() {
+                true => (Vec::new(), held.max(0) as usize),
+                false => self.page(peer, u64::MAX, None)?,
+            };
+            let draft = drafts.remove(&peer).unwrap_or_default();
+            let group = groups.remove(&peer);
+            out.push(Restored {
+                peer,
+                pinned,
+                flags,
+                unread: unread.max(0) as usize,
+                messages,
+                earlier,
+                draft,
+                group,
+                listing,
+            });
+        }
+        // A group with no conversation row yet (only its state came) is
+        // listed too, after the others.
+        for (peer, group) in groups {
+            out.push(Restored {
+                peer,
+                pinned: false,
+                flags: Flags::default(),
+                unread: 0,
+                messages: Vec::new(),
+                earlier: 0,
+                draft: Draft::default(),
+                group: Some(group),
+                listing: None,
             });
         }
         Ok(out)
@@ -1103,8 +1201,64 @@ impl Store {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| failed(&path, e))?;
+        // A batch that touches a conversation's messages without handing
+        // a fresh listing leaves the column NULL (1490): the start read
+        // falls back to a page there, so an import or a foreign writer
+        // can never leave a stale row on screen. Peers are resolved
+        // before the deletes run.
+        let mut dirty: alloc::collections::BTreeSet<[u8; 16]> = Default::default();
+        let mut listed: alloc::collections::BTreeSet<[u8; 16]> = Default::default();
+        for write in writes {
+            match write {
+                StoreWrite::Message { peer, .. } => {
+                    dirty.insert(*peer);
+                }
+                StoreWrite::ForgetMessage { key } => {
+                    let found: Option<Vec<u8>> = tx
+                        .query_row(
+                            "SELECT conversation FROM messages \
+                             WHERE identity = ?1 AND seq = ?2",
+                            params![&identity[..], seq_of(*key)],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|e| failed(&path, e))?;
+                    if let Some(peer) = found.and_then(|p| <[u8; 16]>::try_from(p.as_slice()).ok())
+                    {
+                        dirty.insert(peer);
+                    }
+                }
+                StoreWrite::ForgetId { id } => {
+                    let found: Option<Vec<u8>> = tx
+                        .query_row(
+                            "SELECT conversation FROM messages \
+                             WHERE identity = ?1 AND id = ?2",
+                            params![&identity[..], &id[..]],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(|e| failed(&path, e))?;
+                    if let Some(peer) = found.and_then(|p| <[u8; 16]>::try_from(p.as_slice()).ok())
+                    {
+                        dirty.insert(peer);
+                    }
+                }
+                StoreWrite::Listing { peer, .. } => {
+                    listed.insert(*peer);
+                }
+                _ => {}
+            }
+        }
         for write in writes {
             apply(&tx, &identity, write).map_err(|e| failed(&path, e))?;
+        }
+        for peer in dirty.difference(&listed) {
+            tx.execute(
+                "UPDATE conversations SET listing = NULL \
+                 WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )
+            .map_err(|e| failed(&path, e))?;
         }
         tx.commit().map_err(|e| failed(&path, e))
     }
@@ -1526,6 +1680,53 @@ impl Store {
     }
 
     /// `peer`'s draft (1219), the empty one for none.
+    /// Every conversation's draft in one read: what the start read
+    /// joins, a row per draft that exists instead of an ask per
+    /// conversation (1490).
+    fn drafts(&self) -> Result<BTreeMap<[u8; 16], Draft>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT peer, body, reply, attachments FROM drafts WHERE identity = ?1")
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
+            .map_err(|e| self.failed(e))?;
+        let mut out = BTreeMap::new();
+        for (peer, text, reply, attachments) in rows {
+            let peer = self.address(&peer)?;
+            let reply = match reply {
+                Some(id) => Some(id.as_slice().try_into().map_err(|_| StoreError::Corrupt {
+                    path: self.path.clone(),
+                    detail: format!("a draft's reply id of {} bytes", id.len()),
+                })?),
+                None => None,
+            };
+            let attachments =
+                serde_json::from_str(&attachments).map_err(|e| StoreError::Corrupt {
+                    path: self.path.clone(),
+                    detail: format!("a draft's attachments: {e}"),
+                })?;
+            out.insert(
+                peer,
+                Draft {
+                    text,
+                    reply,
+                    attachments,
+                },
+            );
+        }
+        Ok(out)
+    }
+
     fn draft(&self, peer: [u8; 16]) -> Result<Draft, StoreError> {
         let row = self
             .conn
@@ -3299,6 +3500,67 @@ fn apply(
                 "DELETE FROM client_groups WHERE identity = ?1 AND address = ?2",
                 params![&identity[..], &peer[..]],
             )?;
+        }
+        StoreWrite::Listing { peer, listing } => {
+            tx.execute(
+                "INSERT INTO conversations(identity, peer, listing) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET listing = excluded.listing",
+                params![&identity[..], &peer[..], listing.encode()],
+            )?;
+        }
+        StoreWrite::ReadThrough { id } => {
+            // Another device read through `id` and the screen does not
+            // hold it (1490): the rows say it instead. Everything
+            // received after it stays unread; the kept listing's badge
+            // follows where it can, and heals from a page otherwise.
+            let found: Option<(Vec<u8>, i64)> = tx
+                .query_row(
+                    "SELECT conversation, seq FROM messages \
+                     WHERE identity = ?1 AND id = ?2 AND direction = 0",
+                    params![&identity[..], &id[..]],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((peer, seq)) = found {
+                let after: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE identity = ?1 \
+                     AND conversation = ?2 AND direction = 0 AND seq > ?3",
+                    params![&identity[..], &peer[..], seq],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
+                    "UPDATE conversations SET unread = MIN(unread, ?3) \
+                     WHERE identity = ?1 AND peer = ?2",
+                    params![&identity[..], &peer[..], after],
+                )?;
+                let blob: Option<Vec<u8>> = tx
+                    .query_row(
+                        "SELECT listing FROM conversations \
+                         WHERE identity = ?1 AND peer = ?2",
+                        params![&identity[..], &peer[..]],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if let Some(listing) = blob.as_deref().and_then(Listing::decode) {
+                    let patched = match after {
+                        0 => {
+                            let mut read = listing;
+                            read.unread_rows = 0;
+                            Some(read.encode())
+                        }
+                        // Reports among the rest are not told apart
+                        // here: the next fold, or a page at start,
+                        // rewrites the row.
+                        _ => None,
+                    };
+                    tx.execute(
+                        "UPDATE conversations SET listing = ?3 \
+                         WHERE identity = ?1 AND peer = ?2",
+                        params![&identity[..], &peer[..], patched],
+                    )?;
+                }
+            }
         }
         StoreWrite::PnAsks(state) => write_pn_asks(tx, identity, state)?,
         StoreWrite::Group(group) => {

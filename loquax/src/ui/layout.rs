@@ -828,7 +828,14 @@ fn entry<B>(
         .iter()
         .rev()
         .find(|m| !m.is_group_state());
-    let time = match (last.and_then(|m| m.at), now) {
+    // Nothing loaded: the store's row carries the time and the line
+    // (1490, schema 17), the same row the phone and the M9 draw.
+    let listing = conversation
+        .messages
+        .is_empty()
+        .then_some(conversation.listing.as_ref())
+        .flatten();
+    let time = match (last.and_then(|m| m.at).or(listing.and_then(|l| l.at)), now) {
         (Some(at), Some(now)) => list_time(&at, &now),
         _ => String::new(),
     };
@@ -867,6 +874,16 @@ fn entry<B>(
             match message.outbound && !message.is_reaction() && !invite {
                 true => Text::Key(StrId::RowYou, vec![Arg::Str(first.into())]).resolve(lang),
                 false => first.into(),
+            }
+        }
+        // Nothing loaded: the store's row, through [`list_row`]'s listing
+        // path, worded as the loaded one is (1490).
+        None if listing.is_some() => {
+            let row = super::chat::list_row(model, &conversation.peer);
+            let first = String::from(row.last.split('\n').next().unwrap_or(""));
+            match row.ours && row.kind != "reaction" {
+                true => Text::Key(StrId::RowYou, vec![Arg::Str(first)]).resolve(lang),
+                false => first,
             }
         }
         None => String::new(),

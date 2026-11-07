@@ -62,7 +62,7 @@ pub enum Mark {
 }
 
 /// `state` as the screen shows it ([`super::shown_delivery`]).
-fn shown<B>(state: Option<DeliveryState>, model: &UiModel<B>) -> Option<DeliveryState> {
+pub(crate) fn shown<B>(state: Option<DeliveryState>, model: &UiModel<B>) -> Option<DeliveryState> {
     state.map(|state| super::shown_delivery(state, model.home_client, model.reading.on))
 }
 
@@ -391,7 +391,7 @@ pub fn preview(message: &Message, lang: Lang) -> String {
 /// The list's line for an invitation: the card's title in the reader's
 /// language ("Anna lädt dich zu Verein ein"), not the English sentence
 /// the wire carries for stock clients with the group's code in it (1377).
-fn invitation_line<B>(model: &UiModel<B>, message: &Message) -> Option<String> {
+pub(crate) fn invitation_line<B>(model: &UiModel<B>, message: &Message) -> Option<String> {
     let group = leviculum_lxmf::lev::Lev::from_fields(&message.fields)?
         .invite?
         .group;
@@ -456,6 +456,41 @@ pub fn rows<B>(model: &UiModel<B>, order: Vec<usize>) -> Vec<ListRow> {
 pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
     model.count(super::counters::Op::RowsBuilt, 1);
     let conversation = model.conversations.iter().find(|c| c.peer == *peer);
+    // Nothing loaded: the store's row answers (1490, schema 17), its
+    // liveness and its position words judged fresh at this clock.
+    if let Some((c, listing)) = conversation
+        .filter(|c| c.messages.is_empty())
+        .and_then(|c| Some((c, c.listing.as_ref()?)))
+    {
+        let liveness = model.liveness(peer);
+        let now = model.now.map(|now| now.unix_secs);
+        return ListRow {
+            peer: *peer,
+            name: model.names.label(peer),
+            last: match listing.kind {
+                super::listing::LastKind::Position => {
+                    format!("{PIN} {}", liveness.list_words(now))
+                }
+                _ => listing.line.clone(),
+            },
+            ours: listing.ours,
+            at: listing.at,
+            unread: listing.unread_rows as usize,
+            updates: listing.updates as usize,
+            initials: initials(model.names.shown(peer), peer),
+            icon: listing.appearance.clone(),
+            kind: listing.kind.word(),
+            reaction: listing.reaction.clone(),
+            mark: listing.mark,
+            read_at: listing.read_at,
+            pinned: c.pinned,
+            muted: model.muted(peer),
+            liveness,
+            draft: Some(c)
+                .filter(|c| model.conversations.get(model.selected).map(|o| o.peer) != Some(c.peer))
+                .and_then(|c| c.draft.line()),
+        };
+    }
     let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
     // A group's state (1307) is no line of the list.
     let last = messages.iter().rev().find(|m| !m.is_group_state());

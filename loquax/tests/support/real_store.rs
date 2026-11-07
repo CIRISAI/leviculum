@@ -93,8 +93,6 @@ pub const VOICE: &[u8] = include_bytes!("../fixtures/real-voice.ogg");
 /// The bars still red, by name ([`bar`]). A plan step that turns one
 /// green takes it out here, or its test fails and says so.
 pub const KNOWN_REDS: &[&str] = &[
-    // B: the scene is built only for what is on screen.
-    "core.a_restart_reads_the_summaries",
     "phone.a_key_in_compose_builds_no_list",
     // C: nothing is built when nothing changed.
     "core.a_frame_without_a_change_builds_nothing",
@@ -434,6 +432,7 @@ pub fn restored() -> Vec<Restored> {
             earlier: 0,
             draft: Draft::default(),
             group: (i == GROUP).then(group_info),
+            listing: None,
         })
         .collect()
 }
@@ -479,6 +478,10 @@ pub fn fill_store(home: &Path) -> Store {
 /// address is its mailbox's.
 pub fn fill_store_for(home: &Path, me: [u8; 16]) -> Store {
     let mut store = Store::open_in(home, me).expect("the store");
+    // The rows the list shows (1490, schema 17), derived as the fold
+    // derives them: written beside each conversation, as take_writes
+    // writes them, so a restart reads summaries and no body.
+    let shown: loquax::ui::UiModel<leviculum_ui::input::Line> = model();
     for stored in restored() {
         let mut writes = Vec::new();
         if let Some(group) = &stored.group {
@@ -508,6 +511,10 @@ pub fn fill_store_for(home: &Path, me: [u8; 16]) -> Store {
             pinned: stored.pinned,
             unread: stored.unread,
             flags: stored.flags,
+        });
+        writes.push(StoreWrite::Listing {
+            peer: stored.peer,
+            listing: shown.listing_for(&stored.peer).expect("a filled row"),
         });
         store.write(&writes).expect("a conversation");
     }

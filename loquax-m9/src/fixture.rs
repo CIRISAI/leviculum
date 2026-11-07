@@ -230,6 +230,7 @@ pub fn restored() -> Vec<Restored> {
             earlier: 0,
             draft: Draft::default(),
             group: None,
+            listing: None,
         });
     }
     out
@@ -449,6 +450,7 @@ fn groups() -> Vec<Restored> {
                 earlier: 0,
                 draft: Draft::default(),
                 group: Some(info),
+                listing: None,
             }
         })
         .collect()

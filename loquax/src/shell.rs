@@ -1441,8 +1441,11 @@ pub(crate) async fn start(
     };
     let store =
         Store::open_in(&home, address).map_err(|error| crate::failure(error, "no-store"))?;
+    // The start reads the summaries, not the bodies (1490, schema 17):
+    // each conversation's page loads when it opens, through the same
+    // store reads the scrollback uses.
     let history = store
-        .restore()
+        .start()
         .and_then(|restored| {
             Ok((
                 restored,
@@ -1547,6 +1550,29 @@ pub(crate) async fn start(
     };
     update(&mut model, UiEvent::Clock(start));
     model.restore(restored);
+    // The open conversation's page, read here before the first frame
+    // (1490): the start read handed summaries alone, and the screen
+    // opens on a filled pane as it always did. Every later selection
+    // loads through the fold's own ask.
+    if let Some((peer, true)) = model
+        .conversations
+        .get(model.selected)
+        .map(|c| (c.peer, c.messages.is_empty() && c.earlier > 0))
+    {
+        match store.earlier(peer, u64::MAX, None) {
+            Ok((messages, earlier)) => {
+                update(
+                    &mut model,
+                    UiEvent::Earlier {
+                        peer,
+                        messages,
+                        earlier,
+                    },
+                );
+            }
+            Err(error) => return Err(crate::failure(error, "no-store")),
+        }
+    }
     // What the propagation node is still to be asked about (1409).
     model.pn_asker = loquax::pn_status::Asker::restore(pn_asks);
     model.restore_positions(positions);

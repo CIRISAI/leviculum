@@ -241,24 +241,31 @@ fn a_restart_reads_the_summaries() {
     drop(filled);
     let store = Store::open_in(home.path(), real_store::own()).expect("the store");
     store.reset_counters();
-    let restored = store.restore().expect("restore");
+    let restored = store.start().expect("the start read");
     let names = store.names().expect("names");
     store.last_key().expect("last key");
-    store.positions().expect("positions");
+    let positions = store.positions().expect("positions");
     store.unverified().expect("held");
-    store
+    let tracks = store
         .fixes_between(None, i64::MIN, i64::MAX)
         .expect("tracks");
     store.pn_asks().expect("asks");
     let counts = store.counters().expect("counted");
     println!("COUNTS core.restart {counts} (fill: {commits} commits)");
     assert_eq!(restored.len(), CONVERSATIONS);
-    let most = (CONVERSATIONS + names.len() + LOAD_WINDOW) as u32;
+    let bodies: usize = restored.iter().map(|r| r.messages.len()).sum();
+    assert_eq!(bodies, 0, "the start read hands summaries, no body");
+    // Every row read is one the model keeps (the summaries, the names,
+    // the positions, the tracks), plus at most one page of slack for a
+    // conversation whose listing a foreign write nulled: no read
+    // amplification. Before schema 17 the start read every
+    // conversation's newest page, 4471 rows against this fixture.
+    let most = (CONVERSATIONS + names.len() + positions.len() + tracks.len() + LOAD_WINDOW) as u32;
     bar(
         "core.a_restart_reads_the_summaries",
         counts.store_rows_read <= most,
         &format!(
-            "store_rows_read {} (bar {most}: the summaries, the names, one page)",
+            "store_rows_read {} (bar {most}: the summaries, the names, the state, one page)",
             counts.store_rows_read
         ),
     );

@@ -2399,6 +2399,7 @@ mod tests {
             earlier: 40,
             draft: Default::default(),
             group,
+            listing: None,
         };
         let mut again = reader(&[]);
         again.restore(vec![row(Some(kept[0].clone()))]);
@@ -2436,6 +2437,7 @@ mod tests {
                 earlier: 0,
                 draft: Default::default(),
                 group: None,
+                listing: None,
             })
             .collect();
         let mut again = reader(&[]);

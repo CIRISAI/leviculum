@@ -148,6 +148,7 @@ pub mod info;
 pub mod intent;
 pub mod inventory;
 pub mod layout;
+pub mod listing;
 pub mod liveness;
 pub mod map;
 pub mod photos;
@@ -654,6 +655,10 @@ pub struct Conversation {
     /// What the chats list asks of it, kept up to its messages by
     /// [`update`] (1463): a cache the readers check before they trust it.
     pub summary: summary::Summary,
+    /// The row as the store last kept it (1490, schema 17): what the
+    /// list shows while no message is loaded. The loaded messages win
+    /// wherever they are present.
+    pub listing: Option<listing::Listing>,
     /// Bumped by [`update`] when anything a screen draws of this
     /// conversation changed (1490): what every cache keyed by this
     /// conversation asks before it reuses.
@@ -679,6 +684,12 @@ impl Conversation {
     /// counts by when it came ([`Conversation::touched`]). `None` while
     /// nothing has a time.
     pub fn last_written(&self) -> Option<i64> {
+        // Nothing loaded: the store's row answers (1490, schema 17).
+        if self.messages.is_empty() {
+            if let Some(listing) = &self.listing {
+                return listing.moved.max(self.touched);
+            }
+        }
         if let Some(newest) = self.summary.newest(&self.messages) {
             return newest.max(self.touched);
         }
@@ -706,6 +717,7 @@ impl Conversation {
             earlier: 0,
             draft: history::Draft::default(),
             summary: summary::Summary::default(),
+            listing: None,
             revision: Rev::default(),
             stamp: Rev::default(),
         }
@@ -767,6 +779,11 @@ impl Conversation {
     /// The newest received icon appearance, foreground and background: the
     /// avatar's colours (`chat::latest_appearance`).
     pub fn appearance(&self) -> Option<(String, String)> {
+        if self.messages.is_empty() {
+            if let Some(listing) = &self.listing {
+                return listing.appearance.clone();
+            }
+        }
         self.summary
             .appearance(&self.messages)
             .unwrap_or_else(|| chat::latest_appearance(&self.messages))
@@ -828,6 +845,11 @@ impl Conversation {
     /// nothing (1209), it is a state and no message. [`Conversation::unread`]
     /// stays the messages, which the home's read marks name one by one.
     pub fn unread_rows(&self) -> usize {
+        if self.messages.is_empty() {
+            if let Some(listing) = &self.listing {
+                return listing.unread_rows as usize;
+            }
+        }
         self.summary
             .unread_rows(&self.messages, self.unread)
             .unwrap_or_else(|| self.unread_messages().len())
@@ -869,9 +891,27 @@ impl Conversation {
     /// with a position: each at its fix's time (the receive time where the
     /// sender's clock claims the future), judged at `now`.
     pub fn liveness(&self, now: Option<i64>) -> liveness::Liveness {
-        // The newest few teach the cadence; older ones say nothing. The
-        // summary knows where they are (1463); a walk finds them otherwise.
-        let fixes: Vec<Fix> = match self.summary.reports(&self.messages) {
+        // Nothing loaded: the store's row answers (1490).
+        if self.messages.is_empty() {
+            if let Some(listing) = &self.listing {
+                return listing.liveness(now);
+            }
+        }
+        let fixes = self.report_fixes();
+        let times: Vec<i64> = fixes.iter().map(Fix::order_time).collect();
+        // The newest report's share mark (1273): its promise, or its end.
+        let mark = fixes
+            .first()
+            .map(|fix| leviculum_lxmf::telemetry::ShareMark::of_blob(&fix.telemetry))
+            .unwrap_or_default();
+        liveness::Liveness::of_marked(&times, mark, now)
+    }
+
+    /// The newest reports' fixes, newest first, the few the liveness is
+    /// judged from: by the summary's indices (1463), or a walk when it
+    /// is behind.
+    pub fn report_fixes(&self) -> Vec<Fix> {
+        match self.summary.reports(&self.messages) {
             Some(newest) => newest
                 .filter_map(|i| message_fix(self.peer, &self.messages[i]))
                 .collect(),
@@ -883,14 +923,7 @@ impl Conversation {
                 .filter_map(|m| message_fix(self.peer, m))
                 .take(liveness::CADENCE_GAPS + 1)
                 .collect(),
-        };
-        let times: Vec<i64> = fixes.iter().map(Fix::order_time).collect();
-        // The newest report's share mark (1273): its promise, or its end.
-        let mark = fixes
-            .first()
-            .map(|fix| leviculum_lxmf::telemetry::ShareMark::of_blob(&fix.telemetry))
-            .unwrap_or_default();
-        liveness::Liveness::of_marked(&times, mark, now)
+        }
     }
 
     /// The newest report with a position: the row that says whether the
@@ -1089,6 +1122,16 @@ pub struct UiModel<B> {
     owed_changed: BTreeSet<([u8; 16], u64)>,
     owed_peers: BTreeSet<[u8; 16]>,
     owed_groups: BTreeSet<[u8; 16]>,
+    /// Conversations whose listing the store must relearn (1490): every
+    /// revision bump queues its peer here, take_writes derives the row.
+    listing_owed: BTreeSet<[u8; 16]>,
+    /// The conversation whose first page was asked of the store and has
+    /// not come (1490): asked once per selection, cleared when it lands.
+    page_asked: Option<[u8; 16]>,
+    /// Read marks whose messages no loaded page holds yet (1490): the
+    /// store applied them; the page that brings their conversation
+    /// replays them here ([`history::READ_PENDING_MOST`]).
+    read_pending: Vec<[u8; 32]>,
     /// Deletions for the store, in the order they were made.
     forgotten: Vec<StoreWrite>,
     /// Whether this device is a client of a home node: what the reader
@@ -1339,6 +1382,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             owed_changed: BTreeSet::new(),
             owed_peers: BTreeSet::new(),
             owed_groups: BTreeSet::new(),
+            listing_owed: BTreeSet::new(),
+            page_asked: None,
+            read_pending: Vec::new(),
             forgotten: Vec::new(),
             home_client: false,
             history: false,
@@ -1704,6 +1750,7 @@ impl<B> UiModel<B> {
             {
                 conversation.stamp = Rev::at(stamp);
                 conversation.revision = Rev::at(conversation.revision.get().wrapping_add(1));
+                self.listing_owed.insert(conversation.peer);
                 bumped.push(index);
             }
         }
@@ -1771,6 +1818,62 @@ impl<B> UiModel<B> {
         hash.word(u64::from(self.recording.said.is_some()));
         self.names.fingerprint(&mut hash);
         hash.done()
+    }
+
+    /// Conversation `peer`'s row as the store keeps it (1490, schema
+    /// 17), derived from its loaded messages as the list derives its
+    /// row; `None` while nothing is loaded (the store keeps or heals
+    /// its own then).
+    pub fn listing_for(&self, peer: &[u8; 16]) -> Option<listing::Listing> {
+        let conversation = self.conversations.iter().find(|c| c.peer == *peer)?;
+        if conversation.messages.is_empty() {
+            return None;
+        }
+        let messages = &conversation.messages;
+        let last = messages.iter().rev().find(|m| !m.is_group_state());
+        let updates = match last.is_some_and(Message::is_report) {
+            true => conversation.run(messages.len().saturating_sub(1)).len(),
+            false => 0,
+        };
+        let fixes = conversation.report_fixes();
+        let mark = fixes
+            .first()
+            .map(|fix| leviculum_lxmf::telemetry::ShareMark::of_blob(&fix.telemetry))
+            .unwrap_or_default();
+        let line = last
+            .filter(|m| !m.is_report())
+            .map(|m| {
+                chat::invitation_line(self, m)
+                    .or_else(|| chat::reaction_line(self, peer, m))
+                    .unwrap_or_else(|| chat::preview(m, self.lang))
+            })
+            .unwrap_or_default();
+        Some(listing::Listing {
+            moved: conversation.last_written(),
+            line,
+            ours: last.is_some_and(|m| m.outbound),
+            at: last.and_then(|m| m.at),
+            kind: listing::LastKind::of_word(last.map_or("", |m| chat::kind(m))),
+            reaction: last
+                .filter(|m| m.is_reaction())
+                .and_then(|m| m.reaction())
+                .map(|(_, content)| content),
+            mark: last
+                .filter(|m| m.outbound)
+                .map(|m| chat::Mark::of(chat::shown(m.delivery, self))),
+            read_at: last.filter(|m| m.outbound).and_then(|m| {
+                match chat::shown(m.delivery, self) {
+                    Some(DeliveryState::Read { at }) => Some(at),
+                    _ => None,
+                }
+            }),
+            unread_rows: conversation.unread_rows() as u32,
+            updates: updates as u32,
+            appearance: conversation.appearance(),
+            report_times: fixes.iter().map(Fix::order_time).collect(),
+            share_every: mark.every,
+            share_ended: mark.ended,
+        })
     }
 
     /// The marks a fold made, for the shell to hand the home node.
@@ -2709,6 +2812,21 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // revisions over them (1490): every change the fold made is noted
     // here, so the caches keyed by a revision reuse everything else.
     model.note_changes();
+    // A selected conversation whose messages a restart deferred (1490):
+    // its newest page, asked once, whatever event selected it.
+    if let Some(conversation) = model.conversations.get(model.selected) {
+        if conversation.messages.is_empty()
+            && conversation.earlier > 0
+            && model.page_asked != Some(conversation.peer)
+        {
+            model.page_asked = Some(conversation.peer);
+            effects.push(UiEffect::Store(history::StoreRead::Earlier {
+                peer: conversation.peer,
+                before: u64::MAX,
+                through: None,
+            }));
+        }
+    }
     effects
 }
 
@@ -2957,6 +3075,9 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             messages,
             earlier,
         } => {
+            if model.page_asked == Some(peer) {
+                model.page_asked = None;
+            }
             model.on_earlier(peer, messages, earlier);
             Vec::new()
         }
@@ -9207,7 +9328,7 @@ pub(crate) mod tests {
         assert_eq!(model.conversations[1].messages.len(), 1);
         assert_eq!(model.conversations[1].messages[0].id, Some(ID2));
         assert_eq!(
-            model.take_writes(),
+            washed(model.take_writes()),
             [
                 StoreWrite::ForgetId { id: ID },
                 StoreWrite::ForgetId { id: [0x99; 32] }
@@ -11692,7 +11813,17 @@ pub(crate) mod tests {
             earlier,
             draft: history::Draft::default(),
             group: None,
+            listing: None,
         }
+    }
+
+    /// `writes` without the listing rows every change also writes
+    /// (1490): for assertions that pin the other writes exactly.
+    fn washed(writes: Vec<StoreWrite>) -> Vec<StoreWrite> {
+        writes
+            .into_iter()
+            .filter(|write| !matches!(write, StoreWrite::Listing { .. }))
+            .collect()
     }
 
     fn message_writes(writes: &[StoreWrite]) -> Vec<u64> {
@@ -11761,7 +11892,17 @@ pub(crate) mod tests {
         assert_eq!(message_writes(&model.take_writes()), first);
         state(&mut model, ID, MessageState::Delivered);
         let writes = model.take_writes();
-        match &writes[..] {
+        // The listing rides along once for the changed conversation
+        // (1490).
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| matches!(write, StoreWrite::Listing { .. }))
+                .count(),
+            1,
+            "{writes:?}"
+        );
+        match &washed(writes)[..] {
             [StoreWrite::Message { message, .. }] => {
                 assert_eq!(message.delivery, Some(DeliveryState::Arrived));
             }
@@ -11782,7 +11923,7 @@ pub(crate) mod tests {
         // Opening it reads it: the store learns the count is gone.
         update(&mut model, UiEvent::Run(PaletteCommand::NextUnread));
         assert_eq!(
-            model.take_writes(),
+            washed(model.take_writes()),
             [StoreWrite::Conversation {
                 peer: OTHER,
                 pinned: false,
@@ -11831,7 +11972,10 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(bodies, ["one", "three"]);
         assert_eq!(model.message_cursor, 1);
-        assert_eq!(model.take_writes(), [StoreWrite::ForgetMessage { key: 2 }]);
+        assert_eq!(
+            washed(model.take_writes()),
+            [StoreWrite::ForgetMessage { key: 2 }]
+        );
 
         // A send the runner still works on stays.
         model.focus = Pane::Compose;
@@ -11857,7 +12001,7 @@ pub(crate) mod tests {
         assert_eq!(model.conversations[model.selected].peer, OTHER);
         assert_eq!(model.message_cursor, 0);
         assert_eq!(
-            model.take_writes(),
+            washed(model.take_writes()),
             [StoreWrite::ForgetConversation { peer: PEER }]
         );
     }
@@ -11875,7 +12019,7 @@ pub(crate) mod tests {
         assert_eq!(model.conversations[model.selected].peer, OTHER);
         update(&mut model, UiEvent::Run(PaletteCommand::Pin));
         assert_eq!(
-            model.take_writes(),
+            washed(model.take_writes()),
             [StoreWrite::Conversation {
                 peer: OTHER,
                 pinned: true,
@@ -14937,7 +15081,7 @@ pub(crate) mod tests {
                 ids: vec![ID, ID2],
             }]
         );
-        assert_eq!(model.take_writes().len(), 2);
+        assert_eq!(washed(model.take_writes()).len(), 2);
         assert_eq!(
             model.current_toast().map(|t| t.text.clone()),
             Some(
