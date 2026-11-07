@@ -439,7 +439,7 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:401`).
+  (`narrow`, `loquax-m9/src/screen.rs:402`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
   delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:346`).
@@ -793,8 +793,8 @@ that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 (`loquax/src/home/ask.rs:146`), 412 B, the longest answer that still fits
 one response packet once the response frame (1 + 18 bytes) is around
 it. The home cuts the page to that, keeping at least one entry, and
-says `more` (`fit_page`, `loquax/src/home/wire.rs:408`; the server's
-`sync`, `loquax/src/home/server.rs:1156`). A message larger than a page
+says `more` (`fit_page`, `loquax/src/home/wire.rs:420`; the server's
+`sync`, `loquax/src/home/server.rs:1227`). A message larger than a page
 still comes alone, as a resource.
 
 **The bytes, measured** (`loquax-android/tests/m9_client.rs`). The
@@ -1150,7 +1150,7 @@ clears its cells when the screen leaves the map
 map pixels where its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:4531`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:4551`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1458,7 +1458,7 @@ says the home at its right end (`board::Word`,
 M", "Mailbox unreachable", "You. Your mailbox is connected.", and for a
 refused code "The mailbox did not take this code. Make a new one on the
 computer." M is the home's: a paged `/sync` answer now carries how many
-entries wait after it (`Page::left`, `loquax/src/home/wire.rs:161`), a
+entries wait after it (`Page::left`, `loquax/src/home/wire.rs:173`), a
 fifth element only a client that asked a page bound gets, so every
 client from before reads the four it read. The home cuts the page
 counting with the longest such number, so the count never pushes an
