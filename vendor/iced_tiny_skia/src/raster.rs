@@ -78,6 +78,53 @@ impl Pipeline {
         );
     }
 
+    /// Leviculum's patch (1473): `handle` drawn as [`Self::draw`] draws
+    /// it, through [`crate::fast::draw_scaled`] instead of tiny-skia's
+    /// pipeline; `clip` the clip's pixels when the draw is clipped
+    /// (`Some(None)` for a clip that covers none). Whether it drew; where
+    /// not, the caller draws through tiny-skia.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_fast(
+        &mut self,
+        handle: &raster::Handle,
+        filter_method: raster::FilterMethod,
+        bounds: Rectangle,
+        opacity: f32,
+        pixels: &mut tiny_skia::PixmapMut<'_>,
+        transform: tiny_skia::Transform,
+        clip: Option<Option<crate::fast::Px>>,
+    ) -> bool {
+        if !crate::fast::BLEND_EXACT {
+            return false;
+        }
+        let mut cache = self.cache.borrow_mut();
+        let Ok((image, opaque)) = cache.allocate_opaque(handle) else {
+            return false;
+        };
+        let width_scale = bounds.width / image.width() as f32;
+        let height_scale = bounds.height / image.height() as f32;
+        let transform = transform.pre_scale(width_scale, height_scale);
+        let quality = match filter_method {
+            raster::FilterMethod::Linear => tiny_skia::FilterQuality::Bilinear,
+            raster::FilterMethod::Nearest => tiny_skia::FilterQuality::Nearest,
+        };
+        match clip {
+            // Clipped by a clip that covers nothing: nothing to draw.
+            Some(None) => true,
+            clip => crate::fast::draw_scaled(
+                pixels,
+                image,
+                opaque,
+                (bounds.x / width_scale) as i32,
+                (bounds.y / height_scale) as i32,
+                quality,
+                opacity,
+                transform,
+                clip.flatten(),
+            ),
+        }
+    }
+
     /// Leviculum's patch (1442): `handle` drawn as a row copy when that
     /// is what `draw` would draw: the picture opaque, at full opacity,
     /// at its own size and an identity transform, so tiny-skia's pattern
