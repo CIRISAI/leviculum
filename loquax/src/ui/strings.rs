@@ -102,6 +102,8 @@ leviculum_ui::catalogue! {
     PositionMarker = "position_marker", "⌖", "⌖";
     // Our own pin on the map (1447): "you" was English on every screen.
     MapYou = "map_you", "you", "du";
+    // What stopping the phone's service costs (1447, walk 1 finding 27), under "Dienst beenden".
+    StopServiceText = "stop_service_text", "Loquax then receives nothing until you open it again.", "Loquax empfängt dann nichts mehr, bis du es wieder öffnest.";
     // The radar's line where no map is loaded (1447, walk 1 finding 19).
     RadarNote = "radar_note", "No map loaded for this area · Rings %1$s", "Keine Karte für diese Gegend geladen · Ringe %1$s";
     RadarNoteOn = "radar_note_on", "No map loaded for this area · Rings %1$s around %2$s", "Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s";

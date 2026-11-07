@@ -883,7 +883,12 @@ public class SettingsActivity extends Activity implements Events.Listener {
         row.addView(flings);
         body.addView(row, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView stop = text(getString(R.string.stop_service), 16, R.color.text);
+        // The verb and, under it, what it costs (1447, walk 1 finding 27):
+        // nothing arrives until the app is opened again.
+        LinearLayout stop = new LinearLayout(this);
+        stop.setOrientation(LinearLayout.VERTICAL);
+        stop.addView(text(getString(R.string.stop_service), 16, R.color.text));
+        stop.addView(text(getString(R.string.stop_service_text), 14, R.color.text_secondary));
         stop.setPadding(dp(16), dp(24), dp(16), dp(16));
         stop.setBackgroundResource(android.R.drawable.list_selector_background);
         stop.setOnClickListener(new View.OnClickListener() {

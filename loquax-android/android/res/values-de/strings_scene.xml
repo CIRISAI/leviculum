@@ -60,6 +60,7 @@
     <string name="position_of">Position von %1$s, %2$s</string>
     <string name="position_marker">⌖</string>
     <string name="map_you">du</string>
+    <string name="stop_service_text">Loquax empfängt dann nichts mehr, bis du es wieder öffnest.</string>
     <string name="radar_note">Keine Karte für diese Gegend geladen · Ringe %1$s</string>
     <string name="radar_note_on">Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s</string>
     <string name="no_messages_yet">Noch keine Nachrichten</string>
