@@ -158,6 +158,14 @@ struct Bench {
     cancel_at: Option<usize>,
     /// The link the home last answered on.
     answered_on: Option<LinkId>,
+    /// The `/sync`, counted from 1, whose resource answer the line loses
+    /// whole: every part of it, retransmissions too; the advertisement
+    /// and the link stay (1461).
+    vanish_at: Option<usize>,
+    /// Parts the line lost that way.
+    vanished: usize,
+    /// When the board asked for parts (RESOURCE_REQ), the bench's time.
+    part_asks: Vec<u64>,
 }
 
 /// The context of a packet on the bench wire.
@@ -219,6 +227,9 @@ impl Bench {
             cancels: 0,
             cancel_at: None,
             answered_on: None,
+            vanish_at: None,
+            vanished: 0,
+            part_asks: Vec::new(),
         }
     }
 
@@ -329,6 +340,9 @@ impl Bench {
                     if context(&packet) == Some(PacketContext::ResourceRcl) {
                         self.cancels += 1;
                     }
+                    if context(&packet) == Some(PacketContext::ResourceReq) {
+                        self.part_asks.push(self.now());
+                    }
                     let out = self.home.node.handle_packet(InterfaceId(0), &packet);
                     self.home_output(out);
                 }
@@ -338,6 +352,10 @@ impl Bench {
                     if cut && part {
                         // Parts the home cut before it cancelled: the
                         // line never carries them.
+                        continue;
+                    }
+                    if part && self.vanish_at == Some(self.home.syncs) {
+                        self.vanished += 1;
                         continue;
                     }
                     let out = self.board.handle_packet(InterfaceId(0), &packet);
@@ -418,7 +436,12 @@ impl Bench {
             .pull(batch.page_bytes, self.now(), 120_000)
             .expect("admitted")
             .expect("ask");
-        let mut exec = Executor::fitted(ask, batch);
+        self.run_fitted(Executor::fitted(ask, batch))
+    }
+
+    /// [`Self::pull_fitted`] with the executor given, up to the pull's
+    /// 120 s budget.
+    fn run_fitted(&mut self, mut exec: Executor) -> (Pulled, Option<(LinkClass, u64)>) {
         let until = self.now() + 120_000;
         let pulled = self.run(&mut exec, until, 100);
         (pulled, exec.fit())
@@ -1188,4 +1211,98 @@ fn a_resource_answer_cancelled_mid_way_is_asked_again_within_the_rtt_bound() {
         took < bound + 5_000,
         "took {took} ms, the bound is {bound} ms; the pull's budget is 120 s"
     );
+}
+
+/// 1461 mvr, 1459's finding on the bench: the home answers the serial
+/// page as a resource, the board accepts the advertisement, and the line
+/// loses every part of the answer while the link stays up. From the
+/// accepted advertisement on the request's own timer is off and the
+/// resource's watchdog owns liveness
+/// (`leviculum-core/src/node/link_management.rs`, the accepted response
+/// clearing `response_started_at_ms`): it asks for the parts again after
+/// `part_timeout_ms` (`leviculum-core/src/resource/incoming.rs`, `poll`),
+/// the policy wait plus 0.5 s more for every retry spent, up to 16 times
+/// (`RESOURCE_MAX_RETRIES`). On this bench it asks at 0, 4.3, 9.1, 14.4,
+/// 20.2 ... 105.7 and 117.0 s, and its last retry falls past the pull's
+/// 120 s: the page is never asked again. The board cancels the silent
+/// answer within the request bound of 1440 (an RCL) and asks the same
+/// page again on the same link: the page arrives on the second ask.
+#[test]
+fn a_resource_answer_lost_whole_is_cancelled_and_asked_again_within_the_rtt_bound() {
+    let (bench, pulled, took, start) = vanished_answer(false);
+    assert!(
+        matches!(
+            pulled,
+            Some(Ok(Outcome::Pulled {
+                cursor: 1,
+                entries: 1,
+                ..
+            }))
+        ),
+        "{pulled:?} after {took} ms, {} asks, parts asked at {:?} ms",
+        bench.home.syncs,
+        bench
+            .part_asks
+            .iter()
+            .map(|t| t - start)
+            .collect::<Vec<_>>()
+    );
+    assert!(bench.vanished > 0, "the line lost the answer's parts");
+    assert_eq!(bench.seqs(), std::vec![1], "the entry once");
+    assert_eq!(bench.home.syncs, 2, "asked again, once");
+    assert_eq!(bench.cancels, 1, "the board cancelled the silent answer");
+    let bound = leviculum_core::node::request::request_timeout_ms(
+        leviculum_core::constants::CHANNEL_DEFAULT_RTT_MS,
+    );
+    assert!(
+        took < bound + 5_000,
+        "took {took} ms, the bound is {bound} ms; the pull's budget is 120 s"
+    );
+}
+
+/// 1461, the control: without the rule the same loss leaves the answer to
+/// the resource's watchdog, which keeps asking for the parts with a
+/// growing wait and is still asking when the pull's 120 s run out; the
+/// page is never asked again.
+#[test]
+fn without_the_rule_a_resource_answer_lost_whole_waits_out_the_budget() {
+    let (bench, pulled, took, _) = vanished_answer(true);
+    assert_eq!(pulled, Some(Err(HomeError::Timeout)), "after {took} ms");
+    assert_eq!(bench.home.syncs, 1, "never asked again");
+    assert_eq!(bench.cancels, 0);
+    assert!(took >= 120_000, "took {took} ms");
+    // The watchdog's own asks: more than a few, all inside the budget.
+    assert!(bench.part_asks.len() > 5, "{:?}", bench.part_asks);
+}
+
+/// The bench of the two 1461 cells: one long entry, the M9's fitted pull,
+/// the first answer lost whole; the bench, the pull's end, its time and
+/// when it started.
+fn vanished_answer(rule_off: bool) -> (Bench, Pulled, u64, u64) {
+    let m9 = Batch {
+        page_bytes: LORA_PAGE_BYTES as u64,
+        max_answer: 256 * 1024,
+    };
+    let mut bench = Bench::on(std::vec![entry(1, 900)], 564);
+    let record = bench.join();
+    bench.vanish_at = Some(1);
+    let ask = record
+        .pull(m9.page_bytes, bench.now(), 120_000)
+        .expect("admitted")
+        .expect("ask");
+    let mut exec = Executor::fitted(ask, m9);
+    if rule_off {
+        exec = exec.without_answer_watch();
+    }
+    let start = bench.now();
+    let (pulled, _) = bench.run_fitted(exec);
+    let took = bench.now() - start;
+    std::println!(
+        "[1461] rule_off={rule_off} pulled={pulled:?} took_ms={took} syncs={} cancels={} vanished={} part_asks_ms={:?}",
+        bench.home.syncs,
+        bench.cancels,
+        bench.vanished,
+        bench.part_asks.iter().map(|t| t - start).collect::<Vec<_>>()
+    );
+    (bench, pulled, took, start)
 }

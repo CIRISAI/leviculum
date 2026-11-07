@@ -152,6 +152,15 @@ impl LinkClass {
     }
 }
 
+/// The resource that answers the request in flight, watched for silence
+/// (1461): its hash, the progress it last made and when.
+#[derive(Debug, Clone, Copy)]
+struct Answer {
+    hash: [u8; 32],
+    progress: f32,
+    since_ms: u64,
+}
+
 /// One [`Ask`] performed over a core node.
 #[derive(Debug)]
 pub struct Executor {
@@ -169,6 +178,12 @@ pub struct Executor {
     fit: Option<Batch>,
     /// The class and page the fit chose, once it did.
     fitted: Option<(LinkClass, u64)>,
+    /// The resource answering the request in flight, once its
+    /// advertisement was accepted (1461).
+    answer: Option<Answer>,
+    /// Whether a silent answer is cancelled and asked again (1461); off
+    /// only for the control of the cell that measures the rule.
+    watch_answers: bool,
 }
 
 impl Executor {
@@ -184,6 +199,19 @@ impl Executor {
             reported: false,
             fit: None,
             fitted: None,
+            answer: None,
+            watch_answers: true,
+        }
+    }
+
+    /// The executor without 1461's rule: a silent resource answer is left
+    /// to the resource's own watchdog. Only the control of the cell that
+    /// measures the rule wants this.
+    #[doc(hidden)]
+    pub fn without_answer_watch(self) -> Self {
+        Self {
+            watch_answers: false,
+            ..self
         }
     }
 
@@ -219,9 +247,60 @@ impl Executor {
         now_ms: u64,
         out: &mut TickOutput,
     ) -> Report {
+        self.watch_answer(node, now_ms, out);
         let path = self.path(node);
         let step = self.ask.poll(now_ms, path);
         self.drive(node, device, now_ms, step, out)
+    }
+
+    /// 1461: the resource answering a repeatable request made no progress
+    /// within the request bound of 1440 (six round trips of the link plus
+    /// 11.25 s, `request_timeout_ms`): the line lost the answer whole
+    /// while the link stays up. The resource's own watchdog asks for the
+    /// missing parts with a growing wait, 16 times
+    /// (`leviculum_core::resource::RESOURCE_MAX_RETRIES`, Python's
+    /// `MAX_RETRIES`), which runs past a pull's budget; its asks keep
+    /// running inside the bound and may still save the answer. Past it
+    /// the board cancels the resource (an RCL, which the home expects)
+    /// and the request fails at once as timed out, which
+    /// [`Self::event`] makes a repeat on the same link ([`Ask::lost`],
+    /// counted against [`ask::REPEATS`]). The ask's own budget ends it
+    /// sooner when it runs out first.
+    fn watch_answer<R: CryptoRngCore, C: Clock, S: Storage>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+        out: &mut TickOutput,
+    ) {
+        if !self.watch_answers || self.request.is_none() || !self.ask.repeatable() {
+            return;
+        }
+        let (Some(link_id), Some(answer)) = (self.link, self.answer.as_mut()) else {
+            return;
+        };
+        let Some(link) = node.link(&link_id) else {
+            self.answer = None;
+            return;
+        };
+        let Some(progress) = link.incoming_resource_progress_of(&answer.hash) else {
+            // Done or failed: the core says which with its own events.
+            self.answer = None;
+            return;
+        };
+        if progress > answer.progress {
+            answer.progress = progress;
+            answer.since_ms = now_ms;
+            return;
+        }
+        let bound = request_timeout_ms(link.rtt_ms());
+        if now_ms.saturating_sub(answer.since_ms) < bound {
+            return;
+        }
+        let hash = answer.hash;
+        self.answer = None;
+        if let Ok(cancelled) = node.cancel_incoming_resource(&link_id, &hash) {
+            out.merge(cancelled);
+        }
     }
 
     /// An event the node raised; the ones about this ask move it on.
@@ -241,10 +320,25 @@ impl Executor {
                 self.fit_link(node, &link_id);
                 self.ask.linked(Ok(()))
             }
+            NodeEvent::ResourceTransferStarted {
+                link_id,
+                resource_hash,
+                is_sender: false,
+            } if ours(link_id) && self.request.is_some() => {
+                // The answer comes as a resource: watched for silence from
+                // here on (1461).
+                self.answer = Some(Answer {
+                    hash: *resource_hash,
+                    progress: 0.0,
+                    since_ms: now_ms,
+                });
+                return Report::Idle;
+            }
             NodeEvent::LinkClosed {
                 link_id, reason, ..
             } if ours(link_id) => {
                 self.link = None;
+                self.answer = None;
                 if self.linking {
                     self.linking = false;
                     self.ask.linked(Err(format!("link closed: {reason:?}")))
@@ -328,7 +422,8 @@ impl Executor {
     /// again within it rather than at the end of the ask's budget; on a
     /// serial link that is about 12 s, on a LoRa link with a 2 s round
     /// trip about 23 s. A response that comes as a resource is watched by
-    /// the resource from its first part on. A join waits out its budget.
+    /// the resource from its advertisement on, and by the same bound for
+    /// silence ([`Self::watch_answer`], 1461). A join waits out its budget.
     /// Never past the budget.
     fn answer_wait_ms<R: CryptoRngCore, C: Clock, S: Storage>(
         &self,
@@ -398,6 +493,7 @@ impl Executor {
                         Ok((request, sent)) => {
                             out.merge(sent);
                             self.request = Some(request);
+                            self.answer = None;
                             return Report::Idle;
                         }
                         Err(detail) => self.ask.answered(Err(HomeError::Transfer(detail))),
@@ -427,6 +523,7 @@ impl Executor {
         out: &mut TickOutput,
     ) {
         self.request = None;
+        self.answer = None;
         self.linking = false;
         if let Some(link) = self.link.take() {
             out.merge(node.close_link(&link));
