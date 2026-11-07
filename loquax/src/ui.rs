@@ -159,6 +159,7 @@ pub mod replies;
 pub mod rooms;
 pub mod scene;
 pub mod search;
+pub mod selection;
 pub mod share;
 pub mod state;
 pub mod strings;
