@@ -91,13 +91,18 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use critical_section::Mutex;
 
 use esp_hal::rng::{Trng, TrngSource};
+use esp_hal::system::{CpuControl, Stack};
 use esp_hal::{
     delay::Delay,
     dma_rx_buffer, dma_tx_buffer,
@@ -119,13 +124,17 @@ use leviculum_core::framing::hdlc::{DeframeResult, Deframer};
 use leviculum_esp::flash::Stores;
 use leviculum_esp::handheld::{self, CodeRefusal, Handheld};
 use leviculum_esp::{boards::thinknode_m9 as m9, uptime_ms, UartLog};
-use leviculum_ui::input::{KeyCode, KeyEvent, KeyEventKind};
+use leviculum_ui::input::{KeyCode, KeyEventKind};
+use loquax::home::ask::Verb;
 use loquax::home::board::Word;
+use loquax::home::wire::{Entry, Mark};
+use loquax::ui::strings::{StrId, Text};
 use loquax::ui::UiModel;
 use loquax_m9::census::{self, Probe, Step};
 use loquax_m9::field::Field;
 use loquax_m9::fixture::{self, Screen};
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
+use loquax_m9::home::Answer;
 use loquax_m9::kbraw::{self, Presses, Protocol, Read};
 use loquax_m9::keyboard::{self, Key, POLL_MS};
 use loquax_m9::map::{self, Map};
@@ -145,19 +154,17 @@ const BANNER_INTERVAL_MS: u64 = 5_000;
 /// (`handheld-messenger.md`, "Memory budgets, measured").
 const HEAP_MIN: usize = 1_100_000 + (1 << 20);
 
-/// The keyboard controller's protocol, as the bench capture of 2026-11-04
-/// read it: one key code per press (`thinknode-m9.md`, "The keyboard
-/// controller, measured").
-const KB: Protocol = kbraw::MEASURED;
-
 /// The keyboard's poll, the interrupt's once the boot handed it over
-/// (1463): the controller's bus and the timer that ticks every
-/// [`POLL_MS`]. The loop no longer reads the controller; it takes what the
-/// interrupt kept in [`KB_PRESSES`], so a key pressed while the loop is
-/// busy drawing or storing is read all the same.
+/// (1463): the controller's bus, the timer that ticks every
+/// [`POLL_MS`], and the protocol at the address the probe found (1493:
+/// a V1.0 board answers at 0x6C, and polling the measured 0x6D there
+/// left its keyboard dead). The loop no longer reads the controller; it
+/// takes what the interrupt kept in [`KB_PRESSES`], so a key pressed
+/// while the loop is busy drawing or storing is read all the same.
 struct KbPoll {
     bus: I2c<'static, Blocking>,
     timer: PeriodicTimer<'static, Blocking>,
+    protocol: Protocol,
 }
 
 static KB_POLL: Mutex<RefCell<Option<KbPoll>>> = Mutex::new(RefCell::new(None));
@@ -177,16 +184,17 @@ fn kb_tick() {
             return;
         };
         poll.timer.clear_interrupt();
+        let kb = poll.protocol;
         let mut answer = [0u8; kbraw::MAX_ANSWER];
-        let answer = &mut answer[..KB.len];
-        let read = match KB.register {
-            Some(register) => poll.bus.write_read(KB.address, &[register], answer),
-            None => poll.bus.read(KB.address, answer),
+        let answer = &mut answer[..kb.len];
+        let read = match kb.register {
+            Some(register) => poll.bus.write_read(kb.address, &[register], answer),
+            None => poll.bus.read(kb.address, answer),
         };
         match read {
             Ok(()) => KB_PRESSES
                 .borrow_ref_mut(cs)
-                .poll(&KB, uptime_ms() as u32, answer),
+                .poll(&kb, uptime_ms() as u32, answer),
             Err(_) => {
                 KB_FAILS.fetch_add(1, Ordering::Relaxed);
             }
@@ -203,6 +211,107 @@ fn kb_drain() -> (Vec<kbraw::Press>, u32, u32) {
         (drained, presses.lost(), KB_FAILS.load(Ordering::Relaxed))
     })
 }
+
+// ---------------------------------------------------------------------
+// The two cores and the queues between them (1493)
+// ---------------------------------------------------------------------
+//
+// The I/O side keeps core 0 (PRO): the UART and its RX interrupt, the
+// keyboard's timer interrupt, the node, the client and every flash
+// write. The UI side runs on core 1 (APP): the model, the scene, the
+// renderer and the panel's SPI. Between them stand two queues under the
+// cross-core critical section, and the keyboard queue [`KB_PRESSES`],
+// which the UI side drains directly.
+//
+// The executor is NO executor: each core runs one blocking loop, and
+// the queues are plain `VecDeque`s under `critical_section` (esp-hal's
+// multicore implementation is a cross-core spinlock). Why: the
+// community port's interrupt executor crashed on this board
+// (`thinknode-m9.md`, "The loop"), esp-rtos would add a scheduler and a
+// stack per task against a measured stack budget, and after 1463 the
+// data flow is already message-shaped — pages, answers and key presses
+// in, asks out — so two loops with queues give the decoupling without a
+// new machine to trust. Flash stays on core 0; esp-storage's AutoPark
+// parks the UI core for each write or erase (the flash routines run
+// with the cache off, which core 1 executes through).
+
+/// What the I/O core hands the UI core.
+enum ToUi {
+    /// A fresh model: the restore after a code was taken.
+    Model(Box<UiModel<Field>>),
+    /// A pulled page's entries for the model.
+    Entries(Vec<Entry>, [u8; 16]),
+    /// How an ask ended, for the model.
+    Answer(Answer),
+    /// The top bar's word moved.
+    Word(Option<Word>),
+    /// An error that is a state (1493), or its end.
+    Fault(Option<StrId>),
+    /// The pairing screen could not keep the code ([`CodeRefusal`]).
+    CodeNote(&'static str),
+    /// A `FRAME_DUMP` for the renderer: the screen byte, as the control
+    /// frame carried it.
+    Dump(Option<u8>),
+}
+
+/// What the UI core hands the I/O core.
+enum FromUi {
+    /// A fold's output for the home: the verbs for the ask queue and
+    /// the marks among them for the store ([`Handheld::ask`]).
+    Asks { verbs: Vec<Verb>, marks: Vec<Mark> },
+    /// A formatted log line: prefix and body, printed by the one UART
+    /// writer.
+    Line(&'static str, String),
+    /// A raw line (`KBRAW`, `KEY`, the `PBM` dump).
+    Raw(String),
+    /// A complete home code typed on the pairing screen.
+    Code(String),
+}
+
+static TO_UI: Mutex<RefCell<VecDeque<ToUi>>> = Mutex::new(RefCell::new(VecDeque::new()));
+static FROM_UI: Mutex<RefCell<VecDeque<FromUi>>> = Mutex::new(RefCell::new(VecDeque::new()));
+
+fn to_ui(message: ToUi) {
+    critical_section::with(|cs| TO_UI.borrow_ref_mut(cs).push_back(message));
+}
+
+fn ui_drain() -> Vec<ToUi> {
+    critical_section::with(|cs| TO_UI.borrow_ref_mut(cs).drain(..).collect())
+}
+
+fn io_drain() -> Vec<FromUi> {
+    critical_section::with(|cs| FROM_UI.borrow_ref_mut(cs).drain(..).collect())
+}
+
+/// The UI core's way to the log: every line goes through the queue to
+/// the one UART writer on core 0.
+struct UiLog;
+
+impl UiLog {
+    fn line(&mut self, prefix: &'static str, body: String) {
+        critical_section::with(|cs| {
+            FROM_UI
+                .borrow_ref_mut(cs)
+                .push_back(FromUi::Line(prefix, body))
+        });
+    }
+
+    fn raw(&mut self, body: String) {
+        critical_section::with(|cs| FROM_UI.borrow_ref_mut(cs).push_back(FromUi::Raw(body)));
+    }
+
+    fn send(&mut self, message: FromUi) {
+        critical_section::with(|cs| FROM_UI.borrow_ref_mut(cs).push_back(message));
+    }
+}
+
+/// The UI core's stack: the open chat's census ceilings, scene and draw
+/// added up (`census::CHAT`, the 184,000 B the build script holds the
+/// one stack to before 1493), rounded up to whole KiB.
+const UI_STACK: usize = 184 * 1024;
+const _: () = assert!(UI_STACK >= 184_000);
+
+static mut APP_CORE_STACK: Stack<UI_STACK> = Stack::new();
 
 /// A turn of the loop longer than this says where its time went (1463):
 /// the bar a key is answered within.
@@ -381,11 +490,25 @@ const GUARD_SKIP: usize = 512;
 const FRAME_SKIP: usize = 512;
 
 /// The board's half of the census: the counted allocator and the painted
-/// stack, from just below the probe's frame down to the guard.
+/// stack, from just below the probe's frame down to the guard. `floor`
+/// is the measuring core's stack low end: core 0's linker symbol, or
+/// the UI core's static stack (1493).
 struct BoardProbe {
     before: usize,
     low: usize,
     high: usize,
+    floor: usize,
+}
+
+impl BoardProbe {
+    fn over(floor: usize) -> Self {
+        Self {
+            before: 0,
+            low: 0,
+            high: 0,
+            floor,
+        }
+    }
 }
 
 impl Probe for BoardProbe {
@@ -395,8 +518,7 @@ impl Probe for BoardProbe {
         self.before = leviculum_esp::heap_live();
         let here = 0u8;
         let sp = core::ptr::addr_of!(here) as usize;
-        let (end, _) = stack_bounds();
-        self.low = end + GUARD_SKIP;
+        self.low = self.floor + GUARD_SKIP;
         self.high = sp.saturating_sub(FRAME_SKIP).max(self.low);
         for at in self.low..self.high {
             // SAFETY: the unused stack below the live frames, which this
@@ -429,16 +551,19 @@ fn halt_with_banner(log: &mut UartLog<'_>, heap: usize) -> ! {
 }
 
 /// What the screen shows besides the model: the pairing while a code is
-/// typed, and the home's word in the top bar (1415).
+/// typed, the home's word in the top bar (1415), and a fault that is a
+/// state (1493).
 #[derive(Default)]
 struct Shown {
     pairing: Option<Pairing>,
     word: Option<Word>,
+    fault: Option<StrId>,
 }
 
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
 /// the map in pixels when it is open, or the pairing over all of it, and
-/// send the rows that changed to the panel.
+/// send the rows that changed to the panel. On the UI core (1493); the
+/// lines go through the queue.
 fn redraw(
     renderer: &mut Renderer<'_, Frame>,
     map: &mut Map<'_>,
@@ -446,11 +571,12 @@ fn redraw(
     model: &UiModel<Field>,
     row: usize,
     shown: &Shown,
-    log: &mut UartLog<'_>,
+    log: &mut UiLog,
 ) {
     let look = screen::Look {
         row,
         home: shown.word,
+        fault: shown.fault,
         ..screen::Look::of(model)
     };
     let drawn = match &shown.pairing {
@@ -458,7 +584,7 @@ fn redraw(
         None => renderer.show(model, &look, map),
     };
     if drawn.is_err() {
-        log.line("[DISP] ", format_args!("draw=failed"));
+        log.line("[DISP] ", alloc::string::String::from("draw=failed"));
         return;
     }
     let frame = renderer.panel();
@@ -472,7 +598,7 @@ fn redraw(
         Ok(()) => {
             log.line(
                 "[DISP] ",
-                format_args!(
+                alloc::format!(
                     "flush rows={first}..{last} ms={}.{:03}",
                     us / 1000,
                     us % 1000
@@ -482,10 +608,16 @@ fn redraw(
             // so this flush wrote every row, and the backlight may light.
             if !panel.lit {
                 panel.light(true);
-                log.line("[DISP] ", format_args!("backlight=on"));
+                log.line("[DISP] ", alloc::string::String::from("backlight=on"));
             }
         }
-        Err(e) => log.line("[DISP] ", format_args!("flush=failed spi={e:?}")),
+        Err(e) => {
+            // The panel's bytes are unknown now: every row is owed, so
+            // the next flush that lands is whole — without this the
+            // failed band stayed stale for ever (1493).
+            frame.forget_flushed();
+            log.line("[DISP] ", alloc::format!("flush=failed spi={e:?}"));
+        }
     }
 }
 
@@ -556,26 +688,37 @@ fn main() -> ! {
         log.line("[NODE] ", format_args!("state=down reason=no-entropy"));
         halt_with_banner(&mut log, bytes);
     };
+    // A flash read error keeps the board without an identity (1493):
+    // no node runs, and once the panel is up the screen says why.
     let identity = handheld::identity(&mut stores, &mut rng, &mut log);
-    let before = leviculum_esp::heap_live();
-    let mut node = Handheld::new(identity, node_rng);
-    log.line(
-        "[CENSUS] ",
-        format_args!(
-            "node held={} box={} links={} max_answer={}",
-            leviculum_esp::heap_live() - before,
-            core::mem::size_of::<handheld::Core>(),
-            handheld::MAX_LINKS,
-            handheld::MAX_ANSWER
-        ),
-    );
-    log.line(
-        "[NODE] ",
-        format_args!(
-            "state=up iface=serial hw_mtu={} serial_mux=1",
-            leviculum_esp::serial_iface::SERIAL_HW_MTU
-        ),
-    );
+    let mut node = match identity {
+        Some(identity) => {
+            let before = leviculum_esp::heap_live();
+            let node = Handheld::new(identity, node_rng);
+            log.line(
+                "[CENSUS] ",
+                format_args!(
+                    "node held={} box={} links={} max_answer={}",
+                    leviculum_esp::heap_live() - before,
+                    core::mem::size_of::<handheld::Core>(),
+                    handheld::MAX_LINKS,
+                    handheld::MAX_ANSWER
+                ),
+            );
+            log.line(
+                "[NODE] ",
+                format_args!(
+                    "state=up iface=serial hw_mtu={} serial_mux=1",
+                    leviculum_esp::serial_iface::SERIAL_HW_MTU
+                ),
+            );
+            Some(node)
+        }
+        None => {
+            log.line("[NODE] ", format_args!("state=down reason=identity-unread"));
+            None
+        }
+    };
 
     // The bus supply on, and every chip select on SPI2 high before the bus
     // exists, so the radio and the card ignore the panel's traffic.
@@ -658,7 +801,25 @@ fn main() -> ! {
         ),
     }
 
-    // The keyboard controller, probed at both revisions' addresses.
+    // A board whose identity would not read (1493): the fault on the
+    // panel in the reader's words, the banner on the line, no node.
+    let Some(mut node) = node.take() else {
+        if let Ok(mut renderer) = Renderer::new(&mut frame) {
+            let words =
+                Text::Key(StrId::M9NoIdentity, alloc::vec::Vec::new()).resolve(loquax_m9::LANG);
+            let _ = renderer.text(|cols, rows| fault_lines(&words, cols, rows));
+            let shown = renderer.panel();
+            if let Some((first, last)) = shown.take_dirty() {
+                let _ = panel.flush(shown, first, last);
+            }
+        }
+        halt_with_banner(&mut log, bytes);
+    };
+    drop(frame);
+
+    // The keyboard controller, probed at both revisions' addresses; the
+    // probe's answer is the address polled (1493): a V1.0 board answers
+    // at 0x6C and its keyboard was dead under the fixed 0x6D.
     let sda: m9::KbSda = p.GPIO20;
     let scl: m9::KbScl = p.GPIO21;
     let i2c_config = I2cConfig::default().with_frequency(Rate::from_khz(m9::KB_I2C_KHZ));
@@ -669,20 +830,22 @@ fn main() -> ! {
             None
         }
     };
+    let mut kb = kbraw::MEASURED;
     if let Some(bus) = i2c.as_mut() {
         let mut probe = [0u8; 1];
         let v11 = bus.read(m9::KB_ADDR_V11, &mut probe).is_ok();
         let v10 = bus.read(m9::KB_ADDR_V10, &mut probe).is_ok();
+        kb = kbraw::probed(v11, v10);
         log.line(
             "[KB] ",
             format_args!(
                 "addr={:#04x} found={} v10_addr={:#04x} v10_found={} protocol=codes reg={:#04x} len={} poll_ms={POLL_MS}",
-                KB.address,
+                kb.address,
                 if v11 { "yes" } else { "no" },
                 m9::KB_ADDR_V10,
                 if v10 { "yes" } else { "no" },
-                KB.register.unwrap_or(0),
-                KB.len,
+                kb.register.unwrap_or(0),
+                kb.len,
             ),
         );
     }
@@ -696,7 +859,11 @@ fn main() -> ! {
             Ok(()) => {
                 critical_section::with(|cs| {
                     timer.listen();
-                    KB_POLL.borrow_ref_mut(cs).replace(KbPoll { bus, timer });
+                    KB_POLL.borrow_ref_mut(cs).replace(KbPoll {
+                        bus,
+                        timer,
+                        protocol: kb,
+                    });
                 });
                 log.line(
                     "[KB] ",
@@ -707,79 +874,10 @@ fn main() -> ! {
         }
     }
 
-    // The renderer over the panel's frame, made once; it clears the frame
-    // in memory, the panel keeps the splash.
-    let before = leviculum_esp::heap_live();
-    let Ok(mut renderer) = Renderer::new(&mut frame) else {
-        log.line("[DISP] ", format_args!("state=down reason=renderer"));
-        halt_with_banner(&mut log, bytes);
-    };
-    let renderer_held = leviculum_esp::heap_live() - before;
-    log.line(
-        "[CENSUS] ",
-        format_args!(
-            "renderer held={renderer_held} budget={} verdict={}",
-            census::RENDERER_HELD,
-            if renderer_held < census::RENDERER_HELD {
-                "ok"
-            } else {
-                "over"
-            }
-        ),
-    );
-    // The map beside it (slice seven): the region read in place from the
-    // image, the painter's storage on the heap.
-    let before = leviculum_esp::heap_live();
-    let Ok(mut map) = Map::new(map::FIXTURE) else {
-        log.line("[DISP] ", format_args!("state=down reason=region"));
-        halt_with_banner(&mut log, bytes);
-    };
-    let map_held = leviculum_esp::heap_live() - before;
-    log.line(
-        "[CENSUS] ",
-        format_args!(
-            "map held={map_held} budget={} verdict={}",
-            census::PAINTER_HELD,
-            if map_held < census::PAINTER_HELD {
-                "ok"
-            } else {
-                "over"
-            }
-        ),
-    );
-
-    // The census: every screen, built and drawn as the host's census does,
-    // against the same budgets. Each draw leaves the screen in the frame;
-    // the start screen is drawn fresh after them.
-    let mut probe = BoardProbe {
-        before: 0,
-        low: 0,
-        high: 0,
-    };
-    for shown in fixture::SCREENS {
-        let budget = shown.budget();
-        let (model, row) = shown.walk();
-        match census::measure_at(&mut probe, &model, row, &mut renderer, &mut map) {
-            Ok(got) => log.line(
-                "[CENSUS] ",
-                format_args!(
-                    "{}",
-                    census::Line {
-                        screen: shown.name(),
-                        census: &got,
-                        budget: &budget,
-                    }
-                ),
-            ),
-            Err(_) => log.line(
-                "[CENSUS] ",
-                format_args!("screen={} draw=failed", shown.name()),
-            ),
-        }
-    }
     // The client session's pull (1363's census, measured here since 1414):
     // thirty 200-byte messages in LoRa pages, and the batch the board runs
-    // with on what it measured.
+    // with on what it measured. On this core's stack: the pull runs here.
+    let mut probe = BoardProbe::over(stack_bounds().0);
     let archive = census::archive(30, 200);
     let answers = census::lora_answers(&archive);
     let home_key = node.node.identity().public_key_bytes();
@@ -820,30 +918,44 @@ fn main() -> ! {
             None
         }
     };
-    let mut model = restored.unwrap_or_else(fixture::model);
-    let mut shown = Shown {
+    let model = Box::new(restored.unwrap_or_else(fixture::model));
+    let shown = Shown {
         pairing: node.address().is_none().then(Pairing::new),
         word: node.word(),
+        fault: None,
     };
-    // The M9's own cursor over a group's sheet or picker (slice six).
-    let mut row = 0;
-    redraw(
-        &mut renderer,
-        &mut map,
-        &mut panel,
-        &model,
-        row,
-        &shown,
-        &mut log,
-    );
-    // What the panel shows (1491): a pull that brought nothing new draws
-    // nothing.
-    let mut drawn = screen::Drawn::default();
-    drawn.drawn(&model);
 
+    // The seed the UI core draws client ids from (1493): entropy taken
+    // here, hashed with a counter over there. An id must never repeat
+    // across reboots — the home reads a repeated id as the same message.
+    let mut seed = [0u8; 32];
+    rand_core::RngCore::fill_bytes(&mut rng, &mut seed);
+
+    // The UI core (1493): model, scene, renderer, panel. Everything it
+    // says goes through the queue to this core's UART writer. The guard
+    // must live as long as the image: dropping it parks the core.
+    let mut cpu = CpuControl::new(p.CPU_CTRL);
+    // SAFETY: the one place this static is taken, before the core starts.
+    let ui_stack = unsafe { &mut *addr_of_mut!(APP_CORE_STACK) };
+    let started = cpu.start_app_core(ui_stack, move || ui_main(panel, model, shown, kb, seed));
+    match &started {
+        Ok(_) => log.line(
+            "[CORES] ",
+            format_args!("ui=core1 stack={UI_STACK} io=core0"),
+        ),
+        Err(e) => log.line("[CORES] ", format_args!("ui=down reason={e:?}")),
+    }
+    if started.is_err() {
+        halt_with_banner(&mut log, bytes);
+    }
+
+    // The I/O loop on core 0: the line, the node, the client, the flash.
     let mut deframer = Deframer::new();
     // The keyboard's losses as the last `[KB]` line said them.
     let mut kb_said = (0, 0);
+    // The faults the screen shows (1493): sticky until a boot proves the
+    // flash again; the word is the state, the log has the detail.
+    let mut faulted = false;
     let mut next_banner = uptime_ms() + BANNER_INTERVAL_MS;
     loop {
         let now = uptime_ms();
@@ -868,6 +980,7 @@ fn main() -> ! {
         }
         // Every loss on the line said when it happens (1440).
         log.say_rx_counts(false);
+        let mut busy = n > 0;
         for data in requests {
             if matches!(
                 envelope::decode_frame(&data),
@@ -890,8 +1003,8 @@ fn main() -> ! {
                             match node.take_code(text, &mut rng, &mut stores, batch, &mut log) {
                                 Ok(taken) => {
                                     if let Some(taken) = taken {
-                                        model = taken;
-                                        row = 0;
+                                        to_ui(ToUi::Model(Box::new(taken)));
+                                        to_ui(ToUi::Word(node.word()));
                                     }
                                     envelope::encode_ack(envelope::TYPE_HOME_CODE)
                                 }
@@ -899,39 +1012,42 @@ fn main() -> ! {
                                     envelope::TYPE_HOME_CODE,
                                     envelope::REFUSE_VALUE,
                                 ),
-                                Err(CodeRefusal::Persist) => envelope::encode_refusal(
-                                    envelope::TYPE_HOME_CODE,
-                                    envelope::REFUSE_PERSIST,
-                                ),
+                                Err(CodeRefusal::Persist) => {
+                                    to_ui(ToUi::CodeNote(CODE_NOT_SAVED));
+                                    envelope::encode_refusal(
+                                        envelope::TYPE_HOME_CODE,
+                                        envelope::REFUSE_PERSIST,
+                                    )
+                                }
                             }
                         }
                     };
                     log.frame(&answer);
-                    if node.address().is_some() {
-                        shown.pairing = None;
-                        shown.word = node.word();
-                        redraw(
-                            &mut renderer,
-                            &mut map,
-                            &mut panel,
-                            &model,
-                            row,
-                            &shown,
-                            &mut log,
-                        );
+                    continue;
+                }
+                if frame.frame_type == envelope::TYPE_FRAME_DUMP {
+                    match envelope::decode_frame_dump_payload(frame.payload) {
+                        None => log.frame(&envelope::encode_refusal(
+                            envelope::TYPE_FRAME_DUMP,
+                            envelope::REFUSE_MALFORMED,
+                        )),
+                        Some(Some(byte))
+                            if Screen::of(byte).is_none() && byte != pair::DUMP_BYTE =>
+                        {
+                            log.frame(&envelope::encode_refusal(
+                                envelope::TYPE_FRAME_DUMP,
+                                envelope::REFUSE_VALUE,
+                            ))
+                        }
+                        Some(screen) => {
+                            log.frame(&envelope::encode_ack(envelope::TYPE_FRAME_DUMP));
+                            to_ui(ToUi::Dump(screen));
+                        }
                     }
                     continue;
                 }
             }
-            control(
-                &data,
-                &mut model,
-                &mut row,
-                &mut renderer,
-                &mut map,
-                &mut panel,
-                &mut log,
-            );
+            control(&data, &mut log);
         }
 
         turn.host = uptime_ms().saturating_sub(t_host);
@@ -940,42 +1056,60 @@ fn main() -> ! {
         turn.node = uptime_ms().saturating_sub(t_node);
         let t_take = uptime_ms();
 
-        // What the client brought: pulled entries into the model, ended
-        // sends to their bubbles, and the top bar's word when it moved. The
-        // panel is drawn when the model's revision or the word moved
-        // (1491), not for a page the model already held.
+        // What the client brought goes over to the UI core: pulled
+        // entries, ended asks, the word, and any write that failed.
         let drained = node.drain();
         if let Some(address) = node.address() {
             if !drained.entries.is_empty() {
-                home::take(&mut model, &drained.entries, &address);
+                busy = true;
+                to_ui(ToUi::Entries(drained.entries, address));
             }
-            for result in drained.sent {
-                home::sent(&mut model, result);
+            for answer in drained.answers {
+                to_ui(ToUi::Answer(answer));
             }
         }
-        let word = node.word();
-        let mut dirty = word != shown.word;
-        shown.word = word;
-        dirty |= drawn.due(&model);
-        if dirty {
-            let t_draw = uptime_ms();
-            redraw(
-                &mut renderer,
-                &mut map,
-                &mut panel,
-                &model,
-                row,
-                &shown,
-                &mut log,
-            );
-            turn.draw = uptime_ms().saturating_sub(t_draw);
+        if drained.unsaved > 0 && !faulted {
+            faulted = true;
+            to_ui(ToUi::Fault(Some(StrId::M9NotSaved)));
         }
-        turn.take = uptime_ms().saturating_sub(t_take).saturating_sub(turn.draw);
+        to_ui_word(node.word());
 
-        // The keys the timer read since the last turn (1463), oldest
-        // first: every press, however long the turn that held it was.
-        let t_keys = uptime_ms();
-        let (presses, kb_lost, kb_fails) = kb_drain();
+        // What the UI core asked for.
+        for message in io_drain() {
+            match message {
+                FromUi::Asks { verbs, marks } => {
+                    busy = true;
+                    let mut ids = || {
+                        let mut id = [0u8; 16];
+                        rand_core::RngCore::fill_bytes(&mut rng, &mut id);
+                        id
+                    };
+                    node.ask(verbs, &marks, &mut ids, uptime_ms(), &mut stores, &mut log);
+                }
+                FromUi::Line(prefix, body) => log.line(prefix, format_args!("{body}")),
+                FromUi::Raw(body) => log.raw(&body),
+                FromUi::Code(text) => {
+                    match node.take_code(&text, &mut rng, &mut stores, batch, &mut log) {
+                        Ok(Some(taken)) => {
+                            to_ui(ToUi::Model(Box::new(taken)));
+                            to_ui(ToUi::Word(node.word()));
+                        }
+                        Ok(None) => {}
+                        Err(CodeRefusal::Value) => {}
+                        Err(CodeRefusal::Persist) => to_ui(ToUi::CodeNote(CODE_NOT_SAVED)),
+                    }
+                }
+            }
+        }
+
+        // The keyboard's losses, counted by the interrupt, said here:
+        // the presses themselves are the UI core's.
+        let (kb_lost, kb_fails) = critical_section::with(|cs| {
+            (
+                KB_PRESSES.borrow_ref(cs).lost(),
+                KB_FAILS.load(Ordering::Relaxed),
+            )
+        });
         if (kb_lost, kb_fails) != kb_said {
             kb_said = (kb_lost, kb_fails);
             log.line(
@@ -983,17 +1117,283 @@ fn main() -> ! {
                 format_args!("queue_lost={kb_lost} read_failed={kb_fails}"),
             );
         }
+
+        // A quiet turn (1493): nothing came over the line and nothing was
+        // pulled, so the store may erase its next ring sector now, and a
+        // pulled page later writes into erased flash instead of holding
+        // the interrupts for the erase.
+        if !busy {
+            node.quiet(&mut stores, &mut log);
+        }
+
+        turn.take = uptime_ms().saturating_sub(t_take);
+        turn.say(&mut log, node.entries());
+    }
+}
+
+/// The last word the UI core was told, so the queue carries changes, not
+/// a word per turn.
+fn to_ui_word(word: Option<Word>) {
+    static LAST: Mutex<RefCell<Option<Option<Word>>>> = Mutex::new(RefCell::new(None));
+    critical_section::with(|cs| {
+        let mut last = LAST.borrow_ref_mut(cs);
+        if last.as_ref() != Some(&word) {
+            *last = Some(word);
+            TO_UI.borrow_ref_mut(cs).push_back(ToUi::Word(word));
+        }
+    });
+}
+
+/// The pairing screen's words are English (1363); so is this state.
+const CODE_NOT_SAVED: &str = "The code could not be saved. Try again.";
+
+/// The UI core (1493): the model, the scene, the renderer, the panel.
+/// It drains the key queue and the I/O core's messages, folds them,
+/// routes what the fold asks (`home::route`) back to the I/O core, and
+/// draws at most once per turn, whatever arrived.
+fn ui_main(
+    mut panel: Panel<'static>,
+    mut model: Box<UiModel<Field>>,
+    mut shown: Shown,
+    kb: Protocol,
+    seed: [u8; 32],
+) -> ! {
+    let mut log = UiLog;
+    let mut frame = Frame::new();
+    let before = leviculum_esp::heap_live();
+    let Ok(mut renderer) = Renderer::new(&mut frame) else {
+        log.line("[DISP] ", alloc::string::String::from("state=down reason=renderer"));
+        loop {
+            core::hint::spin_loop();
+        }
+    };
+    let renderer_held = leviculum_esp::heap_live() - before;
+    log.line(
+        "[CENSUS] ",
+        alloc::format!(
+            "renderer held={renderer_held} budget={} verdict={}",
+            census::RENDERER_HELD,
+            if renderer_held < census::RENDERER_HELD {
+                "ok"
+            } else {
+                "over"
+            }
+        ),
+    );
+    // The map beside it (slice seven): the region read in place from the
+    // image, the painter's storage on the heap.
+    let before = leviculum_esp::heap_live();
+    let Ok(mut map) = Map::new(map::FIXTURE) else {
+        log.line("[DISP] ", alloc::string::String::from("state=down reason=region"));
+        loop {
+            core::hint::spin_loop();
+        }
+    };
+    let map_held = leviculum_esp::heap_live() - before;
+    log.line(
+        "[CENSUS] ",
+        alloc::format!(
+            "map held={map_held} budget={} verdict={}",
+            census::PAINTER_HELD,
+            if map_held < census::PAINTER_HELD {
+                "ok"
+            } else {
+                "over"
+            }
+        ),
+    );
+
+    // The census: every screen, built and drawn as the host's census
+    // does, against the same budgets — on this core's stack, which is
+    // where every scene and draw lives now (1493).
+    let stack_floor = core::ptr::addr_of!(APP_CORE_STACK) as usize;
+    let mut probe = BoardProbe::over(stack_floor);
+    for walked in fixture::SCREENS {
+        let budget = walked.budget();
+        let (walk_model, walk_row) = walked.walk();
+        match census::measure_at(&mut probe, &walk_model, walk_row, &mut renderer, &mut map) {
+            Ok(got) => log.line(
+                "[CENSUS] ",
+                alloc::format!(
+                    "{}",
+                    census::Line {
+                        screen: walked.name(),
+                        census: &got,
+                        budget: &budget,
+                    }
+                ),
+            ),
+            Err(_) => log.line(
+                "[CENSUS] ",
+                alloc::format!("screen={} draw=failed", walked.name()),
+            ),
+        }
+    }
+
+    // The ids a fold's asks carry (1493): the boot's entropy hashed with
+    // a counter, unique across reboots, drawn without a Trng over here.
+    let mut counter: u64 = 0;
+    let mut ids = move || {
+        counter += 1;
+        let mut buf = [0u8; 40];
+        buf[..32].copy_from_slice(&seed);
+        buf[32..].copy_from_slice(&counter.to_le_bytes());
+        let hash = leviculum_core::crypto::sha256(&buf);
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&hash[..16]);
+        id
+    };
+
+    // The M9's own cursor over a group's sheet or picker (slice six).
+    let mut row = 0;
+    redraw(
+        &mut renderer,
+        &mut map,
+        &mut panel,
+        &model,
+        row,
+        &shown,
+        &mut log,
+    );
+    // What the panel shows (1491): a page that changed nothing draws
+    // nothing.
+    let mut drawn = screen::Drawn::default();
+    drawn.drawn(&model);
+
+    loop {
+        let mut dirty = false;
+        let mut wants_verbs: Vec<Verb> = Vec::new();
+        let mut wants_marks: Vec<Mark> = Vec::new();
+        let route_out = |model: &mut UiModel<Field>,
+                         effects: Vec<loquax::ui::UiEffect>,
+                         mut ids: &mut dyn FnMut() -> [u8; 16],
+                         log: &mut UiLog,
+                         verbs: &mut Vec<Verb>,
+                         marks: &mut Vec<Mark>|
+         -> bool {
+            let routed = home::route(model, effects, &mut ids);
+            for line in routed.notices {
+                log.line("[UI] ", alloc::format!("notice=\"{line}\""));
+            }
+            for name in routed.unrouted {
+                log.line("[UI] ", alloc::format!("unrouted={name}"));
+            }
+            verbs.extend(routed.verbs);
+            marks.extend(routed.marks);
+            routed.redraw
+        };
+
+        // What the I/O core brought.
+        for message in ui_drain() {
+            match message {
+                ToUi::Model(taken) => {
+                    model = taken;
+                    row = 0;
+                    shown.pairing = None;
+                    dirty = true;
+                }
+                ToUi::Entries(entries, address) => {
+                    let (_, effects) = home::take(&mut model, &entries, &address);
+                    if route_out(
+                        &mut model,
+                        effects,
+                        &mut ids,
+                        &mut log,
+                        &mut wants_verbs,
+                        &mut wants_marks,
+                    ) {
+                        dirty = true;
+                    }
+                }
+                ToUi::Answer(answer) => {
+                    let effects = home::answered(&mut model, answer);
+                    if route_out(
+                        &mut model,
+                        effects,
+                        &mut ids,
+                        &mut log,
+                        &mut wants_verbs,
+                        &mut wants_marks,
+                    ) {
+                        dirty = true;
+                    }
+                }
+                ToUi::Word(word) => {
+                    if word != shown.word {
+                        shown.word = word;
+                        dirty = true;
+                    }
+                }
+                ToUi::Fault(fault) => {
+                    if fault != shown.fault {
+                        shown.fault = fault;
+                        dirty = true;
+                    }
+                }
+                ToUi::CodeNote(note) => {
+                    if let Some(pairing) = shown.pairing.as_mut() {
+                        pairing.note = Some(note);
+                        dirty = true;
+                    }
+                }
+                ToUi::Dump(screen) => {
+                    if let Some(walked) = screen.and_then(Screen::of) {
+                        let (walk_model, walk_row) = walked.walk();
+                        *model = walk_model;
+                        row = walk_row;
+                        shown.pairing = None;
+                        redraw(
+                            &mut renderer,
+                            &mut map,
+                            &mut panel,
+                            &model,
+                            row,
+                            &Shown::default(),
+                            &mut log,
+                        );
+                        log.line("[DUMP] ", alloc::format!("screen={}", walked.name()));
+                    }
+                    if screen == Some(pair::DUMP_BYTE) {
+                        let fresh = Shown {
+                            pairing: Some(Pairing::new()),
+                            word: None,
+                            fault: None,
+                        };
+                        redraw(
+                            &mut renderer,
+                            &mut map,
+                            &mut panel,
+                            &model,
+                            0,
+                            &fresh,
+                            &mut log,
+                        );
+                        log.line("[DUMP] ", alloc::format!("screen={}", pair::DUMP_NAME));
+                    }
+                    let dumped = renderer.panel();
+                    dump::encode(WIDTH, HEIGHT, |x, y| dumped.pixel(x, y), &mut |line| {
+                        log.raw(String::from(line))
+                    });
+                    dirty = true;
+                }
+            }
+        }
+
+        // The keys the timer read, oldest first (1463): every press,
+        // however long the turn that held it was; all of them before the
+        // one draw.
+        let (presses, _, _) = kb_drain();
         for press in presses {
             let ms = press.ms;
-            log.raw(&kbraw::raw_line(ms, press.answer()));
+            log.raw(kbraw::raw_line(ms, press.answer()));
             let mut events = Vec::new();
             let mut command = None;
-            match KB.read(press.answer()) {
+            match kb.read(press.answer()) {
                 Read::Idle => {}
-                Read::Mixed => log.line("[KB] ", format_args!("answer=mixed")),
+                Read::Mixed => log.line("[KB] ", alloc::string::String::from("answer=mixed")),
                 Read::Code(code) => {
                     if let Some(key) = Key::of(code) {
-                        log.raw(&keyboard::key_line(ms, code, key));
+                        log.raw(keyboard::key_line(ms, code, key));
                         events.extend(key.event());
                         command = key.command();
                     }
@@ -1004,102 +1404,104 @@ fn main() -> ! {
             // only Back leaves.
             if let (Some(command), None) = (command, shown.pairing.as_ref()) {
                 keyboard::run(&mut model, &mut row, command);
-                redraw(
-                    &mut renderer,
-                    &mut map,
-                    &mut panel,
-                    &model,
-                    row,
-                    &shown,
-                    &mut log,
-                );
+                dirty = true;
             }
-            if !events.is_empty() {
-                for event in events {
-                    if let Some(pairing) = shown.pairing.as_mut() {
-                        let taken = pairing_key(
-                            pairing,
-                            &event,
-                            &mut node,
-                            &mut rng,
-                            &mut stores,
-                            batch,
-                            &mut log,
-                        );
-                        if event.code == KeyCode::Esc && event.kind != KeyEventKind::Release {
-                            shown.pairing = None;
-                        }
-                        if let Some(taken) = taken {
-                            // The code was taken: the home's chats from
-                            // here (what the store kept of that home),
-                            // the join in the top bar.
-                            model = taken;
-                            row = 0;
-                            shown.pairing = None;
-                        }
-                        shown.word = node.word();
-                        continue;
+            for event in events {
+                dirty = true;
+                if let Some(pairing) = shown.pairing.as_mut() {
+                    if let Some(code) = pairing.key(&event) {
+                        // The code goes to the I/O core, which owns the
+                        // flash and the join; the model comes back.
+                        log.send(FromUi::Code(code.encode()));
                     }
-                    let effects = group::press(&mut model, &mut row, &event);
-                    if node.address().is_some() {
-                        let mut ids = || {
-                            let mut id = [0u8; 16];
-                            rand_core::RngCore::fill_bytes(&mut rng, &mut id);
-                            id
-                        };
-                        node.send(home::sends(effects, &mut ids), uptime_ms());
+                    if event.code == KeyCode::Esc && event.kind != KeyEventKind::Release {
+                        shown.pairing = None;
                     }
+                    continue;
                 }
-                redraw(
-                    &mut renderer,
-                    &mut map,
-                    &mut panel,
-                    &model,
-                    row,
-                    &shown,
+                let effects = group::press(&mut model, &mut row, &event);
+                if route_out(
+                    &mut model,
+                    effects,
+                    &mut ids,
                     &mut log,
-                );
+                    &mut wants_verbs,
+                    &mut wants_marks,
+                ) {
+                    frame_whole(&renderer);
+                    dirty = true;
+                }
             }
         }
-        turn.keys = uptime_ms().saturating_sub(t_keys);
-        // Every path of the turn that changed the model drew it.
-        drawn.drawn(&model);
-        turn.say(&mut log, node.entries());
+
+        if !wants_verbs.is_empty() || !wants_marks.is_empty() {
+            log.send(FromUi::Asks {
+                verbs: core::mem::take(&mut wants_verbs),
+                marks: core::mem::take(&mut wants_marks),
+            });
+        }
+
+        dirty |= drawn.due(&model);
+        if dirty {
+            redraw(
+                &mut renderer,
+                &mut map,
+                &mut panel,
+                &model,
+                row,
+                &shown,
+                &mut log,
+            );
+            drawn.drawn(&model);
+        }
+        core::hint::spin_loop();
     }
 }
 
-/// One key on the pairing screen: the code edited, and on Enter with a
-/// whole code that checks, the code taken as `lnflash --home` would give
-/// it; the model the board shows from then on.
-fn pairing_key(
-    pairing: &mut Pairing,
-    event: &KeyEvent,
-    node: &mut Handheld,
-    rng: &mut Trng,
-    stores: &mut Stores<'_>,
-    batch: loquax::home::board::Batch,
-    log: &mut UartLog<'_>,
-) -> Option<UiModel<Field>> {
-    let code = pairing.key(event)?;
-    log.line("[HOME] ", format_args!("code=typed"));
-    // Refused only when flash would not take it: the typed code checked.
-    node.take_code(&code.encode(), rng, stores, batch, log)
-        .ok()
-        .flatten()
+/// Every row owed again: `Ctrl-l`'s whole redraw.
+fn frame_whole(renderer: &Renderer<'_, Frame>) {
+    renderer.panel().forget_flushed();
 }
 
-/// One control frame from the host: the envelope's capability query and
-/// `FRAME_DUMP`; everything else envelope-shaped is refused by name.
-/// Frames that are not the envelope are the node's and never come here.
-fn control(
-    data: &[u8],
-    model: &mut UiModel<Field>,
-    row: &mut usize,
-    renderer: &mut Renderer<'_, Frame>,
-    map: &mut Map<'_>,
-    panel: &mut Panel<'_>,
-    log: &mut UartLog<'_>,
-) {
+/// The fault screen's lines: `words` wrapped to the panel's cells, a
+/// margin cell before each line.
+fn fault_lines(words: &str, cols: usize, rows: usize) -> Vec<leviculum_ui::style::RLine> {
+    use leviculum_ui::style::{RLine, RStyle};
+    use loquax_m9::screen::{fill, push};
+    let plain = RStyle::default();
+    let mut out = Vec::new();
+    let width = cols.saturating_sub(2).max(1);
+    let mut line = String::new();
+    out.push(fill(RLine::default(), cols, plain));
+    for word in words.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            let mut row = RLine::default();
+            push(&mut row, &alloc::format!(" {line}"), plain);
+            out.push(fill(row, cols, plain));
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        let mut row = RLine::default();
+        push(&mut row, &alloc::format!(" {line}"), plain);
+        out.push(fill(row, cols, plain));
+    }
+    while out.len() < rows {
+        out.push(fill(RLine::default(), cols, plain));
+    }
+    out.truncate(rows);
+    out
+}
+
+/// One control frame from the host: the envelope's capability query;
+/// everything else envelope-shaped is refused by name (`TYPE_HOME_CODE`
+/// and `TYPE_FRAME_DUMP` are the loop's). Frames that are not the
+/// envelope are the node's and never come here.
+fn control(data: &[u8], log: &mut UartLog<'_>) {
     let frame = match envelope::decode_frame(data) {
         Ok(frame) => frame,
         Err(EnvelopeError::NotEnvelope) => return,
@@ -1124,37 +1526,6 @@ fn control(
                 &[envelope::FACT_SERIAL_MUX],
             ));
         }
-        envelope::TYPE_FRAME_DUMP => match envelope::decode_frame_dump_payload(frame.payload) {
-            None => log.frame(&envelope::encode_refusal(
-                envelope::TYPE_FRAME_DUMP,
-                envelope::REFUSE_MALFORMED,
-            )),
-            Some(Some(byte)) if Screen::of(byte).is_none() && byte != pair::DUMP_BYTE => log.frame(
-                &envelope::encode_refusal(envelope::TYPE_FRAME_DUMP, envelope::REFUSE_VALUE),
-            ),
-            Some(screen) => {
-                log.frame(&envelope::encode_ack(envelope::TYPE_FRAME_DUMP));
-                if let Some(shown) = screen.and_then(Screen::of) {
-                    (*model, *row) = shown.walk();
-                    redraw(renderer, map, panel, model, *row, &Shown::default(), log);
-                    log.line("[DUMP] ", format_args!("screen={}", shown.name()));
-                }
-                // The pairing a board without a record opens on (1440),
-                // over the model as it is.
-                if screen == Some(pair::DUMP_BYTE) {
-                    let fresh = Shown {
-                        pairing: Some(Pairing::new()),
-                        word: None,
-                    };
-                    redraw(renderer, map, panel, model, 0, &fresh, log);
-                    log.line("[DUMP] ", format_args!("screen={}", pair::DUMP_NAME));
-                }
-                let frame = renderer.panel();
-                dump::encode(WIDTH, HEIGHT, |x, y| frame.pixel(x, y), &mut |line| {
-                    log.raw(line)
-                });
-            }
-        },
         other => {
             let reason = match other {
                 envelope::TYPE_CAPABILITIES => envelope::REFUSE_MALFORMED,

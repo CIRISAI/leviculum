@@ -22,6 +22,12 @@
 # the board will carry in flash (handheld-messenger.md, "Where the tiles
 # live: the flash").
 #
+# The client record is written copy-then-switch since 1493: the second
+# slot (loquax_client_b) sits in the last sector, so the map region
+# planned after the message store keeps its contiguous start at 0xC12000.
+# A board flashed before 1493 holds a bare record in loquax_client; it
+# reads as write 0 and the first save goes to the B slot.
+#
 # Name,         Type, SubType,   Offset,   Size,     Flags
 nvs,            data, nvs,       0x9000,   0x6000,
 phy_init,       data, phy,       0xf000,   0x1000,
@@ -29,3 +35,4 @@ factory,        app,  factory,   0x10000,  0x800000,
 identity,       data, undefined, 0x810000, 0x1000,
 loquax_client,  data, undefined, 0x811000, 0x1000,
 messages,       data, undefined, 0x812000, 0x400000,
+loquax_client_b, data, undefined, 0xfff000, 0x1000,

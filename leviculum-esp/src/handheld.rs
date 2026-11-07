@@ -22,8 +22,7 @@
 //! instead of trusting a cursor that says everything was fetched.
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::string::String;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use esp_hal::rng::Trng;
@@ -37,13 +36,14 @@ use loquax::home::board::{
     self, Batch, Executor, LinkClass, Progress, Reach, Report, Session, Word,
 };
 use loquax::home::record::{Admission, ClientRecord};
-use loquax::home::wire::{Entry, Submission};
+use loquax::home::wire::{Entry, Mark};
 use rand_core::CryptoRngCore;
 
 use loquax::home::board::store::Store;
 use loquax::ui::UiModel;
 use loquax_m9::field::Field;
 use loquax_m9::home as m9home;
+use loquax_m9::home::{Answer, Outgoing};
 
 use crate::flash::Stores;
 use crate::serial_iface::{SerialIface, SERIAL_HW_MTU, SERIAL_IFACE, SERIAL_NAME};
@@ -86,9 +86,13 @@ pub enum CodeRefusal {
 pub struct Drained {
     /// Pulled entries, oldest first, for the model.
     pub entries: Vec<Entry>,
-    /// Sends that ended, oldest first: the message id the home gave, or
-    /// why it refused.
-    pub sent: Vec<Result<[u8; 32], String>>,
+    /// Asks that ended, oldest first: what the home answered, for the
+    /// model (`m9home::answered`).
+    pub answers: Vec<Answer>,
+    /// Writes that did not reach the flash since the last drain (1493):
+    /// a kept page, an ask frame, a mark, the join's record. The screen
+    /// says it as a fault word, never only the log.
+    pub unsaved: u32,
 }
 
 /// The node, its serial interface and its client.
@@ -117,21 +121,30 @@ struct Client {
     progress: Option<Progress>,
     /// The message store, when the board's table has one (1476).
     store: Option<Store>,
-    /// Sends the model asked for, oldest first.
-    outgoing: VecDeque<Submission>,
+    /// The verbs the model asked for, oldest first, each under the id
+    /// its store frame carries (1493).
+    outgoing: Outgoing,
     drained: Drained,
 }
 
-/// The node's identity: the one in flash, or a new one saved there.
-/// Says which in `[IDENTITY]`.
-pub fn identity(stores: &mut Stores<'_>, rng: &mut Trng, log: &mut UartLog<'_>) -> Identity {
+/// The node's identity: the one in flash, or, where none was ever saved,
+/// a new one saved there. Says which in `[IDENTITY]`.
+///
+/// A flash READ error keeps the board without an identity (1493): the
+/// identity the mesh and the home know may still be in that sector, and
+/// a generated one written over it would replace it for good over a
+/// transient fault. The board says so on its screen and runs no node.
+pub fn identity(
+    stores: &mut Stores<'_>,
+    rng: &mut Trng,
+    log: &mut UartLog<'_>,
+) -> Option<Identity> {
     let (identity, source) = match stores.load_identity() {
         Ok(Some(identity)) => (identity, "flash"),
-        loaded => {
-            if let Err(error) = loaded {
-                log.line("[FLASH] ", format_args!("identity=unread error={error}"));
-            }
-            (Identity::generate(rng), "generated")
+        Ok(None) => (Identity::generate(rng), "generated"),
+        Err(error) => {
+            log.line("[FLASH] ", format_args!("identity=unread error={error}"));
+            return None;
         }
     };
     let stored = match source {
@@ -156,7 +169,7 @@ pub fn identity(stores: &mut Stores<'_>, rng: &mut Trng, log: &mut UartLog<'_>) 
             core::str::from_utf8(&hash).unwrap_or("?")
         ),
     );
-    identity
+    Some(identity)
 }
 
 fn hex(nibble: u8) -> u8 {
@@ -248,6 +261,7 @@ impl Handheld {
             }
         };
         let t0 = crate::uptime_ms();
+        let mut outgoing = Outgoing::default();
         let (model, store) = match stores.messages() {
             None => {
                 log.line(
@@ -257,20 +271,30 @@ impl Handheld {
                 (m9home::model(address), None)
             }
             Some(mut dev) => match m9home::restore(&mut dev, address) {
-                Ok((model, store, restored)) => {
+                Ok((model, store, restored, pending)) => {
                     log.line(
                         "[STORE] ",
                         format_args!(
-                            "sectors={} used={} entries={} cursor={} torn={} foreign={} restore_ms={}",
+                            "sectors={} used={} entries={} cursor={} torn={} foreign={} asks={} restore_ms={}",
                             store.sectors(),
                             store.used(),
                             restored.entries,
                             store.cursor(),
                             restored.torn,
                             restored.foreign,
+                            pending.len(),
                             crate::uptime_ms().saturating_sub(t0)
                         ),
                     );
+                    // The asks the power cut off (1493): queued again,
+                    // oldest first; their requests carry their own ids,
+                    // so one that was answered goes without harm.
+                    for ask in pending {
+                        match board::ask_verb(ask.tag, &ask.request) {
+                            Some(verb) => outgoing.push(ask.id, verb),
+                            None => log.line("[HOME] ", format_args!("ask=unread tag={}", ask.tag)),
+                        }
+                    }
                     (model, Some(store))
                 }
                 Err(error) => {
@@ -299,17 +323,21 @@ impl Handheld {
                         batch.max_answer
                     ),
                 );
+                let mut session = Session::new();
+                if !outgoing.is_empty() {
+                    session.hurry(crate::uptime_ms());
+                }
                 self.client = Some(Client {
                     record,
                     device,
                     address,
                     batch,
-                    session: Session::new(),
+                    session,
                     exec: None,
                     sending: false,
                     pulled: 0,
                     progress: None,
-                    outgoing: VecDeque::new(),
+                    outgoing,
                     drained: Drained::default(),
                     store,
                 });
@@ -345,14 +373,74 @@ impl Handheld {
         })
     }
 
-    /// Sends the model asked for: queued, and asked of the home at once.
-    pub fn send(&mut self, submissions: Vec<Submission>, now_ms: u64) {
-        if submissions.is_empty() {
+    /// What a fold asked for (1493): every verb queued under a fresh id
+    /// and kept in the message store, so a reboot queues it again; the
+    /// marks among them kept as entries too, so read state survives the
+    /// reboot. A write that fails counts as unsaved for the screen and
+    /// is said in the log; the verb is still asked.
+    pub fn ask(
+        &mut self,
+        verbs: Vec<Verb>,
+        marks: &[Mark],
+        ids: &mut impl FnMut() -> [u8; 16],
+        now_ms: u64,
+        stores: &mut Stores<'_>,
+        log: &mut UartLog<'_>,
+    ) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        if !marks.is_empty() {
+            if let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) {
+                if let Err(error) = m9home::keep_marks(store, &mut dev, marks) {
+                    client.drained.unsaved += 1;
+                    log.line("[STORE] ", format_args!("marks=unsaved error={error}"));
+                }
+            }
+        }
+        if verbs.is_empty() {
             return;
         }
-        if let Some(client) = self.client.as_mut() {
-            client.outgoing.extend(submissions);
-            client.session.hurry(now_ms);
+        for verb in verbs {
+            let id = ids();
+            if let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) {
+                if let Some((tag, bytes)) = board::ask_bytes(&verb) {
+                    if let Err(error) = store.keep_ask(&mut dev, &id, tag, &bytes) {
+                        client.drained.unsaved += 1;
+                        log.line("[STORE] ", format_args!("ask=unsaved error={error}"));
+                    }
+                }
+            }
+            client.outgoing.push(id, verb);
+        }
+        client.session.hurry(now_ms);
+    }
+
+    /// The idle moment's flash work (1493): erase the message store's
+    /// next ring sector while the line is quiet, so a pulled page writes
+    /// into erased flash and never holds the interrupts for an erase.
+    /// At most one erase per call; whether one was made.
+    pub fn quiet(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>) -> bool {
+        let Some(client) = self.client.as_mut() else {
+            return false;
+        };
+        let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) else {
+            return false;
+        };
+        match store.pre_erase(&mut dev) {
+            Ok(erased) => {
+                if erased {
+                    log.line(
+                        "[STORE] ",
+                        format_args!("pre_erased=1 erases={}", store.erases()),
+                    );
+                }
+                erased
+            }
+            Err(error) => {
+                log.line("[STORE] ", format_args!("pre_erase=failed error={error}"));
+                false
+            }
         }
     }
 
@@ -506,7 +594,13 @@ impl Handheld {
                                 store.entries()
                             ),
                         ),
-                        Err(error) => log.line("[STORE] ", format_args!("kept=no error={error}")),
+                        Err(error) => {
+                            // A page the flash would not keep is on the
+                            // screen now and gone after a reboot: a
+                            // state, not a log line (1493).
+                            client.drained.unsaved += 1;
+                            log.line("[STORE] ", format_args!("kept=no error={error}"));
+                        }
                     }
                 }
                 client.drained.entries.extend(page.entries);
@@ -522,15 +616,19 @@ impl Handheld {
 
 impl Client {
     /// Begin the ask the record owes: its join while pending; once
-    /// admitted the oldest send, else a pull.
+    /// admitted the oldest queued verb, else a pull.
     fn start(&mut self, now_ms: u64, log: &mut UartLog<'_>) {
         self.sending = false;
-        let ask = match (&self.record.admission, self.outgoing.front()) {
+        let ask = match (&self.record.admission, self.outgoing.next()) {
             (Admission::Pending { .. }, _) => self.record.join(now_ms, JOIN_BUDGET_MS),
-            (Admission::Admitted, Some(submission)) => {
+            (Admission::Admitted, Some((_, verb))) => {
                 self.sending = true;
-                let verb = Verb::Send(submission.clone());
-                Some(Ask::new(&self.record.home, verb, now_ms, SEND_BUDGET_MS))
+                Some(Ask::new(
+                    &self.record.home,
+                    verb.clone(),
+                    now_ms,
+                    SEND_BUDGET_MS,
+                ))
             }
             (Admission::Admitted, None) => {
                 self.record
@@ -556,6 +654,28 @@ impl Client {
         }
     }
 
+    /// The oldest verb is over, taken or refused for good: pop it, put
+    /// its done frame behind it and hand the model its answer.
+    fn finish_ask(
+        &mut self,
+        result: &Result<Outcome, HomeError>,
+        stores: &mut Stores<'_>,
+        log: &mut UartLog<'_>,
+    ) {
+        let Some((id, verb)) = self.outgoing.done() else {
+            return;
+        };
+        if let (Some(store), Some(mut dev)) = (self.store.as_mut(), stores.messages()) {
+            if let Err(error) = store.ask_done(&mut dev, &id) {
+                self.drained.unsaved += 1;
+                log.line("[STORE] ", format_args!("ask_done=unsaved error={error}"));
+            }
+        }
+        if let Some(answer) = m9home::answer_of(&verb, result) {
+            self.drained.answers.push(answer);
+        }
+    }
+
     fn done(
         &mut self,
         result: &Result<Outcome, HomeError>,
@@ -575,6 +695,13 @@ impl Client {
                 self.record.admission = Admission::Admitted;
                 self.session.hurry(now_ms);
                 let saved = stores.save_client(&self.record);
+                if saved.is_err() {
+                    // The board is admitted but the record is not in
+                    // flash: a reboot lands on the pairing screen with a
+                    // used token. A word on the screen, not only here
+                    // (1493).
+                    self.drained.unsaved += 1;
+                }
                 log.line(
                     "[HOME] ",
                     format_args!(
@@ -599,20 +726,18 @@ impl Client {
                     ),
                 );
             }
-            Ok(Outcome::Sent(id)) => {
-                self.outgoing.pop_front();
-                self.drained.sent.push(Ok(*id));
-                // The home archived it: the next pull brings its entry,
-                // which names the bubble on every device.
+            Ok(outcome) if self.sending => {
+                // The oldest verb ended: the home took it. Its done
+                // frame goes behind it, so a reboot does not ask again,
+                // and its answer goes to the model.
+                self.finish_ask(result, stores, log);
+                // What the home archived for it comes with the next
+                // pull, which names the bubble on every device.
                 self.session.hurry(now_ms);
                 log.line(
                     "[HOME] ",
                     format_args!(
-                        "sent id={:02x}{:02x}{:02x}{:02x} waiting={} reach={reach}",
-                        id[0],
-                        id[1],
-                        id[2],
-                        id[3],
+                        "asked done={outcome:?} waiting={} reach={reach}",
                         self.outgoing.len()
                     ),
                 );
@@ -620,10 +745,9 @@ impl Client {
             Ok(other) => log.line("[HOME] ", format_args!("done={other:?} reach={reach}")),
             Err(error) if self.sending => {
                 // A refusal stays one; anything else is asked again when
-                // the session says, the send kept at the front.
+                // the session says, the verb kept at the front.
                 if matches!(error, HomeError::Refused(_)) {
-                    self.outgoing.pop_front();
-                    self.drained.sent.push(Err(alloc::format!("{error}")));
+                    self.finish_ask(result, stores, log);
                 }
                 log.line(
                     "[HOME] ",

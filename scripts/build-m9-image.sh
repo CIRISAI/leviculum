@@ -8,15 +8,20 @@
 #
 #   FLASH_HEADROOM board=thinknode_m9 used=<bytes> free=<bytes>
 #   STACK_HEADROOM board=thinknode_m9 stack=<bytes> need=<bytes>
+#   STACK_HEADROOM board=thinknode_m9 ui_stack=<bytes> need=<bytes>
 #
 # `used` is the application image espflash writes, `free` what is left of
 # the application partition of the M9's table (`leviculum-esp/
 # partitions-m9.csv`, 8 MiB since 1414 made room for the stores), both read
-# off espflash's own "App/part. size: <used>/<partition> bytes" line. The
-# stack is the `.stack` section the linker leaves in internal RAM (the UI
-# heap is PSRAM); `need` is the open chat's scene and draw ceilings of
-# loquax-m9/src/census.rs added up, 184,000 B, the deepest the board's
-# census allows one screen to go.
+# off espflash's own "App/part. size: <used>/<partition> bytes" line.
+#
+# Two stacks since 1493 (the two-core split): the UI core's static stack
+# (the APP_CORE_STACK symbol in the ELF) carries every scene and draw
+# and is held to the open chat's census ceilings of
+# loquax-m9/src/census.rs added up, 184,000 B; core 0's `.stack` section
+# carries the node, the client and the flash, and is held to 111,000 B,
+# the top of the peak the same NodeCore paths measured on the LNode
+# (95-111 KiB, #50's stack follow-on).
 #
 # Red when the image does not build, when fewer than 8 KiB of the partition
 # are free (the nRF floor, for the nRF reason), when the stack is below the
@@ -61,20 +66,26 @@ ESP="$ROOT/leviculum-esp"
 TAG="[m9-image]"
 CANON=/mnt/leviculum
 FLOOR=8192
-STACK_NEED=184000
+UI_STACK_NEED=184000
+IO_STACK_NEED=111000
 
-# verdict <used> <partition> <stack>: the two headroom lines; 1 when either
-# is below its floor.
+# verdict <used> <partition> <io_stack> <ui_stack>: the headroom lines;
+# 1 when any floor is undercut.
 verdict() {
-    local used="$1" partition="$2" stack="$3" rc=0
+    local used="$1" partition="$2" stack="$3" ui_stack="$4" rc=0
     echo "FLASH_HEADROOM board=thinknode_m9 used=$used free=$((partition - used))"
-    echo "STACK_HEADROOM board=thinknode_m9 stack=$stack need=$STACK_NEED"
+    echo "STACK_HEADROOM board=thinknode_m9 stack=$stack need=$IO_STACK_NEED"
+    echo "STACK_HEADROOM board=thinknode_m9 ui_stack=$ui_stack need=$UI_STACK_NEED"
     if [ $((partition - used)) -lt "$FLOOR" ]; then
         echo "$TAG FAIL $((partition - used)) B of the application partition free, below $FLOOR B."
         rc=1
     fi
-    if [ "$stack" -lt "$STACK_NEED" ]; then
-        echo "$TAG FAIL $stack B of stack, below the $STACK_NEED B the open chat's census allows."
+    if [ "$stack" -lt "$IO_STACK_NEED" ]; then
+        echo "$TAG FAIL $stack B of core 0 stack, below the $IO_STACK_NEED B the LNode-measured node peak needs."
+        rc=1
+    fi
+    if [ "$ui_stack" -lt "$UI_STACK_NEED" ]; then
+        echo "$TAG FAIL $ui_stack B of UI stack, below the $UI_STACK_NEED B the open chat's census allows."
         rc=1
     fi
     return "$rc"
@@ -92,10 +103,11 @@ selftest() {
     printf 'Chip type:         esp32s3\nApp/part. size:    927,520/16,384,000 bytes, 5.66%%\n' >"$log"
     [ "$(app_size "$log")" = "927520 16384000" ] || { echo "$TAG selftest FAIL: size line not read"; rc=1; }
     rm -f "$log"
-    verdict 927520 16384000 312440 >/dev/null || { echo "$TAG selftest FAIL: a roomy image was refused"; rc=1; }
-    verdict 16380000 16384000 312440 >/dev/null && { echo "$TAG selftest FAIL: 4000 B free passed"; rc=1; }
-    verdict 927520 16384000 100000 >/dev/null && { echo "$TAG selftest FAIL: a 100 kB stack passed"; rc=1; }
-    [ "$rc" -eq 0 ] && echo "$TAG selftest ok: the size line reads, both floors refuse"
+    verdict 927520 16384000 112000 188416 >/dev/null || { echo "$TAG selftest FAIL: a roomy image was refused"; rc=1; }
+    verdict 16380000 16384000 112000 188416 >/dev/null && { echo "$TAG selftest FAIL: 4000 B free passed"; rc=1; }
+    verdict 927520 16384000 100000 188416 >/dev/null && { echo "$TAG selftest FAIL: a 100 kB core 0 stack passed"; rc=1; }
+    verdict 927520 16384000 112000 100000 >/dev/null && { echo "$TAG selftest FAIL: a 100 kB UI stack passed"; rc=1; }
+    [ "$rc" -eq 0 ] && echo "$TAG selftest ok: the size line reads, every floor refuses"
     return "$rc"
 }
 
@@ -173,9 +185,12 @@ fi
 # shellcheck disable=SC1091
 stack="$(source "$HOME/export-esp.sh" >/dev/null && xtensa-esp32s3-elf-size -A "$OUT/thinknode_m9" \
     | awk '$1 == ".stack" { print $2 }')"
+# The UI core's static stack: the APP_CORE_STACK symbol's size (1493).
+ui_stack="$(source "$HOME/export-esp.sh" >/dev/null && xtensa-esp32s3-elf-nm -S "$OUT/thinknode_m9" \
+    | awk '/APP_CORE_STACK/ { print strtonum("0x" $2) }' | head -1)"
 echo "$TAG image $OUT/thinknode_m9.bin ($(stat -c %s "$OUT/thinknode_m9.bin") B), elf $OUT/thinknode_m9"
 rc=0
-verdict "$used" "$partition" "${stack:-0}" || rc=1
+verdict "$used" "$partition" "${stack:-0}" "${ui_stack:-0}" || rc=1
 # The cheap half of check-m9-reproducible.sh, on every build: the shipped
 # image names no path of this host (the remap above, order 1458).
 for p in "$ROOT/" "$HOME/" "$CANON/"; do

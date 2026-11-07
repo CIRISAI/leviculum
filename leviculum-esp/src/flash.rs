@@ -23,12 +23,16 @@ use esp_storage::{FlashStorage, FlashStorageError};
 use leviculum_core::identity::Identity;
 use leviculum_core::identity_store::{self, ENCODED_SIZE_ALIGNED as IDENTITY_SIZE};
 use loquax::home::board::store::{Sectors, SECTOR as STORE_SECTOR};
-use loquax::home::record::{ClientRecord, RecordError, RECORD_LEN};
+use loquax::home::record::{slots, ClientRecord, RecordError};
 
 /// The partition the node's identity lives in.
 pub const IDENTITY_LABEL: &str = "identity";
 /// The partition the Loquax client record lives in.
 pub const CLIENT_LABEL: &str = "loquax_client";
+/// The record's second slot (1493): the record is written
+/// copy-then-switch across the two, so a power loss during a save leaves
+/// the other slot's record standing (`loquax::home::record::slots`).
+pub const CLIENT_B_LABEL: &str = "loquax_client_b";
 /// The partition the message store lives in (1476).
 pub const MESSAGES_LABEL: &str = "messages";
 
@@ -102,11 +106,17 @@ impl core::fmt::Display for StoreError {
 #[repr(align(4))]
 struct Aligned<const N: usize>([u8; N]);
 
+/// What a record slot read moves: the slot, padded to whole words.
+const SLOT_READ: usize = (slots::SLOT_LEN + 3) & !3;
+
 /// The board's stores.
 pub struct Stores<'d> {
     flash: FlashStorage<'d>,
     identity: Slot,
     client: Slot,
+    /// The record's second slot (1493); `none/no-entry` on a board
+    /// flashed with the old table, which saves in place as before.
+    client_b: Slot,
     /// The message store's region: its offset and how many sectors.
     messages: Result<(u32, u32), NoRegion>,
 }
@@ -114,11 +124,15 @@ pub struct Stores<'d> {
 impl<'d> Stores<'d> {
     /// Open the flash and find both stores in its partition table.
     pub fn open(flash: FLASH<'d>) -> Self {
-        let mut flash = FlashStorage::new(flash);
+        // The UI runs on the second core since 1493: every write and
+        // erase parks it for the op (esp-storage's AutoPark), since the
+        // flash routines run with the cache the core executes from off.
+        let mut flash = FlashStorage::new(flash).multicore_auto_park();
         let mut table = Aligned([0u8; PARTITION_TABLE_MAX_LEN]);
-        let (identity, client, messages) =
+        let (identity, client, client_b, messages) =
             match partitions::read_partition_table(&mut flash, &mut table.0) {
                 Err(_) => (
+                    Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
@@ -126,11 +140,13 @@ impl<'d> Stores<'d> {
                 Ok(table) => {
                     let mut identity = Err(NoRegion::NoEntry);
                     let mut client = Err(NoRegion::NoEntry);
+                    let mut client_b = Err(NoRegion::NoEntry);
                     let mut messages = Err(NoRegion::NoEntry);
                     for entry in table.iter() {
                         let found = match entry.label_as_str() {
                             IDENTITY_LABEL => &mut identity,
                             CLIENT_LABEL => &mut client,
+                            CLIENT_B_LABEL => &mut client_b,
                             MESSAGES_LABEL => &mut messages,
                             _ => continue,
                         };
@@ -147,6 +163,7 @@ impl<'d> Stores<'d> {
                     (
                         identity.map(|(offset, _)| offset),
                         client.map(|(offset, _)| offset),
+                        client_b.map(|(offset, _)| offset),
                         messages,
                     )
                 }
@@ -155,6 +172,7 @@ impl<'d> Stores<'d> {
             flash,
             identity: Slot(identity),
             client: Slot(client),
+            client_b: Slot(client_b),
             messages,
         }
     }
@@ -167,6 +185,11 @@ impl<'d> Stores<'d> {
     /// Where the client record lives.
     pub fn client_slot(&self) -> Slot {
         self.client
+    }
+
+    /// Where its second slot lives (1493).
+    pub fn client_b_slot(&self) -> Slot {
+        self.client_b
     }
 
     /// Where the message store lives.
@@ -218,21 +241,44 @@ impl<'d> Stores<'d> {
         self.write(self.identity, &encoded.0)
     }
 
-    /// The client record: `None` on a board that is no device of a home.
-    pub fn load_client(&mut self) -> Result<Option<ClientRecord>, StoreError> {
-        let mut bytes = Aligned([0u8; RECORD_LEN]);
-        self.read(self.client, &mut bytes.0)?;
-        ClientRecord::decode(&bytes.0).map_err(StoreError::Record)
+    /// The two record slots as they stand: A, then B (erased where B has
+    /// no region, so the picker sees one slot).
+    fn client_slots(&mut self) -> Result<([u8; SLOT_READ], [u8; SLOT_READ]), StoreError> {
+        let mut a = Aligned([0u8; SLOT_READ]);
+        self.read(self.client, &mut a.0)?;
+        let mut b = Aligned([0xFFu8; SLOT_READ]);
+        if self.client_b.0.is_ok() {
+            self.read(self.client_b, &mut b.0)?;
+        }
+        Ok((a.0, b.0))
     }
 
-    /// Save the client record, unless the same bytes are there.
+    /// The client record: `None` on a board that is no device of a home.
+    /// The newer of the two slots answers (1493); a record a pre-1493
+    /// image wrote reads as write 0.
+    pub fn load_client(&mut self) -> Result<Option<ClientRecord>, StoreError> {
+        let (a, b) = self.client_slots()?;
+        Ok(slots::newest(&a, &b).map(|(record, _, _)| record))
+    }
+
+    /// Save the client record, unless it already stands: copy-then-switch
+    /// (1493), into the slot that does not hold the newest record, so a
+    /// power loss between erase and write leaves the old record standing.
+    /// A board without the B partition saves in place as before.
     pub fn save_client(&mut self, record: &ClientRecord) -> Result<(), StoreError> {
-        let encoded = Aligned(record.encode());
-        let mut current = Aligned([0u8; RECORD_LEN]);
-        if self.read(self.client, &mut current.0).is_ok() && current.0 == encoded.0 {
+        let (a, b) = self.client_slots()?;
+        if slots::newest(&a, &b).is_some_and(|(current, _, _)| current == *record) {
             return Ok(());
         }
-        self.write(self.client, &encoded.0)
+        let (target, counter) = slots::plan(&a, &b);
+        let slot = match (target, self.client_b.0.is_ok()) {
+            (1, true) => self.client_b,
+            // No B region: the one sector, erased and rewritten as the
+            // old images did it.
+            _ => self.client,
+        };
+        let encoded = Aligned(slots::encode(record, counter));
+        self.write(slot, &encoded.0)
     }
 }
 
