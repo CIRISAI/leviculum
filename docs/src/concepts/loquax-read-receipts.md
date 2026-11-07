@@ -33,7 +33,7 @@ switch is under Privacy (`loquax-android-navigation.md`, Settings).
 | A contact without receipts | stays at one grey tick (its proof) or two (its device's `0x07`), the detail view says it sends no read receipts | never pretend |
 | What two ticks mean (1462) | one tick is the proof, two the recipient's device saying it has it (`0x07`), read the accent | the recipient's mailbox signs the proof with the recipient's identity, so a proof cannot say "on the device" |
 | Publish the namespace | yes, on this page | so other clients can adopt it; an offer, not an upstream report |
-| Groups | parked | Loquax has none; when they come: read once all have read, "read by 2 of 3" in the detail view |
+| Groups | built (1307, 1466) | read once every member that sends receipts read it, "read by 2 of 3" in the Info; one tick once every copy is proven, two once every copy is on its member's device (section 6) |
 
 ## 1. The wire: the `lev` namespace
 
@@ -201,9 +201,18 @@ many were made, and how many of those members send read receipts. The
 study wrote four elements; `readers` is appended so "read by N of M"
 counts only the members whose receipts are on, and a member with them
 off is never waited for. The home sends it, empty with the pair alone,
-once the last copy is proven (the writer's two ticks), again when a late
-copy is proven after a digest, and when the last reader read it (the
-writer's read mark). A status of four elements is no status.
+once the last copy is proven (the writer's one tick, since 1466), again
+when a late copy is proven after a digest, when the last reader read it
+(the writer's read mark), and since 1466 when every member whose device
+says so has said it. A status of four elements is no status.
+
+1466 appends two elements: `uint on_device`, the copies whose member's
+device said it has them (its `0x07` to the group, or its read receipt,
+which includes it), and `[[bin16 member, uint proven_at, uint
+on_device_at, uint read_at], ...]`, each counted member's rungs in unix
+seconds, 0 for not yet. A status of five elements is a home's from before
+1466; it never says a device, so its writer stays at one tick. A reader of
+five skips the rest, as for any appended element.
 
 A deleted group's last membership carries a third element, the standing
 `1` (ended): `[uint epoch, [[...], ...], 1]`, every member flagged left
@@ -537,9 +546,23 @@ two ticks for a proof said "on the device" when nothing was on a device.
   receipt stays one tick, a week on too; a stock recipient one tick on its
   proof, never two. The scene golden `scene-ladder.json` pins every rung,
   one tick and two, for the four targets that draw the scene.
-- **Groups are not changed**: their two ticks still come with the group's
-  status, once every member's copy is proven, which a member's mailbox can
-  do. Owed.
+- **Groups (1466)** tell the same truth. Every member's copy proven is one
+  tick, "Arrived"; two ticks, "On the devices", come only once every
+  member's copy is on its member's device; read is unchanged (every member
+  that sends receipts read it). A group's copy carries its writer's bit 2,
+  so a member's device answers the group with `0x07` (a client of a
+  mailbox through its mailbox's signature, as above); the home books it
+  (`group_fanout.device_at`, store schema 16) and counts it in the
+  status. A member whose device never says it (a stock client, whose copy
+  has no `lev`, or a Loquax without bit 2) keeps the writer at one tick;
+  so does a lost receipt, and no timer flips it. The Info sheet has a row
+  per member with its rung and since when. A group line stored at two
+  ticks from a status that counted proofs loads at one
+  (`groups::before_1466`). Cells: the group cells in
+  `loquax/tests/device_receipts.rs` and the stock Python member in
+  `loquax/tests/home_node.rs`; goldens `scene-group-ticks.json`,
+  `tui-group-ticks.txt`, `gui-group-ticks.png`, `m9-group-ticks.png` and
+  the phone's `group-ticks.json`.
 
 ## 7. Settings (built, R4)
 
