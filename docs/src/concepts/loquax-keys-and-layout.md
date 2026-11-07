@@ -148,6 +148,29 @@ The first four rows are `lnomad`'s `SCROLL_KEYS` rows unchanged, read from
 the shared table (section 4); the `Ctrl-↑`/`Ctrl-↓` spelling is the one
 chord `loquax` adds to them.
 
+**In the conversation (M) the keys read by the line (1529, Lew on the
+M9, 2026-11-07).** Before, a press jumped a message, which skipped the
+middle of a long one and landed at its start on the way back. The rule
+is a pager with a focus (`step`, `loquax/src/ui/pager.rs`), one place
+for the terminal and the M9:
+
+| Key | in M |
+|---|---|
+| `↓` / `↑`, `j` / `k`, `Ctrl-n` / `Ctrl-p`; the M9's ring up and down | the view a line. The selection stays on a message while it has lines still to come and moves to the next only once its last line is on screen and the next one's first; on the way up a long message is entered at its end, line by line, never at its start |
+| `→` / `←` (1529); the page keys, `Space`, `Ctrl-f` / `Ctrl-b`, `Ctrl-v` / `Alt-v`; the M9's ring right and left | a page: a screen less one line of overlap. The selection goes to the first message the page brought lines of (the last, up); a page that reaches the bottom selects the newest and the pane follows it again, one that reaches the top the first |
+| `Ctrl-d` / `Ctrl-u` | half a screen, the same selection rule |
+| `g` / `G`, `Home` / `End` | the first message at the top, the newest at the bottom |
+
+`Enter` and the message's keys (`v`, `y`, `d`, `e`) act on the selected
+message as before. A held key repeats where its source repeats: the
+terminal's own key repeat, and on the M9 the keyboard controller's code
+answered again on the 10 ms poll, which the driver takes as a press each
+time (no timer of the board's). A message counts as read (the receipt's
+viewport, `hit::viewport`) once its last line has been on screen, not
+when its bubble was selected or half of it showed. The window and the
+phone scroll freely and keep their own selection rules; the list (L)
+stays a row an entry.
+
 ### Conversations
 
 | Action | vi | Emacs | mail, chat | mouse | where |

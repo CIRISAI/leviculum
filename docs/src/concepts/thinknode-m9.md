@@ -379,11 +379,19 @@ and `distinct-20261104.txt`):
   | `0x84` | position pin   | named, no action until the position sheet   |
   | `0x85` | map            | the map tab                                 |
   | `0x86` | back arrow     | back                                        |
-  | `0xb4` | ring left      | left                                        |
-  | `0xb5` | ring up        | up                                          |
-  | `0xb6` | ring down      | down                                        |
-  | `0xb7` | ring right     | right                                       |
+  | `0xb4` | ring left      | left; in a chat a page up (1529)            |
+  | `0xb5` | ring up        | up; in a chat a line up (1529)              |
+  | `0xb6` | ring down      | down; in a chat a line down (1529)          |
+  | `0xb7` | ring right     | right; in a chat a page down (1529)         |
   | `0x0d` | ring centre    | Enter (ASCII CR, 21:03:13)                  |
+
+  In a chat the ring reads by the line (1529, the rule in
+  `loquax/src/ui/pager.rs`, its keys in
+  [Loquax: keys, mouse and layout](loquax-keys-and-layout.md), "Moving"):
+  up and down move the view a line and the selection follows the lines;
+  left and right page a screen less a line. The list stays an entry a
+  press. A held ring key scrolls as long as the controller answers its
+  code again, each answer a press.
 
   1440's provisional table had `0x84`..`0x86` rotated (back, pin, map).
   The walk's note named `0xb6` right and `0xb7` down: the codes rise in
