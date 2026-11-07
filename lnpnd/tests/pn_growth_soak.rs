@@ -30,10 +30,14 @@
 //!
 //! **Red** when a table's slope over the full-store window is above
 //! [`FLAT_KB_PER_MIN`], or the store never filled (then the soak proved
-//! nothing). `dup` is judged against the growth it has by design: every
+//! nothing). Full is full in bytes: eviction takes the heaviest messages
+//! first, so the count may still rise at the limit, and `store_index` may
+//! rise by what those messages cost, the window's count slope times the
+//! index's bytes a message. `dup` is judged against the growth it has by design: every
 //! accepted id is remembered for the reference's 180-day window
 //! (`leviculum-lxmf/src/processed_ids.rs`), [`DUP_BYTES_PER_ACCEPT`] bytes an
-//! id at most. `rss_kb` is printed beside the tables, not judged: the
+//! id at most, and every evicted one for the message expiry,
+//! [`DUP_BYTES_PER_EVICTION`]. `rss_kb` is printed beside the tables, not judged: the
 //! allocator keeps what it once had, and what to fix is the table.
 //!
 //! Run it with `just pn-growth-soak` (release, 20 minutes, 300 000
@@ -70,6 +74,16 @@ const FLAT_KB_PER_MIN: f64 = 1.0;
 /// The duplicate list's designed growth per accepted id: 16 bytes of key in
 /// a sealed bucket, about 27 in an open one by the census's B-tree model.
 const DUP_BYTES_PER_ACCEPT: f64 = 32.0;
+
+/// One peer's store: room for its fresh messages (10 000 at most 600 bytes)
+/// and for what the node forwards it, which it evicts as it goes.
+const PEER_STORE_BYTES: u64 = 8_000_000;
+
+/// The departure the duplicate list remembers for every message that left
+/// the store, for the message expiry (`Departures`,
+/// `leviculum-lxmf/src/propagation_node.rs`): a 32-byte id and its time
+/// and reason in a B-tree, about 78 bytes by the census's model.
+const DUP_BYTES_PER_EVICTION: f64 = 80.0;
 
 /// The line lnpnd prints once its propagation destination is up.
 const READY: &str = "lnpnd: propagation node ready";
@@ -221,7 +235,7 @@ async fn start_peers(
     let mut peers = Vec::new();
     let mut state = 0x243f_6a88_85a3_08d3u64;
     for index in 0..count {
-        let mut store = MemoryPropagationStore::new(4_000_000);
+        let mut store = MemoryPropagationStore::new(PEER_STORE_BYTES);
         let now = unix_secs();
         for n in 0..fresh {
             let seed = 1_000_000_000 + (index * fresh + n) as u64;
@@ -254,7 +268,7 @@ async fn start_peers(
             control_allowed: Vec::new(),
             auth_allowed: None,
             mailbox: None,
-            store_limit_bytes: 4_000_000,
+            store_limit_bytes: PEER_STORE_BYTES,
             delivery_limit_kb: 1000,
         });
         let engine = engine.with_sync_interval(Duration::from_secs(5));
@@ -278,7 +292,7 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     let peer_count = knob("LNPND_SOAK_PEERS", 14) as usize;
     let soak_secs = knob("LNPND_SOAK_SECS", 1200);
     let sample_secs = knob("LNPND_SOAK_SAMPLE_SECS", 60).max(1);
-    let fresh = knob("LNPND_SOAK_PEER_MESSAGES", 3000) as usize;
+    let fresh = knob("LNPND_SOAK_PEER_MESSAGES", 10_000) as usize;
     let base = std::env::var_os("LNPND_SOAK_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pn-growth-soak"));
@@ -466,32 +480,50 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     eprintln!("PN_SOAK first {}", census_line(&first));
     eprintln!("PN_SOAK last  {}", census_line(&last));
 
-    // The full-store window: from the first sample at the store's largest
-    // count on, the second half of the run at the latest.
-    let peak = samples.iter().map(|s| s.get("stored")).fold(0.0, f64::max);
-    let full_from = samples
-        .iter()
-        .position(|s| s.get("stored") >= peak)
-        .unwrap_or(0)
-        .min(samples.len() / 2);
-    let window = &samples[full_from..];
+    // The full-store window: from the first census after the store's first
+    // eviction, the second half of the run at the earliest. Full means full
+    // in bytes: eviction takes the heaviest messages first, so the count can
+    // still rise a little while the bytes stand at the limit, and the index,
+    // which costs per message, rises with it. That growth is bounded by the
+    // limit and is allowed for below; anything past it is not.
+    let first_evict_t = log
+        .lines()
+        .find(|l| l.starts_with("PN_EVICT "))
+        .and_then(|l| l.split_whitespace().find_map(|f| f.strip_prefix("t=")))
+        .and_then(|t| t.parse::<f64>().ok());
     let evicted = count("PN_EVICT ");
-    let full = evicted > 0;
+    let full_from = first_evict_t
+        .and_then(|t| samples.iter().position(|s| s.get("t") >= t))
+        .unwrap_or(samples.len())
+        .max(samples.len() / 2)
+        .min(samples.len());
+    let window = &samples[full_from..];
+    assert!(
+        evicted > 0 && window.len() >= 3,
+        "the store never evicted, or too late to leave three samples ({} of them): \
+         a flat table over a filling store proves nothing",
+        window.len()
+    );
 
-    let window_minutes = window.last().map_or(0.0, |l| l.minute) - window[0].minute;
-    let accepts_per_min = if window_minutes > 0.0 {
-        accepted as f64 / (last.minute - first.minute).max(window_minutes)
-    } else {
-        0.0
-    };
+    let span = (last.minute - first.minute).max(1e-9);
+    let accepts_per_min = accepted as f64 / span;
+    let stored_per_min = slope(window, "stored").max(0.0);
+    let index_per_message = last.get("store_index") / last.get("stored").max(1.0);
+    let index_allowance = stored_per_min * index_per_message / 1000.0;
+    let evictions_per_min = evicted as f64 / span;
+    let dup_allowance = (accepts_per_min * DUP_BYTES_PER_ACCEPT
+        + evictions_per_min * DUP_BYTES_PER_EVICTION)
+        / 1000.0;
     let mut red = Vec::new();
     for table in lnpnd::census::COLUMNS.iter().chain(&["tables"]) {
         let kb_per_min = slope(window, table) / 1000.0;
-        let allowed = if *table == "dup" || *table == "tables" {
-            FLAT_KB_PER_MIN + accepts_per_min * DUP_BYTES_PER_ACCEPT / 1000.0
-        } else {
-            FLAT_KB_PER_MIN
-        };
+        let allowed = FLAT_KB_PER_MIN
+            + match *table {
+                "dup" => dup_allowance,
+                "store_index" => index_allowance,
+                "tables" => dup_allowance + index_allowance,
+                _ => 0.0,
+            };
         println!(
             "PN_GROWTH table={table} kb_per_min={kb_per_min:.2} allowed={allowed:.2} \
              first_kb={:.1} last_kb={:.1}",
@@ -509,14 +541,10 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
         last.get("rss_kb")
     );
     println!(
-        "PN_GROWTH window_from_minute={:.1} samples={} evicted={evicted} accepted={accepted}",
+        "PN_GROWTH window_from_minute={:.1} samples={} evicted={evicted} accepted={accepted} \
+         stored_per_min={stored_per_min:.1} index_bytes_per_message={index_per_message:.0}",
         window[0].minute,
         window.len()
-    );
-    assert!(
-        full,
-        "the store never evicted: it was not full, and a flat table over a \
-         filling store proves nothing"
     );
     assert!(
         red.is_empty(),
