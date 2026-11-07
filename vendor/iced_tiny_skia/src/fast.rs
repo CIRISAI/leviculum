@@ -143,6 +143,18 @@ impl Clip {
         self.want.and_then(|b| covered(b, width, height))
     }
 
+    /// The clip for a draw that crosses it: its rectangle where
+    /// [`blit_over`] blends as tiny-skia does, else `mask` written.
+    pub fn clipping<'a>(
+        &mut self,
+        mask: &'a mut tiny_skia::Mask,
+    ) -> Clipping<'a> {
+        match BLEND_EXACT {
+            true => Clipping::Rect(self.rect(mask.width(), mask.height())),
+            false => Clipping::Mask(self.mask(mask)),
+        }
+    }
+
     /// `mask` holding the clip, as `adjust_clip_mask` left it.
     pub fn mask<'a>(
         &mut self,
@@ -177,6 +189,26 @@ impl Clip {
 /// negative one moves a pixel toward zero.
 fn round(v: i32) -> i64 {
     (v as f32 + 0.5) as i64
+}
+
+/// How a draw is clipped (1442): not at all, to the pixels of a
+/// rectangle (`None`: to none), or by tiny-skia's mask; a draw that
+/// reaches the rectangle form never needs the mask written.
+#[derive(Debug, Clone, Copy)]
+pub enum Clipping<'a> {
+    Unclipped,
+    Rect(Option<Px>),
+    Mask(&'a tiny_skia::Mask),
+}
+
+impl<'a> Clipping<'a> {
+    /// The mask, for a draw through tiny-skia.
+    pub fn mask(self) -> Option<&'a tiny_skia::Mask> {
+        match self {
+            Clipping::Mask(mask) => Some(mask),
+            Clipping::Unclipped | Clipping::Rect(_) => None,
+        }
+    }
 }
 
 /// The opaque `src` drawn at whole pixels `(x, y)` onto `dst` within
@@ -237,6 +269,110 @@ pub fn blit_opaque(
             let a = from + column(col) * 4;
             let b = to + col as usize * 4;
             d[b..b + 4].copy_from_slice(&s[a..a + 4]);
+        }
+    }
+}
+
+/// Whether [`blit_over`] computes what tiny-skia computes on this target:
+/// its high-precision pipeline rounds to the nearest even integer on
+/// x86-64 (SSE2 `cvtps2dq`) and on aarch64 (NEON `vcvtnq`); elsewhere
+/// its fallback rounds otherwise and the renderer keeps tiny-skia's draw.
+pub const BLEND_EXACT: bool = cfg!(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(target_arch = "aarch64", target_feature = "neon")
+));
+
+/// tiny-skia's high-precision store of one channel (`unnorm`).
+#[inline(always)]
+fn unnorm(v: f32) -> u8 {
+    (v.max(0.0).min(1.0) * 255.0).round_ties_even() as u8
+}
+
+/// The premultiplied `src` (a glyph) drawn source-over at whole pixels
+/// `(x, y)` onto `dst` at `opacity`, within `clip`: what tiny-skia's
+/// `draw_pixmap` with an identity transform computes, without building a
+/// pipeline for it (1442; a chat frame built one per glyph, and ran it
+/// through a pattern sampler). The same f32 arithmetic in the same
+/// order, lane for lane: the source loaded as `c * (1/255)`, scaled by
+/// the opacity when it is not one, the destination loaded alike,
+/// `d * (1 - sa) + s`, clamped and rounded to the nearest even; a pixel
+/// the source leaves transparent at full opacity keeps the destination
+/// and an opaque one is the source, which that arithmetic gives too
+/// (`fast_paths` holds both over every byte). The rectangle and the pad
+/// are `blit_opaque`'s. Only where [`BLEND_EXACT`].
+pub fn blit_over(
+    dst: &mut tiny_skia::PixmapMut<'_>,
+    src: tiny_skia::PixmapRef<'_>,
+    x: i32,
+    y: i32,
+    opacity: f32,
+    clip: Option<Px>,
+) {
+    let opacity = if opacity.is_finite() {
+        opacity.max(0.0).min(1.0)
+    } else {
+        0.0
+    };
+    let scaled = opacity != 1.0;
+    let (dw, dh) = (dst.width(), dst.height());
+    let (sw, sh) = (src.width(), src.height());
+    let (rx, ry) = (round(x), round(y));
+    let x0 = rx.clamp(0, i64::from(dw)) as u32;
+    let y0 = ry.clamp(0, i64::from(dh)) as u32;
+    let x1 = (rx + i64::from(sw)).clamp(0, i64::from(dw)) as u32;
+    let y1 = (ry + i64::from(sh)).clamp(0, i64::from(dh)) as u32;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let mut area = Px { x0, y0, x1, y1 };
+    if let Some(clip) = clip {
+        match area.intersect(clip) {
+            Some(a) => area = a,
+            None => return,
+        }
+    }
+    const FACTOR: f32 = 1.0 / 255.0;
+    let column =
+        |d: u32| (i64::from(d) - i64::from(x)).min(i64::from(sw) - 1) as usize;
+    let row_of =
+        |d: u32| (i64::from(d) - i64::from(y)).min(i64::from(sh) - 1) as usize;
+    let sstride = sw as usize * 4;
+    let dstride = dw as usize * 4;
+    let s = src.data();
+    let d = dst.data_mut();
+    for row in area.y0..area.y1 {
+        let from = row_of(row) * sstride;
+        let to = row as usize * dstride;
+        for col in area.x0..area.x1 {
+            let a = from + column(col) * 4;
+            let sp = [s[a], s[a + 1], s[a + 2], s[a + 3]];
+            let b = to + col as usize * 4;
+            if !scaled {
+                match sp[3] {
+                    0 if sp == [0; 4] => continue,
+                    255 => {
+                        d[b..b + 4].copy_from_slice(&sp);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            let mut sf = [
+                f32::from(sp[0]) * FACTOR,
+                f32::from(sp[1]) * FACTOR,
+                f32::from(sp[2]) * FACTOR,
+                f32::from(sp[3]) * FACTOR,
+            ];
+            if scaled {
+                for c in &mut sf {
+                    *c *= opacity;
+                }
+            }
+            let inv = 1.0 - sf[3];
+            for c in 0..4 {
+                let df = f32::from(d[b + c]) * FACTOR;
+                d[b + c] = unnorm(df * inv + sf[c]);
+            }
         }
     }
 }

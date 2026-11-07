@@ -42,7 +42,7 @@ impl Pipeline {
         position: Point,
         color: Color,
         pixels: &mut tiny_skia::PixmapMut<'_>,
-        clip_mask: Option<&tiny_skia::Mask>,
+        clip_mask: crate::fast::Clipping<'_>,
         transformation: Transformation,
     ) {
         let Some(paragraph) = paragraph.upgrade() else {
@@ -69,7 +69,7 @@ impl Pipeline {
         position: Point,
         color: Color,
         pixels: &mut tiny_skia::PixmapMut<'_>,
-        clip_mask: Option<&tiny_skia::Mask>,
+        clip_mask: crate::fast::Clipping<'_>,
         transformation: Transformation,
     ) {
         let Some(editor) = editor.upgrade() else {
@@ -102,7 +102,7 @@ impl Pipeline {
         align_y: alignment::Vertical,
         shaping: Shaping,
         pixels: &mut tiny_skia::PixmapMut<'_>,
-        clip_mask: Option<&tiny_skia::Mask>,
+        clip_mask: crate::fast::Clipping<'_>,
         transformation: Transformation,
     ) {
         let line_height = f32::from(line_height);
@@ -157,7 +157,7 @@ impl Pipeline {
         position: Point,
         color: Color,
         pixels: &mut tiny_skia::PixmapMut<'_>,
-        clip_mask: Option<&tiny_skia::Mask>,
+        clip_mask: crate::fast::Clipping<'_>,
         transformation: Transformation,
     ) {
         let mut font_system = font_system().write().expect("Write font system");
@@ -187,9 +187,14 @@ fn draw(
     position: Point,
     color: Color,
     pixels: &mut tiny_skia::PixmapMut<'_>,
-    clip_mask: Option<&tiny_skia::Mask>,
+    clip_mask: crate::fast::Clipping<'_>,
     transformation: Transformation,
 ) {
+    // Leviculum's patch (1442): a clip that covers nothing draws nothing.
+    if let crate::fast::Clipping::Rect(None) = clip_mask {
+        return;
+    }
+
     let position = position * transformation;
 
     let mut swash = cosmic_text::SwashCache::new();
@@ -220,19 +225,41 @@ fn draw(
                         .map(|c| c.a() as f32 / 255.0)
                         .unwrap_or(1.0);
 
-                pixels.draw_pixmap(
-                    physical_glyph.x + placement.left,
-                    physical_glyph.y - placement.top
-                        + (run.line_y * transformation.scale_factor()).round()
-                            as i32,
-                    pixmap,
-                    &tiny_skia::PixmapPaint {
-                        opacity,
-                        ..tiny_skia::PixmapPaint::default()
-                    },
-                    tiny_skia::Transform::identity(),
-                    clip_mask,
-                );
+                let x = physical_glyph.x + placement.left;
+                let y = physical_glyph.y - placement.top
+                    + (run.line_y * transformation.scale_factor()).round()
+                        as i32;
+
+                // Leviculum's patch (1442): the glyph blended in place,
+                // the arithmetic tiny-skia's pipeline runs (`fast`).
+                match clip_mask {
+                    crate::fast::Clipping::Unclipped
+                        if crate::fast::BLEND_EXACT =>
+                    {
+                        crate::fast::blit_over(
+                            pixels, pixmap, x, y, opacity, None,
+                        );
+                    }
+                    crate::fast::Clipping::Rect(clip) => {
+                        crate::fast::blit_over(
+                            pixels, pixmap, x, y, opacity, clip,
+                        );
+                    }
+                    crate::fast::Clipping::Unclipped
+                    | crate::fast::Clipping::Mask(_) => {
+                        pixels.draw_pixmap(
+                            x,
+                            y,
+                            pixmap,
+                            &tiny_skia::PixmapPaint {
+                                opacity,
+                                ..tiny_skia::PixmapPaint::default()
+                            },
+                            tiny_skia::Transform::identity(),
+                            clip_mask.mask(),
+                        );
+                    }
+                }
             }
         }
     }

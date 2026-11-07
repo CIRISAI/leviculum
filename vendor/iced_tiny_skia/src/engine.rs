@@ -352,10 +352,10 @@ impl Engine {
                 }
 
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
-                    true => None,
+                    true => crate::fast::Clipping::Unclipped,
                     false => {
                         self.clip.set(clip_bounds);
-                        Some(self.clip.mask(clip_mask))
+                        self.clip.clipping(clip_mask)
                     }
                 };
 
@@ -390,10 +390,10 @@ impl Engine {
                 }
 
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
-                    true => None,
+                    true => crate::fast::Clipping::Unclipped,
                     false => {
                         self.clip.set(clip_bounds);
-                        Some(self.clip.mask(clip_mask))
+                        self.clip.clipping(clip_mask)
                     }
                 };
 
@@ -425,10 +425,10 @@ impl Engine {
                 }
 
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
-                    true => None,
+                    true => crate::fast::Clipping::Unclipped,
                     false => {
                         self.clip.set(clip_bounds);
-                        Some(self.clip.mask(clip_mask))
+                        self.clip.clipping(clip_mask)
                     }
                 };
 
@@ -470,8 +470,10 @@ impl Engine {
                     return;
                 }
 
-                let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-                    .then(|| self.clip.mask(clip_mask));
+                let clip_mask = match physical_bounds.is_within(&clip_bounds) {
+                    true => crate::fast::Clipping::Unclipped,
+                    false => self.clip.clipping(clip_mask),
+                };
 
                 self.text_pipeline.draw_raw(
                     &buffer,

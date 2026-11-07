@@ -290,3 +290,90 @@ fn the_display_server_gets_every_changed_pixel() {
     )
     .is_empty());
 }
+
+/// A glyph blended in place (1442): the bytes tiny-skia's `draw_pixmap`
+/// (identity transform, the glyph's opacity, nearest) leaves, for
+/// glyphs of transparent, partial and opaque premultiplied pixels and
+/// colour ones, at opacities at, below and beyond one, unclipped and
+/// through a clip, partly off the target.
+#[test]
+fn a_glyph_blends_as_tiny_skia_blends_it() {
+    // Elsewhere the renderer keeps tiny-skia's draw for text.
+    if !fast::BLEND_EXACT {
+        return;
+    }
+    let mut rng = Rng(0xfeed_beef_dead_c0de);
+    let premultiplied = |rng: &mut Rng| {
+        let a = match rng.below(4) {
+            0 => 0,
+            1 => 255,
+            _ => rng.below(256) as u8,
+        };
+        let mut c = || rng.below(u64::from(a) + 1) as u8;
+        [c(), c(), c(), a]
+    };
+    for _ in 0..3000 {
+        let (sw, sh) = (1 + rng.below(24) as u32, 1 + rng.below(24) as u32);
+        let mut src = tiny_skia::Pixmap::new(sw, sh).expect("glyph");
+        for p in src.data_mut().chunks_exact_mut(4) {
+            p.copy_from_slice(&premultiplied(&mut rng));
+        }
+        let x = rng.below(u64::from(W) + 30) as i32 - 15;
+        let y = rng.below(u64::from(H) + 30) as i32 - 15;
+        let opacity = match rng.below(5) {
+            0 | 1 => 1.0,
+            2 => rng.below(256) as f32 / 255.0,
+            3 => 1.5,
+            _ => 0.3,
+        };
+        let ground: Vec<u8> = (0..W * H).flat_map(|_| premultiplied(&mut rng)).collect();
+        let clipped = rng.below(2) == 0;
+        let r = rng.rect(W, H);
+        let mut mask = tiny_skia::Mask::new(W, H).expect("mask");
+        reference_mask(&mut mask, r);
+        let mut reference = ground.clone();
+        tiny_skia::PixmapMut::from_bytes(&mut reference, W, H)
+            .expect("pixmap")
+            .draw_pixmap(
+                x,
+                y,
+                src.as_ref(),
+                &tiny_skia::PixmapPaint {
+                    opacity,
+                    ..Default::default()
+                },
+                tiny_skia::Transform::identity(),
+                clipped.then_some(&mask),
+            );
+        let mut ours = ground;
+        let mut target = tiny_skia::PixmapMut::from_bytes(&mut ours, W, H).expect("pixmap");
+        match (clipped, fast::covered(r, W, H)) {
+            (true, None) => {}
+            (true, Some(px)) => fast::blit_over(&mut target, src.as_ref(), x, y, opacity, Some(px)),
+            (false, _) => fast::blit_over(&mut target, src.as_ref(), x, y, opacity, None),
+        }
+        let first = reference.iter().zip(&ours).position(|(a, b)| a != b);
+        assert!(
+            first.is_none(),
+            "{sw}x{sh} at {x},{y} opacity {opacity} clip {clipped}: byte {first:?}, {} differ",
+            reference.iter().zip(&ours).filter(|(a, b)| a != b).count()
+        );
+    }
+}
+
+/// The shortcuts of the glyph blend over every byte: a transparent
+/// source pixel at full opacity keeps every destination byte, an opaque
+/// one is the source, as tiny-skia's f32 load, blend and store give.
+#[test]
+fn a_glyphs_empty_and_full_pixels_are_what_the_arithmetic_gives() {
+    const F: f32 = 1.0 / 255.0;
+    // tiny-skia's `unnorm`, max then min as it writes it.
+    #[allow(clippy::manual_clamp)]
+    let store = |v: f32| (v.max(0.0).min(1.0) * 255.0).round_ties_even() as u8;
+    for d in 0..=255u8 {
+        assert_eq!(store(f32::from(d) * F * (1.0 - 0.0) + 0.0), d);
+        for s in 0..=255u8 {
+            assert_eq!(store(f32::from(d) * F * (1.0 - 1.0) + f32::from(s) * F), s);
+        }
+    }
+}
