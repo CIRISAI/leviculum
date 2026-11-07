@@ -150,6 +150,35 @@ pub fn show_imported<B: leviculum_ui::input::InputBuffer>(
     store: &Store,
 ) -> Result<(), String> {
     let stored = store.restore().map_err(|e| e.to_string())?;
+    show_restored(model, store, stored)
+}
+
+/// The store's conversations of the home identity's address under `home`,
+/// read on a connection of its own (1464): the read [`show_imported`] does,
+/// for a frontend that does it off the lock its screens wait on and hands
+/// the rows to [`show_restored`] under it. Nothing there is read as none.
+pub fn read_imported(
+    home: &Path,
+    public_key: &[u8; 64],
+) -> Result<Vec<crate::ui::history::Restored>, String> {
+    let address = super::lxmf_address(public_key)?;
+    match Store::open_read_only(&home.join(crate::store::STORE_FILE), address) {
+        Ok(Some(store)) => store.restore().map_err(|e| e.to_string()),
+        Ok(None) => Ok(Vec::new()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// [`show_imported`] with the conversations [`read_imported`] read: the
+/// model takes those it lacks, and the older pages of those it has come
+/// from `store`. Rows read before the model's last fold are fine: a
+/// conversation the fold brought is in the model by then and only its older
+/// pages are asked.
+pub fn show_restored<B: leviculum_ui::input::InputBuffer>(
+    model: &mut crate::ui::UiModel<B>,
+    store: &Store,
+    stored: Vec<crate::ui::history::Restored>,
+) -> Result<(), String> {
     model
         .grown(stored, |peer, before| store.earlier(peer, before, None))
         .map_err(|e| e.to_string())

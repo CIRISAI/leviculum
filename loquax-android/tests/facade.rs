@@ -2162,10 +2162,14 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
 /// Here a mailbox of [`BIG_CONVERSATIONS`] conversations, thousands of
 /// entries, as Lew's holds, on disk (the store's fsyncs are what the
 /// pump's turn waits on; a tmpfs would hide them). The phone joins; while
-/// the first pull runs, a probe does what `onResume` does through the
-/// facade (close, front, the list) every 50 ms, as the UI thread would,
-/// and measures each block. The longest must stay under [`UI_BAR`], our
-/// own bar well below Android's 5 s. The history must arrive whole.
+/// the first pull runs, two probes measure each block. The engine's
+/// thread does what `onResume` hands it (close, front) every 50 ms, as
+/// `Engine.run` would; the UI thread asks the conversation list every
+/// 16 ms, as `ConversationsActivity.ask` does once per frame (1464: the
+/// Pixel spent 83.6 % of 44 s in that query, 79 to 100 ms a call while
+/// the pull ran). The list's longest block must stay under [`UI_BAR`], a
+/// few frames, so no tap is lost; the engine's under [`ENGINE_BAR`]. The
+/// history must arrive whole.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
     let _facade = facade_turn().await;
@@ -2205,23 +2209,37 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
         assert!(answer.ok, "{answer:?}");
         eprintln!("BIGPULL join: {} ms", joined.elapsed().as_millis());
 
-        // The UI thread's onResume, every 50 ms, while the pull runs.
+        // The engine's thread with onResume's commands, every 50 ms, and
+        // the UI thread with the list, once a frame, while the pull runs.
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let probing = std::sync::Arc::clone(&done);
         let probe = std::thread::spawn(move || {
             let close = schema::encode(&Request::Close);
             let front = schema::encode(&Request::Front { front: true });
-            let list = schema::encode(&schema::Query::Conversations { search: None });
             let mut blocks = Vec::new();
             while !probing.load(std::sync::atomic::Ordering::Relaxed) {
                 let began = std::time::Instant::now();
                 let _ = loquax_android::command(&close);
                 let _ = loquax_android::command(&front);
-                let _ = loquax_android::query(&list);
                 blocks.push(began.elapsed());
                 std::thread::sleep(Duration::from_millis(50));
             }
             blocks
+        });
+        let looking = std::sync::Arc::clone(&done);
+        let look = std::thread::spawn(move || {
+            let list = schema::encode(&schema::Query::Conversations { search: None });
+            let mut blocks = Vec::new();
+            let mut rows = 0;
+            while !looking.load(std::sync::atomic::Ordering::Relaxed) {
+                let began = std::time::Instant::now();
+                let answer: schema::Conversations =
+                    rmp_serde::from_slice(&loquax_android::query(&list)).expect("the list");
+                blocks.push(began.elapsed());
+                rows = rows.max(answer.conversations.len());
+                std::thread::sleep(Duration::from_millis(16));
+            }
+            (blocks, rows)
         });
 
         // The history whole: every conversation but the archived and the
@@ -2231,7 +2249,15 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
         let deadline = std::time::Instant::now() + Duration::from_secs(BIG_PULL_SECS);
         let mut whole = false;
         while std::time::Instant::now() < deadline {
-            let _ = loquax_android::next_event(Duration::from_millis(200));
+            // The check reads all hundred conversations under the lock: four
+            // times a second, not once per event, or the harness's own
+            // reads are the probes' longest waits (1464).
+            std::thread::sleep(Duration::from_millis(250));
+            for _ in 0..10_000 {
+                if loquax_android::next_event(Duration::ZERO).is_none() {
+                    break;
+                }
+            }
             let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
                 &schema::encode(&schema::Query::Conversations { search: None }),
             ))
@@ -2257,20 +2283,34 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
         let took = pulled.elapsed();
         done.store(true, std::sync::atomic::Ordering::Relaxed);
         let blocks = probe.join().expect("the probe");
+        let (looks, rows) = look.join().expect("the list's probe");
         let longest = blocks.iter().max().copied().unwrap_or_default();
+        let longest_look = looks.iter().max().copied().unwrap_or_default();
+        let slow_looks = looks.iter().filter(|block| **block >= FRAME).count();
         eprintln!(
-            "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms",
+            "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms; \
+             list probes={} longest={} ms over a frame={} rows={rows}",
             took.as_millis(),
             blocks.len(),
-            longest.as_millis()
+            longest.as_millis(),
+            looks.len(),
+            longest_look.as_millis(),
+            slow_looks,
         );
         loquax_android::stop();
         assert!(whole, "the history not whole in {BIG_PULL_SECS} s");
         assert!(
-            longest < UI_BAR,
-            "onResume blocked {} ms during the first pull (bar {} ms)",
-            longest.as_millis(),
+            longest_look < UI_BAR,
+            "the list's query blocked the UI thread {} ms during the first pull (bar {} ms)",
+            longest_look.as_millis(),
             UI_BAR.as_millis()
+        );
+        assert!(
+            longest < ENGINE_BAR,
+            "onResume's commands blocked the engine's thread {} ms during the first pull \
+             (bar {} ms)",
+            longest.as_millis(),
+            ENGINE_BAR.as_millis()
         );
     })
     .await
@@ -2284,9 +2324,19 @@ const BIG_CONVERSATIONS: usize = 100;
 const BIG_CAP: u64 = 64 << 20;
 /// How long its first pull may take on the host.
 const BIG_PULL_SECS: u64 = 240;
-/// The UI thread's longest block we accept: 1 s, well under Android's
-/// 5 s input limit.
-const UI_BAR: Duration = Duration::from_secs(1);
+/// The longest block we accept (1464): 100 ms, a few frames. 1446's 1 s
+/// kept Android's 5 s input limit away, but the Pixel still froze 35 s
+/// in blocks of 80 to 100 ms, one per event, and lost taps.
+const UI_BAR: Duration = Duration::from_millis(100);
+/// The engine thread's longest block for onResume's two commands (1464):
+/// each makes a store commit of its own and waits for at most the one
+/// event the pump is folding, another commit; on the host's disk a commit
+/// takes 10 to 35 ms with fsync spikes past 50 ms, so the two together
+/// measured 64 to 110 ms. Not the screen's wait since 1446, and below the
+/// 156 to 287 ms they took when the pump held the lock for whole slices.
+const ENGINE_BAR: Duration = Duration::from_millis(250);
+/// One frame at 60 Hz: the list's blocks longer than this are counted.
+const FRAME: Duration = Duration::from_millis(16);
 
 /// The mailbox on the phone (1152): the first start that chooses it needs no
 /// code and no server, the phone's node dials its entry server (here a stock

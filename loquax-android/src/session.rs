@@ -71,8 +71,11 @@ pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_
 /// thread and Android said the app was not responding.
 pub const SLICE: Duration = Duration::from_millis(50);
 /// How many events the pump takes from the engine between two looks at
-/// the clock: each costs a commit, a few milliseconds on a phone's flash.
-pub const CHUNK: usize = 8;
+/// the clock and at the callers waiting for the lock: each costs a
+/// commit, a few milliseconds on a phone's flash. One (1464): with eight a
+/// turn ran 60 to 80 ms past its [`SLICE`] on the host, and a command that
+/// came in the middle waited for all of it.
+pub const CHUNK: usize = 1;
 /// How long the pump lets go of the lock between two slices of a backlog:
 /// long enough for a screen woken from its wait on the lock to take it,
 /// short against [`SLICE`], so the history still comes at nine tenths of
@@ -157,7 +160,12 @@ impl InputBuffer for Line {
 /// A runner's end, folded by the pump.
 enum Finished {
     Send(UiEvent),
-    Pull(runner::PullEnd),
+    /// A pull's end, with the store's conversations read off the lock when
+    /// it imported history (1464).
+    Pull(
+        runner::PullEnd,
+        Option<Result<Vec<loquax::ui::history::Restored>, String>>,
+    ),
     /// Another runner's answer, the event the model folds (1307).
     Event(UiEvent),
 }
@@ -202,9 +210,16 @@ struct Inner {
     origin: std::time::Instant,
     /// Something the screen shows changed since the last `changed`.
     dirty: bool,
-    /// The last pump turn stopped at [`SLICE`] with events still waiting
-    /// in the engine's queue (1446).
+    /// The last pump turn stopped at [`SLICE`], or for a caller waiting
+    /// for the lock (1464), with events still waiting in the engine's
+    /// queue (1446).
     backlog: bool,
+    /// How many callers of [`Session::lock`] wait for the lock now: the
+    /// pump ends its turn after the event it is folding (1464).
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// The list screens as of the pump's last change (1464), which the UI
+    /// thread reads while the pump holds the lock.
+    scene: Arc<Mutex<Scene>>,
     gone: bool,
     /// Whether the TCP interface to the home node was up at the last look,
     /// none before the first, and when that look was.
@@ -239,6 +254,31 @@ struct Inner {
     redials_seen: usize,
     /// What the device link cost since the last `WAKE_SUMMARY` (1346).
     costs: DeviceCosts,
+}
+
+/// The two list screens' answers, encoded, as the pump left them at the
+/// end of its last turn that changed something, or as the last caller who
+/// found the lock free saw them (1464). The UI thread asks for the list once
+/// per event (the Pixel's profile: 992 times in 44 s of a first pull), and
+/// while the pump folds that pull it holds the lock 50 ms at a time: an
+/// answer that waited for it froze the screen 80 to 100 ms per event. A
+/// list asked while the lock is held is this one: never older than the last
+/// `changed` the screens were told.
+#[derive(Default)]
+struct Scene {
+    conversations: Option<Vec<u8>>,
+    archived: Option<Vec<u8>>,
+    /// Nobody took the lock since the two were made: a caller who finds
+    /// the lock free takes them as they are, and computes them only when
+    /// not. Every [`Session::lock`] and every pump turn clears it.
+    fresh: bool,
+}
+
+/// Which of the two lists of [`Scene`].
+#[derive(Clone, Copy)]
+enum Listed {
+    Conversations,
+    Archived,
 }
 
 /// The phone's side of the `WAKE_SUMMARY` line (1346): the pump's turns,
@@ -301,6 +341,10 @@ impl DeviceCosts {
 /// A running session.
 pub struct Session {
     inner: Arc<Mutex<Inner>>,
+    /// [`Inner::waiting`].
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// [`Inner::scene`].
+    scene: Arc<Mutex<Scene>>,
     /// Wakes the pump when a request may have started work (1176).
     wake: Arc<tokio::sync::Notify>,
     events: Mutex<Receiver<Event>>,
@@ -572,6 +616,8 @@ impl Session {
             },
             Arc::clone(&wake),
         ));
+        let waiting = Arc::clone(&inner.waiting);
+        let scene = Arc::clone(&inner.scene);
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
@@ -597,6 +643,8 @@ impl Session {
         });
         let session = Self {
             inner,
+            waiting,
+            scene,
             wake,
             events: Mutex::new(events_rx),
             runtime: Mutex::new(Some(runtime)),
@@ -1108,11 +1156,57 @@ impl Session {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
+        use std::sync::atomic::Ordering;
+        // Counted while it waits, so the pump lets go after the event it
+        // is folding (1464).
+        self.waiting.fetch_add(1, Ordering::SeqCst);
         // A panic under the lock is caught at the JNI edge; what it left
         // is still the best state there is.
-        self.inner
+        let inner = self
+            .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        inner.stale_scene();
+        inner
+    }
+
+    /// A list screen without waiting for the lock (1464): the [`Scene`]
+    /// while the lock is held, or while it is free and nobody took it
+    /// since the scene was made; else computed under the free lock, or
+    /// (before the first scene) after the wait.
+    fn listed_now(&self, which: Listed) -> Vec<u8> {
+        let inner = match self.inner.try_lock() {
+            Ok(inner) => inner,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if let Some(kept) = self.scene_of(which, false) {
+                    return kept;
+                }
+                self.lock()
+            }
+        };
+        if let Some(kept) = self.scene_of(which, true) {
+            return kept;
+        }
+        inner.show_scene();
+        self.scene_of(which, false).unwrap_or_default()
+    }
+
+    /// The scene's `which`, when there is one, and when `fresh` only if
+    /// it is.
+    fn scene_of(&self, which: Listed, fresh: bool) -> Option<Vec<u8>> {
+        let scene = self
+            .scene
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if fresh && !scene.fresh {
+            return None;
+        }
+        match which {
+            Listed::Conversations => scene.conversations.clone(),
+            Listed::Archived => scene.archived.clone(),
+        }
     }
 
     /// What the user did. The pump is woken after it: whatever the request
@@ -1120,6 +1214,9 @@ impl Session {
     /// and an idle pump would otherwise sleep through it (1176).
     pub fn request(&self, request: schema::Request) -> Result<(), String> {
         let done = self.requested(request);
+        // The lists as the request left them (1464), for a UI thread that
+        // asks while the pump holds the lock.
+        self.lock().show_scene();
         self.wake.notify_one();
         done
     }
@@ -1618,6 +1715,16 @@ impl Session {
             }
             _ => {}
         }
+        // The list screens' own questions never wait for the pump (1464).
+        match &query {
+            schema::Query::Conversations { search: None } => {
+                return Ok(self.listed_now(Listed::Conversations));
+            }
+            schema::Query::Archived { search: None } => {
+                return Ok(self.listed_now(Listed::Archived));
+            }
+            _ => {}
+        }
         let inner = self.lock();
         Ok(match query {
             schema::Query::Conversations { search } => {
@@ -1941,6 +2048,8 @@ impl Inner {
             origin: std::time::Instant::now(),
             dirty: true,
             backlog: false,
+            waiting: Arc::default(),
+            scene: Arc::default(),
             gone: false,
             link: None,
             // The first pump looks, and says what it saw.
@@ -2086,8 +2195,12 @@ impl Inner {
         // and the screens wait on that lock from the UI thread, so the turn
         // stops after [`SLICE`] and the next one comes after
         // [`BACKLOG_PUMP`], in which a waiting screen takes the lock.
+        // A caller waiting for the lock ends the turn after the event in
+        // hand (1464): a screen's command waits for one commit, not for a
+        // slice.
         let began = std::time::Instant::now();
         self.backlog = false;
+        self.stale_scene();
         loop {
             let events = match self.fanout.pump_at_most(&mut self.attached.outbox, CHUNK) {
                 Ok(events) => events,
@@ -2105,7 +2218,8 @@ impl Inner {
             if !full {
                 break;
             }
-            if began.elapsed() >= SLICE {
+            let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            if waited || began.elapsed() >= SLICE {
                 self.backlog = true;
                 break;
             }
@@ -2116,7 +2230,7 @@ impl Inner {
                     self.sending = false;
                     self.apply(event);
                 }
-                Finished::Pull(end) => self.pulled(end),
+                Finished::Pull(end, stored) => self.pulled(end, stored),
                 Finished::Event(event) => self.apply(event),
             }
         }
@@ -2136,6 +2250,9 @@ impl Inner {
         self.quiet(UiEvent::Tick);
         self.apply(UiEvent::Elapsed(elapsed));
         if std::mem::take(&mut self.dirty) {
+            // The lists first: a screen told `changed` reads them at once,
+            // and may find the lock held by the next turn (1464).
+            self.show_scene();
             let _ = self.events.send(Event::Changed { v: VERSION });
         }
         true
@@ -2583,7 +2700,20 @@ impl Inner {
             let wake = Arc::clone(&self.wake);
             self.runtime.spawn(async move {
                 let end = runner::pull(&mut tap, &client, &home, BUDGET).await;
-                let _ = done.send(Finished::Pull(end));
+                // The history it imported, read here, off the session's
+                // lock (1464): the store's read was the pull end's turn.
+                let stored = match end.imported {
+                    0 => None,
+                    _ => {
+                        let key = client.public_key;
+                        let read =
+                            tokio::task::spawn_blocking(move || runner::read_imported(&home, &key))
+                                .await
+                                .map_err(|error| error.to_string());
+                        Some(read.and_then(|read| read))
+                    }
+                };
+                let _ = done.send(Finished::Pull(end, stored));
                 wake.notify_one();
             });
         }
@@ -2595,16 +2725,22 @@ impl Inner {
     /// it imported (1159) the runner wrote to the store itself; the model
     /// takes it from there, as the session lives on in the service and is
     /// never restarted by closing the app.
-    fn pulled(&mut self, end: runner::PullEnd) {
+    fn pulled(
+        &mut self,
+        end: runner::PullEnd,
+        stored: Option<Result<Vec<loquax::ui::history::Restored>, String>>,
+    ) {
         self.pulling = false;
         runner::settle_pull(&self.home, end.cursor);
         // Once a pull settled, what arrives is live mail (1429).
         if end.cursor.is_some() {
             self.model.history = false;
         }
-        if end.imported > 0 {
+        if let Some(stored) = stored {
             self.persist();
-            match runner::show_imported(&mut self.model, &self.store) {
+            let shown = stored
+                .and_then(|stored| runner::show_restored(&mut self.model, &self.store, stored));
+            match shown {
                 Ok(()) => tracing::info!("HOME imported rows={} shown", end.imported),
                 Err(error) => {
                     tracing::warn!("HOME imported rows={} not shown: {error}", end.imported)
@@ -2616,6 +2752,28 @@ impl Inner {
             self.say(say);
         }
         self.apply(UiEvent::FetchDone(end.result));
+    }
+
+    /// The two lists into [`Inner::scene`] (1464).
+    fn show_scene(&self) {
+        let conversations = schema::encode(&self.conversations(None));
+        let archived = schema::encode(&self.listed(self.model.archived_order(), None));
+        let mut scene = self
+            .scene
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        scene.conversations = Some(conversations);
+        scene.archived = Some(archived);
+        scene.fresh = true;
+    }
+
+    /// Something may change what the lists show: the next caller who
+    /// finds the lock free computes them (1464).
+    fn stale_scene(&self) {
+        self.scene
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .fresh = false;
     }
 
     fn conversations(&self, search: Option<&str>) -> schema::Conversations {
