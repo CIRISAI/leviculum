@@ -1719,6 +1719,14 @@ impl<B> UiModel<B> {
         self.ops.read()
     }
 
+    /// What the presentation built since the model was made, across every
+    /// event's fresh count (1514): what a batch of events cost together,
+    /// a restore or a page folded one [`update`] each. `None` where
+    /// [`UiModel::counters`] is.
+    pub fn total_counters(&self) -> Option<counters::Counters> {
+        self.ops.read_total()
+    }
+
     /// Start the count afresh, as [`update`] does for every event: for a
     /// test that measures a frame no event asked for.
     pub fn reset_counters(&self) {

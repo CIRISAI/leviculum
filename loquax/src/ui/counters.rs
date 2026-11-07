@@ -112,6 +112,10 @@ const SLOTS: usize = 9;
 #[derive(Debug, Default)]
 pub struct Ops {
     cells: [core::sync::atomic::AtomicU32; SLOTS],
+    /// Everything counted since the cells were made, never reset (1514):
+    /// what a batch of many events cost, where [`Ops::reset`] would have
+    /// kept only the last event's.
+    total: [core::sync::atomic::AtomicU32; SLOTS],
 }
 
 /// Off: nothing, and nothing done.
@@ -128,6 +132,7 @@ impl Ops {
     pub const fn new() -> Self {
         Self {
             cells: [const { core::sync::atomic::AtomicU32::new(0) }; SLOTS],
+            total: [const { core::sync::atomic::AtomicU32::new(0) }; SLOTS],
         }
     }
 
@@ -136,6 +141,7 @@ impl Ops {
     pub fn add(&self, op: Op, n: usize) {
         let n = u32::try_from(n).unwrap_or(u32::MAX);
         self.cells[op as usize].fetch_add(n, core::sync::atomic::Ordering::Relaxed);
+        self.total[op as usize].fetch_add(n, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Start every count afresh.
@@ -147,8 +153,17 @@ impl Ops {
 
     /// The counts so far.
     pub fn read(&self) -> Option<Counters> {
-        let at = |op: Op| self.cells[op as usize].load(core::sync::atomic::Ordering::Relaxed);
-        Some(Counters {
+        Some(Self::counts(&self.cells))
+    }
+
+    /// The counts since the cells were made, across every reset.
+    pub fn read_total(&self) -> Option<Counters> {
+        Some(Self::counts(&self.total))
+    }
+
+    fn counts(cells: &[core::sync::atomic::AtomicU32; SLOTS]) -> Counters {
+        let at = |op: Op| cells[op as usize].load(core::sync::atomic::Ordering::Relaxed);
+        Counters {
             scenes: at(Op::Scenes),
             scene_nodes: at(Op::SceneNodes),
             rows_built: at(Op::RowsBuilt),
@@ -158,7 +173,7 @@ impl Ops {
             sorted: at(Op::Sorted),
             store_rows_read: at(Op::StoreRowsRead),
             commits: at(Op::Commits),
-        })
+        }
     }
 }
 
@@ -179,6 +194,11 @@ impl Ops {
     pub fn read(&self) -> Option<Counters> {
         None
     }
+
+    #[inline(always)]
+    pub fn read_total(&self) -> Option<Counters> {
+        None
+    }
 }
 
 impl Clone for Ops {
@@ -186,16 +206,13 @@ impl Clone for Ops {
     fn clone(&self) -> Self {
         let ops = Ops::new();
         #[cfg(any(debug_assertions, feature = "counters"))]
-        if let Some(now) = self.read() {
-            ops.add(Op::Scenes, now.scenes as usize);
-            ops.add(Op::SceneNodes, now.scene_nodes as usize);
-            ops.add(Op::RowsBuilt, now.rows_built as usize);
-            ops.add(Op::BubblesBuilt, now.bubbles_built as usize);
-            ops.add(Op::RowsLaid, now.rows_laid as usize);
-            ops.add(Op::Sorts, now.sorts as usize);
-            ops.add(Op::Sorted, now.sorted as usize);
-            ops.add(Op::StoreRowsRead, now.store_rows_read as usize);
-            ops.add(Op::Commits, now.commits as usize);
+        for (to, from) in [(&ops.cells, &self.cells), (&ops.total, &self.total)] {
+            for (to, from) in to.iter().zip(from) {
+                to.store(
+                    from.load(core::sync::atomic::Ordering::Relaxed),
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+            }
         }
         ops
     }
@@ -223,5 +240,9 @@ mod tests {
         assert_eq!((read + read).rows_built, 10);
         ops.reset();
         assert_eq!(ops.read(), Some(Counters::default()));
+        // The total outlives the reset (1514).
+        ops.add(Op::RowsBuilt, 1);
+        assert_eq!(ops.read_total().map(|t| t.rows_built), Some(6));
+        assert_eq!(ops.read().map(|t| t.rows_built), Some(1));
     }
 }
