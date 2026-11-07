@@ -9,9 +9,10 @@
 #[path = "../../loquax/tests/support/real_store.rs"]
 mod real_store;
 
-use loquax_android::schema::{Request, Start};
+use loquax_android::schema::{Query, Request, Start};
 use loquax_android::session::Session;
 use real_store::bar;
+use std::time::{Duration, Instant};
 
 /// The list rows a phone's screen shows, and as many again.
 const LIST_ON_SCREEN: u32 = 14;
@@ -70,6 +71,79 @@ fn a_key_in_compose_builds_no_list() {
             "rows_built {} (bar {})",
             counts.rows_built,
             2 * LIST_ON_SCREEN
+        ),
+    );
+}
+
+/// The fixture's session, offline, the long chat open: the first start
+/// makes the mailbox and its address, the fixture goes into the client
+/// store under it before the second.
+fn fixture_session(dir: &std::path::Path) -> Session {
+    std::fs::write(dir.join("config"), "rendezvous_dial = off\n").expect("config");
+    let first = start(dir);
+    let me = first.address();
+    first.stop();
+    drop(real_store::fill_store_for(dir, me));
+    start(dir)
+}
+
+/// Wait until the session made no list for `quiet`, at most `most`:
+/// what its start owed (the first pull's word, a toast aging out) is
+/// done. Whether it settled.
+fn settle(session: &Session, quiet: Duration, most: Duration) -> bool {
+    let begin = Instant::now();
+    let mut last = (session.scene_builds(), Instant::now());
+    while begin.elapsed() < most {
+        std::thread::sleep(Duration::from_millis(50));
+        let builds = session.scene_builds();
+        if builds != last.0 {
+            last = (builds, Instant::now());
+        } else if last.1.elapsed() >= quiet {
+            return true;
+        }
+    }
+    false
+}
+
+/// Five seconds of a phone left alone make no list (1491), however
+/// often the UI thread asks for one: the pump folds the clock every turn
+/// and makes the lists only when the model's revision moved, and
+/// `listed_now` never makes them (before 1491 every pump turn and every
+/// lock made them stale, and the UI thread's next ask computed both on
+/// its own thread). The control: a request that changes the list makes
+/// them once.
+#[test]
+fn an_idle_phone_builds_no_list() {
+    let dir = tempfile::tempdir().expect("app dir");
+    let session = fixture_session(dir.path());
+    let settled = settle(&session, Duration::from_secs(2), Duration::from_secs(30));
+    let before = session.scene_builds();
+    let begin = Instant::now();
+    let mut asked = 0;
+    while begin.elapsed() < Duration::from_millis(real_store::IDLE_MS) {
+        let listed = session
+            .query(Query::Conversations { search: None })
+            .expect("the list");
+        assert!(!listed.is_empty(), "no list kept");
+        asked += 1;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let idle = session.scene_builds() - before;
+    let anna = loquax::address::to_hex(&real_store::peer(real_store::ANNA));
+    session.request(Request::Open { peer: anna }).expect("open");
+    let control = session.scene_builds() - before - idle;
+    session.stop();
+    println!(
+        "COUNTS phone.idle settled={settled} asked={asked} builds={idle} control_builds={control}"
+    );
+    assert!(settled, "the session never settled");
+    assert!(control >= 1, "the control made no list: {control}");
+    bar(
+        "phone.an_idle_phone_builds_no_list",
+        idle == 0,
+        &format!(
+            "lists made {idle} over {} ms, {asked} asks (bar 0)",
+            real_store::IDLE_MS
         ),
     );
 }

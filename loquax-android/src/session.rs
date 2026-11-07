@@ -268,10 +268,13 @@ struct Inner {
 struct Scene {
     conversations: Option<Vec<u8>>,
     archived: Option<Vec<u8>>,
-    /// Nobody took the lock since the two were made: a caller who finds
-    /// the lock free takes them as they are, and computes them only when
-    /// not. Every [`Session::lock`] and every pump turn clears it.
-    fresh: bool,
+    /// The model's lists revision the two show (1491,
+    /// `UiModel::lists_revision`): the pump makes them again when it
+    /// moved, and only then. A caller never makes them: the
+    /// UI thread takes them as they are.
+    at: Option<u64>,
+    /// How often they were made, for the facade's idle bar.
+    builds: u64,
 }
 
 /// [`schema::Event::Changed::counts`] of `listed` (1464): every row's
@@ -629,6 +632,9 @@ impl Session {
         ));
         let waiting = Arc::clone(&inner.waiting);
         let scene = Arc::clone(&inner.scene);
+        // The lists exist before any screen asks (1491): a screen never
+        // makes them, so the first is made here, before the pump runs.
+        inner.show_scene();
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
@@ -1208,42 +1214,36 @@ impl Session {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.waiting.fetch_sub(1, Ordering::SeqCst);
-        inner.stale_scene();
         inner
     }
 
-    /// A list screen without waiting for the lock (1464): the [`Scene`]
-    /// while the lock is held, or while it is free and nobody took it
-    /// since the scene was made; else computed under the free lock, or
-    /// (before the first scene) after the wait.
+    /// A list screen without waiting for the lock (1464) and without
+    /// computing it (1491): the [`Scene`] as the pump or the last request
+    /// made it, at the model's newest lists revision but for a change the pump
+    /// has not turned over yet, which it tells the screens with
+    /// `changed` once it has. Before 1491 a caller who found the lock free
+    /// computed both lists on its own thread, the UI thread, and every
+    /// lock taken (a map frame's too) made them stale.
     fn listed_now(&self, which: Listed) -> Vec<u8> {
-        let mut inner = match self.inner.try_lock() {
-            Ok(inner) => inner,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                if let Some(kept) = self.scene_of(which, false) {
-                    return kept;
-                }
-                self.lock()
-            }
-        };
-        if let Some(kept) = self.scene_of(which, true) {
-            return kept;
-        }
-        inner.show_scene();
-        self.scene_of(which, false).unwrap_or_default()
+        self.scene_of(which).unwrap_or_default()
     }
 
-    /// The scene's `which`, when there is one, and when `fresh` only if
-    /// it is.
-    fn scene_of(&self, which: Listed, fresh: bool) -> Option<Vec<u8>> {
+    /// How often the session made the two lists (1491), for the
+    /// facade's idle bar.
+    #[doc(hidden)]
+    pub fn scene_builds(&self) -> u64 {
+        self.scene
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .builds
+    }
+
+    /// The scene's `which`, when there is one.
+    fn scene_of(&self, which: Listed) -> Option<Vec<u8>> {
         let scene = self
             .scene
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if fresh && !scene.fresh {
-            return None;
-        }
         match which {
             Listed::Conversations => scene.conversations.clone(),
             Listed::Archived => scene.archived.clone(),
@@ -2247,7 +2247,6 @@ impl Inner {
         // a waiting caller takes the lock. A caller waiting for the lock
         // ends the turn after the event in hand (1464): a screen's command
         // waits for one commit, not for a slice.
-        self.stale_scene();
         let mut slicing = loquax::fanout::Slicing::new(SLICE);
         loop {
             let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
@@ -2290,10 +2289,16 @@ impl Inner {
         self.apply(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
         self.apply(UiEvent::Elapsed(elapsed));
-        if std::mem::take(&mut self.dirty) {
+        let dirty = std::mem::take(&mut self.dirty);
+        // The lists again only when what they show moved (1491): an idle
+        // turn, the clock's three events folded, makes none, nor does a
+        // node the Browse tab heard of.
+        if dirty || self.scene_at() != Some(self.model.lists_revision()) {
+            self.show_scene();
+        }
+        if dirty {
             // The lists first: a screen told `changed` reads them at once,
             // and may find the lock held by the next turn (1464).
-            self.show_scene();
             let _ = self.events.send(Event::Changed {
                 v: VERSION,
                 counts: self.counts,
@@ -2811,16 +2816,16 @@ impl Inner {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         scene.conversations = Some(conversations);
         scene.archived = Some(archived);
-        scene.fresh = true;
+        scene.at = Some(self.model.lists_revision());
+        scene.builds += 1;
     }
 
-    /// Something may change what the lists show: the next caller who
-    /// finds the lock free computes them (1464).
-    fn stale_scene(&self) {
+    /// The model's lists revision the lists show.
+    fn scene_at(&self) -> Option<u64> {
         self.scene
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .fresh = false;
+            .at
     }
 
     fn conversations(&self, search: Option<&str>) -> schema::Conversations {
