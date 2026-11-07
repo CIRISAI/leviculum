@@ -47,6 +47,7 @@
 //! [CENSUS] node held=<n> box=<n> links=8 max_answer=262144 t=<ms>
 //! [NODE] state=up iface=serial hw_mtu=564 serial_mux=1 t=<ms>
 //! [DISP] ST7789 320x240 madctl=0xb0 spi_mhz=40 state=up t=<ms>
+//! [DISP] splash rows=0..239 ms=<ms> backlight=on t=<ms>   (1485; or splash=failed spi=..., backlight=off)
 //! [KB] addr=0x6d found=yes ... protocol=codes reg=0x01 len=8 poll_ms=10 t=<ms>
 //! [CENSUS] renderer held=<n> budget=220000 verdict=ok t=<ms>
 //! [CENSUS] screen=chats scene_held=... verdict=ok t=<ms>
@@ -120,6 +121,7 @@ use loquax_m9::keyboard::{self, Key, POLL_MS};
 use loquax_m9::map::{self, Map};
 use loquax_m9::pair::{self, Pairing};
 use loquax_m9::render::Renderer;
+use loquax_m9::splash::{self, Panel as _};
 use loquax_m9::{dump, group, home, screen};
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -151,11 +153,31 @@ const MADCTL: u8 = 0x36;
 const COLMOD: u8 = 0x3A;
 const COLMOD_RGB565: u8 = 0x55;
 
-/// The panel on SPI2 with DMA, its chip select and data/command line.
+/// The panel on SPI2 with DMA, its chip select and data/command line,
+/// and its backlight, on when low, lit only over a written panel (1485).
 struct Panel<'d> {
     spi: SpiDma<'d, Blocking>,
     cs: Output<'d>,
     dc: Output<'d>,
+    backlight: Output<'d>,
+    lit: bool,
+}
+
+/// The boot order of `loquax_m9::splash`: the board's half.
+impl splash::Panel for Panel<'_> {
+    type Error = esp_hal::spi::Error;
+
+    fn write(&mut self, frame: &Frame, first: u32, last: u32) -> Result<(), Self::Error> {
+        self.flush(frame, first, last)
+    }
+
+    fn light(&mut self, on: bool) {
+        match on {
+            true => self.backlight.set_low(),
+            false => self.backlight.set_high(),
+        }
+        self.lit = on;
+    }
 }
 
 impl Panel<'_> {
@@ -340,14 +362,22 @@ fn redraw(
     let flushed = panel.flush(frame, first, last);
     let us = t0.elapsed().as_micros();
     match flushed {
-        Ok(()) => log.line(
-            "[DISP] ",
-            format_args!(
-                "flush rows={first}..{last} ms={}.{:03}",
-                us / 1000,
-                us % 1000
-            ),
-        ),
+        Ok(()) => {
+            log.line(
+                "[DISP] ",
+                format_args!(
+                    "flush rows={first}..{last} ms={}.{:03}",
+                    us / 1000,
+                    us % 1000
+                ),
+            );
+            // The splash's write failed (1485): the frame was whole again,
+            // so this flush wrote every row, and the backlight may light.
+            if !panel.lit {
+                panel.light(true);
+                log.line("[DISP] ", format_args!("backlight=on"));
+            }
+        }
         Err(e) => log.line("[DISP] ", format_args!("flush=failed spi={e:?}")),
     }
 }
@@ -455,7 +485,9 @@ fn main() -> ! {
     let cs = Output::new(lcd_cs, Level::High, OutputConfig::default());
     let dc = Output::new(lcd_dc, Level::High, OutputConfig::default());
     let mut rst = Output::new(lcd_reset, Level::High, OutputConfig::default());
-    let mut backlight = Output::new(lcd_backlight, Level::High, OutputConfig::default());
+    // Off until the splash is on the panel (1485): the ST7789's memory is
+    // noise after its reset.
+    let backlight = Output::new(lcd_backlight, Level::High, OutputConfig::default());
     let delay = Delay::new();
 
     let (Ok(dma_rx), Ok(dma_tx)) = (dma_rx_buffer!(4096), dma_tx_buffer!(4096)) else {
@@ -478,7 +510,13 @@ fn main() -> ! {
         .with_miso(miso)
         .with_dma(p.DMA_CH0)
         .with_buffers(dma_rx, dma_tx);
-    let mut panel = Panel { spi, cs, dc };
+    let mut panel = Panel {
+        spi,
+        cs,
+        dc,
+        backlight,
+        lit: false,
+    };
     match panel.init(&mut rst, &delay) {
         Ok(()) => log.line(
             "[DISP] ",
@@ -490,7 +528,28 @@ fn main() -> ! {
         ),
         Err(e) => log.line("[DISP] ", format_args!("state=down reason=init spi={e:?}")),
     }
-    backlight.set_low();
+    // The splash written whole, then the backlight (1485). It stays on the
+    // panel through the census and the store's restore: nothing flushes
+    // until the UI's first redraw.
+    let mut frame = Frame::new();
+    let t0 = esp_hal::time::Instant::now();
+    let splashed = splash::power_on(&mut panel, &mut frame);
+    let us = t0.elapsed().as_micros();
+    match splashed {
+        Ok(()) => log.line(
+            "[DISP] ",
+            format_args!(
+                "splash rows=0..{} ms={}.{:03} backlight=on",
+                HEIGHT - 1,
+                us / 1000,
+                us % 1000
+            ),
+        ),
+        Err(e) => log.line(
+            "[DISP] ",
+            format_args!("splash=failed spi={e:?} backlight=off"),
+        ),
+    }
 
     // The keyboard controller, probed at both revisions' addresses.
     let sda: m9::KbSda = p.GPIO20;
@@ -521,8 +580,8 @@ fn main() -> ! {
         );
     }
 
-    // The renderer over the panel's frame, made once.
-    let mut frame = Frame::new();
+    // The renderer over the panel's frame, made once; it clears the frame
+    // in memory, the panel keeps the splash.
     let before = leviculum_esp::heap_live();
     let Ok(mut renderer) = Renderer::new(&mut frame) else {
         log.line("[DISP] ", format_args!("state=down reason=renderer"));
