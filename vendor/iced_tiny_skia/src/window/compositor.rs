@@ -3,7 +3,7 @@ use crate::graphics::compositor::{self, Information};
 use crate::graphics::damage;
 use crate::graphics::error::{self, Error};
 use crate::graphics::{self, Shell, Viewport};
-use crate::{Layer, Renderer, Settings};
+use crate::{Layer, Renderer, Settings, fast};
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
@@ -227,14 +227,16 @@ pub fn present(
         physical_size.height,
     );
 
+    let mut shown = shown;
     {
+        let (shift, damage) = plan(
+            last_layers.map(Vec::as_slice),
+            renderer.layers(),
+            damage,
+            viewport,
+        );
         surface.layer_stack.push_front(renderer.layers().to_vec());
         surface.background_color = background_color;
-
-        let damage = whole_when_fragmented(
-            damage::group(damage, Rectangle::with_size(viewport.logical_size())),
-            Rectangle::with_size(viewport.logical_size()),
-        );
 
         let mut pixels = tiny_skia::PixmapMut::from_bytes(
             bytemuck::cast_slice_mut(&mut buffer),
@@ -242,6 +244,16 @@ pub fn present(
             physical_size.height,
         )
         .expect("Create pixel map");
+
+        if let Some(shift) = &shift {
+            crate::scroll::apply(pixels.data_mut(), physical_size.width, shift);
+            // What the display server takes: the moved rows too (an
+            // empty list is the whole buffer already).
+            let fast::Px { x0, y0, x1, y1 } = shift.pane;
+            if !shown.is_empty() {
+                shown.push([x0, y0, x1 - x0, y1 - y0]);
+            }
+        }
 
         renderer.draw(
             &mut pixels,
@@ -354,6 +366,42 @@ pub fn whole_when_fragmented(
     } else {
         damage
     }
+}
+
+/// Leviculum's patch (1468): how to draw a frame over the buffer that
+/// holds `last` (none: unknown), where `damage` changed: when it would be
+/// drawn whole and one layer's content only moved by whole pixels
+/// ([`crate::scroll`]), that move and what is left to draw after it;
+/// else no move and `damage`, grouped, as [`whole_when_fragmented`]
+/// draws it.
+pub fn plan(
+    last: Option<&[Layer]>,
+    current: &[Layer],
+    damage: Vec<Rectangle>,
+    viewport: &Viewport,
+) -> (Option<crate::scroll::Shift>, Vec<Rectangle>) {
+    let whole = Rectangle::with_size(viewport.logical_size());
+    let plain = whole_when_fragmented(damage::group(damage, whole), whole);
+    let size = viewport.physical_size();
+    if let Some(last) = last
+        && plain == [whole]
+        && let Some(shift) = crate::scroll::find(
+            last,
+            current,
+            viewport.scale_factor(),
+            size.width,
+            size.height,
+        )
+    {
+        let damage = whole_when_fragmented(
+            damage::group(shift.damage.clone(), whole),
+            whole,
+        );
+        if damage != [whole] {
+            return (Some(shift), damage);
+        }
+    }
+    (None, plain)
 }
 
 /// Leviculum's patch (1442): logical `damage` as the buffer's pixels at

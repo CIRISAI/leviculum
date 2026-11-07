@@ -198,7 +198,8 @@ impl Offscreen {
 /// kept between frames like a window's buffer of age one: the layers
 /// compared with the last frame's, only the damaged part filled and
 /// rasterised (the whole window once the damage fragments, the vendored
-/// compositor's rule since 1456), and nothing read back. What a window
+/// compositor's rule since 1456; a scroll as a shift of the frame and the
+/// strip it uncovers, its plan since 1468), and nothing read back. What a window
 /// adds after it, the
 /// display server taking the buffer (softbuffer's present), is not here.
 pub struct Surface {
@@ -211,6 +212,12 @@ pub struct Surface {
     /// The last present's damage as the layers' diff gave it, before
     /// grouping and the whole-window rule (1455).
     rects: Vec<Rectangle>,
+    /// Whether a scroll is drawn as a shift of the frame on it (1468),
+    /// as the window's compositor draws it; off, every frame is drawn
+    /// as the damage says.
+    shift: bool,
+    /// How far the last present moved the frame on it, if it did.
+    shifted: Option<i32>,
 }
 
 impl Surface {
@@ -224,7 +231,20 @@ impl Surface {
             width: w,
             height: h,
             rects: Vec::new(),
+            shift: true,
+            shifted: None,
         })
+    }
+
+    /// Scrolls drawn as a shift of the frame on it, or not (1468).
+    pub fn set_shift(&mut self, shift: bool) {
+        self.shift = shift;
+    }
+
+    /// How far the last present moved the frame on it, physical
+    /// pixels, if it did (1468).
+    pub fn shifted(&self) -> Option<i32> {
+        self.shifted
     }
 
     /// What `renderer` holds since its last reset, presented on
@@ -234,6 +254,7 @@ impl Surface {
         use iced_tiny_skia::graphics::{damage, Viewport};
         let viewport = Viewport::with_physical_size(Size::new(self.width, self.height), 1.0);
         let whole = Rectangle::with_size(viewport.logical_size());
+        self.shifted = None;
         let layers = renderer.layers().to_vec();
         let damaged = match (&self.last, self.background == Some(background)) {
             (Some(last), true) => damage::diff(
@@ -250,15 +271,21 @@ impl Surface {
             return 0.0;
         }
         self.rects = damaged.clone();
-        let damaged = iced_tiny_skia::window::compositor::whole_when_fragmented(
-            damage::group(damaged, whole),
-            whole,
-        );
+        let last = match self.background == Some(background) && self.shift {
+            true => self.last.as_deref(),
+            false => None,
+        };
+        let (shift, damaged) =
+            iced_tiny_skia::window::compositor::plan(last, &layers, damaged, &viewport);
         let area: f32 = damaged
             .iter()
             .filter_map(|r| r.intersection(&whole))
             .map(|r| r.width * r.height)
             .sum();
+        self.shifted = shift.as_ref().map(|s| s.dy);
+        if let Some(shift) = &shift {
+            iced_tiny_skia::scroll::apply(&mut self.pixels, self.width, shift);
+        }
         let Some(mut pixmap) =
             tiny_skia::PixmapMut::from_bytes(&mut self.pixels, self.width, self.height)
         else {
@@ -352,6 +379,34 @@ pub struct Run {
     /// drive's mark came.
     pub rgb: Vec<u8>,
     pub marked_rgb: Option<Vec<u8>>,
+    /// With a twin ([`drive_twinned`], 1468): the frames drawn as a shift
+    /// of the one before, and when a frame had a pixel with a channel more
+    /// than one apart from the twin's, which draws every frame without a
+    /// shift.
+    pub shifted: usize,
+    pub differed: Vec<f64>,
+    /// With a twin: the largest difference of a channel between the two;
+    /// the most pixels of one frame that differed at all, and that
+    /// differed by more than one.
+    pub worst: u8,
+    pub off: usize,
+    pub past_one: usize,
+    /// With a twin: where the first frame that differed by more than one
+    /// differed so, `[x0, y0, x1, y1]` inclusive.
+    pub first_difference: Option<[u32; 4]>,
+}
+
+/// The pixels of the `w` wide RGBA buffers `a` and `b` with a channel
+/// more than one apart, as the box around them, `[x0, y0, x1, y1]`.
+fn difference(a: &[u8], b: &[u8], w: u32) -> [u32; 4] {
+    let mut out = [u32::MAX, u32::MAX, 0, 0];
+    for (i, (p, q)) in a.chunks(4).zip(b.chunks(4)).enumerate() {
+        if p.iter().zip(q).any(|(x, y)| x.abs_diff(*y) > 1) {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            out = [out[0].min(x), out[1].min(y), out[2].max(x), out[3].max(y)];
+        }
+    }
+    out
 }
 
 /// `program` in a window of `w` by `h` as iced 0.14's loop runs it on X11
@@ -372,11 +427,43 @@ pub fn drive<P: Program>(
     script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
     mark: std::time::Duration,
 ) -> Option<Run> {
+    drive_with(program, w, h, script, mark, false)
+}
+
+/// [`drive`], every frame presented a second time on a twin surface that
+/// draws no scroll as a shift (1468), the two compared byte for byte:
+/// [`Run::differed`] says when they were not the same.
+pub fn drive_twinned<P: Program>(
+    program: &mut P,
+    w: u32,
+    h: u32,
+    script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
+    mark: std::time::Duration,
+) -> Option<Run> {
+    drive_with(program, w, h, script, mark, true)
+}
+
+fn drive_with<P: Program>(
+    program: &mut P,
+    w: u32,
+    h: u32,
+    script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
+    mark: std::time::Duration,
+    twinned: bool,
+) -> Option<Run> {
     use iced::window::RedrawRequest;
     use iced_runtime::user_interface::{Cache, State, UserInterface};
     use std::time::{Duration, Instant};
     let mut renderer = software(iced::Font::DEFAULT)?;
     let mut surface = Surface::new(w, h)?;
+    let mut twin = match twinned {
+        true => {
+            let mut twin = Surface::new(w, h)?;
+            twin.set_shift(false);
+            Some(twin)
+        }
+        false => None,
+    };
     let size = Size::new(w as f32, h as f32);
     let mut cache = Cache::default();
     let mut cursor = mouse::Cursor::Unavailable;
@@ -475,6 +562,32 @@ pub fn drive<P: Program>(
                 pending.damage = surface.present(&mut renderer, background);
                 pending.present_ms = ms(t.elapsed());
                 pending.at = start.elapsed().as_secs_f64();
+                if let Some(twin) = &mut twin {
+                    let _ = twin.present(&mut renderer, background);
+                    run.shifted += usize::from(surface.shifted().is_some());
+                    let mut past_one = 0;
+                    let mut off = 0;
+                    for (a, b) in twin.pixels.chunks(4).zip(surface.pixels.chunks(4)) {
+                        let d = a
+                            .iter()
+                            .zip(b)
+                            .map(|(x, y)| x.abs_diff(*y))
+                            .max()
+                            .unwrap_or(0);
+                        run.worst = run.worst.max(d);
+                        off += usize::from(d > 0);
+                        past_one += usize::from(d > 1);
+                    }
+                    run.off = run.off.max(off);
+                    run.past_one = run.past_one.max(past_one);
+                    if past_one > 0 {
+                        if run.differed.is_empty() {
+                            run.first_difference =
+                                Some(difference(&twin.pixels, &surface.pixels, w));
+                        }
+                        run.differed.push(pending.at);
+                    }
+                }
                 drawn = true;
                 if pending.damage == 0.0 {
                     // No frame: nothing changed (1455).

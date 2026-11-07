@@ -7,6 +7,8 @@ mod engine;
 pub mod fast;
 mod layer;
 mod primitive;
+#[doc(hidden)]
+pub mod scroll;
 mod settings;
 mod text;
 
