@@ -1,6 +1,7 @@
 //! What the M9 shows from power-on until the UI's first frame (1485): the
-//! logo on the panel's ground with the word "Loquax" under it, and the rule
-//! that the backlight never lights a panel nothing has been written to.
+//! logo on the panel's ground with "Leviculum Loquax" under it, and the
+//! rule that the backlight never lights a panel nothing has been written
+//! to.
 //!
 //! The ST7789's memory holds noise after its reset, so a backlight lit at
 //! the end of the panel's init showed that noise for the boot's two
@@ -34,8 +35,11 @@ pub const LOGO: &[u8] = include_bytes!("../assets/splash-logo.rgba");
 
 const _: () = assert!(LOGO.len() == (LOGO_PX * LOGO_PX * 4) as usize);
 
-/// The word under the logo. No version, no hash: the splash names the app.
-pub const WORD: &str = "Loquax";
+/// The words under the logo, one line: the suite's name and the app's
+/// (Lew, 2026-11-07). Sixteen cells of the atlas are 160 of the panel's
+/// 320 pixels, so the two stay on one line at the UI's size. No version,
+/// no hash: the splash names the app.
+pub const WORD: &str = "Leviculum Loquax";
 
 /// Pixels between the logo and the word.
 const GAP: u32 = 12;
