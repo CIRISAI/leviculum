@@ -239,3 +239,64 @@ fn the_phones_chat_loads_older_pages_as_its_viewport_reaches_the_top() {
         real_store::ANNA_MESSAGES
     );
 }
+
+/// A list made again asks the file system nothing (1496, structure review
+/// 2026-11-07 K4): a linked peer's thumbnail is looked for once until its
+/// link changes. Before, every list made stat'ed every linked row, 300
+/// per list for a book that links the fixture's conversations. The
+/// control: a link that changes asks again, for that peer only.
+#[test]
+fn a_list_made_again_stats_no_thumbnail() {
+    use loquax_android::schema::{Blob, ContactCopy};
+    let dir = tempfile::tempdir().expect("app dir");
+    let session = fixture_session(dir.path());
+    let linked: Vec<String> = real_store::FRIENDS
+        .map(|i| loquax::address::to_hex(&real_store::peer(i)))
+        .collect();
+    let link = |peer: &str, photo: &[u8]| {
+        session
+            .request(Request::Link {
+                peer: peer.to_string(),
+                contact: ContactCopy {
+                    lookup: format!("lookup-{peer}"),
+                    contact_id: 7,
+                    name: format!("Kontakt {}", &peer[..4]),
+                    photo: Some(Blob(photo.to_vec())),
+                },
+            })
+            .expect("link");
+    };
+    for peer in &linked {
+        link(peer, &[0xff, 0xd8, 0xff]);
+    }
+    let after_links = session.photo_stats();
+    let builds = session.scene_builds();
+    let anna = loquax::address::to_hex(&real_store::peer(real_store::ANNA));
+    for on in [true, false, true, false] {
+        session
+            .request(Request::Pin {
+                peer: anna.clone(),
+                on,
+            })
+            .expect("pin");
+    }
+    let made = session.scene_builds() - builds;
+    let again = session.photo_stats() - after_links;
+    link(&linked[0], &[0xff, 0xd8, 0xfe]);
+    session
+        .request(Request::Pin {
+            peer: anna.clone(),
+            on: true,
+        })
+        .expect("pin");
+    let changed = session.photo_stats() - after_links - again;
+    session.stop();
+    println!(
+        "COUNTS phone.photo_stats linked={} first={after_links} lists={made} again={again} changed={changed}",
+        linked.len()
+    );
+    assert!(made >= 4, "the control made no lists: {made}");
+    assert!(after_links >= 1, "no thumbnail was ever looked for");
+    assert_eq!(again, 0, "{made} lists stat'ed {again} thumbnails");
+    assert_eq!(changed, 1, "a changed link is looked for again, once");
+}

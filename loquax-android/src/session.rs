@@ -239,6 +239,13 @@ struct Inner {
     fallback: Fallback,
     /// loquax's links to the phone's address book (1139).
     book: Book,
+    /// Whether a linked peer's thumbnail is kept, and its path (1496):
+    /// the lists asked the file system once per linked row per list made,
+    /// 300 stats for the real fixture; the link and the unlink, which keep
+    /// and drop the file, drop the entry.
+    photos: std::cell::RefCell<std::collections::HashMap<[u8; 16], Option<String>>>,
+    /// How often [`Inner::photo`] asked the file system, for the facade.
+    photo_stats: std::cell::Cell<u64>,
     /// The peers added by a code while this session runs (walk finding
     /// 15): their chat does not ask to save them to the phone's contacts,
     /// the user just named them.
@@ -1229,6 +1236,13 @@ impl Session {
         self.scene_of(which).unwrap_or_default()
     }
 
+    /// How often the session asked the file system for a linked peer's
+    /// thumbnail (1496), for the facade's bar.
+    #[doc(hidden)]
+    pub fn photo_stats(&self) -> u64 {
+        self.lock().photo_stats.get()
+    }
+
     /// How often the session made the two lists (1491), for the
     /// facade's idle bar.
     #[doc(hidden)]
@@ -2112,6 +2126,8 @@ impl Inner {
             front: false,
             fallback: Fallback::default(),
             book: links::load(home),
+            photos: std::cell::RefCell::default(),
+            photo_stats: std::cell::Cell::new(0),
             just_added: std::collections::BTreeSet::new(),
             keys_told: Arc::default(),
             recorder: Vec::new(),
@@ -2691,6 +2707,7 @@ impl Inner {
         if contact.lookup.trim().is_empty() || contact.lookup.contains('\n') {
             return Err("the contact has no lookup key".to_string());
         }
+        self.photos.get_mut().remove(&peer);
         links::keep_photo(
             &self.home,
             &peer,
@@ -2717,6 +2734,7 @@ impl Inner {
         links::save(&self.home, &self.book)?;
         self.model.names.unlink(&peer);
         self.dirty = true;
+        self.photos.get_mut().remove(&peer);
         links::keep_photo(&self.home, &peer, None)
     }
 
@@ -3325,13 +3343,19 @@ impl Inner {
         bar
     }
 
-    /// A linked peer's copied thumbnail.
+    /// A linked peer's copied thumbnail, asked of the file system once
+    /// until the link changes (1496).
     fn photo(&self, peer: &[u8; 16]) -> Option<String> {
-        self.book
-            .links
-            .contains_key(peer)
-            .then(|| links::photo(&self.home, peer))
-            .flatten()
+        if !self.book.links.contains_key(peer) {
+            return None;
+        }
+        if let Some(known) = self.photos.borrow().get(peer) {
+            return known.clone();
+        }
+        self.photo_stats.set(self.photo_stats.get() + 1);
+        let found = links::photo(&self.home, peer);
+        self.photos.borrow_mut().insert(*peer, found.clone());
+        found
     }
 
     /// `emoji` was used: first in the recents kept in the home. A file that
