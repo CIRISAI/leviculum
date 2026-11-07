@@ -464,7 +464,7 @@ impl Session {
                 )
             })?;
         for server in &servers {
-            loquax::engine::parse_server(server).map_err(|text| {
+            one_server(server).map_err(|text| {
                 StartError::said(Some("server"), StrId::JoinBadWhere, lang, Some(text))
             })?;
         }
@@ -4324,8 +4324,14 @@ fn dial_list(
     home: &Path,
 ) -> Option<Vec<String>> {
     use loquax::home::rendezvous::{default_list, defaults_held_back, reach, Reach};
+    // A code's servers are the code's business (1471): a field that only
+    // shows the code's tail, the whole list `mailbox admit` printed, is not
+    // a server the user typed, and the join walks the code's ladder in its
+    // order. A server typed by hand is one `host:port` and wins.
     if let Some(given) = given.map(str::trim).filter(|given| !given.is_empty()) {
-        return Some(vec![given.to_string()]);
+        if !is_carried(given, &carried) {
+            return Some(vec![given.to_string()]);
+        }
     }
     let known = match carried.is_empty() {
         true => load_servers(home),
@@ -4337,6 +4343,26 @@ fn dial_list(
         Reach::List(list) if list == default_list() && defaults_held_back() => None,
         Reach::List(list) => Some(list),
     }
+}
+
+/// Whether `given` is the list `carried` a code brought, as a field shows
+/// it: its entries joined by the code's separator, whitespace ignored.
+fn is_carried(given: &str, carried: &[String]) -> bool {
+    let compact: String = given.chars().filter(|c| !c.is_whitespace()).collect();
+    !carried.is_empty() && compact == carried.join(&loquax::home::code::LIST_SEPARATOR.to_string())
+}
+
+/// One server the user typed, `host:port`, or why it is not one. A list,
+/// which only a code carries (1471), is named as such: the parser would
+/// read its commas as part of the host and blame an IPv6 bracket.
+fn one_server(text: &str) -> Result<(), String> {
+    let text = text.trim();
+    if text.contains(loquax::home::code::LIST_SEPARATOR) {
+        return Err(format!(
+            "'{text}' names several servers: write one, as host:port, e.g. 192.168.1.20:4242"
+        ));
+    }
+    loquax::engine::parse_server(text).map(|_| ())
 }
 
 /// A peer's address as the app hands it back.
@@ -4354,6 +4380,68 @@ pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1471: a code with three servers joins over all three, in the code's
+    /// order, whether the field is empty or shows the code's tail (what the
+    /// join screen's field held on the Pixel, refused before 1471). A server
+    /// typed by hand wins; a hand-typed list is refused with words that say
+    /// it is a list, under the sentence naming one address.
+    #[test]
+    fn a_code_with_several_servers_dials_them_all_in_order() {
+        let home = tempfile::tempdir().expect("a dir");
+        let config = loquax::config::Config::default();
+        let three = vec![
+            "192.168.178.61:4343".to_string(),
+            "leviculum.network:4343".to_string(),
+            "leviculum.network:4242".to_string(),
+        ];
+        let field = "192.168.178.61:4343,leviculum.network:4343,leviculum.network:4242";
+        assert_eq!(
+            dial_list(None, &config, three.clone(), home.path()),
+            Some(three.clone())
+        );
+        assert_eq!(
+            dial_list(Some(field), &config, three.clone(), home.path()),
+            Some(three.clone())
+        );
+        assert_eq!(
+            dial_list(
+                Some(" 192.168.178.61:4343, leviculum.network:4343,\nleviculum.network:4242 "),
+                &config,
+                three.clone(),
+                home.path()
+            ),
+            Some(three.clone())
+        );
+        // One server in the code.
+        let one = vec!["127.0.0.1:4242".to_string()];
+        assert_eq!(
+            dial_list(Some("127.0.0.1:4242"), &config, one.clone(), home.path()),
+            Some(one)
+        );
+        // A server typed by hand, with or without servers in the code.
+        assert_eq!(
+            dial_list(Some("home.example:4242"), &config, three, home.path()),
+            Some(vec!["home.example:4242".to_string()])
+        );
+        assert_eq!(
+            dial_list(Some("home.example:4242"), &config, Vec::new(), home.path()),
+            Some(vec!["home.example:4242".to_string()])
+        );
+        // A list typed by hand, not the code's, stays the user's and is refused.
+        let typed = "a.example:4242,b.example:4242";
+        assert_eq!(
+            dial_list(Some(typed), &config, Vec::new(), home.path()),
+            Some(vec![typed.to_string()])
+        );
+        let refused = one_server(typed).expect_err("a list is not one server");
+        assert!(refused.contains("several servers"), "{refused}");
+        assert!(one_server("home.example:4242").is_ok());
+        // Control: without the list check the parser blames a bracket.
+        assert!(loquax::engine::parse_server(typed)
+            .expect_err("the parser refuses it too")
+            .contains("IPv6"));
+    }
 
     /// 1307 pass five: the home's answer to Create or Add asks for no
     /// effect, and without a `changed` the list Java shows never takes the

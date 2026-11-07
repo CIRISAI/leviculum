@@ -119,6 +119,20 @@ fn a_first_start_says_what_it_needs() {
     assert!(answer.error.unwrap().contains("192.168.1.20:4242"));
     assert!(answer.details.unwrap().contains("has no port"));
 
+    // A list typed by hand (1471) is refused, with the sentence naming one
+    // address; a code's own list is not typed and goes whole.
+    let answer = started(&loquax_android::start(&start_bytes(&Start {
+        code: Some(code_for(&leviculum_core::Identity::generate(
+            &mut rand_core::OsRng,
+        ))),
+        server: Some("a.example:4242,b.example:4242".to_string()),
+        dir: dir.path().display().to_string(),
+        ..Start::default()
+    })));
+    assert_eq!(answer.need.as_deref(), Some("server"));
+    assert!(answer.error.unwrap().contains("192.168.1.20:4242"));
+    assert!(answer.details.unwrap().contains("several servers"));
+
     let answer = started(&loquax_android::start(b"\xc1"));
     assert!(!answer.ok);
     assert!(answer.error.unwrap().contains("did not decode"));
@@ -169,6 +183,14 @@ fn code_for(identity: &leviculum_core::Identity) -> String {
         token: [7; 16],
     }
     .encode()
+}
+
+/// `code` with the rendezvous list `servers` behind it, as `mailbox admit`
+/// prints it (1471).
+fn with_servers(code: &str, servers: &[String]) -> String {
+    loquax::home::code::HomeCode::parse(code)
+        .expect("a code")
+        .encode_with_rendezvous(servers)
 }
 
 /// A token issued for "phone" in the store of the home node of `home`, and
@@ -286,6 +308,10 @@ fn wait_for<T: serde::de::DeserializeOwned + std::fmt::Debug>(
 /// which names the bubble; a pull runs; the conversation list shows it. The
 /// second start needs neither code nor server and shows the conversation
 /// from the store. A second code on a joined phone is refused.
+///
+/// The code carries three servers, as `mailbox admit` prints the ladder
+/// (1471), and the start names none, as the join screen sends it: the
+/// session dials the code's list in its order and keeps all three.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_phone_joins_sends_pulls_and_comes_back() {
     let instance = instance();
@@ -295,16 +321,27 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let port = listener.local_addr().expect("its address").port();
     let home = tempfile::tempdir().expect("home node dir");
-    let code = admit(home.path());
+    // Two more rendezvous behind the home's own server, ports nobody
+    // listens on: the ladder's later rungs, never reached.
+    let silent = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a loopback port")
+            .local_addr()
+            .expect("its address")
+            .to_string()
+    };
+    let servers = vec![format!("127.0.0.1:{port}"), silent(), silent()];
+    let code = with_servers(&admit(home.path()), &servers);
     ugly(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
     let home_dir = home.path().to_path_buf();
 
     let phone = tempfile::tempdir().expect("app dir");
     let dir = phone.path().display().to_string();
+    let saved = phone.path().join(loquax_android::session::SERVER_FILE);
     let first = Start {
         dir: dir.clone(),
-        server: Some(format!("127.0.0.1:{port}")),
+        server: None,
         code: Some(code.clone()),
         name: Some("Pixel".to_string()),
         offset: 3600,
@@ -716,6 +753,17 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     })
     .await
     .expect("the first session");
+
+    // All three kept, in the code's order.
+    let kept = std::fs::read_to_string(&saved).expect("the servers kept");
+    assert_eq!(
+        kept.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>(),
+        servers.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{kept}"
+    );
 
     // The second start: no code, no server, the conversation from the store.
     let again = Start {

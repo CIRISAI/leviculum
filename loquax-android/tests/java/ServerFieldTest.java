@@ -20,15 +20,50 @@ final class ServerFieldTest {
         check("1".equals(typed(CODE, "", true)),
                 "the rule before 1464 ends with " + typed(CODE, "", true));
         check("127.0.0.1:4242".equals(ServerField.follow(CODE, "", "")), "pasted");
-        check("home.example:4242".equals(typed(CODE, "home.example:4242", false)),
-                "the user's server stays: " + typed(CODE, "home.example:4242", false));
-        check("".equals(typed("lqxh1q2w3e4r5t6y7u8i9o0p", "", false)), "no server in the code");
+        // A code that carries servers shows them, over what the user wrote (1471).
+        check("127.0.0.1:4242".equals(typed(CODE, "home.example:4242", false)),
+                "the code's server shows: " + typed(CODE, "home.example:4242", false));
+        check("home.example:4242".equals(typed(BARE, "home.example:4242", false)),
+                "the user's server stays under a bare code: " + typed(BARE, "home.example:4242", false));
+        check("".equals(typed(BARE, "", false)), "no server in the code");
         // A typo after the @ taken back: the field follows the code back.
         String field = ServerField.follow("lqxh1@12", "", "");
         field = ServerField.follow("lqxh1@1", field, "12");
         check("1".equals(field), "back to " + field);
+        // The code taken back past its @: the field it filled empties.
+        field = ServerField.follow("lqxh1", field, field);
+        check("".equals(field), "emptied: " + field);
+
+        // 1471, the Pixel 2026-11-07: a code typed with three servers. The
+        // field shows all three, read-only, and the join request names no
+        // server: the code goes whole, its three servers in their order,
+        // and the library dials them as the code lists them.
+        String shown = typed(THREE, "", false);
+        check(SERVERS.equals(shown), "three shown: " + shown);
+        check(ServerField.carried(THREE), "read-only while the code carries servers");
+        check(ServerField.request(THREE, shown) == null,
+                "the request names no server: " + ServerField.request(THREE, shown));
+        check(ServerField.tail(THREE).equals(SERVERS), "the code carries all three in order");
+        // Control: the request before 1471 sent the field as the server,
+        // a list the library refuses ("Loquax kann nicht lesen, wo ...").
+        check(shown.trim().contains(","), "the field before 1471 sent a list");
+        // A code with one server: the same.
+        check(ServerField.request(CODE, typed(CODE, "", false)) == null, "one server, none named");
+        // A server typed by hand with no code server: it goes.
+        check(!ServerField.carried(BARE), "a bare code leaves the field editable");
+        check("home.example:4242".equals(ServerField.request(BARE, " home.example:4242 ")),
+                "typed by hand: " + ServerField.request(BARE, " home.example:4242 "));
+        check(ServerField.request(BARE, "  ") == null, "nothing typed, nothing named");
+        // A list typed by hand goes as typed; the library refuses it with
+        // the sentence naming one address (session.rs one_server).
+        check("a.example:4242,b.example:4242".equals(
+                ServerField.request(BARE, "a.example:4242,b.example:4242")), "a typed list goes as typed");
         System.out.println(checks + " checks passed");
     }
+
+    static final String BARE = "lqxh1q2w3e4r5t6y7u8i9o0p";
+    static final String SERVERS = "192.168.178.61:4343,leviculum.network:4343,leviculum.network:4242";
+    static final String THREE = BARE + "@" + SERVERS;
 
     /** The field after `code` was typed one character at a time into a field holding `field`. */
     static String typed(String code, String field, boolean before) {

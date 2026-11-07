@@ -361,6 +361,8 @@ mod tests {
             )
         );
         assert_eq!(HomeCode::parse_with_rendezvous(&text), Ok((code(), list)));
+        // `loquax mailbox join CODE` takes the code whole, its list too (1471).
+        assert_eq!(HomeCode::parse(&text), Ok(code()));
         // The first entry is the address to try first.
         assert_eq!(
             HomeCode::parse_with_server(&text).map(|(_, first)| first),

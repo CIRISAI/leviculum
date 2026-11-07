@@ -211,6 +211,8 @@ public class MainActivity extends Activity {
             server.setText(next);
             serverGiven = next.trim();
         }
+        // The code's servers are the code's business (1471): shown, not edited.
+        server.setEnabled(!ServerField.carried(text));
     }
 
     /** What the code gave the server field last (1464). */
@@ -223,7 +225,10 @@ public class MainActivity extends Activity {
     /** Start the session, with what the form holds when asked to join. */
     private void start(final boolean joining) {
         final String typedCode = joining ? code.getText().toString().trim() : null;
-        final String typedServer = joining ? server.getText().toString().trim() : null;
+        // A code with servers names none here: the library takes the
+        // code's list whole, in its order (1471).
+        final String typedServer = joining
+                ? ServerField.request(typedCode, server.getText().toString()) : null;
         final boolean first = typedCode != null && !typedCode.isEmpty();
         join.setEnabled(false);
         retry.setVisibility(View.GONE);
