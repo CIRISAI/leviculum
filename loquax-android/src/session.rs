@@ -1177,6 +1177,25 @@ impl Session {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// What the model built and the store read and committed since the
+    /// last event or [`Session::reset_counters`] (1489,
+    /// `loquax::ui::counters`); `None` in a release build without
+    /// loquax's `counters` feature. For the facade's bars.
+    #[doc(hidden)]
+    pub fn counters(&self) -> Option<loquax::ui::counters::Counters> {
+        let inner = self.lock();
+        Some(inner.model.counters()? + inner.store.counters()?)
+    }
+
+    /// Start the model's and the store's counts afresh. For the facade's
+    /// bars.
+    #[doc(hidden)]
+    pub fn reset_counters(&self) {
+        let inner = self.lock();
+        inner.model.reset_counters();
+        inner.store.reset_counters();
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         use std::sync::atomic::Ordering;
         // Counted while it waits, so the pump lets go after the event it
