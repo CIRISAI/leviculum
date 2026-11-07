@@ -51,9 +51,12 @@ const SIZE: (u32, u32) = (900, 560);
 /// What the emulated shell sends the window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Rule {
-    /// As `drive` does since 1455 ([`Sent`]).
+    /// As `drive` does since 1491 ([`Driving`]): a state built only when
+    /// its stamp moved, sent only when the window shows it differently
+    /// ([`Sent`], 1455).
     Shown,
-    /// Before 1455: every state that differs, its clock's second too.
+    /// Before 1455 and 1491: a state built on every pass, sent whenever
+    /// it differs, its clock's second too.
     EveryChange,
     /// As [`Rule::Shown`], and the map bar's loading word changes every
     /// second, as it does while a region arrives.
@@ -68,12 +71,16 @@ struct Shell {
     clock: WallTime,
     template: Seen,
     rule: Rule,
-    sent: Sent,
+    driving: Driving,
+    browsing: crate::browsing::Browsing,
     last: Option<Seen>,
     start: Instant,
     ticks: u32,
     /// When the window was handed a state, seconds since the start.
     wakes: Vec<f64>,
+    /// When the shell built a state for the window, seconds since the
+    /// start (1491).
+    builds: Vec<f64>,
 }
 
 impl Shell {
@@ -90,28 +97,42 @@ impl Shell {
             };
             update(&mut self.model, UiEvent::Clock(clock));
             update(&mut self.model, UiEvent::Tick);
-            let mut seen = Seen {
-                pins: self.model.map_pins(),
-                tracks: self.model.track_input(),
-                track_window: self.model.track_window,
-                scene: self.model.scene(LayoutClass::Wide),
-                now: self.model.now,
-                receipts: self.model.reading.on,
-                photo_size: self.model.photo_size,
-                ..self.template.clone()
+            // The drive's own builder (`drive` in `gui.rs`), the maps
+            // directory and the map's finish the window was made with.
+            let (model, browsing, template) = (&self.model, &self.browsing, &self.template);
+            let (start, builds, rule) = (self.start, &mut self.builds, self.rule);
+            let mut build = || {
+                builds.push(start.elapsed().as_secs_f64());
+                let mut seen = Seen {
+                    maps: template.maps,
+                    style: template.style,
+                    ..Seen::of_model(model, template.maps, browsing)
+                };
+                if rule == Rule::Loading {
+                    seen.loading = Some(format!("Loading Florence, {secs} s"));
+                }
+                seen
             };
-            if self.rule == Rule::Loading {
-                seen.loading = Some(format!("Loading Florence, {secs} s"));
-            }
             let offered = match self.rule {
-                Rule::Shown | Rule::Loading => self.sent.offer(seen),
-                Rule::EveryChange => match self.last.as_ref() == Some(&seen) {
-                    true => None,
-                    false => {
-                        self.last = Some(seen.clone());
-                        Some(seen)
+                Rule::Shown => self
+                    .driving
+                    .pass(Seen::stamp(model, template.maps, browsing, None), build),
+                // The region's word is the shell's, and moves the stamp
+                // as `map_loading` moves the revision.
+                Rule::Loading => self.driving.pass(
+                    Seen::stamp(model, template.maps, browsing, None) ^ secs as u64,
+                    build,
+                ),
+                Rule::EveryChange => {
+                    let seen = build();
+                    match self.last.as_ref() == Some(&seen) {
+                        true => None,
+                        false => {
+                            self.last = Some(seen.clone());
+                            Some(seen)
+                        }
                     }
-                },
+                }
             };
             if let Some(seen) = offered {
                 self.wakes.push(self.start.elapsed().as_secs_f64());
@@ -288,8 +309,13 @@ struct Quiet {
     /// only [`SETTLE_MAX`] settled it.
     settled: f64,
     timed_out: bool,
-    /// States the shell handed the window.
+    /// States the shell built, and handed the window (1491).
+    builds: usize,
     wakes: usize,
+    /// The wakes a redraw followed before the next wake, wherever it
+    /// landed: a wake late in the five seconds is redrawn after them
+    /// (1486's control under load: 4 wakes, 3 redraws inside them).
+    redrawn: usize,
     /// Every message the window was handed, by kind.
     messages: Vec<(String, usize)>,
     /// The window still waited on its worker at the end.
@@ -308,11 +334,13 @@ struct Quiet {
 impl Quiet {
     fn line(&self, screen: Screen1455, rule: Rule) -> String {
         format!(
-            "IDLE_WINDOW screen={screen:?} rule={rule:?} seconds={} settled={:.2} timed_out={} wakes={} messages={:?} busy={} redraws_unpresented={} presents={} max_damage={:.4} last_rects={}",
+            "IDLE_WINDOW screen={screen:?} rule={rule:?} seconds={} settled={:.2} timed_out={} builds={} wakes={} redrawn={} messages={:?} busy={} redraws_unpresented={} presents={} max_damage={:.4} last_rects={}",
             IDLE.as_secs(),
             self.settled,
             self.timed_out,
+            self.builds,
             self.wakes,
+            self.redrawn,
             self.messages,
             self.busy,
             self.unpresented,
@@ -327,6 +355,20 @@ impl Quiet {
     }
 }
 
+/// The chat's model with nothing left to happen by the clock: the
+/// toasts its sends said have aged out ([`loquax::ui::TOAST_TICKS`]), as
+/// they have on a screen left alone. A toast that ages out inside the
+/// five seconds is a change the window shows (1491: the drive builds
+/// what the model shows, the notice among it), not an idle wake.
+fn settled_model() -> crate::shell::Model {
+    let mut model = chat_model();
+    for _ in 0..loquax::ui::TOAST_TICKS {
+        update(&mut model, UiEvent::Tick);
+    }
+    assert!(model.toasts.is_empty(), "a toast outlived its ticks");
+    model
+}
+
 fn idle(screen: Screen1455, rule: Rule) -> Quiet {
     idle_with(screen, rule, Settle::Events, None)
 }
@@ -337,14 +379,14 @@ fn idle_with(screen: Screen1455, rule: Rule, settle: Settle, late: Option<Durati
     let (w, h) = SIZE;
     let (app, model) = match screen {
         Screen1455::Chat | Screen1455::Typing => {
-            let model = chat_model();
+            let model = settled_model();
             let (tx, _) = tokio::sync::mpsc::unbounded_channel();
             let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
             app.window = Size::new(w as f32, h as f32);
             app.apply(Message::Seen(Box::new(super::tests::seen_of(&model))));
             (app, model)
         }
-        Screen1455::Map => (map_window(w, h).0, chat_model()),
+        Screen1455::Map => (map_window(w, h).0, settled_model()),
     };
     let template = app.seen.clone();
     let mut program = Idle {
@@ -357,11 +399,13 @@ fn idle_with(screen: Screen1455, rule: Rule, settle: Settle, late: Option<Durati
             model,
             template,
             rule,
-            sent: Sent::default(),
+            driving: Driving::default(),
+            browsing: crate::browsing::Browsing::off(),
             last: None,
             start: Instant::now(),
             ticks: 0,
             wakes: Vec::new(),
+            builds: Vec::new(),
         }),
         handed: Vec::new(),
         own: Cell::new(Duration::ZERO),
@@ -427,10 +471,23 @@ fn idle_with(screen: Screen1455, rule: Rule, settle: Settle, late: Option<Durati
             None => messages.push((kind.clone(), 1)),
         }
     }
+    // Each wake with its redraw: the first redraw at or after it, before
+    // the next wake, wherever the five seconds end.
+    let mut redraws: Vec<f64> = run.frames.iter().map(|f| f.at).collect();
+    redraws.extend(run.unpresented.iter().copied());
+    let redrawn = (shell.wakes.iter().enumerate())
+        .filter(|(_, &t)| inside(t))
+        .filter(|&(i, &t)| {
+            let next = shell.wakes.get(i + 1).copied().unwrap_or(f64::INFINITY);
+            redraws.iter().any(|&r| r >= t && r < next)
+        })
+        .count();
     Quiet {
         settled: from,
         timed_out: program.timed_out.get(),
+        builds: shell.builds.iter().filter(|&&t| inside(t)).count(),
         wakes: shell.wakes.iter().filter(|&&t| inside(t)).count(),
+        redrawn,
         messages,
         busy: program.forced.get(),
         unpresented: run.unpresented.iter().filter(|&&t| inside(t)).count(),
@@ -487,24 +544,32 @@ fn an_idle_window_draws_nothing() {
     for (&(screen, rule), quiet) in cases.iter().zip(&measured) {
         match (screen, rule) {
             (Screen1455::Typing, _) => {
-                assert_eq!((quiet.wakes, quiet.messages.len()), (0, 0), "{quiet:?}");
+                assert_eq!(
+                    (quiet.builds, quiet.wakes, quiet.messages.len()),
+                    (0, 0, 0),
+                    "{quiet:?}"
+                );
                 assert!((1..=12).contains(&quiet.presents), "the blink: {quiet:?}");
                 assert!(quiet.damage < 0.1, "the blink drew the window: {quiet:?}");
             }
             (_, Rule::Shown) => assert_eq!(
                 (
                     quiet.timed_out,
+                    quiet.builds,
                     quiet.wakes,
                     quiet.messages.len(),
                     quiet.busy,
                     quiet.unpresented,
                     quiet.presents
                 ),
-                (false, 0, 0, false, 0, 0),
+                (false, 0, 0, 0, false, 0, 0),
                 "{screen:?} idle: {quiet:?}"
             ),
+            // The rule before 1491 builds on every tick, twenty in the
+            // five seconds, and wakes the window on every second of the
+            // clock; each wake is redrawn, counted with its wake.
             (_, Rule::EveryChange) => assert!(
-                quiet.wakes >= 4 && quiet.unpresented + quiet.presents >= 4,
+                quiet.builds >= 16 && quiet.wakes >= 4 && quiet.redrawn >= 4,
                 "the control woke nothing: {quiet:?}"
             ),
             (_, Rule::Loading) => {

@@ -177,31 +177,91 @@ impl std::fmt::Debug for Browsed {
 
 impl Seen {
     fn of(shell: &Shell) -> Self {
+        Self::of_model(&shell.model, shell.maps.epoch(), &shell.browsing)
+    }
+
+    /// What the window shows of `model`, the maps directory at `maps`,
+    /// the hosted browser's pictures in `browsing`: [`Seen::of`] without
+    /// the rest of the shell, which the idle tests have none of.
+    fn of_model(
+        model: &crate::shell::Model,
+        maps: u64,
+        browsing: &crate::browsing::Browsing,
+    ) -> Self {
         Self {
-            pins: shell.model.map_pins(),
-            tracks: shell.model.track_input(),
-            track_window: shell.model.track_window,
-            notice: shell.model.toasts.last().map(|t| t.text.clone()),
-            loading: shell.model.map_loading.clone(),
-            maps: shell.maps.epoch(),
-            autoload: shell.model.map_autoload,
-            style: Style::SCREEN.in_theme(map_theme(shell.model.map_theme, None)),
-            scene: shell.model.scene(LayoutClass::Wide),
-            now: shell.model.now,
-            receipts: shell.model.reading.on,
-            photo_size: shell.model.photo_size,
+            pins: model.map_pins(),
+            tracks: model.track_input(),
+            track_window: model.track_window,
+            notice: model.toasts.last().map(|t| t.text.clone()),
+            loading: model.map_loading.clone(),
+            maps,
+            autoload: model.map_autoload,
+            style: Style::SCREEN.in_theme(map_theme(model.map_theme, None)),
+            scene: model.scene(LayoutClass::Wide),
+            now: model.now,
+            receipts: model.reading.on,
+            photo_size: model.photo_size,
             photo: None,
-            browse: match (shell.model.browse.showing(), &shell.browsing.pictures) {
+            browse: match (model.browse.showing(), &browsing.pictures) {
                 (true, Some(pictures)) => Some(Browsed {
-                    model: Arc::new(shell.model.browse.model.clone()),
-                    scene: shell.model.browse.model.scene(),
+                    model: Arc::new(model.browse.model.clone()),
+                    scene: model.browse.model.scene(),
                     pictures: Arc::clone(pictures),
-                    epoch: shell.browsing.epoch,
+                    epoch: browsing.epoch,
                 }),
                 _ => None,
             },
-            copied: shell.browsing.copied.clone(),
+            copied: browsing.copied.clone(),
         }
+    }
+
+    /// What [`Seen::of_model`] is built from (1491): the model's
+    /// revision, the maps directory's epoch, the browser's pictures and
+    /// copies, the photo the viewer shows. The drive builds a state only
+    /// when it moved.
+    fn stamp(
+        model: &crate::shell::Model,
+        maps: u64,
+        browsing: &crate::browsing::Browsing,
+        photo: Option<&viewer::Picture>,
+    ) -> u64 {
+        loquax::ui::Presented::stamp(
+            model.revision,
+            &[
+                maps,
+                browsing.epoch,
+                browsing.copied.as_ref().map_or(0, |(serial, _)| *serial),
+                photo.map_or(0, |p| p.serial),
+            ],
+        )
+    }
+}
+
+/// The drive's half of a pass (1491): the state the window is sent,
+/// built only when its stamp moved and sent only when the window would
+/// show it differently ([`Sent`]). Before 1491 the drive built the whole
+/// scene, the pins and the tracks on every pass, fifty times a second,
+/// and [`Sent`] threw the build away.
+#[derive(Default)]
+struct Driving {
+    presented: loquax::ui::Presented,
+    sent: Sent,
+}
+
+impl Driving {
+    /// The state for the window, when one is owed: `build` runs only when
+    /// `stamp` moved.
+    fn pass(&mut self, stamp: u64, build: impl FnOnce() -> Seen) -> Option<Seen> {
+        if !self.presented.due(stamp) {
+            return None;
+        }
+        self.sent.offer(build())
+    }
+
+    /// How many states the drive built.
+    #[cfg(test)]
+    fn builds(&self) -> u64 {
+        self.presented.builds()
     }
 }
 
@@ -247,6 +307,8 @@ pub async fn run(options: ShellOptions) -> ExitCode {
     // No receiver on a desktop (1371): the position sheet takes it by
     // hand, typed or the map's centre.
     shell.model.bar.abilities.manual = true;
+    // Set here, not folded: the scene the start built is dropped (1491).
+    shell.model.changed_outside();
     // The Browse tab's pictures (1369): lnomad's window code holds them in
     // the shell, which the window draws them from.
     shell.browsing.pictures = Some(Arc::default());
@@ -283,9 +345,10 @@ async fn drive(
     // words the model says itself, a group's notes and a digest's
     // left-out lines among them (1348), are the window's too.
     shell.model.lang = locale();
+    shell.model.changed_outside();
     shell.apply(UiEvent::Clock(local_now()));
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
-    let mut sent = Sent::default();
+    let mut driving = Driving::default();
     let mut photo: Option<viewer::Picture> = None;
     let mut notices = desktop::Notices::default();
     let mut front = true;
@@ -321,9 +384,17 @@ async fn drive(
                 tracing::warn!("could not open {}: {error}", path.display());
             }
         }
-        let mut now = Seen::of(&shell);
-        now.photo = photo.clone();
-        if let Some(now) = sent.offer(now) {
+        let stamp = Seen::stamp(
+            &shell.model,
+            shell.maps.epoch(),
+            &shell.browsing,
+            photo.as_ref(),
+        );
+        let offered = driving.pass(stamp, || Seen {
+            photo: photo.clone(),
+            ..Seen::of(&shell)
+        });
+        if let Some(now) = offered {
             if seen.unbounded_send(now).is_err() {
                 break;
             }
@@ -3471,6 +3542,8 @@ mod tests {
     /// conversation is open.
     pub(super) fn chat_model() -> crate::shell::Model {
         let mut model = crate::shell::Model::new(&[]);
+        // The window keeps its scenes whole, as `run` sets it (1490).
+        update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
         model.address = Some(OWN);
         model.names.remember(OWN, "Mia Sander");
         model.names.remember(ANNA, "Anna Schulz");
@@ -3545,6 +3618,7 @@ mod tests {
         let (w, h) = (900, 560);
         let mut model = chat_model();
         model.bar.abilities = loquax::ui::compose::Abilities::desktop();
+        model.changed_outside();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
         app.window = Size::new(w as f32, h as f32);
@@ -4738,6 +4812,7 @@ mod tests {
         let (w, h) = (900, 560);
         let mut model = chat_model();
         model.bar.abilities.picker = true;
+        model.changed_outside();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
         app.window = Size::new(w as f32, h as f32);
