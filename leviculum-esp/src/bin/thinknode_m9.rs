@@ -273,7 +273,10 @@ fn kb_drain() -> (Vec<kbraw::Press>, u32, u32) {
 // in, asks out — so two loops with queues give the decoupling without a
 // new machine to trust. Flash stays on core 0; esp-storage's AutoPark
 // parks the UI core for each write or erase (the flash routines run
-// with the cache off, which core 1 executes through).
+// with the cache off, which core 1 executes through), and core 0 holds
+// the critical section across each one, so the UI core is never parked
+// holding it and no interrupt here waits on it while the UI core is
+// parked (1534, `leviculum_esp::flash`, `parked`).
 
 /// What the I/O core hands the UI core.
 enum ToUi {

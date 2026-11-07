@@ -27,11 +27,26 @@ use loquax::home::record::{slots, ClientRecord, RecordError};
 
 use crate::stall::{self, Core, Lock};
 
-/// Run a flash write or erase, `f`, named in the stall record (1534):
-/// esp-storage parks the other core for it, and a hang inside is the
-/// record's `core0_lock=flash`.
+/// Run a flash write or erase, `f`, inside the cross-core critical
+/// section, named in the stall record (1534).
+///
+/// esp-storage's AutoPark stalls the other core wherever it is
+/// (`esp-storage-0.10.0/src/common.rs`, `pre_write`, then `post_write`
+/// unparks). The UI core takes the one cross-core critical section for
+/// every queue push, every key drain and every allocation (embedded-alloc's
+/// heap locks with it), so it is often parked holding that spinlock. The
+/// ROM call itself runs with core 0's interrupts off (esp-storage's own
+/// lock), but they are on again between the op and the unpark, and the
+/// keyboard's 10 ms tick, pending after any erase (about 45 ms), runs
+/// there: its `critical_section::with` spins for a lock the parked core
+/// holds, with interrupts off, and both cores are dead (the M9's hang of
+/// 2026-11-07, UART silent until a hand reset). Holding the section
+/// across the whole op closes both halves: the UI core cannot be parked
+/// inside it (core 0 owns it), and no interrupt runs on core 0 until the
+/// UI core is unparked. Core 0's interrupts were already off for the op
+/// itself, so the latency added is the park and unpark around it.
 fn parked<R>(f: impl FnOnce() -> R) -> R {
-    stall::locked(Core::Io, Lock::Flash, f)
+    stall::locked(Core::Io, Lock::Flash, || critical_section::with(|_| f()))
 }
 
 /// The partition the node's identity lives in.
@@ -136,6 +151,8 @@ impl<'d> Stores<'d> {
         // The UI runs on the second core since 1493: every write and
         // erase parks it for the op (esp-storage's AutoPark), since the
         // flash routines run with the cache the core executes from off.
+        // Never while it holds the critical section (1534): every write
+        // and erase goes through `parked`.
         let mut flash = FlashStorage::new(flash).multicore_auto_park();
         let mut table = Aligned([0u8; PARTITION_TABLE_MAX_LEN]);
         let (identity, client, client_b, messages) =
