@@ -2700,7 +2700,7 @@ build-m9:
 # 230400 baud its CH340K holds (lnflash/src/esp.rs, the bench notes of
 # 2026-10-25), with the M9's partition table (`leviculum-esp/
 # partitions-m9.csv`: the identity and the Loquax client record beside the
-# application, 1414). The port is the bridge's tty; espflash resets the
+# application, 1414, and the message store, 1476). The port is the bridge's tty; espflash resets the
 # board into the loader and back.
 [doc('Flash the ThinkNode M9 Loquax image over its CH340 (port: the tty)')]
 flash-m9 port:

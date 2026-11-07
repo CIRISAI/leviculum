@@ -42,7 +42,7 @@
 //! [BOARD] id=M9 name=Elecrow ThinkNode M9 heap=<psram bytes> t=<ms>
 //! [HEAP] region=psram start=<addr> bytes=<n> t=<ms>
 //! [STACK] bytes=<n> t=<ms>
-//! [FLASH] identity=<offset|none/why> client=<offset|none/why> t=<ms>  (1414)
+//! [FLASH] identity=<offset|none/why> client=<offset|none/why> messages=<offset|none/why> t=<ms>  (1414, 1476)
 //! [IDENTITY] identity=<hash> probe=none lxmf=none source=<flash|generated> stored=<yes|no> t=<ms>
 //! [CENSUS] node held=<n> box=<n> links=8 max_answer=262144 t=<ms>
 //! [NODE] state=up iface=serial hw_mtu=564 serial_mux=1 t=<ms>
@@ -56,9 +56,11 @@
 //! [CENSUS] screen=<map|pan> ... verdict=ok t=<ms>               (1375)
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
+//! [STORE] sectors=1024 used=<n> entries=<n> cursor=<seq> torn=<n> foreign=<n> restore_ms=<ms>  (1476)
 //! [HOME] store=empty cursor=reset was=<n> cursor=0   (1476, a record whose store is gone; or store=behind/ahead)
 //! [HOME] page ... taken=<n> of=<m> / pulled ... / joined=yes ... / failed ...   (as the client asks)
 //! [HOME] code=typed / code=taken saved=yes / code=refused ...   (1415, a code taken in)
+//! [STORE] kept=<n> writes=<n> erased=<n> cursor=<seq> used=<n> entries=<n>   (1476, every page pulled)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
 //! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> t=<ms>
@@ -404,9 +406,10 @@ fn main() -> ! {
     log.line(
         "[FLASH] ",
         format_args!(
-            "identity={} client={}",
+            "identity={} client={} messages={}",
             stores.identity_slot(),
-            stores.client_slot()
+            stores.client_slot(),
+            stores.messages_slot()
         ),
     );
     // The true random source: the SoC's RNG with the ADC's noise. Kept for
@@ -614,24 +617,24 @@ fn main() -> ! {
     };
     drop(answers);
     drop(archive);
-    match stores.load_client() {
-        // The messages are in PSRAM, which came up empty: the store ends
-        // at zero, and a record that pulled before pulls again (1476).
-        Ok(Some(record)) => node.client(record, 0, batch, &mut log),
-        Ok(None) => log.line(
-            "[HOME] ",
-            format_args!("client=none page={}", batch.page_bytes),
-        ),
-        Err(error) => log.line("[HOME] ", format_args!("client=unread error={error}")),
-    }
-
-    // A device of a home draws its home's chats, from the first pull on;
-    // a board that is none opens on the pairing, and Back from there shows
-    // the fixture as before (1415).
-    let mut model = match node.address() {
-        Some(address) => home::model(address),
-        None => fixture::model(),
+    // A device of a home draws its home's chats: what its message store
+    // kept (1476), then every pull; a board that is none opens on the
+    // pairing, and Back from there shows the fixture as before (1415).
+    let restored = match stores.load_client() {
+        Ok(Some(record)) => node.client(record, batch, &mut stores, &mut log),
+        Ok(None) => {
+            log.line(
+                "[HOME] ",
+                format_args!("client=none page={}", batch.page_bytes),
+            );
+            None
+        }
+        Err(error) => {
+            log.line("[HOME] ", format_args!("client=unread error={error}"));
+            None
+        }
     };
+    let mut model = restored.unwrap_or_else(fixture::model);
     let mut shown = Shown {
         pairing: node.address().is_none().then(Pairing::new),
         word: node.word(),
@@ -694,7 +697,13 @@ fn main() -> ! {
                         ),
                         Some(text) => {
                             match node.take_code(text, &mut rng, &mut stores, batch, &mut log) {
-                                Ok(()) => envelope::encode_ack(envelope::TYPE_HOME_CODE),
+                                Ok(taken) => {
+                                    if let Some(taken) = taken {
+                                        model = taken;
+                                        row = 0;
+                                    }
+                                    envelope::encode_ack(envelope::TYPE_HOME_CODE)
+                                }
                                 Err(CodeRefusal::Value) => envelope::encode_refusal(
                                     envelope::TYPE_HOME_CODE,
                                     envelope::REFUSE_VALUE,
@@ -707,9 +716,7 @@ fn main() -> ! {
                         }
                     };
                     log.frame(&answer);
-                    if let Some(address) = node.address() {
-                        model = home::model(address);
-                        row = 0;
+                    if node.address().is_some() {
                         shown.pairing = None;
                         shown.word = node.word();
                         redraw(
@@ -819,8 +826,7 @@ fn main() -> ! {
                 if !events.is_empty() {
                     for event in events {
                         if let Some(pairing) = shown.pairing.as_mut() {
-                            let before = node.address();
-                            pairing_key(
+                            let taken = pairing_key(
                                 pairing,
                                 &event,
                                 &mut node,
@@ -832,10 +838,11 @@ fn main() -> ! {
                             if event.code == KeyCode::Esc && event.kind != KeyEventKind::Release {
                                 shown.pairing = None;
                             }
-                            if let (None, Some(address)) = (before, node.address()) {
+                            if let Some(taken) = taken {
                                 // The code was taken: the home's chats from
-                                // here, the join in the top bar.
-                                model = home::model(address);
+                                // here (what the store kept of that home),
+                                // the join in the top bar.
+                                model = taken;
                                 row = 0;
                                 shown.pairing = None;
                             }
@@ -876,7 +883,7 @@ fn main() -> ! {
 
 /// One key on the pairing screen: the code edited, and on Enter with a
 /// whole code that checks, the code taken as `lnflash --home` would give
-/// it.
+/// it; the model the board shows from then on.
 fn pairing_key(
     pairing: &mut Pairing,
     event: &KeyEvent,
@@ -885,12 +892,13 @@ fn pairing_key(
     stores: &mut Stores<'_>,
     batch: loquax::home::board::Batch,
     log: &mut UartLog<'_>,
-) {
-    if let Some(code) = pairing.key(event) {
-        log.line("[HOME] ", format_args!("code=typed"));
-        // Refused only when flash would not take it: the typed code checked.
-        let _ = node.take_code(&code.encode(), rng, stores, batch, log);
-    }
+) -> Option<UiModel<Field>> {
+    let code = pairing.key(event)?;
+    log.line("[HOME] ", format_args!("code=typed"));
+    // Refused only when flash would not take it: the typed code checked.
+    node.take_code(&code.encode(), rng, stores, batch, log)
+        .ok()
+        .flatten()
 }
 
 /// One control frame from the host: the envelope's capability query and

@@ -21,6 +21,8 @@ use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::{DestinationHash, Identity, LinkId, TickOutput};
 use rand_core::CryptoRngCore;
 
+pub mod store;
+
 use super::ask::{self, Ask, HomeError, Outcome, Step};
 use super::wire::{self, Status};
 use crate::outbox::OutboxEvent;

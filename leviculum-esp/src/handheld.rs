@@ -15,11 +15,11 @@
 //! the keys or written over the control link (`TYPE_HOME_CODE`, 1415)
 //! makes the record ([`Handheld::take_code`]). A page's entries are handed
 //! to the board's loop ([`Handheld::drain`]), which folds them into the
-//! model the screen draws (`loquax_m9::home`). The messages live in
-//! PSRAM and go with the power; at boot the record's cursor is made to
-//! agree with what the board still holds ([`Handheld::client`], 1476), so
-//! a board that lost them pulls them again instead of trusting a cursor
-//! that says everything was fetched.
+//! model the screen draws (`loquax_m9::home`), and each page is kept in
+//! the message store in flash as it comes (1476). At boot the model is
+//! restored from the store and the record's cursor is made to agree with
+//! it ([`Handheld::client`]): a board whose store is gone pulls again
+//! instead of trusting a cursor that says everything was fetched.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -39,6 +39,11 @@ use loquax::home::board::{
 use loquax::home::record::{Admission, ClientRecord};
 use loquax::home::wire::{Entry, Submission};
 use rand_core::CryptoRngCore;
+
+use loquax::home::board::store::Store;
+use loquax::ui::UiModel;
+use loquax_m9::field::Field;
+use loquax_m9::home as m9home;
 
 use crate::flash::Stores;
 use crate::serial_iface::{SerialIface, SERIAL_HW_MTU, SERIAL_IFACE, SERIAL_NAME};
@@ -112,6 +117,8 @@ struct Client {
     progress: Option<Progress>,
     /// The cursor as flash has it; the record's moves with every page.
     saved_cursor: u64,
+    /// The message store, when the board's table has one (1476).
+    store: Option<Store>,
     /// Sends the model asked for, oldest first.
     outgoing: VecDeque<Submission>,
     drained: Drained,
@@ -188,8 +195,9 @@ impl Handheld {
 
     /// Take `text` as a home's admission code (1415): a new device
     /// identity from `rng`, the pending record written to flash, and the
-    /// client that joins with it, replacing any it had. Typed on the keys
-    /// or written by `lnflash --home`; the same record either way.
+    /// client that joins with it, replacing any it had; the model the
+    /// screen shows from here. Typed on the keys or written by `lnflash
+    /// --home`; the same record either way.
     pub fn take_code(
         &mut self,
         text: &str,
@@ -197,7 +205,7 @@ impl Handheld {
         stores: &mut Stores<'_>,
         batch: Batch,
         log: &mut UartLog<'_>,
-    ) -> Result<(), CodeRefusal> {
+    ) -> Result<Option<UiModel<Field>>, CodeRefusal> {
         let device = Identity::generate(rng);
         let record = match board::admit(text, &device, DEVICE_NAME) {
             Ok(record) => record,
@@ -211,27 +219,67 @@ impl Handheld {
             return Err(CodeRefusal::Persist);
         }
         log.line("[HOME] ", format_args!("code=taken saved=yes"));
-        self.client(record, 0, batch, log);
-        Ok(())
+        Ok(self.client(record, batch, stores, log))
     }
 
     /// Become a device of the home `record` names, pulling in `batch`,
-    /// with a message store that ends at sequence `stored` (zero: empty);
-    /// says why not when the record's identity does not read.
+    /// and the model the screen shows: what the message store in flash
+    /// holds for that home (1476), said in a `[STORE]` line. `None`, and
+    /// why in a `[HOME]` line, when the record's identity does not read.
     ///
-    /// The record's cursor is first made to agree with the store
-    /// (`board::agree`, 1476): a cursor past zero over an empty store
-    /// means the store was lost, and the board pulls again from the start
-    /// rather than showing an empty list under a cursor that says
-    /// everything was fetched. The record in flash keeps its old cursor
-    /// until the next pull ends and writes the new one.
+    /// The record's cursor is then made to agree with the store
+    /// (`board::agree`): a cursor past zero over an empty store means the
+    /// store was lost, and the board pulls again from the start rather
+    /// than showing an empty list under a cursor that says everything was
+    /// fetched. The record in flash keeps its old cursor until the next
+    /// pull ends and writes the new one.
     pub fn client(
         &mut self,
         mut record: ClientRecord,
-        stored: u64,
         batch: Batch,
+        stores: &mut Stores<'_>,
         log: &mut UartLog<'_>,
-    ) {
+    ) -> Option<UiModel<Field>> {
+        let address = match loquax::home::lxmf_address(&record.home) {
+            Ok(address) => address,
+            Err(error) => {
+                log.line("[HOME] ", format_args!("client=unread error={error}"));
+                return None;
+            }
+        };
+        let t0 = crate::uptime_ms();
+        let (model, store) = match stores.messages() {
+            None => {
+                log.line(
+                    "[STORE] ",
+                    format_args!("sectors=0 region={}", stores.messages_slot()),
+                );
+                (m9home::model(address), None)
+            }
+            Some(mut dev) => match m9home::restore(&mut dev, address) {
+                Ok((model, store, restored)) => {
+                    log.line(
+                        "[STORE] ",
+                        format_args!(
+                            "sectors={} used={} entries={} cursor={} torn={} foreign={} restore_ms={}",
+                            store.sectors(),
+                            store.used(),
+                            restored.entries,
+                            store.cursor(),
+                            restored.torn,
+                            restored.foreign,
+                            crate::uptime_ms().saturating_sub(t0)
+                        ),
+                    );
+                    (model, Some(store))
+                }
+                Err(error) => {
+                    log.line("[STORE] ", format_args!("restore=failed error={error}"));
+                    (m9home::model(address), None)
+                }
+            },
+        };
+        let stored = store.as_ref().map_or(0, Store::cursor);
         let saved_cursor = record.cursor;
         let agreement = board::agree(&mut record, stored);
         if agreement != board::Agreement::Agrees {
@@ -240,9 +288,8 @@ impl Handheld {
                 format_args!("{agreement} cursor={}", record.cursor),
             );
         }
-        let address = loquax::home::lxmf_address(&record.home);
-        match (record.device_identity(), address) {
-            (Ok(device), Ok(address)) => {
+        match record.device_identity() {
+            Ok(device) => {
                 log.line(
                     "[HOME] ",
                     format_args!(
@@ -266,10 +313,14 @@ impl Handheld {
                     progress: None,
                     outgoing: VecDeque::new(),
                     drained: Drained::default(),
+                    store,
                 });
+                Some(model)
             }
-            (Err(error), _) => log.line("[HOME] ", format_args!("client=unread error={error:?}")),
-            (_, Err(error)) => log.line("[HOME] ", format_args!("client=unread error={error}")),
+            Err(error) => {
+                log.line("[HOME] ", format_args!("client=unread error={error:?}"));
+                None
+            }
         }
     }
 
@@ -431,6 +482,26 @@ impl Handheld {
                         progress.of.map_or(-1, |of| of as i64)
                     ),
                 );
+                // Kept in flash before the model takes it (1476): one write
+                // per sector the page touches, before the next page is
+                // asked, so the line is quiet while the flash is busy.
+                if let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) {
+                    match m9home::keep(store, &mut dev, &page.entries, &client.address) {
+                        Ok(done) => log.line(
+                            "[STORE] ",
+                            format_args!(
+                                "kept={} writes={} erased={} cursor={} used={} entries={}",
+                                done.entries,
+                                done.writes,
+                                done.erased,
+                                store.cursor(),
+                                store.used(),
+                                store.entries()
+                            ),
+                        ),
+                        Err(error) => log.line("[STORE] ", format_args!("kept=no error={error}")),
+                    }
+                }
                 client.drained.entries.extend(page.entries);
             }
             Report::Done(result) => {

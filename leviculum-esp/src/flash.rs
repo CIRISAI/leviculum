@@ -1,6 +1,8 @@
 //! The board's stores in flash, found by label in the partition table
 //! (1414): the node's identity and, on a Loquax handheld, the client
-//! record that makes it a device of its home.
+//! record that makes it a device of its home and (1476) the message store
+//! its chats come back from after a power cycle
+//! (`loquax::home::board::store`, over [`Messages`]).
 //!
 //! The same approach the Heltec node on the `esp` branch took
 //! (`9bb5efbf`, "The ESP32 board keeps what it was told"): espflash writes
@@ -20,12 +22,15 @@ use esp_hal::peripherals::FLASH;
 use esp_storage::{FlashStorage, FlashStorageError};
 use leviculum_core::identity::Identity;
 use leviculum_core::identity_store::{self, ENCODED_SIZE_ALIGNED as IDENTITY_SIZE};
+use loquax::home::board::store::{Sectors, SECTOR as STORE_SECTOR};
 use loquax::home::record::{ClientRecord, RecordError, RECORD_LEN};
 
 /// The partition the node's identity lives in.
 pub const IDENTITY_LABEL: &str = "identity";
 /// The partition the Loquax client record lives in.
 pub const CLIENT_LABEL: &str = "loquax_client";
+/// The partition the message store lives in (1476).
+pub const MESSAGES_LABEL: &str = "messages";
 
 /// `data`, the partition type every store is.
 const TYPE_DATA: u8 = 0x01;
@@ -102,6 +107,8 @@ pub struct Stores<'d> {
     flash: FlashStorage<'d>,
     identity: Slot,
     client: Slot,
+    /// The message store's region: its offset and how many sectors.
+    messages: Result<(u32, u32), NoRegion>,
 }
 
 impl<'d> Stores<'d> {
@@ -109,34 +116,46 @@ impl<'d> Stores<'d> {
     pub fn open(flash: FLASH<'d>) -> Self {
         let mut flash = FlashStorage::new(flash);
         let mut table = Aligned([0u8; PARTITION_TABLE_MAX_LEN]);
-        let (identity, client) = match partitions::read_partition_table(&mut flash, &mut table.0) {
-            Err(_) => (Err(NoRegion::NoTable), Err(NoRegion::NoTable)),
-            Ok(table) => {
-                let mut identity = Err(NoRegion::NoEntry);
-                let mut client = Err(NoRegion::NoEntry);
-                for entry in table.iter() {
-                    let found = match entry.label_as_str() {
-                        IDENTITY_LABEL => &mut identity,
-                        CLIENT_LABEL => &mut client,
-                        _ => continue,
-                    };
-                    *found = if entry.raw_type() != TYPE_DATA {
-                        Err(NoRegion::NotData)
-                    } else if entry.is_read_only() {
-                        Err(NoRegion::ReadOnly)
-                    } else if entry.offset() % SECTOR != 0 || entry.len() < SECTOR {
-                        Err(NoRegion::Unfit)
-                    } else {
-                        Ok(entry.offset())
-                    };
+        let (identity, client, messages) =
+            match partitions::read_partition_table(&mut flash, &mut table.0) {
+                Err(_) => (
+                    Err(NoRegion::NoTable),
+                    Err(NoRegion::NoTable),
+                    Err(NoRegion::NoTable),
+                ),
+                Ok(table) => {
+                    let mut identity = Err(NoRegion::NoEntry);
+                    let mut client = Err(NoRegion::NoEntry);
+                    let mut messages = Err(NoRegion::NoEntry);
+                    for entry in table.iter() {
+                        let found = match entry.label_as_str() {
+                            IDENTITY_LABEL => &mut identity,
+                            CLIENT_LABEL => &mut client,
+                            MESSAGES_LABEL => &mut messages,
+                            _ => continue,
+                        };
+                        *found = if entry.raw_type() != TYPE_DATA {
+                            Err(NoRegion::NotData)
+                        } else if entry.is_read_only() {
+                            Err(NoRegion::ReadOnly)
+                        } else if entry.offset() % SECTOR != 0 || entry.len() < SECTOR {
+                            Err(NoRegion::Unfit)
+                        } else {
+                            Ok((entry.offset(), entry.len() / SECTOR))
+                        };
+                    }
+                    (
+                        identity.map(|(offset, _)| offset),
+                        client.map(|(offset, _)| offset),
+                        messages,
+                    )
                 }
-                (identity, client)
-            }
-        };
+            };
         Self {
             flash,
             identity: Slot(identity),
             client: Slot(client),
+            messages,
         }
     }
 
@@ -148,6 +167,22 @@ impl<'d> Stores<'d> {
     /// Where the client record lives.
     pub fn client_slot(&self) -> Slot {
         self.client
+    }
+
+    /// Where the message store lives.
+    pub fn messages_slot(&self) -> Slot {
+        Slot(self.messages.map(|(offset, _)| offset))
+    }
+
+    /// The message store's sectors, as the store reads and writes them;
+    /// `None` on a board whose table has no `messages` partition.
+    pub fn messages(&mut self) -> Option<Messages<'_, 'd>> {
+        let (offset, count) = self.messages.ok()?;
+        Some(Messages {
+            flash: &mut self.flash,
+            offset,
+            count,
+        })
     }
 
     fn read(&mut self, slot: Slot, buf: &mut [u8]) -> Result<(), StoreError> {
@@ -198,5 +233,71 @@ impl<'d> Stores<'d> {
             return Ok(());
         }
         self.write(self.client, &encoded.0)
+    }
+}
+
+/// The bytes one flash call moves for the message store: the store's
+/// buffers are on the heap, which is PSRAM behind the cache the flash
+/// routines turn off, so every byte goes through this much stack.
+const BOUNCE: usize = 512;
+
+/// The message store's partition as [`Sectors`] (1476).
+pub struct Messages<'a, 'd> {
+    flash: &'a mut FlashStorage<'d>,
+    offset: u32,
+    count: u32,
+}
+
+impl Messages<'_, '_> {
+    fn at(&self, sector: u32, offset: usize, len: usize) -> Result<u32, StoreError> {
+        let inside = sector < self.count && offset + len <= STORE_SECTOR;
+        match inside {
+            true => Ok(self.offset + sector * SECTOR + offset as u32),
+            false => Err(StoreError::Flash(FlashStorageError::OutOfBounds)),
+        }
+    }
+}
+
+impl Sectors for Messages<'_, '_> {
+    type Error = StoreError;
+
+    fn count(&self) -> u32 {
+        self.count
+    }
+
+    fn read(&mut self, sector: u32, offset: usize, buf: &mut [u8]) -> Result<(), StoreError> {
+        let mut at = self.at(sector, offset, buf.len())?;
+        let mut bounce = Aligned([0u8; BOUNCE]);
+        for chunk in buf.chunks_mut(BOUNCE) {
+            // The store reads whole words: offsets and lengths are its
+            // frames', a multiple of four.
+            let words = (chunk.len() + 3) & !3;
+            self.flash
+                .read_nor(at, &mut bounce.0[..words])
+                .map_err(StoreError::Flash)?;
+            chunk.copy_from_slice(&bounce.0[..chunk.len()]);
+            at += chunk.len() as u32;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, sector: u32, offset: usize, data: &[u8]) -> Result<(), StoreError> {
+        let mut at = self.at(sector, offset, data.len())?;
+        let mut bounce = Aligned([0u8; BOUNCE]);
+        for chunk in data.chunks(BOUNCE) {
+            bounce.0[..chunk.len()].copy_from_slice(chunk);
+            self.flash
+                .write_nor(at, &bounce.0[..chunk.len()])
+                .map_err(StoreError::Flash)?;
+            at += chunk.len() as u32;
+        }
+        Ok(())
+    }
+
+    fn erase(&mut self, sector: u32) -> Result<(), StoreError> {
+        let from = self.at(sector, 0, STORE_SECTOR)?;
+        self.flash
+            .erase(from, from + SECTOR)
+            .map_err(StoreError::Flash)
     }
 }

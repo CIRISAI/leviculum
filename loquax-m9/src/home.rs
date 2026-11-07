@@ -9,6 +9,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use loquax::home::board;
+use loquax::home::board::store::{self, Appended, Restored, Sectors, Store};
 use loquax::home::wire::{Entry, Submission};
 use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel};
 
@@ -37,6 +38,42 @@ pub fn take(model: &mut UiModel<Field>, entries: &[Entry], address: &[u8; 16]) -
         }
     }
     taken
+}
+
+/// What a board that is a device of the home at `address` shows at boot
+/// (1476): its model with every entry its message store on `dev` holds
+/// folded in, the store, and what the store found. The client's cursor
+/// then agrees with [`Store::cursor`] (`board::agree`).
+pub fn restore<S: Sectors>(
+    dev: &mut S,
+    address: [u8; 16],
+) -> Result<(UiModel<Field>, Store, Restored), S::Error> {
+    let mut shown = model(address);
+    let (store, restored) = Store::open(dev, store::tag(&address), |entry| {
+        take(&mut shown, core::slice::from_ref(&entry), &address);
+    })?;
+    Ok((shown, store, restored))
+}
+
+/// Keep a pulled page in `store`: the entries the board's fold keeps
+/// (`board::fold`, what the list and a chat show), and the page's newest
+/// sequence as the store's end, in one write per sector it touches. An
+/// empty page writes nothing.
+pub fn keep<S: Sectors>(
+    store: &mut Store,
+    dev: &mut S,
+    entries: &[Entry],
+    address: &[u8; 16],
+) -> Result<Appended, S::Error> {
+    let Some(last) = entries.iter().map(|entry| entry.seq).max() else {
+        return Ok(Appended::default());
+    };
+    let kept: Vec<Entry> = entries
+        .iter()
+        .filter(|entry| board::fold(entry, address).is_some())
+        .cloned()
+        .collect();
+    store.append(dev, &kept, last)
 }
 
 /// The sends among `effects`, as the home takes them, each with an id of

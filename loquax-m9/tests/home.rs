@@ -249,3 +249,202 @@ fn a_line_typed_on_the_board_is_a_send_to_the_home() {
         .collect();
     assert_eq!(lines, ["na?", "vom M9"]);
 }
+
+/// A pulled archive of `n` messages from `friends` to `address`, oldest
+/// first, one in five sent by the board's own home (1476).
+fn archive(me: &Identity, address: [u8; 16], friends: &[Identity], n: u64) -> Vec<Entry> {
+    (1..=n)
+        .map(|seq| {
+            let friend = &friends[seq as usize % friends.len()];
+            let theirs = lxmf_address(&friend.public_key_bytes()).expect("address");
+            let at = 1_762_000_000.0 + seq as f64;
+            let (kind, packed) = match seq % 5 {
+                0 => (KIND_SENT, pack(me, theirs, &format!("Antwort {seq}"), at)),
+                _ => (
+                    KIND_RECEIVED,
+                    pack(friend, address, &format!("Nachricht {seq}"), at),
+                ),
+            };
+            Entry {
+                seq,
+                kind,
+                at: at as i64,
+                packed,
+            }
+        })
+        .collect()
+}
+
+fn list_text(model: &loquax::ui::UiModel<loquax_m9::field::Field>) -> Vec<String> {
+    screen::lines(&screen::scene(model), &Look::of(model), COLS, ROWS)
+        .iter()
+        .map(row_text)
+        .collect()
+}
+
+/// 1476, the photo of 2026-11-07: the board pulls its archive in pages,
+/// each kept in the flash store as it comes, and is "rebooted": the PSRAM
+/// model is dropped, the flash images (the client record and the store)
+/// stay. At boot the store gives back the same chats list, every message
+/// of every chat, and the record's cursor agrees with the store, so the
+/// next pull asks for nothing it has. The control: a board whose store is
+/// gone (the flash erased) shows the empty list and its cursor resets.
+#[test]
+fn the_chats_come_back_from_the_flash_store_after_a_reboot() {
+    use loquax::home::board::store::MemFlash;
+    use loquax::home::board::{agree, Agreement};
+    use loquax::home::record::{Admission, ClientRecord};
+
+    let me = Identity::generate(&mut OsRng);
+    let address = lxmf_address(&me.public_key_bytes()).expect("address");
+    let friends: Vec<Identity> = (0..3).map(|_| Identity::generate(&mut OsRng)).collect();
+    let all = archive(&me, address, &friends, 120);
+    let code = HomeCode {
+        public_key: me.public_key_bytes(),
+        token: [3; 16],
+    };
+    let device = Identity::generate(&mut OsRng);
+    let mut record = ClientRecord::pending(&device, &code, "M9").expect("record");
+    record.admission = Admission::Admitted;
+
+    // The pull: pages of 25, each into the model and the store.
+    let mut flash = MemFlash::new(64);
+    let (mut model, mut store, restored) = home::restore(&mut flash, address).expect("boot");
+    assert_eq!(restored.entries, 0);
+    let mut writes = 0;
+    for page in all.chunks(25) {
+        home::take(&mut model, page, &address);
+        let done = home::keep(&mut store, &mut flash, page, &address).expect("keep");
+        assert_eq!(done.entries, page.len() as u64);
+        writes += done.writes;
+        record.cursor = page.last().map(|e| e.seq).unwrap_or(0);
+    }
+    // A write per page, and one more each time a page runs into the
+    // next sector.
+    assert!(
+        writes <= 5 + store.used(),
+        "{writes} writes for 5 pages over {} sectors",
+        store.used()
+    );
+    let before = list_text(&model);
+    assert!(
+        before.iter().any(|l| l.contains("Nachricht")),
+        "{before:#?}"
+    );
+    let chats: Vec<_> = model
+        .conversations
+        .iter()
+        .map(|c| (c.peer, c.messages.len()))
+        .collect();
+    assert_eq!(chats.len(), 3);
+
+    // The reboot: RAM gone (the model; the store's state is rebuilt from
+    // flash below), flash kept.
+    drop(model);
+    let flash_record = record.encode();
+    let mut booted = ClientRecord::decode(&flash_record)
+        .expect("record")
+        .expect("some");
+    let (model, store, restored) = home::restore(&mut flash, address).expect("reboot");
+    assert_eq!(restored.entries, 120);
+    assert_eq!(agree(&mut booted, store.cursor()), Agreement::Agrees);
+    assert_eq!(booted.cursor, 120);
+    assert_eq!(list_text(&model), before, "the same list as before");
+    let again: Vec<_> = model
+        .conversations
+        .iter()
+        .map(|c| (c.peer, c.messages.len()))
+        .collect();
+    assert_eq!(again, chats);
+
+    // The control: the store erased, the list is empty and the cursor
+    // resets, so the next pull fills it.
+    let mut erased = MemFlash::new(64);
+    let (model, store, _) = home::restore(&mut erased, address).expect("erased");
+    assert!(model.conversations.is_empty());
+    let mut lost = ClientRecord::decode(&flash_record)
+        .expect("record")
+        .expect("some");
+    assert_eq!(
+        agree(&mut lost, store.cursor()),
+        Agreement::Lost { was: 120 }
+    );
+    assert_eq!(lost.cursor, 0);
+}
+
+/// 1476, the fold decides what is stored: a message for this board and
+/// one it sent are kept, a message for another address, a delivery state
+/// and an imported entry are not; the page's end still moves the store's
+/// cursor past them all, so they are not pulled again.
+#[test]
+fn the_store_keeps_what_the_fold_keeps() {
+    use loquax::home::board::store::MemFlash;
+    use loquax::home::{KIND_DELIVERED, KIND_IMPORTED};
+
+    let me = Identity::generate(&mut OsRng);
+    let friend = Identity::generate(&mut OsRng);
+    let address = lxmf_address(&me.public_key_bytes()).expect("address");
+    let theirs = lxmf_address(&friend.public_key_bytes()).expect("address");
+    let entry = |seq, kind, packed| Entry {
+        seq,
+        kind,
+        at: 1_762_000_000,
+        packed,
+    };
+    let page = vec![
+        entry(1, KIND_RECEIVED, pack(&friend, address, "für dich", 1.0)),
+        entry(2, KIND_SENT, pack(&me, theirs, "von mir", 2.0)),
+        entry(3, KIND_RECEIVED, pack(&friend, theirs, "nicht unsere", 3.0)),
+        entry(4, KIND_DELIVERED, vec![7; 32]),
+        entry(5, KIND_IMPORTED, pack(&friend, address, "importiert", 4.0)),
+    ];
+    let mut flash = MemFlash::new(8);
+    let (_, mut store, _) = home::restore(&mut flash, address).expect("boot");
+    let done = home::keep(&mut store, &mut flash, &page, &address).expect("keep");
+    assert_eq!(done.entries, 2);
+    let mut kept = Vec::new();
+    let (store, _) = loquax::home::board::store::Store::open(
+        &mut flash,
+        loquax::home::board::store::tag(&address),
+        |e| kept.push(e.seq),
+    )
+    .expect("open");
+    assert_eq!(kept, [1, 2]);
+    assert_eq!(store.cursor(), 5, "the page's end, past what was not kept");
+    // An empty page writes nothing.
+    let writes = flash.writes;
+    let mut store = store;
+    let done = home::keep(&mut store, &mut flash, &[], &address).expect("empty");
+    assert_eq!(done, Default::default());
+    assert_eq!(flash.writes, writes);
+}
+
+/// 1476, the report's number: the restore of 4058 entries the size of
+/// Lew's archive of 2026-11-06 (a text with its signature), timed on the
+/// host; the board says its own time in its `[STORE]` line.
+#[test]
+fn a_restore_of_4058_entries_is_timed() {
+    use loquax::home::board::store::{MemFlash, SECTOR};
+    let me = Identity::generate(&mut OsRng);
+    let address = lxmf_address(&me.public_key_bytes()).expect("address");
+    let friends: Vec<Identity> = (0..12).map(|_| Identity::generate(&mut OsRng)).collect();
+    let all = archive(&me, address, &friends, 4058);
+    let bytes: usize = all.iter().map(|e| e.packed.len()).sum();
+    let mut flash = MemFlash::new(1024);
+    let (_, mut store, _) = home::restore(&mut flash, address).expect("boot");
+    for page in all.chunks(67) {
+        home::keep(&mut store, &mut flash, page, &address).expect("keep");
+    }
+    let used = store.used();
+    let start = std::time::Instant::now();
+    let (model, store, restored) = home::restore(&mut flash, address).expect("restore");
+    let took = start.elapsed();
+    assert_eq!(restored.entries, 4058);
+    assert_eq!(store.cursor(), 4058);
+    assert_eq!(model.conversations.len(), 12);
+    println!(
+        "[1476] restore entries=4058 packed_bytes={bytes} sectors_used={used} flash_bytes={} host_ms={}",
+        used as usize * SECTOR,
+        took.as_millis()
+    );
+}
