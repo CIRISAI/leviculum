@@ -39,6 +39,8 @@
 mod bench;
 pub mod chat;
 #[cfg(test)]
+mod counts;
+#[cfg(test)]
 mod idle;
 pub mod map;
 mod select;
@@ -4462,6 +4464,18 @@ mod tests {
     /// The window over Anna's chat with `chat_model`'s messages and 3000
     /// more, open, `w` by `h` (1431, the window bench of 1441).
     pub(super) fn long_chat(w: u32, h: u32) -> App {
+        let model = long_chat_model();
+        // The channel's receiver dropped: what the window tells the model
+        // goes nowhere.
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app
+    }
+
+    /// [`long_chat`]'s model: Anna's chat with 3000 more, open.
+    pub(super) fn long_chat_model() -> crate::shell::Model {
         let mut model = chat_model();
         for i in 0..3000u32 {
             let mut id = [7u8; 32];
@@ -4481,13 +4495,7 @@ mod tests {
             );
         }
         update(&mut model, UiEvent::Open { peer: ANNA });
-        // The channel's receiver dropped: what the window tells the model
-        // goes nowhere.
-        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
-        app.window = Size::new(w as f32, h as f32);
-        app.apply(Message::Seen(Box::new(seen_of(&model))));
-        app
+        model
     }
 
     /// The window over Anna's chat shaped like Lew's real ones (1456): not
@@ -4660,12 +4668,16 @@ mod tests {
     fn a_long_chat_scrolls_without_building_the_view() {
         let (w, h) = (900u32, 560u32);
         let app = long_chat(w, h);
-        let bubbles: usize = app
-            .scene
-            .chat
-            .as_ref()
-            .map_or(0, |c| c.groups.iter().map(|g| g.bubbles.len()).sum());
-        assert!(bubbles > 3000, "{bubbles} bubbles");
+        // The chat holds more than 3000 messages: the model's count, not
+        // the scene's (1489, review finding 14). A scene that builds only
+        // the bubbles on screen is the goal, not a break of this test.
+        let held = long_chat_model()
+            .conversations
+            .iter()
+            .find(|c| c.peer == ANNA)
+            .map_or(0, |c| c.messages.len());
+        assert!(held > 3000, "{held} messages");
+        assert!(app.scene.chat.is_some(), "the chat open");
         let (text, ground) = (
             chat::colour(app.tokens().text),
             chat::colour(app.tokens().background),
@@ -4698,7 +4710,7 @@ mod tests {
         assert_ne!(before, after, "the notch scrolled the messages");
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         for (viewed, laid, raster) in &built {
-            println!("LONG_CHAT {bubbles} bubbles: view built {viewed:.2} ms, laid out {laid:.2} ms, rasterised {raster:.2} ms");
+            println!("LONG_CHAT {held} messages: view built {viewed:.2} ms, laid out {laid:.2} ms, rasterised {raster:.2} ms");
         }
         let frames: Vec<String> = times[1..]
             .iter()
