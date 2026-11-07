@@ -70,7 +70,7 @@
 //!   writer's capability bit 2, so a member's device that says it (its own
 //!   mark, [`MEMBER_DEVICES`]) answers the group with `0x07` once the copy
 //!   is on it, itself or through its mailbox; the home books it
-//!   (`group_fanout.device_at`, [`device_receipts`]), a read receipt too,
+//!   (`group_fanout.device_at`, `device_receipts`), a read receipt too,
 //!   and the status carries how many copies are on a device and each
 //!   member's rungs with their times. The writer's one tick is every copy
 //!   proven, its two every copy on a device ([`status_after_device`]);
