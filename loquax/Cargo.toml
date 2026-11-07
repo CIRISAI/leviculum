@@ -175,6 +175,10 @@ std = [
 # history of docs/src/concepts/loquax-storage.md. The terminal messenger
 # reads and writes it; the CLI does not yet.
 history = ["std", "dep:rusqlite"]
+# The operation counters (`loquax::ui::counters`, 1489) in a release build:
+# every debug build counts anyway, a release one only with this. Off, the
+# counters are a zero-sized type and `counters()` answers `None`.
+counters = []
 # The map's picture (`loquax::picture`): the region files and one view of
 # them drawn into a frame, for the terminal and the GUI alike.
 picture = [
@@ -372,7 +376,9 @@ codec2 = { version = "0.3.1", optional = true }
 # The history (`history`): bundled, so the musl-static binary carries its
 # SQLite and FTS5 (the build probe of loquax-storage.md, "Options", C), at
 # the version leviculum-cli already ships.
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"], optional = true }
+# `hooks` for the store's commit counter (1489): the commit hook is only
+# set where the counters are on.
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "hooks"], optional = true }
 # The structured event log (docs/src/structured-event-logs.md) is a tracing
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true

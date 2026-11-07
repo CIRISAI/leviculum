@@ -50,6 +50,7 @@ use serde_json::{json, Map, Value};
 
 use super::chat::{self, Bubble, ListRow, Placement};
 use super::compose::{self, Button, Round, SheetRow};
+use super::counters::Op;
 use super::intent::{Intent, Messages, Switch, Target};
 use super::liveness::{self, Liveness};
 use super::recording::{self, Fold, LevelTrack, Phase, Verb};
@@ -1016,6 +1017,7 @@ pub struct Scene {
 impl<B> UiModel<B> {
     /// The scene of the list and the open chat for `class`.
     pub fn scene(&self, class: LayoutClass) -> Scene {
+        self.count(Op::Scenes, 1);
         let mut scene = self.content_scene(class);
         scene.profile = self.profile_screen();
         scene
@@ -1027,6 +1029,7 @@ impl<B> UiModel<B> {
     /// M9's list screen: a chat of 4000 bubbles built and thrown away on
     /// every key was most of its draw.
     pub fn list_scene(&self, class: LayoutClass) -> Scene {
+        self.count(Op::Scenes, 1);
         let mut scene = self.content_scene_of(class, false);
         scene.profile = self.profile_screen();
         scene
@@ -1041,10 +1044,10 @@ impl<B> UiModel<B> {
     /// selected.
     fn content_scene_of(&self, class: LayoutClass, chat_open: bool) -> Scene {
         if self.browse.enabled && self.browse.open {
-            return browse_scene(self).in_class(class);
+            return self.counted(browse_scene(self)).in_class(class);
         }
         if self.rooms.showing() {
-            return rooms_scene(self).in_class(class);
+            return self.counted(rooms_scene(self)).in_class(class);
         }
         let open = self
             .conversations
@@ -1060,7 +1063,7 @@ impl<B> UiModel<B> {
             Some(chat) => bar_sheet(self, chat.peer),
             None => (None, None),
         };
-        Scene {
+        self.counted(Scene {
             class: LayoutClass::Wide,
             screen,
             top: me_bar(self),
@@ -1076,8 +1079,21 @@ impl<B> UiModel<B> {
             browse: None,
             rooms: None,
             profile: None,
-        }
+        })
         .in_class(class)
+    }
+
+    /// `scene` with its nodes counted as built (1489), before a class
+    /// throws any away: the reader's bar, the tabs, the list's rows, the
+    /// chat's bar and its bubbles.
+    fn counted(&self, scene: Scene) -> Scene {
+        let tabs = scene.tabs.as_ref().map_or(0, |t| t.items.len());
+        let rows = scene.list.as_ref().map_or(0, |l| l.rows.len());
+        let chat = scene.chat.as_ref().map_or(0, |c| {
+            1 + c.groups.iter().map(|g| g.bubbles.len()).sum::<usize>()
+        });
+        self.count(Op::SceneNodes, 1 + tabs + rows + chat);
+        scene
     }
 }
 

@@ -721,6 +721,8 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
             false => rows.push(RLine::default()),
         }
     }
+    // Every row laid, the ones cut off below too (1489).
+    model.count(super::counters::Op::RowsLaid, rows.len());
     rows.truncate(height);
     rows
 }

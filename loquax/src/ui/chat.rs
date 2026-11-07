@@ -454,6 +454,7 @@ pub fn rows<B>(model: &UiModel<B>, order: Vec<usize>) -> Vec<ListRow> {
 /// The row for `peer`, empty when it has no conversation: a blocked peer
 /// is listed whether it wrote or not.
 pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
+    model.count(super::counters::Op::RowsBuilt, 1);
     let conversation = model.conversations.iter().find(|c| c.peer == *peer);
     let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
     // A group's state (1307) is no line of the list.
@@ -603,6 +604,13 @@ pub struct Bubble {
 /// ([`super::relayed::is_relayed`]) each post is drawn under its writer,
 /// without the relay's prefix.
 pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
+    let bubbles = bubbles_of(model, c);
+    model.count(super::counters::Op::BubblesBuilt, bubbles.len());
+    bubbles
+}
+
+/// [`bubbles`], uncounted.
+fn bubbles_of<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
     let Some(conversation) = model.conversations.get(c) else {
         return Vec::new();
     };

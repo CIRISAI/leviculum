@@ -118,6 +118,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::home::outgoing::Change;
 use crate::send::Leg;
 use crate::telemetry::{pack_fields, unpack_fields, Fix};
+use crate::ui::counters::{Counters, Op, Ops};
 use crate::ui::groups::{GroupInfo, Standing};
 use crate::ui::history::{Draft, Flags, Restored, StoreWrite, StoredHit, LOAD_WINDOW};
 use crate::ui::share::{Report, Share, Span};
@@ -525,6 +526,9 @@ pub struct Store {
     conn: Connection,
     path: PathBuf,
     identity: [u8; 16],
+    /// The rows read and the commits made since the last reset (1489,
+    /// [`crate::ui::counters`]); shared with the commit hook.
+    ops: std::sync::Arc<Ops>,
 }
 
 impl Store {
@@ -549,11 +553,7 @@ impl Store {
         let conn = Connection::open_with_flags(path, flags).map_err(|e| failed(path, e))?;
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_MS))
             .map_err(|e| failed(path, e))?;
-        let store = Self {
-            conn,
-            path: path.to_path_buf(),
-            identity,
-        };
+        let store = Self::over(conn, path, identity);
         match fresh {
             true => store.create()?,
             false => store.check()?,
@@ -590,11 +590,55 @@ impl Store {
                 format!("schema {version}; start Loquax once to bring it to {SCHEMA_VERSION}"),
             ));
         }
-        Ok(Some(Self {
+        Ok(Some(Self::over(conn, path, identity)))
+    }
+
+    /// The store over an open connection, its commits counted where the
+    /// counters are on ([`crate::ui::counters`]): every commit, a
+    /// transaction's and a lone statement's alike, is one sync to the disk.
+    fn over(conn: Connection, path: &Path, identity: [u8; 16]) -> Self {
+        let ops = std::sync::Arc::new(Ops::new());
+        if crate::ui::counters::ON {
+            let counting = std::sync::Arc::clone(&ops);
+            let hooked = conn.commit_hook(Some(move || {
+                counting.add(Op::Commits, 1);
+                // Never veto the commit.
+                false
+            }));
+            if let Err(error) = hooked {
+                tracing::debug!("STORE no commit counter: {error}");
+            }
+        }
+        Self {
             conn,
             path: path.to_path_buf(),
             identity,
-        }))
+            ops,
+        }
+    }
+
+    /// The rows the store's reads handed up and the commits it made since
+    /// it opened or the last [`Store::reset_counters`] (1489); `None` in a
+    /// release build without the `counters` feature.
+    pub fn counters(&self) -> Option<Counters> {
+        self.ops.read()
+    }
+
+    /// Start the store's count afresh.
+    pub fn reset_counters(&self) {
+        self.ops.reset();
+    }
+
+    /// `rows`, counted as read.
+    fn read<T>(&self, rows: Vec<T>) -> Vec<T> {
+        self.ops.add(Op::StoreRowsRead, rows.len());
+        rows
+    }
+
+    /// One row read, when there was one.
+    fn read_one<T>(&self, row: T) -> T {
+        self.ops.add(Op::StoreRowsRead, 1);
+        row
     }
 
     /// Where it is.
@@ -825,6 +869,7 @@ impl Store {
         let last: Option<i64> = self
             .conn
             .query_row("SELECT MAX(seq) FROM messages", [], |row| row.get(0))
+            .map(|row| self.read_one(row))
             .map_err(|e| self.failed(e))?;
         // Never below seq 0: imported history sits there, and the model counts
         // on from here.
@@ -859,6 +904,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         let mut groups = self.client_groups()?;
         let mut out = Vec::new();
@@ -919,6 +965,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         let mut out = BTreeMap::new();
         for (address, name, admin_name, inviter, ours, epoch, standing, members) in rows {
@@ -988,6 +1035,7 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()
+            .map(|row| self.read_one(row))
             .map_err(|e| self.failed(e))?;
         let through = through.map(seq_of);
         let lowest = match (window_start, through) {
@@ -1010,6 +1058,7 @@ impl Store {
                 row_message,
             )
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         let mut ledger = self
             .conn
@@ -1024,6 +1073,7 @@ impl Store {
                     })
                 })
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                .map(|rows| self.read(rows))
                 .map_err(|e| self.failed(e))?;
             crate::ui::arrival::before_1462(message);
             crate::ui::groups::before_1466(message);
@@ -1037,6 +1087,7 @@ impl Store {
                 params![&self.identity[..], &peer[..], first],
                 |row| row.get(0),
             )
+            .map(|row| self.read_one(row))
             .map_err(|e| self.failed(e))?;
         Ok((messages, earlier.max(0) as usize))
     }
@@ -1119,6 +1170,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .filter_map(|(id, source, packed)| {
@@ -1228,6 +1280,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .map(
@@ -1269,6 +1322,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         let mut shared = Vec::new();
         for (seq, peer, sent, packed) in rows {
@@ -1314,6 +1368,7 @@ impl Store {
                 Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .map(|(peer, name)| Ok((self.address(&peer)?, name)))
@@ -1374,6 +1429,7 @@ impl Store {
             .map_err(|e| self.failed(e))?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            self.ops.add(Op::StoreRowsRead, 1);
             let key: i64 = row.get(0).map_err(|e| self.failed(e))?;
             let peer: Vec<u8> = row.get(1).map_err(|e| self.failed(e))?;
             let peer = self.address(&peer)?;
@@ -1434,6 +1490,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         let corrupt = |detail: String| StoreError::Corrupt {
             path: self.path.clone(),
@@ -1484,6 +1541,7 @@ impl Store {
                 },
             )
             .optional()
+            .map(|row| self.read_one(row))
             .map_err(|e| self.failed(e))?;
         let Some((text, reply, attachments)) = row else {
             return Ok(Draft::default());
@@ -1896,6 +1954,7 @@ impl Store {
         let mut bytes = 0usize;
         let mut more = false;
         while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            self.ops.add(Op::StoreRowsRead, 1);
             let packed: Vec<u8> = row.get(3).map_err(|e| self.failed(e))?;
             if !entries.is_empty() && bytes.saturating_add(packed.len()) > max_bytes {
                 more = true;
@@ -2174,6 +2233,7 @@ impl Store {
         let mut bytes = 0usize;
         let mut more = false;
         while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            self.ops.add(Op::StoreRowsRead, 1);
             let packed: Vec<u8> = row.get(4).map_err(|e| self.failed(e))?;
             if !entries.is_empty() && bytes.saturating_add(packed.len()) > max_bytes {
                 more = true;
@@ -2359,6 +2419,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .map(|(device, name, admitted_at)| {
@@ -2401,6 +2462,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .map(|(token, name, created_at)| {
@@ -2539,6 +2601,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
             .map(|(id, destination, packed, created_at, propagated)| {
@@ -2762,6 +2825,7 @@ impl Store {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         let mut out = Vec::with_capacity(rows.len());
         for (peer, id, mut row) in rows {

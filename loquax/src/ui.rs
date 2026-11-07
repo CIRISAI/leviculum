@@ -138,6 +138,7 @@ pub mod by_hand;
 pub mod chat;
 pub mod compose;
 pub mod contacts;
+pub mod counters;
 pub mod files;
 pub mod group_scene;
 pub mod groups;
@@ -977,6 +978,9 @@ pub struct UiModel<B> {
     /// view, which no user reads; `LOQUAX_FPS=1` turns it on with the
     /// frame counter.
     pub debug_overlay: bool,
+    /// What the presentation built since the last event (1489,
+    /// [`counters`]).
+    ops: counters::Ops,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -1091,6 +1095,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             rooms: rooms::Rooms::default(),
             lang: strings::Lang::En,
             debug_overlay: false,
+            ops: counters::Ops::new(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1348,6 +1353,25 @@ impl<B> UiModel<B> {
         }
     }
 
+    /// What the presentation built since the last event or reset (1489):
+    /// scenes, their nodes, list rows, bubbles, laid rows, sorts. `None`
+    /// in a release build without the `counters` feature ([`counters`]).
+    pub fn counters(&self) -> Option<counters::Counters> {
+        self.ops.read()
+    }
+
+    /// Start the count afresh, as [`update`] does for every event: for a
+    /// test that measures a frame no event asked for.
+    pub fn reset_counters(&self) {
+        self.ops.reset();
+    }
+
+    /// Count `n` more of `op` ([`counters`]).
+    #[inline]
+    pub(crate) fn count(&self, op: counters::Op, n: usize) {
+        self.ops.add(op, n);
+    }
+
     /// The marks a fold made, for the shell to hand the home node.
     pub fn take_marks(&mut self) -> Vec<crate::home::wire::Mark> {
         core::mem::take(&mut self.marks)
@@ -1361,6 +1385,8 @@ impl<B> UiModel<B> {
     /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
     pub fn order(&self) -> Vec<usize> {
         let mut order: Vec<usize> = self.listed().collect();
+        self.count(counters::Op::Sorts, 1);
+        self.count(counters::Op::Sorted, order.len());
         // Each key once (1463): `last_written` is a walk when the summary
         // is behind.
         order.sort_by_cached_key(|&i| {
@@ -1454,6 +1480,16 @@ impl<B> UiModel<B> {
 
     /// The open conversation laid out at the pane's width.
     fn laid(&self) -> layout::Laid
+    where
+        B: InputBuffer,
+    {
+        let laid = self.laid_uncounted();
+        self.count(counters::Op::RowsLaid, laid.rows.len());
+        laid
+    }
+
+    /// [`UiModel::laid`], uncounted.
+    fn laid_uncounted(&self) -> layout::Laid
     where
         B: InputBuffer,
     {
@@ -1955,6 +1991,8 @@ pub enum UiEffect {
 
 /// Fold one event into the model.
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
+    // Each event's work is counted on its own (1489).
+    model.ops.reset();
     let mut effects = fold(model, event);
     // The list's summaries up to what the event did (1463): the new tail of
     // each conversation, read once here instead of whole on every draw.

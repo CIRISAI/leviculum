@@ -120,6 +120,8 @@ impl<B> UiModel<B> {
                 c.flags.archived && self.names.trust(&c.peer) != Trust::Blocked
             })
             .collect();
+        self.count(super::counters::Op::Sorts, 1);
+        self.count(super::counters::Op::Sorted, order.len());
         order.sort_by_key(|&i| core::cmp::Reverse(self.conversations[i].activity));
         order
     }
