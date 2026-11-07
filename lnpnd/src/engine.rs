@@ -708,6 +708,19 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         }
     }
 
+    /// Whether a peer's sync batch is in progress: arrived as a resource
+    /// and not yet all stored, whether it waits for the stamp worker, for
+    /// its turn in the queue, or for its next slice. Gates `/offer` as the
+    /// reference's sequential validation does
+    /// ([`PeeringRuntime::answer_offer_request`]).
+    fn batch_in_progress(&self) -> bool {
+        self.validation.resources_in_flight() > 0
+            || self
+                .pending
+                .iter()
+                .any(|queued| matches!(queued, Pending::Resource { .. } | Pending::Sync { .. }))
+    }
+
     /// The census of a registered engine, `None` before it registered.
     pub fn census_now(&self) -> Option<PnCensus> {
         match &self.state {
@@ -2175,9 +2188,14 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
                 data,
                 ..
             } if destination_hash == &ready.destination_hash && path == OFFER_REQUEST_PATH => {
-                let response = ready
-                    .peering
-                    .answer_offer_request(core, &ready.node, link_id, data);
+                let batch_in_progress = self.batch_in_progress();
+                let response = ready.peering.answer_offer_request(
+                    core,
+                    &ready.node,
+                    link_id,
+                    data,
+                    batch_in_progress,
+                );
                 self.respond(core, link_id, request_id, &response, &mut out);
             }
             NodeEvent::RequestReceived {
@@ -4293,6 +4311,121 @@ mod tests {
     /// answers `ERROR_THROTTLED` (`offer_request`, `:2286-2291`). Without
     /// it the remote can resubmit at link rate, each attempt a full stamp
     /// validation on this node.
+    /// LV-1000 (order 1515): a peer's sync batch that has arrived and is
+    /// not yet all stored postpones every other non-static peer's `/offer`
+    /// with `ERROR_THROTTLED`, as the reference's sequential validation
+    /// does (`reference/LXMF/LXMF/LXMRouter.py:2273-2278`). Without the gate
+    /// 14 peers queued batches faster than the store took them, and the
+    /// queue grew from 6.8 to 37 MB in seven minutes of the growth soak.
+    #[test]
+    fn a_peer_batch_in_progress_postpones_the_next_offer() {
+        use leviculum_lxmf::{OfferResponse, PeerSyncEnvelope};
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: cost_free(),
+            store: MemoryPropagationStore::new(4_000_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 4_000_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        // A validated peer's batch of 50 messages, arrived and queued.
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let batch_link = LinkId::new([0x42; 16]);
+        ready
+            .peering
+            .validate_link_for_tests(batch_link, [0x17; 16]);
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: (0..50u32)
+                .map(|seed| {
+                    let mut message = vec![0x11u8; leviculum_lxmf::constants::LXMF_OVERHEAD + 240];
+                    message[16..20].copy_from_slice(&seed.to_be_bytes());
+                    message.extend_from_slice(&[0x5b; STAMP_SIZE]);
+                    message
+                })
+                .collect(),
+        }
+        .encode();
+        engine.on_inbound_resource_completed(&mut ready, &server, &batch_link, &envelope);
+        engine.state = State::Ready(ready);
+        assert!(
+            engine.batch_in_progress(),
+            "the batch must be queued, or the test proves nothing"
+        );
+
+        // Another peer, identified on its own link, offers.
+        let sender = leviculum_std::generate_identity();
+        let link_id = identified_link(
+            &mut engine,
+            &mut server,
+            &mut client,
+            destination_hash,
+            &signing_key,
+            &sender,
+        );
+        let offer = |engine: &mut Engine<MemoryPropagationStore>,
+                     server: &mut leviculum_std::driver::StdNodeCore,
+                     client: &mut leviculum_std::driver::StdNodeCore| {
+            let (_, out) = client
+                .send_request(&link_id, OFFER_REQUEST_PATH, Some(&[0xc0]), None)
+                .expect("request");
+            let (events, _) = converse(engine, server, client, out);
+            events
+                .into_iter()
+                .find_map(|event| match event {
+                    NodeEvent::ResponseReceived { response_data, .. } => {
+                        OfferResponse::decode(&response_data).ok()
+                    }
+                    _ => None,
+                })
+                .expect("the node must answer the offer")
+        };
+        assert_eq!(
+            offer(&mut engine, &mut server, &mut client),
+            OfferResponse::Error(PeerError::Throttled),
+            "an offer while a batch is in progress is postponed"
+        );
+
+        // The batch stored, the same offer passes the gate (and fails later,
+        // on the key it does not carry).
+        let mut rounds = 0;
+        while engine.batch_in_progress() {
+            rounds += 1;
+            assert!(rounds < 1000, "the batch did not drain");
+            let now = server.now_ms();
+            let _ = engine.on_tick(&mut server, now);
+        }
+        assert_ne!(
+            offer(&mut engine, &mut server, &mut client),
+            OfferResponse::Error(PeerError::Throttled),
+            "with no batch in progress the gate must not postpone"
+        );
+    }
+
     #[test]
     fn an_invalid_stamp_upload_throttles_its_identified_sender() {
         use leviculum_lxmf::peering::PN_STAMP_THROTTLE_SECS;
@@ -4378,9 +4511,10 @@ mod tests {
             State::Ready(ready) => ready,
             _ => panic!("engine must be ready"),
         };
-        let response = ready
-            .peering
-            .answer_offer_request(&mut server, &ready.node, &second, &[]);
+        let response =
+            ready
+                .peering
+                .answer_offer_request(&mut server, &ready.node, &second, &[], false);
         assert_eq!(
             OfferResponse::decode(&response).ok(),
             Some(OfferResponse::Error(PeerError::Throttled)),
@@ -4627,9 +4761,10 @@ mod tests {
                 State::Ready(ready) => ready,
                 _ => panic!("engine must be ready"),
             };
-            let response = ready
-                .peering
-                .answer_offer_request(server, &ready.node, &link_id, &[]);
+            let response =
+                ready
+                    .peering
+                    .answer_offer_request(server, &ready.node, &link_id, &[], false);
             engine.state = State::Ready(ready);
             OfferResponse::decode(&response).ok()
         };

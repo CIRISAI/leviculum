@@ -798,12 +798,18 @@ impl PeeringRuntime {
     /// Answer one `/offer` request
     /// (`offer_request`, `reference/LXMF/LXMF/LXMRouter.py:2266-2329`).
     /// Returns the encoded response body.
+    ///
+    /// `batch_in_progress`: a peer's sync batch has arrived and is not yet
+    /// all stored (the engine's queue, [`crate::engine`]), the state the
+    /// reference calls `validating_pn_stamps_from` and postpones every
+    /// non-static peer's offer for (`:2273-2278`).
     pub(crate) fn answer_offer_request<S: PropagationStore>(
         &mut self,
         core: &mut Core,
         node: &PropagationNode<S>,
         link_id: &LinkId,
         data: &[u8],
+        batch_in_progress: bool,
     ) -> Vec<u8> {
         let now = unix_secs();
         // Unidentified links get ERROR_NO_IDENTITY (:2267).
@@ -813,15 +819,22 @@ impl PeeringRuntime {
         let remote_identity_hash = *identity.hash();
         let remote_hash = Self::propagation_hash_of(&identity);
 
-        // The gates, in the reference's order (:2273-2295). Sequential
-        // stamp validation cannot be observed mid-flight here — this
-        // engine validates inside the same lock-held call that ingested
-        // the resource — so that gate never fires on this host.
+        // The gates, in the reference's order (:2273-2295). The first is
+        // sequential validation: the reference holds a peer's batch in
+        // `validating_pn_stamps_from` while it validates and stores it, and
+        // postpones every other non-static offer meanwhile. This engine
+        // grinds stamps on a worker and stores a batch a slice per hook
+        // (deliverable 5, order 1009), so a batch is in progress from its
+        // resource's completion until its last message is stored. Passing
+        // `false` here, as this did since the batch stopped being stored in
+        // one call, let 14 peers queue batches faster than the store took
+        // them: 6.8 MB of queued payload grew to 37 MB in seven minutes in
+        // the growth soak (LV-1000, order 1515).
         if let Err(error) = self.gate.admit(
             self.table.config(),
             &remote_hash,
             now,
-            false,
+            batch_in_progress,
             self.inbound_transfers.len(),
         ) {
             return OfferResponse::Error(error).encode();

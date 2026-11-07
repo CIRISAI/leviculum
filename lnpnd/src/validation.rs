@@ -195,6 +195,9 @@ pub(crate) struct ValidationWorker {
     in_flight: usize,
     /// Payload bytes of the jobs in flight, for `PN_CENSUS sync_in=`.
     in_flight_bytes: usize,
+    /// Of the jobs in flight, the completed resources: a peer batch among
+    /// them gates `/offer` (`Engine::batch_in_progress`).
+    resources_in_flight: usize,
 }
 
 impl ValidationWorker {
@@ -220,6 +223,7 @@ impl ValidationWorker {
             results: results_rx,
             in_flight: 0,
             in_flight_bytes: 0,
+            resources_in_flight: 0,
         }
     }
 
@@ -232,10 +236,12 @@ impl ValidationWorker {
 
     pub(crate) fn enqueue(&mut self, job: ValidationJob) -> bool {
         let bytes = job.data.capacity();
+        let resource = job.carrier == Carrier::Resource;
         match self.jobs.send(job) {
             Ok(()) => {
                 self.in_flight += 1;
                 self.in_flight_bytes += bytes;
+                self.resources_in_flight += usize::from(resource);
                 true
             }
             Err(_) => false,
@@ -246,6 +252,9 @@ impl ValidationWorker {
         match self.results.try_recv() {
             Ok(done) => {
                 self.in_flight = self.in_flight.saturating_sub(1);
+                if done.carrier == Carrier::Resource {
+                    self.resources_in_flight = self.resources_in_flight.saturating_sub(1);
+                }
                 if self.in_flight == 0 {
                     self.in_flight_bytes = 0;
                 } else {
@@ -256,6 +265,11 @@ impl ValidationWorker {
             }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
         }
+    }
+
+    /// Completed resources the worker holds or has queued.
+    pub(crate) fn resources_in_flight(&self) -> usize {
+        self.resources_in_flight
     }
 
     /// Payload bytes the worker holds or has queued.
