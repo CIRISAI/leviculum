@@ -28,6 +28,7 @@ import android.view.Gravity;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AbsListView;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
@@ -474,6 +475,17 @@ public class ChatActivity extends Activity implements Events.Listener {
         list = (ListView) findViewById(R.id.list);
         adapter = new Adapter();
         list.setAdapter(adapter);
+        // What is on screen, to the library on every change (1496): the
+        // read receipts and the page above come from it.
+        list.setOnScrollListener(new AbsListView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(AbsListView view, int state) {}
+
+            @Override
+            public void onScroll(AbsListView view, int first, int visible, int total) {
+                tellViewport();
+            }
+        });
         list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
@@ -627,6 +639,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         recordingBar.leave();
         player.stop();
         resumed = false;
+        told = new ArrayList<>();
         Engine.run(new Engine.Call() {
             @Override
             public String run() {
@@ -2663,6 +2676,47 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
     }
 
+    /** The keys last said as the viewport; empty after a pause, so the next resume says them again. */
+    private List<Long> told = new ArrayList<>();
+
+    /**
+     * The bubbles on screen, at least half of each, to the library when they
+     * changed (1231, 1496). Before 1496 the phone never said them: it sent no
+     * read receipt to anyone and its chat ended after the first page.
+     */
+    private void tellViewport() {
+        if (peer == null || !resumed) {
+            return;
+        }
+        int first = list.getFirstVisiblePosition();
+        int top = list.getPaddingTop();
+        int bottom = list.getHeight() - list.getPaddingBottom();
+        List<Long> keys = new ArrayList<>();
+        for (int i = 0; i < list.getChildCount(); i++) {
+            int position = first + i;
+            View child = list.getChildAt(i);
+            if (position < 0 || position >= rows.size() || child == null) {
+                continue;
+            }
+            int shown = Math.min(child.getBottom(), bottom) - Math.max(child.getTop(), top);
+            if (shown * 2 >= child.getHeight()) {
+                keys.add(Core.num(rows.get(position), "key"));
+            }
+        }
+        if (keys.isEmpty() || keys.equals(told)) {
+            return;
+        }
+        told = keys;
+        final String of = peer;
+        final List<Long> said = new ArrayList<>(keys);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.viewport(of, said);
+            }
+        });
+    }
+
     /** A question for the chat is with the engine, and another is owed after it. */
     private boolean asking;
     private boolean askOwed;
@@ -2732,8 +2786,26 @@ public class ChatActivity extends Activity implements Events.Listener {
             invitationShown = true;
             GroupDialogs.invitation(this, peer, invited, Core.str(answer, "invite_trust"), again);
         }
+        // A page that came above (1496) keeps the bubble the reader looks at
+        // where it was; anything else is the list's own transcript mode.
+        int at = list.getFirstVisiblePosition();
+        View atChild = list.getChildAt(0);
+        Long anchor = at >= 0 && at < rows.size() && atChild != null
+                ? Long.valueOf(Core.num(rows.get(at), "key")) : null;
+        int anchorTop = atChild == null ? 0 : atChild.getTop();
+        Long oldFirst = rows.isEmpty() ? null : Long.valueOf(Core.num(rows.get(0), "key"));
         rows.clear();
         rows.addAll(Core.list(answer, "messages"));
+        int keep = -1;
+        if (anchor != null && oldFirst != null && !rows.isEmpty()
+                && !oldFirst.equals(Core.num(rows.get(0), "key"))) {
+            for (int i = 0; i < rows.size(); i++) {
+                if (anchor.equals(Core.num(rows.get(i), "key"))) {
+                    keep = i;
+                    break;
+                }
+            }
+        }
         if (selection != null) {
             // What another device deleted is no longer selected.
             Set<Long> here = new LinkedHashSet<>();
@@ -2749,6 +2821,15 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         showPinned();
         adapter.notifyDataSetChanged();
+        if (keep >= 0) {
+            list.setSelectionFromTop(keep, anchorTop);
+        }
+        list.post(new Runnable() {
+            @Override
+            public void run() {
+                tellViewport();
+            }
+        });
         if (draftOwed) {
             draftOwed = false;
             mirrorDraft(answer);

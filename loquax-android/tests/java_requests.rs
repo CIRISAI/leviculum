@@ -383,6 +383,18 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             Request::Front { front: true },
         ),
         (
+            "viewport",
+            java_map(&[
+                ("t", Java::Str("viewport")),
+                ("peer", Java::Str(PEER)),
+                ("keys", Java::Longs(&[KEY, 3])),
+            ]),
+            Request::Viewport {
+                peer: s(PEER),
+                keys: vec![KEY, 3],
+            },
+        ),
+        (
             "network",
             java_map(&[
                 ("t", Java::Str("network")),

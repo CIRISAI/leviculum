@@ -765,6 +765,15 @@ final class Core {
     }
 
     /**
+     * These bubbles of `peer`'s chat are on screen, at least half of each, by
+     * their keys (1231, 1496): the library decides from them, and from the
+     * front, what was read, and loads the page above the first loaded one.
+     */
+    static String viewport(String peer, List<Long> keys) {
+        return command(map("t", "viewport", "peer", peer, "keys", keys));
+    }
+
+    /**
      * The phone's network is `kind` now (`none`, `wifi`, `mobile`, `other`),
      * `changed` when it is another network than before (1298, {@link NetWatch}).
      */
