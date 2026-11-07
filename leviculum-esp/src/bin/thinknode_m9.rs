@@ -1162,7 +1162,10 @@ fn ui_main(
     let mut frame = Frame::new();
     let before = leviculum_esp::heap_live();
     let Ok(mut renderer) = Renderer::new(&mut frame) else {
-        log.line("[DISP] ", alloc::string::String::from("state=down reason=renderer"));
+        log.line(
+            "[DISP] ",
+            alloc::string::String::from("state=down reason=renderer"),
+        );
         loop {
             core::hint::spin_loop();
         }
@@ -1184,7 +1187,10 @@ fn ui_main(
     // image, the painter's storage on the heap.
     let before = leviculum_esp::heap_live();
     let Ok(mut map) = Map::new(map::FIXTURE) else {
-        log.line("[DISP] ", alloc::string::String::from("state=down reason=region"));
+        log.line(
+            "[DISP] ",
+            alloc::string::String::from("state=down reason=region"),
+        );
         loop {
             core::hint::spin_loop();
         }

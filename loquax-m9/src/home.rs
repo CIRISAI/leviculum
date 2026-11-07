@@ -90,10 +90,7 @@ pub fn take(
 /// the store found, and the asks still owed the home.
 pub type Booted = (UiModel<Field>, Store, Restored, Vec<PendingAsk>);
 
-pub fn restore<S: Sectors>(
-    dev: &mut S,
-    address: [u8; 16],
-) -> Result<Booted, S::Error> {
+pub fn restore<S: Sectors>(dev: &mut S, address: [u8; 16]) -> Result<Booted, S::Error> {
     let mut shown = model(address);
     // No chat is on the panel at boot: the fold must not read anything
     // "where it arrived" ([`take`]'s rule; the restored read state is the
