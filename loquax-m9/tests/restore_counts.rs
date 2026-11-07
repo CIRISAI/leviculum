@@ -121,6 +121,7 @@ fn since(before: Counters, model: &loquax::ui::UiModel<loquax_m9::field::Field>)
         sorted: now.sorted - before.sorted,
         store_rows_read: now.store_rows_read - before.store_rows_read,
         commits: now.commits - before.commits,
+        walked: now.walked - before.walked,
     }
 }
 
@@ -167,6 +168,10 @@ fn a_restore_sorts_and_builds_once() {
         "a restore of {MESSAGES} entries: {counts} (bar sorts 1, rows_built {})",
         window()
     );
+    // 1521: the batch's folds found every id by the summary's index, as
+    // the per-entry folds did; before, the summary stood behind until the
+    // note and each entry walked its conversation (2,194,736 messages).
+    assert_eq!(counts.walked, 0, "a restore walked: {counts}");
 
     // The control: per entry, the cost is a sort and a window each.
     // Folded with no chat open, as the restore folds (1493): the boot

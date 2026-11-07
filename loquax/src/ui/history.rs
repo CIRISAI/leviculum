@@ -497,7 +497,7 @@ impl<B> UiModel<B> {
         if !self.read_pending.is_empty() {
             for id in core::mem::take(&mut self.read_pending) {
                 let applies = self.conversations[c]
-                    .with_id(&id)
+                    .with_id(&id, &self.ops)
                     .into_iter()
                     .any(|m| !self.conversations[c].messages[m].outbound);
                 match applies {
@@ -797,10 +797,15 @@ impl<B> UiModel<B> {
     /// message up to it in its conversation is read, as opening the
     /// conversation there read them.
     pub(super) fn read_through(&mut self, id: &[u8; 32]) {
-        let Some(conversation) = self.conversations.iter_mut().find(|c| {
+        let ops = &self.ops;
+        let Some(conversation) = self.conversations.iter_mut().find_map(|c| {
             // By the summary's index (1463): a read mark per entry of a
             // pull walked every message of every conversation.
-            c.with_id(id).into_iter().any(|m| !c.messages[m].outbound)
+            let found = c
+                .with_id(id, ops)
+                .into_iter()
+                .any(|m| !c.messages[m].outbound);
+            found.then_some(c)
         }) else {
             // The screen does not hold the message (1490, the lazy
             // start): the store applies the mark to its own rows, and

@@ -88,6 +88,9 @@ pub struct Summary {
     reports: Vec<usize>,
     /// Each id a message carries, and which messages carry it.
     ids: BTreeMap<[u8; 32], Vec<usize>>,
+    /// A [`Summary::catch_up`] read messages the next
+    /// [`Summary::refresh`] has not reported yet.
+    unnoted: bool,
 }
 
 impl PartialEq for Summary {
@@ -104,10 +107,28 @@ impl Summary {
     /// was read: the conversation's messages changed since the last
     /// refresh (1490, the revision counter's detector).
     pub fn refresh(&mut self, peer: [u8; 16], messages: &[Message]) -> bool {
+        let read = self.read(peer, messages);
+        read | core::mem::take(&mut self.unnoted)
+    }
+
+    /// Bring the summary up to `messages` inside a fold (1521): a
+    /// batch's folds look ids up before its one note, and a summary
+    /// behind them walked the whole conversation per entry. What it read
+    /// is still the next [`Summary::refresh`]'s to report, so the note
+    /// sees the change as before.
+    pub fn catch_up(&mut self, peer: [u8; 16], messages: &[Message]) {
+        if self.read(peer, messages) {
+            self.unnoted = true;
+        }
+    }
+
+    fn read(&mut self, peer: [u8; 16], messages: &[Message]) -> bool {
         let from = match &self.seen {
             Some(seen) if seen.is_prefix_of(messages) => seen.len,
             _ => {
+                let unnoted = self.unnoted;
                 *self = Self::default();
+                self.unnoted = unnoted;
                 0
             }
         };

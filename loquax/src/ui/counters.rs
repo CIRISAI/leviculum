@@ -47,6 +47,10 @@ pub struct Counters {
     pub store_rows_read: u32,
     /// Transactions the store committed, each one a sync to the disk.
     pub commits: u32,
+    /// Messages walked to find an id because a conversation's summary
+    /// was behind them (1521): a batch's folds before its note did, every
+    /// message of the conversation per entry.
+    pub walked: u32,
 }
 
 impl Add for Counters {
@@ -63,6 +67,7 @@ impl Add for Counters {
             sorted: self.sorted + other.sorted,
             store_rows_read: self.store_rows_read + other.store_rows_read,
             commits: self.commits + other.commits,
+            walked: self.walked + other.walked,
         }
     }
 }
@@ -74,7 +79,7 @@ impl fmt::Display for Counters {
         write!(
             f,
             "scenes={} scene_nodes={} rows_built={} bubbles_built={} rows_laid={} \
-             sorts={} sorted={} store_rows_read={} commits={}",
+             sorts={} sorted={} store_rows_read={} commits={} walked={}",
             self.scenes,
             self.scene_nodes,
             self.rows_built,
@@ -83,7 +88,8 @@ impl fmt::Display for Counters {
             self.sorts,
             self.sorted,
             self.store_rows_read,
-            self.commits
+            self.commits,
+            self.walked
         )
     }
 }
@@ -100,10 +106,11 @@ pub enum Op {
     Sorted,
     StoreRowsRead,
     Commits,
+    Walked,
 }
 
 #[cfg(any(debug_assertions, feature = "counters"))]
-const SLOTS: usize = 9;
+const SLOTS: usize = 10;
 
 /// The counters' cells, one set in the model and one in the store.
 /// Atomics, so the store's commit hook (a `'static` closure) and a
@@ -173,6 +180,7 @@ impl Ops {
             sorted: at(Op::Sorted),
             store_rows_read: at(Op::StoreRowsRead),
             commits: at(Op::Commits),
+            walked: at(Op::Walked),
         }
     }
 }

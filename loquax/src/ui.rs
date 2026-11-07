@@ -763,12 +763,19 @@ impl Conversation {
     }
 
     /// The messages that carry `id`, oldest first: the summary's index
-    /// (1463), or a walk when it is behind. Each one checked, so an index
-    /// that missed a rename finds nothing wrong, only nothing.
-    pub fn with_id(&self, id: &[u8; 32]) -> Vec<usize> {
+    /// (1463), brought up to the messages first (1521: a batch notes
+    /// once at its end, and until then every lookup walked the whole
+    /// conversation), or a walk, counted into `ops`, when it still is
+    /// not. Each one checked, so an index that missed a rename finds
+    /// nothing wrong, only nothing.
+    pub fn with_id(&mut self, id: &[u8; 32], ops: &counters::Ops) -> Vec<usize> {
+        self.summary.catch_up(self.peer, &self.messages);
         let found: Vec<usize> = match self.summary.with_id(&self.messages, id) {
             Some(indices) => indices.to_vec(),
-            None => (0..self.messages.len()).collect(),
+            None => {
+                ops.add(counters::Op::Walked, self.messages.len());
+                (0..self.messages.len()).collect()
+            }
         };
         found
             .into_iter()
@@ -5475,9 +5482,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             }
             let open = index == model.selected && shown;
             let follow = model.scroll_top.is_none();
-            let conversation = &model.conversations[index];
+            let conversation = &mut model.conversations[index];
             if conversation
-                .with_id(&message_id)
+                .with_id(&message_id, &model.ops)
                 .into_iter()
                 .any(|m| !conversation.messages[m].outbound)
             {
@@ -6044,6 +6051,7 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
     let running = model.sending.clone();
     let changed = &mut model.changed;
     let groups = &model.groups;
+    let ops = &model.ops;
     for (c, conversation) in model.conversations.iter_mut().enumerate() {
         // In a group (1307 pass four) the group's proof is one tick: the
         // group has it. Its status moves it on (1466: arrived once every
@@ -6055,7 +6063,7 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
             other => other,
         };
         // By the summary's index, not a walk over every message (1463).
-        for m in conversation.with_id(&id) {
+        for m in conversation.with_id(&id, ops) {
             let message = &mut conversation.messages[m];
             if !message.outbound {
                 continue;
@@ -6169,7 +6177,7 @@ fn home_sent<B>(
     let mut found = false;
     for conversation in &mut model.conversations {
         // The messages that carry the id, by the summary's index (1463).
-        for m in conversation.with_id(&message_id) {
+        for m in conversation.with_id(&message_id, &model.ops) {
             let message = &mut conversation.messages[m];
             if !message.outbound || message.id != Some(message_id) {
                 continue;
