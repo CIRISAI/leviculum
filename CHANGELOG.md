@@ -11,6 +11,17 @@ git tag, not the version string. -->
 
 ## [0.34.0+ciris.1] — CIRIS fork
 
+### Added
+
+- `WindowPolicy::ByMedium` for incoming resources (leviculum#103). `Current`
+  picks its tier from one part over the round trip, which at 464-byte parts
+  caps the window at 10 past about 31 ms. Edge measured 9.7 s per 256 KiB at
+  40 ms against 1.76 s at 9 ms. `ByMedium` uses `Adaptive` on TCP, UDP, Auto
+  and Local interfaces with a round trip under 1 s, and `Current` on everything
+  else, so radio stays safe, including a TCP link with LoRa behind it. It is
+  opt-in: `resource_window_policy(WindowPolicy::ByMedium)` or
+  `LEVICULUM_RESOURCE_WINDOW_POLICY=bymedium`. The default stays `Current`.
+
 ### Fixed
 
 - `stop_shared` closes every link as the event loop exits (leviculum#97),
