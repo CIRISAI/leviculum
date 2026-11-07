@@ -18,6 +18,13 @@
 # folds differently on different names. The wrapper now builds at one fixed
 # path in a private mount namespace; its header says why.
 #
+# On 2026-11-07, at d4a425e7, the land gate's tree and a clone still differed
+# by 14 bytes: leviculum-core's build floor, which a target directory keeps
+# from the commit it was first built at (b07e759b) while a clone stamps its
+# own. The wrapper now pins SOURCE_DATE_EPOCH to HEAD (order 1467). So this
+# guard is only as strong as the tree's target is old: a target first built
+# at HEAD cannot show a stale stamp.
+#
 #   NRF_REPRO sha_tree=<sha256> sha_clone=<sha256> verdict=<same|DIFFERENT>
 #
 # Red when either build fails, when the bytes differ, or when an image names

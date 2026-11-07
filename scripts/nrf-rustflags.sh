@@ -53,6 +53,20 @@
 # A host that refuses unprivileged user namespaces builds in place, and the
 # wrapper says on stderr that this image is not the reproducible one.
 #
+# The path is not the only input that differs between a checkout and a clone
+# (order 1467, #474). leviculum-core's build script stamps the image with a
+# build floor (LEVICULUM_BUILD_UNIX_SECS: SOURCE_DATE_EPOCH, else HEAD's
+# committer date) and on purpose does not rerun when HEAD moves, so a target
+# directory keeps the date of the commit it was FIRST built at. On 2026-11-07
+# the T114 image of d4a425e7 differed by 14 bytes between the land gate's
+# push-tree and a clone: two literal-pool words in leviculum_core's
+# `emission_secs` and the calendar code, 21:17:21 (b07e759b, where that target
+# had first been built at $NRF_CANON) against 00:22:31 (d4a425e7). So the
+# wrapper exports SOURCE_DATE_EPOCH as HEAD's committer date unless the caller
+# set one, as scripts/build-m9-image.sh does for the M9; the build script
+# reruns when it changes, so leviculum-core and what links it rebuild once per
+# commit in a firmware target dir, which a change to core costs anyway.
+#
 # `cargo run` is refused through the wrapper: the runner flashes, and a UF2
 # volume udisks mounts after the 1200-baud touch never shows up inside a
 # private mount namespace. Flash with scripts/nrf-flash.sh, which builds
@@ -126,6 +140,24 @@ esp_rustflags_export() {
     export CARGO_TARGET_XTENSA_ESP32S3_NONE_ELF_RUSTFLAGS="${CARGO_TARGET_XTENSA_ESP32S3_NONE_ELF_RUSTFLAGS:+$CARGO_TARGET_XTENSA_ESP32S3_NONE_ELF_RUSTFLAGS }${flags% }"
 }
 
+# firmware_epoch_export <repo root>: exports SOURCE_DATE_EPOCH as the
+# committer date of HEAD in <repo root>, unless the caller already set one.
+# Returns 1, with SOURCE_DATE_EPOCH unset, when there is no commit to ask
+# (a source tarball); the build then carries the build clock.
+firmware_epoch_export() {
+    local secs
+    if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+        export SOURCE_DATE_EPOCH
+        return 0
+    fi
+    secs="$(git -C "${1:?firmware_epoch_export: need the repository root}" log -1 --format=%ct HEAD 2>/dev/null)" || secs=""
+    if [ -z "$secs" ]; then
+        unset SOURCE_DATE_EPOCH
+        return 1
+    fi
+    export SOURCE_DATE_EPOCH="$secs"
+}
+
 # The fixed path every nRF and M9 image is built at, inside the namespace.
 NRF_CANON=/mnt/leviculum
 
@@ -155,6 +187,10 @@ nrf_canon_exec() {
         echo "nrf-rustflags: scripts/nrf-flash.sh <bin> <features> (order 1460)" >&2
         return 2
     fi
+    # Before the hop: the namespace inherits it, and git is asked on the
+    # host's own path. Inside, the caller's value is kept as it is.
+    firmware_epoch_export "$root" ||
+        echo "nrf-rustflags: note: no git commit date at $root, the image carries the build clock" >&2
     if [ "$root" = "$NRF_CANON" ]; then
         nrf_rustflags_export || return 1
         exec "$@"

@@ -140,15 +140,8 @@ fi
 selftest || exit 1
 target="$(cargo_target_dir "$ESP")" || { echo "$TAG FAIL no target directory for $ESP"; exit 1; }
 OUT="$target/xtensa-esp32s3-none-elf/release"
-if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
-    SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct HEAD 2>/dev/null)" || SOURCE_DATE_EPOCH=""
-fi
-if [ -n "$SOURCE_DATE_EPOCH" ]; then
-    export SOURCE_DATE_EPOCH
-else
-    unset SOURCE_DATE_EPOCH
+firmware_epoch_export "$ROOT" ||
     echo "$TAG note: no git commit date here, the image carries the build clock"
-fi
 mkdir -p "$ROOT/target/tmp"
 log="$ROOT/target/tmp/m9-image.log"
 if unshare --user --map-root-user --mount true 2>/dev/null; then
