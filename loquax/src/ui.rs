@@ -1671,7 +1671,12 @@ impl<B> UiModel<B> {
         self.selected = index;
         self.scroll_top = None;
         self.selection = None;
-        self.read_out(index);
+        // Where the list stands beside the chat, selecting is seeing.
+        // Where the list is a screen of its own (1493: the phone, the
+        // M9), moving the cursor shows nothing: [`UiEvent::Open`] reads.
+        if !self.list_apart {
+            self.read_out(index);
+        }
         if let Some(conversation) = self.conversations.get(index) {
             self.message_cursor = conversation.messages.len().saturating_sub(1);
         }
@@ -3354,6 +3359,9 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Open { peer } => {
             let index = model.conversation(peer);
             model.select(index);
+            // Opening shows the chat wherever the list lives: read here
+            // and, through the mark, on the home's other devices.
+            model.read_out(index);
             Vec::new()
         }
         UiEvent::Close => {
@@ -3369,6 +3377,8 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Write { peer, body } => {
             let index = model.conversation(peer);
             model.select(index);
+            // Writing happens in an open chat: read as Open reads.
+            model.read_out(index);
             send_body(model, body)
         }
         UiEvent::React {
