@@ -7277,3 +7277,79 @@ fn a_groups_one_and_two_ticks_are_the_phones_golden() {
         "group-ticks.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
     );
 }
+
+mod relay_group {
+    include!("../../loquax/tests/support/relay_group.rs");
+}
+
+/// 1482, a relayed post shows its writer, on the phone: the relay's chat
+/// of `scene-relay-group.json` as Java reads it, in German. The bar's
+/// title says it is a group via a relay; each row carries its writer and
+/// the words without the bot's prefix; the reaction whose target is not
+/// here is a row in words; the reply's quote names its writer; the Info
+/// names Anna with her address's 4-hex tail and the relay. Pinned as
+/// `golden/relay-group.json`; `LOQUAX_WRITE_GOLDEN=1` writes it again.
+#[test]
+fn a_relayed_group_is_the_phones_golden() {
+    use loquax_android::session;
+    let mut model = loquax::ui::UiModel::<session::Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    model.lang = Lang::De;
+    let c = relay_group::relay_group(&mut model, 1_800_000_000, 3600);
+    let title = session::relayed_title(&model, &relay_group::RELAY, Lang::De);
+    assert!(title.ends_with(" · Gruppe über Relais"), "{title}");
+    let rows = session::rows(&model, c, Lang::De);
+    let bodies: Vec<&str> = rows.iter().map(|r| r.body.as_str()).collect();
+    assert_eq!(
+        bodies,
+        [
+            "Hallo zusammen",
+            "Moin Anna",
+            "hat mit 👍 auf eine Nachricht reagiert, die hier nicht liegt",
+            "Ich bin auch da",
+            "Schön, dass du da bist",
+        ]
+    );
+    let writers: Vec<&str> = rows.iter().map(|r| r.writer.as_str()).collect();
+    assert_eq!(writers, ["Anna", "Ben", "", "", "Anna"]);
+    assert_eq!(rows[4].quote.as_deref(), Some("Ben: Moin Anna"));
+    let key = model.conversations[c]
+        .messages
+        .iter()
+        .find(|m| m.id == Some(relay_group::RELAY_POST))
+        .expect("Anna's post")
+        .activity;
+    let info: Vec<schema::InfoRow> =
+        loquax::ui::info::message_info(&model, relay_group::RELAY, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| {
+                let (label, value) = row.resolve(Lang::De);
+                schema::InfoRow { label, value }
+            })
+            .collect();
+    assert!(
+        info[0]
+            .value
+            .starts_with("Anna ·6b6b, über ReticulumNet NL"),
+        "{info:?}"
+    );
+    let mut got = serde_json::to_string_pretty(&serde_json::json!({
+        "title": title,
+        "rows": rows,
+        "info_annas_post": info,
+    }))
+    .expect("json");
+    got.push('\n');
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/relay-group.json");
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, &got).expect("write the golden");
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "relay-group.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
+    );
+}

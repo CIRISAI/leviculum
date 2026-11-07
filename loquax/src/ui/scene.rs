@@ -1513,6 +1513,19 @@ pub fn share_rows<B>(model: &UiModel<B>) -> Vec<ShareRow> {
         .collect()
 }
 
+/// The peer's name in a chat's bar title: the title itself, but for a
+/// relay's chat (1482) without the words "group via relay", for the
+/// compose's hint and a quote's writer.
+pub fn peer_title(bar: &TopBar) -> Text {
+    match &bar.title {
+        Text::Key(StrId::RelayedGroup, args) => match args.first() {
+            Some(Arg::Str(name)) => Text::Raw(name.clone()),
+            _ => bar.title.clone(),
+        },
+        title => title.clone(),
+    }
+}
+
 /// The open chat of conversation `c`: its bar, its bubbles grouped, its
 /// compose. An index past the conversations gives an empty chat.
 pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
@@ -1542,16 +1555,26 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
             peer: Target::Peer(peer),
         })]),
     };
+    // A relay's chat says it is a group via a relay (1482).
+    let title = match badge.is_none()
+        && model
+            .conversations
+            .get(c)
+            .is_some_and(super::relayed::is_relayed)
+    {
+        true => Text::Key(StrId::RelayedGroup, Vec::from([Arg::Str(name.clone())])),
+        false => Text::Raw(name.clone()),
+    };
     let bar = TopBar {
         id: NodeId::ChatBar,
         lead: Lead::Back {
             back: Action::of(Intent::CloseChat),
             avatar,
         },
-        title: Text::Raw(name.clone()),
+        title: title.clone(),
         // The list's pin and the chat's bar open the map alike (1224).
         actions: bar_actions,
-        a11y: A11y::of(NodeId::ChatBar, Role::Bar, Text::Raw(name.clone())),
+        a11y: A11y::of(NodeId::ChatBar, Role::Bar, title),
     };
     let bubbles = chat::bubbles(model, c);
     let places = chat::placements(&bubbles);

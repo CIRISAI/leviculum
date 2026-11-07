@@ -167,6 +167,26 @@ pub(super) fn mark_sends(effects: &mut [UiEffect], capabilities: u64) {
     }
 }
 
+/// Name this device as the writer of every `lev` map among `effects`
+/// (1482, key `0x08`), once its address is known: a relay that passes the
+/// map through to others hands them a map naming someone else, which they
+/// take as no word of the relay's ([`leviculum_lxmf::relay::own_lev`]).
+pub(super) fn name_writer(effects: &mut [UiEffect], address: Option<[u8; 16]>) {
+    let Some(address) = address else {
+        return;
+    };
+    for effect in effects {
+        if let UiEffect::Send { fields, .. } = effect {
+            if let Some(mut lev) = Lev::from_fields(fields) {
+                if lev.writer.is_none() {
+                    lev.writer = Some(address);
+                    lev.put_into(fields);
+                }
+            }
+        }
+    }
+}
+
 /// Whether a received message is a receipt and nothing else: no text, no
 /// field but the namespace's pair.
 pub(super) fn alone(body: &[u8], fields: &[Field], lev: &Lev) -> bool {
@@ -517,7 +537,7 @@ impl<B> UiModel<B> {
                     .messages
                     .iter()
                     .find(|m| m.activity == *key)
-                    .is_some_and(owes_receipt)
+                    .is_some_and(|m| owes_receipt(m, &peer))
             })
             .collect()
     }
@@ -530,10 +550,14 @@ impl<B> UiModel<B> {
 /// stock client's plain reply beside a marked message is never named
 /// (1322), as the home node names none either (`home/server.rs`, its
 /// `seen`).
-fn owes_receipt(message: &super::Message) -> bool {
+///
+/// The mark must be the peer's own (1482): a relay's copy carries its
+/// writer's, passed through, and the relay gets no receipt for it.
+fn owes_receipt(message: &super::Message, peer: &[u8; 16]) -> bool {
     !message.outbound
         && message.id.is_some()
-        && Lev::from_fields(&message.fields).is_some_and(|lev| lev.supports_receipts())
+        && leviculum_lxmf::relay::own_lev(message.body.as_bytes(), &message.fields, peer)
+            .is_some_and(|lev| lev.supports_receipts())
         && !message.is_report()
         && !message.is_aside()
         && !message.ledger.iter().any(|entry| entry.what == SEEN)

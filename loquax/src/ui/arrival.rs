@@ -236,7 +236,8 @@ impl<B> UiModel<B> {
         else {
             return Vec::new();
         };
-        let lev = Lev::from_fields(&message.fields);
+        // The source's own mark (1482): a relay's copy gets no receipt.
+        let lev = leviculum_lxmf::relay::own_lev(message.body.as_bytes(), &message.fields, &source);
         if !acknowledges(lev.as_ref())
             || message.is_report()
             || message

@@ -43,7 +43,13 @@ pub const FORWARDED_FIELDS: [i64; 4] = [
 ];
 
 /// What a reply quotes of `body`: its first line, cut at [`QUOTE_CHARS`].
+///
+/// A relay's post (1482) is quoted by its writer and words, `"Anna: Hallo"`,
+/// not by the first line of the relay's prefix, the writer's name alone.
 pub fn quote(body: &str) -> String {
+    let named = leviculum_lxmf::relay::prefix(body)
+        .map(|writer| alloc::format!("{}: {}", writer.name, writer.text));
+    let body = named.as_deref().unwrap_or(body);
     let first = body.lines().next().unwrap_or("").trim();
     match first.chars().count() > QUOTE_CHARS {
         true => {
@@ -90,11 +96,18 @@ impl<B> UiModel<B> {
             .messages
             .iter()
             .find(|t| t.id == Some(reply.to));
+        // A target this device does not hold (1482): a relay passes the
+        // writer's own copy's id through. Its quote names its writer when
+        // the relay's prefix is in it; without a quote, a stub says the
+        // message is not here, never an empty block.
         Some(Quoted {
             text: match (target, reply.quote) {
                 (Some(target), _) => quote(&target.body),
-                (None, Some(quote)) => quote,
-                (None, None) => String::new(),
+                (None, Some(text)) if leviculum_lxmf::relay::prefix(&text).is_some() => {
+                    quote(&text)
+                }
+                (None, Some(text)) => text,
+                (None, None) => String::from(super::strings::StrId::QuoteNotHere.text(self.lang)),
             },
             ours: target.map(|t| t.outbound),
             to: reply.to,

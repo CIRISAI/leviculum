@@ -493,14 +493,25 @@ fn message_row() -> BoxedStrategy<MessageRow> {
         .boxed()
 }
 
+/// The head of [`Messages`], boxed on its own as [`voice_parts`] is: with
+/// a relay's title (1482) inline the tuple overflowed the test thread's
+/// stack in [`the_lists_round_trip`].
+type MessagesHead = (u32, String, String, Vec<MessageRow>, String);
+
+fn messages_head() -> BoxedStrategy<MessagesHead> {
+    (
+        u32s(),
+        text(),
+        text(),
+        prop::collection::vec(message_row(), 0..3),
+        text(),
+    )
+        .boxed()
+}
+
 fn messages() -> BoxedStrategy<Messages> {
     (
-        (
-            u32s(),
-            text(),
-            text(),
-            prop::collection::vec(message_row(), 0..3),
-        ),
+        messages_head(),
         (text(), opt_text(), opt_text(), any::<bool>(), opt_text()),
         (
             any::<bool>(),
@@ -524,7 +535,7 @@ fn messages() -> BoxedStrategy<Messages> {
     )
         .prop_map(
             |(
-                (v, peer, name, messages),
+                (v, peer, name, messages, relayed),
                 (initials, icon_fg, icon_bg, home_client, photo),
                 (linked, lookup, contact_id, ask_link),
                 (announced, petname, others, verified, receipts),
@@ -537,6 +548,7 @@ fn messages() -> BoxedStrategy<Messages> {
                 v,
                 peer,
                 name,
+                relayed,
                 messages,
                 initials,
                 icon_fg,

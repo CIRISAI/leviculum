@@ -594,8 +594,10 @@ fn seen(
         }) else {
             continue;
         };
-        let marked = leviculum_lxmf::lev::Lev::from_fields(&message.fields)
-            .is_some_and(|lev| lev.supports_receipts());
+        // The source's own mark (1482): a relay's copy gets no receipt.
+        let marked =
+            leviculum_lxmf::relay::own_lev(&message.content, &message.fields, &message.source_hash)
+                .is_some_and(|lev| lev.supports_receipts());
         if marked {
             owed.entry(message.source_hash).or_default().push(*id);
         }
@@ -695,7 +697,9 @@ fn arrived(
         }) else {
             continue;
         };
-        let lev = leviculum_lxmf::lev::Lev::from_fields(&message.fields);
+        // The source's own mark (1482): a relay's copy gets no receipt.
+        let lev =
+            leviculum_lxmf::relay::own_lev(&message.content, &message.fields, &message.source_hash);
         let read = seen && lev.as_ref().is_some_and(|lev| lev.supports_receipts());
         if read
             || message.source_hash == home.address
@@ -859,6 +863,11 @@ fn lev_out(
     lev: leviculum_lxmf::lev::Lev,
     now: f64,
 ) -> Result<Option<Outgoing>, alloc::string::String> {
+    // The map names its writer (1482), as a device's own does.
+    let lev = leviculum_lxmf::lev::Lev {
+        writer: Some(home.address),
+        ..lev
+    };
     let message = leviculum_lxmf::Message::create(
         peer,
         home.address,
@@ -1918,7 +1927,7 @@ mod tests {
         let home = home();
         let sender = Identity::generate(&mut rand_core::OsRng);
         let from = crate::home::lxmf_address(&sender.public_key_bytes()).expect("address");
-        let message = |caps: u64, body: &[u8]| {
+        let written = |caps: u64, body: &[u8], writer: Option<[u8; 16]>| {
             leviculum_lxmf::Message::create(
                 HOME,
                 from,
@@ -1928,6 +1937,7 @@ mod tests {
                 body.to_vec(),
                 Lev {
                     capabilities: Some(caps),
+                    writer,
                     ..Lev::default()
                 }
                 .fields()
@@ -1936,11 +1946,21 @@ mod tests {
             )
             .expect("message")
         };
+        let message = |caps: u64, body: &[u8]| written(caps, body, None);
         let asks = message(CAP_GROUPS | CAP_PROPAGATION_RECEIPTS, b"hi");
+        // 1482: the sender is a relay here, and these are its copies of
+        // Anna's messages, her mark passed through: with her as the
+        // writer, and from before the writer key with her prefix only.
+        // Neither owes the relay a receipt of either kind.
+        let all = CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS;
+        let anna = [0xa1; 16];
+        let relayed = written(all, b"Anna:\nnot a prefix", Some(anna));
+        let prefixed = alloc::format!("Anna\n<{}>\nhallo", crate::address::to_hex(&anna));
+        let relayed_old = written(all, prefixed.as_bytes(), None);
         let also = message(CAP_PROPAGATION_RECEIPTS, b"again");
         let silent = message(CAP_GROUPS, b"quiet");
         let read = message(CAP_READ_RECEIPTS | CAP_PROPAGATION_RECEIPTS, b"read");
-        for m in [&asks, &also, &silent, &read] {
+        for m in [&asks, &also, &silent, &read, &relayed, &relayed_old] {
             store
                 .archive_append(KIND_RECEIVED, &m.message_id, &m.pack(), 50, u64::MAX)
                 .expect("archived");
@@ -1950,7 +1970,7 @@ mod tests {
         // Read on a device first: its read receipt names it.
         let seen = wire::Mark {
             flag: wire::MarkFlag::Seen { at: 1_799_999_000 },
-            ids: vec![read.message_id],
+            ids: vec![read.message_id, relayed.message_id, relayed_old.message_id],
         };
         let answer_of = |store: &mut Store, mark: &wire::Mark, device: [u8; 16]| {
             answer(
@@ -1962,7 +1982,20 @@ mod tests {
                 200.0,
             )
         };
-        assert_eq!(answer_of(&mut store, &seen, PHONE).accepted.len(), 1);
+        let seen_answer = answer_of(&mut store, &seen, PHONE);
+        assert_eq!(seen_answer.accepted.len(), 1);
+        let read_receipt = leviculum_lxmf::Message::unpack(
+            &seen_answer.accepted[0].packed,
+            None,
+            None,
+            DeliveryMethod::Direct,
+        )
+        .expect("the read receipt");
+        assert_eq!(
+            Lev::from_fields(&read_receipt.fields).and_then(|l| l.receipt.map(|r| r.ids)),
+            Some(vec![read.message_id]),
+            "no read receipt for the relayed copies"
+        );
         let mark = wire::Mark {
             flag: wire::MarkFlag::Arrived { at: 1_800_000_000 },
             ids: vec![
@@ -1970,6 +2003,8 @@ mod tests {
                 also.message_id,
                 silent.message_id,
                 read.message_id,
+                relayed.message_id,
+                relayed_old.message_id,
                 [0x77; 32],
             ],
         };
@@ -1987,6 +2022,7 @@ mod tests {
         assert_eq!(receipt.source_hash, HOME, "signed by the home's identity");
         let lev = Lev::from_fields(&receipt.fields).expect("lev");
         assert_eq!(lev.capabilities, None);
+        assert_eq!(lev.writer, Some(HOME), "the map names its writer");
         assert_eq!(
             lev.propagation_receipt.map(|r| (r.received_at, r.ids)),
             Some((1_800_000_000, vec![asks.message_id, also.message_id]))

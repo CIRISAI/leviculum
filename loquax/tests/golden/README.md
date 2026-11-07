@@ -163,3 +163,17 @@ as text) and `gui::tests::a_groups_one_and_two_ticks_are_the_windows_golden`
 (900 x 560, light, pixel for pixel). The M9's frame of the same scene is
 `loquax-m9/tests/golden/m9-group-ticks.png`, the phone's rows and Info
 `loquax-android/tests/golden/group-ticks.json`.
+
+`scene-relay-group.json`, `tui-relay-group.txt`, `gui-relay-group.png`: a
+relayed post shows its writer (1482). A relay bot, "ReticulumNet NL", hands
+us Anna's and Ben's posts with its default prefix `Name\n<hash>\n` in front,
+from one fixture (`tests/support/relay_group.rs`): each post under its
+writer and without the prefix, the bar "ReticulumNet NL · group via relay",
+Ben's reaction to a message this device does not hold said in words, our
+own line, and Anna's reply quoting "Ben: Moin Anna". Pinned by
+`scene_golden::a_relayed_group_is_the_golden_scene`,
+`tui::tests::a_relayed_group_is_the_terminals_golden` (80 by 24, as text;
+the terminal names the writer in the line and draws no quotes) and
+`gui::tests::a_relayed_group_is_the_windows_golden` (900 x 560, light,
+pixel for pixel). The phone's title, rows and Info in German are
+`loquax-android/tests/golden/relay-group.json`.

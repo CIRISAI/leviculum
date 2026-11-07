@@ -5116,6 +5116,45 @@ mod tests {
         map::tests::same_as("gui-group-ticks.png", &shoot(&app, w, h), w, h);
     }
 
+    mod relay_group {
+        include!("../tests/support/relay_group.rs");
+    }
+
+    /// 1482, a relayed post shows its writer: the window draws the relay's
+    /// chat of `scene-relay-group.json`, each post under its writer without
+    /// the bot's prefix, the bar naming it a group via a relay; pixel for
+    /// pixel the golden, light, 900 x 560.
+    #[test]
+    fn a_relayed_group_is_the_windows_golden() {
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        relay_group::relay_group(&mut model, 1_800_000_000, 3600);
+        update(
+            &mut model,
+            UiEvent::Open {
+                peer: relay_group::RELAY,
+            },
+        );
+        model.toasts.clear();
+        let (w, h) = (900, 560);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let writers: Vec<_> = app
+            .scene
+            .chat
+            .as_ref()
+            .expect("the chat")
+            .groups
+            .iter()
+            .filter(|g| g.named)
+            .map(|g| g.sender.resolve(Lang::En))
+            .collect();
+        assert_eq!(writers, ["Anna", "Ben", "Anna"]);
+        map::tests::same_as("gui-relay-group.png", &shoot(&app, w, h), w, h);
+    }
+
     /// `pcm` as the microphone's levels for Anna's recording, a window
     /// every 50 ms from `from` on; the time after the last.
     fn levels_of(model: &mut crate::shell::Model, pcm: &[i16], from: u64) -> u64 {

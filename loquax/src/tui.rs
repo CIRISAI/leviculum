@@ -1849,6 +1849,41 @@ mod tests {
         same_text("tui-group-ticks.txt", &screen);
     }
 
+    mod relay_group {
+        include!("../tests/support/relay_group.rs");
+    }
+
+    /// 1482, a relayed post shows its writer: the terminal draws the relay's
+    /// chat of `scene-relay-group.json`, each post under its writer without
+    /// the bot's prefix (as the terminal names a group's writer, in the
+    /// line), a reaction to a message that is not here in words; the golden
+    /// is the screen, 80 by 24. The terminal draws no quotes at all.
+    #[test]
+    fn a_relayed_group_is_the_terminals_golden() {
+        let mut model = Model::new(&[]);
+        model.address = Some([0x30; 16]);
+        relay_group::relay_group(&mut model, 1_800_000_000, 3600);
+        model.focus = loquax::ui::Pane::Messages;
+        // The arrivals' toasts would cover our own line.
+        model.toasts.clear();
+        let screen = whole_screen(&model);
+        for words in [
+            "group via relay",
+            "Anna: Hallo zusammen",
+            "Ben: Moin Anna",
+            "Ben: reacted",
+            "to a message that is",
+            "Ich bin auch da",
+        ] {
+            assert!(screen.contains(words), "{words:?}:\n{screen}");
+        }
+        assert!(
+            !screen.contains(&loquax::address::to_hex(&relay_group::RELAY_ANNA)),
+            "no hash on screen:\n{screen}"
+        );
+        same_text("tui-relay-group.txt", &screen);
+    }
+
     /// 1379: the Rooms tab in the terminal: `R` brings it and asks the
     /// shell to link to the hub; the hub's welcome, a join, Bob's line, his
     /// action, the hub's notice and the echo of our own line make the

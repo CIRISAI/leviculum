@@ -378,6 +378,13 @@ pub fn preview(message: &Message, lang: Lang) -> String {
             .resolve(lang);
         }
     }
+    // A relay's post (1482): its writer and the first line of its words,
+    // not the writer's name alone.
+    if let Some(writer) = leviculum_lxmf::relay::prefix(&message.body).filter(|_| !message.outbound)
+    {
+        let first = writer.text.lines().next().unwrap_or_default();
+        return alloc::format!("{}: {first}", writer.name);
+    }
     message.body.lines().next().unwrap_or_default().to_string()
 }
 
@@ -590,6 +597,11 @@ pub struct Bubble {
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
 /// the bubble it names, not a bubble, and a run of reports is one bubble,
 /// its newest, as the terminal folds it ([`super::Conversation::run`]).
+/// In a relayed chat a reaction whose target is not on this device is a
+/// bubble that says so (1482), never a chip on nothing: the target never
+/// comes, a relay's copies carry their own ids. In a relayed chat
+/// ([`super::relayed::is_relayed`]) each post is drawn under its writer,
+/// without the relay's prefix.
 pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
     let Some(conversation) = model.conversations.get(c) else {
         return Vec::new();
@@ -599,6 +611,15 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
     let liveness = newest_report.map(|_| model.liveness(&conversation.peer));
     let info = model.group(&conversation.peer);
     let group = info.is_some();
+    let relayed = !group && super::relayed::is_relayed(conversation);
+    // A reaction to a message this device does not hold (1482).
+    // Only in a relay's chat: elsewhere a reaction that came before its
+    // target waits for it, drawn nowhere until it arrives.
+    let orphan = |message: &Message| {
+        relayed
+            .then(|| super::relayed::orphan_reaction(conversation, message))
+            .flatten()
+    };
     // A group's lines by their writer and the writer's clock (study 6.2):
     // one already shown, alone or in a digest, is not shown again, and one
     // older than a line shown before it arrived late (6.1).
@@ -639,7 +660,8 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
             (m, message, note)
         })
         .filter(|(m, message, note)| {
-            (!message.is_aside() || note.is_some()) && !conversation.report_folded(*m)
+            (!message.is_aside() || note.is_some() || orphan(message).is_some())
+                && !conversation.report_folded(*m)
         })
         .flat_map(|(m, message, note)| {
             let fix = model.message_fix(c, m);
@@ -652,7 +674,18 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 .filter(|_| group && !message.outbound);
             // The reader's own word for the writer, else the admin's
             // (1307); the bare name, as a group's sender line has it.
-            let writer = copy.map(|(address, name, _)| (address, writer_name(&address, name)));
+            let relay = relayed
+                .then(|| super::relayed::writer_of(message, &conversation.peer))
+                .flatten()
+                .filter(|_| !message.outbound);
+            let writer = match &relay {
+                Some(w) => Some((w.address, model.relayed_name(w))),
+                None => copy.map(|(address, name, _)| (address, writer_name(&address, name))),
+            };
+            let elsewhere = orphan(message).map(|content| {
+                Text::Key(StrId::ReactedElsewhere, Vec::from([Arg::Str(content)]))
+                    .resolve(model.lang)
+            });
             let lev = (group && !message.outbound)
                 .then(|| leviculum_lxmf::lev::Lev::from_fields(&message.fields))
                 .flatten();
@@ -677,6 +710,8 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 late,
                 body: match (message.is_report(), &fix, copy) {
                     _ if note.is_some() => note.clone().unwrap_or_default(),
+                    _ if elsewhere.is_some() => elsewhere.clone().unwrap_or_default(),
+                    _ if relay.is_some() => relay.as_ref().map_or("", |w| w.text).to_string(),
                     (true, Some(_), _) => String::new(),
                     (true, None, _) => "position report".to_string(),
                     (false, _, Some((_, _, text))) => text.to_string(),

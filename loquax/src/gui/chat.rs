@@ -989,7 +989,7 @@ impl App {
         if let Some(quote) = &bubble.quote {
             let who = match quote.ours {
                 Some(true) => Some(self.word(StrId::QuoteYou).to_string()),
-                Some(false) => Some(open.bar.title.resolve(self.lang)),
+                Some(false) => Some(loquax::ui::scene::peer_title(&open.bar).resolve(self.lang)),
                 None => None,
             };
             let mut said = column![];
@@ -1497,7 +1497,7 @@ impl App {
             .placeholder(format!(
                 "{} {}",
                 open.compose.hint.resolve(self.lang),
-                open.bar.title.resolve(self.lang)
+                loquax::ui::scene::peer_title(&open.bar).resolve(self.lang)
             ))
             .size(size::COMPOSE_TEXT)
             .height(Length::Shrink)

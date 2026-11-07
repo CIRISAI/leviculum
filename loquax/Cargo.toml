@@ -449,6 +449,12 @@ required-features = ["history"]
 name = "device_receipts"
 required-features = ["history"]
 
+# 1482: a relay bot that passes its members' fields through gets no
+# receipts, and its posts show their writer.
+[[test]]
+name = "relay_group"
+required-features = ["history"]
+
 # The home node end to end: `--daemon` and `home` are the terminal build's.
 [[test]]
 name = "home_node"

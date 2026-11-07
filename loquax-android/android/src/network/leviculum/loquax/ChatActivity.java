@@ -2711,7 +2711,9 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         header = answer;
         // The verified mark after the name (1146), once the identity was compared.
-        title.setText(Core.str(answer, "name")
+        // A relay's chat says it is a group via a relay (1482).
+        String relayed = Core.str(answer, "relayed");
+        title.setText((relayed.isEmpty() ? Core.str(answer, "name") : relayed)
                 + (Core.bool(answer, "verified") ? " \u2714" : ""));
         avatar.show(peer, answer);
         banner.setVisibility(Core.bool(answer, "ask_link") ? View.VISIBLE : View.GONE);

@@ -82,6 +82,9 @@ pub struct Draw<'a> {
     pub tracks: Option<&'a BTreeMap<([u8; 16], u64), LevelTrack>>,
     /// The reader's language, for the pane's own words (1447).
     pub lang: Lang,
+    /// The reader's names, for a relayed post's writer (1482); none draws
+    /// a relay's posts as they came.
+    pub names: Option<&'a crate::names::Names>,
 }
 
 /// A style drawn in a token's colours.
@@ -180,9 +183,13 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
     // block instead.
     let mut skipped: Option<usize> = None;
     let reactions = reactions::gather(conversation);
+    // A relay's chat (1482): each post names its writer in its line.
+    let relayed = draw
+        .names
+        .filter(|_| super::relayed::is_relayed(conversation));
     for (index, message) in conversation.messages.iter().enumerate() {
         let start = laid.rows.len();
-        if folded(conversation, index) {
+        if folded(conversation, index, relayed.is_some()) {
             skipped.get_or_insert(index);
             // Drawn as the report after it: no rows, so no click lands on
             // it and the cursor steps over it.
@@ -246,6 +253,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
             width,
             draw,
             draw.selected == Some(index),
+            relayed,
             &mut laid.links,
         );
         laid.rows.extend(drawn.rows);
@@ -278,13 +286,20 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
 /// under its target ([`reactions`]), or a telemetry report the next one
 /// replaces on screen: one peer's consecutive reports fold into the latest
 /// (`loquax-map.md`, "In the conversation"), by the rule every screen folds
-/// by ([`Conversation::report_folded`]).
-pub fn folded(conversation: &Conversation, index: usize) -> bool {
+/// by ([`Conversation::report_folded`]). In a relay's chat (`relayed`,
+/// 1482) a reaction whose target is not here has a block, in words.
+pub fn folded(conversation: &Conversation, index: usize, relayed: bool) -> bool {
     conversation
         .messages
         .get(index)
         .is_some_and(Message::is_aside)
         && super::groups::membership_note(&conversation.messages, index, None, Lang::En).is_none()
+        && !(relayed
+            && conversation
+                .messages
+                .get(index)
+                .and_then(|m| super::relayed::orphan_reaction(conversation, m))
+                .is_some())
         || conversation.report_folded(index)
 }
 
@@ -435,6 +450,7 @@ fn block(
     width: usize,
     draw: &Draw<'_>,
     selected: bool,
+    relayed: Option<&crate::names::Names>,
     links: &mut Vec<String>,
 ) -> Block {
     let peer = conversation.peer;
@@ -471,6 +487,11 @@ fn block(
             // A group's copy without words names its writer as every copy
             // does here, not with the home's sentence (1388).
             let body = super::groups::stand_in_line(&message.body, &message.fields)
+                .or_else(|| {
+                    relayed.and_then(|names| {
+                        super::relayed::terminal_line(names, draw.lang, conversation, message)
+                    })
+                })
                 .unwrap_or_else(|| message.body.clone());
             match mark {
                 Some(query) => super::search::mark_first(&body, query),

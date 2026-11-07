@@ -82,6 +82,10 @@
     <string name="you_reacted">You reacted %1$s</string>
     <string name="run_updates">%1$d updates since %2$s</string>
     <string name="quote_you">You</string>
+    <string name="relayed_group">%1$s · group via relay</string>
+    <string name="reacted_elsewhere">reacted %1$s to a message that is not here</string>
+    <string name="quote_not_here">A message that is not here</string>
+    <string name="info_relayed_from">%1$s %2$s, via %3$s</string>
     <string name="row_photo">Photo</string>
     <string name="row_position_shared">Position shared</string>
     <string name="row_position_report">Position report</string>

@@ -592,3 +592,63 @@ fn a_groups_one_and_two_ticks_are_the_golden_scene() {
     assert_eq!(words.resolve(Lang::En), "On the devices");
     check("scene-group-ticks.json", &scene);
 }
+
+mod relay_group {
+    include!("support/relay_group.rs");
+}
+
+/// 1482, a relayed post shows its writer: a relay bot's chat, each post
+/// under its writer and without the bot's prefix, the bar saying it is a
+/// group via a relay, a reaction to a message this device does not hold
+/// said in words, and a reply quoting a post by its writer. Every target
+/// draws what this scene says.
+#[test]
+fn a_relayed_group_is_the_golden_scene() {
+    use loquax::ui::strings::Lang;
+
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    relay_group::relay_group(&mut model, now().unix_secs, now().offset_secs);
+    let scene = model.scene(LayoutClass::Compact);
+    let chat = scene.chat.as_ref().expect("the chat");
+    let title = chat.bar.title.resolve(Lang::De);
+    assert!(
+        title.starts_with("ReticulumNet NL") && title.ends_with(" · Gruppe über Relais"),
+        "{title}"
+    );
+    let groups: Vec<(String, Vec<String>)> = chat
+        .groups
+        .iter()
+        .map(|g| {
+            (
+                g.sender.resolve(Lang::En),
+                g.bubbles.iter().map(|b| b.bubble.body.clone()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            ("Anna".to_string(), vec!["Hallo zusammen".to_string()]),
+            (
+                "Ben".to_string(),
+                vec![
+                    "Moin Anna".to_string(),
+                    "reacted 👍 to a message that is not here".to_string()
+                ]
+            ),
+            ("You".to_string(), vec!["Ich bin auch da".to_string()]),
+            (
+                "Anna".to_string(),
+                vec!["Schön, dass du da bist".to_string()]
+            ),
+        ]
+    );
+    let quote = chat
+        .groups
+        .last()
+        .and_then(|g| g.bubbles[0].bubble.quote.clone())
+        .map(|q| q.text);
+    assert_eq!(quote.as_deref(), Some("Ben: Moin Anna"));
+    check("scene-relay-group.json", &scene);
+}

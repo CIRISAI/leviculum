@@ -138,6 +138,11 @@ leviculum_ui::catalogue! {
     YouReacted = "you_reacted", "You reacted %1$s", "Du hast mit %1$s reagiert";
     RunUpdates = "run_updates", "%1$d updates since %2$s", "%1$d Meldungen seit %2$s";
     QuoteYou = "quote_you", "You", "Du";
+    // A relayed group (1482): a bot's chat, a reaction or a reply whose target is not on this device.
+    RelayedGroup = "relayed_group", "%1$s · group via relay", "%1$s · Gruppe über Relais";
+    ReactedElsewhere = "reacted_elsewhere", "reacted %1$s to a message that is not here", "hat mit %1$s auf eine Nachricht reagiert, die hier nicht liegt";
+    QuoteNotHere = "quote_not_here", "A message that is not here", "Eine Nachricht, die hier nicht liegt";
+    InfoRelayedFrom = "info_relayed_from", "%1$s %2$s, via %3$s", "%1$s %2$s, über %3$s";
     // A row's last line for a message without words (1377): the list and
     // the phone's notification say these in the reader's language.
     RowPhoto = "row_photo", "Photo", "Foto";

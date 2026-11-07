@@ -1881,6 +1881,10 @@ pub struct Messages {
     pub v: u32,
     pub peer: String,
     pub name: String,
+    /// A relay's chat (1482): the bar's title, "ReticulumNet NL · Gruppe
+    /// über Relais"; empty for every other chat, whose title is the name.
+    #[serde(default)]
+    pub relayed: String,
     pub messages: Vec<MessageRow>,
     /// The header's avatar, as in [`ConversationRow`].
     #[serde(default)]

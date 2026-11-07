@@ -155,6 +155,7 @@ pub mod radar;
 pub mod reactions;
 pub mod receipts;
 pub mod recording;
+pub mod relayed;
 pub mod replies;
 pub mod rooms;
 pub mod scene;
@@ -1428,6 +1429,7 @@ impl<B> UiModel<B> {
                     receipts: self.reading.on,
                     tracks: Some(&self.voice_tracks),
                     lang: self.lang,
+                    names: Some(&self.names),
                 },
             ),
             None => layout::Laid::empty(self.sizes().messages.0, self.tokens(), self.lang),
@@ -1936,6 +1938,8 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // the switch is on, understands groups (1307) and acknowledges
     // propagated post (1395), always.
     receipts::mark_sends(&mut effects, groups::client_caps(model.reading.on));
+    // And names this device as the map's writer (1482).
+    receipts::name_writer(&mut effects, model.address);
     effects
 }
 
@@ -4292,7 +4296,18 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             sent_at,
             ..
         } => {
-            let lev = leviculum_lxmf::lev::Lev::from_fields(&fields);
+            // The source's own word only (1482): a relay's copy carries its
+            // writer's map, which says nothing of the relay.
+            let lev = leviculum_lxmf::relay::own_lev(&body, &fields, &source);
+            // What a relay hands back of a receipt it was sent (by a writer
+            // before 1482): the writer's name over no words, with the
+            // namespace alone. Nobody's post; nothing is kept.
+            if relayed::noise(&body, &fields, &source) {
+                return Vec::from([UiEffect::Log(format!(
+                    "relayed receipt from {} dropped: no words, no field but lev",
+                    crate::address::to_hex(&source)
+                ))]);
+            }
             // A receipt alone is a state, not a message (1230): it changes
             // the messages it names and nothing else.
             if lev
@@ -5680,6 +5695,20 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let wide = sizes.messages.0 >= WIDE_HEADER;
     let peer = model.conversations.get(model.selected).map(|c| c.peer);
     let messages_title = match peer {
+        // A relay's chat says it is a group via a relay (1482).
+        Some(peer)
+            if !model.groups.contains_key(&peer)
+                && model
+                    .conversations
+                    .get(model.selected)
+                    .is_some_and(relayed::is_relayed) =>
+        {
+            strings::Text::Key(
+                strings::StrId::RelayedGroup,
+                vec![strings::Arg::Str(header_title(&model.names, &peer))],
+            )
+            .resolve(model.lang)
+        }
         Some(peer) => header_title(&model.names, &peer),
         None => "messages".to_string(),
     };
@@ -13483,9 +13512,16 @@ pub(crate) mod tests {
             panic!("one send: {effects:?}");
         };
         assert_eq!((*to, body.as_str()), (PEER, ""));
+        // The mark names its writer since 1482.
+        let mut expected = position_fields(location);
+        leviculum_lxmf::lev::Lev {
+            capabilities: Some(groups::client_caps(true)),
+            writer: Some(OTHER),
+            ..leviculum_lxmf::lev::Lev::default()
+        }
+        .put_into(&mut expected);
         assert_eq!(
-            *fields,
-            marked(position_fields(location)),
+            *fields, expected,
             "the Telemeter and the receipt mark alone"
         );
         let read = telemetry::read(OTHER, fields, None);

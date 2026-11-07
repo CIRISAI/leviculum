@@ -3135,6 +3135,7 @@ impl Inner {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
             name: self.model.names.label(&peer),
+            relayed: relayed_title(&self.model, &peer, self.lang),
             messages: rows,
             initials: self.initials(&peer),
             icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
@@ -3476,6 +3477,26 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
 }
 
 /// A ring as the facade carries it: its colour's name, empty for none.
+/// The bar's title of a relay's chat (1482), "ReticulumNet NL · Gruppe
+/// über Relais", as [`schema::Messages::relayed`] carries it; empty for
+/// every other chat.
+pub fn relayed_title<B>(model: &UiModel<B>, peer: &[u8; 16], lang: Lang) -> String {
+    let relayed = model.group(peer).is_none()
+        && model
+            .conversations
+            .iter()
+            .find(|c| c.peer == *peer)
+            .is_some_and(loquax::ui::relayed::is_relayed);
+    match relayed {
+        true => Text::Key(
+            StrId::RelayedGroup,
+            Vec::from([loquax::ui::strings::Arg::Str(model.names.label(peer))]),
+        )
+        .resolve(lang),
+        false => String::new(),
+    }
+}
+
 pub fn ring(ring: Option<scene::Ring>) -> String {
     ring.map_or("", scene::Ring::word).to_string()
 }
