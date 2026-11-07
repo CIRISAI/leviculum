@@ -1,0 +1,685 @@
+#!/usr/bin/env python3
+"""Walk the ThinkNode M9 on the bench without hands (order 1533).
+
+The board runs the bench image (`scripts/build-m9-image.sh --bench`, boot
+line `[BENCH] inject=on`). The rig folder's proxy (`m9-proxy.py`, the
+reviewer's reader) owns the M9's CH340: it appends every byte the board
+sends to `<rig>/raw.bin`, writes the hex lines it finds in `<rig>/tx.hex`
+to the board, and pulses EN when `<rig>/reset` appears. This walker speaks
+through those three files only, so lnsd can keep the node link on the
+proxy's pty while a walk runs.
+
+A walk is a text file, one step a line, `#` to the line's end a comment:
+
+    key <key>                 press a key: a name (ring_up ring_down
+                              ring_left ring_right enter back chats home
+                              map new_message pin space backspace), one
+                              character, or a code (0xb6); waits for its
+                              KEY line and the frame after it
+    hold <key> <ms>           hold a key, answers again every 200 ms
+    wait page=<name> [<ms>]   until a [PAGE] line names the page (5000)
+    expect <field><op><value> page, cursor, top, zoom against the last
+                              [PAGE] line; op one of = != < >
+    expect <field> changed    the field moved since the last action
+                              (key, hold, dump, reboot, idle, sleep)
+    expect log "<words>"      the words in a board line since the last
+                              action began
+    dump <name>               a FRAME_DUMP of what is shown, decoded to
+                              <out>/dumps/<name>.png
+    reboot                    EN pulse, wait for the UI, note restore_ms
+    idle <s>                  watch the line <s> seconds: rx_lost must
+                              not grow
+    sleep <ms>                wait
+    measure                   the key latencies so far into walk.md
+
+The walk's verdict is held to the bars of order 1533: key to frame under
+100 ms (a KEY line's board time to the next `[DISP] flush` line's t=),
+a resumed restore under 2 s on every boot after the first, no `[LOOP]`
+turn over 250 ms, no `[PREV_RUN]` line that carries a record (a watchdog
+or a panic; a power-on reset says `record=none`), rx_lost not growing in
+an idle step, and every expect and wait met. Output, in --out:
+
+    board.log   every board line the walk saw, host time first
+    walk.md     one line per step: page, cursor, top, latency, dump path,
+                for an agent to read and judge the dumps by eye
+    dumps/      the frame dumps as PNG
+    VERDICT     the verdict line, also the last line of walk.md
+
+Usage:
+  m9-walk.py --rig DIR --walk FILE [--out DIR] [--boots N]
+  m9-walk.py --selftest
+"""
+
+import argparse
+import os
+import re
+import shlex
+import struct
+import sys
+import tempfile
+import threading
+import time
+import zlib
+
+FLAG, ESC, XON, XOFF = 0x7E, 0x7D, 0x11, 0x13
+TYPE_FRAME_DUMP, TYPE_KEY_INJECT = 0x18, 0x1A
+# The steps that do something; `expect ... changed` and `expect log` look
+# back to the last of them.
+ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep")
+KEY_MS_BAR = 100
+RESTORE_MS_BAR = 2000
+LOOP_MS_BAR = 250
+KEY_WAIT_S = 2.0
+READY_WAIT_S = 90.0
+DUMP_WAIT_S = 20.0
+
+# loquax-m9/src/keyboard.rs, SPECIALS and Key::of.
+NAMES = {
+    "chats": 0x81, "home": 0x82, "new_message": 0x83, "pin": 0x84,
+    "map": 0x85, "back": 0x86, "ring_left": 0xB4, "ring_up": 0xB5,
+    "ring_down": 0xB6, "ring_right": 0xB7, "enter": 0x0D,
+    "backspace": 0x08, "space": 0x20,
+}
+
+
+VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure")
+
+
+def parse(steps):
+    """The walk's steps as (line, verb, args); a ValueError naming the line
+    for one that does not read, before the board is touched."""
+    out = []
+    for number, raw in enumerate(steps, 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        try:
+            verb, *args = shlex.split(line)
+            if verb not in VERBS:
+                raise ValueError(f"no step {verb!r}")
+            if verb in ("key", "hold"):
+                key_code(args[0])
+            if verb == "hold":
+                if not 0 < int(args[1]) <= 10_000:
+                    raise ValueError("a hold is 1 to 10000 ms")
+            if verb in ("idle", "sleep"):
+                float(args[0])
+            if verb in ("dump", "wait", "expect") and not args:
+                raise ValueError(f"{verb} what?")
+        except (IndexError, ValueError) as e:
+            raise ValueError(f"line {number}: `{line}`: {e}") from None
+        out.append((line, verb, args))
+    return out
+
+
+def key_code(word):
+    if word in NAMES:
+        return NAMES[word]
+    if re.fullmatch(r"0x[0-9a-fA-F]{2}", word):
+        code = int(word, 16)
+    elif len(word) == 1 and 0x20 < ord(word) < 0x7F:
+        code = ord(word)
+    else:
+        raise ValueError(f"no key named {word!r}")
+    if code == 0:
+        raise ValueError("0 is the idle answer, no key")
+    return code
+
+
+def envelope(frame_type, payload):
+    return b"\xa4\xa5" + bytes([frame_type]) + struct.pack(">H", len(payload)) + payload
+
+
+def wire(data):
+    """HDLC with 0x7E/0x7D escaped, then XON/XOFF escaped as the M9's
+    one UART asks of every sender (leviculum-nrf/serial-mux)."""
+    out = bytearray([FLAG])
+    for b in data:
+        if b in (FLAG, ESC, XON, XOFF):
+            out += bytes([ESC, b ^ 0x20])
+        else:
+            out.append(b)
+    out.append(FLAG)
+    return bytes(out)
+
+
+def key_frame(code, hold_ms=None):
+    payload = bytes([code]) if hold_ms is None else bytes([code]) + struct.pack(">H", hold_ms)
+    return wire(envelope(TYPE_KEY_INJECT, payload))
+
+
+def dump_frame():
+    return wire(envelope(TYPE_FRAME_DUMP, b""))
+
+
+def fields(line):
+    """The key=value words of a board line."""
+    return dict(m.groups() for m in re.finditer(r"(\w+)=(\S+)", line))
+
+
+def png(path, width, height, pixels):
+    """RGB565 pixels as an 8-bit RGB PNG, stdlib only."""
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for v in pixels[y * width:(y + 1) * width]:
+            r5, g6, b5 = v >> 11, (v >> 5) & 0x3F, v & 0x1F
+            rows += bytes(((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2)))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
+        f.write(chunk(b"IDAT", zlib.compress(bytes(rows), 6)))
+        f.write(chunk(b"IEND", b""))
+
+
+def decode_dump(lines):
+    """PBM/PBR/PBE lines (loquax-m9/src/dump.rs) to (w, h, pixels), or a
+    reason it does not read."""
+    w = h = None
+    px = None
+    for line in lines:
+        if line.startswith("PBM "):
+            w, h = map(int, line[4:].split()[:2])
+            px = [0] * (w * h)
+        elif line.startswith("PBR ") and px is not None:
+            f = line[4:].split()
+            y, x = int(f[0]), int(f[1])
+            for run in f[2:]:
+                value, _, n = run.partition("*")
+                for _ in range(int(n or 1)):
+                    if x < w:
+                        px[y * w + x] = int(value, 16)
+                    x += 1
+        elif line.startswith("PBE ") and px is not None:
+            said = line[4:].split()[0]
+            h32 = 0x811C9DC5
+            for v in px:
+                for b in (v & 0xFF, v >> 8):
+                    h32 = ((h32 ^ b) * 0x01000193) & 0xFFFFFFFF
+            if said != "%08x" % h32:
+                return None, f"fnv said {said}, read {h32:08x}"
+            return (w, h, px), None
+    return None, "no PBE line"
+
+
+class Rig:
+    """The proxy's three files."""
+
+    def __init__(self, rig):
+        self.rig = rig
+        self.raw = os.path.join(rig, "raw.bin")
+        self.tx = os.path.join(rig, "tx.hex")
+        self.offset = os.path.getsize(self.raw) if os.path.exists(self.raw) else 0
+        self.pending = b""
+
+    def read_lines(self):
+        """The board's complete lines since the last read; frames dropped."""
+        if not os.path.exists(self.raw):
+            return []
+        with open(self.raw, "rb") as f:
+            f.seek(self.offset)
+            data = f.read()
+        self.offset += len(data)
+        self.pending += data
+        *whole, self.pending = self.pending.split(b"\n")
+        out = []
+        for raw in whole:
+            # A frame is followed by a line end before the next line
+            # (UartLog::frame); a text line has its 0x7E escaped.
+            if FLAG in raw:
+                raw = raw[raw.rfind(bytes([FLAG])) + 1:]
+            text = raw.strip(b"\r").decode("ascii", "replace")
+            if text:
+                out.append(text)
+        return out
+
+    def send(self, frame):
+        """One frame to the board, once the proxy took what it had."""
+        deadline = time.monotonic() + 2.0
+        while os.path.exists(self.tx) and os.path.getsize(self.tx) > 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with open(self.tx, "a") as f:
+            f.write(frame.hex() + "\n")
+
+    def reset(self):
+        open(os.path.join(self.rig, "reset"), "w").close()
+
+
+class Walk:
+    def __init__(self, rig, out, boots):
+        self.rig = rig
+        self.out = out
+        self.boots_asked = boots
+        os.makedirs(os.path.join(out, "dumps"), exist_ok=True)
+        self.log = open(os.path.join(out, "board.log"), "a")
+        self.md = []
+        self.fails = []
+        self.notes = []
+        self.page = {}
+        self.page_before = {}
+        # Every board line of the walk, and where the last action began:
+        # `expect log` and `changed` look back to it.
+        self.step_lines = []
+        self.action_at = 0
+        self.keys = []
+        self.restores = []
+        self.boots = 0
+        self.rx_lost = None
+        self.loop_max = 0
+
+    # ----- the line -----
+
+    def pump(self, timeout=0.0):
+        """Read what came, at least once, for up to `timeout` seconds."""
+        deadline = time.monotonic() + timeout
+        got = []
+        while True:
+            lines = self.rig.read_lines()
+            for line in lines:
+                self.seen(line)
+            got += lines
+            if time.monotonic() >= deadline:
+                return got
+            time.sleep(0.02)
+
+    def seen(self, line):
+        self.log.write("%.3f %s\n" % (time.time(), line))
+        self.log.flush()
+        self.step_lines.append(line)
+        if line.startswith("[PAGE] "):
+            self.page = {k: v for k, v in fields(line).items() if k != "t"}
+        elif line.startswith("[LOOP] "):
+            ms = int(fields(line).get("turn_ms", 0))
+            self.loop_max = max(self.loop_max, ms)
+            if ms > LOOP_MS_BAR:
+                self.fail(f"[LOOP] turn_ms={ms} over {LOOP_MS_BAR}: {line}")
+        elif line.startswith("[PREV_RUN] ") and "record=none" not in line:
+            self.fail(f"the board stopped and restarted: {line}")
+        elif line.startswith("[UART] "):
+            self.rx_lost = int(fields(line).get("rx_lost", 0))
+        elif line.startswith("[STORE] ") and "restore_ms=" in line:
+            f = fields(line)
+            self.restores.append((self.boots, f.get("restore", "?"), int(f["restore_ms"])))
+
+    def mark(self):
+        """Read what is there; the place in the step's lines after it."""
+        self.pump(0.0)
+        return len(self.step_lines)
+
+    def until(self, test, timeout, start):
+        """The first line from `start` on in the step's lines for which
+        `test` holds, pumping for up to `timeout` seconds; with its index
+        after it, or (None, start)."""
+        deadline = time.monotonic() + timeout
+        at = start
+        while True:
+            while at < len(self.step_lines):
+                line = self.step_lines[at]
+                at += 1
+                if test(line):
+                    return line, at
+            if time.monotonic() >= deadline:
+                return None, at
+            self.pump(0.0)
+            time.sleep(0.02)
+
+    def fail(self, why):
+        self.fails.append(why)
+
+    def row(self, step, extra=""):
+        p = self.page
+        self.md.append(
+            f"| {len(self.md) + 1} | `{step}` | {p.get('name', '-')} | {p.get('cursor', '-')} "
+            f"| {p.get('top', '-')} | {p.get('zoom', '')} | {extra} |"
+        )
+
+    # ----- the steps -----
+
+    def boot(self, why):
+        """An EN pulse and the UI up: the core-0 loop armed and a page."""
+        start = self.mark()
+        self.rig.reset()
+        self.page = {}
+        self.boots += 1
+        up, at = self.until(lambda l: l.startswith("[WATCHDOG] "), READY_WAIT_S, start)
+        page = None
+        if up:
+            page, _ = self.until(lambda l: l.startswith("[PAGE] "), READY_WAIT_S, start)
+        if not page:
+            self.fail(f"boot {self.boots} ({why}): no UI within {READY_WAIT_S:.0f} s")
+        bench = any(l.startswith("[BENCH] inject=on") for l in self.step_lines[start:at])
+        if up and not bench:
+            self.fail(f"boot {self.boots}: no [BENCH] inject=on line, not the bench image")
+        restore = [r for r in self.restores if r[0] == self.boots]
+        said = "restore=none"
+        if restore:
+            _, how, ms = restore[-1]
+            said = f"restore={how} restore_ms={ms}"
+            if self.boots > 1 and (how != "resumed" or ms >= RESTORE_MS_BAR):
+                self.fail(f"boot {self.boots}: {said}, the bar is resumed under {RESTORE_MS_BAR} ms")
+        return said
+
+    def key(self, code, hold_ms=None):
+        start = self.mark()
+        self.rig.send(key_frame(code, hold_ms))
+        line, at = self.until(lambda l: l.startswith("KEY ") and f"code={code:#04x}" in l, KEY_WAIT_S, start)
+        if not line:
+            self.fail(f"key {code:#04x}: no KEY line within {KEY_WAIT_S} s")
+            return "no KEY line"
+        pressed = int(line.split()[1])
+        flush, _ = self.until(lambda l: l.startswith("[DISP] flush rows="), KEY_WAIT_S, at)
+        if hold_ms:
+            self.pump(hold_ms / 1000 + 0.3)
+        self.pump(0.15)
+        if not flush:
+            self.keys.append((code, None))
+            return "no frame"
+        ms = int(fields(flush)["t"]) - pressed
+        self.keys.append((code, ms))
+        if ms >= KEY_MS_BAR:
+            self.fail(f"key {code:#04x}: {ms} ms to its frame, the bar is under {KEY_MS_BAR}")
+        return f"key_ms={ms}"
+
+    def dump(self, name):
+        start = self.mark()
+        self.rig.send(dump_frame())
+        end, _ = self.until(lambda l: l.startswith("PBE "), DUMP_WAIT_S, start)
+        if not end:
+            self.fail(f"dump {name}: no PBE line within {DUMP_WAIT_S:.0f} s")
+            return "no dump"
+        lines = [l for l in self.step_lines[start:] if l[:4] in ("PBM ", "PBR ", "PBE ")]
+        image, why = decode_dump(lines)
+        if not image:
+            self.fail(f"dump {name}: {why}")
+            return f"dump unread: {why}"
+        path = os.path.join("dumps", f"{name}.png")
+        png(os.path.join(self.out, path), *image)
+        self.pump(0.2)
+        return f"dump {path}"
+
+    def expect(self, words):
+        if words[0] == "log":
+            text = " ".join(words[1:])
+            ok = any(text in l for l in self.step_lines[self.action_at:])
+            return ok, f"log has {text!r}"
+        if len(words) == 2 and words[1] == "changed":
+            name = words[0]
+            ok = self.page.get(name) != self.page_before.get(name)
+            return ok, f"{name} {self.page_before.get(name)} -> {self.page.get(name)}"
+        m = re.fullmatch(r"(page|name|cursor|top|zoom)(=|!=|<|>)(\S+)", "".join(words))
+        if not m:
+            raise ValueError(f"expect what? {' '.join(words)}")
+        field, op, want = m.groups()
+        field = "name" if field == "page" else field
+        got = self.page.get(field)
+        if op in "<>":
+            ok = got is not None and (int(got) < int(want) if op == "<" else int(got) > int(want))
+        else:
+            ok = (got == want) == (op == "=")
+        return ok, f"{field}={got}"
+
+    def run(self, steps):
+        self.notes.append(self.boot("before the walk"))
+        for n in range(1, self.boots_asked):
+            self.notes.append(self.boot(f"boot {n + 1} of {self.boots_asked}"))
+        self.row("boot", "; ".join(self.notes))
+        for line, verb, args in parse(steps):
+            extra = ""
+            if verb in ACTIONS:
+                self.pump(0.0)
+                self.page_before = dict(self.page)
+                self.action_at = len(self.step_lines)
+            if verb == "key":
+                extra = self.key(key_code(args[0]))
+            elif verb == "hold":
+                extra = self.key(key_code(args[0]), int(args[1]))
+            elif verb == "wait":
+                name = args[0].removeprefix("page=")
+                ms = int(args[1]) if len(args) > 1 else 5000
+                self.pump(0.0)
+                if self.page.get("name") != name:
+                    got, _ = self.until(lambda l: l.startswith("[PAGE] ") and fields(l).get("name") == name,
+                                        ms / 1000, self.action_at)
+                    if not got:
+                        self.fail(f"wait page={name}: still {self.page.get('name')} after {ms} ms")
+                extra = f"waited for {name}"
+            elif verb == "expect":
+                self.pump(0.1)
+                ok, said = self.expect(args)
+                extra = ("ok " if ok else "FAILED ") + said
+                if not ok:
+                    self.fail(f"step `{line}`: {said}")
+            elif verb == "dump":
+                extra = self.dump(args[0])
+            elif verb == "reboot":
+                extra = self.boot("reboot step")
+            elif verb == "idle":
+                self.pump(0.1)
+                before = self.rx_lost
+                self.pump(float(args[0]))
+                extra = f"rx_lost {before} -> {self.rx_lost}"
+                if before is not None and self.rx_lost is not None and self.rx_lost > before:
+                    self.fail(f"idle {args[0]} s: rx_lost grew {before} -> {self.rx_lost}")
+                if before is None or self.rx_lost is None:
+                    extra += " (no [UART] line to compare)"
+            elif verb == "sleep":
+                self.pump(int(args[0]) / 1000)
+            elif verb == "measure":
+                extra = self.latencies()
+            else:
+                raise ValueError(f"no step {verb!r}")
+            self.row(line, extra)
+        return self.verdict()
+
+    def latencies(self):
+        ms = sorted(m for _, m in self.keys if m is not None)
+        if not ms:
+            return "key_ms none"
+        return f"key_ms n={len(ms)} median={ms[len(ms) // 2]} max={ms[-1]} no_frame={sum(1 for _, m in self.keys if m is None)}"
+
+    def verdict(self):
+        verdict = "PASS" if not self.fails else "FAIL"
+        line = (f"VERDICT {verdict} steps={len(self.md)} boots={self.boots} {self.latencies()} "
+                f"loop_max_ms={self.loop_max} rx_lost={self.rx_lost} fails={len(self.fails)}")
+        with open(os.path.join(self.out, "walk.md"), "w") as f:
+            f.write("# M9 bench walk\n\n")
+            f.write("Each dump is for an agent's eye: judge it against the step it follows.\n\n")
+            f.write("| # | step | page | cursor | top | zoom | what happened |\n")
+            f.write("|---|---|---|---|---|---|---|\n")
+            f.write("\n".join(self.md) + "\n\n")
+            if self.fails:
+                f.write("## Failed\n\n" + "".join(f"- {why}\n" for why in self.fails) + "\n")
+            f.write(line + "\n")
+        with open(os.path.join(self.out, "VERDICT"), "w") as f:
+            f.write(line + "\n")
+        print(line)
+        for why in self.fails:
+            print("  " + why)
+        return 0 if not self.fails else 1
+
+
+# ----- the selftest: a board in a thread, behind the proxy's files -----
+
+class FakeBoard(threading.Thread):
+    """The proxy and the bench image in one: takes tx.hex, answers into
+    raw.bin as the M9 would. `slow_ms` delays every flush."""
+
+    def __init__(self, rig, slow_ms=0, grow_rx=False):
+        super().__init__(daemon=True)
+        self.rig, self.slow_ms, self.grow_rx = rig, slow_ms, grow_rx
+        self.t0 = time.monotonic()
+        self.stop = False
+        self.cursor = 0
+        self.rx_lost = 0
+        self.boots = 0
+
+    def ms(self):
+        return int((time.monotonic() - self.t0) * 1000)
+
+    def say(self, *lines):
+        with open(os.path.join(self.rig, "raw.bin"), "ab") as f:
+            for line in lines:
+                f.write(line.encode() + b"\r\n")
+
+    def page_line(self):
+        self.say(f"[PAGE] name=chats cursor={self.cursor} top={max(0, self.cursor - 4)} t={self.ms()}")
+
+    def run(self):
+        tx, rst = os.path.join(self.rig, "tx.hex"), os.path.join(self.rig, "reset")
+        while not self.stop:
+            if os.path.exists(rst):
+                os.unlink(rst)
+                self.boots += 1
+                self.cursor = 0
+                self.say("[PREV_RUN] reason=power record=none t=1", "[BENCH] inject=on t=2",
+                         f"[STORE] sectors=896 used=3 entries=40 restore={'whole' if self.boots == 1 else 'resumed'} restore_ms=640 t=900",
+                         "[WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow t=950")
+                self.page_line()
+            if os.path.exists(tx) and os.path.getsize(tx) > 0:
+                with open(tx, "r+") as f:
+                    lines = f.read().split()
+                    f.seek(0)
+                    f.truncate()
+                for hexline in lines:
+                    self.frame(bytes.fromhex(hexline))
+            if self.grow_rx:
+                self.rx_lost += 1
+            self.say(f"[UART] rx_lost={self.rx_lost} overrun=0 t={self.ms()}")
+            time.sleep(0.05)
+
+    def frame(self, data):
+        body, esc = bytearray(), False
+        for b in data[1:-1]:
+            if esc:
+                body.append(b ^ 0x20)
+                esc = False
+            elif b == ESC:
+                esc = True
+            else:
+                body.append(b)
+        kind, payload = body[2], bytes(body[5:])
+        if kind == TYPE_KEY_INJECT:
+            at = self.ms()
+            code = payload[0]
+            self.say(f"KBRAW {at} {code:02x}", f"KEY {at} code={code:#04x} name=x")
+            if code == 0xB6:
+                self.cursor += 1
+            time.sleep(self.slow_ms / 1000)
+            self.say(f"[DISP] flush rows=0..239 ms=4.000 t={self.ms() + 20}")
+            self.page_line()
+        elif kind == TYPE_FRAME_DUMP:
+            w, h = 4, 2
+            px = [0xF800, 0x07E0, 0x001F, 0xFFFF, 0, 0, 0x1234, 0x1234]
+            h32 = 0x811C9DC5
+            for v in px:
+                for b in (v & 0xFF, v >> 8):
+                    h32 = ((h32 ^ b) * 0x01000193) & 0xFFFFFFFF
+            self.say(f"PBM {w} {h}", "PBR 0 0 f800 07e0 001f ffff", "PBR 1 0 0000*2 1234*2", f"PBE {h32:08x}")
+
+
+SELFTEST_WALK = """
+# the selftest's walk: a press, a wait, expects, a dump, a reboot
+key ring_down
+wait page=chats
+expect cursor=1
+expect cursor changed
+expect log "KEY"
+dump list
+reboot
+expect cursor=0
+idle 0.4
+measure
+"""
+
+
+def selftest():
+    rc = 0
+    with tempfile.TemporaryDirectory(dir=os.environ.get("M9_WALK_TMP")) as base:
+        def walk(name, **board):
+            rig = os.path.join(base, name)
+            os.makedirs(rig)
+            open(os.path.join(rig, "raw.bin"), "wb").close()
+            fake = FakeBoard(rig, **board)
+            fake.start()
+            out = os.path.join(rig, "out")
+            w = Walk(Rig(rig), out, boots=2)
+            got = w.run(SELFTEST_WALK.splitlines())
+            fake.stop = True
+            return got, w, out
+        got, w, out = walk("good")
+        if got != 0:
+            print("[m9-walk] selftest FAIL: a good board's walk failed:", w.fails)
+            rc = 1
+        if not os.path.exists(os.path.join(out, "dumps", "list.png")):
+            print("[m9-walk] selftest FAIL: the dump was not written as a PNG")
+            rc = 1
+        if w.boots != 3 or not any(r[1] == "resumed" for r in w.restores):
+            print("[m9-walk] selftest FAIL: the boots and restores were not read", w.boots, w.restores)
+            rc = 1
+        # The positive controls: a slow frame and a growing rx_lost fail.
+        got, w, _ = walk("slow", slow_ms=150)
+        if got == 0 or not any("to its frame" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a 150 ms frame passed the 100 ms bar")
+            rc = 1
+        got, w, _ = walk("lossy", grow_rx=True)
+        if got == 0 or not any("rx_lost grew" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a growing rx_lost passed the idle step")
+            rc = 1
+    shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "m9-walks", "bench.walk")
+    try:
+        with open(shipped) as f:
+            parse(f.read().splitlines())
+    except ValueError as e:
+        print(f"[m9-walk] selftest FAIL: the shipped walk does not read: {e}")
+        rc = 1
+    try:
+        parse(["key nosuchkey"])
+        print("[m9-walk] selftest FAIL: a key nobody names was read")
+        rc = 1
+    except ValueError:
+        pass
+    if wire(b"\x11\x7e\x00") != b"\x7e\x7d\x31\x7d\x5e\x00\x7e":
+        print("[m9-walk] selftest FAIL: the flow and flag bytes are not escaped")
+        rc = 1
+    if key_frame(0xB5, 500).hex() != "7ea4a51a0003b501f47e":
+        print("[m9-walk] selftest FAIL: the key frame is not the envelope's", key_frame(0xB5, 500).hex())
+        rc = 1
+    if rc == 0:
+        print("[m9-walk] selftest ok: a good walk passes and writes its dump, a slow frame and a growing rx_lost fail")
+    return rc
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--rig")
+    ap.add_argument("--walk")
+    ap.add_argument("--out")
+    ap.add_argument("--boots", type=int, default=2)
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--check", metavar="WALK", help="only read the walk file")
+    a = ap.parse_args()
+    if a.selftest:
+        return selftest()
+    if a.check:
+        try:
+            with open(a.check) as f:
+                n = len(parse(f.read().splitlines()))
+        except ValueError as e:
+            print(f"[m9-walk] {a.check}: {e}")
+            return 2
+        print(f"[m9-walk] {a.check}: {n} steps read")
+        return 0
+    if not a.rig or not a.walk:
+        ap.error("--rig and --walk, or --selftest")
+    out = a.out or os.path.join(a.rig, "walk-" + time.strftime("%Y%m%d-%H%M%S"))
+    with open(a.walk) as f:
+        steps = f.read().splitlines()
+    return Walk(Rig(a.rig), out, a.boots).run(steps)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
