@@ -36,7 +36,8 @@ final class AddContact {
      * sentence for the screen, and asks nothing; null otherwise.
      */
     static String take(final Activity activity, String text, final Runnable then) {
-        Map<String, Object> code = Core.lxma(text.trim());
+        final String trimmed = text.trim();
+        final Map<String, Object> code = Core.code(trimmed);
         if (code.containsKey("error")) {
             return Core.str(code, "error");
         }
@@ -49,7 +50,22 @@ final class AddContact {
             }
             return null;
         }
-        ask(activity, code, then);
+        // The name the session knows for it, asked on the engine's thread
+        // (1464): the read above asks no session.
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.lxma(trimmed);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> known) {
+                if (activity.isFinishing() || activity.isDestroyed()) {
+                    return;
+                }
+                ask(activity, known.containsKey("error") ? code : known, then);
+            }
+        });
         return null;
     }
 

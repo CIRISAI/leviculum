@@ -280,7 +280,7 @@ public class ScanActivity extends Activity {
      */
     private String refusal(String text) {
         if (prefixes.length == 1 && CODES.equals(prefixes[0])) {
-            Map<String, Object> read = Core.lxma(text);
+            Map<String, Object> read = Core.code(text);
             return read.containsKey("error") ? Core.str(read, "error") : null;
         }
         for (String prefix : prefixes) {
@@ -288,7 +288,7 @@ public class ScanActivity extends Activity {
                 return null;
             }
         }
-        Map<String, Object> read = Core.lxma(text);
+        Map<String, Object> read = Core.code(text);
         return read.containsKey("error") ? Core.str(read, "error") : getString(R.string.scan_wrong_kind);
     }
 

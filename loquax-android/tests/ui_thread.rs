@@ -10,6 +10,14 @@
 //! `Engine.Call`, or is one of the few calls a worker thread of its own
 //! makes, each named below with the method it runs in. A call put back
 //! onto the UI thread fails here by file and line.
+//!
+//! The library's questions too (1464): a fresh join still froze the Pixel
+//! for 35 s, its UI thread 83.6 % of the time in `Native.query` for the
+//! conversation list, waiting on the same lock. Every query builder of
+//! `Core.java` (a `static` method that goes through `query(`) sits in the
+//! `ask()` of an `Engine.Ask`, in an `Engine.Call`, or in a named worker.
+//! The two lists the library answers without the lock (`Core.look`) and
+//! the photo viewer's zoom, which asks no session, are the UI thread's.
 
 use std::path::{Path, PathBuf};
 
@@ -46,6 +54,48 @@ const WORKERS: &[(&str, &str, &str)] = &[
         "Core.deleteRegions(",
         "public void run() {",
     ),
+    // Questions on workers of their own (1464): the address book's links on
+    // "loquax-book"; the chat's photos, voices and files on its executors;
+    // the photo viewer's picture, the map's settings and the first start's
+    // own address on threads of their own.
+    (
+        "Book.java",
+        "Core.links(",
+        "static void refresh(Context context) {",
+    ),
+    (
+        "ChatActivity.java",
+        "Core.stagedBitmap(",
+        "public void run() {",
+    ),
+    ("ChatActivity.java", "Core.voicePcm(", "public void run() {"),
+    ("ChatActivity.java", "Core.saveFile(", "public void run() {"),
+    (
+        "ChatActivity.java",
+        "Core.photoBitmap(",
+        "public void run() {",
+    ),
+    (
+        "PhotoActivity.java",
+        "Core.photoBitmap(",
+        "public void run() {",
+    ),
+    (
+        "SettingsActivity.java",
+        "Core.mapTheme(",
+        "public void run() {",
+    ),
+    (
+        "SettingsActivity.java",
+        "Core.mapRegions(",
+        "public void run() {",
+    ),
+    (
+        "SettingsActivity.java",
+        "Core.mapFling(",
+        "public void run() {",
+    ),
+    ("WelcomeActivity.java", "Core.me(", "public void run() {"),
     // Not a thread: `Locator.tell` is a command itself, checked at its callers.
     (
         "Locator.java",
@@ -74,6 +124,33 @@ fn builders(core: &str) -> Vec<String> {
         }
         if let Some(name) = &current {
             if line.contains("command(") && name != "command" && !found.contains(name) {
+                found.push(name.clone());
+            }
+        }
+    }
+    found
+}
+
+/// The query builders of `Core.java` (1464): its `static` methods, of any
+/// type, whose body calls `query(`, the guarded one, and not `query`
+/// itself.
+fn questions(core: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut current: Option<String> = None;
+    for line in core.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("static ") && trimmed.ends_with('{') && trimmed.contains('(') {
+            current = trimmed
+                .split('(')
+                .next()
+                .and_then(|head| head.split_whitespace().last())
+                .map(str::to_string);
+            continue;
+        }
+        let code = line.split("//").next().unwrap_or_default();
+        let guarded = code.contains("query(") && !code.contains("Native.query(");
+        if let Some(name) = &current {
+            if guarded && name != "query" && !found.contains(name) {
                 found.push(name.clone());
             }
         }
@@ -126,7 +203,8 @@ fn on_the_ui_thread(file: &str, source: &str, calls: &[String]) -> Vec<String> {
         }
         for call in calls.iter().filter(|call| code.contains(call.as_str())) {
             let head = enclosing(&lines, at).unwrap_or_default();
-            let engine = head == "public String run() {";
+            let engine = head == "public String run() {"
+                || (head.starts_with("public ") && head.ends_with(" ask() {"));
             let worker = WORKERS
                 .iter()
                 .any(|(f, c, h)| *f == file && c == call && head == *h);
@@ -142,6 +220,7 @@ fn calls() -> Vec<String> {
     let core = std::fs::read_to_string(sources().join("Core.java")).expect("Core.java");
     let mut calls: Vec<String> = builders(&core)
         .into_iter()
+        .chain(questions(&core))
         .map(|name| format!("Core.{name}("))
         .collect();
     calls.push("Locator.tell(".to_string());
@@ -164,6 +243,31 @@ fn no_command_runs_on_the_ui_thread() {
         "only {} builders read: {calls:?}",
         calls.len()
     );
+    // The questions too (1464): the Pixel's two and a few more; the lists
+    // the library answers without the lock are not among them.
+    for known in [
+        "Core.messages(",
+        "Core.detail(",
+        "Core.bar(",
+        "Core.findConversations(",
+        "Core.friends(",
+    ] {
+        assert!(
+            calls.iter().any(|c| c == known),
+            "{known} not found among {calls:?}"
+        );
+    }
+    for free in [
+        "Core.conversations(",
+        "Core.archived(",
+        "Core.code(",
+        "Core.zoom(",
+    ] {
+        assert!(
+            !calls.iter().any(|c| c == free),
+            "{free} waits on no lock (1464), yet it is among {calls:?}"
+        );
+    }
     let mut wrong = Vec::new();
     let mut files: Vec<_> = std::fs::read_dir(sources())
         .expect("the Java sources")
@@ -200,6 +304,7 @@ fn the_device_guard_sits_before_every_native_command() {
     for (head, native) in [
         ("static String command(", "Native.command("),
         ("static Map<String, Object> start(", "Native.start("),
+        ("static Map<String, Object> query(", "Native.query("),
     ] {
         let body = core.split(head).nth(1).expect(head);
         let guard = body.find("Engine.offMain(").expect("the guard");
@@ -258,6 +363,53 @@ fn the_check_catches_the_walks_line() {
 ";
     assert_eq!(
         on_the_ui_thread("ChatActivity.java", stray, &calls).len(),
+        1
+    );
+}
+
+/// The positive control of 1464: the Pixel's own line, the chat's
+/// `refresh` asking `Core.messages` on the UI thread, is caught; the same
+/// question in an `Engine.Ask` passes; the list's `Core.conversations()`,
+/// which the library answers without the lock, passes bare.
+#[test]
+fn the_check_catches_a_stray_query() {
+    let calls = calls();
+    let bare = "\
+    private void refresh() {
+        refresh(Core.messages(peer));
+    }
+";
+    let caught = on_the_ui_thread("ChatActivity.java", bare, &calls);
+    assert_eq!(caught.len(), 1, "{caught:?}");
+    assert!(caught[0].contains("ChatActivity.java:2"), "{caught:?}");
+
+    let asked = "\
+    private void refresh() {
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.messages(of);
+            }
+        }, got);
+    }
+";
+    assert!(on_the_ui_thread("ChatActivity.java", asked, &calls).is_empty());
+
+    let look = "\
+    private Map<String, Object> ask() {
+        return archivedView ? Core.archived() : Core.conversations();
+    }
+";
+    assert!(on_the_ui_thread("ConversationsActivity.java", look, &calls).is_empty());
+
+    // A question a worker of its own asks outside its named method is caught.
+    let moved = "\
+    private void tap() {
+        Core.photoBitmap(peer, key, edge);
+    }
+";
+    assert_eq!(
+        on_the_ui_thread("ChatActivity.java", moved, &calls).len(),
         1
     );
 }

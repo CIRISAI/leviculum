@@ -154,7 +154,7 @@ public class MainActivity extends Activity {
             if (!AddContact.is(word)) {
                 continue;
             }
-            Map<String, Object> read = Core.lxma(word);
+            Map<String, Object> read = Core.code(word);
             if (!read.containsKey("error") && !"mailbox".equals(Core.str(read, "kind"))) {
                 return word;
             }

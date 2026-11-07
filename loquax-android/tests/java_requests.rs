@@ -648,6 +648,18 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             },
         ),
         (
+            "code",
+            java_map(&[
+                ("t", Java::Str("code")),
+                ("text", Java::Str(LXMA)),
+                ("lang", Java::Str("de-DE")),
+            ]),
+            Query::Code {
+                text: s(LXMA),
+                lang: Some(s("de-DE")),
+            },
+        ),
+        (
             "info",
             java_map(&[
                 ("t", Java::Str("info")),

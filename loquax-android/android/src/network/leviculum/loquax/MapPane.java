@@ -223,8 +223,17 @@ final class MapPane implements MapView.Listener {
      * at a zoom that shows the pin and its streets, its card opened once
      * the map has drawn there. A friend without a fix says so.
      */
-    void openAt(String peer) {
-        refresh();
+    void openAt(final String peer) {
+        refresh(new Runnable() {
+            @Override
+            public void run() {
+                openedAt(peer);
+            }
+        });
+    }
+
+    /** {@link #openAt} with the friends as the library answered. */
+    private void openedAt(String peer) {
         Map<String, Object> row = people.get(peer);
         if (row == null || row.get("lat_e6") == null || row.get("lon_e6") == null) {
             say(activity.getString(R.string.no_position));
@@ -368,7 +377,7 @@ final class MapPane implements MapView.Listener {
      * the share to the one picked.
      */
     private void pickAndShare() {
-        Map<String, Object> answer = Core.conversations(null);
+        Map<String, Object> answer = Core.conversations();
         final List<Map<String, Object>> rows = Core.list(answer, "conversations");
         if (rows.isEmpty()) {
             say(activity.getString(R.string.share_nobody));
@@ -421,8 +430,38 @@ final class MapPane implements MapView.Listener {
 
     /** The friends again from the library: the pins' faces, the card's words. */
     private void refresh() {
-        Map<String, Object> answer = fix == null ? Core.friends()
-                : Core.friends(Math.round(fix.getLatitude() * 1e6), Math.round(fix.getLongitude() * 1e6));
+        refresh(null);
+    }
+
+    /**
+     * {@link #refresh}, asked on the engine's thread (1464), then `after`
+     * (null for nothing) with the answer in place.
+     */
+    private void refresh(final Runnable after) {
+        final Location at = fix;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return at == null ? Core.friends()
+                        : Core.friends(Math.round(at.getLatitude() * 1e6),
+                                Math.round(at.getLongitude() * 1e6));
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (activity.isDestroyed()) {
+                    return;
+                }
+                friendsAre(answer);
+                if (after != null) {
+                    after.run();
+                }
+            }
+        });
+    }
+
+    /** The friends as the library answered: the pins' faces, the card's words. */
+    private void friendsAre(Map<String, Object> answer) {
         if (answer.containsKey("error")) {
             return;
         }
@@ -658,8 +697,17 @@ final class MapPane implements MapView.Listener {
      * cluster no zoom parts); with the search field when `searching`. A
      * tap closes it and flies the map to the friend with the card open.
      */
-    private void showSheet(final List<String> only, boolean searching) {
-        refresh();
+    private void showSheet(final List<String> only, final boolean searching) {
+        refresh(new Runnable() {
+            @Override
+            public void run() {
+                sheet(only, searching);
+            }
+        });
+    }
+
+    /** {@link #showSheet} with the friends as the library answered. */
+    private void sheet(final List<String> only, boolean searching) {
         if (sheet != null) {
             sheet.dismiss();
         }

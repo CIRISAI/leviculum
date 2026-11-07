@@ -8,7 +8,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 
 /**
- * The thread the library's commands run on (1446). A command waits on the
+ * The thread the library's commands and questions run on (1446, 1464). A command waits on the
  * session's lock, which the library's pump holds while it folds what the
  * engine said; the first pull of a big mailbox kept it for 12 s, and
  * `ConversationsActivity.onResume` waited for it on the UI thread until
@@ -31,6 +31,16 @@ final class Engine {
     /** What a {@link Call} said, on the UI thread. */
     interface Said {
         void said(String error);
+    }
+
+    /** A library question (1464); its answer. */
+    interface Ask<T> {
+        T ask();
+    }
+
+    /** What an {@link Ask} answered, on the UI thread. */
+    interface Got<T> {
+        void got(T answer);
     }
 
     /** A blocking native call on the UI thread, in a debuggable build. */
@@ -78,6 +88,27 @@ final class Engine {
                     @Override
                     public void run() {
                         said.said(error);
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * Ask `ask` on the engine's thread (1464), behind the commands handed
+     * before it; its answer to `got` on the UI thread. A question waits on
+     * the session's lock as a command does: the Pixel spent 83.6 % of a
+     * first pull's 44 s in the list's query on the UI thread.
+     */
+    static <T> void ask(final Ask<T> ask, final Got<T> got) {
+        THREAD.execute(new Runnable() {
+            @Override
+            public void run() {
+                final T answer = ask.ask();
+                MAIN.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        got.got(answer);
                     }
                 });
             }

@@ -218,11 +218,22 @@ public class ChatActivity extends Activity implements Events.Listener {
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            // Drawn again only when the answer moved (1455).
-            Map<String, Object> answer = Core.messages(peer);
-            if (!Quiet.same(header, answer)) {
-                refresh(answer);
-            }
+            // Drawn again only when the answer moved (1455); asked on the
+            // engine's thread (1464).
+            final String of = peer;
+            Engine.ask(new Engine.Ask<Map<String, Object>>() {
+                @Override
+                public Map<String, Object> ask() {
+                    return Core.messages(of);
+                }
+            }, new Engine.Got<Map<String, Object>>() {
+                @Override
+                public void got(Map<String, Object> answer) {
+                    if (!isDestroyed() && of.equals(peer) && !Quiet.same(header, answer)) {
+                        refresh(answer);
+                    }
+                }
+            });
             ticker.postDelayed(this, 30_000);
         }
     };
@@ -689,9 +700,25 @@ public class ChatActivity extends Activity implements Events.Listener {
      * letter and the microphone hides.
      */
     private void sendable() {
-        if (peer != null) {
-            bar(Core.bar(peer));
+        if (peer == null) {
+            return;
         }
+        // Asked on the engine's thread (1464): the answers come back in the
+        // order the changes were made.
+        final String of = peer;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.bar(of);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (!isDestroyed() && of.equals(peer)) {
+                    bar(answer);
+                }
+            }
+        });
     }
 
     /**
@@ -1223,15 +1250,38 @@ public class ChatActivity extends Activity implements Events.Listener {
      * and "Not now"; without it, a line that asks for the permission.
      */
     private void choose() {
+        final Map<String, String> display = new java.util.HashMap<>();
+        if (!Book.canRead(this)) {
+            choose(new ArrayList<Map<String, Object>>(), display);
+            return;
+        }
+        final List<Map<String, Object>> candidates = Book.candidates(getContentResolver());
+        for (Map<String, Object> candidate : candidates) {
+            display.put(Core.str(candidate, "key"), Core.str(candidate, "display"));
+        }
+        // The library ranks them on the engine's thread (1464).
+        final String of = peer;
+        Engine.ask(new Engine.Ask<List<Map<String, Object>>>() {
+            @Override
+            public List<Map<String, Object>> ask() {
+                return Core.suggest(of, candidates);
+            }
+        }, new Engine.Got<List<Map<String, Object>>>() {
+            @Override
+            public void got(List<Map<String, Object>> suggestions) {
+                if (!isDestroyed()) {
+                    choose(suggestions, display);
+                }
+            }
+        });
+    }
+
+    /** {@link #choose} with the library's `suggestions` and the contacts' `display` names. */
+    private void choose(List<Map<String, Object>> suggestions, Map<String, String> display) {
         final List<String> labels = new ArrayList<>();
         final List<Runnable> actions = new ArrayList<>();
         if (Book.canRead(this)) {
-            List<Map<String, Object>> candidates = Book.candidates(getContentResolver());
-            Map<String, String> display = new java.util.HashMap<>();
-            for (Map<String, Object> candidate : candidates) {
-                display.put(Core.str(candidate, "key"), Core.str(candidate, "display"));
-            }
-            for (final Map<String, Object> suggestion : Core.suggest(peer, candidates)) {
+            for (final Map<String, Object> suggestion : suggestions) {
                 final String key = Core.str(suggestion, "key");
                 labels.add(display.get(key) + " \u00B7 " + matched(suggestion));
                 actions.add(new Runnable() {
@@ -1379,11 +1429,30 @@ public class ChatActivity extends Activity implements Events.Listener {
      * whatever the editor does after.
      */
     private void confirm(final Map<String, Object> copy) {
+        // The contact's other addresses, asked on the engine's thread (1464).
+        final String lookup = Core.str(copy, "lookup");
+        Engine.ask(new Engine.Ask<List<Map<String, Object>>>() {
+            @Override
+            public List<Map<String, Object>> ask() {
+                return Core.contact(lookup);
+            }
+        }, new Engine.Got<List<Map<String, Object>>>() {
+            @Override
+            public void got(List<Map<String, Object>> addresses) {
+                if (!isDestroyed()) {
+                    confirm(copy, addresses);
+                }
+            }
+        });
+    }
+
+    /** {@link #confirm} with the contact's `addresses` as the library has them. */
+    private void confirm(final Map<String, Object> copy, List<Map<String, Object>> addresses) {
         final String contactName = Core.str(copy, "name");
         StringBuilder message = new StringBuilder(
                 getString(R.string.link_to, Core.str(header, "name"), contactName));
         List<String> others = new ArrayList<>();
-        for (Map<String, Object> row : Core.contact(Core.str(copy, "lookup"))) {
+        for (Map<String, Object> row : addresses) {
             if (!peer.equals(Core.str(row, "peer"))) {
                 others.add(Core.str(row, "name"));
             }
@@ -1983,7 +2052,25 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     /** The linked contact's addresses, each with its own chat. */
     private void addresses() {
-        final List<Map<String, Object>> rows = Core.contact(Core.str(header, "lookup"));
+        // Asked on the engine's thread (1464).
+        final String lookup = Core.str(header, "lookup");
+        Engine.ask(new Engine.Ask<List<Map<String, Object>>>() {
+            @Override
+            public List<Map<String, Object>> ask() {
+                return Core.contact(lookup);
+            }
+        }, new Engine.Got<List<Map<String, Object>>>() {
+            @Override
+            public void got(List<Map<String, Object>> rows) {
+                if (!isDestroyed()) {
+                    addresses(rows);
+                }
+            }
+        });
+    }
+
+    /** {@link #addresses} with the library's `rows`. */
+    private void addresses(final List<Map<String, Object>> rows) {
         String[] names = new String[rows.size()];
         for (int i = 0; i < rows.size(); i++) {
             names[i] = Core.str(rows.get(i), "name");
@@ -2239,7 +2326,26 @@ public class ChatActivity extends Activity implements Events.Listener {
      * newest.
      */
     private void showRun(Map<String, Object> row) {
-        final List<Map<String, Object>> run = Core.run(peer, Core.num(row, "key"));
+        // Asked on the engine's thread (1464).
+        final String of = peer;
+        final long key = Core.num(row, "key");
+        Engine.ask(new Engine.Ask<List<Map<String, Object>>>() {
+            @Override
+            public List<Map<String, Object>> ask() {
+                return Core.run(of, key);
+            }
+        }, new Engine.Got<List<Map<String, Object>>>() {
+            @Override
+            public void got(List<Map<String, Object>> run) {
+                if (!isDestroyed()) {
+                    showRun(run);
+                }
+            }
+        });
+    }
+
+    /** {@link #showRun} with the library's `run`. */
+    private void showRun(final List<Map<String, Object>> run) {
         java.text.DateFormat time = android.text.format.DateFormat.getTimeFormat(this);
         String[] lines = new String[run.size()];
         for (int i = 0; i < run.size(); i++) {
@@ -2284,7 +2390,8 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     /** Pick a conversation and send it a copy of `row`. */
     private void forward(final Map<String, Object> row) {
-        final List<Map<String, Object>> all = Core.list(Core.conversations(null), "conversations");
+        // The list never waits for the session's lock (1464).
+        final List<Map<String, Object>> all = Core.list(Core.conversations(), "conversations");
         String[] names = new String[all.size()];
         for (int i = 0; i < all.size(); i++) {
             names[i] = Core.str(all.get(i), "name");
@@ -2404,12 +2511,32 @@ public class ChatActivity extends Activity implements Events.Listener {
      * phone's language; the terminal's lines with the hex only once Advanced is tapped.
      */
     private void info(Map<String, Object> row) {
-        String[] error = new String[1];
-        Map<String, Object> info = Core.info(peer, Core.num(row, "key"), error);
-        if (info == null) {
-            line(error[0]);
-            return;
-        }
+        // Asked on the engine's thread (1464).
+        final String of = peer;
+        final long key = Core.num(row, "key");
+        final String[] error = new String[1];
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.info(of, key, error);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> info) {
+                if (isDestroyed()) {
+                    return;
+                }
+                if (info == null) {
+                    line(error[0]);
+                    return;
+                }
+                showInfo(info);
+            }
+        });
+    }
+
+    /** {@link #info}'s sheet from the library's `info`. */
+    private void showInfo(Map<String, Object> info) {
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setPadding(dp(20), dp(12), dp(20), dp(12));
@@ -2536,8 +2663,45 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
     }
 
+    /** A question for the chat is with the engine, and another is owed after it. */
+    private boolean asking;
+    private boolean askOwed;
+
+    /**
+     * The chat again, asked on the engine's thread (1464): one question at
+     * a time, and the events that came while it was out make one more.
+     */
     private void refresh() {
-        refresh(Core.messages(peer));
+        if (peer == null) {
+            return;
+        }
+        if (asking) {
+            askOwed = true;
+            return;
+        }
+        asking = true;
+        final String of = peer;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.messages(of);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                asking = false;
+                if (isDestroyed()) {
+                    return;
+                }
+                if (of.equals(peer)) {
+                    refresh(answer);
+                }
+                if (askOwed) {
+                    askOwed = false;
+                    refresh();
+                }
+            }
+        });
     }
 
     private void refresh(Map<String, Object> answer) {

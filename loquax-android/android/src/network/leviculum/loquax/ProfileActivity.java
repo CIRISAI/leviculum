@@ -141,9 +141,26 @@ public class ProfileActivity extends Activity {
         super.onPause();
     }
 
+    /** The profile again, asked on the engine's thread (1464). */
     private void refresh() {
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.profile();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (!isDestroyed()) {
+                    show(answer);
+                }
+            }
+        });
+    }
+
+    private void show(Map<String, Object> answer) {
         body.removeAllViews();
-        profile = Core.profile();
+        profile = answer;
         if (profile.containsKey("error")) {
             body.addView(padded(text(Core.str(profile, "error"), 15, R.color.text_secondary)));
             return;
@@ -369,12 +386,33 @@ public class ProfileActivity extends Activity {
      * code ran out with a new one a tap away.
      */
     private void linkDevice() {
-        codeSheet(Core.linkDevice(), R.string.link_title, R.string.link_text, R.string.link_waiting,
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.linkDevice();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> code) {
+                if (!isDestroyed()) {
+                    linkDevice(code);
+                }
+            }
+        });
+    }
+
+    /** {@link #linkDevice}'s sheet for the library's `code`. */
+    private void linkDevice(Map<String, Object> code) {
+        codeSheet(code, R.string.link_title, R.string.link_text, R.string.link_waiting,
                 new int[] {R.id.link_text, R.id.link_qr, R.id.link_code, R.id.link_status},
                 new Look() {
                     @Override
-                    public boolean look(TextView status) {
-                        Map<String, Object> linked = Core.linked();
+                    public Map<String, Object> ask() {
+                        return Core.linked();
+                    }
+
+                    @Override
+                    public boolean look(TextView status, Map<String, Object> linked) {
                         String state = Core.str(linked, "state");
                         if ("linked".equals(state)) {
                             status.setText(getString(R.string.link_linked, Core.str(linked, "name")));
@@ -396,12 +434,33 @@ public class ProfileActivity extends Activity {
      * then. Done after the move opens the first screen, which says this phone moved.
      */
     private void movePhone() {
-        codeSheet(Core.movePhone(), R.string.move_title, R.string.move_text, R.string.move_waiting,
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.movePhone();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> code) {
+                if (!isDestroyed()) {
+                    movePhone(code);
+                }
+            }
+        });
+    }
+
+    /** {@link #movePhone}'s sheet for the library's `code`. */
+    private void movePhone(Map<String, Object> code) {
+        codeSheet(code, R.string.move_title, R.string.move_text, R.string.move_waiting,
                 new int[] {R.id.link_text, R.id.move_qr, R.id.move_code, R.id.move_status},
                 new Look() {
                     @Override
-                    public boolean look(TextView status) {
-                        Map<String, Object> moving = Core.moving();
+                    public Map<String, Object> ask() {
+                        return Core.moving();
+                    }
+
+                    @Override
+                    public boolean look(TextView status, Map<String, Object> moving) {
                         String state = Core.str(moving, "state");
                         if ("moved".equals(state)) {
                             status.setText(getString(R.string.move_moved, Core.str(moving, "name")));
@@ -417,9 +476,12 @@ public class ProfileActivity extends Activity {
                 }, true);
     }
 
-    /** What a code sheet asks the library every second; true once the answer is final. */
-    private interface Look {
-        boolean look(TextView status);
+    /**
+     * What a code sheet asks the library every second, on the engine's
+     * thread (1464), and its answer shown; true once it is final.
+     */
+    private interface Look extends Engine.Ask<Map<String, Object>> {
+        boolean look(TextView status, Map<String, Object> answer);
     }
 
     /**
@@ -499,11 +561,19 @@ public class ProfileActivity extends Activity {
                 if (!dialog.isShowing()) {
                     return;
                 }
-                if (look.look(status)) {
-                    over[0] = true;
-                    return;
-                }
-                status.postDelayed(poll[0], 1000);
+                Engine.ask(look, new Engine.Got<Map<String, Object>>() {
+                    @Override
+                    public void got(Map<String, Object> answer) {
+                        if (!dialog.isShowing()) {
+                            return;
+                        }
+                        if (look.look(status, answer)) {
+                            over[0] = true;
+                            return;
+                        }
+                        status.postDelayed(poll[0], 1000);
+                    }
+                });
             }
         };
         dialog.setOnShowListener(new DialogInterface.OnShowListener() {

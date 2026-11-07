@@ -218,6 +218,8 @@ struct Inner {
     /// The list screens as of the pump's last change (1464), which the UI
     /// thread reads while the pump holds the lock.
     scene: Arc<Mutex<Scene>>,
+    /// [`schema::Event::Changed::counts`] as the last scene made it.
+    counts: u64,
     gone: bool,
     /// Whether the TCP interface to the home node was up at the last look,
     /// none before the first, and when that look was.
@@ -270,6 +272,17 @@ struct Scene {
     /// the lock free takes them as they are, and computes them only when
     /// not. Every [`Session::lock`] and every pump turn clears it.
     fresh: bool,
+}
+
+/// [`schema::Event::Changed::counts`] of `listed` (1464): every row's
+/// peer, unread count, muted and sharing flag, hashed.
+fn counts(listed: &schema::Conversations) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in &listed.conversations {
+        (&row.peer, row.unread, row.muted, row.sharing).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Which of the two lists of [`Scene`].
@@ -1174,7 +1187,7 @@ impl Session {
     /// since the scene was made; else computed under the free lock, or
     /// (before the first scene) after the wait.
     fn listed_now(&self, which: Listed) -> Vec<u8> {
-        let inner = match self.inner.try_lock() {
+        let mut inner = match self.inner.try_lock() {
             Ok(inner) => inner,
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
@@ -1721,6 +1734,13 @@ impl Session {
             schema::Query::Archived { search: None } => {
                 return Ok(self.listed_now(Listed::Archived));
             }
+            schema::Query::Code { text, lang } => {
+                return Ok(schema::encode(&read_code(
+                    text,
+                    Lang::of_tag(lang.as_deref().unwrap_or_default()),
+                    |_| String::new(),
+                )?));
+            }
             _ => {}
         }
         let inner = self.lock();
@@ -1819,6 +1839,7 @@ impl Session {
             | schema::Query::SaveFile { .. }
             | schema::Query::Recording { .. }
             | schema::Query::Browse
+            | schema::Query::Code { .. }
             | schema::Query::Voice { .. } => return Err("answered above".to_string()),
             // The viewer's zoom needs no session: `lib.rs` answers it.
             schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
@@ -2048,6 +2069,7 @@ impl Inner {
             backlog: false,
             waiting: Arc::default(),
             scene: Arc::default(),
+            counts: 0,
             gone: false,
             link: None,
             // The first pump looks, and says what it saw.
@@ -2242,7 +2264,10 @@ impl Inner {
             // The lists first: a screen told `changed` reads them at once,
             // and may find the lock held by the next turn (1464).
             self.show_scene();
-            let _ = self.events.send(Event::Changed { v: VERSION });
+            let _ = self.events.send(Event::Changed {
+                v: VERSION,
+                counts: self.counts,
+            });
         }
         true
     }
@@ -2743,9 +2768,12 @@ impl Inner {
         self.apply(UiEvent::FetchDone(end.result));
     }
 
-    /// The two lists into [`Inner::scene`] (1464).
-    fn show_scene(&self) {
-        let conversations = schema::encode(&self.conversations(None));
+    /// The two lists into [`Inner::scene`] (1464), and the digest of the
+    /// counts the service notifies by.
+    fn show_scene(&mut self) {
+        let listed = self.conversations(None);
+        self.counts = counts(&listed);
+        let conversations = schema::encode(&listed);
         let archived = schema::encode(&self.listed(self.model.archived_order(), None));
         let mut scene = self
             .scene

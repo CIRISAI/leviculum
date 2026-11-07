@@ -57,6 +57,26 @@ final class GroupDialogs {
         verb(screen, verb, group, "", "", false, after);
     }
 
+    /**
+     * The group screen as the library has it now, asked on the engine's
+     * thread (1464), to `then` on the UI thread while `screen` lives.
+     */
+    private static void shown(final Activity screen, final Engine.Got<Map<String, Object>> then) {
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.groupScreen();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                if (!screen.isDestroyed()) {
+                    then.got(shown);
+                }
+            }
+        });
+    }
+
     /** The open sheet closes. */
     private static void close(Activity screen) {
         verb(screen, "close", "", null);
@@ -87,7 +107,17 @@ final class GroupDialogs {
 
     /** The friends to tick, then Next (a new group's name step) or Add. */
     private static void picker(final Activity screen, final boolean adding) {
-        final Map<String, Object> shown = Core.groupScreen();
+        shown(screen, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                picker(screen, adding, shown);
+            }
+        });
+    }
+
+    /** {@link #picker} as the library `shown` it. */
+    private static void picker(final Activity screen, final boolean adding,
+            final Map<String, Object> shown) {
         final List<Map<String, Object>> rows = Core.list(shown, "rows");
         String[] names = new String[rows.size()];
         boolean[] picked = new boolean[rows.size()];
@@ -114,11 +144,16 @@ final class GroupDialogs {
                                     // picker and opens the member sheet.
                                     return;
                                 }
-                                if ("name".equals(Core.str(Core.groupScreen(), "step"))) {
-                                    name(screen);
-                                } else {
-                                    close(screen);
-                                }
+                                shown(screen, new Engine.Got<Map<String, Object>>() {
+                                    @Override
+                                    public void got(Map<String, Object> now) {
+                                        if ("name".equals(Core.str(now, "step"))) {
+                                            name(screen, now);
+                                        } else {
+                                            close(screen);
+                                        }
+                                    }
+                                });
                             }
                         });
                     }
@@ -134,7 +169,16 @@ final class GroupDialogs {
 
     /** The name step: the field, the trust sentence, Create. */
     private static void name(final Activity screen) {
-        Map<String, Object> shown = Core.groupScreen();
+        shown(screen, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                name(screen, shown);
+            }
+        });
+    }
+
+    /** {@link #name} as the library `shown` it. */
+    private static void name(final Activity screen, Map<String, Object> shown) {
         final EditText field = new EditText(screen);
         field.setHint(Core.str(shown, "hint"));
         // The draft's name: empty for a new group, the old one when it
@@ -196,7 +240,17 @@ final class GroupDialogs {
 
     /** The member sheet the library opened for `group`. */
     private static void memberSheet(final Activity screen, final String group, final Runnable after) {
-        final Map<String, Object> shown = Core.groupScreen();
+        shown(screen, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                memberSheet(screen, group, after, shown);
+            }
+        });
+    }
+
+    /** {@link #memberSheet} as the library `shown` it. */
+    private static void memberSheet(final Activity screen, final String group, final Runnable after,
+            Map<String, Object> shown) {
         final List<Map<String, Object>> rows = Core.list(shown, "rows");
         // The admin's "Delete group" (1307 pass four) is the list's last
         // line: the dialog's three buttons are taken by Cancel, Add and
@@ -293,7 +347,17 @@ final class GroupDialogs {
     /** The sheet's question before a Leave or a Remove, in the library's words. */
     private static void ask(final Activity screen, final String verb, final String group,
             final String member, final Runnable after) {
-        Map<String, Object> shown = Core.groupScreen();
+        shown(screen, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                ask(screen, verb, group, member, after, shown);
+            }
+        });
+    }
+
+    /** {@link #ask} as the library `shown` it. */
+    private static void ask(final Activity screen, final String verb, final String group,
+            final String member, final Runnable after, Map<String, Object> shown) {
         new AlertDialog.Builder(screen)
                 .setMessage(Core.str(shown, "ask"))
                 .setPositiveButton(Core.str(shown, "yes"), new DialogInterface.OnClickListener() {

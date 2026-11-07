@@ -783,6 +783,15 @@ pub enum Query {
         #[serde(default)]
         lang: Option<String>,
     },
+    /// [`Query::Lxma`] never asking the session (1464), `known` always
+    /// empty: whether `text` is a code and which kind, for the UI thread,
+    /// which may not wait on the session's lock (a shared text's first
+    /// word, before the screen decides where it goes).
+    Code {
+        text: String,
+        #[serde(default)]
+        lang: Option<String>,
+    },
     /// The Maps page (1207): with `delete` that region file deleted
     /// ([`RegionRow::name`]), with `set_autoload` the automatic download
     /// stored, then the regions of the app's maps directory. A page's
@@ -2294,8 +2303,15 @@ pub struct BarButton {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Event {
-    /// Something the screen shows changed: ask again.
-    Changed { v: u32 },
+    /// Something the screen shows changed: ask again. `counts` is a digest
+    /// of every listed conversation's unread count and its muted and
+    /// sharing flags (1464): the service that notifies asks the list only
+    /// when it moved, not once per event.
+    Changed {
+        v: u32,
+        #[serde(default)]
+        counts: u64,
+    },
     /// A line for the user: what the terminal shows as a toast.
     Notice { v: u32, text: String },
     /// A pull began (`running`), ended (`done`, with how many new

@@ -156,11 +156,9 @@ final class BrowsePane {
         verb("tab", "", "");
     }
 
-    /** Back: the browser's back while it has one; false when it has none. */
+    /** Back: the browser's back while it has one, as last drawn; false when it has none. */
     boolean back() {
-        Map<String, Object> shown = Core.browseScreen();
-        handOver(shown);
-        if (!Core.bool(shown, "back")) {
+        if (last == null || !Core.bool(last, "back")) {
             return false;
         }
         verb("back", "", "");
@@ -210,9 +208,28 @@ final class BrowsePane {
         });
     }
 
-    /** Draw what the library says the tab shows. */
+    /** What the tab showed last (1464): Back decides by it. */
+    private Map<String, Object> last;
+
+    /** Draw what the library says the tab shows, asked on the engine's thread (1464). */
     void draw() {
-        Map<String, Object> shown = Core.browseScreen();
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.browseScreen();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> shown) {
+                if (!screen.isDestroyed()) {
+                    show(shown);
+                }
+            }
+        });
+    }
+
+    private void show(Map<String, Object> shown) {
+        last = shown;
         handOver(shown);
         if (!Core.bool(shown, "open")) {
             host.left();

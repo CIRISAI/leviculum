@@ -130,7 +130,8 @@ pub fn command(request: &[u8]) -> Vec<u8> {
 pub fn query(request: &[u8]) -> Vec<u8> {
     let answer = match (current(), schema::decode::<schema::Query>(request)) {
         // A code read before anything runs: the first start's scanner.
-        (None, Ok(schema::Query::Lxma { text, lang })) => session::read_code(
+        (None, Ok(schema::Query::Lxma { text, lang }))
+        | (_, Ok(schema::Query::Code { text, lang })) => session::read_code(
             &text,
             Lang::of_tag(lang.as_deref().unwrap_or_default()),
             |_| String::new(),

@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.view.Choreographer;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
@@ -253,8 +254,19 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
         // The tab shows where the library has it (1337 pass two): off in the
         // APK until its fetch through the phone's own node was seen on a device.
-        findViewById(R.id.tab_browse).setVisibility(
-                Core.bool(Core.browseScreen(), "enabled") ? View.VISIBLE : View.GONE);
+        // Asked on the engine's thread (1464), hidden until it answers.
+        findViewById(R.id.tab_browse).setVisibility(View.GONE);
+        Engine.ask(new Engine.Ask<Boolean>() {
+            @Override
+            public Boolean ask() {
+                return Core.bool(Core.browseScreen(), "enabled");
+            }
+        }, new Engine.Got<Boolean>() {
+            @Override
+            public void got(Boolean enabled) {
+                findViewById(R.id.tab_browse).setVisibility(enabled ? View.VISIBLE : View.GONE);
+            }
+        });
         findViewById(R.id.tab_rooms).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -263,9 +275,20 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         });
         tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, false);
         // The tab shows where the config names a hub (1384), as on the
-        // terminal and the window: the library says so.
-        findViewById(R.id.tab_rooms).setVisibility(
-                Core.bool(Core.roomsScreen(), "enabled") ? View.VISIBLE : View.GONE);
+        // terminal and the window: the library says so, on the engine's
+        // thread (1464).
+        findViewById(R.id.tab_rooms).setVisibility(View.GONE);
+        Engine.ask(new Engine.Ask<Boolean>() {
+            @Override
+            public Boolean ask() {
+                return Core.bool(Core.roomsScreen(), "enabled");
+            }
+        }, new Engine.Got<Boolean>() {
+            @Override
+            public void got(Boolean enabled) {
+                findViewById(R.id.tab_rooms).setVisibility(enabled ? View.VISIBLE : View.GONE);
+            }
+        });
         select(map);
     }
 
@@ -736,6 +759,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         }
         resumed = false;
         ticker.removeCallbacks(tick);
+        Choreographer.getInstance().removeFrameCallback(frame);
+        refreshOwed = false;
+        panesOwed = false;
         Engine.run(new Engine.Call() {
             @Override
             public String run() {
@@ -769,12 +795,48 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     /** The answer the list on screen shows (1455). */
     private Map<String, Object> shownAnswer;
 
+    /**
+     * The list as the library has it: never waits for the session's lock
+     * (1464), so it is asked here, on the UI thread.
+     */
     private Map<String, Object> ask() {
-        return archivedView ? Core.archived(null) : Core.conversations(null);
+        return archivedView ? Core.archived() : Core.conversations();
     }
 
+    /** A refresh is owed at the next frame, and the open pane's with it. */
+    private boolean refreshOwed;
+    private boolean panesOwed;
+    /**
+     * One refresh per frame (1464), however many events came in it: a first
+     * pull says `changed` hundreds of times, and the Pixel's list asked 341
+     * times in 44 s, once per event.
+     */
+    private final Choreographer.FrameCallback frame = new Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            refreshOwed = false;
+            refresh(ask());
+            if (panesOwed) {
+                panesOwed = false;
+                if (onRooms) {
+                    // A line the hub brought, or how the link stands.
+                    roomsPane.draw();
+                }
+                if (onMap) {
+                    // A position that came moves its pin.
+                    mapPane.ask();
+                }
+            }
+        }
+    };
+
+    /** The list again, at the next frame. */
     private void refresh() {
-        refresh(ask());
+        if (refreshOwed) {
+            return;
+        }
+        refreshOwed = true;
+        Choreographer.getInstance().postFrameCallback(frame);
     }
 
     private void refresh(Map<String, Object> answer) {
@@ -822,30 +884,41 @@ public class ConversationsActivity extends Activity implements Events.Listener {
      * while the field is empty.
      */
     private void filter() {
-        String needle = query.getText().toString().trim();
-        rows.clear();
+        final String needle = query.getText().toString().trim();
         if (needle.isEmpty()) {
+            rows.clear();
             rows.addAll(all);
-        } else {
-            Map<String, Object> found = archivedView ? Core.archived(needle) : Core.conversations(needle);
-            rows.addAll(Core.list(found, "conversations"));
+            adapter.notifyDataSetChanged();
+            return;
         }
-        adapter.notifyDataSetChanged();
+        // The search waits on the session's lock: the engine's thread asks
+        // (1464), and an answer to a word no longer typed is dropped.
+        final boolean archived = archivedView;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return archived ? Core.findArchived(needle) : Core.findConversations(needle);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> found) {
+                if (isDestroyed() || !needle.equals(query.getText().toString().trim())) {
+                    return;
+                }
+                rows.clear();
+                rows.addAll(Core.list(found, "conversations"));
+                adapter.notifyDataSetChanged();
+            }
+        });
     }
 
     @Override
     public void onEvent(Map<String, Object> event) {
         String kind = Core.str(event, "t");
         if ("changed".equals(kind)) {
+            // The list and the open pane at the next frame (1464).
+            panesOwed = true;
             refresh();
-            if (onRooms) {
-                // A line the hub brought, or how the link stands.
-                roomsPane.draw();
-            }
-            if (onMap) {
-                // A position that came moves its pin.
-                mapPane.ask();
-            }
         } else if ("stopped".equals(kind)) {
             // The notification's stop button, the menu's, or the engine
             // gone: the session is over, and so is the app until it starts

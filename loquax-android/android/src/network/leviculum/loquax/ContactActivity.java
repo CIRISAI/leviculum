@@ -138,8 +138,43 @@ public class ContactActivity extends Activity implements Events.Listener {
         }
     }
 
+    /** A question for the screen is with the engine, and another is owed after it. */
+    private boolean asking;
+    private boolean askOwed;
+
+    /**
+     * The contact again, asked on the engine's thread (1464): one question
+     * at a time, and the events that came while it was out make one more.
+     */
     private void refresh() {
-        Map<String, Object> answer = Core.detail(peer);
+        if (asking) {
+            askOwed = true;
+            return;
+        }
+        asking = true;
+        final String of = peer;
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.detail(of);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                asking = false;
+                if (isDestroyed() || isFinishing()) {
+                    return;
+                }
+                show(answer);
+                if (askOwed) {
+                    askOwed = false;
+                    refresh();
+                }
+            }
+        });
+    }
+
+    private void show(Map<String, Object> answer) {
         if (answer.containsKey("error")) {
             Toast.makeText(this, Core.str(answer, "error"), Toast.LENGTH_LONG).show();
             finish();

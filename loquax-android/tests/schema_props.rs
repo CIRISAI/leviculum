@@ -302,6 +302,7 @@ fn query() -> impl Strategy<Value = Query> {
         Just(Query::MovePhone),
         Just(Query::Moving),
         (text(), opt_text()).prop_map(|(text, lang)| Query::Lxma { text, lang }),
+        (text(), opt_text()).prop_map(|(text, lang)| Query::Code { text, lang }),
         (opt_text(), prop::option::of(any::<bool>())).prop_map(|(delete, set_autoload)| {
             Query::MapRegions {
                 delete,
@@ -327,7 +328,7 @@ fn query() -> impl Strategy<Value = Query> {
 
 fn event() -> impl Strategy<Value = Event> {
     prop_oneof![
-        u32s().prop_map(|v| Event::Changed { v }),
+        (u32s(), any::<u64>()).prop_map(|(v, counts)| Event::Changed { v, counts }),
         (u32s(), text()).prop_map(|(v, text)| Event::Notice { v, text }),
         (u32s(), text(), text()).prop_map(|(v, state, detail)| Event::Sync { v, state, detail }),
         (u32s(), any::<bool>()).prop_map(|(v, up)| Event::Link { v, up }),

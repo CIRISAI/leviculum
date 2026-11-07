@@ -52,6 +52,11 @@ public class LoquaxService extends Service implements Events.Listener {
     private final Binder binder = new Local();
     /** Each conversation's unread count as last seen; null before the first look. */
     private Map<String, Long> unread;
+    /**
+     * The library's digest of the list's counts at the last look (1464,
+     * `changed`'s `counts`): a `changed` that leaves it is no reason to look.
+     */
+    private Long counts;
     /** Whether the TCP interface to the home node is up, as the library last said. */
     private boolean linkUp;
     /** Whether the mailbox runs here, in this process (1152). */
@@ -262,7 +267,14 @@ public class LoquaxService extends Service implements Events.Listener {
     public void onEvent(Map<String, Object> event) {
         String kind = Core.str(event, "t");
         if ("changed".equals(kind)) {
-            look(true);
+            // Only when an unread count, a mute or a share moved (1464): a
+            // first pull says `changed` hundreds of times and moves none,
+            // and the Pixel's service looked 648 times in 44 s.
+            long now = Core.num(event, "counts");
+            if (counts == null || counts != now) {
+                counts = now;
+                look(true);
+            }
         } else if ("link".equals(kind)) {
             linkUp = Core.bool(event, "up");
             describe();
@@ -286,7 +298,8 @@ public class LoquaxService extends Service implements Events.Listener {
      * or the mailbox's place changed with it (1345).
      */
     private void look(boolean tell) {
-        Map<String, Object> answer = Core.conversations(null);
+        // The list never waits for the session's lock (1464).
+        Map<String, Object> answer = Core.conversations();
         if (answer.containsKey("error")) {
             return;
         }
@@ -294,6 +307,16 @@ public class LoquaxService extends Service implements Events.Listener {
         Map<String, Long> now = new HashMap<>();
         boolean sharing = false;
         NotificationManager manager = getSystemService(NotificationManager.class);
+        // What there is to cancel (1464): a binder call each, 4 s of the
+        // Pixel's 44. The first look cancels what an earlier run posted.
+        java.util.Set<String> posted = new java.util.HashSet<>();
+        if (unread == null) {
+            for (android.service.notification.StatusBarNotification shown : manager.getActiveNotifications()) {
+                if (shown.getTag() != null) {
+                    posted.add(shown.getTag());
+                }
+            }
+        }
         for (Map<String, Object> row : rows) {
             String peer = Core.str(row, "peer");
             sharing |= Core.bool(row, "sharing");
@@ -301,7 +324,10 @@ public class LoquaxService extends Service implements Events.Listener {
             now.put(peer, count);
             Long before = unread == null ? null : unread.get(peer);
             if (count == 0) {
-                manager.cancel(peer, 0);
+                boolean shown = unread == null ? posted.contains(peer) : before != null && before > 0;
+                if (shown) {
+                    manager.cancel(peer, 0);
+                }
             } else if (tell && unread != null && count > (before == null ? 0 : before)
                     && screens == 0 && !Core.bool(row, "muted")) {
                 // A muted conversation counts, and posts nothing (1146).

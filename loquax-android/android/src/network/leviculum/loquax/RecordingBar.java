@@ -418,8 +418,28 @@ final class RecordingBar {
         preview.shutdownNow();
     }
 
+    /**
+     * The library's answer, asked on the engine's thread (1464) right
+     * behind the command it follows, so its effects come in their order.
+     */
     private void answer() {
-        Map<String, Object> answer = Core.recording(host.peer());
+        final String peer = host.peer();
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.recording(peer);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (!screen.isDestroyed()) {
+                    answered(answer);
+                }
+            }
+        });
+    }
+
+    private void answered(Map<String, Object> answer) {
         if (!Core.bool(answer, "ok")) {
             host.line(Core.str(answer, "error"));
             return;
