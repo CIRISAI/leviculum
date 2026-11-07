@@ -2149,7 +2149,7 @@ impl App {
         let mut pins = self.seen.pins.clone();
         let at_rest = self.view.at_zoom(self.view.tile_zoom());
         let shown = match radar::shows(&at_rest, &self.setup.regions) {
-            true => radar::radar(&pins, self.view.unit(), self.view.size()),
+            true => radar::radar(&pins, self.view.unit(), self.view.size(), self.lang),
             false => None,
         };
         if let Some(r) = &shown {

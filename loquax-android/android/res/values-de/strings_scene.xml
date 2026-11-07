@@ -59,6 +59,8 @@
     <string name="last_position">letzte Position %1$s</string>
     <string name="position_of">Position von %1$s, %2$s</string>
     <string name="position_marker">⌖</string>
+    <string name="radar_note">Keine Karte für diese Gegend geladen · Ringe %1$s</string>
+    <string name="radar_note_on">Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s</string>
     <string name="map_empty">Noch niemand teilt eine Position mit dir</string>
     <string name="no_position">Noch keine Position von dieser Person</string>
     <string name="nearby_card">In der Nähe, nicht in deinen Kontakten</string>

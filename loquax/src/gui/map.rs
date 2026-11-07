@@ -501,7 +501,12 @@ pub(super) mod tests {
             );
             let mut pins = scenes::pins(&scene);
             let shown = match radar::shows(&fitted, &setup.regions) {
-                true => radar::radar(&pins, view.unit(), view.size()),
+                true => radar::radar(
+                    &pins,
+                    view.unit(),
+                    view.size(),
+                    loquax::ui::strings::Lang::En,
+                ),
                 false => None,
             };
             assert_eq!(shown.is_some(), scene.name == "radar", "{}", scene.name);

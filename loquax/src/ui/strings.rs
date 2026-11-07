@@ -100,6 +100,9 @@ leviculum_ui::catalogue! {
     LastPosition = "last_position", "last position %1$s", "letzte Position %1$s";
     PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
     PositionMarker = "position_marker", "⌖", "⌖";
+    // The radar's line where no map is loaded (1447, walk 1 finding 19).
+    RadarNote = "radar_note", "No map loaded for this area · Rings %1$s", "Keine Karte für diese Gegend geladen · Ringe %1$s";
+    RadarNoteOn = "radar_note_on", "No map loaded for this area · Rings %1$s around %2$s", "Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s";
     // The map with nobody else's position (1447): the window, the phone and the terminal.
     MapEmpty = "map_empty", "Nobody shares a position with you yet", "Noch niemand teilt eine Position mit dir";
     NoPosition = "no_position", "No position from this person yet", "Noch keine Position von dieser Person";

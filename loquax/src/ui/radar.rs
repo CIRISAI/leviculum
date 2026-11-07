@@ -21,6 +21,7 @@ use leviculum_map::viewport::Viewport;
 use leviculum_ui::Rect;
 
 use super::map::MapPin;
+use super::strings::{Arg, Lang, StrId, Text};
 use super::tracks::cells::TrackCell;
 
 /// Metres around the equator, the projection's 2^32 units.
@@ -58,17 +59,25 @@ pub struct Radar {
     pub step_m: u32,
     /// The rings' radii in metres, the step's multiples.
     pub rings: Vec<u32>,
+    /// The language its note is said in (1447).
+    pub lang: Lang,
 }
 
 impl Radar {
-    /// The line that says what the radar centres on: north up and the
-    /// step, and the peer it centres on without an own position.
+    /// The line over the radar, from the catalogue (1447, walk 1 finding
+    /// 19): that no map is loaded for the area and the rings' step, and
+    /// whom the rings are around without an own position. "radar" and
+    /// "north up" were words for the map's maker, not its reader.
     pub fn note(&self) -> String {
-        let step = distance(f64::from(self.step_m));
-        match &self.on {
-            None => format!("no map here · radar · rings {step} · north up"),
-            Some(name) => format!("radar on {name}, no own position · rings {step}"),
-        }
+        let step = Arg::Str(distance(f64::from(self.step_m)));
+        let text = match &self.on {
+            None => Text::Key(StrId::RadarNote, Vec::from([step])),
+            Some(name) => Text::Key(
+                StrId::RadarNoteOn,
+                Vec::from([step, Arg::Str(name.clone())]),
+            ),
+        };
+        text.resolve(self.lang)
     }
 }
 
@@ -165,7 +174,7 @@ pub fn relative(a: World, b: World) -> String {
 /// The radar of a view `size` pixels across and down, a pixel spanning
 /// `unit` world units: centred on our own pin, or on the newest peer's
 /// without one; `None` without any pin.
-pub fn radar(pins: &[MapPin], unit: f64, size: (u32, u32)) -> Option<Radar> {
+pub fn radar(pins: &[MapPin], unit: f64, size: (u32, u32), lang: Lang) -> Option<Radar> {
     let (centre, on) = match pins.iter().find(|p| p.own) {
         Some(own) => (own.at, None),
         None => {
@@ -191,6 +200,7 @@ pub fn radar(pins: &[MapPin], unit: f64, size: (u32, u32)) -> Option<Radar> {
         on,
         step_m: step,
         rings,
+        lang,
     })
 }
 
@@ -321,7 +331,7 @@ mod tests {
         let us = pin(1, 46.6006, 11.7254, true, 0);
         let step = |z: u8| {
             let unit = libm::exp2(24.0 - f64::from(z));
-            radar(core::slice::from_ref(&us), unit, (480, 320)).map(|r| r.step_m)
+            radar(core::slice::from_ref(&us), unit, (480, 320), Lang::En).map(|r| r.step_m)
         };
         assert_eq!(
             [step(11), step(13), step(15), step(17)],
@@ -363,7 +373,7 @@ mod tests {
             pin(3, 43.77, 11.25, false, 300),
         ];
         let unit = libm::exp2(24.0 - 15.0);
-        let r = radar(&pins, unit, (480, 320)).expect("a radar");
+        let r = radar(&pins, unit, (480, 320), Lang::En).expect("a radar");
         assert_eq!(r.centre, pins[1].at);
         assert!(r.on.is_none());
         assert!(!r.rings.is_empty() && r.rings.len() <= MAX_RINGS as usize);
@@ -378,11 +388,29 @@ mod tests {
         let anna = labelled[0].age.clone().unwrap_or_default();
         assert_eq!(anna, "830 m NE, 12 min ago");
 
-        let r = radar(&[pins[0].clone(), pins[2].clone()], unit, (480, 320)).expect("a radar");
+        let r = radar(
+            &[pins[0].clone(), pins[2].clone()],
+            unit,
+            (480, 320),
+            Lang::En,
+        )
+        .expect("a radar");
         assert_eq!(r.centre, pins[2].at, "the newest peer");
         assert_eq!(r.on.as_deref(), Some("p3"));
-        assert_eq!(r.note(), "radar on p3, no own position · rings 200 m");
-        assert!(radar(&[], unit, (480, 320)).is_none());
+        assert_eq!(
+            r.note(),
+            "No map loaded for this area · Rings 200 m around p3"
+        );
+        let de = Radar {
+            lang: Lang::De,
+            on: None,
+            ..r.clone()
+        };
+        assert_eq!(
+            de.note(),
+            "Keine Karte für diese Gegend geladen · Ringe 200 m"
+        );
+        assert!(radar(&[], unit, (480, 320), Lang::En).is_none());
     }
 
     /// Deeper than the outline and touched by no region: a radar; zoomed

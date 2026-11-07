@@ -556,7 +556,7 @@ impl Renderer {
         // No region touches the view: the radar (1386), every pin saying
         // how far and which way it is from the centre.
         let radar = match radar::shows(&view.at_zoom(rest_zoom), &setup.regions) {
-            true => radar::radar(pins, view.unit(), view.size()),
+            true => radar::radar(pins, view.unit(), view.size(), lang),
             false => None,
         };
         let mut labelled;

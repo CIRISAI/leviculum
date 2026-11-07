@@ -43,7 +43,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││·       ·         · · ·      · · ·         ·       ·│
 │                        ││ ·       ··             · ··             ··       · │
 │                        ││  ·         ·                          ·         ·  │
-│                        ││  radar on them ·61dd, no own position · rings 50 m │
+│                        ││No map loaded for this area · Rings 50 m around them│
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

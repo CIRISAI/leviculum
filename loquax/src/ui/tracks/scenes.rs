@@ -615,7 +615,7 @@ mod tests {
         );
         let mut pinned = pins(scene);
         let radar = match scene.name == "radar" {
-            true => crate::ui::radar::radar(&pinned, unit, view.size()),
+            true => crate::ui::radar::radar(&pinned, unit, view.size(), Lang::En),
             false => None,
         };
         if let Some(r) = &radar {

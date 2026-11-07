@@ -4663,7 +4663,7 @@ impl<B> UiModel<B> {
         // No region touches the view: the radar (1386), its pins labelled
         // by distance and compass point from the centre.
         let radar = match radar::shows(&viewport, &self.map_setup.regions) {
-            true => radar::radar(&shown, viewport_unit(&viewport), viewport.size()),
+            true => radar::radar(&shown, viewport_unit(&viewport), viewport.size(), self.lang),
             false => None,
         };
         if let Some(r) = &radar {
