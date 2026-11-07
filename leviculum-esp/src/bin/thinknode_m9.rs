@@ -68,8 +68,12 @@
 //! [STORE] page_read entries=<n> earlier=<n> ms=<ms>   (1521, a conversation opened or scrolled to its top)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
-//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> t=<ms>
-//!                           on every loss and with every banner (1440)
+//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> t=<ms>
+//!                           on every loss and every five seconds (1440);
+//!                           stack_free is core 0's stack never touched
+//!                           since the boot's census, above the guard (1521b)
+//! [CORES] census=done waited_ms=<n>   core 0 held still while the UI
+//!                           core's census ran (1521b), or census=late
 //! KBRAW <ms> <hex>          one per answer that is no idle one: a timer
 //!                           polls every 10 ms into a queue the loop takes
 //!                           (1463); <ms> is the poll's time, not the line's
@@ -80,7 +84,9 @@
 //!                           a turn of the loop longer than 100 ms (1463)
 //! ```
 //!
-//! and the banner pair every five seconds. A `FRAME_DUMP` control frame
+//! and the banner pair at boot and every five seconds for the first two
+//! minutes, the window `lnflash` reads it in, never after (1521b: it
+//! stood beside every `[UART]` line for good). A `FRAME_DUMP` control frame
 //! (`7e a4 a5 18 00 00 7e`, or `7e a4 a5 18 00 01 <screen> 7e`) is acked
 //! and answered with the `PBM` dump of `loquax_m9::dump`; `<screen>` is a
 //! byte of `fixture::SCREENS`, 0 to 10, or `pair::DUMP_BYTE`, 11, the
@@ -101,7 +107,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use critical_section::Mutex;
 
@@ -153,6 +159,20 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// How often the board re-states what it is: the five seconds every
 /// leviculum board uses, so a reader that attaches late still reads it.
 const BANNER_INTERVAL_MS: u64 = 5_000;
+
+/// The banner pair repeats only this long after boot (1521b): the window
+/// `lnflash`'s verify reads `[FW_BUILD]` in, as the nRF boards keep it.
+const BANNER_WINDOW_MS: u64 = 120_000;
+
+/// While the UI core's census runs (1521b), core 0 holds still: no node,
+/// no flash (an erase parks the UI core), no allocation in the census's
+/// count. Window 7 measured the census beside a running I/O loop: ten
+/// times slower, and `draw_held` counted core 0's allocations.
+static CENSUS_RUNNING: AtomicBool = AtomicBool::new(true);
+
+/// How long core 0 waits for the census before it runs anyway: a UI core
+/// that stalled must not take the line down with it.
+const CENSUS_WAIT_MS: u64 = 30_000;
 
 /// The least PSRAM the UI heap wants: the plan's 1.1 MB, model, scene,
 /// renderer and two frames on the 64-bit host
@@ -565,6 +585,40 @@ impl Probe for BoardProbe {
     }
 }
 
+/// Core 0's stack high-water mark (1521b): painted once below the
+/// caller's frame, read on every `[UART]` line as the bytes above the
+/// guard nothing has written since.
+struct StackWatch {
+    low: usize,
+    high: usize,
+}
+
+impl StackWatch {
+    #[inline(never)]
+    fn paint() -> Self {
+        let here = 0u8;
+        let sp = core::ptr::addr_of!(here) as usize;
+        let low = stack_bounds().0 + GUARD_SKIP;
+        let high = sp.saturating_sub(FRAME_SKIP).max(low);
+        for at in low..high {
+            // SAFETY: core 0's unused stack below the live frames, which
+            // this core owns; an interrupt that lands here writes over
+            // paint, which is what it is there to show.
+            unsafe { core::ptr::write_volatile(at as *mut u8, PAINT) };
+        }
+        Self { low, high }
+    }
+
+    /// The bytes above the guard never written since [`StackWatch::paint`].
+    fn free(&self) -> usize {
+        // SAFETY: as in `paint`; read only.
+        let touched = (self.low..self.high)
+            .find(|at| unsafe { core::ptr::read_volatile(*at as *const u8) } != PAINT)
+            .unwrap_or(self.high);
+        touched - self.low
+    }
+}
+
 fn halt_with_banner(log: &mut UartLog<'_>, heap: usize) -> ! {
     let delay = Delay::new();
     loop {
@@ -924,6 +978,10 @@ fn main() -> ! {
     };
     drop(answers);
     drop(archive);
+    // From here on core 0's deepest frame is measured (1521b): the
+    // restore, the loop, the flash, after the session census above
+    // painted and read its own.
+    let watch = StackWatch::paint();
     // A device of a home draws its home's chats: what its message store
     // kept (1476), then every pull; a board that is none opens on the
     // pairing, and Back from there shows the fixture as before (1415).
@@ -971,6 +1029,26 @@ fn main() -> ! {
     if started.is_err() {
         halt_with_banner(&mut log, bytes);
     }
+    // The UI core's census runs alone (1521b): what it counts and how
+    // long it takes are its own.
+    let waited = uptime_ms();
+    while CENSUS_RUNNING.load(Ordering::Acquire)
+        && uptime_ms().saturating_sub(waited) < CENSUS_WAIT_MS
+    {
+        core::hint::spin_loop();
+    }
+    log.line(
+        "[CORES] ",
+        format_args!(
+            "census={} waited_ms={}",
+            if CENSUS_RUNNING.load(Ordering::Acquire) {
+                "late"
+            } else {
+                "done"
+            },
+            uptime_ms().saturating_sub(waited)
+        ),
+    );
 
     // The I/O loop on core 0: the line, the node, the client, the flash.
     let mut deframer = Deframer::new();
@@ -985,7 +1063,10 @@ fn main() -> ! {
         let mut turn = Turn::default();
         if now >= next_banner {
             next_banner = now + BANNER_INTERVAL_MS;
-            log.identify(m9::LOG_PREFIX, m9::BOARD_NAME, bytes);
+            if now < BANNER_WINDOW_MS {
+                log.identify(m9::LOG_PREFIX, m9::BOARD_NAME, bytes);
+            }
+            log.set_stack_free(watch.free());
             log.say_rx_counts(true);
         }
 
@@ -1129,7 +1210,9 @@ fn main() -> ! {
                         });
                     }
                 }
-                FromUi::Line(prefix, body) => log.line(prefix, format_args!("{body}")),
+                // Whole, however long (1521b): the census's screen lines
+                // outgrew the fixed line and lost their verdict's reason.
+                FromUi::Line(prefix, body) => log.text(prefix, &body),
                 FromUi::Raw(body) => log.raw(&body),
                 FromUi::Code(text) => {
                     match node.take_code(&text, &mut rng, &mut stores, batch, &mut log) {
@@ -1290,6 +1373,8 @@ fn ui_main(
             ),
         }
     }
+    // Core 0 may run again (1521b).
+    CENSUS_RUNNING.store(false, Ordering::Release);
 
     // The ids a fold's asks carry (1493): the boot's entropy hashed with
     // a counter, unique across reboots, drawn without a Trng over here.

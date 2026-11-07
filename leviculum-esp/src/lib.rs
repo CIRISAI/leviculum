@@ -379,6 +379,14 @@ pub struct UartLog<'d> {
     last_read_ms: Option<u64>,
     /// The counts the last `[UART]` line said.
     said: Option<RxCounts>,
+    /// The last write was a frame, which ends on its flag and no line end
+    /// (1521b): the next line starts on a line of its own, or a reader
+    /// that splits on line ends finds it glued to the frame's tail.
+    after_frame: bool,
+    /// The I/O core's stack bytes never touched since the board painted
+    /// them, said on every `[UART]` line when the board measures it
+    /// (1521b, [`UartLog::set_stack_free`]).
+    stack_free: Option<usize>,
 }
 
 /// The most host bytes kept while the loop is busy: 8 KiB is fourteen
@@ -469,7 +477,14 @@ impl<'d> UartLog<'d> {
             gap_max_ms: 0,
             last_read_ms: None,
             said: None,
+            after_frame: false,
+            stack_free: None,
         }
+    }
+
+    /// What the next `[UART]` line says as `stack_free=` (1521b).
+    pub fn set_stack_free(&mut self, bytes: usize) {
+        self.stack_free = Some(bytes);
     }
 
     /// Host bytes lost because the board's keep was full.
@@ -505,7 +520,10 @@ impl<'d> UartLog<'d> {
         }
         self.said = Some(counts);
         self.gap_max_ms = 0;
-        self.line("[UART] ", format_args!("{counts}"));
+        match self.stack_free {
+            Some(free) => self.line("[UART] ", format_args!("{counts} stack_free={free}")),
+            None => self.line("[UART] ", format_args!("{counts}")),
+        }
     }
 
     /// One line, shaped by [`leviculum_log_line::format_line`] as
@@ -513,6 +531,31 @@ impl<'d> UartLog<'d> {
     pub fn line(&mut self, prefix: &str, args: core::fmt::Arguments) {
         let mut buf = [0u8; LINE_MAX];
         let line = leviculum_log_line::format_line(&mut buf, prefix, args, uptime_ms());
+        self.escaped(line);
+    }
+
+    /// One line of any length (1521b): `body` whole, shaped as
+    /// [`UartLog::line`] shapes it, in a buffer the size of the line. For
+    /// lines that arrive formatted and outgrow [`LINE_MAX`]: the UI
+    /// core's census lines were cut at it (`verdict=over o t=`).
+    pub fn text(&mut self, prefix: &str, body: &str) {
+        let mut buf = alloc::vec![0u8; prefix.len() + body.len() + 32];
+        let line =
+            leviculum_log_line::format_line(&mut buf, prefix, format_args!("{body}"), uptime_ms());
+        let mut start = 0;
+        while start < line.len() {
+            let end = (start + LINE_MAX).min(line.len());
+            self.escaped(&line[start..end]);
+            start = end;
+        }
+    }
+
+    /// `line`'s bytes with the line's own flow and flag bytes escaped, on a
+    /// line of its own after a frame.
+    fn escaped(&mut self, line: &[u8]) {
+        if core::mem::take(&mut self.after_frame) {
+            self.write_all(b"\r\n");
+        }
         let mut out = [0u8; 4 * LINE_MAX];
         let mut n = 0;
         for byte in line {
@@ -538,6 +581,9 @@ impl<'d> UartLog<'d> {
     /// One raw line, `text` and a line end, as it is: for the lines read
     /// whole by their first word. `text` must be plain ASCII.
     pub fn raw(&mut self, text: &str) {
+        if core::mem::take(&mut self.after_frame) {
+            self.write_all(b"\r\n");
+        }
         self.write_all(text.as_bytes());
         self.write_all(b"\r\n");
     }
@@ -551,6 +597,7 @@ impl<'d> UartLog<'d> {
         let mut wire = alloc::vec::Vec::with_capacity(framed.len() + 8);
         leviculum_serial_mux::escape_flow(&framed, &mut |piece| wire.extend_from_slice(piece));
         self.write_all(&wire);
+        self.after_frame = true;
     }
 
     /// All of `bytes`: esp-hal's `write` places what fits in the FIFO and
