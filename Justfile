@@ -2706,8 +2706,8 @@ flash-m9 port:
 # (LMR3 with names and buildings, sha256 5022565b...a2b7c7a). One MAP_BENCH
 # line a scene, size and zoom on the host, as an A/B in the same run: the
 # bench of `BASE` (default: the commit that last wrote the baseline,
-# loquax/examples/map_eye_bench.baseline) built in a worktree under target/,
-# and this tree's, in turn, five rounds, one worker thread, the medians compared; a held
+# loquax/examples/map_eye_bench.baseline) built in a worktree under target/
+# into its own target directory (1470), and this tree's, in turn, five rounds, one worker thread, the medians compared; a held
 # column more than 5 % and 0.1 ms slower fails. A run against the file alone
 # measured a phone frame's compose 3.2 and 4.8 ms with one binary, which no
 # 5 % rule survives. Then this tree's bench under the weak CPU emulation
@@ -2732,11 +2732,17 @@ map-bench REGION BASE="":
     src="$out/base-src"
     git worktree remove --force "$src" 2>/dev/null || rm -rf "$src"
     git worktree add -q --detach "$src" "$base"
-    target="$(realpath target)"
+    # BASE into its own target directory (1470): sharing this tree's, cargo
+    # can take BASE's artefacts as fresh for this tree, and the A/B is one
+    # binary against itself. The same bytes when BASE is not this tree is red.
+    target="$(realpath -m "$out/base-target")"
     built="$(cd "$src" && CARGO_TARGET_DIR="$target" cargo build --release -p loquax --features screenmap --example map_eye_bench --message-format=json-render-diagnostics | exe)"
     cp "$built" "$out/base-bench"
     git worktree remove --force "$src"
     bench="$(cargo build --release -p loquax --features screenmap --example map_eye_bench --message-format=json-render-diagnostics | exe)"
+    mode=ab
+    if [ "$(git rev-parse "$base^{commit}")" = "$(git rev-parse HEAD)" ] && git diff --quiet HEAD; then mode=aa; fi
+    python3 -I scripts/window-bench-compare.py --check-exes "$mode" "$out/base-bench" "$bench"
     rm -rf "$out/maps" && mkdir -p "$out/maps"
     ln -s "$(realpath "{{REGION}}")" "$out/maps/$(basename "{{REGION}}")"
     status=0
