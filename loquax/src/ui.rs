@@ -659,6 +659,10 @@ pub struct Conversation {
     /// list shows while no message is loaded. The loaded messages win
     /// wherever they are present.
     pub listing: Option<listing::Listing>,
+    /// The newest unread received ids while none of the messages is
+    /// loaded (1521, [`listing::Row::unread_ids`]): a read mark naming
+    /// one clears the badge here, as the store applies it to its rows.
+    pub unread_ids: Vec<[u8; 32]>,
     /// Bumped by [`update`] when anything a screen draws of this
     /// conversation changed (1490): what every cache keyed by this
     /// conversation asks before it reuses.
@@ -718,6 +722,7 @@ impl Conversation {
             draft: history::Draft::default(),
             summary: summary::Summary::default(),
             listing: None,
+            unread_ids: Vec::new(),
             revision: Rev::default(),
             stamp: Rev::default(),
         }
@@ -1970,6 +1975,85 @@ impl<B> UiModel<B> {
             share_every: mark.every,
             share_ended: mark.ended,
         })
+    }
+
+    /// Conversation `peer` as a device keeps it to list it at boot
+    /// (1521, [`listing::Row`]): its row derived from the loaded
+    /// messages, or the one it was restored with while none is loaded;
+    /// `None` for a conversation with neither.
+    pub fn row(&self, peer: &[u8; 16]) -> Option<listing::Row> {
+        let conversation = self.conversations.iter().find(|c| c.peer == *peer)?;
+        let listing = self
+            .listing_for(peer)
+            .or_else(|| conversation.listing.clone())?;
+        // The unread ids: those still unloaded, then the loaded ones,
+        // the newest `unread` of them.
+        let mut ids: Vec<[u8; 32]> = match conversation.earlier {
+            0 => Vec::new(),
+            _ => conversation.unread_ids.clone(),
+        };
+        ids.extend(
+            conversation
+                .messages
+                .iter()
+                .filter(|m| !m.outbound && !m.is_aside())
+                .filter_map(|m| m.id),
+        );
+        let keep = conversation.unread.min(listing::UNREAD_IDS);
+        let ids = ids.split_off(ids.len().saturating_sub(keep));
+        Some(listing::Row {
+            peer: *peer,
+            unread: u32::try_from(conversation.unread).unwrap_or(u32::MAX),
+            activity: conversation.activity,
+            unread_ids: ids,
+            listing,
+        })
+    }
+
+    /// The list from kept rows alone (1521), each with how many messages
+    /// the store holds for it, and the names heard: no message read, the conversations listed
+    /// as their rows say, the list ordered and the scene's window built
+    /// once. A conversation's messages load when it opens
+    /// ([`UiModel::ask_page`]). The counters are the restore's.
+    pub fn restore_rows(
+        &mut self,
+        rows: Vec<(listing::Row, usize)>,
+        names: Vec<([u8; 16], String)>,
+    ) {
+        self.ops.reset();
+        // The names the peers announced, as the fold of their entries
+        // would have heard them.
+        for (peer, name) in names {
+            let _ = self.names.heard(peer, Some(&name));
+        }
+        for (row, earlier) in rows {
+            let peer = row.peer;
+            self.restore_one(history::Restored {
+                peer,
+                pinned: false,
+                flags: history::Flags::default(),
+                unread: row.unread as usize,
+                messages: Vec::new(),
+                earlier,
+                draft: history::Draft::default(),
+                group: None,
+                listing: Some(row.listing),
+            });
+            if let Some(conversation) = self.conversations.iter_mut().find(|c| c.peer == peer) {
+                conversation.activity = row.activity;
+                conversation.unread_ids = row.unread_ids;
+                self.activity = self.activity.max(row.activity);
+            }
+        }
+        self.note_changes();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Give every message from here on a key above `floor` (1521): a
+    /// board keys the messages it loads from its ring by their entry's
+    /// sequence, and the ones it folds live must never meet them.
+    pub fn keys_above(&mut self, floor: u64) {
+        self.activity = self.activity.max(floor);
     }
 
     /// The marks a fold made, for the shell to hand the home node.

@@ -364,6 +364,87 @@ impl Listing {
     }
 }
 
+/// The most unread message ids a [`Row`] carries: a read mark naming
+/// one of them clears the badge of a conversation nothing of which is
+/// loaded (1521). Older unread are cleared by any newer one's mark.
+pub const UNREAD_IDS: usize = 64;
+
+/// A conversation as a device keeps it to list it at boot without
+/// reading a message (1521): the board's flash store writes one per
+/// change and the boot restores the list from them alone
+/// ([`super::UiModel::restore_rows`]); the messages load when the
+/// conversation opens, through the same page read the scrollback uses
+/// ([`super::history::StoreRead::Earlier`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Row {
+    /// The conversation's peer.
+    pub peer: [u8; 16],
+    /// [`super::Conversation::unread`].
+    pub unread: u32,
+    /// [`super::Conversation::activity`]: the order's tie-break among
+    /// equal times, as the model had it.
+    pub activity: u64,
+    /// The newest unread received ids, oldest first, at most
+    /// [`UNREAD_IDS`].
+    pub unread_ids: Vec<[u8; 32]>,
+    /// The list's row: order key, last written, the preview line, the
+    /// mark.
+    pub listing: Listing,
+}
+
+/// A [`Row`]'s form, its own version byte ahead of the listing's form.
+const ROW_VERSION: u8 = 1;
+
+impl Row {
+    /// The row as bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let listing = self.listing.encode();
+        let ids = self.unread_ids.len().min(UNREAD_IDS);
+        let mut out = Vec::with_capacity(34 + 32 * ids + listing.len());
+        out.push(ROW_VERSION);
+        out.extend_from_slice(&self.peer);
+        put_u32(&mut out, self.unread);
+        out.extend_from_slice(&self.activity.to_le_bytes());
+        out.push(ids as u8);
+        for id in &self.unread_ids[self.unread_ids.len() - ids..] {
+            out.extend_from_slice(id);
+        }
+        out.extend_from_slice(&listing);
+        out
+    }
+
+    /// The row the bytes carry; `None` for damage or a form this build
+    /// does not know.
+    pub fn decode(bytes: &[u8]) -> Option<Row> {
+        let mut take = Take(bytes);
+        if take.u8()? != ROW_VERSION {
+            return None;
+        }
+        let (peer, rest) = take.0.split_first_chunk::<16>()?;
+        take.0 = rest;
+        let unread = take.u32()?;
+        let (activity, rest) = take.0.split_first_chunk::<8>()?;
+        take.0 = rest;
+        let count = usize::from(take.u8()?);
+        if count > UNREAD_IDS {
+            return None;
+        }
+        let mut unread_ids = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (id, rest) = take.0.split_first_chunk::<32>()?;
+            take.0 = rest;
+            unread_ids.push(*id);
+        }
+        Some(Row {
+            peer: *peer,
+            unread,
+            activity: u64::from_le_bytes(*activity),
+            unread_ids,
+            listing: Listing::decode(take.0)?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::borrow::ToOwned;
@@ -399,6 +480,23 @@ mod tests {
         for listing in [full(), Listing::default()] {
             let bytes = listing.encode();
             assert_eq!(Listing::decode(&bytes), Some(listing));
+        }
+    }
+
+    /// A row round trips, and every truncation of it is none.
+    #[test]
+    fn a_row_round_trips() {
+        let row = Row {
+            peer: [7; 16],
+            unread: 3,
+            activity: 4_067,
+            unread_ids: vec![[1; 32], [2; 32], [3; 32]],
+            listing: full(),
+        };
+        let bytes = row.encode();
+        assert_eq!(Row::decode(&bytes), Some(row));
+        for cut in 0..bytes.len() {
+            assert_eq!(Row::decode(&bytes[..cut]), None, "cut at {cut}");
         }
     }
 

@@ -242,7 +242,7 @@ impl<B: InputBuffer> UiModel<B> {
 
 impl<B> UiModel<B> {
     /// One conversation the store handed back, listed as at start.
-    fn restore_one(&mut self, stored: Restored) {
+    pub(super) fn restore_one(&mut self, stored: Restored) {
         if stored.messages.is_empty()
             && !stored.pinned
             && stored.flags == Flags::default()
@@ -811,6 +811,9 @@ impl<B> UiModel<B> {
             // start): the store applies the mark to its own rows, and
             // the page that loads it here replays it.
             self.forgotten.push(StoreWrite::ReadThrough { id: *id });
+            // A conversation listed from its kept row (1521) knows its
+            // newest unread ids: the badge clears here too.
+            self.read_through_unloaded(id);
             if self.read_pending.len() < READ_PENDING_MOST {
                 self.read_pending.push(*id);
             }
@@ -830,6 +833,36 @@ impl<B> UiModel<B> {
             }
             self.changed_peers.insert(conversation.peer);
         }
+    }
+
+    /// A read mark through `id` on a conversation none of whose messages
+    /// is loaded (1521): its kept unread ids say how many came after.
+    fn read_through_unloaded(&mut self, id: &[u8; 32]) {
+        let Some(conversation) = self
+            .conversations
+            .iter_mut()
+            .find(|c| c.messages.is_empty() && c.unread_ids.contains(id))
+        else {
+            return;
+        };
+        let at = conversation
+            .unread_ids
+            .iter()
+            .position(|kept| kept == id)
+            .unwrap_or(0);
+        let after = conversation.unread_ids.len() - at - 1;
+        if conversation.unread <= after {
+            return;
+        }
+        conversation.unread = after;
+        conversation.unread_ids.drain(..=at);
+        if let Some(listing) = conversation.listing.as_mut() {
+            listing.unread_rows = listing.unread_rows.min(after as u32);
+        }
+        if after == 0 {
+            conversation.new_rule = None;
+        }
+        self.changed_peers.insert(conversation.peer);
     }
 
     /// Take one message off the screen, every index into its conversation
