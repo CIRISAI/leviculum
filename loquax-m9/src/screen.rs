@@ -115,11 +115,9 @@ impl Look {
 /// are in.
 pub fn scene<B>(model: &UiModel<B>) -> Scene {
     match model.focus {
+        // The list alone, no chat built for it (1463).
         Pane::Conversations => {
-            let mut scene = model.scene(LayoutClass::Wide);
-            scene.chat = None;
-            scene.sheet = None;
-            scene.whereabouts = None;
+            let mut scene = model.list_scene(LayoutClass::Wide);
             scene.screen = ScreenId::Chats;
             scene.in_class(LayoutClass::Compact)
         }
