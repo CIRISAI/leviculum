@@ -42,8 +42,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use leviculum_lxmf::constants::{FIELD_AUDIO, FIELD_FILE_ATTACHMENTS, FIELD_IMAGE};
 use leviculum_lxmf::lev::{Lev, PropagationReceipt};
 use leviculum_lxmf::lev_status::MessageStatus;
+use leviculum_lxmf::message::Field;
 use leviculum_ui::delivery::DeliveryState;
 
 use super::{to_hex, Message, Trust, UiEffect, UiModel};
@@ -169,17 +171,28 @@ pub fn rung_times(message: &Message) -> (Option<WallTime>, Option<WallTime>) {
 
 /// The acknowledgement rule (1462): a message on this device is
 /// acknowledged, however it came, when its own `lev` mark carries bit 2 and
-/// it is a message, not a receipt of either kind (no receipt of a receipt).
+/// it is a message, not a bare receipt of either kind (no receipt of a
+/// receipt). A receipt is bare when nothing else came with it: no text, no
+/// attachment. A message that carries one, an answer with the read or
+/// device receipt riding on it (1486), is a message and is acknowledged.
 /// A group's copy is one too since 1466: its home passes the writer's bit 2
 /// on, and the receipt goes to the group, which counts it for the writer's
 /// two ticks. A group's status, membership or digest carries no bit 2. A
 /// stock sender's message has no mark and gets none.
-pub fn acknowledges(lev: Option<&Lev>) -> bool {
+pub fn acknowledges(body: &[u8], fields: &[Field], lev: Option<&Lev>) -> bool {
     lev.is_some_and(|lev| {
-        lev.supports_propagation_receipts()
-            && lev.receipt.is_none()
-            && lev.propagation_receipt.is_none()
+        let receipt = lev.receipt.is_some() || lev.propagation_receipt.is_some();
+        lev.supports_propagation_receipts() && !(receipt && is_bare(body, fields))
     })
+}
+
+/// Nothing but marks: no text and no attachment. A receipt alone is sent
+/// so, with an empty body and its `lev` field.
+fn is_bare(body: &[u8], fields: &[Field]) -> bool {
+    body.iter().all(u8::is_ascii_whitespace)
+        && !fields
+            .iter()
+            .any(|(key, _)| matches!(*key, FIELD_FILE_ATTACHMENTS | FIELD_IMAGE | FIELD_AUDIO))
 }
 
 /// The receipt alone to `peer`: the namespace with key `0x07` and no
@@ -238,7 +251,7 @@ impl<B> UiModel<B> {
         };
         // The source's own mark (1482): a relay's copy gets no receipt.
         let lev = leviculum_lxmf::relay::own_lev(message.body.as_bytes(), &message.fields, &source);
-        if !acknowledges(lev.as_ref())
+        if !acknowledges(message.body.as_bytes(), &message.fields, lev.as_ref())
             || message.is_report()
             || message
                 .ledger
@@ -520,18 +533,27 @@ mod tests {
     }
 
     /// The acknowledgement rule, case by case: bit 2 is a receipt, a
-    /// group's copy with it too (1466); bit unset, no mark, a receipt of
-    /// either kind are none, and a group's copy without bit 2 (its writer
+    /// group's copy with it too (1466), a text or attachment that carries a
+    /// receipt too (1486); bit unset, no mark, a bare receipt of either kind
+    /// are none, and a group's copy without bit 2 (its writer
     /// did not ask) is none.
     #[test]
     fn the_acknowledgement_rule() {
         let asks = caps(CAP_PROPAGATION_RECEIPTS);
-        assert!(acknowledges(Some(&asks)));
-        assert!(acknowledges(Some(&caps(
-            CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS
-        ))));
-        assert!(!acknowledges(Some(&caps(CAP_READ_RECEIPTS | CAP_GROUPS))));
-        assert!(!acknowledges(None), "a stock sender");
+        assert!(acknowledges(b"text", &[], Some(&asks)));
+        assert!(acknowledges(
+            b"text",
+            &[],
+            Some(&caps(
+                CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS
+            ))
+        ));
+        assert!(!acknowledges(
+            b"text",
+            &[],
+            Some(&caps(CAP_READ_RECEIPTS | CAP_GROUPS))
+        ));
+        assert!(!acknowledges(b"text", &[], None), "a stock sender");
         let read = Lev {
             receipt: Some(Receipt {
                 read_at: 1,
@@ -539,7 +561,15 @@ mod tests {
             }),
             ..asks.clone()
         };
-        assert!(!acknowledges(Some(&read)), "no receipt of a receipt");
+        assert!(
+            !acknowledges(b"", &[], Some(&read)),
+            "no receipt of a receipt"
+        );
+        assert!(!acknowledges(b" \n", &[], Some(&read)), "blank is bare");
+        assert!(
+            acknowledges(b"text", &[], Some(&read)),
+            "1486: an answer that carries a read receipt"
+        );
         let arrival = Lev {
             propagation_receipt: Some(PropagationReceipt {
                 received_at: 1,
@@ -547,7 +577,21 @@ mod tests {
             }),
             ..asks.clone()
         };
-        assert!(!acknowledges(Some(&arrival)));
+        assert!(!acknowledges(b"", &[], Some(&arrival)));
+        assert!(
+            acknowledges(b"text", &[], Some(&arrival)),
+            "1486: an answer that carries a device receipt"
+        );
+        for key in [FIELD_FILE_ATTACHMENTS, FIELD_IMAGE, FIELD_AUDIO] {
+            assert!(
+                acknowledges(b"", &[(key, vec![0xc0])], Some(&arrival)),
+                "1486: an attachment {key} that carries one"
+            );
+        }
+        assert!(
+            !acknowledges(b"", &[(0x02, vec![0xc0])], Some(&arrival)),
+            "a field that is no attachment leaves it bare"
+        );
         let copy = Lev {
             group_copy: Some(GroupCopy {
                 sender: [1; 16],
@@ -556,12 +600,15 @@ mod tests {
             }),
             ..asks
         };
-        assert!(acknowledges(Some(&copy)), "1466: a group's copy");
+        assert!(
+            acknowledges(b"text", &[], Some(&copy)),
+            "1466: a group's copy"
+        );
         let unasked = Lev {
             capabilities: Some(CAP_GROUPS),
             ..copy
         };
-        assert!(!acknowledges(Some(&unasked)));
+        assert!(!acknowledges(b"text", &[], Some(&unasked)));
     }
 
     /// 1462: a stored message at two ticks loads at one when its ledger

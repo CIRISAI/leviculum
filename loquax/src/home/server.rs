@@ -703,7 +703,7 @@ fn arrived(
         let read = seen && lev.as_ref().is_some_and(|lev| lev.supports_receipts());
         if read
             || message.source_hash == home.address
-            || !crate::ui::arrival::acknowledges(lev.as_ref())
+            || !crate::ui::arrival::acknowledges(&message.content, &message.fields, lev.as_ref())
         {
             continue;
         }

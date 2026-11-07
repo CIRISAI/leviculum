@@ -510,6 +510,62 @@ fn a_recipient_without_a_mailbox_shows_two_ticks_on_its_devices_receipt() {
     .is_empty());
 }
 
+/// Cell 3b, happy (1486): the answer carries the receipt. Bob reads Alice's
+/// message and answers inside the batch window, so the device receipt he
+/// owes her rides on his answer. Her message goes to two ticks on it, and
+/// his answer is a message like any other: her device owes him its own
+/// receipt, and his answer goes to two ticks too.
+#[test]
+fn an_answer_that_carries_a_device_receipt_is_acknowledged_itself() {
+    let mut alice = Side::new(false);
+    let mut bob = Side::new(false);
+    let message = alice.write(bob.address, "frage", |_| {});
+    bob.takes(&message, &alice.identity);
+    alice.proven(&message);
+    update(&mut bob.model, UiEvent::Elapsed(BATCH_MS - 1));
+    let answer = bob.write(alice.address, "antwort", |_| {});
+    let rider = Lev::from_fields(&answer.fields).expect("lev");
+    assert_eq!(
+        rider.propagation_receipt.map(|r| r.ids),
+        Some(vec![message.message_id]),
+        "the receipt rides on the answer"
+    );
+    assert!(
+        device_receipts(
+            &update(&mut bob.model, UiEvent::Elapsed(BATCH_MS * 3)),
+            &bob
+        )
+        .is_empty(),
+        "nothing owed alone once it rode"
+    );
+    alice.takes(&answer, &bob.identity);
+    assert_eq!(
+        alice.ticks(&message.message_id),
+        (Some(DeliveryState::Delivered), Ticks::Delivered)
+    );
+    bob.proven(&answer);
+    assert_eq!(bob.ticks(&answer.message_id).1, Ticks::Arrived);
+    let receipts = device_receipts(
+        &update(&mut alice.model, UiEvent::Elapsed(BATCH_MS)),
+        &alice,
+    );
+    assert_eq!(
+        receipts.len(),
+        1,
+        "Alice's device owes Bob his answer's receipt"
+    );
+    let lev = Lev::from_fields(&receipts[0].fields).expect("lev");
+    assert_eq!(
+        lev.propagation_receipt.map(|r| r.ids),
+        Some(vec![answer.message_id])
+    );
+    bob.takes(&receipts[0], &alice.identity);
+    assert_eq!(
+        bob.ticks(&answer.message_id),
+        (Some(DeliveryState::Delivered), Ticks::Delivered)
+    );
+}
+
 /// Cell 4, unhappy: the device's receipt is lost on the way. The writer
 /// stays at one tick: no timer turns a proof into two, a week later
 /// neither.
