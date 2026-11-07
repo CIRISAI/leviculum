@@ -193,7 +193,7 @@ Note that `LxmfRouter`, `RouterEvent`, `RouterOutput`, `RouterConfig` and
 `MessageState` are *not* re-exported at the crate root — the crate root
 exports only `BuiltResource`, `DeliveryStampRequest`, `InboundStampRequest`,
 `PendingResourceBuild` and `PropagationStampRequest` from that module
-(`leviculum-lxmf/src/lib.rs:137-140`) — so they are reachable as
+(`leviculum-lxmf/src/lib.rs:138-141`) — so they are reachable as
 `leviculum_lxmf::router::*` only.
 
 ### Events are return values, not a channel
@@ -245,7 +245,7 @@ peer as a live one does, but says nothing of whether the peer is there.
 
 `Sending` does arrive, on the event every verdict travels on:
 `RouterEvent::MessageState`, from all three sites that enter the state —
-the composed send (`leviculum-lxmf/src/router.rs:2063-2068`), the
+the composed send (`leviculum-lxmf/src/router.rs:2069-2074`), the
 built-transfer commit (`leviculum-lxmf/src/router.rs:1186-1191`) and the
 upload the transport reports through `UploadSubmitted`
 (`leviculum-lxmf/src/router/propagation_runtime.rs:415-427`) — and on the
@@ -275,7 +275,7 @@ pub enum MessageState {          // leviculum-lxmf/src/router.rs:60-69
 Discriminants are the Python `LXMessage` constants. Four traps:
 
 1. **`Generating` is dead.** It is only ever produced by snapshot decoding
-   (`leviculum-lxmf/src/router.rs:2563`); nothing assigns it.
+   (`leviculum-lxmf/src/router.rs:2569`); nothing assigns it.
 2. **`Sent` means two different things and never applies to direct
    delivery.** For opportunistic messages it means the packet was handed to
    Reticulum unproven, and the message is still queued and still retryable
@@ -365,7 +365,7 @@ What the router will not do:
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
-  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2333-2350`).
+  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2339-2356`).
   The client must persist and replay them via
   `restore_known_propagation_node`
   (`leviculum-lxmf/src/router/propagation_runtime.rs:1528`). The selected
@@ -411,12 +411,12 @@ crate is `no_std`.
 The router writes exactly one key, `b"lxmf/router-state"`
 (`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:65`), holding the
 outbound queue, delivered and processed ID windows, stamp costs, tickets
-and the ignore set (`leviculum-lxmf/src/router.rs:2333-2350`). A client
+and the ignore set (`leviculum-lxmf/src/router.rs:2339-2356`). A client
 should stay off the `lxmf/` prefix and is otherwise free.
 
 Restore resets every queued message to `Outbound` with
 `next_attempt_ms = 0` and `progress = 0.01`
-(`leviculum-lxmf/src/router.rs:2318-2321`), because in-flight correlation
+(`leviculum-lxmf/src/router.rs:2324-2327`), because in-flight correlation
 is expressed in a process-local monotonic clock that does not survive a
 restart. A UI therefore cannot show a stable "sending" progress across
 restarts, and must not pretend to.
@@ -818,7 +818,7 @@ Three specific things `lnomad` does that must change:
    (`lnomad/src/tui.rs:1457`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
-   (`leviculum-lxmf/src/router.rs:2264`).
+   (`leviculum-lxmf/src/router.rs:2270`).
 
 Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/transfer.rs:53-85`), the tick-counted
@@ -964,7 +964,7 @@ not a list of open work.
    correct for a sans-IO crate, but it means every client invents its own
    policy.
 5. **Known propagation nodes and the selection are not in the snapshot**
-   (`leviculum-lxmf/src/router.rs:2333-2350`), so every client writes its
+   (`leviculum-lxmf/src/router.rs:2339-2356`), so every client writes its
    own persistence and replay.
 6. **No stamp cancellation or deadline.** `generate` loops until success
    (`leviculum-lxmf/src/stamp.rs:356-367`) and `StampError::Cancelled` is

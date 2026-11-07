@@ -32,9 +32,9 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:166`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:4498`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:3157`) and the positions in a table of
-their own (`SCHEMA_V2`, `loquax/src/store.rs:196`). The sender's timestamp
+`loquax/src/ui.rs:5760`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:3422`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:198`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
 change of its own and not the one line of plumbing the fields were.

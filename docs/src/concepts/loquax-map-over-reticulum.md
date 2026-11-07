@@ -22,7 +22,7 @@ region into the maps directory. One request's whole budget is 60 s
 backs off 30 s doubling to an hour (`BACKOFF_FIRST_MS`,
 `loquax/src/mapload.rs:60`); autoloaded regions are a cache under
 500 MB by default (`CACHE_DEFAULT_MB`, `loquax/src/mapload.rs:58`),
-evicted least recently viewed (`evict`, `loquax/src/mapload.rs:640`).
+evicted least recently viewed (`evict`, `loquax/src/mapload.rs:639`).
 
 The sizes, measured 2026-11-01 from the Protomaps build of 2026-10-28
 ([Loquax: the map](loquax-map.md), section "Regions"): a city region,
@@ -118,7 +118,7 @@ every frontend only renders its question.
    same region: that is slow, so the user is asked. Independently of
    the estimate, **a radio-class link always asks** — the class the
    board's page fit already discriminates (`LinkClass`,
-   `loquax/src/home/board.rs:112`) — so no fetch ever starts over
+   `loquax/src/home/board.rs:115`) — so no fetch ever starts over
    LoRa without the answer, not even a tiny one.
 5. **The question**, rendered by each platform, sizes and time from
    the index and the probe, never a hash on screen: English master
@@ -137,7 +137,7 @@ A region over LoRa occupies the channel, and the pacing lives where
 [interface isolation](interface-isolation.md) puts it: the LoRa
 interface's airtime rules space the parts, and the Resource's part
 size follows the link's class and MTU, as the board's sync pages
-already do (`Executor::fitted`, `loquax/src/home/board.rs:220`; the
+already do (`Executor::fitted`, `loquax/src/home/board.rs:223`; the
 1439 table in [The handheld messenger](handheld-messenger.md)). No
 map-awareness enters transport. And map regions are link traffic
 between one client and the server, never propagation payloads: a
