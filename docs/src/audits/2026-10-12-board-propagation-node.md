@@ -58,7 +58,7 @@ board against the clock seed (`refresh_after_calendar_jump`,
 reference counterpart because the reference always has a calendar);
 the inbound `/offer` gate in the reference's order — sequential
 validation, concurrent syncs, per-peer throttle, static-only
-(`InboundGate::admit`, `leviculum-lxmf/src/peering.rs:1558`, against
+(`InboundGate::admit`, `leviculum-lxmf/src/peering.rs:1564`, against
 `reference/LXMF/LXMF/LXMRouter.py:2274-2295`); the 180 s
 invalid-stamp throttle (`PN_STAMP_THROTTLE_SECS`,
 `leviculum-lxmf/src/peering.rs:88`, applied at
@@ -131,7 +131,7 @@ more candidates pressing on the 16-slot table (D1).
 Test: an mvr driving `handle_announce` at hops 5-6 asserting
 `Added`, board config — one assertion beside lnpnd's
 `a_sync_from_a_client_or_from_beyond_the_depth_peers_nobody`
-(`lnpnd/src/engine.rs:3367`).
+(`lnpnd/src/engine.rs:3506`).
 **Fixed in d2a9dcfb**: the board builds its table from
 `board_peering_config` (`leviculum-nrf/pn-store`), whose
 `BOARD_AUTOPEER_MAXDEPTH` is 6 with lxmd's generated config as its
@@ -146,7 +146,7 @@ reference's `rotate_peers`,
 `reference/LXMF/LXMF/LXMRouter.py:2060-2126`, every 22 min 24 s,
 `ROTATION_INTERVAL_SECS`, `leviculum-lxmf/src/peering.rs:110`);
 lnpnd runs it on its tick (`rotate_peers`,
-`lnpnd/src/peering.rs:419`, landed 0a1d7e38). The board never calls
+`lnpnd/src/peering.rs:473`, landed 0a1d7e38). The board never calls
 it (the arm that names the reason says so,
 `leviculum-nrf/src/pn.rs:1654-1657`), and the inputs do not exist
 there: `PeerTraffic` is a host-side map persisted with the host's
@@ -167,7 +167,7 @@ the keys of #388 pass 3 already ate; plus ~26 B per persisted record
 pass. CPU and airtime: none (rotation only unpeers).
 Test: the shared-crate rule is pinned
 (`a_restored_full_table_rotates_out_its_two_lowest_acceptance_peers_on_the_tick`,
-`lnpnd/src/peering.rs:2059`); a board engine test would assert the
+`lnpnd/src/peering.rs:2126`); a board engine test would assert the
 counters survive `PeerRecord` round-trips through the record log.
 
 **D4 — no static peers on the board.** lnpnd and the reference take
@@ -210,7 +210,7 @@ empty), red before the fix (no record, no list), and the reclaim rule by
 **D5 — the peer-back recall is RAM-only and does not survive a
 reset.** Both stacks peer back a node whose sync lands by recalling
 its last announce (`peer_from_recalled_announce`,
-`leviculum-nrf/src/pn.rs:2275` and `lnpnd/src/peering.rs:1246`,
+`leviculum-nrf/src/pn.rs:2275` and `lnpnd/src/peering.rs:1313`,
 against `reference/LXMF/LXMF/LXMRouter.py:2355-2375`). The
 reference recalls from `Identity.known_destinations`, which is
 persisted; the board recalls from `EmbeddedStorage`'s 16-entry RAM
@@ -252,7 +252,7 @@ more tests beside them.
 
 **D6 — lnpnd judges an inbound sync by its link's hops when no path
 is known; the board does not.** lnpnd's deliberate deviation 556
-(8756a5df, documented at `lnpnd/src/peering.rs:1227-1245`): the
+(8756a5df, documented at `lnpnd/src/peering.rs:1294-1312`): the
 reference reads only the path table, which answers `PATHFINDER_M`
 for an unknown path, so after a restart a recallable neighbour is
 "too deep" until its next announce; the link the sync arrived over
@@ -268,7 +268,7 @@ Price to adopt: 0 B — the link is still up when
 `on_inbound_resource` runs on the board's synchronous event path, so
 its hop count is a read, not a new field.
 Test: the lnpnd rule's test shape
-(`lnpnd/src/engine.rs:3519-3526`) replayed through the board engine.
+(`lnpnd/src/engine.rs:3658-3665`) replayed through the board engine.
 **Fixed in 00ac770b**: the board reads the link's hop count at the
 resource advertisement, while the link certainly exists, into one slot
 (`AdvertisedHops`, `leviculum-nrf/sync-batch`; one because D14 admits
@@ -324,7 +324,7 @@ already `KeyMining`, and `mining_peer` already says the miner is busy.
 Pinned by `a_busy_miner_holds_only_the_peers_that_need_it`
 (`leviculum-lxmf/src/peering_tests.rs`), red against the early return.
 lnpnd's tick carries the same early return
-(`lnpnd/src/peering.rs:1349`, `self.mining.is_some()`), so the
+(`lnpnd/src/peering.rs:1416`, `self.mining.is_some()`), so the
 sentence above about lnpnd does not hold; not changed here.
 
 ## 2. The store, pricing, and what the board announces
@@ -402,7 +402,7 @@ flexibility 3 (`PROPAGATION_COST`,
 `reference/LXMF/LXMF/LXMRouter.py:54`), so it takes only value ≥ 13;
 the offering side drops lower-valued ids permanently —
 `build_offer` steps the cursor past them
-(`leviculum-lxmf/src/peering.rs:1694-1697`, the reference's own
+(`leviculum-lxmf/src/peering.rs:1700-1703`, the reference's own
 never-retry at `reference/LXMF/LXMF/LXMPeer.py:340`). When a
 demanding peer later joins, `set_compute_stamp_value(true)` (from
 `on_pn_announce` as audited; the calls are gone with the fix) prices
@@ -432,7 +432,7 @@ extra lap of the region's write pointer, ~150 appends and their
 share of page erases, once.
 Test: a board-config twin of
 `a_message_stored_at_value_zero_is_offered_once_repriced`
-(`lnpnd/src/validation.rs:411`).
+(`lnpnd/src/validation.rs:441`).
 **Fixed in 5c82832d**, both halves: `board_role_config` prices every
 accept, and `RepriceWalk` prices an older store once at boot in one
 lap over the existing sliced grind, re-appending each valuable value-0
@@ -542,10 +542,10 @@ planned against the live link's MDU
 (`offer_budget_for_mdu`, `leviculum-lxmf/src/peering.rs:179`, ten
 ids on a LoRa link); the cursor replacing the reference's per-peer
 sets, with its documented offer-order deviation
-(`build_offer`, `leviculum-lxmf/src/peering.rs:1753`); offer
+(`build_offer`, `leviculum-lxmf/src/peering.rs:1759`); offer
 responses, unpeer-on-`NO_ACCESS`, throttle backoff and key re-mining
 all through the shared `offer_reply`
-(`leviculum-lxmf/src/peering.rs:1853`, against
+(`leviculum-lxmf/src/peering.rs:1859`, against
 `reference/LXMF/LXMF/LXMPeer.py:400-452`); and the inbound drain
 through the same accept path as uploads, one message per settle
 pass, batch outliving its link exactly as the reference's sender
@@ -611,7 +611,7 @@ Pinned by `four_links_advertising_at_once_get_what_the_reserve_funds`
 lnpnd and the reference.** lnpnd tears down a propagation link
 without payload after `PROPAGATION_LINK_MAX_INACTIVITY_SECS` = 180 s
 (`leviculum-lxmf/src/constants.rs:30`, applied `close_idle_links`,
-`lnpnd/src/engine.rs:1234`, the reference's
+`lnpnd/src/engine.rs:1355`, the reference's
 `reference/LXMF/LXMF/LXMRouter.py:968-974`). The board has no such
 pass; its inbound links fall to the core's generic stale rule,
 keepalive 360 s × 2 + 5 s grace
@@ -630,7 +630,7 @@ links reading `no_data_for_ms`, the lnpnd loop transplanted; a few
 hundred bytes of flash.
 Test: lnpnd's
 `an_idle_inbound_link_is_torn_down_after_the_reference_bound`
-(`lnpnd/src/engine.rs:4004`) through the board engine.
+(`lnpnd/src/engine.rs:4143`) through the board engine.
 **Fixed in 5c82832d**: one rule for both stacks, `link_idle_past_bound`
 (`leviculum-lxmf`), used by lnpnd's `close_idle_links` and by the
 board's sweep in `settle` (`tick_idle_links`, at most 15 s late on a
@@ -668,7 +668,7 @@ shortfalls re-listed on the client's next round.
 lnpnd registers the reference's control destination with
 `/pn/get/stats`, `/pn/peer/sync`, `/pn/peer/unpeer` behind the
 identity allow list (`register_control_handlers`,
-`lnpnd/src/engine.rs:890-894`, the codec in
+`lnpnd/src/engine.rs:1011-1015`, the codec in
 `leviculum-lxmf/src/control.rs:35-39`, against
 `reference/LXMF/LXMF/LXMRouter.py:672-676` and `:89-91`). The board
 registers nothing of it.

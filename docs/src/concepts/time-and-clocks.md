@@ -186,7 +186,7 @@ router does exactly that: it keeps the `(emission_secs, now_ms)` pair
 of the last tick and, when the calendar advances by more than the
 stopwatch says it should have, shifts every stored stamp by the
 difference (`LxmfRouter::anchor_wall_clock`,
-`leviculum-lxmf/src/router.rs:2191`, Codeberg #186). The ages the
+`leviculum-lxmf/src/router.rs:2206`, Codeberg #186). The ages the
 cache encodes are then preserved exactly across the re-anchor, and
 real elapsed time still expires entries.
 
@@ -209,7 +209,7 @@ keeps a ticket only while `time.time() < expires` on its own machine
 does not. A backwards-biased expiry from an unhealed calendar is
 therefore already expired on arrival — issuing it is emitting a field
 the peer silently discards. `LxmfRouter::issue_ticket_field`
-(`leviculum-lxmf/src/router.rs:816`) returns
+(`leviculum-lxmf/src/router.rs:831`) returns
 `RouterError::NoWallClock` while the calendar is not a plausible wall
 clock, rather than issue one: a named error is a diagnosis; a
 discarded ticket is a mystery that surfaces months later as "replies
