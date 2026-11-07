@@ -634,7 +634,21 @@ fn drive_with<P: Program>(
 /// A left click at `at` on `element` laid out on `w` by `h`: the pointer
 /// moves there, the button goes down and comes up. The messages the
 /// widgets published, in order; `None` without a renderer.
-pub fn click<M>(mut element: Element<'_, M>, at: Point, w: u32, h: u32) -> Option<Vec<M>> {
+pub fn click<M>(element: Element<'_, M>, at: Point, w: u32, h: u32) -> Option<Vec<M>> {
+    clicks(element, at, 1, w, h)
+}
+
+/// `n` left clicks in a row at `at` on `element` laid out on `w` by `h`,
+/// as quickly as a double or a triple click (1444): the pointer moves
+/// there, the button goes down and comes up `n` times. The messages the
+/// widgets published, in order; `None` without a renderer.
+pub fn clicks<M>(
+    mut element: Element<'_, M>,
+    at: Point,
+    n: usize,
+    w: u32,
+    h: u32,
+) -> Option<Vec<M>> {
     let renderer = software(iced::Font::DEFAULT)?;
     let size = Size::new(w as f32, h as f32);
     let mut tree = Tree::new(&element);
@@ -646,11 +660,13 @@ pub fn click<M>(mut element: Element<'_, M>, at: Point, w: u32, h: u32) -> Optio
     let viewport = Rectangle::with_size(size);
     let cursor = mouse::Cursor::Available(at);
     let mut messages = Vec::new();
-    for event in [
-        mouse::Event::CursorMoved { position: at },
-        mouse::Event::ButtonPressed(mouse::Button::Left),
-        mouse::Event::ButtonReleased(mouse::Button::Left),
-    ] {
+    let presses = (0..n).flat_map(|_| {
+        [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ]
+    });
+    for event in std::iter::once(mouse::Event::CursorMoved { position: at }).chain(presses) {
         let mut shell = Shell::new(&mut messages);
         element.as_widget_mut().update(
             &mut tree,
