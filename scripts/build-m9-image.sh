@@ -186,6 +186,7 @@ fi
 stack="$(source "$HOME/export-esp.sh" >/dev/null && xtensa-esp32s3-elf-size -A "$OUT/thinknode_m9" \
     | awk '$1 == ".stack" { print $2 }')"
 # The UI core's static stack: the APP_CORE_STACK symbol's size (1493).
+# shellcheck disable=SC1091
 ui_stack="$(source "$HOME/export-esp.sh" >/dev/null && xtensa-esp32s3-elf-nm -S "$OUT/thinknode_m9" \
     | awk '/APP_CORE_STACK/ { print strtonum("0x" $2) }' | head -1)"
 echo "$TAG image $OUT/thinknode_m9.bin ($(stat -c %s "$OUT/thinknode_m9.bin") B), elf $OUT/thinknode_m9"
