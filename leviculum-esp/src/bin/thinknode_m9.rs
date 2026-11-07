@@ -72,6 +72,12 @@
 //!                           on every loss and every five seconds (1440);
 //!                           stack_free is core 0's stack never touched
 //!                           since the boot's census, above the guard (1521b)
+//! [PREV_RUN] reason=<wdt0|wdt1|panic|power|..> core0_stage=.. core0_lock=.. core0_isr=.. core1_stage=.. core1_lock=.. peer=.. turns=<c0>/<c1>
+//!                           at boot: where each core was when the last run
+//!                           stopped (1534, `leviculum_esp::stall`); a power
+//!                           cycle or an EN reset says record=none
+//! [WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow
+//!                           once, as core 0's loop arms its watchdog (1534)
 //! [CORES] census=done waited_ms=<n>   core 0 held still while the UI
 //!                           core's census ran (1521b), or census=late
 //! KBRAW <ms> <hex>          one per answer that is no idle one: a timer
@@ -111,6 +117,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use critical_section::Mutex;
 
+use esp_hal::peripherals::{TIMG0, TIMG1};
 use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::system::{CpuControl, Stack};
 use esp_hal::{
@@ -125,7 +132,10 @@ use esp_hal::{
         Mode,
     },
     time::{Duration, Rate},
-    timer::{timg::TimerGroup, PeriodicTimer},
+    timer::{
+        timg::{TimerGroup, Wdt},
+        PeriodicTimer,
+    },
     uart::Uart,
     Blocking,
 };
@@ -133,6 +143,7 @@ use leviculum_core::envelope::{self, EnvelopeError};
 use leviculum_core::framing::hdlc::{DeframeResult, Deframer};
 use leviculum_esp::flash::Stores;
 use leviculum_esp::handheld::{self, CodeRefusal, Handheld};
+use leviculum_esp::stall::{self, Core, Isr, Lock, Stage, Watchdog};
 use leviculum_esp::{boards::thinknode_m9 as m9, uptime_ms, UartLog};
 use leviculum_ui::input::{KeyCode, KeyEventKind};
 use loquax::home::ask::Verb;
@@ -203,6 +214,7 @@ static KB_FAILS: AtomicU32 = AtomicU32::new(0);
 /// section; the UART's interrupt has 5.5 ms of slack behind it.
 #[esp_hal::handler]
 fn kb_tick() {
+    stall::isr(Isr::Keyboard);
     critical_section::with(|cs| {
         let mut poll = KB_POLL.borrow_ref_mut(cs);
         let Some(poll) = poll.as_mut() else {
@@ -225,15 +237,18 @@ fn kb_tick() {
             }
         }
     });
+    stall::isr(Isr::None);
 }
 
 /// The answers kept since the last call, oldest first, and how many were
 /// dropped and failed so far.
 fn kb_drain() -> (Vec<kbraw::Press>, u32, u32) {
-    critical_section::with(|cs| {
-        let mut presses = KB_PRESSES.borrow_ref_mut(cs);
-        let drained = core::iter::from_fn(|| presses.pop()).collect();
-        (drained, presses.lost(), KB_FAILS.load(Ordering::Relaxed))
+    stall::locked(Core::Ui, Lock::Keys, || {
+        critical_section::with(|cs| {
+            let mut presses = KB_PRESSES.borrow_ref_mut(cs);
+            let drained = core::iter::from_fn(|| presses.pop()).collect();
+            (drained, presses.lost(), KB_FAILS.load(Ordering::Relaxed))
+        })
     })
 }
 
@@ -315,15 +330,21 @@ static TO_UI: Mutex<RefCell<VecDeque<ToUi>>> = Mutex::new(RefCell::new(VecDeque:
 static FROM_UI: Mutex<RefCell<VecDeque<FromUi>>> = Mutex::new(RefCell::new(VecDeque::new()));
 
 fn to_ui(message: ToUi) {
-    critical_section::with(|cs| TO_UI.borrow_ref_mut(cs).push_back(message));
+    stall::locked(Core::Io, Lock::ToUi, || {
+        critical_section::with(|cs| TO_UI.borrow_ref_mut(cs).push_back(message))
+    });
 }
 
 fn ui_drain() -> Vec<ToUi> {
-    critical_section::with(|cs| TO_UI.borrow_ref_mut(cs).drain(..).collect())
+    stall::locked(Core::Ui, Lock::ToUi, || {
+        critical_section::with(|cs| TO_UI.borrow_ref_mut(cs).drain(..).collect())
+    })
 }
 
 fn io_drain() -> Vec<FromUi> {
-    critical_section::with(|cs| FROM_UI.borrow_ref_mut(cs).drain(..).collect())
+    stall::locked(Core::Io, Lock::FromUi, || {
+        critical_section::with(|cs| FROM_UI.borrow_ref_mut(cs).drain(..).collect())
+    })
 }
 
 /// The UI core's way to the log: every line goes through the queue to
@@ -332,19 +353,17 @@ struct UiLog;
 
 impl UiLog {
     fn line(&mut self, prefix: &'static str, body: String) {
-        critical_section::with(|cs| {
-            FROM_UI
-                .borrow_ref_mut(cs)
-                .push_back(FromUi::Line(prefix, body))
-        });
+        self.send(FromUi::Line(prefix, body));
     }
 
     fn raw(&mut self, body: String) {
-        critical_section::with(|cs| FROM_UI.borrow_ref_mut(cs).push_back(FromUi::Raw(body)));
+        self.send(FromUi::Raw(body));
     }
 
     fn send(&mut self, message: FromUi) {
-        critical_section::with(|cs| FROM_UI.borrow_ref_mut(cs).push_back(message));
+        stall::locked(Core::Ui, Lock::FromUi, || {
+            critical_section::with(|cs| FROM_UI.borrow_ref_mut(cs).push_back(message))
+        });
     }
 }
 
@@ -712,6 +731,11 @@ fn main() -> ! {
     };
     let mut log = UartLog::new(uart.with_tx(tx).with_rx(rx));
     leviculum_esp::say_panics_on_uart0(m9::UART_BAUD);
+    // Where the last run stopped (1534), read before this run's record
+    // starts over it.
+    let prev = stall::previous();
+    stall::begin();
+    log.line("[PREV_RUN] ", format_args!("{prev}"));
 
     // The heap in PSRAM, before anything allocates.
     let psram = Psram::new(
@@ -927,10 +951,13 @@ fn main() -> ! {
         );
     }
 
-    // The keyboard's poll from here on is the timer's (1463).
+    // The keyboard's poll from here on is the timer's (1463); the same
+    // group's watchdog is core 0's loop's (1534), TG1's the UI core's.
+    let group0 = TimerGroup::new(p.TIMG0);
+    let wdt0 = group0.wdt;
+    let wdt1 = TimerGroup::new(p.TIMG1).wdt;
     if let Some(bus) = i2c.take() {
-        let group = TimerGroup::new(p.TIMG0);
-        let mut timer = PeriodicTimer::new(group.timer0);
+        let mut timer = PeriodicTimer::new(group0.timer0);
         timer.set_interrupt_handler(kb_tick);
         match timer.start(Duration::from_millis(u64::from(POLL_MS))) {
             Ok(()) => {
@@ -1018,7 +1045,9 @@ fn main() -> ! {
     let mut cpu = CpuControl::new(p.CPU_CTRL);
     // SAFETY: the one place this static is taken, before the core starts.
     let ui_stack = unsafe { &mut *addr_of_mut!(APP_CORE_STACK) };
-    let started = cpu.start_app_core(ui_stack, move || ui_main(panel, model, shown, kb, seed));
+    let started = cpu.start_app_core(ui_stack, move || {
+        ui_main(panel, model, shown, kb, seed, wdt1)
+    });
     match &started {
         Ok(_) => log.line(
             "[CORES] ",
@@ -1058,7 +1087,21 @@ fn main() -> ! {
     // flash again; the word is the state, the log has the detail.
     let mut faulted = false;
     let mut next_banner = uptime_ms() + BANNER_INTERVAL_MS;
+    // From here core 0's loop feeds its watchdog every turn, and between
+    // the messages of a long one (1534): a frame dump's lines took 4.6 s
+    // of one turn on the bench (2026-11-07f), all of it the UART's.
+    let mut wdt: Watchdog<TIMG0<'static>> = Watchdog::arm(wdt0);
+    log.line(
+        "[WATCHDOG] ",
+        format_args!(
+            "core0=mwdt0 core1=mwdt1 timeout_ms={} record=rtc-slow",
+            stall::TIMEOUT_MS
+        ),
+    );
     loop {
+        wdt.feed();
+        stall::turned(Core::Io);
+        stall::stage(Core::Io, Stage::Host);
         let now = uptime_ms();
         let mut turn = Turn::default();
         if now >= next_banner {
@@ -1091,11 +1134,14 @@ fn main() -> ! {
                 Err(EnvelopeError::NotEnvelope)
             ) {
                 // Not the control envelope: a Reticulum packet for the node.
+                stall::stage(Core::Io, Stage::Packet);
                 node.packet(&data, uptime_ms(), &mut stores, &mut log);
+                wdt.feed();
                 continue;
             }
             if let Ok(frame) = envelope::decode_frame(&data) {
                 if frame.frame_type == envelope::TYPE_HOME_CODE {
+                    stall::stage(Core::Io, Stage::Code);
                     // The code written over the control link (1415): the
                     // record before the ack, then the same join as typed.
                     let answer = match envelope::decode_home_code_payload(frame.payload) {
@@ -1155,9 +1201,11 @@ fn main() -> ! {
         }
 
         turn.host = uptime_ms().saturating_sub(t_host);
+        stall::stage(Core::Io, Stage::Node);
         let t_node = uptime_ms();
         node.turn(uptime_ms(), &mut stores, &mut log);
         turn.node = uptime_ms().saturating_sub(t_node);
+        stall::stage(Core::Io, Stage::Take);
         let t_take = uptime_ms();
 
         // What the client brought goes over to the UI core: pulled
@@ -1183,8 +1231,10 @@ fn main() -> ! {
 
         // What the UI core asked for.
         for message in io_drain() {
+            wdt.feed();
             match message {
                 FromUi::Asks { verbs, marks } => {
+                    stall::stage(Core::Io, Stage::Asks);
                     busy = true;
                     let mut ids = || {
                         let mut id = [0u8; 16];
@@ -1194,9 +1244,12 @@ fn main() -> ! {
                     node.ask(verbs, &marks, &mut ids, uptime_ms(), &mut stores, &mut log);
                 }
                 FromUi::Rows { rows, gone, pages } => {
+                    stall::stage(Core::Io, Stage::Rows);
                     node.said(rows, gone, pages, &mut stores, &mut log);
                 }
                 FromUi::Load(peer) => {
+                    stall::stage(Core::Io, Stage::Load);
+                    stall::peer(&peer);
                     busy = true;
                     let want = home::page_entries();
                     if let (Some(address), Some((entries, earlier))) =
@@ -1212,9 +1265,16 @@ fn main() -> ! {
                 }
                 // Whole, however long (1521b): the census's screen lines
                 // outgrew the fixed line and lost their verdict's reason.
-                FromUi::Line(prefix, body) => log.text(prefix, &body),
-                FromUi::Raw(body) => log.raw(&body),
+                FromUi::Line(prefix, body) => {
+                    stall::stage(Core::Io, Stage::Line);
+                    log.text(prefix, &body);
+                }
+                FromUi::Raw(body) => {
+                    stall::stage(Core::Io, Stage::Line);
+                    log.raw(&body);
+                }
                 FromUi::Code(text) => {
+                    stall::stage(Core::Io, Stage::Code);
                     match node.take_code(&text, &mut rng, &mut stores, batch, &mut log) {
                         Ok(Some(taken)) => {
                             to_ui(ToUi::Model(Box::new(taken)));
@@ -1230,11 +1290,14 @@ fn main() -> ! {
 
         // The keyboard's losses, counted by the interrupt, said here:
         // the presses themselves are the UI core's.
-        let (kb_lost, kb_fails) = critical_section::with(|cs| {
-            (
-                KB_PRESSES.borrow_ref(cs).lost(),
-                KB_FAILS.load(Ordering::Relaxed),
-            )
+        stall::stage(Core::Io, Stage::KbCount);
+        let (kb_lost, kb_fails) = stall::locked(Core::Io, Lock::Keys, || {
+            critical_section::with(|cs| {
+                (
+                    KB_PRESSES.borrow_ref(cs).lost(),
+                    KB_FAILS.load(Ordering::Relaxed),
+                )
+            })
         });
         if (kb_lost, kb_fails) != kb_said {
             kb_said = (kb_lost, kb_fails);
@@ -1249,6 +1312,7 @@ fn main() -> ! {
         // pulled page later writes into erased flash instead of holding
         // the interrupts for the erase.
         if !busy {
+            stall::stage(Core::Io, Stage::Quiet);
             node.quiet(&mut stores, &mut log);
         }
 
@@ -1261,12 +1325,14 @@ fn main() -> ! {
 /// a word per turn.
 fn to_ui_word(word: Option<Word>) {
     static LAST: Mutex<RefCell<Option<Option<Word>>>> = Mutex::new(RefCell::new(None));
-    critical_section::with(|cs| {
-        let mut last = LAST.borrow_ref_mut(cs);
-        if last.as_ref() != Some(&word) {
-            *last = Some(word);
-            TO_UI.borrow_ref_mut(cs).push_back(ToUi::Word(word));
-        }
+    stall::locked(Core::Io, Lock::Word, || {
+        critical_section::with(|cs| {
+            let mut last = LAST.borrow_ref_mut(cs);
+            if last.as_ref() != Some(&word) {
+                *last = Some(word);
+                TO_UI.borrow_ref_mut(cs).push_back(ToUi::Word(word));
+            }
+        })
     });
 }
 
@@ -1295,7 +1361,9 @@ fn ui_main(
     mut shown: Shown,
     kb: Protocol,
     seed: [u8; 32],
+    wdt: Wdt<TIMG1<'static>>,
 ) -> ! {
+    stall::stage(Core::Ui, Stage::Census);
     let mut log = UiLog;
     let mut frame = Frame::new();
     let before = leviculum_esp::heap_live();
@@ -1406,7 +1474,12 @@ fn ui_main(
     let mut drawn = screen::Drawn::default();
     drawn.drawn(&model);
 
+    // From here the UI core's loop feeds its own watchdog (1534).
+    let mut wdt = Watchdog::arm(wdt);
     loop {
+        wdt.feed();
+        stall::turned(Core::Ui);
+        stall::stage(Core::Ui, Stage::Drain);
         let mut dirty = false;
         let mut wants = Wants::default();
         let route_out = |model: &mut UiModel<Field>,
@@ -1534,6 +1607,7 @@ fn ui_main(
         // The keys the timer read, oldest first (1463): every press,
         // however long the turn that held it was; all of them before the
         // one draw.
+        stall::stage(Core::Ui, Stage::Keys);
         let (presses, _, _) = kb_drain();
         for press in presses {
             let ms = press.ms;
@@ -1579,6 +1653,7 @@ fn ui_main(
             }
         }
 
+        stall::stage(Core::Ui, Stage::Send);
         if !wants.verbs.is_empty() || !wants.marks.is_empty() {
             log.send(FromUi::Asks {
                 verbs: core::mem::take(&mut wants.verbs),
@@ -1598,6 +1673,7 @@ fn ui_main(
             log.send(FromUi::Load(peer));
         }
 
+        stall::stage(Core::Ui, Stage::Draw);
         dirty |= drawn.due(&model);
         if dirty {
             redraw(

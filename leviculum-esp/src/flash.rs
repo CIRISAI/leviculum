@@ -25,6 +25,15 @@ use leviculum_core::identity_store::{self, ENCODED_SIZE_ALIGNED as IDENTITY_SIZE
 use loquax::home::board::store::{Sectors, SECTOR as STORE_SECTOR};
 use loquax::home::record::{slots, ClientRecord, RecordError};
 
+use crate::stall::{self, Core, Lock};
+
+/// Run a flash write or erase, `f`, named in the stall record (1534):
+/// esp-storage parks the other core for it, and a hang inside is the
+/// record's `core0_lock=flash`.
+fn parked<R>(f: impl FnOnce() -> R) -> R {
+    stall::locked(Core::Io, Lock::Flash, f)
+}
+
 /// The partition the node's identity lives in.
 pub const IDENTITY_LABEL: &str = "identity";
 /// The partition the Loquax client record lives in.
@@ -215,10 +224,9 @@ impl<'d> Stores<'d> {
 
     fn write(&mut self, slot: Slot, buf: &[u8]) -> Result<(), StoreError> {
         let offset = slot.0.map_err(StoreError::NoRegion)?;
-        self.flash
-            .erase(offset, offset + SECTOR)
-            .map_err(StoreError::Flash)?;
-        self.flash.write_nor(offset, buf).map_err(StoreError::Flash)
+        let flash = &mut self.flash;
+        parked(|| flash.erase(offset, offset + SECTOR)).map_err(StoreError::Flash)?;
+        parked(|| flash.write_nor(offset, buf)).map_err(StoreError::Flash)
     }
 
     /// The node's identity, when one was saved.
@@ -332,9 +340,8 @@ impl Sectors for Messages<'_, '_> {
         let mut bounce = Aligned([0u8; BOUNCE]);
         for chunk in data.chunks(BOUNCE) {
             bounce.0[..chunk.len()].copy_from_slice(chunk);
-            self.flash
-                .write_nor(at, &bounce.0[..chunk.len()])
-                .map_err(StoreError::Flash)?;
+            let flash = &mut *self.flash;
+            parked(|| flash.write_nor(at, &bounce.0[..chunk.len()])).map_err(StoreError::Flash)?;
             at += chunk.len() as u32;
         }
         Ok(())
@@ -342,8 +349,7 @@ impl Sectors for Messages<'_, '_> {
 
     fn erase(&mut self, sector: u32) -> Result<(), StoreError> {
         let from = self.at(sector, 0, STORE_SECTOR)?;
-        self.flash
-            .erase(from, from + SECTOR)
-            .map_err(StoreError::Flash)
+        let flash = &mut *self.flash;
+        parked(|| flash.erase(from, from + SECTOR)).map_err(StoreError::Flash)
     }
 }

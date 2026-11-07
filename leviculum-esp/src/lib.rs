@@ -37,6 +37,7 @@ pub mod boards;
 pub mod flash;
 pub mod handheld;
 pub mod serial_iface;
+pub mod stall;
 pub mod sx1262;
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -431,11 +432,13 @@ fn pull_rx(rx: &mut UartRx<'static, Blocking>, keep: &mut RxKeep<RX_KEEP>) {
 /// The UART0 interrupt: the FIFO passed [`RX_FIFO_THRESHOLD`].
 #[esp_hal::handler]
 fn uart0_rx() {
+    stall::isr(stall::Isr::Uart);
     critical_section::with(|cs| {
         if let Some(rx) = RX_PORT.borrow_ref_mut(cs).as_mut() {
             pull_rx(rx, &mut RX_BYTES.borrow_ref_mut(cs));
         }
     });
+    stall::isr(stall::Isr::None);
 }
 
 /// The config the log's UART runs with at `baud`: the FIFO-full
@@ -673,8 +676,18 @@ pub fn say_panics_on_uart0(baud: u32) {
 /// pretend to. What it can do honestly: on a board that named UART0 as its
 /// log ([`say_panics_on_uart0`]), one `[PANIC]` line on a fresh driver,
 /// then stop, and leave the board visibly dead rather than quietly wrong.
+/// Since 1534 the panic's site goes into [`stall`]'s record first, and a
+/// board that armed its loops' watchdogs (the M9) resets itself out of the
+/// stop and says the site as `[PREV_RUN] reason=panic ... at=<file>:<line>`.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // The site first, into the record that survives the watchdog's reset
+    // (1534): a panic whose line never reaches the UART, because the
+    // lock the writer needs is held, still leaves where it was.
+    let (file, line) = info
+        .location()
+        .map_or(("?", 0), |at| (at.file(), at.line()));
+    stall::panicked(file, line);
     let baud = PANIC_UART0_BAUD.load(Ordering::Relaxed);
     if baud != 0 {
         // SAFETY: the panicking context owns nothing any more; a fresh
