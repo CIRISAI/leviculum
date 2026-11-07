@@ -30,7 +30,11 @@
 //! bubbles, house, square bubble, back, pin, map, ring left, up, down,
 //! right, centre): `0x81` the bubbles, `0x82` the house, `0x83` the square
 //! bubble, `0x84` the pin, `0x85` the map, `0x86` the back arrow; the ring
-//! `0xb4` left, `0xb5` up, `0xb6` right, `0xb7` down. The ring's centre
+//! `0xb4` left, `0xb5` up, `0xb6` down, `0xb7` right. The walk's note had
+//! down and right the other way round (the codes rise in the order the
+//! keys were pressed, down before right); Lew at the device on 2026-11-07
+//! (1528, board log `2026-11-07f`) pressed down and saw nothing, pressed
+//! right and saw the selection move down. The ring's centre
 //! sends `0x0d`, ASCII CR, which is Enter already (21:03:13, `KEY
 //! code=0x0d name=enter`). `0x90`, seen once on 2026-11-04, is no key the
 //! walk pressed and stays unnamed. A code nothing
@@ -134,8 +138,8 @@ pub const SPECIALS: [(u8, Role); 10] = [
     (0x86, Role::Back),
     (0xb4, Role::RingLeft),
     (0xb5, Role::RingUp),
-    (0xb6, Role::RingRight),
-    (0xb7, Role::RingDown),
+    (0xb6, Role::RingDown),
+    (0xb7, Role::RingRight),
 ];
 
 /// What one code is.
@@ -276,16 +280,16 @@ mod tests {
                 (0x86, "back"),
                 (0xb4, "ring_left"),
                 (0xb5, "ring_up"),
-                (0xb6, "ring_right"),
-                (0xb7, "ring_down"),
+                (0xb6, "ring_down"),
+                (0xb7, "ring_right"),
             ]
         );
         let code_of = |key: KeyEvent| key.code;
         let ring = |code: u8| Key::of(code).and_then(Key::event).map(code_of);
         assert_eq!(ring(0xb4), Some(KeyCode::Left));
         assert_eq!(ring(0xb5), Some(KeyCode::Up));
-        assert_eq!(ring(0xb6), Some(KeyCode::Right));
-        assert_eq!(ring(0xb7), Some(KeyCode::Down));
+        assert_eq!(ring(0xb6), Some(KeyCode::Down));
+        assert_eq!(ring(0xb7), Some(KeyCode::Right));
         assert_eq!(ring(0x0d), Some(KeyCode::Enter), "the centre");
         assert_eq!(ring(0x86), Some(KeyCode::Esc));
         let command = |code: u8| Key::of(code).and_then(Key::command);
@@ -326,7 +330,7 @@ mod tests {
         let mut model = crate::fixture::model();
         assert_eq!(model.focus, Pane::Conversations);
         let at = model.selected;
-        press(&mut model, &mut row, 0xb7);
+        press(&mut model, &mut row, 0xb6);
         assert_ne!(model.selected, at, "ring down moves the list's cursor");
         press(&mut model, &mut row, 0xb5);
         assert_eq!(model.selected, at, "ring up moves it back");
@@ -355,8 +359,8 @@ mod tests {
         assert_eq!(line(0x20), "KEY 9308251 code=0x20 name=space");
         assert_eq!(line(0x0d), "KEY 9308251 code=0x0d name=enter");
         assert_eq!(line(0x08), "KEY 9308251 code=0x08 name=backspace");
-        assert_eq!(line(0xb7), "KEY 9308251 code=0xb7 name=ring_down");
-        assert_eq!(line(0xb6), "KEY 9308251 code=0xb6 name=ring_right");
+        assert_eq!(line(0xb6), "KEY 9308251 code=0xb6 name=ring_down");
+        assert_eq!(line(0xb7), "KEY 9308251 code=0xb7 name=ring_right");
         assert_eq!(line(0x90), "KEY 9308251 code=0x90 name=special_0x90");
         assert_eq!(line(0x81), "KEY 9308251 code=0x81 name=chats");
         assert_eq!(line(0x91), "KEY 9308251 code=0x91 name=special_0x91");

@@ -251,11 +251,11 @@ mod tests {
     #[test]
     fn the_bench_capture_replays_to_its_key_names() {
         let names = names(CAPTURE);
-        let want = "q w e new_message r t y ring_right u enter i o p pin \
+        let want = "q w e new_message r t y ring_down u enter i o p pin \
                     i u y t g f d s z x c v b n m m j h g t \
                     chats new_message home \
                     back back back back \
-                    ring_down ring_down ring_right ring_left ring_up \
+                    ring_right ring_right ring_down ring_left ring_up \
                     back map pin back e d \
                     new_message home new_message space special_0x90 \
                     new_message back back";

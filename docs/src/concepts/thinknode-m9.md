@@ -381,12 +381,16 @@ and `distinct-20261104.txt`):
   | `0x86` | back arrow     | back                                        |
   | `0xb4` | ring left      | left                                        |
   | `0xb5` | ring up        | up                                          |
-  | `0xb6` | ring right     | right                                       |
-  | `0xb7` | ring down      | down                                        |
+  | `0xb6` | ring down      | down                                        |
+  | `0xb7` | ring right     | right                                       |
   | `0x0d` | ring centre    | Enter (ASCII CR, 21:03:13)                  |
 
-  1440's provisional table had `0x84`..`0x86` rotated (back, pin, map)
-  and the ring's right and down swapped. `0x90`, once seen on
+  1440's provisional table had `0x84`..`0x86` rotated (back, pin, map).
+  The walk's note named `0xb6` right and `0xb7` down: the codes rise in
+  the order the walk pressed the ring (down before right), and the note
+  read them the other way round. Lew at the device on 2026-11-07 (1528,
+  board log `2026-11-07f`) pressed down and nothing moved, pressed right
+  and the selection went down; the table follows his hand since. `0x90`, once seen on
   2026-11-04, is no key the walk pressed and stays unnamed
   (`special_0x90`) until a capture shows it.
 - **No key-up, no state byte.** No read carries a release. The last byte

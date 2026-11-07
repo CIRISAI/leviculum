@@ -581,10 +581,10 @@ this slice.
   keyboard controller, measured"). 1427 replaced the matrix driver with
   the measured one; the scan frame, the `KB` line and the test layout are
   gone.
-- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:156`) keeps no
+- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:160`) keeps no
   state: a non-zero code is one press, printable ASCII a character,
   `0x0d` Enter, `0x08` Backspace, a code of `SPECIALS`
-  (`loquax-m9/src/keyboard.rs:128`) its control's role, any other
+  (`loquax-m9/src/keyboard.rs:132`) its control's role, any other
   `special_0x..`, which makes no key event. A role is a key of the
   shared table (the ring and Back) or a palette command run as a GUI's
   menu runs one (the chats list, the compose line, the map;
