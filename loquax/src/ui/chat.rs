@@ -315,6 +315,37 @@ pub fn kind(message: &Message) -> &'static str {
     }
 }
 
+/// The list's line for a reaction someone else sent, with its subject
+/// (1447, walk 1 finding 24): "Lew Mobile hat mit ❤️ reagiert", where the
+/// line said "hat mit ❤️ reagiert" and nobody knew who. In a group the
+/// subject is the member whose copy it is; `None` where no name is known,
+/// and for our own reaction, whose line says "Du" already.
+pub fn reaction_line<B>(model: &UiModel<B>, peer: &[u8; 16], message: &Message) -> Option<String> {
+    let (_, content) = message.reaction().filter(|_| !message.outbound)?;
+    let name = match model.group(peer) {
+        Some(info) => {
+            let (address, name, _) =
+                super::groups::copy_of(&message.body, &message.fields, Some(info))?;
+            match model.names.shown(&address) {
+                Some(shown) => shown.to_string(),
+                None if !name.is_empty() => name.to_string(),
+                None => info
+                    .member(&address)
+                    .filter(|m| !m.name.is_empty())
+                    .map(|m| m.name.clone())?,
+            }
+        }
+        None => model.names.shown(peer)?.to_string(),
+    };
+    Some(
+        Text::Key(
+            StrId::ReactedBy,
+            Vec::from([Arg::Str(name), Arg::Str(content)]),
+        )
+        .resolve(model.lang),
+    )
+}
+
 /// The list's line for a conversation's last message, in `lang`: what
 /// the phone's notification says too, so a word Loquax puts there itself
 /// is the catalogue's (1377), never an English one under a German list.
@@ -433,7 +464,9 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         last: last
             .map(|m| match m.is_report() {
                 true => format!("{PIN} {}", liveness.list_words(now)),
-                false => invitation_line(model, m).unwrap_or_else(|| preview(m, model.lang)),
+                false => invitation_line(model, m)
+                    .or_else(|| reaction_line(model, peer, m))
+                    .unwrap_or_else(|| preview(m, model.lang)),
             })
             .unwrap_or_default(),
         ours: last.is_some_and(|m| m.outbound),

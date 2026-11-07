@@ -75,6 +75,7 @@
     <string name="draft_row">Draft: %1$s</string>
     <string name="row_you">you: %1$s</string>
     <string name="reacted">reacted %1$s</string>
+    <string name="reacted_by">%1$s reacted %2$s</string>
     <string name="you_reacted">You reacted %1$s</string>
     <string name="run_updates">%1$d updates since %2$s</string>
     <string name="quote_you">You</string>

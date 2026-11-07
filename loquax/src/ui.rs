@@ -13538,6 +13538,27 @@ pub(crate) mod tests {
 
     /// A reaction whose target is not here yet is kept, drawn nowhere,
     /// and attaches when the target arrives.
+    /// 1447 (walk 1 finding 24): the list's line of a reaction someone
+    /// else sent names who, in the reader's language; without a name it
+    /// says what it said before.
+    #[test]
+    fn a_reaction_line_in_the_list_names_its_subject() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.lang = strings::Lang::De;
+        received(&mut model, ID, "lunch at noon?");
+        reacted(&mut model, ID2, "columba", ID, "❤️");
+        let line = |model: &UiModel<Field>| chat::list_row(model, &PEER).last;
+        assert_eq!(
+            line(&model),
+            "hat mit ❤️ reagiert",
+            "no name known: the control"
+        );
+        model.names.remember(PEER, "Lew Mobile");
+        assert_eq!(line(&model), "Lew Mobile hat mit ❤️ reagiert");
+        model.lang = strings::Lang::En;
+        assert_eq!(line(&model), "Lew Mobile reacted ❤️");
+    }
+
     #[test]
     fn a_reaction_before_its_target_attaches_when_the_target_arrives() {
         let mut model = UiModel::<Field>::new(&[PEER]);

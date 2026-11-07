@@ -75,6 +75,7 @@
     <string name="draft_row">Entwurf: %1$s</string>
     <string name="row_you">du: %1$s</string>
     <string name="reacted">hat mit %1$s reagiert</string>
+    <string name="reacted_by">%1$s hat mit %2$s reagiert</string>
     <string name="you_reacted">Du hast mit %1$s reagiert</string>
     <string name="run_updates">%1$d Meldungen seit %2$s</string>
     <string name="quote_you">Du</string>

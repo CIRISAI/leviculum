@@ -127,6 +127,8 @@ leviculum_ui::catalogue! {
     // The terminal's list line of our own last message (1381).
     RowYou = "row_you", "you: %1$s", "du: %1$s";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";
+    // A reaction's line with its subject (1447, walk 1 finding 24).
+    ReactedBy = "reacted_by", "%1$s reacted %2$s", "%1$s hat mit %2$s reagiert";
     YouReacted = "you_reacted", "You reacted %1$s", "Du hast mit %1$s reagiert";
     RunUpdates = "run_updates", "%1$d updates since %2$s", "%1$d Meldungen seit %2$s";
     QuoteYou = "quote_you", "You", "Du";
