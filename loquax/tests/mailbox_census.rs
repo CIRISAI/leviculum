@@ -91,11 +91,16 @@ async fn sigusr1_prints_the_census_and_the_mailbox_lives_on() {
     let text = stderr.lock().expect("stderr").clone();
     let line = text
         .lines()
-        .find(|line| line.contains("MAILBOX_CENSUS"))
+        .find(|line| line.starts_with("MAILBOX_CENSUS "))
         .unwrap_or_else(|| panic!("no MAILBOX_CENSUS line:\n{text}"));
     for column in loquax::home::census::COLUMNS {
         assert!(line.contains(&format!(" {column}=")), "{column}: {line}");
     }
+    // And the structured event, for the log's readers.
+    assert!(
+        text.contains("occasion") && text.contains("\"signal\""),
+        "{text}"
+    );
     assert!(line.contains(" nodes=1 "), "{line}");
     assert!(text.contains("--- node home ---"), "{text}");
     assert!(text.contains("=== Total estimated: "), "{text}");

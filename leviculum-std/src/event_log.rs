@@ -982,6 +982,27 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "origin_slots",
         ],
     },
+    // loquax-mailbox: one heap census of the mailbox's own tables, every
+    // ten minutes and on SIGUSR1 (order 1585), as PN_CENSUS is lnpnd's.
+    EventSchema {
+        name: "MAILBOX_CENSUS",
+        required_keys: &[
+            "occasion",
+            "outbox",
+            "group_outbox",
+            "sender",
+            "relations",
+            "asker",
+            "wakes",
+            "costs",
+            "pn_asks",
+            "router",
+            "engine",
+            "tables",
+            "rss_kb",
+            "nodes",
+        ],
+    },
     // lnpnd: the message store's limit at start, and whether it is the
     // default bounded by the host's RAM or the config's (order 1548).
     EventSchema {

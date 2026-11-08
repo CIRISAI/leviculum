@@ -193,6 +193,43 @@ impl MailboxCensus {
     }
 }
 
+impl MailboxCensus {
+    /// Write the census into the structured log, one `MAILBOX_CENSUS`
+    /// event; `occasion` is `period` or `signal`.
+    pub fn log(&self, occasion: &'static str) {
+        tracing::info!(
+            event = "MAILBOX_CENSUS",
+            occasion = occasion,
+            outbox = self.outbox,
+            group_outbox = self.group_outbox,
+            sender = self.sender,
+            relations = self.relations,
+            asker = self.asker,
+            wakes = self.wakes,
+            costs = self.costs,
+            pn_asks = self.pn_asks,
+            router = self.router,
+            engine = self.engine,
+            tables = self.tables(),
+            rss_kb = self.rss_kb,
+            nodes = self.nodes,
+            outbox_n = self.outbox_n,
+            group_outbox_n = self.group_outbox_n,
+            told_n = self.told_n,
+            related_n = self.related_n,
+            heard_n = self.heard_n,
+            asker_n = self.asker_n,
+            watchers_n = self.watchers_n,
+            devices_n = self.devices_n,
+            tracked_n = self.tracked_n,
+            recipients_n = self.recipients_n,
+            unheard_n = self.unheard_n,
+            events_queued = self.events_queued,
+            archive_kb = self.archive_kb,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

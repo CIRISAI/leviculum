@@ -903,7 +903,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             store: &store,
                         };
                         let line = held.census();
-                        tracing::info!(event = "MAILBOX_CENSUS", "{}", line.line());
+                        line.log(if dump { "signal" } else { "period" });
                         if dump {
                             eprint!("{}", census_dump(&node, &groups, &line));
                         }
