@@ -188,3 +188,12 @@ and the `WALK` line format. The recording bar's (1276) readers,
 (the dot's `selected`, which `parse_dump` now reads), `rec_notice_problems`,
 `parse_rec_lines` and `rec_went` (the `REC_BAR` lines in order), are pinned
 by the class `Recording`.
+
+## The M9's walk on the host
+
+The ThinkNode M9 has a walk of its own that needs no device:
+`loquax-m9-sim` (1530) runs the board's UI loop and its store on the
+host, headless with a key script and PNG and text dumps, or in a window.
+`just m9-sim-walk` runs its walks over the fixture and the 1489 store;
+the usage is in [the M9 section of the handheld
+messenger](handheld-messenger.md#the-m9-on-the-host-loquax-m9-sim-1530).

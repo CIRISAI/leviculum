@@ -1740,6 +1740,78 @@ visible bubbles is the next step. The board numbers (restore, KEY to
 flush, page gaps, `overrun` during the store's erase, which runs with
 interrupts off) are the reviewer's window.
 
+### The M9 on the host: `loquax-m9-sim` (1530)
+
+The board's screens can be walked without the board. `loquax-m9-sim`, a
+bin of `loquax-m9` behind its `sim` feature (the library stays `no_std`),
+runs the image's UI loop (`ui_main` in
+`leviculum-esp/src/bin/thinknode_m9.rs`) through the same library calls:
+a key is the controller's code, queued as the controller's answer for it
+(`kbraw::answer_of`), read by `Protocol::read` and `Key::of`, run by
+`keyboard::run` or `group::press`, routed by `home::route`, drawn by the
+board's `Renderer`, said in a `[PAGE]` line by `page::of`. Its I/O side is
+the store half of `leviculum_esp::handheld`: the restore at boot, the
+asks and marks kept, the summary log, a chat's page read from the ring,
+the idle erase. The two cores are one thread, a UI turn and then an I/O
+turn until neither queue holds anything.
+
+What it stands in for, and what that cannot show: the panel is the frame
+the renderer draws into (no SPI, `[DISP] flush ... ms=0.000`); the flash
+is a memory flash of the `messages` partition's 1024 sectors, saved to a
+file (no erase timing, no power cut); the keyboard is the code a script
+or the window names (no I2C, no lost polls); the heap is the host's (no
+PSRAM census); the boot's census of every screen is not run; the clock is
+the script's in a headless run, so the `[MAP]` timings read 0. There is
+no node and no UART yet: nothing is pulled from a home, an ask stays
+queued, and the top bar's word is the one a board shows before its
+first ask ends. `--mailbox` says so and exits 2; the client
+(`handheld.rs`) is built on the ESP's types, and moving it to the host
+changes the image, which this order kept byte for byte.
+
+Headless, as an agent or the reviewer drives it:
+
+```text
+cargo run -p loquax-m9 --features sim --bin loquax-m9-sim -- \
+    --store real --save flash.img --keys "down enter up up" \
+    --reboot-after 2 --dump last.png --dump-every 5 --text
+```
+
+- `--store fixture` (the default) is a board without a client record:
+  the pairing, Back to the fixture model. `--store real` is a home's
+  board whose first pull kept the 1489 fixture (300 conversations, 4000
+  messages, `loquax/tests/support/real_store.rs`), pulled page by page
+  through `home::keep` and `home::take`. Any other value is a flash image
+  a run saved with `--save`, so a second run is a power cycle.
+- `--keys` names keys as the `KEY` line does (`ring_down`, `enter`,
+  `back`, `map`, `t`) or as the host does (`down`, `esc`, `f5`);
+  `--script <file>` takes timed steps (`key`, `hold <key> <ms>`, `wait`,
+  `text`, `reboot`, `dump <png>`, `screen <name> <png>`, the last the
+  board's `FRAME_DUMP` of a fixture screen). Each press advances the
+  clock 150 ms.
+- `--reboot-after <n>` power-cycles the board on its flash after the
+  `n`th press: "read on the board survives a reboot" runs on the host.
+- `--dump`, `--dump-every <n>` (every `n`th frame drawn, as
+  `<stem>-f<frame>.png`), `--text` (the screen's rows on stdout, `PAGE`
+  then `ROW nn |...|`; the map's picture, pins and names are pixels and
+  not in them). The board's lines go to stderr in the firmware's shape.
+
+`just m9-sim-walk` runs the bin's tests and the two walks under
+`scripts/m9-sim-walks/` (the fixture from the pairing on, the 1489 store
+and a reboot), with the dumps, the log and the text rows under
+`target/m9-sim-walk/`. The parity tests reach every golden
+(`tests/golden/m9-fw-*.png`, the eleven fixture screens and the pairing)
+through the sim's board, by the `FRAME_DUMP` path and, for the four the
+board's first model reaches, by its keys from power-on, and compare them
+pixel for pixel; the walk's `screen` dumps are byte for byte the golden
+files.
+
+In a window, for a hand or an eye: `just m9-sim [store] [scale]`, the
+panel at 2x or 3x, the arrows the ring, Enter its centre, Esc Back, F1 to
+F5 the bubbles, the house, the square bubble, the pin and the map, the
+letters the QWERTY block (`+`, `-`, `t`, `y` the map's), the page and the
+last `KEY` line in the title. It builds for the host's own triple, as
+`loquax gui` does.
+
 ### Tracks on the M9 (1385, not built)
 
 The tracks ([Loquax: tracks on the map](loquax-tracks.md)) are derived
