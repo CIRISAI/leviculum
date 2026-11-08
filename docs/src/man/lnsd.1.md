@@ -6,7 +6,7 @@ lnsd -- Reticulum network daemon
 
 ## SYNOPSIS
 
-**lnsd** [**-c** *dir*] [**--storage** *dir*] [**-s**] [**--exampleconfig**] [**--writeconfig**] [**-v**...] [**-q**...]
+**lnsd** [**-c** *dir*] [**--storage** *dir*] [**--instance-name** *name*] [**-s**] [**--exampleconfig**] [**--writeconfig**] [**-v**...] [**-q**...]
 
 ## DESCRIPTION
 
@@ -25,6 +25,9 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 
 **--storage** *dir*
 :   Storage directory path. Overrides the config file's `storage_path`, which in turn overrides the default `<config_dir>/storage`. It moves the daemon alone — the client tools read `storage_path` from the config — so a storage directory shared with `lnstatus`, `lncp`, `lnpath` or `lnprobe` belongs in the config file. Long-only on purpose: in `rnsd`, `-s` means `--service`, so the short letter stays reserved for that and the storage override is a Leviculum extension.
+
+**--instance-name** *name*
+:   Serve the shared instance under *name* instead of the config's `instance_name` (`default` without one); the file is not rewritten. A client tool that starts **lnsd** for an instance its configuration does not name passes it, so the daemon it started answers where it waits. A Leviculum extension: `rnsd` has no such option.
 
 **-s**, **--service**
 :   Declare that the daemon is running as a service, accepted for compatibility with `rnsd -s`. **lnsd** keeps logging to standard output, which journald captures; it does not redirect to a log file.

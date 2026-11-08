@@ -63,7 +63,7 @@ transport off, a shared instance named `default`, log level 4,
   (`InterfaceOrigin`, `leviculum-std/src/config.rs:681`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
   builds any (`leviculum-std/src/driver/mod.rs:2348`), and once
-  `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:215`).
+  `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:229`).
 - `interface_stats` serves the origin as the `origin` key
   (`leviculum-std/src/rpc/handlers.rs:674`), and `lnstatus` prints it,
   behind `--origin`, as an `Origin` line under `Status`. Without the flag
@@ -591,7 +591,10 @@ The function is `find_or_start` (`leviculum-std/src/instance.rs`), and
   asked on TCP only. Each channel is asked until `FIND_BOUND` (150 ms) has
   passed: a loopback connect is refused at once, so the bound covers only
   a daemon caught binding.
-- **The start**, when nothing answers: `lnsd -c <config_dir>`, the lnsd
+- **The start**, when nothing answers: `lnsd -c <config_dir>`, with
+  `--instance-name <instance>` when the tool asks for a name the config
+  does not give (without it the daemon would answer under the config's name
+  and the tool would wait out the bound, 1570), the lnsd
   from `LEVICULUM_LNSD`, else beside the tool, else on `PATH`, through
   `spawn_supervised`, its stdout and stderr appended to `lnsd.log` in the
   config directory. The tool waits until the channel accepts, at most

@@ -98,7 +98,7 @@ struct Args {
     config_dir: PathBuf,
     defer_resource_builds: bool,
     /// `-v` / `--verbose` occurrences, `lnsd`'s and `lnpnd`'s spelling
-    /// (`leviculum-cli/src/lnsd.rs:104-109`, `lnpnd/src/main.rs:96-99`).
+    /// (`leviculum-cli/src/lnsd.rs:114-119`, `lnpnd/src/main.rs:96-99`).
     verbose: u8,
     /// `-q` / `--quiet` occurrences.
     quiet: u8,
@@ -146,7 +146,7 @@ const DEFAULT_LOGLEVEL: u8 = 4;
 ///
 /// tracing has no notice/verbose/extreme, so notice folds into info, verbose
 /// into debug and extreme into trace. The third copy of this ladder
-/// (`leviculum-cli/src/lnsd.rs:444`, `lnpnd/src/config.rs:468`); kept local
+/// (`leviculum-cli/src/lnsd.rs:458`, `lnpnd/src/config.rs:468`); kept local
 /// because this batch is scoped to this crate, and cited from here so a later
 /// consolidation into `leviculum-std` finds all three.
 fn loglevel_filter(level: u8) -> &'static str {
@@ -283,7 +283,7 @@ async fn main() -> ExitCode {
 async fn run(args: Args) -> Result<(), String> {
     let daemon_keys = daemon_config_keys(&args.config_dir);
     // The stack's own voice, on stderr: exactly the subscriber `lnsd` installs
-    // (`leviculum-cli/src/lnsd.rs:166`), so `RUST_LOG` wins, `-v`/`-q` shift
+    // (`leviculum-cli/src/lnsd.rs:176`), so `RUST_LOG` wins, `-v`/`-q` shift
     // the config's level, and `LEVICULUM_EVENT_LOG` picks up the structured
     // event layer if it is set. Installed before anything else in `run` so no
     // startup line is lost; `parse_args` failures above it stay plain

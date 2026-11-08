@@ -15,7 +15,8 @@
 //!    37428 whatever the stack. Each channel is asked until [`FIND_BOUND`]
 //!    has passed; a loopback connect succeeds or is refused at once, so the
 //!    bound only covers a daemon that is binding at that moment.
-//! 2. **Start.** `lnsd -c <config_dir>`, spawned through
+//! 2. **Start.** `lnsd -c <config_dir>`, with `--instance-name <instance>`
+//!    when the tool asks for a name the config does not give, spawned through
 //!    [`spawn_supervised`](crate::process::spawn_supervised): on Linux the
 //!    kernel kills it when the tool dies (`PR_SET_PDEATHSIG`), however the
 //!    tool dies. Its stdout and stderr go to [`DAEMON_LOG`] in the config
@@ -133,6 +134,10 @@ pub struct Request {
     pub lnsd: Option<PathBuf>,
     /// When the line goes to stderr.
     pub report: Report,
+    /// How long a started lnsd gets to answer: [`START_BOUND`], shorter only
+    /// in a test that wants the [`InstanceError::Timeout`] without waiting
+    /// for it.
+    pub start_bound: Duration,
 }
 
 impl Request {
@@ -145,6 +150,7 @@ impl Request {
             no_start: false,
             lnsd: None,
             report: Report::Started,
+            start_bound: START_BOUND,
         }
     }
 }
@@ -296,8 +302,10 @@ pub enum InstanceError {
         /// Its log.
         log: PathBuf,
     },
-    /// The started lnsd did not answer within [`START_BOUND`].
+    /// The started lnsd did not answer within [`Request::start_bound`].
     Timeout {
+        /// The bound it had.
+        bound: Duration,
         /// Its log.
         log: PathBuf,
     },
@@ -326,10 +334,10 @@ impl fmt::Display for InstanceError {
                  its log is {}",
                 log.display()
             ),
-            InstanceError::Timeout { log } => write!(
+            InstanceError::Timeout { bound, log } => write!(
                 f,
                 "the started lnsd did not answer within {} s; its log is {}",
-                START_BOUND.as_secs(),
+                bound.as_secs(),
                 log.display()
             ),
         }
@@ -480,9 +488,17 @@ pub fn find_or_start(request: &Request) -> Result<Instance, InstanceError> {
         error,
     })?;
     let mut cmd = Command::new(&program);
-    cmd.arg("-c")
-        .arg(&request.config_dir)
-        .stdin(Stdio::null())
+    cmd.arg("-c").arg(&request.config_dir);
+    // The daemon serves the name its config gives, `default` without one.
+    // A tool that asks for another name would wait the whole bound for a
+    // daemon answering elsewhere, so the started one is told the name.
+    let configured_name = config
+        .as_ref()
+        .map_or("default", |c| c.reticulum.instance_name.as_str());
+    if request.instance_name != configured_name {
+        cmd.arg("--instance-name").arg(&request.instance_name);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
     let child = crate::process::spawn_supervised(cmd).map_err(|error| InstanceError::Spawn {
@@ -492,7 +508,7 @@ pub fn find_or_start(request: &Request) -> Result<Instance, InstanceError> {
     let mut daemon = Daemon { child: Some(child) };
     let pid = daemon.pid().unwrap_or(0);
 
-    let deadline = Instant::now() + START_BOUND;
+    let deadline = Instant::now() + request.start_bound;
     loop {
         // What the started lnsd serves is what the config it wrote or read
         // says, so the candidates are read again.
@@ -527,7 +543,10 @@ pub fn find_or_start(request: &Request) -> Result<Instance, InstanceError> {
             }
         }
         if Instant::now() >= deadline {
-            return Err(InstanceError::Timeout { log: log_path });
+            return Err(InstanceError::Timeout {
+                bound: request.start_bound,
+                log: log_path,
+            });
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -712,5 +731,68 @@ mod tests {
             find_or_start(&request),
             Err(InstanceError::Spawn { .. })
         ));
+    }
+
+    /// A stub lnsd at `dir/lnsd` that writes its arguments to `dir/lnsd.args`,
+    /// one a line, and then sleeps without ever binding a socket. Written by
+    /// a child shell, so no descriptor open for writing on it lives in this
+    /// multi-threaded test process, where a sibling test's fork could carry
+    /// it into its child and make the exec fail with ETXTBSY.
+    #[cfg(unix)]
+    fn silent_stub(dir: &Path) -> PathBuf {
+        const SCRIPT: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nexec sleep 30\n";
+        let stub = dir.join("lnsd");
+        let status = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"printf '%s' "$2" > "$1" && chmod +x "$1""#)
+            .arg("stub")
+            .arg(&stub)
+            .arg(SCRIPT)
+            .status()
+            .expect("run sh");
+        assert!(status.success());
+        stub
+    }
+
+    /// The real failure the 20 s sentence is for: an lnsd that starts and
+    /// never answers. The bound is the test's, one second; the sentence
+    /// names it and the log, which lies in the config directory. The stub
+    /// was told the instance asked for, which its config does not name.
+    #[cfg(unix)]
+    #[test]
+    fn a_started_lnsd_that_never_answers_is_a_timeout_naming_its_log() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = tempfile::tempdir().expect("stub dir");
+        let stub = silent_stub(bin.path());
+        let name = format!("silent{}", std::process::id());
+        let mut request = Request::new(dir.path(), name.clone());
+        request.lnsd = Some(stub.clone());
+        request.report = Report::Quiet;
+        request.start_bound = Duration::from_secs(1);
+        let started = Instant::now();
+        let error = find_or_start(&request).expect_err("nothing answers");
+        assert!(
+            started.elapsed() < Duration::from_secs(1) + STOP_GRACE + Duration::from_secs(2),
+            "the bound is the request's, not START_BOUND: {:?}",
+            started.elapsed()
+        );
+        let log = dir.path().join(DAEMON_LOG);
+        assert!(
+            matches!(&error, InstanceError::Timeout { bound, log: l }
+                if *bound == Duration::from_secs(1) && *l == log),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the started lnsd did not answer within 1 s; its log is {}",
+                log.display()
+            )
+        );
+        let args = std::fs::read_to_string(bin.path().join("lnsd.args")).expect("stub args");
+        assert_eq!(
+            args,
+            format!("-c\n{}\n--instance-name\n{name}\n", dir.path().display())
+        );
     }
 }

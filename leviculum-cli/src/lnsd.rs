@@ -82,6 +82,16 @@ struct Args {
     #[arg(long)]
     storage: Option<PathBuf>,
 
+    /// Serve the shared instance under this name instead of the config's
+    /// `instance_name` (a Leviculum extension, rnsd has none).
+    ///
+    /// A client tool that starts lnsd for an instance its config does not
+    /// name passes it here (`leviculum_std::instance::find_or_start`), so the
+    /// daemon it started answers on the name it waits for. The file is not
+    /// rewritten.
+    #[arg(long, value_name = "NAME")]
+    instance_name: Option<String>,
+
     /// Running as a service (rnsd `-s/--service`). Recognised for drop-in
     /// compatibility with `rnsd -s`. lnsd keeps logging to stdout, which
     /// systemd/journald captures; it does not redirect to a log file.
@@ -190,6 +200,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // configuration rnsd would write on its first start, from memory: one
     // AutoInterface, a shared instance, transport off (#471 step 1).
     let (mut config, source) = Config::load_or_default(&config_file)?;
+    if let Some(name) = args.instance_name.as_ref().filter(|n| !n.is_empty()) {
+        info!("Instance name: {} (--instance-name)", name);
+        config.reticulum.instance_name = name.clone();
+    }
     // And writes it, the way rnsd does (`Reticulum.py:336`), the bytes
     // `--writeconfig` writes (#471, open question 1): a Python tool pointed
     // at this directory afterwards finds a file and writes its own stock
