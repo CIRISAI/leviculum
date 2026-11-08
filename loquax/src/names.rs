@@ -499,6 +499,80 @@ pub struct Linked {
     pub contact: String,
 }
 
+/// Who looks like whom (1581): every named peer under the [`skeleton`]
+/// of its shown name, in [`Names::named`]'s order, and the met peers
+/// without a name, built once for the names as they stand. Before it,
+/// every [`Names::collisions`] took the skeleton of every other named
+/// peer, a string allocated each: a list row asks twice (its name and its
+/// "same name" sentence), so the M9's window of 32 rows over 276
+/// conversations made about 17 600 of them per build, four seconds on the
+/// board (window 17).
+#[derive(Clone, Debug)]
+struct Looks {
+    /// The petnames the index was built under: the contacts are a public
+    /// field, changed without a word to the names, and a petname is a
+    /// shown name. Few, compared whole.
+    petnames: BTreeMap<[u8; 16], String>,
+    /// The peers of one look each, in [`Names::named`]'s order.
+    alike: Vec<Vec<[u8; 16]>>,
+    /// Each named peer's place in `alike`: a row's question allocates
+    /// nothing (an allocation is the board's dear part, window 17).
+    look_of: BTreeMap<[u8; 16], usize>,
+    nameless: BTreeSet<[u8; 16]>,
+}
+
+/// [`Looks`] built on demand and dropped on every change of a name
+/// ([`Names`]' `&mut self` methods); a cache, so two names are equal
+/// whatever either has built.
+#[derive(Clone, Debug, Default)]
+struct LooksCache(core::cell::RefCell<Option<Looks>>);
+
+impl PartialEq for LooksCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for LooksCache {}
+
+impl LooksCache {
+    fn drop_all(&mut self) {
+        *self.0.get_mut() = None;
+    }
+}
+
+/// Which state of the names the model's look fingerprint has seen
+/// (1581): a number taken afresh on every change of a heard, linked or
+/// met name, unique across every [`Names`] of the process, so a names
+/// replaced whole is a change too, and a clone (the same names) is not.
+/// Before it the fingerprint hashed every name on every fold, the
+/// heaviest O(n) left on a key after the collisions (1581's profile).
+#[derive(Clone, Copy, Debug)]
+struct Edition(u32);
+
+static EDITIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+impl Edition {
+    fn next() -> Self {
+        Self(EDITIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Default for Edition {
+    fn default() -> Self {
+        Self::next()
+    }
+}
+
+/// An edition is no part of what the names say.
+impl PartialEq for Edition {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Edition {}
+
 /// Every name this session heard, and the reader's contacts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Names {
@@ -511,6 +585,10 @@ pub struct Names {
     /// Every peer with a conversation (1452): two of them without a name
     /// are two "Unknown"s, a collision like two Alices.
     met: BTreeSet<[u8; 16]>,
+    /// Who looks like whom, for [`Names::collisions`] (1581).
+    looks: LooksCache,
+    /// The heard, linked and met names' state, for the fingerprint.
+    edition: Edition,
 }
 
 impl Names {
@@ -520,18 +598,43 @@ impl Names {
             contacts,
             book: BTreeMap::new(),
             met: BTreeSet::new(),
+            looks: LooksCache::default(),
+            edition: Edition::next(),
         }
+    }
+
+    /// A heard, linked or met name changed: the index goes, and the
+    /// fingerprint moves.
+    fn edited(&mut self) {
+        self.looks.drop_all();
+        self.edition = Edition::next();
     }
 
     /// `peer` has a conversation now: a nameless one counts among the
     /// "Unknown"s that collide.
     pub fn meet(&mut self, peer: [u8; 16]) {
-        self.met.insert(peer);
+        // A conversation per new peer during a pull (1581): the index
+        // takes a nameless one in place, a named one changes nothing.
+        if !self.met.insert(peer) {
+            return;
+        }
+        self.edition = Edition::next();
+        if self.shown(&peer).is_none() {
+            if let Some(looks) = self.looks.0.get_mut() {
+                looks.nameless.insert(peer);
+            }
+        }
     }
 
     /// `peer`'s conversation is gone.
     pub fn part(&mut self, peer: &[u8; 16]) {
-        self.met.remove(peer);
+        if !self.met.remove(peer) {
+            return;
+        }
+        self.edition = Edition::next();
+        if let Some(looks) = self.looks.0.get_mut() {
+            looks.nameless.remove(peer);
+        }
     }
 
     /// Link `peer` to the address book's `contact`, named `name` there; a
@@ -539,6 +642,7 @@ impl Names {
     pub fn link(&mut self, peer: [u8; 16], name: &str, contact: &str) {
         match sanitise(name) {
             Some(name) => {
+                self.edited();
                 self.book.insert(
                     peer,
                     Linked {
@@ -552,7 +656,9 @@ impl Names {
     }
 
     pub fn unlink(&mut self, peer: &[u8; 16]) {
-        self.book.remove(peer);
+        if self.book.remove(peer).is_some() {
+            self.edited();
+        }
     }
 
     /// The address book's name for the peer, when it is linked.
@@ -578,9 +684,14 @@ impl Names {
         let Some(name) = name.and_then(sanitise) else {
             return Heard::Nameless;
         };
+        // An announce of the name already held, the common one, keeps
+        // the index (1581).
+        if self.announced.get(&peer) == Some(&name) {
+            return Heard::Same;
+        }
+        self.edited();
         match self.announced.insert(peer, name.clone()) {
             None => Heard::New,
-            Some(was) if was == name => Heard::Same,
             Some(was) => Heard::Changed { was, now: name },
         }
     }
@@ -589,7 +700,10 @@ impl Names {
     /// until it announces again, and a different name then is a change.
     pub fn remember(&mut self, peer: [u8; 16], name: &str) {
         if let Some(name) = sanitise(name) {
-            self.announced.insert(peer, name);
+            if self.announced.get(&peer) != Some(&name) {
+                self.edited();
+                self.announced.insert(peer, name);
+            }
         }
     }
 
@@ -602,23 +716,15 @@ impl Names {
     /// part of the model's look fingerprint, so a name heard rebuilds the
     /// rows that show it.
     pub(crate) fn fingerprint(&self, hash: &mut crate::ui::Fnv) {
-        for (peer, name) in &self.announced {
-            hash.bytes(peer);
-            hash.bytes(name.as_bytes());
-        }
-        for (peer, linked) in &self.book {
-            hash.bytes(peer);
-            hash.bytes(linked.name.as_bytes());
-        }
+        // The heard, linked and met names by their edition (1581); the
+        // contacts are a public field, changed without a word, and few:
+        // hashed whole.
+        hash.word(u64::from(self.edition.0));
         for (peer, petname) in &self.contacts.petnames {
             hash.bytes(peer);
             hash.bytes(petname.as_bytes());
         }
         for peer in &self.contacts.blocked {
-            hash.bytes(peer);
-        }
-        // A second nameless peer gives the first its tail.
-        for peer in &self.met {
             hash.bytes(peer);
         }
     }
@@ -672,20 +778,74 @@ impl Names {
     /// name collides with every other nameless peer that has a
     /// conversation: two "Unknown"s look the same too.
     pub fn collisions(&self, peer: &[u8; 16]) -> Vec<[u8; 16]> {
-        let Some(mine) = self.shown(peer).map(skeleton) else {
-            return self
-                .met
+        self.build_looks();
+        let built = self.looks.0.borrow();
+        let Some(looks) = built.as_ref() else {
+            return Vec::new();
+        };
+        let Some(&look) = looks.look_of.get(peer) else {
+            // No name: every other nameless conversation looks the same.
+            return looks
+                .nameless
                 .iter()
-                .filter(|other| *other != peer && self.shown(other).is_none())
+                .filter(|other| *other != peer)
                 .copied()
                 .collect();
         };
+        let Some(alike) = looks.alike.get(look) else {
+            return Vec::new();
+        };
+        // Alone under its look, the common case: no contact to ask.
+        if alike.iter().all(|other| other == peer) {
+            return Vec::new();
+        }
         let same = self.same_contact(peer);
-        self.named()
+        alike
+            .iter()
             .filter(|other| *other != peer && !same.contains(other))
-            .filter(|other| self.shown(other).map(skeleton).as_deref() == Some(&mine))
             .copied()
             .collect()
+    }
+
+    /// Build the index [`Self::collisions`] reads when the names changed
+    /// since the last build (1581).
+    fn build_looks(&self) {
+        let current = self
+            .looks
+            .0
+            .borrow()
+            .as_ref()
+            .is_some_and(|looks| looks.petnames == self.contacts.petnames);
+        if current {
+            return;
+        }
+        let mut by_look: BTreeMap<String, usize> = BTreeMap::new();
+        let mut alike: Vec<Vec<[u8; 16]>> = Vec::new();
+        let mut look_of = BTreeMap::new();
+        for other in self.named() {
+            if let Some(name) = self.shown(other) {
+                let look = *by_look.entry(skeleton(name)).or_insert_with(|| {
+                    alike.push(Vec::new());
+                    alike.len() - 1
+                });
+                if let Some(peers) = alike.get_mut(look) {
+                    peers.push(*other);
+                }
+                look_of.insert(*other, look);
+            }
+        }
+        let nameless = self
+            .met
+            .iter()
+            .filter(|other| self.shown(other).is_none())
+            .copied()
+            .collect();
+        *self.looks.0.borrow_mut() = Some(Looks {
+            petnames: self.contacts.petnames.clone(),
+            alike,
+            look_of,
+            nameless,
+        });
     }
 
     /// The name alone, as every screen shows the peer: `Alice`, or
@@ -1105,6 +1265,93 @@ mod tests {
         names.unlink(&CAROL);
         names.link(CAROL, "Alice Schmidt", "lookup-9");
         assert_eq!(en(&names, &CAROL), "Alice Schmidt ·17ee");
+    }
+
+    /// The index the collisions read (1581) follows every way a shown
+    /// name changes after it was built: a petname set on the public
+    /// contacts without a word to the names, one taken away again, a name
+    /// remembered from the store, and a nameless conversation met.
+    #[test]
+    fn the_collision_index_follows_every_change_of_a_shown_name() {
+        let mut names = Names::default();
+        names.heard(ALICE, Some("Alice"));
+        names.heard(CAROL, Some("Carol"));
+        assert_eq!(en(&names, &CAROL), "Carol");
+        names.contacts.set(&Contact {
+            peer: CAROL,
+            petname: Some("alice".into()),
+            blocked: false,
+        });
+        assert_eq!(en(&names, &CAROL), "alice ·17ee");
+        assert_eq!(en(&names, &ALICE), "Alice ·4f2a");
+        names.contacts.petnames.remove(&CAROL);
+        assert_eq!(en(&names, &ALICE), "Alice");
+        names.remember(MALLORY, "ALICE");
+        assert_eq!(en(&names, &ALICE), "Alice ·4f2a");
+        assert_eq!(names.collisions(&ALICE), Vec::from([MALLORY]));
+        // The same announce again keeps the index and the answer.
+        assert_eq!(names.heard(MALLORY, Some("ALICE")), Heard::Same);
+        assert_eq!(names.collisions(&MALLORY), Vec::from([ALICE]));
+        // Met while the index stands: two nameless peers collide.
+        let mut nameless = Names::default();
+        nameless.meet(ALICE);
+        assert_eq!(en(&nameless, &ALICE), "Unknown");
+        nameless.meet(CAROL);
+        assert_eq!(en(&nameless, &ALICE), "Unknown ·4f2a");
+        // A named peer met is no "Unknown".
+        nameless.heard(MALLORY, Some("Mallory"));
+        nameless.meet(MALLORY);
+        assert_eq!(nameless.collisions(&ALICE), Vec::from([CAROL]));
+    }
+
+    /// The names' part of the look fingerprint (1581) moves with every
+    /// change a screen shows and stands while none comes: a name heard
+    /// again, a peer met twice. Names replaced whole move it; a clone,
+    /// the same names, does not.
+    #[test]
+    fn the_fingerprint_moves_with_a_shown_change_only() {
+        let print = |names: &Names| {
+            let mut hash = crate::ui::Fnv::new();
+            names.fingerprint(&mut hash);
+            hash.done()
+        };
+        let mut names = Names::default();
+        let mut was = print(&names);
+        let mut moved = |names: &Names| {
+            let now = print(names);
+            let moved = now != was;
+            was = now;
+            moved
+        };
+        names.heard(ALICE, Some("Alice"));
+        assert!(moved(&names));
+        names.heard(ALICE, Some("Alice"));
+        assert!(!moved(&names));
+        names.heard(ALICE, Some("Alicia"));
+        assert!(moved(&names));
+        names.remember(ALICE, "Alicia");
+        assert!(!moved(&names));
+        names.meet(CAROL);
+        assert!(moved(&names));
+        names.meet(CAROL);
+        assert!(!moved(&names));
+        names.part(&CAROL);
+        assert!(moved(&names));
+        names.link(MALLORY, "Mallory", "lookup-1");
+        assert!(moved(&names));
+        names.unlink(&MALLORY);
+        assert!(moved(&names));
+        names.unlink(&MALLORY);
+        assert!(!moved(&names));
+        names.contacts.petnames.insert(CAROL, "Carol".into());
+        assert!(moved(&names));
+        names.contacts.blocked.insert(CAROL);
+        assert!(moved(&names));
+        let copy = names.clone();
+        assert!(!moved(&copy));
+        assert_eq!(copy, names);
+        let other = Names::new(names.contacts.clone());
+        assert!(moved(&other));
     }
 
     #[test]

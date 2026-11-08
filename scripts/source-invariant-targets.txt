@@ -254,6 +254,7 @@ skip  loquax-android   home_reach                 # phone and mailbox through in
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   m9_scene_census            # counts the M9 screens' scene heap with a global allocator (1343); subject is the code
 skip  loquax-android   m9_fold_census             # a pulled page's fold split into unpack, step, note and route by time and allocator calls and bytes, and folded in chunks (1575); subject is the code
+skip  loquax-android   name_lookups               # a list row's name questions counted in allocator calls for 32 and 1000 names (1581); subject is the code
 skip  loquax-android   operation_counts           # a phone session over the real fixture, a key in compose counted against its bar (1489); subject is the code, starts a node
 skip  loquax-android   m9_fixture_census          # counts the M9 image's fixture screens (the group's since 1366) and the client session's pull against the census budgets with a global allocator (1361, 1363); subject is the code
 skip  loquax-android   m9_client                  # the M9's no_std client against in-process mailboxes and a transport over loopback TCP, through a counting proxy (1363), and the group verbs from the board's keys (1366); subject is the code
