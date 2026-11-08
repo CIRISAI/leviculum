@@ -85,7 +85,9 @@ draws, 1554; the house key's bar is HOUSE_GAP_MS longer, the time its tap
 waits to tell itself from a hold before the overview opens),
 a resumed restore under 2 s on every boot after the first, no `[LOOP]`
 turn over 250 ms (a dump step's own turn, core 0 writing the dump's lines,
-is exempt and named `dump_ms=` in walk.md instead), no `[PREV_RUN]` line that carries a record (a watchdog
+is exempt and named `dump_ms=` in walk.md instead), no `[LOOP] core=ui`
+line whose drain= is over 100 ms (1575, the fold's budget and the entry,
+note and route after it; a dump's and a boot's own UI turns are exempt), no `[PREV_RUN]` line that carries a record (a watchdog
 or a panic; a power-on reset says `record=none`), rx_lost not growing in
 an idle step, a `[BENCH] inject=on` line on every boot (whatever else
 the boot says), and every expect and wait met. Output, in --out:
@@ -134,6 +136,9 @@ HOUSE_GAP_MS = 300
 CHANGED_WAIT_S = 1.0
 RESTORE_MS_BAR = 2000
 LOOP_MS_BAR = 250
+# loquax-m9/src/home.rs, DRAIN_BAR_MS (1575): the UI core's drain stage, a
+# `[LOOP] core=ui` line's drain=, since its fold yields to the keys.
+UI_DRAIN_MS_BAR = 100
 KEY_WAIT_S = 2.0
 READY_WAIT_S = 90.0
 DUMP_WAIT_S = 20.0
@@ -436,6 +441,10 @@ class Walk:
         self.boots = 0
         self.rx_lost = None
         self.loop_max = 0
+        self.ui_drain_max = 0
+        # 1575: a boot's own turns until its first [PAGE] line (the
+        # preload fold) are no drain under the bar.
+        self.booting = False
         self.key_bar = KEY_MS_BAR
         self.opens = []
         # A dump step's own [LOOP] turn (1542): exempt from the bar while
@@ -467,10 +476,17 @@ class Walk:
         elif line.startswith("[LOOP] "):
             f = fields(line)
             if f.get("core") == "ui":
-                # The UI core's own slow-turn line (1569): an instrument
-                # the log keeps, not a bar. The boot's preload fold and
-                # a dump's encode cross 250 ms on that core by design;
-                # the walk's bars stay the key's flush and core 0's turn.
+                # The UI core's own slow-turn line (1569). Its drain is
+                # held to UI_DRAIN_MS_BAR since 1575 (the fold yields to
+                # the keys after a budget); its draw is the key bar's.
+                # The boot's preload fold and a dump's encode cross it on
+                # that core by design and are exempt.
+                if self.dumping or self.booting:
+                    return
+                drain = int(f.get("drain", 0))
+                self.ui_drain_max = max(self.ui_drain_max, drain)
+                if drain > UI_DRAIN_MS_BAR:
+                    self.fail(f"[LOOP] core=ui drain={drain} over {UI_DRAIN_MS_BAR}: {line}")
                 return
             ms = int(f.get("turn_ms", 0))
             if self.forgetting:
@@ -547,7 +563,11 @@ class Walk:
         self.boots += 1
         # The UI up: a [PAGE] line, with or without the [WATCHDOG] line
         # before it (an image older than 1534 says none).
-        page, _ = self.until(lambda l: l.startswith("[PAGE] "), READY_WAIT_S, start)
+        self.booting = True
+        try:
+            page, _ = self.until(lambda l: l.startswith("[PAGE] "), READY_WAIT_S, start)
+        finally:
+            self.booting = False
         if not page:
             self.fail(f"boot {self.boots} ({why}): no UI within {READY_WAIT_S:.0f} s")
         # On every boot, whatever else it said (1542): the bench image
@@ -842,7 +862,7 @@ class Walk:
     def verdict(self):
         verdict = "PASS" if not self.fails else "FAIL"
         line = (f"VERDICT {verdict} steps={len(self.md)} boots={self.boots} {self.latencies()} "
-                f"loop_max_ms={self.loop_max} rx_lost={self.rx_lost} opens={len(self.opens)} fails={len(self.fails)}")
+                f"loop_max_ms={self.loop_max} ui_drain_max_ms={self.ui_drain_max} rx_lost={self.rx_lost} opens={len(self.opens)} fails={len(self.fails)}")
         with open(os.path.join(self.out, "walk.md"), "w") as f:
             f.write("# M9 bench walk\n\n")
             f.write("Each dump is for an agent's eye: judge it against the step it follows.\n\n")
@@ -879,7 +899,8 @@ class FakeBoard(threading.Thread):
     key opens the house page after its tap's 300 ms gap."""
 
     def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
-                 release=False, slow_turn=False, tops=(0, 5, 2), torn=False, stuck_zoom=False,
+                 release=False, slow_turn=False, slow_drain=False, tops=(0, 5, 2), torn=False,
+                 stuck_zoom=False,
                  home=None):
         super().__init__(daemon=True)
         # 1562: the home its client record names; None says client=none.
@@ -888,6 +909,7 @@ class FakeBoard(threading.Thread):
         self.rig, self.slow_ms, self.grow_rx = rig, slow_ms, grow_rx
         self.refuse_owe, self.hang_on = refuse_owe, hang_on
         self.release, self.slow_turn, self.tops = release, slow_turn, tops
+        self.slow_drain = slow_drain
         self.torn, self.stuck_zoom = torn, stuck_zoom
         self.zoom = 13
         self.row = 0
@@ -989,6 +1011,10 @@ class FakeBoard(threading.Thread):
             self.page_line()
             if self.slow_turn:
                 self.say("[LOOP] turn_ms=400 stage=draw host=0 node=0 take=0 draw=400 keys=0 entries=40")
+            if self.slow_drain:
+                # Window 16b's drain: a page folded whole before the keys.
+                self.say("[LOOP] core=ui turn_ms=918 stage=drain drain=836 keys=0 send=0 draw=82 "
+                         "msgs=2 folded=234 turn=99")
             if code == 0x0D and self.page == "chat":
                 if self.opens == self.hang_on:
                     # Silent, then the watchdog's reset and its record.
@@ -1239,6 +1265,12 @@ def selftest():
             rc = 1
         if any(f for f in w.fails if "TORN" not in f):
             print("[m9-walk] selftest FAIL: a torn dump failed more than its dump", w.fails)
+            rc = 1
+        # 1575: the UI core's drain over its bar fails by name; the dump's
+        # own core=ui line of drain=550 in the good walk passed.
+        got, w, _ = walk("slowdrain", slow_drain=True)
+        if got == 0 or not any("[LOOP] core=ui drain=836 over 100" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: an 836 ms UI drain passed its 100 ms bar", w.fails)
             rc = 1
         got, w, _ = walk("slowturn", slow_turn=True)
         if got == 0 or not any("[LOOP] turn_ms=400 over" in f for f in w.fails):
