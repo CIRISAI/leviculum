@@ -92,9 +92,9 @@ What exists today for one home and carries over:
 ## The experiments
 
 The study's experiments run on today's code first, as the negative
-baseline, in periculum's `regression/` (order 1304). All four cells are
-registered known reds against #232, each with what clears it and what
-falsifies it:
+baseline, in periculum's `regression/` (orders 1304 and 1512) and, for E4,
+its `hardware/` corpus. Every red cell is a registered known red against
+#232, with what clears it and what falsifies it; E5's control is green:
 
 | Cell | Experiment | Red today at |
 |---|---|---|
@@ -102,6 +102,9 @@ falsifies it:
 | `loquax_homes_flap` | E2: two homes one hop behind one transport node, announcing in turn every 20 s, a stock sender sending 200 | `in_all_archives`: the split follows the announces |
 | `loquax_homes_flap_own_ratchets` | E2's positive control: the second home on a ring of its own | `in_all_archives`, `rings_differ`, `undecryptable` |
 | `loquax_homes_ring` | E3: three homes in a line, the two ends never linked | `in_all_archives`: each holds its own 50 |
+| `loquax_homes_lost` | E5: three homes; c alone takes in 10 single packets and collects 10 uploads from lnpnd while a and b are cut away, then dies (mailbox killed, store removed, container killed); a and b rejoin | `home_lost`: `HOME_LOST recovered=0 lost=20` |
+| `loquax_homes_lost_stock` | E5's control: the reference client as the identity's one home, dying with its storage; its key restored onto a fresh client | green; the same `recovered=0 lost=20` |
+| `loquax_homes_lora`, `loquax_homes_ble` (hardware) | E4: E1's shape on two LNodes, LoRa or BLE the only medium between the homes, partitioned by taking one board off the air | `in_all_archives`: expected, first run owed |
 
 Measured on 2026-11-02: nothing lost and every message proven, but no
 home holds what reached another. In the own-ratchets arm each mailbox
@@ -109,13 +112,42 @@ restart is followed within 50 ms by one `LXMF_RX_UNDECRYPTABLE` at the
 home that just announced (the event, `loquax/src/engine.rs:1503`): the
 sender sealed to the other home's ratchet before the new announce reached
 it. The stock router's retry heals a single packet; a propagated message
-has no such retry, which is where the loss lives. E4 (hardware, LoRa or
-BLE as the forest) and E5 (a home lost for good) follow.
+has no such retry, which is where the loss lives.
 
-Build order after the cells: H1 the ratchet schedule, H6 the events
-(`HOME_ACCEPT`, `HOME_PROVE`, `HOME_SYNC`, `HOME_ANNOUNCE`), H2 the sync,
-H3 the announce rule, H4 the propagation node collection rule, H5 the
-home list. Each slice turns a cell green.
+E5 (order 1512, 2026-11-07, docker, leviculum a8703650): a lost home takes
+everything it alone held. `HOME_LOST recovered=0 lost=20` for three Loquax
+homes, the same line as the reference stack's single home. The 10 single
+packets were never anywhere else. The 10 uploads were gone from lnpnd the
+moment the dying home's collection confirmed them (`PN_DEPART
+reason="collected"`), as the reference node purges a client's "haves". So
+today N homes protect nothing that one home would not. Only H2 (a sibling
+took the messages in while the home lived) or H4 (the node keeps a home's
+collection for the identity's other homes) changes that line. E4
+(`loquax_homes_lora`, `loquax_homes_ble`) puts E1 on two LNodes. Its
+senders' legs are TCP, so on today's code it is expected to read E1's
+numbers; its radio-rate figure, `converge_ms` over the air, exists once H2
+does.
+
+Build order after the cells; each slice turns a cell green:
+
+- **H1, the ratchet schedule:** each epoch's ratchet derived from a seed
+  that travels with the identity. Clears `loquax_homes_flap_own_ratchets`'
+  `rings_differ`.
+- **H6, the events:** `HOME_ACCEPT`, `HOME_PROVE`, `HOME_SYNC`,
+  `HOME_ANNOUNCE`. ACCEPT, PROVE and ANNOUNCE already show in E5's record
+  (`home_accept=20 home_prove=10 home_announce=3`); `HOME_SYNC` waits on H2.
+- **H2, the sibling sync:** two-way paging from cursors, forwarding what a
+  home took from a sibling. Clears E1 to E3 and E4. For E5, a sibling that
+  took the messages in *before* the loss is what recovers them; with the
+  cell's shape today (the survivors cut away until after the death), H2
+  alone cannot turn `loquax_homes_lost` green, and its register row says
+  the cell or its shape changes with H2.
+- **H3, the announce rule:** decided (d), mesh-only announce when an
+  always-on home exists.
+- **H4, the propagation node collection rule:** the node keeps a
+  collection for the identity's other homes. Turns E5's
+  `recovered_propagated` from 0 to 10.
+- **H5, the home list.**
 
 ## Decided
 
