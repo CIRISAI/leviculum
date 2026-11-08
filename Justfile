@@ -2413,6 +2413,19 @@ site-check:
 site-unpack-docs-selftest:
     @bash scripts/test-site-unpack-docs.sh
 
+# 1585: loquax-mailbox's growth soak. `loquax mailbox run` (release) beside
+# an in-process shared instance that hears `rate` new named lxmf.delivery
+# destinations a second, as a field home hears the network's announces; a
+# SIGUSR1 census every `sample` seconds and, at the end, the slope of every
+# census table, the node tables and RSS plus swap after the warm-up third
+# (`MAILBOX_GROWTH`). Red above `limit` kB/min (`MAILBOX_SOAK_VERDICT`);
+# the field mailbox grew 366 kB/min. Two hours by default: a reviewer's
+# window job, never a coder pass's (loquax/tests/mailbox_growth_soak.rs).
+[doc('Soak loquax mailbox run under network announce load and judge its growth')]
+mailbox-growth-soak secs="7200" sample="600" rate="2" limit="20":
+    MAILBOX_SOAK_SECS={{secs}} MAILBOX_SOAK_SAMPLE_SECS={{sample}} MAILBOX_SOAK_RATE={{rate}} MAILBOX_SOAK_MAX_KB_PER_MIN={{limit}} \
+        cargo test --release -p loquax --features tui,history --test mailbox_growth_soak -- --ignored --nocapture
+
 # 1515 (LV-1000): lnpnd's growth soak, the minimal test for "what keeps
 # growing". The release daemon on a store prefilled to `messages` (the field's
 # 300 000 by default, cached under the soak directory so a rerun skips the

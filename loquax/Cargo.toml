@@ -493,6 +493,12 @@ required-features = ["tui"]
 name = "mailbox_census"
 required-features = ["tui"]
 
+# The mailbox's growth soak (1585): ignored, two hours by default,
+# `just mailbox-growth-soak`.
+[[test]]
+name = "mailbox_growth_soak"
+required-features = ["tui"]
+
 # A throwaway: the samples and cost table of
 # docs/drafts/terminal-map-rendering-2026-10.md (1090). Never in a package.
 [[example]]
