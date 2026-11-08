@@ -25,6 +25,9 @@
 //!                     needs `--bench` and a home (`--store real`)
 //! bench forget        TYPE_BENCH_FORGET (1562): every arrival out of the
 //!                     store, the store opened again
+//! pull <pages> [<n>]  the next <pages> pages of <n> entries (72) of the
+//!                     archive a `--store pulling` board pulls (1575),
+//!                     handed over at once, folded by the turns after
 //! ```
 //!
 //! Every press advances the clock [`STEP_MS`] unless the file waits.
@@ -54,6 +57,8 @@ pub enum Step {
     BenchArrive,
     /// `bench forget` (1562).
     BenchForget,
+    /// `pull <pages> <entries>` (1575).
+    Pull(usize, usize),
 }
 
 /// The `FRAME_DUMP` byte of the screen named `name`.
@@ -161,6 +166,20 @@ pub fn file(text: &str) -> Result<Vec<Step>, String> {
                 }
             }
             "wait" | "sleep" | "idle" => steps.push(Step::Wait(ms(rest)?)),
+            "pull" => {
+                let mut words = rest.split_whitespace();
+                let count = |word: Option<&str>, default: Option<usize>| match word {
+                    Some(word) => word
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| at(format!("{word:?} is no count"))),
+                    None => default.ok_or_else(|| at(String::from("pull <pages> [<entries>]"))),
+                };
+                let pages = count(words.next(), None)?;
+                let entries = count(words.next(), Some(72))?;
+                steps.push(Step::Pull(pages, entries));
+            }
             "text" => {
                 for c in rest.chars() {
                     match c {
@@ -211,7 +230,7 @@ mod tests {
     #[test]
     fn a_file_says_its_steps() {
         let steps = file(
-            "# a walk\ndown\nkey enter\nwait 500\nhold up 400\nreboot\ndump a.png\nscreen pan p.png\n",
+            "# a walk\ndown\nkey enter\nwait 500\nhold up 400\nreboot\ndump a.png\nscreen pan p.png\npull 2 234\npull 1\n",
         )
             .expect("a script");
         assert_eq!(
@@ -228,10 +247,14 @@ mod tests {
                 Step::Reboot,
                 Step::Dump(String::from("a.png")),
                 Step::Screen(10, String::from("p.png")),
+                Step::Pull(2, 234),
+                Step::Pull(1, 72),
             ]
         );
         assert!(file("frobnicate\n").is_err(), "the negative: no such step");
         assert!(file("screen nowhere x.png\n").is_err(), "no such screen");
+        assert!(file("pull\n").is_err(), "a pull says its pages");
+        assert!(file("pull 0\n").is_err(), "a pull of no pages");
         assert_eq!(screen_byte("pairing"), Some(11));
     }
 }

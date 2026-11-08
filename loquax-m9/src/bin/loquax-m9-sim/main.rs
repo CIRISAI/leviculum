@@ -6,6 +6,7 @@
 //!               [--keys "down down enter" | --script <file>]
 //!               [--reboot-after <n>] [--dump <png>] [--dump-every <n>]
 //!               [--text] [--window [--scale 2|3]]
+//!               [--fold-cost-us <us>] [--fold-budget-us <us>]
 //! ```
 //!
 //! - `--store`: what the board's flash holds at power-on. `fixture` (the
@@ -13,7 +14,15 @@
 //!   leaves it for the fixture model, as on the board. `real` is a device
 //!   of a home whose store a first pull of the 1489 fixture filled (300
 //!   conversations, 4000 messages). Anything else is a flash image a run
-//!   saved with `--save`.
+//!   saved with `--save`. `pulling` (1575) is a device of that home
+//!   with nothing pulled yet: the script's `pull <pages>` steps hand it
+//!   the fixture's pages while its keys are pressed.
+//! - `--fold-cost-us`: what one pulled entry's fold costs the board's UI
+//!   core, on the sim's clock (1575; 0, the default, costs nothing, and a
+//!   page folds in one turn). `--fold-budget-us`: the drain's budget
+//!   (`home::FOLD_BUDGET_US` by default; 0 for none, a page whole in its
+//!   turn whatever the keys, as before 1575). Each key's frame says
+//!   `[SIM] key_ms=<n>`, the press to the flush on the sim's clock.
 //! - `--bench`: the bench image (1562): "Bench" listed, `bench arrive`
 //!   and `bench forget` in a script taken. Without it the board is a
 //!   release image, which restores no "Bench" and refuses both.
@@ -70,12 +79,16 @@ struct Args {
     text: bool,
     window: bool,
     scale: u32,
+    fold_cost_us: u64,
+    /// `None`: the default budget; `Some(0)`: no budget, as before 1575.
+    fold_budget_us: Option<u64>,
 }
 
 fn usage() -> &'static str {
     "usage: loquax-m9-sim --seed-home <dir> | [--store fixture|real|<image>] [--save <image>] [--bench] \
      [--keys \"down enter\" | --script <file>] [--reboot-after <n>] \
-     [--dump <png>] [--dump-every <n>] [--text] [--window [--scale 2|3]]"
+     [--dump <png>] [--dump-every <n>] [--text] [--window [--scale 2|3]] \
+     [--fold-cost-us <us>] [--fold-budget-us <us>]"
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -114,6 +127,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 args.dump_every = Some(n);
             }
             "--text" => args.text = true,
+            "--fold-cost-us" => {
+                let n = value("--fold-cost-us")?;
+                args.fold_cost_us = n.parse().map_err(|_| format!("--fold-cost-us {n}"))?;
+            }
+            "--fold-budget-us" => {
+                let n = value("--fold-budget-us")?;
+                args.fold_budget_us = Some(n.parse().map_err(|_| format!("--fold-budget-us {n}"))?);
+            }
             "--bench" => args.bench = true,
             "--seed-home" => args.seed_home = Some(PathBuf::from(value("--seed-home")?)),
             "--window" => args.window = true,
@@ -189,6 +210,16 @@ fn power_on(store: Option<&str>, arrivals: Arrivals) -> Result<Board, String> {
             );
             Ok(board)
         }
+        // 1575: a device of the home with nothing pulled yet; the 1489
+        // fixture is the archive `pull <pages>` steps hand it, while the
+        // script presses keys.
+        "pulling" => {
+            let mut flash = Flash::blank();
+            flash.home = Some(real::address());
+            let mut board = Board::boot_as(flash, Log::default(), 1, arrivals)?;
+            board.to_pull = real::archive()?;
+            Ok(board)
+        }
         image => Board::boot_as(Flash::load(Path::new(image))?, Log::default(), 1, arrivals),
     }
 }
@@ -216,7 +247,13 @@ fn run(args: &Args) -> Result<(), String> {
         );
         return Ok(());
     }
-    let board = power_on(args.store.as_deref(), arrivals(args))?;
+    let mut board = power_on(args.store.as_deref(), arrivals(args))?;
+    board.fold_cost_us = args.fold_cost_us;
+    match args.fold_budget_us {
+        Some(0) => board.fold_budget_us = None,
+        Some(us) => board.fold_budget_us = Some(us),
+        None => {}
+    }
     if args.window {
         #[cfg(feature = "sim-window")]
         return window::run(board, args.scale, args.save.as_deref());
@@ -236,14 +273,22 @@ fn headless(mut board: Board, args: &Args) -> Result<(), String> {
     let mut rebooted = false;
     let mut frames_dumped = board.frames;
     board.settle();
-    for step in &args.steps {
+    for (n, step) in args.steps.iter().enumerate() {
         match step {
             Step::Key(code) => {
+                // The press at the script's time (1575): scheduled, and
+                // the turns run once the run of presses ends, so a board
+                // still busy takes each after the turn it fell into.
                 now += script::STEP_MS;
-                board::set_clock_ms(now);
-                board.press(*code);
-                board.settle();
+                board.press_at(*code, now);
                 presses += 1;
+                // A pull's pages join the queue without a turn, so
+                // presses after it are scheduled before the turns run too.
+                let more = matches!(args.steps.get(n + 1), Some(Step::Key(_) | Step::Pull(..)));
+                if !more || args.reboot_after == Some(presses) {
+                    board.answer_keys();
+                    board.run_until(now + script::STEP_MS);
+                }
             }
             Step::Wait(ms) => {
                 // The board turns all the while: the map's words come
@@ -251,9 +296,20 @@ fn headless(mut board: Board, args: &Args) -> Result<(), String> {
                 let end = now + ms;
                 while now < end {
                     now = (now + 50).min(end);
-                    board::set_clock_ms(now);
-                    board.settle();
+                    board::clock_to_ms(now);
+                    board.run_until(now);
                 }
+            }
+            Step::Pull(pages, entries) => {
+                if board.to_pull.is_empty() {
+                    return Err(String::from(
+                        "pull: only a --store pulling board has an archive to pull",
+                    ));
+                }
+                let went = board.pull_next(*pages, *entries);
+                board
+                    .log
+                    .line("[SIM] ", &format!("pull pages={went} entries={entries}"));
             }
             Step::Reboot => {
                 boots += 1;
@@ -305,11 +361,19 @@ fn headless(mut board: Board, args: &Args) -> Result<(), String> {
 /// Power the board off and on again over the flash it wrote.
 fn reboot(board: Board, boots: u64, save: Option<&Path>) -> Result<Board, String> {
     let arrivals = board.arrivals;
+    let (cost, budget, to_pull) = (
+        board.fold_cost_us,
+        board.fold_budget_us,
+        board.to_pull.clone(),
+    );
     let (flash, log) = board.power_off();
     if let Some(save) = save {
         flash.save(save)?;
     }
     let mut board = Board::boot_as(flash, log, boots, arrivals)?;
+    board.fold_cost_us = cost;
+    board.fold_budget_us = budget;
+    board.to_pull = to_pull;
     // The loop turns before a key, as after the first power-on: what the
     // boot asked (1546, the cursor chat's page) is read at t=0.
     board.settle();

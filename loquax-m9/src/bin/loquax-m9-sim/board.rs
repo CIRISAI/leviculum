@@ -42,7 +42,7 @@ use loquax::ui::UiModel;
 use loquax_m9::field::Field;
 use loquax_m9::font::Size;
 use loquax_m9::frame::Frame;
-use loquax_m9::home::{self, How, Outgoing, Shelf};
+use loquax_m9::home::{self, Folding, How, Outgoing, Shelf};
 use loquax_m9::house::{self, Did, Overview};
 use loquax_m9::kbraw::{self, Presses, Protocol, Read};
 use loquax_m9::keyboard::{self, Key};
@@ -81,6 +81,18 @@ pub fn uptime_ms() -> u64 {
 /// Set the clock.
 pub fn set_clock_ms(ms: u64) {
     CLOCK_US.with(|clock| clock.set(ms.saturating_mul(1000)));
+}
+
+/// Move the clock on to `ms`, never back (1575): a board whose turns
+/// ran past the script's time keeps its own.
+pub fn clock_to_ms(ms: u64) {
+    CLOCK_US.with(|clock| clock.set(clock.get().max(ms.saturating_mul(1000))));
+}
+
+/// Move the clock on by `us`: the board's cost of an entry folded
+/// ([`Board::fold_cost_us`]).
+fn advance_us(us: u64) {
+    CLOCK_US.with(|clock| clock.set(clock.get() + us));
 }
 
 /// A turn longer than this says where its time went, as the board's
@@ -205,6 +217,24 @@ pub struct Board {
     pub arrivals: Arrivals,
     /// The bench's arrivals since boot, each its own number.
     arrived: u32,
+    /// The pulled page folded a budget at a time (1575), as `ui_main`.
+    folding: Folding,
+    /// What one entry folded costs the board's UI core, in the sim's
+    /// microseconds (`--fold-cost-us`): 0, the default, folds in no time,
+    /// so the budget never runs out and a page folds in one turn.
+    pub fold_cost_us: u64,
+    /// The drain's budget (`--fold-budget-us`), `None` for none: every
+    /// page whole in the turn that took it, keys or not, as before 1575.
+    pub fold_budget_us: Option<u64>,
+    /// Presses the script made, by time, not yet in the queue (1575).
+    scheduled: VecDeque<(u64, u8)>,
+    /// The presses the keys stage took this turn, by their press time,
+    /// for the `[SIM] key_ms=` line of the frame that answers them.
+    keys_owed: Vec<u64>,
+    /// The archive a `--store pulling` board pulls by `pull <pages>`
+    /// steps, and how much of it is pulled.
+    pub to_pull: Vec<Entry>,
+    pulled: usize,
 }
 
 impl Board {
@@ -306,6 +336,13 @@ impl Board {
             reader: Reader::default(),
             arrivals,
             arrived: 0,
+            folding: Folding::default(),
+            fold_cost_us: 0,
+            fold_budget_us: Some(home::FOLD_BUDGET_US),
+            keys_owed: Vec::new(),
+            scheduled: VecDeque::new(),
+            to_pull: Vec::new(),
+            pulled: 0,
         };
         // The record's type (1532), as the board reads it at boot; a board
         // without a record shows the default.
@@ -336,10 +373,50 @@ impl Board {
 
     /// A key pressed now: the controller's answer for `code`, queued as
     /// the keyboard's timer queues a polled one.
+    #[cfg(any(test, feature = "sim-window"))]
     pub fn press(&mut self, code: u8) {
         let (answer, len) = kbraw::answer_of(&self.kb, code);
         self.presses
             .poll(&self.kb, uptime_ms() as u32, &answer[..len]);
+    }
+
+    /// A key pressed at `ms` (1575): it reaches the queue when the
+    /// board's clock passes `ms`, inside whatever turn runs then, as the
+    /// keyboard's timer puts it there on the board. Scheduled before the
+    /// turns run, so a press falls into the turn that spans it.
+    pub fn press_at(&mut self, code: u8, ms: u64) {
+        self.scheduled.push_back((ms, code));
+    }
+
+    /// The scheduled presses whose time the clock passed, into the queue.
+    fn release_presses(scheduled: &mut VecDeque<(u64, u8)>, presses: &mut Presses, kb: &Protocol) {
+        while let Some(&(ms, code)) = scheduled.front() {
+            if ms > uptime_ms() {
+                break;
+            }
+            scheduled.pop_front();
+            let (answer, len) = kbraw::answer_of(kb, code);
+            presses.poll(kb, ms as u32, &answer[..len]);
+        }
+    }
+
+    /// `pull <pages> <entries>` (1575): the next pages of the archive a
+    /// `--store pulling` board was given, kept and handed to the UI side
+    /// as the client hands a pull's pages, without a turn between them.
+    /// How many pages went.
+    pub fn pull_next(&mut self, pages: usize, entries: usize) -> usize {
+        let mut went = 0;
+        for _ in 0..pages {
+            let end = (self.pulled + entries.max(1)).min(self.to_pull.len());
+            if end == self.pulled {
+                break;
+            }
+            let page = self.to_pull[self.pulled..end].to_vec();
+            self.pulled = end;
+            self.pull(&page);
+            went += 1;
+        }
+        went
     }
 
     /// A `FRAME_DUMP` naming screen `byte` (`ToUi::Dump`): the fixture's
@@ -391,9 +468,23 @@ impl Board {
         Some(name)
     }
 
-    /// Turns of both sides until neither has anything left.
+    /// Turns of both sides until neither has anything left. A pull
+    /// folded a budget at a time takes a turn per budget (1575).
     pub fn settle(&mut self) {
-        for _ in 0..64 {
+        self.run_until(u64::MAX);
+    }
+
+    /// Turns of both sides until neither has anything left or the clock
+    /// reached `until_ms` (1575): a board whose folds cost time
+    /// (`fold_cost_us`) is still busy when the script's next step comes,
+    /// and the step's key falls into the turn that ran past it. With no
+    /// cost the clock stands and this is [`Board::settle`].
+    pub fn run_until(&mut self, until_ms: u64) {
+        let until_us = until_ms.saturating_mul(1000);
+        for _ in 0..100_000 {
+            if uptime_us() >= until_us {
+                return;
+            }
             let (busy_ui, draw_ms, keys_ms) = self.ui_turn();
             let t1 = std::time::Instant::now();
             let busy_io = self.io_turn();
@@ -401,14 +492,41 @@ impl Board {
             self.say_turn(draw_ms, keys_ms, take);
             if !busy_ui
                 && !busy_io
+                && !self.folding.busy()
                 && self.to_ui.is_empty()
                 && self.from_ui.is_empty()
                 && self.asked.is_empty()
             {
+                // Idle until the next press the script made, if it
+                // comes before `until_ms`.
+                if let Some(&(ms, _)) = self.scheduled.front() {
+                    if ms.saturating_mul(1000) < until_us {
+                        clock_to_ms(ms);
+                        continue;
+                    }
+                }
                 // A quiet turn: the store erases ahead (`node.quiet`).
                 self.quiet();
                 return;
             }
+        }
+    }
+
+    /// Turns until every press the script made is taken (1575), the
+    /// clock moved on to a press still ahead when the board is idle.
+    pub fn answer_keys(&mut self) {
+        while let Some(&(ms, _)) = self.scheduled.front() {
+            self.run_until(ms);
+            clock_to_ms(ms);
+            Self::release_presses(&mut self.scheduled, &mut self.presses, &self.kb);
+            while self.presses.waiting() {
+                self.ui_turn();
+                self.io_turn();
+            }
+        }
+        while self.presses.waiting() {
+            self.ui_turn();
+            self.io_turn();
         }
     }
 
@@ -626,6 +744,7 @@ impl Board {
         let mut dirty = false;
         let mut busy = false;
         let mut wants = Wants::default();
+        Self::release_presses(&mut self.scheduled, &mut self.presses, &self.kb);
         // What the last size set asked (1546): the boot's among them.
         let asked = std::mem::take(&mut self.asked);
         if !asked.is_empty() {
@@ -636,16 +755,50 @@ impl Board {
         // tells them. A turn that only told the time is not busy.
         let (ticked, first_day) = self.reader.tick(&mut self.model, uptime_ms());
         dirty |= self.route_out(ticked, &mut wants) || first_day;
-        while let Some(message) = self.to_ui.pop_front() {
+        // The drain as `ui_main`'s (1575): what the I/O side handed over,
+        // in order; a pulled page folded until the budget is spent or a
+        // press waits, its rest the next turn's, and the turn that folds
+        // a page's last entry ends its drain there.
+        let start = uptime_us();
+        let deadline = self.fold_budget_us.map_or(u64::MAX, |b| start + b);
+        let budgeted = self.fold_budget_us.is_some();
+        loop {
+            if self.folding.busy() {
+                busy = true;
+                let cost = self.fold_cost_us;
+                let (scheduled, presses, kb) = (&mut self.scheduled, &mut self.presses, &self.kb);
+                let chunk = self
+                    .folding
+                    .fold(&mut self.model, &uptime_us, deadline, &mut || {
+                        // The entry's cost on the board, then the press
+                        // asked, as the board asks its queue.
+                        advance_us(cost);
+                        Self::release_presses(scheduled, presses, kb);
+                        budgeted && presses.waiting()
+                    });
+                if self.route_out(chunk.effects, &mut wants) {
+                    dirty = true;
+                }
+                if chunk.done.is_some() {
+                    wants.pages += 1;
+                    break;
+                }
+                if self.folding.busy() {
+                    break;
+                }
+            }
+            Self::release_presses(&mut self.scheduled, &mut self.presses, &self.kb);
+            if uptime_us() >= deadline || (budgeted && self.presses.waiting()) {
+                break;
+            }
+            let Some(message) = self.to_ui.pop_front() else {
+                break;
+            };
             busy = true;
             match message {
                 ToUi::Entries(entries, address) => {
-                    wants.pages += 1;
                     self.reader.saw(&entries, uptime_ms());
-                    let (_, effects) = home::take(&mut self.model, &entries, &address);
-                    if self.route_out(effects, &mut wants) {
-                        dirty = true;
-                    }
+                    self.folding.begin(entries, address);
                 }
                 ToUi::Page {
                     peer,
@@ -666,11 +819,20 @@ impl Board {
                 }
             }
         }
+        let drain_ms = (uptime_us() - start) / 1000;
+        if drain_ms > SLOW_TURN_MS {
+            self.log.line(
+                "[LOOP] ",
+                &format!("core=ui turn_ms={drain_ms} stage=drain drain={drain_ms}"),
+            );
+        }
 
+        Self::release_presses(&mut self.scheduled, &mut self.presses, &self.kb);
         let t_keys = std::time::Instant::now();
         while let Some(press) = self.presses.pop() {
             busy = true;
             let ms = press.ms;
+            self.keys_owed.push(u64::from(ms));
             self.log.raw(&kbraw::raw_line(ms, press.answer()));
             let mut events = Vec::new();
             let mut command = None;
@@ -730,7 +892,10 @@ impl Board {
                 marks: std::mem::take(&mut wants.marks),
             });
         }
-        if !wants.rows.is_empty() || !wants.gone.is_empty() || wants.pages > 0 {
+        // Held while a page is part-folded (1575), as the board holds them.
+        if self.folding.rows_due(&mut wants.rows, &mut wants.gone)
+            && (!wants.rows.is_empty() || !wants.gone.is_empty() || wants.pages > 0)
+        {
             self.from_ui.push_back(FromUi::Rows {
                 rows: std::mem::take(&mut wants.rows),
                 gone: std::mem::take(&mut wants.gone),
@@ -755,6 +920,14 @@ impl Board {
         if overlay != self.shown.map {
             self.shown.map = overlay;
             dirty = true;
+        }
+        // The keys this turn took are answered by its frame (1575): the
+        // walker's key_ms, a press's time to the flush after it.
+        for at in std::mem::take(&mut self.keys_owed) {
+            self.log.line(
+                "[SIM] ",
+                &format!("key_ms={}", uptime_ms().saturating_sub(at)),
+            );
         }
         if dirty {
             self.redraw();

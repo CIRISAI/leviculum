@@ -2934,7 +2934,10 @@ m9-bench-home-selftest:
 # `tests/golden/m9-fw-*.png` reached through the sim's board, by its
 # FRAME_DUMP path and by its keys from power-on, compared pixel for pixel),
 # then the two walks under scripts/m9-sim-walks/: the fixture from the
-# pairing on, and the 1489 store pulled into a home's board and booted again.
+# pairing on, and the 1489 store pulled into a home's board and booted again;
+# and since 1575 the pull walk (pull.walk) with the board's fold cost, once
+# with the drain's budget, whose keys must flush under 100 ms, and once
+# without, the control, whose keys must not.
 # Dumps, logs and text rows land in `out`, under target/; the bin's lines
 # are the board's (`KEY`, `[PAGE]`, `[STORE]`). Not in `fast`: nothing ships
 # it, and it builds the bin.
@@ -2962,6 +2965,23 @@ m9-sim-walk out="target/m9-sim-walk":
     grep -q '^\[TYPE\] size=large via=row ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the overview's row did not switch the type"; exit 1; }
     grep -q '^\[TYPE\] size=small via=hold ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the held house key did not switch the type"; exit 1; }
     grep -q '^\[TYPE\] size=large via=boot ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the record did not keep the large type across the reboot"; exit 1; }
+    # 1575: the pull walk, the fold costing the board's 3.6 ms an entry
+    # (window 16b), with the drain's budget and without it (as before):
+    # every key's frame under 100 ms with it, the control over it without.
+    for mode in budget none; do
+        dir="$root/{{out}}/pull-$mode"
+        rm -rf "$dir" && mkdir -p "$dir"
+        budget=""; [ "$mode" = none ] && budget="--fold-budget-us 0"
+        (cd "$dir" && sim --store pulling --fold-cost-us 3600 $budget --script "$root/scripts/m9-sim-walks/pull.walk" --text > text.txt 2> board.log)
+        max="$(sed -n 's/^\[SIM\] key_ms=\([0-9]*\) .*/\1/p' "$dir/board.log" | sort -n | tail -1)"
+        keys="$(grep -c '^\[SIM\] key_ms=' "$dir/board.log" || true)"
+        echo "m9-sim-walk: pull budget=$mode keys=$keys key_ms_max=${max:-none}"
+        [ "${keys:-0}" -eq 24 ] || { echo "m9-sim-walk: FAIL the pull walk ($mode) answered $keys of 24 keys"; exit 1; }
+    done
+    max_budget="$(sed -n 's/^\[SIM\] key_ms=\([0-9]*\) .*/\1/p' "{{out}}/pull-budget/board.log" | sort -n | tail -1)"
+    max_none="$(sed -n 's/^\[SIM\] key_ms=\([0-9]*\) .*/\1/p' "{{out}}/pull-none/board.log" | sort -n | tail -1)"
+    [ "$max_budget" -lt 100 ] || { echo "m9-sim-walk: FAIL a key under the pull waited $max_budget ms with the budget"; exit 1; }
+    [ "$max_none" -ge 100 ] || { echo "m9-sim-walk: FAIL the control: without the budget no key waited 100 ms ($max_none)"; exit 1; }
     echo "m9-sim-walk: PASS"
 
 # 1530, #232: the M9 in a window on the host: the panel at `scale` (2 or 3),
