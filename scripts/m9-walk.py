@@ -405,6 +405,12 @@ class Walk:
             self.page = {k: v for k, v in fields(line).items() if k != "t"}
         elif line.startswith("[LOOP] "):
             f = fields(line)
+            if f.get("core") == "ui":
+                # The UI core's own slow-turn line (1569): an instrument
+                # the log keeps, not a bar. The boot's preload fold and
+                # a dump's encode cross 250 ms on that core by design;
+                # the walk's bars stay the key's flush and core 0's turn.
+                return
             ms = int(f.get("turn_ms", 0))
             if self.dumping and self.dump_turn is None and f.get("stage") == "take":
                 # The dump's turn: core 0 wrote its lines (4.4 to 5 s in
@@ -907,6 +913,12 @@ class FakeBoard(threading.Thread):
                 # row 3 glued to row 1's line.
                 lines = [lines[0], lines[1] + lines[3]]
             self.say(f"PBM {w} {h}", *lines, f"PBE {h32:08x}",
+                     # The UI core's own slow-turn line (1569), as the dump's
+                     # encode sends it before core 0's take turn: an
+                     # instrument, never the 250 ms bar — the good walk
+                     # passing with it is the exemption's positive control.
+                     "[LOOP] core=ui turn_ms=600 stage=drain drain=550 keys=0 send=0 draw=50 "
+                     "msgs=1 folded=0 turn=42",
                      "[LOOP] turn_ms=4400 stage=take host=0 node=0 take=4400 draw=0 keys=0 entries=40")
 
 
