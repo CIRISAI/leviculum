@@ -796,8 +796,12 @@ impl Handheld {
         }
     }
 
-    /// An open's page went to the UI core, which folds it now: an armed
-    /// owe fires. Every conversation's row and the ring's state with its
+    /// An open reached the I/O core, the UI core folding and drawing it
+    /// now: an armed owe fires. Called on what every open sends (1542):
+    /// the open's `Load` (the first open after a boot only), its read
+    /// mark among the `Asks`, and its row read in `Rows`; an open in a
+    /// running session sends no `Load`, so an owe that waited for one
+    /// never fired. Every conversation's row and the ring's state with its
     /// marks are owed the summary log, the log's tail closed when asked,
     /// and written at once, while the other core allocates.
     pub fn bench_fire(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>) {

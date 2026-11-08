@@ -90,7 +90,9 @@
 //! [BENCH] owe=<armed|refused|ring-closed|fired> flags=<0x..>
 //!                           the bench image's `TYPE_BENCH_OWE` (1540): the
 //!                           next open writes every row again, `flags` says
-//!                           which store's write erases a sector first
+//!                           which store's write erases a sector first; it
+//!                           fires on the open's Load, read mark or read
+//!                           row, whichever comes first (1542)
 //! [BENCH] arrive=<sent|refused|folded> row=<n> of=<n> peer=<8 hex> [unread=<n>]
 //!                           `TYPE_BENCH_ARRIVE` (1540): a message came into
 //!                           the chat at that row, kept and folded as a
@@ -1341,16 +1343,35 @@ fn main() -> ! {
                     busy = true;
                     #[cfg(m9_bench)]
                     node.bench_before_ask(&mut log);
+                    // An open's read mark (1542): what an open of an
+                    // unread chat always sends, Load or not.
+                    #[cfg(m9_bench)]
+                    let opened = marks
+                        .iter()
+                        .any(|mark| mark.flag == loquax::home::wire::MarkFlag::Read);
                     let mut ids = || {
                         let mut id = [0u8; 16];
                         rand_core::RngCore::fill_bytes(&mut rng, &mut id);
                         id
                     };
                     node.ask(verbs, &marks, &mut ids, uptime_ms(), &mut stores, &mut log);
+                    #[cfg(m9_bench)]
+                    if opened {
+                        node.bench_fire(&mut stores, &mut log);
+                    }
                 }
                 FromUi::Rows { rows, gone, pages } => {
                     stall::stage(Core::Io, Stage::Rows);
+                    // A chat read (1542): the opened one's row. An
+                    // arrival's row is unread, so the owe the walk arms
+                    // after one waits for the open.
+                    #[cfg(m9_bench)]
+                    let opened = rows.iter().any(|row| row.unread == 0);
                     node.said(rows, gone, pages, &mut stores, &mut log);
+                    #[cfg(m9_bench)]
+                    if opened {
+                        node.bench_fire(&mut stores, &mut log);
+                    }
                 }
                 FromUi::Load(peer) => {
                     stall::stage(Core::Io, Stage::Load);
