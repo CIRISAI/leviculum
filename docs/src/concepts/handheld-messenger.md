@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:1060`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:1075`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -518,7 +518,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   screen of one pane shows the pane the keys are in. That builds the Wide
   scene and drops its chat: the list's peak then carries the chat's.
 - **The list's cursor is the reader's** (1546, `list_top`,
-  `loquax/src/ui.rs:2244`). The model keeps the selected peer and the line
+  `loquax/src/ui.rs:2259`). The model keeps the selected peer and the line
   it stands on; while it stays selected, a pull or an arrival that sorts
   rows in above it moves the window, not the cursor. A key moves the line
   by as many rows as the selection moved in the order. Before, the window
@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:851`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:890`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1178,7 +1178,7 @@ its cells when the screen leaves the map (`leave_map`,
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:5942`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:5957`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1187,7 +1187,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:1220`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:1235`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1931,7 +1931,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2110`).
+both (`thinknode_m9.rs:2162`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -1979,7 +1979,7 @@ read: those of messages pulled before a resumed boot and not opened
 since.
 
 `a_chat_opens_with_its_own_marks_only`
-(`loquax-m9/tests/restore_counts.rs:859`) keeps the archive with 1800
+(`loquax-m9/tests/restore_counts.rs:1048`) keeps the archive with 1800
 read marks of another chat and a deleted mark of the small chat's: after
 a resumed boot the small chat's page is its 5 messages and the one mark
 from 8 sectors, its deleted message stays deleted, and the bubbles are
@@ -1997,17 +1997,65 @@ plus decode under 100 ms for the long chat, window 16's to prove.
 
 **An invitation keeps its row.** A group the reader is invited to that
 no message reached has the invitation's listing, "Einladung", from when
-the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:1979`);
+the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:1994`);
 the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2122`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2174`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
 gives it back: `draw_held` +64 / -64 B (+32 / -32 large) is within
 `SEEN_HELD` (`loquax-m9/src/census.rs:170`), more either way stays over.
+
+### A pull never starves the panel, a reset never refolds the ring (1563)
+
+Lew's board, its store erased and pulled again from his home (bench
+2026-11-08, 13:10): 4258 entries came back, and the board reset by
+MWDT1 four times on the way, each `[PREV_RUN] reason=wdt1` with core 1
+in `draw`, beside `[DISP] flush` lines of 12,800 bytes taking 2 to
+4.4 s. Every boot after a reset folded the whole ring
+(`index=rebuilt why=ring-moved`, 12.6 s at 1714 entries, 55.2 s at
+4066), so the pull took 472 s and a bigger store would never finish.
+
+**The panel's DMA is owed a gap.** The 1507 arbitration let a DMA out
+of PSRAM start only while no flash op was announced. During a pull
+core 0 writes op after op, each op parks core 1, and the gap between
+one op and the next announce is a few instructions, shorter than core
+1's wake: the flush waited as long as the pull wrote. Now a DMA that
+finds the flash busy records when it first asked, and core 0 holds its
+next op until that DMA started, at most `YIELD_US`, 2 ms, after the ask
+(`Arbiter::flash_yields`, `loquax-m9/src/mspi.rs:108`). The protocol is
+in `loquax-m9` so the host steps both cores a microsecond at a time
+with the bench's numbers: without the yield a five-chunk flush is not
+out after a second (`without_the_yield_a_flush_starves_under_a_pull`,
+`loquax-m9/src/mspi/tests.rs:109`), with it it is out in 37.8 ms, 5.2 ms
+of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
+`loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
+`waited_ms=`, the wait before a draw is its own stall stage, `flush`,
+and a wait that moves feeds MWDT1 once per chunk started
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:796`); one
+that stopped does not.
+
+**A reset reads the tail.** The summary written before a reset stands
+for everything before its end. `Store::open_after`
+(`loquax/src/home/board/store.rs:240`) reads only the frames after it,
+and the boot folds them into the model and the index as the live pull
+folded them, then writes the summary at the ring's end
+(`resume_tail`, `loquax-m9/src/home.rs:509`); `[STORE] index=summaries`
+says `tail=<n>`. A state whose sector went round the ring, or an end the
+log does not reach, still rebuilds. On the host the fixture's 4000
+entries with a 360-entry tail resume in 22 ms decoding the 360, against
+4360 for the whole fold, and list what the whole fold lists
+(`a_reset_mid_pull_resumes_from_the_summary`,
+`loquax-m9/tests/restore_counts.rs:538`).
+
+That test found a model bug on the way: a chat listed from its kept row
+counted only its loaded messages once a live one came in, 96 of 776
+unread. The unread beyond the received messages loaded now counts a row
+each (`Conversation::unread_rows`, `loquax/src/ui.rs:876`), on a live
+pull as on the tail boot.
 
 ### Tracks on the M9 (1385, not built)
 
