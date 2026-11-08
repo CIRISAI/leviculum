@@ -2735,6 +2735,20 @@ m9-reproducible:
     bash scripts/check-m9-reproducible.sh --selftest
     bash scripts/check-m9-reproducible.sh
 
+# The M9 gates of every coder pass that moves leviculum-esp/src or a crate
+# the M9 links (1574, #474): the release image and the bench image, each
+# with its FLASH_HEADROOM and two STACK_HEADROOM lines and red below a
+# floor, then m9-reproducible. 1569 ran check and clippy on both variants
+# but never the image script, and its bench image's stack FAIL was first
+# seen on the bench. The report quotes the headroom lines of both images.
+# Not in a gate for the same reason as build-m9 (the Xtensa fork is
+# optional per host); each image build says SKIP without it.
+[doc('Build both M9 images with their headroom, then m9-reproducible')]
+m9-gates:
+    bash scripts/build-m9-image.sh
+    LEVICULUM_M9_BENCH=1 bash scripts/build-m9-image.sh --bench
+    just m9-reproducible
+
 # The nRF images are the same bytes from any clone of the same commit (1460,
 # #474): builds the T114 image in this tree and in a clone of HEAD under a
 # throwaway path, both through scripts/nrf-rustflags.sh's fixed-path wrapper,
