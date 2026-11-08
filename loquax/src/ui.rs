@@ -1209,6 +1209,10 @@ pub struct UiModel<B> {
     /// width, 1375); `None` for the terminal's conversation pane. The fit,
     /// the pan's step and the pins' cells go by it ([`UiModel::map_area`]).
     pub map_picture: Option<Rect>,
+    /// The pane the map was opened from, which closing it returns to
+    /// (1531): the list on a screen that showed the list, the chat on one
+    /// that showed the chat.
+    pub map_from: Pane,
     /// The left button held down on the map, a click or a drag.
     pub map_press: Option<map::MapPress>,
     /// Whether going to a place loads its region by itself (`map_autoload`,
@@ -1433,6 +1437,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             map_setup: map::MapSetup::default(),
             map_picture: None,
             map_press: None,
+            map_from: Pane::Messages,
             map_autoload: false,
             map_theme: None,
             map_loading: None,
@@ -3968,6 +3973,7 @@ fn open_map_at<B: InputBuffer>(model: &mut UiModel<B>, fix: &Fix) {
         selected: Some(fix.peer),
     });
     model.map_press = None;
+    model.remember_map_from();
     model.focus = Pane::Map;
     model.selection = None;
     // Going to a place loads its region (1089): the map is shown at once
@@ -4026,6 +4032,7 @@ fn open_map<B: InputBuffer>(model: &mut UiModel<B>) {
         zoom,
         selected: pins.first().map(|p| p.peer),
     });
+    model.remember_map_from();
     model.focus = Pane::Map;
     model.selection = None;
     // Pins where no region is: their places load (1089).
@@ -4120,7 +4127,7 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
             model.map = None;
             model.map_press = None;
             model.map_glyph_test = false;
-            model.focus = Pane::Messages;
+            model.focus = model.map_from;
         }
         MapCmd::Drawing(forward) => {
             let n = setup.drawings.len();
@@ -5898,6 +5905,14 @@ impl<B> UiModel<B> {
             // were, measured by us.
             true => self.address.and_then(|own| own_fix(own, message)),
             false => message_fix(conversation.peer, message),
+        }
+    }
+
+    /// Keep the pane the keys are in as the one the map returns to
+    /// (1531); a map opened over the map keeps the first one.
+    fn remember_map_from(&mut self) {
+        if self.focus != Pane::Map {
+            self.map_from = self.focus;
         }
     }
 
@@ -13683,7 +13698,8 @@ pub(crate) mod tests {
         assert_eq!(selected_label(&model), "you");
         update(&mut model, key(KeyCode::Esc));
         assert!(model.map.is_none());
-        assert_eq!(model.focus, Pane::Messages);
+        // Back where it was opened from, the list (1531).
+        assert_eq!(model.focus, Pane::Conversations);
         assert!(view(&model).map.is_none());
     }
 
@@ -14411,6 +14427,11 @@ pub(crate) mod tests {
         assert_eq!(model.focus, Pane::Map);
         assert_eq!(model.map.expect("open").selected, Some(PEER));
         update(&mut model, key(KeyCode::Esc));
+        // Back in the compose line it was opened from (1531); its Esc
+        // leaves for the conversation.
+        assert_eq!(model.focus, Pane::Compose);
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.focus, Pane::Messages);
         // A peer without a position.
         update(
             &mut model,

@@ -159,3 +159,27 @@ fn the_pairing_and_the_compose_line_have_their_names() {
     let at = page::of(&model, row, false, &window);
     assert_eq!((at.name, at.cursor), ("compose", 2));
 }
+
+/// Back on the map returns to the page the map was opened from (1531,
+/// the reviewer's walk of 2026-11-08: back from a map opened over the
+/// list landed in the chat): list, map key, back is `chats`; chat, map
+/// key, back is `chat`.
+#[test]
+fn back_from_the_map_returns_to_the_page_it_was_opened_from() {
+    let window = Default::default();
+    let mut model = fixture::model();
+    let mut row = 0;
+    assert_eq!(page::of(&model, row, false, &window).name, "chats");
+    press(&mut model, &mut row, 0x85);
+    assert_eq!(page::of(&model, row, false, &window).name, "map");
+    press(&mut model, &mut row, 0x86);
+    assert_eq!(page::of(&model, row, false, &window).name, "chats");
+
+    // The centre opens the chat under the cursor; the map over it.
+    press(&mut model, &mut row, 0x0d);
+    assert_eq!(page::of(&model, row, false, &window).name, "chat");
+    press(&mut model, &mut row, 0x85);
+    assert_eq!(page::of(&model, row, false, &window).name, "map");
+    press(&mut model, &mut row, 0x86);
+    assert_eq!(page::of(&model, row, false, &window).name, "chat");
+}
