@@ -136,13 +136,7 @@ fn a_map_redraw_is_the_frame_a_fresh_draw_gives() {
     let mut map = Map::new(FIXTURE).expect("region");
     let mut renderer = Renderer::new(&mut panel).expect("renderer");
     let flush = |renderer: &Renderer<'_, Frame>, shown: &mut Frame| {
-        let panel = renderer.panel();
-        if let Some((first, last)) = panel.take_dirty() {
-            let mut pixels = shown.pixels().to_vec();
-            let rows = (first * WIDTH) as usize..((last + 1) * WIDTH) as usize;
-            pixels[rows.clone()].copy_from_slice(&panel.pixels()[rows]);
-            *shown = Frame::from_pixels(pixels).expect("whole");
-        }
+        support::flush_runs(renderer.panel(), shown)
     };
     renderer
         .show(&model, &Look::of(&model), &mut map)

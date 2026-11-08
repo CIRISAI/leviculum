@@ -45,8 +45,12 @@ use crate::stall::{self, Core, Lock};
 /// inside it (core 0 owns it), and no interrupt runs on core 0 until the
 /// UI core is unparked. Core 0's interrupts were already off for the op
 /// itself, so the latency added is the park and unpark around it.
+///
+/// Since 1507 the op also waits for the panel's DMA out of PSRAM to end
+/// and holds the next one off ([`crate::mspi`]): the bus that DMA reads is
+/// the one the op takes.
 fn parked<R>(f: impl FnOnce() -> R) -> R {
-    stall::locked(Core::Io, Lock::Flash, || critical_section::with(|_| f()))
+    crate::mspi::flash(|| stall::locked(Core::Io, Lock::Flash, || critical_section::with(|_| f())))
 }
 
 /// The partition the node's identity lives in.

@@ -47,7 +47,7 @@
 //! [CENSUS] node held=<n> box=<n> links=8 max_answer=262144 t=<ms>
 //! [NODE] state=up iface=serial hw_mtu=564 serial_mux=1 t=<ms>
 //! [DISP] ST7789 320x240 madctl=0xb0 spi_mhz=40 state=up t=<ms>
-//! [DISP] splash rows=0..239 ms=<ms> backlight=on t=<ms>   (1485; or splash=failed spi=..., backlight=off)
+//! [DISP] splash rows=0..239 ms=<ms> backlight=on t=<ms>   (1485; or splash=failed err=..., backlight=off)
 //! [KB] addr=0x6d found=yes ... protocol=codes reg=0x01 len=8 poll_ms=10 t=<ms>
 //! [CENSUS] renderer held=<n> budget=220000 verdict=ok t=<ms>
 //! [CENSUS] screen=chats scene_held=... verdict=ok t=<ms>
@@ -68,7 +68,15 @@
 //! [STORE] marks=<n> writes=<n> erased=<n>   (1542, the read marks a fold kept in the ring)
 //! [STORE] page_read entries=<n> earlier=<n> ms=<ms>   (1521, a conversation opened or scrolled to its top)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
-//! [DISP] flush rows=0..239 ms=<ms> t=<ms>
+//! [DISP] flush rows=0..239 ms=<ms> runs=<n> bytes=<n> t=<ms>
+//!                           when a flush's last byte is out (1507): rows
+//!                           from the first run's first to the last's
+//!                           last, each run its own window, sent by DMA
+//!                           straight out of the frame in PSRAM; ms from
+//!                           its start to its end, the loop running on
+//! [DISP] dma=bounce reason=<e>   the descriptors would not align: every
+//!                           flush goes through the driver's bounce buffer
+//! [DISP] flush=failed err=<spi:..|dma:..>   the frame is owed whole
 //! [DISP] pace=<te|clock> edges=<n> merged=<n> t=<ms>
 //!                           when what paces the draws changes (1507,
 //!                           `loquax_m9::pace`): te is the panel's blank on
@@ -153,13 +161,14 @@ use esp_hal::rng::{Trng, TrngSource};
 use esp_hal::system::{CpuControl, Stack};
 use esp_hal::{
     delay::Delay,
-    dma_rx_buffer, dma_tx_buffer,
+    dma::{aligned::DmaAlignedMut, DmaDescriptor, DmaTxBuf},
+    dma_descriptors_chunk_size, dma_rx_buffer, dma_tx_buffer,
     gpio::{Event, Input, InputConfig, Io, Level, Output, OutputConfig},
     i2c::master::{Config as I2cConfig, I2c},
     main,
     psram::{Psram, PsramConfig, PsramMode, PsramSize, SpiRamFreq},
     spi::{
-        master::{Config as SpiConfig, Spi, SpiDma},
+        master::{Config as SpiConfig, Spi, SpiDma, SpiDmaTransfer},
         Mode,
     },
     time::{Duration, Rate},
@@ -509,10 +518,86 @@ const TEON: u8 = 0x35;
 const COLMOD: u8 = 0x3A;
 const COLMOD_RGB565: u8 = 0x55;
 
+/// The most rows one DMA transfer out of the frame carries: esp-hal's
+/// 32,736 bytes a transfer, in whole rows of 640 (1507).
+const ROWS_PER_DMA: u32 = 32_736 / (WIDTH * 2);
+/// Their bytes.
+const DMA_BYTES: usize = (ROWS_PER_DMA * WIDTH * 2) as usize;
+/// A descriptor's bytes over PSRAM: 4,095 less the 64-byte alignment.
+const DMA_CHUNK: usize = 4032;
+
+/// Why a write did not reach the panel.
+#[derive(Debug)]
+enum PanelError {
+    Spi(esp_hal::spi::Error),
+    Dma(esp_hal::dma::DmaBufError),
+}
+
+impl core::fmt::Display for PanelError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PanelError::Spi(e) => write!(f, "spi:{e:?}"),
+            PanelError::Dma(e) => write!(f, "dma:{e:?}"),
+        }
+    }
+}
+
+impl From<esp_hal::spi::Error> for PanelError {
+    fn from(e: esp_hal::spi::Error) -> Self {
+        PanelError::Spi(e)
+    }
+}
+
+/// A flush on its way (1507): the runs of rows still to send, the next row
+/// of the one whose window is open, and the frame they come out of.
+#[derive(Default)]
+struct Flush {
+    runs: VecDeque<(u32, u32)>,
+    /// The open window's next row; `None` once its last chunk went out.
+    at: Option<u32>,
+    /// A window is open: chip select low, RAMWR sent.
+    open: bool,
+    /// The frame's first word, the DMA's source.
+    base: usize,
+    /// What the `[DISP] flush` line says once all of it is out: the rows
+    /// from the first run's first to the last run's last, the runs, the
+    /// bytes, and when it began, microseconds.
+    report: Option<Sent>,
+}
+
+/// A flush, for its `[DISP] flush` line.
+#[derive(Clone, Copy)]
+struct Sent {
+    first: u32,
+    last: u32,
+    runs: usize,
+    bytes: usize,
+    began_us: u64,
+    /// Microseconds from begin to the last byte on the panel; 0 until then.
+    us: u64,
+}
+
 /// The panel on SPI2 with DMA, its chip select and data/command line,
 /// and its backlight, on when low, lit only over a written panel (1485).
+///
+/// Since 1507 a flush sends each run of changed rows in its own window,
+/// straight out of the frame by DMA (the frame keeps the panel's byte
+/// order on the DMA's boundary, `loquax_m9::frame`), and does not wait:
+/// [`Panel::begin`] starts it, [`Panel::pump`] moves it on between the
+/// turn's other work, [`Panel::settle`] waits it out before the frame is
+/// drawn into again.
 struct Panel<'d> {
-    spi: SpiDma<'d, Blocking>,
+    /// The bus, `None` while a transfer owns it.
+    spi: Option<SpiDma<'d, Blocking>>,
+    inflight: Option<SpiDmaTransfer<'d, Blocking, DmaTxBuf>>,
+    /// The transfer's descriptors, `None` while one runs.
+    descriptors: Option<DmaAlignedMut<'static, [DmaDescriptor]>>,
+    flush: Flush,
+    /// The last flush that reached the panel, until the loop says it.
+    done: Option<Sent>,
+    /// The frame's memory refused a DMA ([`PanelError::Dma`]): the rows
+    /// go through the driver's bounce buffer, as before 1507.
+    bounce: bool,
     cs: Output<'d>,
     dc: Output<'d>,
     backlight: Output<'d>,
@@ -521,10 +606,10 @@ struct Panel<'d> {
 
 /// The boot order of `loquax_m9::splash`: the board's half.
 impl splash::Panel for Panel<'_> {
-    type Error = esp_hal::spi::Error;
+    type Error = PanelError;
 
     fn write(&mut self, frame: &Frame, first: u32, last: u32) -> Result<(), Self::Error> {
-        self.flush(frame, first, last)
+        self.write_rows(frame, first, last)
     }
 
     fn light(&mut self, on: bool) {
@@ -537,26 +622,30 @@ impl splash::Panel for Panel<'_> {
 }
 
 impl Panel<'_> {
-    fn cmd(&mut self, op: u8, data: &[u8]) -> Result<(), esp_hal::spi::Error> {
+    fn cmd(&mut self, op: u8, data: &[u8]) -> Result<(), PanelError> {
         self.cs.set_low();
         let r = self.send(op, data);
         self.cs.set_high();
         r
     }
 
-    fn send(&mut self, op: u8, data: &[u8]) -> Result<(), esp_hal::spi::Error> {
-        self.dc.set_low();
-        self.spi.write(&[op])?;
-        self.dc.set_high();
+    fn send(&mut self, op: u8, data: &[u8]) -> Result<(), PanelError> {
+        let Panel { spi, dc, .. } = self;
+        let Some(spi) = spi.as_mut() else {
+            return Err(PanelError::Spi(esp_hal::spi::Error::Unsupported));
+        };
+        dc.set_low();
+        spi.write(&[op])?;
+        dc.set_high();
         if !data.is_empty() {
-            self.spi.write(data)?;
+            spi.write(data)?;
         }
         Ok(())
     }
 
     /// The datasheet's power-on sequence with its delays, as the map
     /// firmware ran it on this unit, landscape.
-    fn init(&mut self, rst: &mut Output<'_>, delay: &Delay) -> Result<(), esp_hal::spi::Error> {
+    fn init(&mut self, rst: &mut Output<'_>, delay: &Delay) -> Result<(), PanelError> {
         rst.set_low();
         delay.delay_millis(1);
         rst.set_high();
@@ -575,35 +664,197 @@ impl Panel<'_> {
         self.cmd(DISPON, &[])
     }
 
-    /// Rows `first..=last` of `frame`, full width, in one chip-select
-    /// window: the ST7789's row window, so a moved cursor sends its band
-    /// and not the screen. The frame holds native RGB565 words; the panel
-    /// takes them high byte first, swapped here a DMA chunk at a time.
-    fn flush(&mut self, frame: &Frame, first: u32, last: u32) -> Result<(), esp_hal::spi::Error> {
+    /// Rows `first..=last` of `frame`, written before it returns: the
+    /// splash and the fault screen, which nothing overlaps.
+    fn write_rows(&mut self, frame: &Frame, first: u32, last: u32) -> Result<(), PanelError> {
+        self.settle()?;
+        self.begin(frame, [(first, last)].into_iter().collect())?;
+        let r = self.settle();
+        self.done = None;
+        r
+    }
+
+    /// The flush that reached the panel since the last call, once.
+    fn take_done(&mut self) -> Option<Sent> {
+        self.done.take()
+    }
+
+    /// Start sending `runs` of `frame`, each in its own window. The frame
+    /// must not be drawn into until [`Panel::settle`] (or a [`Panel::pump`]
+    /// that said done): the DMA reads it as it goes.
+    fn begin(&mut self, frame: &Frame, runs: VecDeque<(u32, u32)>) -> Result<(), PanelError> {
+        self.settle()?;
+        let report = match (runs.front(), runs.back()) {
+            (Some(&(first, _)), Some(&(_, last))) => Some(Sent {
+                first,
+                last,
+                runs: runs.len(),
+                bytes: runs
+                    .iter()
+                    .map(|(a, b)| ((b + 1 - a) * WIDTH * 2) as usize)
+                    .sum(),
+                began_us: leviculum_esp::uptime_us(),
+                us: 0,
+            }),
+            _ => None,
+        };
+        self.flush = Flush {
+            runs,
+            at: None,
+            open: false,
+            base: frame.pixels().as_ptr() as usize,
+            report,
+        };
+        self.pump().map(|_| ())
+    }
+
+    /// Wait for the flush on its way to reach the panel.
+    fn settle(&mut self) -> Result<(), PanelError> {
+        while !self.pump()? {
+            core::hint::spin_loop();
+        }
+        Ok(())
+    }
+
+    /// Move the flush on as far as it goes without waiting: the transfer
+    /// that ended is taken back, the next chunk or window started. `true`
+    /// once all of it reached the panel. An error leaves no window open
+    /// and nothing owed; the caller owes the frame whole.
+    fn pump(&mut self) -> Result<bool, PanelError> {
+        let r = self.pump_inner();
+        match r {
+            Err(_) => {
+                self.flush = Flush::default();
+                self.cs.set_high();
+            }
+            Ok(true) => {
+                if let Some(mut sent) = self.flush.report.take() {
+                    sent.us = leviculum_esp::uptime_us().saturating_sub(sent.began_us);
+                    self.done = Some(sent);
+                }
+            }
+            Ok(false) => {}
+        }
+        r
+    }
+
+    fn pump_inner(&mut self) -> Result<bool, PanelError> {
+        loop {
+            if let Some(transfer) = self.inflight.take() {
+                if !transfer.is_done() {
+                    self.inflight = Some(transfer);
+                    return Ok(false);
+                }
+                let (spi, buf) = transfer.wait();
+                leviculum_esp::mspi::dma_done();
+                self.spi = Some(spi);
+                self.descriptors = Some(buf.split().0);
+            }
+            if self.flush.open && self.flush.at.is_none() {
+                self.cs.set_high();
+                self.flush.open = false;
+                self.flush.runs.pop_front();
+            }
+            let Some(&(first, last)) = self.flush.runs.front() else {
+                return Ok(true);
+            };
+            if !self.flush.open {
+                self.window(first, last)?;
+                self.flush.at = Some(first);
+            }
+            let Some(row) = self.flush.at else {
+                // An open window always has a next row here: the close
+                // above took the one whose last chunk went.
+                return Ok(true);
+            };
+            let end = (row + ROWS_PER_DMA - 1).min(last);
+            let bytes = ((end + 1 - row) * WIDTH * 2) as usize;
+            let at = self.flush.base + (row * WIDTH * 2) as usize;
+            // SAFETY: rows `row..=end` of the frame `begin` was given,
+            // which lives as long as the UI core and is not drawn into
+            // until the flush settled; the DMA only reads them.
+            let rows: &'static mut [u8] =
+                unsafe { core::slice::from_raw_parts_mut(at as *mut u8, bytes) };
+            if self.bounce {
+                self.bounced(rows)?;
+            } else if !self.dma(rows)? {
+                return Ok(false);
+            }
+            self.flush.at = (end < last).then_some(end + 1);
+        }
+    }
+
+    /// Open the window of rows `first..=last`, full width, and say RAMWR:
+    /// the ST7789's row window, so a moved cursor sends its rows and not
+    /// the screen.
+    fn window(&mut self, first: u32, last: u32) -> Result<(), PanelError> {
         let x1 = (WIDTH - 1) as u16;
         let (y0, y1) = (first as u16, last as u16);
-        let words = &frame.pixels()[(first * WIDTH) as usize..((last + 1) * WIDTH) as usize];
         self.cs.set_low();
-        let r = (|| {
-            self.send(CASET, &[0, 0, (x1 >> 8) as u8, x1 as u8])?;
-            self.send(
-                RASET,
-                &[(y0 >> 8) as u8, y0 as u8, (y1 >> 8) as u8, y1 as u8],
-            )?;
-            self.dc.set_low();
-            self.spi.write(&[RAMWR])?;
-            self.dc.set_high();
-            let mut chunk = [0u8; 4096];
-            for part in words.chunks(chunk.len() / 2) {
-                for (i, word) in part.iter().enumerate() {
-                    chunk[2 * i..2 * i + 2].copy_from_slice(&word.to_be_bytes());
-                }
-                self.spi.write(&chunk[..2 * part.len()])?;
+        self.flush.open = true;
+        self.send(CASET, &[0, 0, (x1 >> 8) as u8, x1 as u8])?;
+        self.send(
+            RASET,
+            &[(y0 >> 8) as u8, y0 as u8, (y1 >> 8) as u8, y1 as u8],
+        )?;
+        self.send(RAMWR, &[])
+    }
+
+    /// Start a DMA of `rows` straight out of PSRAM. `false` when the flash
+    /// is busy (`leviculum_esp::mspi`): the chunk goes on a later pump.
+    fn dma(&mut self, rows: &'static mut [u8]) -> Result<bool, PanelError> {
+        let len = rows.len();
+        let buffer = match DmaAlignedMut::new(rows) {
+            Ok(buffer) => buffer,
+            Err(e) => {
+                // The frame's memory is no DMA's: through the bounce
+                // buffer from here on, said once by the caller's error.
+                self.bounce = true;
+                return Err(PanelError::Dma(e));
             }
-            Ok(())
-        })();
-        self.cs.set_high();
-        r
+        };
+        let (Some(descriptors), Some(spi)) = (self.descriptors.take(), self.spi.take()) else {
+            return Err(PanelError::Spi(esp_hal::spi::Error::Unsupported));
+        };
+        let buf = match DmaTxBuf::new(descriptors, buffer) {
+            Ok(buf) => buf,
+            Err(e) => {
+                self.spi = Some(spi);
+                self.bounce = true;
+                return Err(PanelError::Dma(e));
+            }
+        };
+        if !leviculum_esp::mspi::dma_begin(leviculum_esp::mspi::transfer_us(len, m9::LCD_SPI_MHZ)) {
+            self.spi = Some(spi);
+            self.descriptors = Some(buf.split().0);
+            return Ok(false);
+        }
+        self.dc.set_high();
+        match spi.write_buffer(len, buf) {
+            Ok(transfer) => {
+                self.inflight = Some(transfer);
+                Ok(true)
+            }
+            Err((e, spi, buf)) => {
+                leviculum_esp::mspi::dma_done();
+                self.spi = Some(spi);
+                self.descriptors = Some(buf.split().0);
+                Err(PanelError::Spi(e))
+            }
+        }
+    }
+
+    /// `rows` through the driver's own buffer in internal RAM, a chunk at
+    /// a time and waiting: the way before 1507, for a frame no DMA reads.
+    fn bounced(&mut self, rows: &[u8]) -> Result<(), PanelError> {
+        let Some(spi) = self.spi.as_mut() else {
+            return Err(PanelError::Spi(esp_hal::spi::Error::Unsupported));
+        };
+        self.dc.set_high();
+        for part in rows.chunks(4096) {
+            spi.write(part)?;
+        }
+        Ok(())
     }
 }
 
@@ -743,9 +994,10 @@ struct Shown {
 
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
 /// the map in pixels when it is open, or the pairing over all of it, and
-/// send the rows that changed to the panel. On the UI core (1493); the
-/// lines go through the queue. A `[PAGE]` line follows the flush when the
-/// page or its cursor moved (1533).
+/// start the rows that changed on their way to the panel. On the UI core
+/// (1493); the lines go through the queue. A `[PAGE]` line follows when the
+/// page or its cursor moved (1533). Whether a flush began (1507): its
+/// `[DISP] flush` line comes when it is out ([`flushed`]).
 #[allow(clippy::too_many_arguments)]
 fn redraw(
     renderer: &mut Renderer<'_, Frame>,
@@ -756,7 +1008,9 @@ fn redraw(
     shown: &Shown,
     said: &mut page::Said,
     log: &mut UiLog,
-) {
+) -> bool {
+    // The last flush reads the frame until it is out (1507).
+    let _ = flushed(panel, renderer.panel(), true, log);
     let look = screen::Look {
         row,
         home: shown.word,
@@ -779,11 +1033,9 @@ fn redraw(
         None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
         None => bench::show(renderer, model, &look, map),
     };
-    #[cfg(m9_bench)]
-    bench::FLUSH_US.store(0, Ordering::Relaxed);
     if drawn.is_err() {
         log.line("[DISP] ", alloc::string::String::from("draw=failed"));
-        return;
+        return false;
     }
     // What the map's draw did (1531): its zoom, the picture's and the
     // label pass's time, the names set and dropped.
@@ -806,46 +1058,58 @@ fn redraw(
         false => page::of(model, row, shown.pairing.is_some(), &renderer.window()),
     };
     let moved = said.say(at);
+    // The changed rows as runs, a window each, sent by DMA while the loop
+    // goes on (1507); the `[DISP] flush` line follows when the last byte
+    // is out ([`flushed`]).
     let frame = renderer.panel();
-    let Some((first, last)) = frame.take_dirty() else {
-        if let Some(body) = moved {
-            log.line("[PAGE] ", body);
-        }
-        return;
-    };
-    let t0 = esp_hal::time::Instant::now();
-    let flushed = panel.flush(frame, first, last);
-    let us = t0.elapsed().as_micros();
-    #[cfg(m9_bench)]
-    bench::FLUSH_US.store(us as u32, Ordering::Relaxed);
-    match flushed {
-        Ok(()) => {
-            log.line(
-                "[DISP] ",
-                alloc::format!(
-                    "flush rows={first}..{last} ms={}.{:03}",
-                    us / 1000,
-                    us % 1000
-                ),
-            );
-            // The splash's write failed (1485): the frame was whole again,
-            // so this flush wrote every row, and the backlight may light.
-            if !panel.lit {
-                panel.light(true);
-                log.line("[DISP] ", alloc::string::String::from("backlight=on"));
-            }
-        }
-        Err(e) => {
-            // The panel's bytes are unknown now: every row is owed, so
-            // the next flush that lands is whole — without this the
-            // failed band stayed stale for ever (1493).
+    let runs = frame.take_runs();
+    let flushing = !runs.is_empty();
+    if flushing {
+        if let Err(e) = panel.begin(frame, runs.into_iter().collect()) {
             frame.forget_flushed();
-            log.line("[DISP] ", alloc::format!("flush=failed spi={e:?}"));
+            log.line("[DISP] ", alloc::format!("flush=failed err={e}"));
         }
     }
     if let Some(body) = moved {
         log.line("[PAGE] ", body);
     }
+    flushing
+}
+
+/// Move the panel's flush on, or wait it out when `wait`, and say the one
+/// that reached the panel: its `[DISP] flush` line (rows from the first
+/// run's first to the last's last, the time from begin to the last byte),
+/// and the backlight after the first frame that landed (1485). Its
+/// microseconds, when one landed. A flush that failed owes the frame
+/// whole: the panel's bytes are unknown now (1493).
+fn flushed(panel: &mut Panel<'_>, frame: &Frame, wait: bool, log: &mut UiLog) -> Option<u64> {
+    let moved = match wait {
+        true => panel.settle(),
+        false => panel.pump().map(|_| ()),
+    };
+    if let Err(e) = moved {
+        frame.forget_flushed();
+        log.line("[DISP] ", alloc::format!("flush=failed err={e}"));
+        return None;
+    }
+    let sent = panel.take_done()?;
+    log.line(
+        "[DISP] ",
+        alloc::format!(
+            "flush rows={}..{} ms={}.{:03} runs={} bytes={}",
+            sent.first,
+            sent.last,
+            sent.us / 1000,
+            sent.us % 1000,
+            sent.runs,
+            sent.bytes
+        ),
+    );
+    if !panel.lit {
+        panel.light(true);
+        log.line("[DISP] ", alloc::string::String::from("backlight=on"));
+    }
+    Some(sent.us)
 }
 
 #[main]
@@ -994,8 +1258,23 @@ fn main() -> ! {
         .with_miso(miso)
         .with_dma(p.DMA_CH0)
         .with_buffers(dma_rx, dma_tx);
+    // The descriptors a flush's DMA runs on (1507): one transfer's rows
+    // of the frame, in PSRAM-sized chunks.
+    let (_, descriptors) = dma_descriptors_chunk_size!(0, DMA_BYTES, DMA_CHUNK);
+    let descriptors = match DmaAlignedMut::new(descriptors) {
+        Ok(descriptors) => Some(descriptors),
+        Err(e) => {
+            log.line("[DISP] ", format_args!("dma=bounce reason={e:?}"));
+            None
+        }
+    };
     let mut panel = Panel {
-        spi,
+        spi: Some(spi),
+        inflight: None,
+        bounce: descriptors.is_none(),
+        descriptors,
+        flush: Flush::default(),
+        done: None,
         cs,
         dc,
         backlight,
@@ -1010,7 +1289,7 @@ fn main() -> ! {
                 m9::LCD_SPI_MHZ
             ),
         ),
-        Err(e) => log.line("[DISP] ", format_args!("state=down reason=init spi={e:?}")),
+        Err(e) => log.line("[DISP] ", format_args!("state=down reason=init err={e}")),
     }
     // The splash written whole, then the backlight (1485). It stays on the
     // panel through the census and the store's restore: nothing flushes
@@ -1031,7 +1310,7 @@ fn main() -> ! {
         ),
         Err(e) => log.line(
             "[DISP] ",
-            format_args!("splash=failed spi={e:?} backlight=off"),
+            format_args!("splash=failed err={e} backlight=off"),
         ),
     }
 
@@ -1044,7 +1323,7 @@ fn main() -> ! {
             let _ = renderer.text(|cols, rows| fault_lines(&words, cols, rows));
             let shown = renderer.panel();
             if let Some((first, last)) = shown.take_dirty() {
-                let _ = panel.flush(shown, first, last);
+                let _ = panel.write_rows(shown, first, last);
             }
         }
         halt_with_banner(&mut log, bytes);
@@ -2044,7 +2323,7 @@ fn ui_main(
         if draw_owed && !pace.due(edges, now) {
             merged = merged.saturating_add(u32::from(dirty));
         } else if draw_owed {
-            redraw(
+            let flushing = redraw(
                 &mut renderer,
                 &mut map,
                 &mut panel,
@@ -2057,9 +2336,25 @@ fn ui_main(
             pace.drew(edges, now);
             draw_owed = false;
             drawn.drawn(&model);
+            #[cfg(not(m9_bench))]
+            let _ = flushing;
+            // A draw that changed no row is said at once (1540).
             #[cfg(m9_bench)]
+            if !flushing {
+                bench::FLUSH_US.store(0, Ordering::Relaxed);
+                open.say(&mut log);
+            }
+        }
+        // The flush on its way, moved on between the turns (1507); the
+        // bench's `[OPEN]` waits for its last byte.
+        let landed = flushed(&mut panel, renderer.panel(), false, &mut log);
+        #[cfg(m9_bench)]
+        if let Some(us) = landed {
+            bench::FLUSH_US.store(us as u32, Ordering::Relaxed);
             open.say(&mut log);
         }
+        #[cfg(not(m9_bench))]
+        let _ = landed;
         core::hint::spin_loop();
     }
 }

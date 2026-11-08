@@ -27,6 +27,28 @@ pub fn through_dump(frame: &Frame) -> (Frame, usize) {
     (back, text.len())
 }
 
+/// What the board's flush does to the panel, on `shown`: the runs of rows
+/// `panel` changed since its last flush, a window each (1507), copied
+/// over. Nothing when nothing changed.
+pub fn flush_runs(panel: &Frame, shown: &mut Frame) {
+    let runs = panel.take_runs();
+    if runs.is_empty() {
+        return;
+    }
+    let mut pixels: Vec<u16> = (0..HEIGHT)
+        .flat_map(|y| (0..WIDTH).map(move |x| (x, y)))
+        .map(|(x, y)| shown.pixel(x, y))
+        .collect();
+    for (first, last) in runs {
+        for y in first..=last {
+            for x in 0..WIDTH {
+                pixels[(y * WIDTH + x) as usize] = panel.pixel(x, y);
+            }
+        }
+    }
+    *shown = Frame::from_pixels(pixels).expect("whole");
+}
+
 pub fn png(frame: &Frame) -> Vec<u8> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, WIDTH, HEIGHT);

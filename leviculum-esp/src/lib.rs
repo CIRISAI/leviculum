@@ -36,6 +36,7 @@ extern crate alloc;
 pub mod boards;
 pub mod flash;
 pub mod handheld;
+pub mod mspi;
 pub mod serial_iface;
 pub mod stall;
 pub mod sx1262;

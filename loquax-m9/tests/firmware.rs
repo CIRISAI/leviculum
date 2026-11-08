@@ -14,12 +14,12 @@
 
 mod support;
 
-use support::{check, through_dump};
+use support::{check, flush_runs, through_dump};
 
 use loquax::ui::{update, UiEvent, UiModel};
 use loquax_m9::field::Field;
 use loquax_m9::fixture::{Screen, SCREENS};
-use loquax_m9::frame::{Frame, WIDTH};
+use loquax_m9::frame::Frame;
 use loquax_m9::keys::event;
 use loquax_m9::map::{Map, FIXTURE};
 use loquax_m9::render::Renderer;
@@ -118,23 +118,17 @@ fn a_screen_byte_names_the_screen_and_nothing_else() {
 }
 
 /// The board's loop: one renderer over one frame, a key, a draw, a flush
-/// of the band the draw touched. What it shows after the walk is what a
-/// fresh draw shows, and the band covers every row that changed.
+/// of the runs of rows the draw changed, a window each (1507). What it
+/// shows after the walk is what a fresh draw shows, and the runs cover
+/// every row that changed.
 #[test]
 fn the_boards_redraw_and_its_band_equal_a_fresh_draw() {
     let mut model = Screen::Chats.model();
     let mut panel = Frame::new();
     let mut shown = Frame::new();
     let mut renderer = Renderer::new(&mut panel).expect("renderer");
-    let flush = |renderer: &Renderer<'_, Frame>, shown: &mut Frame| {
-        let panel = renderer.panel();
-        if let Some((first, last)) = panel.take_dirty() {
-            let mut pixels = shown.pixels().to_vec();
-            let rows = (first * WIDTH) as usize..((last + 1) * WIDTH) as usize;
-            pixels[rows.clone()].copy_from_slice(&panel.pixels()[rows]);
-            *shown = Frame::from_pixels(pixels).expect("whole");
-        }
-    };
+    let flush =
+        |renderer: &Renderer<'_, Frame>, shown: &mut Frame| flush_runs(renderer.panel(), shown);
     renderer
         .draw(&screen::scene(&model), &Look::of(&model))
         .expect("draw");
