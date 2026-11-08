@@ -179,7 +179,7 @@
 //! [KB] answer=mixed t=<ms>  after one whose bytes disagree
 //! [KB] queue_lost=<n> read_failed=<n>   when either count moved (1463)
 //! [LOOP] turn_ms=<n> stage=<host|node|take|draw|keys> host=.. node=.. take=.. draw=.. keys=.. entries=<n>
-//! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n>  (1569, the UI core's slow turn: msgs the queue held, entries folded)
+//! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n> rows_us=.. layout_us=.. blit_us=.. flush_us=..  (1569, the UI core's slow turn: msgs the queue held, entries folded; 1591, the turn's draw split: the scene's rows, their layout into cells, the changed cells into the frame, the wait for the last flush)
 //!                           a turn of the loop longer than 100 ms (1463)
 //! [FOLD] entries=<n> turns=<n> wall_us=<n> unpack_us=<n> step_us=<n> finish_us=<n> route_us=<n> alloc_us=<n> allocs=<n> alloc_bytes=<n> per_entry_us wall=<n> unpack=<n> step=<n> alloc=<n>  (1575, the bench image: a pulled page's fold on the UI core, said when its last entry is folded, summed over the turns it took)
 //! ```
@@ -1150,6 +1150,18 @@ struct Shown {
     overview: Overview,
 }
 
+/// Where a turn's draw went (1591), microseconds: the wait for the last
+/// flush to leave the frame, the scene's rows, their layout into cells,
+/// the changed cells into the frame ([`loquax_m9::render::DrawSplit`]).
+/// Said in the `[LOOP] core=ui` line of a slow turn.
+#[derive(Clone, Copy, Default)]
+struct DrawSpent {
+    rows: u64,
+    layout: u64,
+    blit: u64,
+    flush: u64,
+}
+
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
 /// the map in pixels when it is open, or the pairing over all of it, and
 /// start the rows that changed on their way to the panel. On the UI core
@@ -1167,11 +1179,14 @@ fn redraw(
     said: &mut page::Said,
     fed: &dyn Fn(),
     log: &mut UiLog,
+    spent: &mut DrawSpent,
 ) -> bool {
     // The last flush reads the frame until it is out (1507): its own
     // stage, so a record names the wait apart from the draw (1563).
     stall::stage(Core::Ui, Stage::Flush);
+    let t_flush = leviculum_esp::uptime_us();
     let _ = flushed(panel, renderer.panel(), true, fed, log);
+    spent.flush = leviculum_esp::uptime_us().saturating_sub(t_flush);
     stall::stage(Core::Ui, Stage::Draw);
     let look = screen::Look {
         row,
@@ -1195,6 +1210,10 @@ fn redraw(
         None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
         None => bench::show(renderer, model, &look, map),
     };
+    let split = renderer.take_split();
+    spent.rows = split.scene_us;
+    spent.layout = split.layout_us;
+    spent.blit = split.blit_us;
     if drawn.is_err() {
         log.line("[DISP] ", alloc::string::String::from("draw=failed"));
         return false;
@@ -2373,6 +2392,9 @@ fn ui_main(
     // among it, routed by the loop's next turn. Dropped before, the
     // boot's cursor chat never loaded and opened with no read mark.
     let mut asked = house::set_size(size, &mut model, &mut renderer);
+    // The renderer times its draws by the board's clock (1591): the
+    // `[LOOP] core=ui` line's draw split, the `[MAP]` line's passes.
+    renderer.set_clock(leviculum_esp::uptime_us);
     log.line("[TYPE] ", alloc::format!("size={} via=boot", size.name()));
 
     // The M9's own cursor over a group's sheet or picker (slice six).
@@ -2390,6 +2412,7 @@ fn ui_main(
         // No watchdog is armed on this core yet.
         &|| {},
         &mut log,
+        &mut DrawSpent::default(),
     );
     // What the panel shows (1491): a page that changed nothing draws
     // nothing.
@@ -2448,6 +2471,7 @@ fn ui_main(
         // The queue's depth this turn: messages taken, entries in them.
         let mut turn_msgs: u32 = 0;
         let mut turn_entries: u32 = 0;
+        let mut draw_spent = DrawSpent::default();
         let mut dirty = false;
         let mut wants = Wants::default();
         let route_out = |model: &mut UiModel<Field>,
@@ -2643,6 +2667,7 @@ fn ui_main(
                             &mut said,
                             &|| wdt.feed(),
                             &mut log,
+                            &mut DrawSpent::default(),
                         );
                         log.line("[DUMP] ", alloc::format!("screen={}", walked.name()));
                     }
@@ -2664,6 +2689,7 @@ fn ui_main(
                             &mut said,
                             &|| wdt.feed(),
                             &mut log,
+                            &mut DrawSpent::default(),
                         );
                         log.line("[DUMP] ", alloc::format!("screen={}", pair::DUMP_NAME));
                     }
@@ -2824,6 +2850,7 @@ fn ui_main(
                 &mut said,
                 &|| wdt.feed(),
                 &mut log,
+                &mut draw_spent,
             );
             pace.drew(edges, now);
             draw_owed = false;
@@ -2868,12 +2895,16 @@ fn ui_main(
             log.line(
                 "[LOOP] ",
                 alloc::format!(
-                    "core=ui turn_ms={} stage={slowest} drain={} keys={} send={} draw={} msgs={turn_msgs} folded={turn_entries} turn={ui_turns}",
+                    "core=ui turn_ms={} stage={slowest} drain={} keys={} send={} draw={} msgs={turn_msgs} folded={turn_entries} turn={ui_turns} rows_us={} layout_us={} blit_us={} flush_us={}",
                     t_end.saturating_sub(t_turn) / 1000,
                     spent[0].1 / 1000,
                     spent[1].1 / 1000,
                     spent[2].1 / 1000,
-                    spent[3].1 / 1000
+                    spent[3].1 / 1000,
+                    draw_spent.rows,
+                    draw_spent.layout,
+                    draw_spent.blit,
+                    draw_spent.flush,
                 ),
             );
         }
@@ -3249,6 +3280,7 @@ mod bench {
         let t0 = Instant::now();
         let scene = screen::scene(model);
         let t1 = Instant::now();
+        renderer.scene_took((t1 - t0).as_micros());
         let drawn = renderer.draw(&scene, look);
         SCENE_US.store((t1 - t0).as_micros() as u32, Ordering::Relaxed);
         DRAW_US.store(t1.elapsed().as_micros() as u32, Ordering::Relaxed);

@@ -76,6 +76,22 @@ where
     /// The names the picture last drawn carries, said again when it is
     /// copied back (1507).
     names_kept: map::NameStats,
+    /// Where the last cell draw's time went (1591), by the clock.
+    split: DrawSplit,
+}
+
+/// Where a cell draw's time went (1591, the board's `[LOOP] core=ui`
+/// line), microseconds by [`Renderer::set_clock`]'s clock, 0 without
+/// one: the scene built of the model (the list's rows and the chat's
+/// bubbles, `rows_us`), its lines laid into the grid's cells
+/// (`layout_us`: the words fitted, the styles, ratatui's paragraph), and
+/// the cells that changed drawn into the frame (`blit_us`: the diff and
+/// mousefood's glyphs). The flush to the panel is the board's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrawSplit {
+    pub scene_us: u64,
+    pub layout_us: u64,
+    pub blit_us: u64,
 }
 
 /// One size's two buffers: the last frame's cells and the next one's.
@@ -130,6 +146,7 @@ where
             clock: None,
             map_stats: None,
             names_kept: map::NameStats::default(),
+            split: DrawSplit::default(),
         };
         renderer.set_grid(Size::DEFAULT)?;
         Ok(renderer)
@@ -215,6 +232,23 @@ where
         self.clock = Some(clock);
     }
 
+    /// Where the last cell draw's time went (1591), once.
+    pub fn take_split(&mut self) -> DrawSplit {
+        core::mem::take(&mut self.split)
+    }
+
+    /// The scene of the next cell draw took `us` to build: for a caller
+    /// that builds it itself before [`Renderer::draw`] (the bench's
+    /// `[OPEN]` split).
+    pub fn scene_took(&mut self, us: u64) {
+        self.split.scene_us = us;
+    }
+
+    /// The clock's microseconds now, 0 without one.
+    fn now(&self) -> u64 {
+        self.clock.map_or(0, |clock| clock())
+    }
+
     /// What the last map draw did, once: the board says it in a `[MAP]`
     /// line.
     pub fn take_map_stats(&mut self) -> Option<MapStats> {
@@ -230,7 +264,10 @@ where
         map: &mut Map<'_>,
     ) -> Result<(), DrawError> {
         let Some((view, pins)) = map::shown(model).then(|| map::view(model)).flatten() else {
-            return self.draw(&screen::scene(model), look);
+            let t0 = self.now();
+            let scene = screen::scene(model);
+            self.split.scene_us = self.now().saturating_sub(t0);
+            return self.draw(&scene, look);
         };
         let attribution = map.credit();
         let font = self.font(Size::Large);
@@ -348,8 +385,10 @@ where
         }
         let at = usize::from(size.large());
         let area = self.grids[at].next.area;
+        let t0 = self.now();
         let lines = lines(area.width.into(), area.height.into());
         Paragraph::new(to_ratatui_text(&lines)).render(area, &mut self.grids[at].next);
+        let t1 = self.now();
         // The backend borrows the panel and the atlas, the diff the grid:
         // the grid is moved out for the draw and back after.
         let Grid { last, next } = core::mem::replace(
@@ -372,6 +411,9 @@ where
             last: next,
             next: spare,
         };
+        let t2 = self.now();
+        self.split.layout_us = t1.saturating_sub(t0);
+        self.split.blit_us = t2.saturating_sub(t1);
         drawn.map_err(|_| DrawError)
     }
 

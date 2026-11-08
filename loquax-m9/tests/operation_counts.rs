@@ -106,3 +106,94 @@ fn an_idle_board_draws_nothing() {
         ),
     );
 }
+
+/// The host's microseconds since the first call.
+fn host_us() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros() as u64
+}
+
+/// 1591: where the list's draw goes on the host, split as the board's
+/// `[LOOP] core=ui` line splits it (`render::DrawSplit`): the scene's
+/// rows, their layout into cells, the changed cells into the frame.
+/// Forty keys down the 1489 fixture's list, and forty arrivals that move
+/// a row to the top under the cursor (a pull's page). Printed, not
+/// barred: the board's own line is the bar (window 19); the host says
+/// which part leads.
+#[test]
+fn the_list_draw_split() {
+    use loquax_m9::frame::Frame;
+    use loquax_m9::map::{Map, FIXTURE};
+    use loquax_m9::render::{DrawSplit, Renderer};
+    use loquax_m9::screen::Look;
+    let mut model: UiModel<Field> = real_store::model();
+    model.focus = Pane::Conversations;
+    model.list_apart = true;
+    update(
+        &mut model,
+        UiEvent::Viewing(screen::viewing(screen::Size::DEFAULT)),
+    );
+    let mut frame = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    let mut renderer = Renderer::new(&mut frame).expect("renderer");
+    renderer.set_clock(host_us);
+    let mut draw = |model: &UiModel<Field>, renderer: &mut Renderer<'_, Frame>| -> DrawSplit {
+        renderer
+            .show(model, &Look::of(model), &mut map)
+            .expect("draw");
+        renderer.take_split()
+    };
+    let _ = draw(&model, &mut renderer);
+    let mut keys = Vec::new();
+    for _ in 0..40 {
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        );
+        keys.push(draw(&model, &mut renderer));
+    }
+    let mut arrivals = Vec::new();
+    for n in 0..40u8 {
+        update(
+            &mut model,
+            UiEvent::Engine(loquax::outbox::OutboxEvent::Received {
+                sent_at: real_store::BASE + 1000 + i64::from(n),
+                message_id: [0xa0u8.wrapping_add(n); 32],
+                source: real_store::peer(20 + usize::from(n)),
+                title: Vec::new(),
+                body: format!("Nachricht {n}").into_bytes(),
+                fields: Vec::new(),
+                verified: true,
+            }),
+        );
+        arrivals.push(draw(&model, &mut renderer));
+    }
+    let say = |what: &str, splits: &[DrawSplit]| {
+        let part = |f: fn(&DrawSplit) -> u64| {
+            let mut v: Vec<u64> = splits.iter().map(f).collect();
+            v.sort_unstable();
+            (v[v.len() / 2], v[v.len() - 1])
+        };
+        let (rows, layout, blit) = (
+            part(|s| s.scene_us),
+            part(|s| s.layout_us),
+            part(|s| s.blit_us),
+        );
+        println!(
+            "DRAW_SPLIT {what} n={} rows_us={}/{} layout_us={}/{} blit_us={}/{} (median/max)",
+            splits.len(),
+            rows.0,
+            rows.1,
+            layout.0,
+            layout.1,
+            blit.0,
+            blit.1
+        );
+    };
+    say("keys", &keys);
+    say("arrivals", &arrivals);
+}
