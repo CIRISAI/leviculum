@@ -720,6 +720,48 @@ fn no_daemon(error: &loquax::engine::AttachError) -> ExitCode {
     }
 }
 
+/// The configuration directory of the daemon the window and the terminal
+/// attach to, and start when none answers: `--config`, else
+/// `$LNMSG_HOME/reticulum` when [`LNMSG_HOME`](identity::HOME_ENV) moves
+/// Loquax's state, else the user's default (`~/.reticulum`). A Loquax whose
+/// state lives elsewhere (a test, a second identity) starts its daemon
+/// there too, never in the user's own directory (1570: a test's started
+/// lnsd ran 20 s on the coder host's `~/.reticulum`, its AutoInterface up).
+/// The instance it asks for is still the config's, `default` without one, so
+/// a running default daemon is found from either.
+#[cfg(any(feature = "tui", feature = "gui"))]
+fn daemon_config_dir(flag: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    flag.unwrap_or_else(|| {
+        std::env::var_os(identity::HOME_ENV)
+            .filter(|home| !home.is_empty())
+            .map(|home| std::path::PathBuf::from(home).join(DAEMON_DIR))
+            .unwrap_or_else(Config::default_config_dir)
+    })
+}
+
+/// The daemon's directory under a moved `LNMSG_HOME` ([`daemon_config_dir`]).
+/// Not the state directory itself: Loquax's own `config` lies there.
+#[cfg(any(feature = "tui", feature = "gui"))]
+const DAEMON_DIR: &str = "reticulum";
+
+/// No daemon to attach to and none could be started. An lnsd that is not
+/// there to start is the missing daemon the one sentence is for (1265), so
+/// it reads as [`no_daemon`] does; a start that failed otherwise (it exited,
+/// it never answered) is said as it is, with its log.
+#[cfg(any(feature = "tui", feature = "gui"))]
+fn no_start(error: leviculum_std::instance::InstanceError, instance: &str) -> ExitCode {
+    use leviculum_std::instance::InstanceError;
+    match &error {
+        InstanceError::Spawn { error: io, .. } if io.kind() == std::io::ErrorKind::NotFound => {
+            no_daemon(&loquax::engine::AttachError::NoDaemon {
+                instance: instance.to_string(),
+                detail: error.to_string(),
+            })
+        }
+        _ => failure(error, "no-daemon"),
+    }
+}
+
 /// The instance name decides the abstract socket (`\0rns/{name}`) the daemon
 /// listens on, so it comes from the daemon's own config file. Same derivation
 /// `lncp`, `lnstatus` and `leviculum-lxmf-node` use.

@@ -66,8 +66,10 @@ const SETTLE_MS: u64 = 1_000;
 /// clock, so its frames are the same on every run.
 const SCRIPT_CLOCK: (i64, u32, u32, u32, u32) = (2026, 10, 26, 12, 0);
 
-/// The log file's filter without `RUST_LOG`.
-const LOG_FILTER: &str = "warn,loquax=info";
+/// The log file's filter without `RUST_LOG`: Loquax's own lines, and the
+/// `INSTANCE` line that says whether the daemon was found or started, and
+/// its pid (1570; the man page promised it, the filter dropped it).
+const LOG_FILTER: &str = "warn,loquax=info,leviculum_std::instance=info";
 
 /// What a frontend tells the shell it starts.
 pub(crate) struct ShellOptions {
@@ -1462,10 +1464,7 @@ pub(crate) async fn start(
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
     let display_name = display_name::from_process(None).map_err(crate::usage)?;
-    let config_dir = options
-        .config
-        .clone()
-        .unwrap_or_else(leviculum_std::config::Config::default_config_dir);
+    let config_dir = crate::daemon_config_dir(options.config.clone());
     let instance = options
         .instance
         .clone()
@@ -1479,7 +1478,7 @@ pub(crate) async fn start(
         options.no_start,
         leviculum_std::instance::Report::Quiet,
     )
-    .map_err(|error| crate::failure(error, "no-daemon"))?;
+    .map_err(|error| crate::no_start(error, &instance))?;
     let storage_dir =
         crate::storage_dir(&home).map_err(|error| crate::failure(error, "no-daemon"))?;
 

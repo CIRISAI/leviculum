@@ -3385,37 +3385,84 @@ async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row() {
     }
 }
 
-/// The messenger started with no daemon (1265, walk finding 5 of the ninety
-/// percent walk): before any frame is drawn it says one sentence and one
-/// command, in the locale's language, and exits 1, as plain `loquax` and as
-/// `loquax tui`. This binary is a checkout's build, so the command is the
-/// checkout's; the packaged `sudo systemctl start lnsd` is
-/// `start_command`'s unit test. The stack's words (the instance, the shared
-/// instance, rnsd) only with `--verbose`.
+/// A messenger run whose own state lives in `lnmsg_home` and whose user's
+/// home is `home`, with `lnsd` as the daemon it may start, no display to
+/// open a window on, and pipes for its input and output. Returns the exit code,
+/// stdout and stderr.
+fn run_messenger(
+    args: &[&str],
+    lang: &str,
+    lnmsg_home: &Path,
+    home: &Path,
+    lnsd: &Path,
+) -> (Option<i32>, String, String) {
+    let mut command = Command::new(LNMSG);
+    for name in [
+        "LC_ALL",
+        "LC_MESSAGES",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "LEVICULUM_EVENT_LOG",
+        "RUST_LOG",
+    ] {
+        command.env_remove(name);
+    }
+    command
+        .args(args)
+        .env("LANG", lang)
+        .env("LNMSG_HOME", lnmsg_home)
+        .env("HOME", home)
+        .env("LEVICULUM_LNSD", lnsd)
+        // A started daemon brings up no medium of its own: no AutoInterface
+        // on the host's network, no serial or Bluetooth scan.
+        .env("LEVICULUM_NO_AUTO", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+    let output = child.wait_with_output().expect("wait for loquax");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Every entry under `dir`, for an assertion that names what is there.
+fn entries(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|it| {
+            it.flatten()
+                .map(|e| e.path().display().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The messenger started with no daemon and no lnsd to start (1265, walk
+/// finding 5; since 1550 it starts one where it can, 1570): before any frame
+/// is drawn it says one sentence and one command, in the locale's language,
+/// and exits 1, as plain `loquax` and as `loquax tui`. No lnsd is reachable:
+/// `LEVICULUM_LNSD` names none, and the user's home is empty. This binary
+/// is a checkout's build, so the command is the checkout's; the packaged
+/// `sudo systemctl start lnsd` is `start_command`'s unit test. The stack's
+/// words (the instance, the shared instance, rnsd) only with `--verbose`.
 #[test]
-fn without_a_daemon_the_messenger_says_one_sentence_and_one_command() {
+fn without_a_daemon_or_an_lnsd_to_start_the_messenger_says_one_sentence_and_one_command() {
     let instance = format!("loquax-nodaemon-tui-{}", std::process::id());
+    let missing = Path::new("/nonexistent/lnsd-1570");
     let run = |args: &[&str], lang: &str| {
-        let home = tempfile::tempdir().expect("state dir");
-        let mut command = Command::new(LNMSG);
-        for name in ["LC_ALL", "LC_MESSAGES"] {
-            command.env_remove(name);
-        }
-        command
-            .args(args)
-            .env("LANG", lang)
-            .env("LNMSG_HOME", home.path())
-            .env_remove("LEVICULUM_EVENT_LOG")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
-        let output = child.wait_with_output().expect("wait for loquax");
-        (
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        )
+        let lnmsg_home = tempfile::tempdir().expect("state dir");
+        let home = tempfile::tempdir().expect("user home");
+        let got = run_messenger(args, lang, lnmsg_home.path(), home.path(), missing);
+        assert!(
+            entries(home.path()).is_empty(),
+            "{args:?} wrote into the user's home: {:?}",
+            entries(home.path())
+        );
+        got
     };
     let expected = [
         (
@@ -3443,7 +3490,162 @@ fn without_a_daemon_the_messenger_says_one_sentence_and_one_command() {
 
     let (code, _, stderr) = run(&["--instance", &instance, "--verbose"], "C.UTF-8");
     assert_eq!(code, Some(1), "stderr: {stderr}");
-    for words in [instance.as_str(), "shared instance", "rnsd"] {
+    for words in [
+        instance.as_str(),
+        "shared instance",
+        "rnsd",
+        "/nonexistent/lnsd-1570",
+    ] {
         assert!(stderr.contains(words), "--verbose lacks {words}: {stderr}");
+    }
+}
+
+/// The checkout's release lnsd, which `just build-integ-bins` builds (the
+/// `loquax-tui` recipe depends on it), refused by name when it is older
+/// than the sources it is built from: an old build has no
+/// `--instance-name` and would fail this test for a reason the tree does
+/// not have (the mvrs' check, leviculum#507).
+fn release_lnsd() -> std::path::PathBuf {
+    let lnsd = Path::new(LNMSG)
+        .parent()
+        .and_then(Path::parent)
+        .expect("the target directory")
+        .join("release")
+        .join(format!("lnsd{}", std::env::consts::EXE_SUFFIX));
+    let built = std::fs::metadata(&lnsd)
+        .and_then(|m| m.modified())
+        .unwrap_or_else(|e| {
+            panic!(
+                "{} not found ({e}): run `just build-integ-bins` first, or `just loquax-tui`, \
+                 which builds it",
+                lnsd.display()
+            )
+        });
+    fn newest(dir: &Path, found: &mut Option<(std::time::SystemTime, std::path::PathBuf)>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                newest(&path, found);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                if let Ok(m) = entry.metadata().and_then(|m| m.modified()) {
+                    if found.as_ref().is_none_or(|(t, _)| m > *t) {
+                        *found = Some((m, path));
+                    }
+                }
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut found = None;
+    for dir in [
+        "leviculum-core/src",
+        "leviculum-std/src",
+        "leviculum-cli/src",
+        "leviculum-lxmf/src",
+    ] {
+        newest(&root.join(dir), &mut found);
+    }
+    if let Some((touched, source)) = found {
+        assert!(
+            built >= touched,
+            "{} is older than {}: run `just build-integ-bins` first, or `just loquax-tui`, \
+             which builds it",
+            lnsd.display(),
+            source.display()
+        );
+    }
+    lnsd
+}
+
+/// The messenger with an lnsd to start and no daemon running (1570): it
+/// starts the daemon in its own state directory, `$LNMSG_HOME/reticulum`,
+/// on the instance it was asked for, and never in the user's
+/// `~/.reticulum` (the user's home here is a second empty directory, and
+/// stays empty). The daemon answers, so the messenger goes on to its
+/// screen; its input and output are pipes, so it says it needs a terminal
+/// and exits 1. The daemon goes with it:
+/// the log shows the stop, and the pid the `INSTANCE` line named is gone.
+#[test]
+fn with_an_lnsd_to_start_the_messenger_starts_it_in_its_own_home_and_it_goes_with_it() {
+    let lnsd = release_lnsd();
+    for (n, front) in [&[][..], &["tui"][..]].into_iter().enumerate() {
+        let instance = format!("loquax-starts-{}-{n}", std::process::id());
+        let lnmsg_home = tempfile::tempdir().expect("state dir");
+        let home = tempfile::tempdir().expect("user home");
+        let mut args: Vec<&str> = front.to_vec();
+        args.extend(["--instance", &instance]);
+        let (code, stdout, stderr) =
+            run_messenger(&args, "C.UTF-8", lnmsg_home.path(), home.path(), &lnsd);
+        assert_eq!(code, Some(1), "{args:?} stderr: {stderr}");
+        assert!(stdout.is_empty(), "{args:?} stdout: {stdout}");
+        assert_eq!(
+            stderr,
+            "loquax: the terminal view needs a terminal on its input and output; \
+             run it in one, or \"loquax gui\" for the window\n",
+            "{args:?}: the daemon answered, so the screen is what failed"
+        );
+
+        assert!(
+            entries(home.path()).is_empty(),
+            "{args:?}: the started daemon wrote into the user's home: {:?}",
+            entries(home.path())
+        );
+        let dir = lnmsg_home.path().join("reticulum");
+        for file in ["config", "lnsd.log", "storage"] {
+            assert!(
+                dir.join(file).exists(),
+                "{args:?}: no {file} in {}: {:?}",
+                dir.display(),
+                entries(&dir)
+            );
+        }
+        let daemon_log = std::fs::read_to_string(dir.join("lnsd.log")).expect("lnsd.log");
+        assert!(
+            daemon_log.contains(&format!("Instance name: {instance} (--instance-name)")),
+            "{args:?}: the daemon serves another name:\n{daemon_log}"
+        );
+        assert!(
+            daemon_log.contains(&format!("Config dir: {}", dir.display())),
+            "{args:?}: the daemon runs elsewhere:\n{daemon_log}"
+        );
+        assert!(
+            daemon_log.contains("Received SIGTERM"),
+            "{args:?}: the daemon was not stopped with the messenger:\n{daemon_log}"
+        );
+
+        let tui_log = std::fs::read_to_string(lnmsg_home.path().join("tui.log")).expect("tui.log");
+        let line = tui_log
+            .lines()
+            .find(|l| l.contains("INSTANCE") && l.contains("started"))
+            .unwrap_or_else(|| panic!("{args:?}: no INSTANCE started line:\n{tui_log}"));
+        let pid: u32 = line
+            .split("pid=")
+            .nth(1)
+            .and_then(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or_else(|| panic!("{args:?}: no pid in {line}"));
+        let stat = Path::new("/proc").join(pid.to_string()).join("stat");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // Gone, a zombie its new parent has yet to reap, or the pid
+            // already reused by another program: no lnsd running there.
+            let alive = std::fs::read_to_string(&stat).ok().is_some_and(|s| {
+                let state = s.rsplit(')').next().unwrap_or("").trim_start();
+                s.contains("(lnsd)") && !state.starts_with('Z')
+            });
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{args:?}: lnsd {pid} outlived the messenger"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }

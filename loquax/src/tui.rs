@@ -145,6 +145,11 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     shell::finish(shell, outcome).await
 }
 
+/// Said when the terminal view is started with its input or output not a
+/// terminal: from a script, a pipe or a service.
+pub(crate) const NOT_A_TERMINAL: &str = "the terminal view needs a terminal on its input and \
+     output; run it in one, or \"loquax gui\" for the window";
+
 /// The terminal with the keyboard enhancement protocol on top, where the
 /// terminal speaks it: `Shift-Enter` and `Ctrl-Enter` then arrive as
 /// themselves (loquax-keys-and-layout.md, section 3, "What the terminal can and
@@ -227,6 +232,16 @@ async fn run_terminal(
     graphics: map::GraphicsFlag,
     remembered: &[(String, String)],
 ) -> Result<(), String> {
+    // Without a terminal on both ends there is nothing to draw on and no
+    // keys to read: said in a sentence, before raw mode reaches for the
+    // controlling terminal, which is ENXIO without one and someone else's
+    // screen with one (1570).
+    {
+        use std::io::IsTerminal;
+        if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+            return Err(NOT_A_TERMINAL.to_string());
+        }
+    }
     install_panic_hook();
     // Before the alternate screen, as lnomad does: the background query reads
     // its answer on stdin, which raw mode would hand to the key handler. The

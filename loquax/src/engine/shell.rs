@@ -454,8 +454,8 @@ impl core::fmt::Display for AttachError {
             Self::NoDaemon { instance, detail } => write!(
                 f,
                 "could not join the Reticulum shared instance named '{instance}'.\n  \
-                 Loquax talks to a daemon that is already running; it does not start a \
-                 Reticulum stack of its own.\n  \
+                 Loquax talks to a daemon; it starts lnsd when none answers, unless \
+                 --no-start forbids it or there is no lnsd to start.\n  \
                  Start one with `lnsd` (or Python's `rnsd`), or name another instance \
                  with --instance / --config.\n  \
                  The stack said: {detail}"

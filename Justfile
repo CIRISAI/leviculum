@@ -2622,8 +2622,10 @@ m9-render-no-std:
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
 # 1167); where the reference is checked out they run.
+# build-integ-bins: tui_snapshot starts the checkout's release lnsd as the
+# messenger's daemon (1570), and refuses one older than its sources.
 [doc('Lint and test loquax with its tui feature (#232)')]
-loquax-tui:
+loquax-tui: build-integ-bins
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
     {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh loquax/device_receipts -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts
 
