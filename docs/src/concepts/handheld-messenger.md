@@ -216,7 +216,7 @@ messenger core holds the same types a board will.
 Lew, 2026-11-02: Loquax is the M9's UI. The board's facts are in one
 place on [The ThinkNode M9](thinknode-m9.md), "The board as the UI sees
 it"; the frontend renders the scene the other three targets already
-render (`Scene`, `loquax/src/ui/scene.rs:994`), and this section records
+render (`Scene`, `loquax/src/ui/scene.rs:999`), and this section records
 what was measured for the plan, the budgets, and the slices. The host
 numbers below are 64-bit figures from a counting allocator, upper bounds
 for the 32-bit board (the 1337 pattern); the spike code ran under
@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:1051`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:1060`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -421,10 +421,10 @@ The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
 `thumbv7em-none-eabihf` and the M9's `xtensa-esp32s3-none-elf` by `just
 m9-render-no-std` (in `guards`, with an injected `std::fs` call as its
 positive control). It words the chats list scene in cells
-(`lines`, `loquax-m9/src/screen.rs:206`) and draws them through
+(`lines`, `loquax-m9/src/screen.rs:224`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
-mousefood (`draw`, `loquax-m9/src/render.rs:104`). Mousefood's own
+mousefood (`draw`, `loquax-m9/src/render.rs:172`). Mousefood's own
 `framebuffer` is off: the cells go straight into the caller's frame, and
 the crate's `framebuffer` feature turns it back on for the board's DMA
 measurement. What the slice settled on the host:
@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:496`).
+  (`narrow`, `loquax-m9/src/screen.rs:522`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:440`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:466`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -484,7 +484,7 @@ the table above it takes the host halves of slices 2 and 3: the chat
 drawn from the scene, and typed text through the model's keys. The board
 halves stay: the store in flash, the scancodes, the send over the mesh.
 
-- **The chat in cells** (`lines_at`, `loquax-m9/src/chat.rs:55`). The
+- **The chat in cells** (`lines_at`, `loquax-m9/src/chat.rs:53`). The
   scene's chat set as the terminal sets a conversation: a bubble wrapped
   to three quarters of the 53 cells (`block_cap`,
   `loquax/src/ui/layout.rs:410`), tinted with a margin cell either side,
@@ -510,13 +510,25 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   the cursor nine bubbles, opens the line and types an emoji with one
   renderer, and must equal a fresh draw.
 - **What the M9 shows of a model** (`scene`,
-  `loquax-m9/src/screen.rs:179`, and `Look::of`,
-  `loquax-m9/src/screen.rs:156`). The Compact scene, which is the open chat
+  `loquax-m9/src/screen.rs:197`, and `Look::of`,
+  `loquax-m9/src/screen.rs:174`). The Compact scene, which is the open chat
   alone, with the cursor of the pane the keys are in; and the list while
   the keys are on the list. The model's back from the chat moves the keys
   to the list and keeps the chat open, as the terminal's panes do, so a
   screen of one pane shows the pane the keys are in. That builds the Wide
   scene and drops its chat: the list's peak then carries the chat's.
+- **The list's cursor is the reader's** (1546, `list_top`,
+  `loquax/src/ui.rs:2233`). The model keeps the selected peer and the line
+  it stands on; while it stays selected, a pull or an arrival that sorts
+  rows in above it moves the window, not the cursor. A key moves the line
+  by as many rows as the selection moved in the order. Before, the window
+  was a function of the cursor's place in the order alone, and a first
+  pull's 61 pages made the cursor jump about the panel with no key
+  pressed. Moving the cursor onto a chat loads its page behind the list
+  and reads nothing (`behind_the_list`, `loquax-m9/src/home.rs:81`); Enter
+  reads, and an Enter before the page arrived names the row's kept unread
+  ids. What a type size set asks of the model, the boot's cursor chat's
+  page among it, is routed (`set_size`, `loquax-m9/src/house.rs:304`).
 - **The compose line** (`compose_line`, `loquax-m9/src/chat.rs:531`): the
   hint while empty and not typed into, the text scrolled so the caret
   shows and the caret's cell reversed while it is. The field is
@@ -679,7 +691,7 @@ draws is the scene the terminal, the window and the phone already draw.
   goes through mousefood into `loquax-m9`'s frame, which keeps the band
   of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:85`), and the
   board sends only that band through the row window (`flush`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:541`): the full frame's 30.8 ms
+  `leviculum-esp/src/bin/thinknode_m9.rs:545`): the full frame's 30.8 ms
   is the first draw's cost, a moved cursor sends two entries. The
   redraw test drives one renderer through four keys and must equal a
   fresh draw, its band flushed into a second frame
@@ -691,7 +703,7 @@ draws is the scene the terminal, the window and the phone already draw.
   is a store on disk with signed messages, which the board has neither of
   yet, so the board's two screens have goldens of their own,
   `m9-fw-chats.png` and `m9-fw-chat.png`, walked to with the board's keys
-  (`Screen::model`, `loquax-m9/src/fixture.rs:634`).
+  (`Screen::model`, `loquax-m9/src/fixture.rs:636`).
 - **The keyboard:** the controller's answer is read as the community port
   reads it, register 0x01 of 0x6D, eight bytes a poll. Every answer goes
   out raw, `KBRAW <ms> <hex>`, one a 10 ms poll, and `parse_raw`
@@ -909,7 +921,7 @@ group keys run the node's `Action` the way a tap does (`hit`,
 `loquax-m9/src/group.rs:137`), and nothing new enters the model. The
 cursor over the sheet's and the picker's rows is the M9's own, as a
 finger is the phone's: a row index the board keeps beside the model
-(`Look::row`, `loquax-m9/src/screen.rs:120`), back to the first row
+(`Look::row`, `loquax-m9/src/screen.rs:134`), back to the first row
 whenever another screen opens, kept when the sheet's question is
 answered (`press`, `loquax-m9/src/group.rs:263`). The board's key loop
 now goes through `press`; a key no group screen takes goes to the model
@@ -952,18 +964,18 @@ avatar, the name, "2 selected" in the bar, `[Space] tick  [Enter] Next`
 at the bottom, muted while disabled. The name: whom it is for, the
 field with its caret, the trust sentence, `[Enter] Create  [Back]
 Close`. The card in the invited group's chat adds the trust sentence and
-`[Enter] Join` under the invitation (`loquax-m9/src/chat.rs:95`), and an
+`[Enter] Join` under the invitation (`loquax-m9/src/chat.rs:93`), and an
 invitation's bubble in the inviter's chat says `[Enter] Join` too. A
 group's row in the list has its member count as the avatar from the
 scene; a group with no line yet says "Invitation" or "3 members" where
 the last line would be. Every word goes through `narrow`.
 
-**The fixture's groups** (`group_model`, `loquax-m9/src/fixture.rs:465`):
+**The fixture's groups** (`group_model`, `loquax-m9/src/fixture.rs:467`):
 Jürgen's "Familie", the reader in it and Ünal gone; the reader's own
 "Kletterhalle", Ivan still invited; Jürgen's "Chor", the reader invited.
 `FRAME_DUMP` names nine screens now, one byte each in `SCREENS`
-(`loquax-m9/src/fixture.rs:510`), walked with the board's keys through
-`press` (`Screen::walk`, `loquax-m9/src/fixture.rs:624`):
+(`loquax-m9/src/fixture.rs:512`), walked with the board's keys through
+`press` (`Screen::walk`, `loquax-m9/src/fixture.rs:626`):
 
 | byte | screen | the walk | dump |
 |---:|---|---|---:|
@@ -989,7 +1001,7 @@ fresh draw after every key (`a_group_redraw_is_the_frame_a_fresh_draw_gives`).
 
 **The census** (`loquax-android/tests/m9_fixture_census.rs`, 64-bit
 host, debug build), every screen of `SCREENS` with the M9's cursor, held
-to `Screen::budget` (`loquax-m9/src/fixture.rs:536`). The group's
+to `Screen::budget` (`loquax-m9/src/fixture.rs:538`). The group's
 screens have a budget of their own (`SHEET`,
 `loquax-m9/src/census.rs:186`), about double the largest of them; the
 board prints the same lines at boot:
@@ -1099,7 +1111,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
 - **Pixels** is the map core's filler painting the view straight into
   the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:738`); the
   whole screen adds the bar's and the legend's cells and the pins
-  (`Renderer::show`, `loquax-m9/src/render.rs:136`).
+  (`Renderer::show`, `loquax-m9/src/render.rs:204`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
   drawn at four by eight source pixels a cell, encoded into glyphs and
   drawn by ratatui through mousefood. The atlas has two of the
@@ -1161,11 +1173,11 @@ cells first, every row in the map's ground, then the map over them, the
 names, the pins and the words; ratatui draws only cells that changed,
 so the next map leaves the blank rows alone, and the renderer clears
 its cells when the screen leaves the map (`leave_map`,
-`loquax-m9/src/render.rs:203`), or the list would keep map pixels where
+`loquax-m9/src/render.rs:274`), or the list would keep map pixels where
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:5834`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:5909`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1174,7 +1186,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:1211`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:1220`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1196,7 +1208,7 @@ takes every row through the shared resolver
 | open the pin's chat | Enter | `Open` |
 | close | Back | `Close` |
 
-**The fixture** (`map`, `loquax-m9/src/fixture.rs:326`) gives the
+**The fixture** (`map`, `loquax-m9/src/fixture.rs:328`) gives the
 board's model the map core's Florence region (`FIXTURE`,
 `loquax-m9/src/map.rs:83`, read in place from the image), the picture,
 and five positions: the board's GNSS fix by the cathedral, Jürgen's and
@@ -1291,10 +1303,10 @@ All targets:
 The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
-a branch in `lines` (`loquax-m9/src/screen.rs:206`) for the scene's
+a branch in `lines` (`loquax-m9/src/screen.rs:224`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:592`), which
 the model already returns while the tab is in front (`rooms_scene`,
-`loquax/src/ui/scene.rs:1172`), and its tab in the tab bar the screen
+`loquax/src/ui/scene.rs:1178`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
 list (name, unread count) or the open room's one live line and its lines
 as `who text`, and one input line at the bottom on the chat's editor
@@ -1402,7 +1414,7 @@ the cache those routines switch off.
   message that fits no page ends the pull with an error, never a panic
   and never a skipped message. The answer ceiling is the largest message
   the board takes in, 256 KiB on the PSRAM heap, not the session's room.
-- **The record** (`ClientRecord`, `loquax/src/home/record.rs:73`), the
+- **The record** (`ClientRecord`, `loquax/src/home/record.rs:78`), the
   board's form of the desktop's three files: the device identity's
   private key, the home's public key, the admission (pending with its
   token, or admitted), the sync cursor and the device name, 196 bytes
