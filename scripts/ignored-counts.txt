@@ -183,6 +183,10 @@
 # an assertion: its runtime is a coin-flip distribution and only means
 # anything in --release on the host it runs on, by hand. Run manually before
 # a release and whenever the stamp code changes (see the test's header).
+# 0 -> 1 (2026-11-08, order 1585): the_mailbox_does_not_grow_with_uptime is
+# the mailbox's growth soak, two hours by default: a reviewer's window job
+# through `just mailbox-growth-soak`, never a suite's.
+1    -p loquax --test mailbox_growth_soak
 1    -p loquax --test stamp_timing
 
 # 0 -> 1 (2026-10-26, order 1009): hook_profile_under_field_load is the
