@@ -501,7 +501,11 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   `narrow` first, the store's emoji and Japanese included.
 - **Only the screen is laid out.** The bubbles go from the bottom up,
   from the newest or, when the cursor stands above the last screen, from
-  the cursor's bubble (`bubbles`, `loquax-m9/src/chat.rs:239`). The window
+  the cursor's bubble (`bubbles`, `loquax-m9/src/chat.rs:239`). When the
+  bubbles up to the cursor's do not fill the screen, it starts at the
+  chat's first bubble and the newer ones fill the rows under it (1544:
+  the bench walk's held ring up showed a folded position run alone at the
+  bottom over a black body; `m9-chat-top-held.png`). The window
   is a function of the scene and the cursor alone; the redraw test moves
   the cursor nine bubbles, opens the line and types an emoji with one
   renderer, and must equal a fresh draw.
