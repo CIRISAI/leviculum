@@ -286,7 +286,7 @@ marked one not, is the reviewer's.
 
 A start without a file opens two TCP connections to entries drawn at
 random from a list shipped in the binary, each marked `bootstrap_only`
-(`bootstrap_only`, `leviculum-std/src/driver/builder.rs:645`): it exists
+(`bootstrap_only`, `leviculum-std/src/driver/builder.rs:646`): it exists
 to join the network and is detached once enough discovered connections
 stand. Discovery is already on by default (`default_discover_interfaces`,
 `leviculum-std/src/config.rs:588`); autoconnect is not

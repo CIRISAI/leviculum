@@ -40,9 +40,9 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:478`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:503`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
-  (`loquax/Cargo.toml:279`, `loquax/Cargo.toml:283`), since 2026-10-25 behind its `std` feature,
+  (`loquax/Cargo.toml:284`, `loquax/Cargo.toml:288`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
   993; the pass order is in [Loquax: architecture](loquax-architecture.md),
   "Plan: the Loquax core without std").
@@ -804,7 +804,7 @@ bytes, and its MDU is 431 (`LORA_LINK_MDU`,
 `loquax/src/home/ask.rs:139`). A response longer than that goes as a
 resource (`leviculum-core/src/node/mod.rs:1827`), which is an
 advertisement, its parts and a proof. The home's own page bound is
-64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:330`). So
+64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:332`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
 that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 (`loquax/src/home/ask.rs:146`), 412 B, the longest answer that still fits

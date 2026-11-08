@@ -605,7 +605,7 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   picture's fitted size, not its cell box, in which iced centred it.
 
 **Slice 4a, built 2026-11-02 (1303).** The core is `no_std` plus `alloc`;
-`just lnomad-core-no-std` (`Justfile:2597`) holds it.
+`just lnomad-core-no-std` (`Justfile:2610`) holds it.
 
 - **`leviculum-micron` is `no_std` always** (`leviculum-micron/src/lib.rs:25`):
   a parser has no use for a file or a clock, and its `std` paths were
@@ -745,7 +745,7 @@ two).** Slice 3's network seam: one node, lent, not a second one.
   stopping takes the node to itself.
 - **Which node.** With the mailbox on the phone, its node: the home node
   lends it once it runs (`DaemonOptions::lends`,
-  `loquax/src/home/daemon.rs:237`), at every start, a restart included,
+  `loquax/src/home/daemon.rs:247`), at every start, a restart included,
   since the screens' leaf reaches nothing past the mailbox, which is no
   transport node. With the mailbox on a computer, the screens' leaf,
   whose rendezvous carries its links on. The fetch identifies with the

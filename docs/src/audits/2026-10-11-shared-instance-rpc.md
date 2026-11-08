@@ -562,7 +562,7 @@ daemon:
 1. **`share_instance`** — Python defaults true
    (`reference/Reticulum/RNS/Reticulum.py:287`); ours defaults false
    (`leviculum-std/src/config.rs:94-99`, resolved unchanged by the
-   builder, `leviculum-std/src/driver/builder.rs:928-930`). A config
+   builder, `leviculum-std/src/driver/builder.rs:929-931`). A config
    that never names the key gives rnsd a shared instance and lnsd
    none: every Python tool answers "No shared RNS instance available"
    against lnsd. This is the central drop-in switch defaulting to the

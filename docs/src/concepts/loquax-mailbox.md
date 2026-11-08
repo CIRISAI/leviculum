@@ -289,7 +289,7 @@ default for a user who runs two clients on the same identity, because the
 first one to sync takes the mail. This must be a visible setting with the
 consequence spelled out, not a config-file default nobody reads. Loquax
 does not expose it yet: it enables the client with
-`PropagationClientConfig::default()` (`loquax/src/engine.rs:1807`).
+`PropagationClientConfig::default()` (`loquax/src/engine.rs:1827`).
 
 Set to `true`, our client keeps every message on the node. That is a
 deviation from the reference client, whose flag only keeps messages it
@@ -473,3 +473,82 @@ The identity file itself must not behave like `lnomad`'s
 (`load_or_create`, `lnomad/src/identity.rs:48-62`, silently regenerating on
 a decode failure). A corrupt identity is a refusal to start with a clear
 message, because minting a new one silently changes the user's address.
+
+## 3. Memory: what the mailbox holds, and its bounds
+
+Order 1585, after miauhaus (Odroid N2, 1.9 GiB RAM, swap full) on
+2026-11-08: `loquax mailbox run` held about 630 MiB, resident plus swap,
+after 28 hours, grew about 22 MB an hour and burned 23 % of a core while
+idle, for a personal mailbox with a 9.8 MB history. A mailbox has to run
+on a small server beside lnsd and lnpnd, so every table it holds is
+bounded by a count or by bytes, never by time alone, and the census says
+which.
+
+### The census
+
+`SIGUSR1` prints a `MAILBOX_CENSUS` line, one estimated heap figure per
+table the daemon holds (`COLUMNS` and `RUN_LOCALS`,
+`loquax/src/home/census.rs:67`), each embedded node's transport census
+under `--- node home ---` and `--- node group <address> ---`, and lnsd's
+process sections with one `gap:` line over all of it
+(`compose_multi_node_dump`, `leviculum-std/src/census.rs:59`). The same
+line goes into the log as a structured `MAILBOX_CENSUS` event every ten
+minutes (`CENSUS_PERIOD`, `loquax/src/home/census.rs:42`). A build with
+`--features heap-accounting` adds the measured live line and honours
+`LEVICULUM_HEAP_SAMPLE`, as lnpnd's does. A unit test reads the bindings
+of the daemon's loop out of its source and fails on a table without a
+census column.
+
+### The bounds and their rule
+
+- **The embedded nodes' transport tables.** A mailbox beside lnsd is a
+  local client of its shared instance, and so is every hosted group's
+  engine: one node more per group. A local client keeps at most
+  `TableCaps::local_client` (`leviculum-core/src/memory_storage.rs:194`,
+  applied in `client_table_caps`, `leviculum-std/src/driver/builder.rs:1288`):
+  2 048 identities and destinations, 1 024 paths, 10 000 packet hashes,
+  about 10 MB at the ceiling where the desktop profile allows 339 MB. The
+  instance holds the network's tables and answers a client's path
+  request from its own cache, which brings an evicted key back. lnpnd
+  builds through the same place.
+- **Known destinations in memory.** The newest `identity_cap` by announce
+  time, at load and after every flush (`newest_known_destinations`,
+  `leviculum-std/src/storage.rs:532`); the file keeps all of them. The
+  remember stamps a flush folds are held to what the identity table still
+  holds (`leviculum-std/src/storage.rs:1185`): the growth soak found them
+  rising 111 kB/min at 40 announces a second, cleared only by the hourly
+  flush.
+- **Names heard from strangers.** The newest 4 096 (`HEARD_CAP`,
+  `loquax/src/home/relation.rs:27`), about half a megabyte: a home hears
+  the whole network's announces, and the map kept every name for the
+  whole run.
+- **The outbox.** Bounded by the messages handed in, as before; their
+  direct retries back off, 1 h, 2 h, 4 h, then every 8 h
+  (`MAX_RETRY_DOUBLINGS`, `loquax/src/home/outgoing.rs:52`), about 24
+  legs over the seven days instead of 168, and the recipient's own
+  announce still tries at once. A message's first miss is logged, its
+  retries once a peer an hour with the count held back
+  (`PEER_LINE_EVERY_SECS`, `loquax/src/home/outgoing.rs:564`, at most
+  1 024 peers).
+- **The idle loop.** The engine's events are read every 20 ms while
+  anything moves and every 250 ms after a second of nothing
+  (`PUMP_QUIET`, `loquax/src/home/daemon.rs:157`); a device's request is
+  never read by that pump and is answered at once. Measured idle on the
+  coder host: 0.6 % and 1.0 % of a core before, 0.35 % twice after
+  (`tests/mailbox_census.rs`, `an_idle_mailbox_uses_almost_no_cpu`).
+
+### The soak
+
+`just mailbox-growth-soak` (`Justfile:2425`) runs the release mailbox
+beside an in-process shared instance that hears new named delivery
+destinations every second, takes a census every ten minutes for two
+hours, and prints the slope of every mailbox column and node table after
+the warm-up third (`MAILBOX_GROWTH`); it is red when resident plus swap
+or the tracked total rises faster than 20 kB/min. An eight-minute run at
+40 announces a second (19 040 destinations, every table at its ceiling
+after two minutes) read 4.3 kB/min tracked, the stamps' bounded
+sawtooth, and resident plus swap falling.
+
+Not yet bounded here, and named so: the history store is SQLite on disk,
+its page cache SQLite's own; a device's sync load (the 1489 fixture and
+the bench board) is not part of the soak's default load.

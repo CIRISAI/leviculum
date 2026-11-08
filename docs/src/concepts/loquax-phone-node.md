@@ -17,7 +17,7 @@ change to the interface seam keeps the way to the full node open.
 | Where messages wait while the phone sleeps | in the mailbox's archive | at a propagation node, as for any LXMF peer |
 
 **The client has no destination of its own.** `Engine::client`
-(`loquax/src/engine.rs:377`) says it "registers nothing, by
+(`loquax/src/engine.rs:389`) says it "registers nothing, by
 construction", and a guard test, `a_client_engine_registers_no_delivery_destination`,
 holds that. The session attaches through `attach_leaf`
 (`loquax-android/src/session.rs:514`) with `Role::Client`. That node runs
@@ -34,7 +34,7 @@ only for the home role (`loquax/src/engine/shell.rs:952`).
 runs the messenger engine in one case: the mailbox on the phone
 (`loquax-android/src/mailbox.rs`) is `loquax --daemon`'s home node inside
 the app, with a node of its own that dials the entry servers
-(`DaemonUpstream::Mesh`, `loquax/src/home/daemon.rs:187`). So the full
+(`DaemonUpstream::Mesh`, `loquax/src/home/daemon.rs:197`). So the full
 node is the engine the phone's mailbox already uses, without
 `loquax.home`, on a node whose interface list holds more than TCP.
 

@@ -93,7 +93,7 @@ path's interface changes. Nothing medium-aware enters transport
   `loquax/src/engine/shell.rs:616`) are the leaf, the phone's own
   mailbox and the mailbox daemon. The daemon on a shared instance dials
   its rendezvous as a peer (`DaemonUpstream::Shared`,
-  `loquax/src/home/daemon.rs:370`), which it needs for devices that are
+  `loquax/src/home/daemon.rs:380`), which it needs for devices that are
   elsewhere, not for the one beside it. So on one lnsd the client should
   find the mailbox through the local interface with no rendezvous
   dialled. Slice 1 turns this reading into a cell before anything else
@@ -386,7 +386,7 @@ Not a way of its own: how the device learns 2b, 3 and 4.
   announce carries the list in its app data, signed as the announce is,
   so every way that delivers an announce teaches the device every direct
   way, and the rendezvous stays the bootstrap. `loquax.home` is announced
-  without app data today (`announce_home`, `loquax/src/home/daemon.rs:280`),
+  without app data today (`announce_home`, `loquax/src/home/daemon.rs:290`),
   and no Python program registers a handler for it, so a Python peer
   relays the announce and ignores the blob. The LXMF delivery announce
   is not touched: its app data is LXMF's.
