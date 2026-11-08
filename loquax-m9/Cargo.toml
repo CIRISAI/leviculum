@@ -26,6 +26,28 @@ default = []
 # frame. Which of the two the SPI driver wants (DMA out of one frame against
 # per-cell writes) is measured on the board, so the switch stays.
 framebuffer = ["mousefood/framebuffer"]
+# The M9 on the host (1530): `loquax-m9-sim`, the board's screens, scene,
+# renderer and page and key logic over a memory flash, headless (`--keys`,
+# `--dump`, `--text`). `std` for the bin only; the library stays `no_std`
+# (`just m9-render-no-std` builds it without features). `loquax/history`
+# for the 1489 fixture (`loquax/tests/support/real_store.rs`), which
+# `--store real` writes into the board's store.
+sim = [
+    "loquax/history",
+    "dep:leviculum-core",
+    "dep:leviculum-log-line",
+    "dep:png",
+]
+# The sim's window (1530): the panel at 2x or 3x, the host's keys as the
+# M9's. winit opens X11 and Wayland with dlopen, which a musl-static
+# binary cannot, so it builds for the host's own triple, as `loquax gui`
+# does (`just m9-sim`); headless needs only `sim`.
+sim-window = ["sim", "dep:winit", "dep:softbuffer"]
+
+[[bin]]
+name = "loquax-m9-sim"
+path = "src/bin/loquax-m9-sim/main.rs"
+required-features = ["sim"]
 
 [dependencies]
 # The messenger core: the scene, its catalogue, the key table and the
@@ -50,6 +72,14 @@ leviculum-map = { path = "../leviculum-map" }
 leviculum-mapfill = { path = "../leviculum-mapfill" }
 # The position a fixture's GNSS fix and its friends' shares are read in.
 leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false }
+# The sim's (1530): the 1489 fixture's messages signed as the home packs
+# them, the board's log line shape (the firmware's own crate, as
+# leviculum-esp reaches it), the PNG dumps, the window.
+leviculum-core = { path = "../leviculum-core", optional = true }
+leviculum-log-line = { path = "../leviculum-nrf/log-line", optional = true }
+png = { version = "0.18", optional = true }
+winit = { version = "0.30", optional = true, default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+softbuffer = { version = "0.4", optional = true, default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 
 [dev-dependencies]
 # The goldens draw the ugly store's model (loquax/tests/support/ugly_store.rs).
