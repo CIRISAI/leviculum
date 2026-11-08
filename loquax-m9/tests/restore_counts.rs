@@ -660,7 +660,9 @@ fn with_rowless(archive: &Archive) -> (Vec<Entry>, [[u8; 16]; 2]) {
 /// carried it. The two boots of one store list the same conversations:
 /// the fold leaves out what the summaries cannot carry. The positive
 /// control is the same entries folded page by page into a fresh model,
-/// as the pull folds them: it holds the two rowless conversations.
+/// as the pull folds them: it holds both message-less conversations.
+/// 1556: the invited group has the invitation's row ("Einladung") and is
+/// listed on both boots; the chat whose message was deleted is on none.
 #[test]
 fn a_rebuilt_and_a_resumed_boot_count_the_same_conversations() {
     let archive = Archive::new();
@@ -677,13 +679,22 @@ fn a_rebuilt_and_a_resumed_boot_count_the_same_conversations() {
     for page in entries.chunks(72) {
         home::take(&mut control, page, &archive.address);
     }
+    let [group, deleted] = rowless;
     for peer in rowless {
         let held = control.conversations.iter().find(|c| c.peer == peer);
         assert!(
-            held.is_some_and(|c| c.messages.is_empty()) && control.row(&peer).is_none(),
-            "the fold holds {peer:02x?} without a message or a row"
+            held.is_some_and(|c| c.messages.is_empty()),
+            "the fold holds {peer:02x?} without a message"
         );
     }
+    // 1556: the invitation's group has its row, the deleted chat none.
+    let invitation = loquax::ui::strings::StrId::GroupInvitation.text(control.lang);
+    assert_eq!(
+        control.row(&group).map(|row| row.listing.line),
+        Some(invitation.to_string()),
+        "the invited group's row is the invitation's"
+    );
+    assert!(control.row(&deleted).is_none());
     assert_eq!(control.conversations.len(), CONVERSATIONS + 2);
 
     let rebuilt = home::restore(&mut flash, archive.address).expect("rebuild");
@@ -709,7 +720,17 @@ fn a_rebuilt_and_a_resumed_boot_count_the_same_conversations() {
         resumed.model.conversations.len(),
         "the boot that folds the ring and the one that resumes count alike"
     );
-    assert_eq!(rebuilt.model.conversations.len(), CONVERSATIONS);
+    // The fixture's conversations and the invitation, on both boots.
+    assert_eq!(rebuilt.model.conversations.len(), CONVERSATIONS + 1);
+    for boot in [&rebuilt, &resumed] {
+        assert!(boot.model.conversations.iter().any(|c| c.peer == group));
+        assert!(boot.model.conversations.iter().all(|c| c.peer != deleted));
+        assert_eq!(
+            boot.model.row(&group).map(|row| row.listing.line),
+            Some(invitation.to_string()),
+            "listed as the invitation on every boot"
+        );
+    }
     let peers = |boot: &home::Boot| {
         let mut peers: Vec<[u8; 16]> = boot.model.conversations.iter().map(|c| c.peer).collect();
         peers.sort();

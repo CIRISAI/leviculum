@@ -359,10 +359,25 @@ impl Index {
     }
 
     /// What the fold made of `entry` at `span` (1556): its message's id
-    /// learnt ([`Index::learn`]). Call before [`Index::take`].
+    /// learnt ([`Index::learn`]), and the name of a group an invitation
+    /// in it names, which the model takes from the invitation and a boot
+    /// from kept rows has from no announce. Call before [`Index::take`].
     pub fn learn_event(&mut self, entry: &Entry, span: Span, event: &crate::outbox::OutboxEvent) {
+        use crate::outbox::OutboxEvent;
         if let Some(id) = event_id(event) {
             self.learn(entry, span, &id);
+        }
+        let fields = match event {
+            OutboxEvent::Received { fields, .. } | OutboxEvent::HomeSent { fields, .. } => fields,
+            _ => return,
+        };
+        let Some(invite) = leviculum_lxmf::lev::Lev::from_fields(fields).and_then(|lev| lev.invite)
+        else {
+            return;
+        };
+        if self.names.get(&invite.group) != Some(&invite.name) {
+            self.names.insert(invite.group, invite.name);
+            self.names_owed.insert(invite.group);
         }
     }
 

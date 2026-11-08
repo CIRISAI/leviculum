@@ -1971,11 +1971,22 @@ impl<B> UiModel<B> {
     /// Conversation `peer`'s row as the store keeps it (1490, schema
     /// 17), derived from its loaded messages as the list derives its
     /// row; `None` while nothing is loaded (the store keeps or heals
-    /// its own then).
+    /// its own then). A group the reader is invited to that no message
+    /// reached yet, and none waits unloaded, has the invitation's row
+    /// (1556): its line says "Einladung", from when the invitation came.
+    /// Before, it had none, and a device that lists from kept rows lost
+    /// it at every boot (1521c).
     pub fn listing_for(&self, peer: &[u8; 16]) -> Option<listing::Listing> {
         let conversation = self.conversations.iter().find(|c| c.peer == *peer)?;
         if conversation.messages.is_empty() {
-            return None;
+            let invited = self
+                .group(peer)
+                .is_some_and(|g| g.standing == groups::Standing::Invited);
+            return (invited && conversation.earlier == 0).then(|| listing::Listing {
+                moved: conversation.touched,
+                line: strings::StrId::GroupInvitation.text(self.lang).into(),
+                ..listing::Listing::default()
+            });
         }
         let messages = &conversation.messages;
         let last = messages.iter().rev().find(|m| !m.is_group_state());
