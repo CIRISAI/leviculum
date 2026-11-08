@@ -1723,11 +1723,18 @@ impl<B> UiModel<B> {
             return;
         }
         let unread = core::mem::take(&mut conversation.unread);
+        // A chat opened before its page loaded (1546, a board's two
+        // cores): the row's kept ids name its unread, and its badge goes
+        // with the count. Before, the count went to 0 with no mark.
+        let kept = core::mem::take(&mut conversation.unread_ids);
+        if let Some(listing) = conversation.listing.as_mut() {
+            listing.unread_rows = 0;
+        }
         self.changed_peers.insert(conversation.peer);
         if !self.home_client {
             return;
         }
-        let ids: Vec<[u8; 32]> = conversation
+        let mut ids: Vec<[u8; 32]> = conversation
             .messages
             .iter()
             .rev()
@@ -1735,6 +1742,17 @@ impl<B> UiModel<B> {
             .take(unread)
             .filter_map(|message| message.id)
             .collect();
+        // Newest first, the unloaded ones behind the loaded.
+        if ids.len() < unread {
+            let room = unread - ids.len();
+            let missing: Vec<[u8; 32]> = kept
+                .into_iter()
+                .rev()
+                .filter(|id| !ids.contains(id))
+                .take(room)
+                .collect();
+            ids.extend(missing);
+        }
         self.mark_out(crate::home::wire::MarkFlag::Read, ids);
     }
 
@@ -9591,6 +9609,50 @@ pub(crate) mod tests {
         let index = model.conversations.iter().position(|c| c.peer == new);
         assert_eq!(model.conversations[index.expect("listed")].unread, 1);
         assert!(model.take_marks().is_empty());
+    }
+
+    /// A chat opened before its page is loaded (1546): a board's two
+    /// cores, the open said before the I/O core's page. The row's kept
+    /// unread ids are what the mark names, and the list's badge goes with
+    /// the count; before, the count went to 0 with no mark, and the home
+    /// and the summary log kept the 7.
+    #[test]
+    fn an_open_before_the_page_marks_the_kept_unread_ids() {
+        use crate::home::wire::MarkFlag;
+        let group = [0x47; 16];
+        let ids: Vec<[u8; 32]> = (1..=7u8).map(|n| [n; 32]).collect();
+        let mut model = UiModel::<Field>::new(&[]);
+        model.home_client = true;
+        model.list_apart = true;
+        model.restore_rows(
+            vec![(
+                listing::Row {
+                    peer: group,
+                    unread: 7,
+                    activity: 9,
+                    unread_ids: ids.clone(),
+                    listing: listing::Listing {
+                        line: String::from("gen! Ich habe"),
+                        moved: Some(9),
+                        unread_rows: 7,
+                        ..listing::Listing::default()
+                    },
+                },
+                500,
+            )],
+            Vec::new(),
+        );
+        assert!(model.conversations[0].messages.is_empty());
+        let _ = update(&mut model, UiEvent::Open { peer: group });
+        let marks = model.take_marks();
+        assert!(marks.iter().all(|m| m.flag == MarkFlag::Read));
+        let named: Vec<[u8; 32]> = marks.into_iter().flat_map(|m| m.ids).collect();
+        let newest_first: Vec<[u8; 32]> = ids.iter().rev().copied().collect();
+        assert_eq!(named, newest_first, "the kept ids, all of them");
+        let row = model.row(&group).expect("the group's row");
+        assert_eq!(row.unread, 0);
+        assert_eq!(row.listing.unread_rows, 0, "the badge goes too");
+        assert!(row.unread_ids.is_empty());
     }
 
     /// A frontend's text goes out as compose's does: a bubble of ours,
