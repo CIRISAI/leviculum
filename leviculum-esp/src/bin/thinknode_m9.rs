@@ -2370,6 +2370,10 @@ fn ui_main(
     // An opened chat's page on its way, for the `[OPEN]` line (1540).
     #[cfg(m9_bench)]
     let mut open = bench::Open::default();
+    // A chat the keys opened this turn (1581): an `[OPEN]` line for it
+    // whether a page is asked or the model held it already.
+    #[cfg(m9_bench)]
+    let mut opened: Option<[u8; 16]> = None;
     // The peer of the bench's arrival on its way to the fold (1540).
     #[cfg(m9_bench)]
     let mut arriving = false;
@@ -2680,7 +2684,13 @@ fn ui_main(
                 if !map::bound(&model, &event) {
                     chrome.nudge(leviculum_esp::uptime_ms());
                 }
+                #[cfg(m9_bench)]
+                let listed = group::Place::of(&model) == group::Place::List;
                 let effects = group::press(&mut model, &mut row, &event);
+                #[cfg(m9_bench)]
+                if listed && group::Place::of(&model) == group::Place::Chat {
+                    opened = model.conversations.get(model.selected).map(|c| c.peer);
+                }
                 if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
                     frame_whole(&renderer);
                     dirty = true;
@@ -2713,6 +2723,12 @@ fn ui_main(
             #[cfg(m9_bench)]
             open.asked(peer);
             log.send(FromUi::Load(peer));
+        }
+        // An open whose page the model held (1581): said after its draw
+        // as a page's is, with nothing read.
+        #[cfg(m9_bench)]
+        if let Some(peer) = opened.take() {
+            open.held(peer);
         }
 
         let t_draw = leviculum_esp::uptime_us();
@@ -3206,12 +3222,38 @@ mod bench {
         /// decode and after the fold.
         free: (usize, usize),
         largest: (usize, usize),
+        /// Whether a page was read for it: the I/O core's counts are the
+        /// last page's otherwise, and said as none.
+        paged: bool,
     }
 
     impl Open {
         /// The UI core asked `peer`'s page.
         pub fn asked(&mut self, peer: [u8; 16]) {
             self.asked = Some((peer, Instant::now()));
+        }
+
+        /// The keys opened `peer`'s chat (1581). Without a page asked for
+        /// it the model held its messages already (the bench's own chat,
+        /// its arrivals folded as they came): the `[OPEN]` line is said
+        /// after the draw all the same, with nothing read, decoded or
+        /// folded. Window 17's hang walk had one line for 38 opens.
+        pub fn held(&mut self, peer: [u8; 16]) {
+            if self.asked.is_some_and(|(asked, _)| asked == peer) {
+                return;
+            }
+            let free = leviculum_esp::heap_free();
+            let largest = leviculum_esp::heap_largest();
+            self.folded = Some(Folded {
+                peer,
+                entries: 0,
+                wait: 0,
+                spent: home::PageSpent::default(),
+                alloc: 0,
+                free: (free, free),
+                largest: (largest, largest),
+                paged: false,
+            });
         }
 
         /// `home::page_in`, timed (1556): the entries decoded into
@@ -3255,6 +3297,7 @@ mod bench {
                 alloc,
                 free: (free_before, leviculum_esp::heap_free()),
                 largest: (largest_before, leviculum_esp::heap_largest()),
+                paged: true,
             });
             effects
         }
@@ -3268,17 +3311,18 @@ mod bench {
             };
             let ms = |us: u64| format!("{}.{:03}", us / 1000, us % 1000);
             let load = |at: &AtomicU32| u64::from(at.load(Ordering::Relaxed));
+            let paged = |at: &AtomicU32| if f.paged { load(at) } else { 0 };
             log.line(
                 "[OPEN] ",
                 format!(
                     "peer={} entries={} messages={} marks={} sectors={} wait_ms={} page_read_ms={} decode_ms={} unpack_ms={} alloc_ms={} fold_ms={} scene_ms={} draw_ms={} flush_ms={}",
                     short(&f.peer),
                     f.entries,
-                    load(&PAGE_MESSAGES),
-                    load(&PAGE_MARKS),
-                    load(&PAGE_SECTORS),
+                    paged(&PAGE_MESSAGES),
+                    paged(&PAGE_MARKS),
+                    paged(&PAGE_SECTORS),
                     ms(f.wait),
-                    ms(load(&READ_US)),
+                    ms(paged(&READ_US)),
                     ms(f.spent.decode),
                     ms(f.spent.unpack),
                     ms(f.alloc),
