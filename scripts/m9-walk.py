@@ -235,32 +235,62 @@ def png(path, width, height, pixels):
         f.write(chunk(b"IEND", b""))
 
 
+def dump_parts(lines):
+    """The dump's lines out of a capture's: a line the board's ring tore
+    (window 13 of 2026-11-08: `PBR 169 0 f79d*320PBR 188 0 f79d*320`, a
+    line end dropped and the lines between gone) splits where the next
+    PBM/PBR/PBE starts, so the rows that came are kept."""
+    return [p for l in lines for p in re.split(r"(?=PB[MRE] )", l) if p[:4] in ("PBM ", "PBR ", "PBE ")]
+
+
+def torn_lines(w, h, seen):
+    """The dump lines a decode lacks, at least: per row, the spans of
+    pixels no PBR line carried (a row takes one line or a few, so two lost
+    lines of the same row count as one)."""
+    n = 0
+    for y in range(h):
+        row = seen[y * w:(y + 1) * w]
+        n += sum(1 for x in range(w) if not row[x] and (x == 0 or row[x - 1]))
+    return n
+
+
 def decode_dump(lines):
-    """PBM/PBR/PBE lines (loquax-m9/src/dump.rs) to (w, h, pixels), or a
-    reason it does not read."""
+    """PBM/PBR/PBE lines (loquax-m9/src/dump.rs) to (w, h, pixels) and
+    None, or with why it does not read: `TORN lines=<n>` when rows are
+    missing (the pixels then come with gaps, drawn black), the hash's
+    words when every pixel came and still does not hash; None for the
+    image when there is no PBM or no PBE at all (1553)."""
     w = h = None
-    px = None
-    for line in lines:
+    px = seen = None
+    for line in dump_parts(lines):
         if line.startswith("PBM "):
             w, h = map(int, line[4:].split()[:2])
-            px = [0] * (w * h)
+            px, seen = [0] * (w * h), [False] * (w * h)
         elif line.startswith("PBR ") and px is not None:
             f = line[4:].split()
-            y, x = int(f[0]), int(f[1])
-            for run in f[2:]:
-                value, _, n = run.partition("*")
-                for _ in range(int(n or 1)):
-                    if x < w:
-                        px[y * w + x] = int(value, 16)
+            try:
+                y, x = int(f[0]), int(f[1])
+                runs = [(int(v, 16), int(n or 1)) for v, _, n in (r.partition("*") for r in f[2:])]
+            except (ValueError, IndexError):
+                continue
+            if not 0 <= y < h:
+                continue
+            for value, n in runs:
+                for _ in range(n):
+                    if 0 <= x < w:
+                        px[y * w + x], seen[y * w + x] = value, True
                     x += 1
         elif line.startswith("PBE ") and px is not None:
             said = line[4:].split()[0]
+            lost = torn_lines(w, h, seen)
+            if lost:
+                return (w, h, px), f"TORN lines={lost}"
             h32 = 0x811C9DC5
             for v in px:
                 for b in (v & 0xFF, v >> 8):
                     h32 = ((h32 ^ b) * 0x01000193) & 0xFFFFFFFF
             if said != "%08x" % h32:
-                return None, f"fnv said {said}, read {h32:08x}"
+                return (w, h, px), f"fnv said {said}, read {h32:08x}"
             return (w, h, px), None
     return None, "no PBE line"
 
@@ -482,14 +512,18 @@ class Walk:
         if not end:
             self.fail(f"dump {name}: no PBE line within {DUMP_WAIT_S:.0f} s")
             return "no dump"
-        lines = [l for l in self.step_lines[start:] if l[:4] in ("PBM ", "PBR ", "PBE ")]
-        image, why = decode_dump(lines)
+        image, why = decode_dump(self.step_lines[start:])
         if not image:
             self.fail(f"dump {name}: {why}")
             return f"dump unread: {why}"
         path = os.path.join("dumps", f"{name}.png")
         png(os.path.join(self.out, path), *image)
         self.pump(0.2)
+        if why:
+            # A torn dump is a named failure, never a crash (1553): the PNG
+            # is written with its gaps for the eye.
+            self.fail(f"dump {name}: {why}")
+            return f"dump {path} {why}"
         return f"dump {path}"
 
     def bench(self, args):
@@ -706,11 +740,12 @@ class FakeBoard(threading.Thread):
     [LOOP] turn as the board's does."""
 
     def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
-                 release=False, slow_turn=False, tops=(0, 5, 2)):
+                 release=False, slow_turn=False, tops=(0, 5, 2), torn=False):
         super().__init__(daemon=True)
         self.rig, self.slow_ms, self.grow_rx = rig, slow_ms, grow_rx
         self.refuse_owe, self.hang_on = refuse_owe, hang_on
         self.release, self.slow_turn, self.tops = release, slow_turn, tops
+        self.torn = torn
         self.row = 0
         self.page = "chats"
         self.opens = 0
@@ -810,13 +845,20 @@ class FakeBoard(threading.Thread):
                      "[STORE] kept=1 writes=1 erased=0 cursor=40 used=3 entries=41",
                      "[BENCH] arrive=folded peer=0a0b0c0d unread=1")
         elif kind == TYPE_FRAME_DUMP:
-            w, h = 4, 2
-            px = [0xF800, 0x07E0, 0x001F, 0xFFFF, 0, 0, 0x1234, 0x1234]
+            w, h = 4, 4
+            rows = [[0xF800, 0x07E0, 0x001F, 0xFFFF], [0, 0, 0x1234, 0x1234],
+                    [0xF79D] * 4, [0x0001] * 4]
             h32 = 0x811C9DC5
-            for v in px:
+            for v in (v for row in rows for v in row):
                 for b in (v & 0xFF, v >> 8):
                     h32 = ((h32 ^ b) * 0x01000193) & 0xFFFFFFFF
-            self.say(f"PBM {w} {h}", "PBR 0 0 f800 07e0 001f ffff", "PBR 1 0 0000*2 1234*2", f"PBE {h32:08x}",
+            lines = ["PBR 0 0 f800 07e0 001f ffff", "PBR 1 0 0000*2 1234*2", "PBR 2 0 f79d*4",
+                     "PBR 3 0 0001*4"]
+            if self.torn:
+                # Window 13's tear: row 1's line end dropped, row 2 gone,
+                # row 3 glued to row 1's line.
+                lines = [lines[0], lines[1] + lines[3]]
+            self.say(f"PBM {w} {h}", *lines, f"PBE {h32:08x}",
                      "[LOOP] turn_ms=4400 stage=take host=0 node=0 take=4400 draw=0 keys=0 entries=40")
 
 
@@ -925,6 +967,18 @@ def selftest():
             if "dump_ms=4400" not in f.read():
                 print("[m9-walk] selftest FAIL: walk.md does not name the dump's turn")
                 rc = 1
+        # 1553: a torn dump fails by name with its lost lines, the walk
+        # goes on and the PNG is written with its gaps.
+        got, w, out = walk("torn", torn=True)
+        if got == 0 or not any("dump list: TORN lines=1" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a torn dump was not named TORN lines=1", w.fails)
+            rc = 1
+        if not os.path.exists(os.path.join(out, "dumps", "list.png")):
+            print("[m9-walk] selftest FAIL: a torn dump wrote no PNG")
+            rc = 1
+        if any(f for f in w.fails if "TORN" not in f):
+            print("[m9-walk] selftest FAIL: a torn dump failed more than its dump", w.fails)
+            rc = 1
         got, w, _ = walk("slowturn", slow_turn=True)
         if got == 0 or not any("[LOOP] turn_ms=400 over" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a 400 ms turn outside a dump passed the 250 ms bar")
@@ -977,7 +1031,8 @@ def selftest():
         print("[m9-walk] selftest ok: a good walk passes and writes its dump, a slow frame and a growing rx_lost fail; "
               "the bench steps pass and count opens, a refused owe and a hang on an open fail; "
               "a release boot fails by name, the dump's turn is named and another slow turn fails, "
-              "open longest picks the longest chat and fails on a list of one-screen chats")
+              "open longest picks the longest chat and fails on a list of one-screen chats, "
+              "a torn dump is named TORN with its lost lines and still drawn")
     return rc
 
 
