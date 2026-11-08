@@ -249,7 +249,14 @@ pub fn lines_at(scene: &Scene, look: &Look, cols: usize, rows: usize) -> (Vec<RL
             false => {
                 let shown = (below / ENTRY_ROWS).max(1);
                 let at = list.rows.iter().position(|r| r.selected).unwrap_or(0);
-                let first = (at + 1).saturating_sub(shown);
+                // The core's line for the cursor (1546): its row keeps it
+                // while a pull reorders the rows around it. Kept on the
+                // screen whatever the scene was built for.
+                let lowest = (at + 1).saturating_sub(shown);
+                let first = match list.top {
+                    Some(top) => top.saturating_sub(list.first).clamp(lowest, at),
+                    None => lowest,
+                };
                 window.list = Some((list.first + at, list.first + first));
                 for row in list.rows.iter().skip(first).take(shown) {
                     out.extend(entry(row, look, cols));

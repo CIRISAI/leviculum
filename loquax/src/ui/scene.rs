@@ -442,6 +442,11 @@ pub struct List {
     /// the scroll geometry when `rows` is a window of it.
     pub first: usize,
     pub total: usize,
+    /// The first row on screen, in the whole order, of a list apart
+    /// (1546, [`super::Viewing::apart`]): where the reader's cursor keeps
+    /// its line while the rows move around it. `None` where the frontend
+    /// scrolls the list itself.
+    pub top: Option<usize>,
     /// What shows when there is no row.
     pub empty: Text,
     pub a11y: A11y,
@@ -1095,13 +1100,14 @@ impl<B> UiModel<B> {
         if !self.folding {
             if let Some(built) = &self.built_list {
                 let order = self.order();
-                let (first, len) = self.list_window(&order);
-                if built.stamp == self.list_stamp(&order, first, len) {
+                let (first, len, top) = self.list_window(&order);
+                if built.stamp == self.list_stamp(&order, first, len, top) {
                     return List {
                         id: NodeId::List,
                         rows: built.rows.clone(),
                         first: built.first,
                         total: built.total,
+                        top: built.top,
                         empty: Text::key(StrId::NoConversations),
                         a11y: A11y::of(NodeId::List, Role::List, Text::key(StrId::TabChats)),
                     };
@@ -1443,11 +1449,13 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
 fn list<B>(model: &UiModel<B>) -> List {
     let order = model.order();
     let total = order.len();
+    let top = model.viewing.apart.then(|| model.list_top(&order));
     List {
         id: NodeId::List,
         rows: rows(model, order),
         first: 0,
         total,
+        top,
         empty: Text::key(StrId::NoConversations),
         a11y: A11y::of(NodeId::List, Role::List, Text::key(StrId::TabChats)),
     }

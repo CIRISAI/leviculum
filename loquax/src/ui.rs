@@ -589,6 +589,8 @@ struct BuiltList {
     /// length: the scroll geometry.
     first: usize,
     total: usize,
+    /// The first row on screen of a list apart (1546).
+    top: Option<usize>,
     rows: Vec<scene::Row>,
 }
 
@@ -1324,6 +1326,13 @@ pub struct UiModel<B> {
     /// The list's window as the last fold built it ([`scene::Scene`]'s
     /// list): checked against its stamp before every reuse.
     built_list: Option<BuiltList>,
+    /// Where a list apart (the M9's compact list) last stood (1546): the
+    /// selected conversation's peer and its line in the rows on screen.
+    /// The cursor is the reader's: rows that move in the order move
+    /// around it, its row keeps the cursor and the cursor keeps its line
+    /// ([`UiModel::list_top`]). Interior-mutable: the scene's read keeps
+    /// it.
+    list_line: core::cell::Cell<Option<([u8; 16], usize)>>,
     /// The open chat as the last fold built it: the window of bubbles
     /// around the newest, or around the cursor while the keys are in the
     /// chat.
@@ -1482,6 +1491,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             folding: false,
             viewing: Viewing::default(),
             built_list: None,
+            list_line: core::cell::Cell::new(None),
             built_chat: None,
             laid_cache: core::cell::RefCell::new(None),
             view_cache: core::cell::RefCell::new(None),
@@ -2196,20 +2206,59 @@ impl<B> UiModel<B> {
 
     /// The slice of `order` the scene's list is built for (1490): the
     /// rows in view and half a screen either side, the selected row
-    /// inside. `(first, how many)`.
-    fn list_window(&self, order: &[usize]) -> (usize, usize) {
+    /// inside. `(first, how many, the first row on screen)`, the last for
+    /// a list apart only ([`UiModel::list_top`]).
+    fn list_window(&self, order: &[usize]) -> (usize, usize, Option<usize>) {
         let visible = self.viewing.list_rows.max(1);
         let build = order.len().min(visible.saturating_mul(2));
+        if self.viewing.apart {
+            let top = self.list_top(order);
+            let first = top.saturating_sub(visible / 2).min(order.len() - build);
+            return (first, build, Some(top));
+        }
         let at = order.iter().position(|&i| i == self.selected).unwrap_or(0);
         let first = at.saturating_sub(visible / 2).min(order.len() - build);
-        (first, build)
+        (first, build, None)
+    }
+
+    /// The first row of `order` a list apart shows (1546): the cursor's
+    /// own rule, one for every compact list. The cursor never moves by
+    /// itself: while the selected conversation stays selected it keeps
+    /// the line it stood on, and the rows a pull or an arrival reorders
+    /// move around it. A key that moves the selection moves the line by
+    /// as many rows as the selection moved in the order, kept on the
+    /// screen; the line gives way only where the list ends. A selection
+    /// never seen stands as low as the rows above it let it, at most on
+    /// the last line: the window the M9 had before 1546.
+    pub(crate) fn list_top(&self, order: &[usize]) -> usize {
+        let visible = self.viewing.list_rows.max(1);
+        let Some(at) = order.iter().position(|&i| i == self.selected) else {
+            return 0;
+        };
+        let peer = self.conversations[self.selected].peer;
+        let line = match self.list_line.get() {
+            Some((held, line)) if held == peer => line,
+            Some((held, line)) => match order
+                .iter()
+                .position(|&i| self.conversations[i].peer == held)
+            {
+                Some(was) => (line + at).saturating_sub(was),
+                None => at,
+            },
+            None => at,
+        };
+        let line = line.min(visible - 1).min(at);
+        let top = (at - line).min(order.len().saturating_sub(visible));
+        self.list_line.set(Some((peer, at - top)));
+        top
     }
 
     /// The fingerprint of everything the list's window is built from:
     /// the look, the viewport, the whole order and the windowed
     /// conversations' revisions.
-    fn list_stamp(&self, order: &[usize], first: usize, len: usize) -> u64 {
+    fn list_stamp(&self, order: &[usize], first: usize, len: usize, top: Option<usize>) -> u64 {
         let mut hash = Fnv::new();
+        hash.word(top.map_or(u64::MAX, |top| top as u64));
         hash.word(self.look_rev);
         hash.word(self.viewing.list_rows as u64);
         hash.word(self.selected as u64);
@@ -2288,14 +2337,15 @@ impl<B> UiModel<B> {
     /// from these and builds nothing itself while they are current.
     fn refresh_scene(&mut self) {
         let order = self.order();
-        let (first, len) = self.list_window(&order);
-        let stamp = self.list_stamp(&order, first, len);
+        let (first, len, top) = self.list_window(&order);
+        let stamp = self.list_stamp(&order, first, len, top);
         if self.built_list.as_ref().map(|b| b.stamp) != Some(stamp) {
             let rows = scene::rows(self, order[first..first + len].to_vec());
             self.built_list = Some(BuiltList {
                 stamp,
                 first,
                 total: order.len(),
+                top,
                 rows,
             });
         }
