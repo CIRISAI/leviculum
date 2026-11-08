@@ -94,7 +94,7 @@
 //!                           after the draw, when the page or its cursor
 //!                           moved (1533, `loquax_m9::page`): what a bench
 //!                           walk asserts without a dump
-//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> t=<ms>
+//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> t=<ms>
 //!                           on every loss and every five seconds (1440);
 //!                           stack_free is core 0's stack never touched
 //!                           since the boot's census, above the guard (1521b),
@@ -104,7 +104,9 @@
 //!                           from the LNode's node peak (#50), not a measure;
 //!                           tx_drop the records the send ring dropped, its
 //!                           oldest first, while the loop wrote faster than
-//!                           the line took (1507)
+//!                           the line took (1507), tx_drop_kind the same
+//!                           by what they were (1553); dump stays 0, a
+//!                           dump's line is never dropped for another
 //! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> t=<ms>
 //!                           every five seconds (1507, `leviculum_esp::idle`):
 //!                           the share of the window each core waited for
@@ -1867,15 +1869,18 @@ fn main() -> ! {
                 }
                 // Every line before anything else is written (1533): the
                 // 4.6 s of a dump fed line by line to the watchdog.
-                // Every line of it, waiting for the ring's room (1507).
+                // Every line of it, waiting for the ring's room (1507), a
+                // record the ring never drops, its line end in it; then
+                // its tail waited out, so the loop's lossy lines after it
+                // drop nothing either (1553: window 13 lost 2 to 28 lines
+                // of 19 dumps in 20 to the lossy writes behind the tail).
                 FromUi::Dump(lines) => {
                     stall::stage(Core::Io, Stage::Line);
-                    log.set_lossy(false);
                     for line in lines {
-                        log.raw(&line);
+                        log.dump_line(&line);
                         wdt.feed();
                     }
-                    log.set_lossy(true);
+                    log.wait_dump_out(&mut || wdt.feed());
                 }
                 FromUi::Type(size) => {
                     // The reader's type into the client record (1532).

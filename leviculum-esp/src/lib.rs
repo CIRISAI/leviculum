@@ -64,7 +64,7 @@ use esp_hal::{
 
 use boards::BoardConfig;
 use leviculum_serial_mux::rx::{RxCounts, RxKeep};
-use leviculum_serial_mux::tx::TxRing;
+use leviculum_serial_mux::tx::{Kind, TxRing};
 
 /// The build identity this image carries, as ONE contiguous string
 /// literal.
@@ -382,8 +382,11 @@ impl<'d> UsbLog<'d> {
 /// FIFO from there, so the loop never waits for the line
 /// (`leviculum_serial_mux::tx`, whose host model pins the ring). A full
 /// ring drops its oldest whole record, counted and said as `tx_drop=` on
-/// the `[UART]` line; a writer that must not lose (the boot's lines, a
-/// frame dump) waits for room instead ([`UartLog::set_lossy`]).
+/// the `[UART]` line, by kind as `tx_drop_kind=` (1553); a writer that must
+/// not lose (the boot's lines) waits for room instead
+/// ([`UartLog::set_lossy`]). A frame dump's lines are records the ring
+/// never drops for another, and their writer waits for room and then for
+/// its tail ([`UartLog::dump_line`], [`UartLog::wait_dump_out`]).
 pub struct UartLog<'d> {
     /// The UART's send half, for a log that writes and waits (a panic's);
     /// `None` when the interrupt owns the UART.
@@ -565,6 +568,17 @@ impl<'d> UartLog<'d> {
         })
     }
 
+    /// The records the full ring dropped, by [`Kind`] in [`Kind::ALL`]'s
+    /// order (1553).
+    pub fn tx_dropped_kinds(&self) -> [u32; 3] {
+        critical_section::with(|cs| {
+            TX_BYTES
+                .borrow_ref(cs)
+                .as_ref()
+                .map_or([0; 3], |ring| ring.dropped_kinds())
+        })
+    }
+
     /// Send through the ring from here on (1507): once the heap is up,
     /// which the ring lives on.
     pub fn start_ring(&mut self) {
@@ -605,6 +619,7 @@ impl<'d> UartLog<'d> {
     pub fn say_rx_counts(&mut self, always: bool) {
         let counts = self.rx_counts();
         let (tx_drop, tx_drop_bytes) = self.tx_dropped();
+        let [drop_line, drop_frame, drop_dump] = self.tx_dropped_kinds();
         let changed =
             self.said.is_none_or(|said| counts.losses_differ(&said)) || tx_drop != self.tx_said;
         if !(always || changed) {
@@ -613,22 +628,18 @@ impl<'d> UartLog<'d> {
         self.said = Some(counts);
         self.tx_said = tx_drop;
         self.gap_max_ms = 0;
-        match self.stack_free {
-            Some(free) => self.line(
-                "[UART] ",
-                format_args!(
-                    "{counts} stack_free={free} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes}"
-                ),
-            ),
-            // Before the first measure (1521c): the field is there and
-            // says so, so every `[UART]` line has the same keys.
-            None => self.line(
-                "[UART] ",
-                format_args!(
-                    "{counts} stack_free=unset tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes}"
-                ),
-            ),
-        }
+        // Before the first measure (1521c) the field is there and says so,
+        // so every `[UART]` line has the same keys. Through `text` (1553):
+        // with the kinds the line outgrows the fixed line's 135 bytes.
+        let free = match self.stack_free {
+            Some(free) => alloc::format!("{free}"),
+            None => alloc::string::String::from("unset"),
+        };
+        let body = alloc::format!(
+            "{counts} stack_free={free} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes} \
+             tx_drop_kind=line:{drop_line},frame:{drop_frame},dump:{drop_dump}"
+        );
+        self.text("[UART] ", &body);
     }
 
     /// One line, shaped by [`leviculum_log_line::format_line`] as
@@ -647,50 +658,87 @@ impl<'d> UartLog<'d> {
         let mut buf = alloc::vec![0u8; prefix.len() + body.len() + 32];
         let line =
             leviculum_log_line::format_line(&mut buf, prefix, format_args!("{body}"), uptime_ms());
-        let mut start = 0;
-        while start < line.len() {
-            let end = (start + LINE_MAX).min(line.len());
-            self.escaped(&line[start..end]);
-            start = end;
+        let mut out = alloc::vec::Vec::with_capacity(line.len() + 8);
+        if core::mem::take(&mut self.after_frame) {
+            out.extend_from_slice(b"\r\n");
         }
+        for &byte in line {
+            escape_byte(byte, &mut |piece| out.extend_from_slice(piece));
+        }
+        self.write_all(Kind::Line, &out);
     }
 
     /// `line`'s bytes with the line's own flow and flag bytes escaped, on a
-    /// line of its own after a frame.
+    /// line of its own after a frame: one record, the line end before it
+    /// included (1553), so the ring never drops the one without the other.
     fn escaped(&mut self, line: &[u8]) {
-        if core::mem::take(&mut self.after_frame) {
-            self.write_all(b"\r\n");
-        }
-        let mut out = [0u8; 4 * LINE_MAX];
+        let mut out = [0u8; 4 * LINE_MAX + 2];
         let mut n = 0;
-        for byte in line {
-            match byte {
-                0x7E | 0x7D | 0x11 | 0x13 => {
-                    for (i, b) in [b'\\', b'x', hex_digit(byte >> 4), hex_digit(byte & 0xF)]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        out[n + i] = b;
-                    }
-                    n += 4;
-                }
-                _ => {
-                    out[n] = *byte;
-                    n += 1;
-                }
-            }
+        if core::mem::take(&mut self.after_frame) {
+            out[..2].copy_from_slice(b"\r\n");
+            n = 2;
         }
-        self.write_all(&out[..n]);
+        for &byte in line.iter().take(LINE_MAX) {
+            escape_byte(byte, &mut |piece| {
+                out[n..n + piece.len()].copy_from_slice(piece);
+                n += piece.len();
+            });
+        }
+        self.write_all(Kind::Line, &out[..n]);
     }
 
-    /// One raw line, `text` and a line end, as it is: for the lines read
-    /// whole by their first word. `text` must be plain ASCII.
+    /// One raw line, `text` and its line end, one record (1553): for the
+    /// lines read whole by their first word. `text` must be plain ASCII.
     pub fn raw(&mut self, text: &str) {
-        if core::mem::take(&mut self.after_frame) {
-            self.write_all(b"\r\n");
+        let record = self.raw_record(text);
+        self.write_all(Kind::Line, &record);
+    }
+
+    /// One line of a frame dump, as [`UartLog::raw`] writes it but a
+    /// record the ring never drops for another (1553), written once the
+    /// ring has room: a dump is a bench path, and its writer may wait.
+    pub fn dump_line(&mut self, text: &str) {
+        let record = self.raw_record(text);
+        self.write_all(Kind::Dump, &record);
+    }
+
+    /// Wait until the dump's last line has left the ring (1553), so the
+    /// loop's lossy writes after it find room and drop nothing: at most
+    /// the ring's 0.7 s of the line. `feed` runs on every pass, the
+    /// watchdog's.
+    pub fn wait_dump_out(&mut self, feed: &mut dyn FnMut()) {
+        if self.tx.is_some() {
+            return;
         }
-        self.write_all(text.as_bytes());
-        self.write_all(b"\r\n");
+        loop {
+            let held = critical_section::with(|cs| {
+                let mut port = PORT.borrow_ref_mut(cs);
+                let mut ring = TX_BYTES.borrow_ref_mut(cs);
+                match (port.as_mut(), ring.as_mut()) {
+                    (Some(uart), Some(ring)) => {
+                        feed_tx(uart, ring);
+                        ring.holds(Kind::Dump)
+                    }
+                    _ => false,
+                }
+            });
+            if !held {
+                return;
+            }
+            feed();
+            core::hint::spin_loop();
+        }
+    }
+
+    /// `text` and a line end, on a line of its own after a frame.
+    fn raw_record(&mut self, text: &str) -> alloc::vec::Vec<u8> {
+        let mut record = alloc::vec::Vec::with_capacity(text.len() + 4);
+        if core::mem::take(&mut self.after_frame) {
+            record.extend_from_slice(b"\r\n");
+        }
+        record.extend_from_slice(text.as_bytes());
+        record.extend_from_slice(b"\r\n");
+        record
     }
 
     /// One HDLC frame of `payload`, flags included (`leviculum_core`'s
@@ -701,16 +749,17 @@ impl<'d> UartLog<'d> {
         leviculum_core::framing::hdlc::frame(payload, &mut framed);
         let mut wire = alloc::vec::Vec::with_capacity(framed.len() + 8);
         leviculum_serial_mux::escape_flow(&framed, &mut |piece| wire.extend_from_slice(piece));
-        self.write_all(&wire);
+        self.write_all(Kind::Frame, &wire);
         self.after_frame = true;
     }
 
-    /// All of `bytes`, one record. Into the send ring, the interrupt's
-    /// (1507): at once when the log is lossy, a full ring dropping its
-    /// oldest record; else once the ring has room, which the FIFO is fed
-    /// from here as well, so the wait ends with interrupts off too. A log
-    /// that owns its send half (a panic's) writes and waits, as before.
-    fn write_all(&mut self, mut bytes: &[u8]) {
+    /// All of `bytes`, one record of `kind`. Into the send ring, the
+    /// interrupt's (1507): at once when the log is lossy, a full ring
+    /// dropping its oldest record; else, and always for a dump's line
+    /// (1553), once the ring has room, which the FIFO is fed from here as
+    /// well, so the wait ends with interrupts off too. A log that owns its
+    /// send half (a panic's) writes and waits, as before.
+    fn write_all(&mut self, kind: Kind, mut bytes: &[u8]) {
         if let Some(tx) = self.tx.as_mut() {
             while !bytes.is_empty() {
                 match tx.write(bytes) {
@@ -720,7 +769,7 @@ impl<'d> UartLog<'d> {
             }
             return;
         }
-        let lossy = self.lossy || bytes.len() > Ring::max_record();
+        let lossy = (self.lossy && kind != Kind::Dump) || bytes.len() > Ring::max_record();
         loop {
             let left = critical_section::with(|cs| {
                 let mut port = PORT.borrow_ref_mut(cs);
@@ -738,7 +787,7 @@ impl<'d> UartLog<'d> {
                     return bytes.len() - n;
                 };
                 let kept = (lossy || ring.fits(bytes.len())) && {
-                    ring.push(bytes);
+                    ring.push(kind, bytes);
                     true
                 };
                 feed_tx(uart, ring);
@@ -782,6 +831,16 @@ impl<'d> UartLog<'d> {
             "[BOARD] ",
             format_args!("id={log_prefix} name={board_name} heap={heap}"),
         );
+    }
+}
+
+/// `byte`, or its `\\xNN` when it is a flow or flag byte, to `out`.
+fn escape_byte(byte: u8, out: &mut dyn FnMut(&[u8])) {
+    match byte {
+        0x7E | 0x7D | 0x11 | 0x13 => {
+            out(&[b'\\', b'x', hex_digit(byte >> 4), hex_digit(byte & 0xF)])
+        }
+        _ => out(&[byte]),
     }
 }
 
