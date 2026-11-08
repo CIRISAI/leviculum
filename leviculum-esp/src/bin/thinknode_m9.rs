@@ -221,6 +221,7 @@ use loquax_m9::map::{self, Map};
 use loquax_m9::pace::{self, Pace};
 use loquax_m9::page;
 use loquax_m9::pair::{self, Pairing};
+use loquax_m9::read::Reader;
 use loquax_m9::render::Renderer;
 use loquax_m9::splash::{self, Panel as _};
 use loquax_m9::{dump, group, home, screen};
@@ -2143,6 +2144,9 @@ fn ui_main(
     // nothing.
     let mut drawn = screen::Drawn::default();
     drawn.drawn(&model);
+    // What the reader saw, said to the model, and the clocks its dwell
+    // runs on (1541).
+    let mut reader = Reader::default();
     // One draw per frame of the panel (1507): what the turns change is
     // owed until the next blank, then drawn once.
     let mut pace = Pace::new();
@@ -2205,6 +2209,12 @@ fn ui_main(
         if !owed.is_empty() && route_out(&mut model, owed, &mut ids, &mut log, &mut wants) {
             dirty = true;
         }
+        // The model's clocks once a second (1541): a bubble on screen for
+        // the dwell is seen, and its mark goes to the home.
+        let (ticked, first_day) = reader.tick(&mut model, leviculum_esp::uptime_ms());
+        if route_out(&mut model, ticked, &mut ids, &mut log, &mut wants) || first_day {
+            dirty = true;
+        }
 
         // What the I/O core brought.
         for message in ui_drain() {
@@ -2225,6 +2235,7 @@ fn ui_main(
                 }
                 ToUi::Entries(entries, address) => {
                     wants.pages += 1;
+                    reader.saw(&entries, leviculum_esp::uptime_ms());
                     let (_, effects) = home::take(&mut model, &entries, &address);
                     if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
                         dirty = true;
@@ -2250,6 +2261,7 @@ fn ui_main(
                     earlier,
                     address,
                 } => {
+                    reader.saw(&entries, leviculum_esp::uptime_ms());
                     #[cfg(not(m9_bench))]
                     let effects = home::page_in(&mut model, peer, &entries, earlier, &address);
                     #[cfg(m9_bench)]
@@ -2463,6 +2475,9 @@ fn ui_main(
             );
             pace.drew(edges, now);
             draw_owed = false;
+            // What the frame showed of the open chat (1541), said when it
+            // moved; its asks route on the next turn, before its sends.
+            asked.extend(reader.say(&mut model, renderer.seen(), leviculum_esp::uptime_ms()));
             drawn.drawn(&model);
             #[cfg(not(m9_bench))]
             let _ = flushing;

@@ -48,6 +48,7 @@ use loquax_m9::kbraw::{self, Presses, Protocol, Read};
 use loquax_m9::keyboard::{self, Key};
 use loquax_m9::map::{self, Map};
 use loquax_m9::pair::{self, Pairing};
+use loquax_m9::read::Reader;
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ROWS};
 
@@ -197,6 +198,8 @@ pub struct Board {
     /// What a size set asked of the model (1546), routed by the next
     /// turn as the board's loop routes it.
     asked: Vec<loquax::ui::UiEffect>,
+    /// What the reader saw, said to the model, and its clocks (1541).
+    reader: Reader,
 }
 
 impl Board {
@@ -324,6 +327,7 @@ impl Board {
             frames: 0,
             owed: false,
             asked: Vec::new(),
+            reader: Reader::default(),
         };
         // The record's type (1532), as the board reads it at boot; a board
         // without a record shows the default.
@@ -554,11 +558,16 @@ impl Board {
             busy = true;
             dirty |= self.route_out(asked, &mut wants);
         }
+        // The model's clocks once a second (1541), as the board's loop
+        // tells them. A turn that only told the time is not busy.
+        let (ticked, first_day) = self.reader.tick(&mut self.model, uptime_ms());
+        dirty |= self.route_out(ticked, &mut wants) || first_day;
         while let Some(message) = self.to_ui.pop_front() {
             busy = true;
             match message {
                 ToUi::Entries(entries, address) => {
                     wants.pages += 1;
+                    self.reader.saw(&entries, uptime_ms());
                     let (_, effects) = home::take(&mut self.model, &entries, &address);
                     if self.route_out(effects, &mut wants) {
                         dirty = true;
@@ -570,6 +579,7 @@ impl Board {
                     earlier,
                     address,
                 } => {
+                    self.reader.saw(&entries, uptime_ms());
                     let effects = home::page_in(&mut self.model, peer, &entries, earlier, &address);
                     self.route_out(effects, &mut wants);
                     dirty = true;
@@ -674,6 +684,12 @@ impl Board {
         }
         if dirty {
             self.redraw();
+            // What the frame showed of the open chat (1541); its asks
+            // route on the next turn, as the board's loop routes them.
+            let said = self
+                .reader
+                .say(&mut self.model, self.renderer.seen(), uptime_ms());
+            self.asked.extend(said);
             self.drawn.drawn(&self.model);
         }
         (busy || dirty, t_draw.elapsed().as_millis() as u64, keys_ms)

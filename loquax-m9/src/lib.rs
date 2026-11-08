@@ -43,6 +43,8 @@
 //!   1375).
 //! - [`splash`]: the logo from power-on until the UI's first frame, and
 //!   the order that lights the backlight only over a written panel (1485).
+//! - [`read`]: what the reader saw, said to the model as its viewport,
+//!   and the clocks its dwell runs on (1541).
 //! - [`census`]: what a screen costs where it is drawn, and its budget.
 //! - [`bench`](mod@bench): a message that arrives with no network, for the bench
 //!   image's walks (1540).
@@ -69,6 +71,7 @@ pub mod map;
 pub mod pace;
 pub mod page;
 pub mod pair;
+pub mod read;
 pub mod render;
 pub mod screen;
 pub mod splash;

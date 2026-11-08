@@ -424,7 +424,7 @@ positive control). It words the chats list scene in cells
 (`lines`, `loquax-m9/src/screen.rs:224`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
-mousefood (`draw`, `loquax-m9/src/render.rs:178`). Mousefood's own
+mousefood (`draw`, `loquax-m9/src/render.rs:182`). Mousefood's own
 `framebuffer` is off: the cells go straight into the caller's frame, and
 the crate's `framebuffer` feature turns it back on for the board's DMA
 measurement. What the slice settled on the host:
@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:522`).
+  (`narrow`, `loquax-m9/src/screen.rs:537`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:466`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:481`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -484,7 +484,7 @@ the table above it takes the host halves of slices 2 and 3: the chat
 drawn from the scene, and typed text through the model's keys. The board
 halves stay: the store in flash, the scancodes, the send over the mesh.
 
-- **The chat in cells** (`lines_at`, `loquax-m9/src/chat.rs:53`). The
+- **The chat in cells** (`lines_at`, `loquax-m9/src/chat.rs:57`). The
   scene's chat set as the terminal sets a conversation: a bubble wrapped
   to three quarters of the 53 cells (`block_cap`,
   `loquax/src/ui/layout.rs:410`), tinted with a margin cell either side,
@@ -501,7 +501,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   `narrow` first, the store's emoji and Japanese included.
 - **Only the screen is laid out.** The bubbles go from the bottom up,
   from the newest or, when the cursor stands above the last screen, from
-  the cursor's bubble (`bubbles`, `loquax-m9/src/chat.rs:239`). When the
+  the cursor's bubble (`bubbles`, `loquax-m9/src/chat.rs:257`). When the
   bubbles up to the cursor's do not fill the screen, it starts at the
   chat's first bubble and the newer ones fill the rows under it (1544:
   the bench walk's held ring up showed a folded position run alone at the
@@ -529,7 +529,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   reads, and an Enter before the page arrived names the row's kept unread
   ids. What a type size set asks of the model, the boot's cursor chat's
   page among it, is routed (`set_size`, `loquax-m9/src/house.rs:304`).
-- **The compose line** (`compose_line`, `loquax-m9/src/chat.rs:531`): the
+- **The compose line** (`compose_line`, `loquax-m9/src/chat.rs:576`): the
   hint while empty and not typed into, the text scrolled so the caret
   shows and the caret's cell reversed while it is. The field is
   `loquax-m9`'s own (`Field`, `loquax-m9/src/field.rs:20`): the terminal's
@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:832`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:833`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -965,7 +965,7 @@ avatar, the name, "2 selected" in the bar, `[Space] tick  [Enter] Next`
 at the bottom, muted while disabled. The name: whom it is for, the
 field with its caret, the trust sentence, `[Enter] Create  [Back]
 Close`. The card in the invited group's chat adds the trust sentence and
-`[Enter] Join` under the invitation (`loquax-m9/src/chat.rs:93`), and an
+`[Enter] Join` under the invitation (`loquax-m9/src/chat.rs:97`), and an
 invitation's bubble in the inviter's chat says `[Enter] Join` too. A
 group's row in the list has its member count as the avatar from the
 scene; a group with no line yet says "Invitation" or "3 members" where
@@ -1112,7 +1112,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
 - **Pixels** is the map core's filler painting the view straight into
   the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:738`); the
   whole screen adds the bar's and the legend's cells and the pins
-  (`Renderer::show`, `loquax-m9/src/render.rs:210`).
+  (`Renderer::show`, `loquax-m9/src/render.rs:226`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
   drawn at four by eight source pixels a cell, encoded into glyphs and
   drawn by ratatui through mousefood. The atlas has two of the
@@ -1174,7 +1174,7 @@ cells first, every row in the map's ground, then the map over them, the
 names, the pins and the words; ratatui draws only cells that changed,
 so the next map leaves the blank rows alone, and the renderer clears
 its cells when the screen leaves the map (`leave_map`,
-`loquax-m9/src/render.rs:300`), or the list would keep map pixels where
+`loquax-m9/src/render.rs:318`), or the list would keep map pixels where
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
@@ -1752,6 +1752,81 @@ flash at about sixty cycles an instruction: the bootloader said DIO at
 visible bubbles is the next step. The board numbers (restore, KEY to
 flush, page gaps, `overrun` during the store's erase, which runs with
 interrupts off) are the reviewer's window.
+
+### The M9 reads by what it showed (1541)
+
+**Before.** On the board "read" was the open (`UiEvent::Open`, 1493):
+the board never said `UiEvent::Viewport`, so the line rule of 1529 (a
+message is read when its last line stood on screen for the dwell) did
+not apply there, and a chat of 1300 entries opened once was seen no
+further than the open marks it. The model had no clock either: the board
+never said `UiEvent::Elapsed` or `UiEvent::Clock`, and the dwell
+(`loquax::ui::receipts`, `SEEN_MS`) runs on both.
+
+**What the draw says.** The chat's layout (`loquax-m9/src/chat.rs`,
+`windowed` for a chat scrolled by the line, `bubbles` for the newest at
+the bottom) hands back, beside its rows, the keys of the bubbles whose
+last line is on screen, by the same rule the terminal uses
+(`loquax::ui::pager::last_line_shown`). The renderer keeps them for the
+last draw (`Renderer::seen`); a draw of the list, a group's sheet, the
+map or the board's own screens keeps none.
+
+**The hook.** `loquax_m9::read::Reader`. After each draw the board's
+loop (`leviculum-esp/src/bin/thinknode_m9.rs`, right after `redraw`,
+before `drawn.drawn`; the sim's `ui_turn` the same) calls
+`Reader::say`: it says `Front(true)` once (the panel is the board's
+front while it draws) and `Viewport { peer, keys }` only when the keys
+moved, so a frame that showed the same says nothing; a draw without a
+chat says the open chat's empty viewport. What it hands back routes on
+the next turn, before that turn's sends. The viewport's ask for the page
+above the first loaded bubble is dropped: the M9 asks that page by its
+own lines (1529), and a second ask would read the same page twice. Once
+a second of uptime `Reader::tick` says `Elapsed` and, when known,
+`Clock`; both are the model's clock events, which move its revision only
+when something shown moved, so they cost no draw.
+
+**The board's day.** The board has no clock for the day. The home stamps
+every archive entry with its own time (`Entry::at`); `Reader::saw` takes
+the newest stamp of every pulled page and every page read from the ring,
+and carries it forward by the board's uptime. That is never later than
+the true time and never earlier than the arrival of anything the board
+shows, so a seen mark's time falls between the message's arrival and
+its reading, and the sender's side keeps a read time within when it sent
+and when the receipt came anyway. The model's `now` is set from it, so
+the board's list shows its times as the goldens always drew them (in
+UTC: the board knows no zone).
+
+**What flows.** The rest is the core's, as on every target: the bubbles
+that count, the dwell, and, the board being a device of its home, a
+seen mark (`MarkFlag::Seen`) in place of a receipt of its own, routed by
+`home::route` as a `/mark` ask and kept in the store as a `KIND_MARK`
+entry (`home::keep_marks`), so what was seen stays seen after a reboot
+and owes no second receipt. The home signs the receipt.
+`UiEvent::Open` stays what it was: the open marks the chat's unread
+read (`MarkFlag::Read`), which is the list's count, not a receipt.
+
+**What it costs.** A viewport is one `update` a drawn window whose
+seen keys changed: a scroll key, an arrival in view, the open; never one
+a frame. The clock is one or two `update`s a second of uptime, no draw.
+In flash and on the air, the seen marks coalesce per chat: everything
+seen in a chat gathers into one owed mark, sent `BATCH_MS` (5 s) after
+the last bubble seen there, so a reader scrolling through a long chat
+writes one `KIND_MARK` entry and asks the home once, not once a bubble.
+A mark carries up to 64 ids (`MARK_IDS_MAX`) and is split beyond; its
+payload is 8 bytes and 34 an id (`wire::mark_request`), plus the store
+frame's header. Opening a chat with unread messages also writes the
+open's read mark, as before.
+
+**Tests.** `a_long_message_is_read_once_its_last_line_showed_for_the_dwell`
+(`loquax-m9/tests/read.rs`): 1529's walk drawn as the board draws; twenty
+presses in the long message is not read however long the reader stays,
+it is read at the dwell once its last line came on and not a moment
+before, the short one under it, on screen only for the moment of the
+open, is not, and the seen mark carries the home's time carried forward.
+Its control `without_the_viewport_nothing_is_seen`: the same keys
+without the hook see nothing. `a_seen_mark_from_the_viewport_survives_a_reboot`:
+after a reboot the message seen on the board owes no second seen mark;
+its control, the same walk without `keep_marks`, sends it again.
 
 ### The M9 on the host: `loquax-m9-sim` (1530)
 

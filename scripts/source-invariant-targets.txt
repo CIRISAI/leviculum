@@ -275,6 +275,7 @@ skip  loquax-m9        turn                       # a list draw and a page take 
 skip  loquax-m9        operation_counts           # a key down the M9 list counted over the real fixture against its bar (1489); subject is the code
 skip  loquax-m9        restore_counts             # the M9 restore, a pulled page and one new message counted over a 1489-shaped store, the per-entry fold as control (1514); subject is the code
 skip  loquax-m9        page                       # the M9 [PAGE] line walked over the fixture with the board's keys and one renderer: page, cursor, top, zoom (1533); subject is the code
+skip  loquax-m9        read                       # the M9 reads by its viewport: the board's draw says the bubbles whose last line showed, the dwell sees them, the seen mark is routed and kept over a reboot, each with its control (1541); subject is the code
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer
