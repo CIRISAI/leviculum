@@ -100,6 +100,13 @@
 //!                           tx_drop the records the send ring dropped, its
 //!                           oldest first, while the loop wrote faster than
 //!                           the line took (1507)
+//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> t=<ms>
+//!                           every five seconds (1507, `leviculum_esp::idle`):
+//!                           the share of the window each core waited for
+//!                           its next interrupt (WAITI) instead of spinning;
+//!                           core 0 waits on a quiet turn when the keyboard's
+//!                           tick runs, core 1 when no flush, no fold and no
+//!                           due draw is left, woken by TE or its 16 ms tick
 //! [PREV_RUN] reason=<wdt0|wdt1|panic|power|..> core0_stage=.. core0_lock=.. core0_isr=.. core1_stage=.. core1_lock=.. peer=.. turns=<c0>/<c1>
 //!                           at boot: where each core was when the last run
 //!                           stopped (1534, `leviculum_esp::stall`); a power
@@ -261,6 +268,27 @@ static KB_POLL: Mutex<RefCell<Option<KbPoll>>> = Mutex::new(RefCell::new(None));
 static KB_PRESSES: Mutex<RefCell<Presses>> = Mutex::new(RefCell::new(Presses::new()));
 /// Polls whose I2C transfer failed.
 static KB_FAILS: AtomicU32 = AtomicU32::new(0);
+/// The keyboard's timer runs: core 0 has an interrupt every
+/// [`POLL_MS`] and may wait for it (1507, `leviculum_esp::idle`).
+static KB_TICKING: AtomicBool = AtomicBool::new(false);
+
+/// The UI core's own tick (1507): a timer on that core, so it always has
+/// an interrupt coming within a frame when it waits, TE line or none.
+static UI_TICK: Mutex<RefCell<Option<PeriodicTimer<'static, Blocking>>>> =
+    Mutex::new(RefCell::new(None));
+
+/// The UI core's tick period: just under the panel's frame.
+const UI_TICK_MS: u64 = 16;
+
+/// The UI core's tick: only that the core wakes.
+#[esp_hal::handler]
+fn ui_tick() {
+    critical_section::with(|cs| {
+        if let Some(timer) = UI_TICK.borrow_ref_mut(cs).as_mut() {
+            timer.clear_interrupt();
+        }
+    });
+}
 
 /// The panel's TE line (1507), the UI core's interrupt once `ui_main`
 /// listens on it: every rising edge is a vertical blank.
@@ -686,6 +714,11 @@ impl Panel<'_> {
     /// The flush that reached the panel since the last call, once.
     fn take_done(&mut self) -> Option<Sent> {
         self.done.take()
+    }
+
+    /// Whether a flush is still on its way.
+    fn busy(&self) -> bool {
+        self.inflight.is_some() || !self.flush.runs.is_empty() || self.flush.open
     }
 
     /// Start sending `runs` of `frame`, each in its own window. The frame
@@ -1379,7 +1412,10 @@ fn main() -> ! {
     // group's watchdog is core 0's loop's (1534), TG1's the UI core's.
     let group0 = TimerGroup::new(p.TIMG0);
     let wdt0 = group0.wdt;
-    let wdt1 = TimerGroup::new(p.TIMG1).wdt;
+    let group1 = TimerGroup::new(p.TIMG1);
+    let wdt1 = group1.wdt;
+    // The UI core's tick (1507), started over there.
+    let ui_timer = group1.timer0;
     if let Some(bus) = i2c.take() {
         let mut timer = PeriodicTimer::new(group0.timer0);
         timer.set_interrupt_handler(kb_tick);
@@ -1393,6 +1429,7 @@ fn main() -> ! {
                         protocol: kb,
                     });
                 });
+                KB_TICKING.store(true, Ordering::Release);
                 log.line(
                     "[KB] ",
                     format_args!("poll=timer every_ms={POLL_MS} queue={}", kbraw::QUEUE),
@@ -1473,7 +1510,19 @@ fn main() -> ! {
     // SAFETY: the one place this static is taken, before the core starts.
     let ui_stack = unsafe { &mut *addr_of_mut!(APP_CORE_STACK) };
     let started = cpu.start_app_core(ui_stack, move || {
-        ui_main(panel, model, shown, kb, seed, wdt1, (io, lcd_te))
+        ui_main(
+            panel,
+            model,
+            shown,
+            kb,
+            seed,
+            wdt1,
+            UiWakes {
+                io,
+                te: lcd_te,
+                tick: ui_timer,
+            },
+        )
     });
     match &started {
         Ok(_) => log.line(
@@ -1514,6 +1563,9 @@ fn main() -> ! {
     // flash again; the word is the state, the log has the detail.
     let mut faulted = false;
     let mut next_banner = uptime_ms() + BANNER_INTERVAL_MS;
+    // Where the `[IDLE]` line's window began (1507).
+    let mut idle_since = uptime_ms();
+    let _ = leviculum_esp::idle::waited_us();
     // The bench's keys (1533), only in an image built for it.
     #[cfg(m9_bench)]
     let mut inject = loquax_m9::kbraw::Inject::new();
@@ -1552,6 +1604,19 @@ fn main() -> ! {
             }
             log.set_stack_free(watch.free());
             log.say_rx_counts(true);
+            // How much of the window each core waited (1507).
+            let [io, ui] = leviculum_esp::idle::waited_us();
+            let window_us = (now.saturating_sub(idle_since) * 1000).max(1);
+            idle_since = now;
+            log.line(
+                "[IDLE] ",
+                format_args!(
+                    "io_pct={} ui_pct={} window_ms={}",
+                    u64::from(io) * 100 / window_us,
+                    u64::from(ui) * 100 / window_us,
+                    window_us / 1000
+                ),
+            );
         }
 
         // The host: control frames between the lines.
@@ -1854,6 +1919,13 @@ fn main() -> ! {
         turn.say(&mut log, node.entries());
         if core::mem::take(&mut first_turn) {
             log.set_lossy(true);
+        } else if !busy && KB_TICKING.load(Ordering::Acquire) {
+            // A quiet turn waits for the next interrupt (1507): the
+            // keyboard's tick within 10 ms, the line's bytes, the send
+            // FIFO running dry. A frame under the receive threshold waits
+            // for the tick, as it waited for the loop before.
+            stall::stage(Core::Io, Stage::IoIdle);
+            leviculum_esp::idle::wait(0);
         }
     }
 }
@@ -1888,6 +1960,15 @@ struct Wants {
 /// The pairing screen's words are English (1363); so is this state.
 const CODE_NOT_SAVED: &str = "The code could not be saved. Try again.";
 
+/// What wakes the UI core (1507): the GPIO block the TE line's interrupt
+/// is bound through, the line, and the core's own tick's timer. Bound
+/// on the UI core, which is where their interrupts are taken.
+struct UiWakes {
+    io: Io<'static>,
+    te: m9::LcdTe<'static>,
+    tick: esp_hal::timer::timg::Timer<'static>,
+}
+
 /// The UI core (1493): the model, the scene, the renderer, the panel.
 /// It drains the key queue and the I/O core's messages, folds them,
 /// routes what the fold asks (`home::route`) back to the I/O core, and
@@ -1899,19 +1980,40 @@ fn ui_main(
     kb: Protocol,
     seed: [u8; 32],
     wdt: Wdt<TIMG1<'static>>,
-    te: (Io<'static>, m9::LcdTe<'static>),
+    wakes: UiWakes,
 ) -> ! {
     stall::stage(Core::Ui, Stage::Census);
     let mut log = UiLog;
     // The TE line's interrupt on this core (1507): bound and listened to
     // here, so its edges wake the core that draws.
-    let (mut io, te_pin) = te;
+    let UiWakes {
+        mut io,
+        te: te_pin,
+        tick,
+    } = wakes;
     io.set_interrupt_handler(te_edge);
     let mut te_line = Input::new(te_pin, InputConfig::default());
     critical_section::with(|cs| {
         te_line.listen(Event::RisingEdge);
         TE_LINE.borrow_ref_mut(cs).replace(te_line);
     });
+    // Its tick, bound here too (1507): the core that waits has a wake
+    // within a frame whatever the TE line does.
+    let mut timer = PeriodicTimer::new(tick);
+    timer.set_interrupt_handler(ui_tick);
+    let ticking = match timer.start(Duration::from_millis(UI_TICK_MS)) {
+        Ok(()) => {
+            critical_section::with(|cs| {
+                timer.listen();
+                UI_TICK.borrow_ref_mut(cs).replace(timer);
+            });
+            true
+        }
+        Err(e) => {
+            log.line("[UI] ", alloc::format!("tick=down err={e:?}"));
+            false
+        }
+    };
     let mut frame = Frame::new();
     let before = leviculum_esp::heap_live();
     let Ok(mut renderer) = Renderer::new(&mut frame) else {
@@ -2381,7 +2483,18 @@ fn ui_main(
         }
         #[cfg(not(m9_bench))]
         let _ = landed;
-        core::hint::spin_loop();
+        // Nothing to do until the next frame or a key (1507): no flush on
+        // its way, no fold's effects owed, no draw that may go now. The
+        // TE edge or the tick wakes the core; a key waits at most until
+        // then, and its draw would have waited for the frame anyway.
+        let now = pace_now();
+        let edges = TE_EDGES.load(Ordering::Relaxed);
+        if ticking && !panel.busy() && asked.is_empty() && !(draw_owed && pace.due(edges, now)) {
+            stall::stage(Core::Ui, Stage::UiIdle);
+            leviculum_esp::idle::wait(1);
+        } else {
+            core::hint::spin_loop();
+        }
     }
 }
 

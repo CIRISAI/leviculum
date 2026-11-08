@@ -30,12 +30,16 @@
 //! a firmware family the proof cannot read.
 
 #![no_std]
+// `WAITI` for the idle cores (1507, `idle`): inline asm on Xtensa is
+// still behind this gate in the esp toolchain, as in `xtensa-lx`.
+#![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
 
 extern crate alloc;
 
 pub mod boards;
 pub mod flash;
 pub mod handheld;
+pub mod idle;
 pub mod mspi;
 pub mod serial_iface;
 pub mod stall;

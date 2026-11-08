@@ -119,6 +119,8 @@ pub enum Stage {
     Quiet = 11,
     /// Core 0: the keyboard's loss counts.
     KbCount = 12,
+    /// Core 0: waiting for its next interrupt (1507, `idle`).
+    IoIdle = 13,
     /// Core 1: the I/O core's messages folded.
     Drain = 20,
     /// Core 1: the key presses folded.
@@ -129,6 +131,8 @@ pub enum Stage {
     Send = 23,
     /// Core 1: the census at boot.
     Census = 24,
+    /// Core 1: waiting for the panel's next frame or its tick (1507).
+    UiIdle = 25,
 }
 
 impl Stage {
@@ -147,11 +151,13 @@ impl Stage {
             10 => "code",
             11 => "quiet",
             12 => "kb-count",
+            13 => "idle",
             20 => "drain",
             21 => "keys",
             22 => "draw",
             23 => "send",
             24 => "census",
+            25 => "idle",
             _ => "?",
         }
     }
