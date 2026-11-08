@@ -180,8 +180,10 @@ use loquax::ui::UiModel;
 use loquax_m9::census::{self, Probe, Step};
 use loquax_m9::field::Field;
 use loquax_m9::fixture::{self, Screen};
+use loquax_m9::font::Size;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
 use loquax_m9::home::Answer;
+use loquax_m9::house::{self, Did, Overview};
 use loquax_m9::kbraw::{self, Presses, Protocol, Read};
 use loquax_m9::keyboard::{self, Key, POLL_MS};
 use loquax_m9::map::{self, Map};
@@ -359,6 +361,8 @@ enum FromUi {
     },
     /// The model asks a conversation's next page (1521).
     Load([u8; 16]),
+    /// The reader switched the type (1532): the client record keeps it.
+    Type(Size),
     /// The bench's arrival (1540): the chat's peer and the time it is
     /// written at, for the I/O core to keep and hand back.
     #[cfg(m9_bench)]
@@ -696,6 +700,8 @@ struct Shown {
     /// The map's key hint and corner credit (1531), as the loop's
     /// [`map::Chrome`] says them.
     map: map::Overlay,
+    /// The house key's overview and the reader's type size (1532).
+    overview: Overview,
 }
 
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
@@ -718,18 +724,22 @@ fn redraw(
         row,
         home: shown.word,
         fault: shown.fault,
+        note: shown.overview.note(),
         map: shown.map,
         ..screen::Look::of(model)
     };
+    let overview = shown.overview;
     #[cfg(not(m9_bench))]
     let drawn = match &shown.pairing {
         Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
+        None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
         None => renderer.show(model, &look, map),
     };
     // The bench times the scene and the draw apart (1540).
     #[cfg(m9_bench)]
     let drawn = match &shown.pairing {
         Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
+        None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
         None => bench::show(renderer, model, &look, map),
     };
     #[cfg(m9_bench)]
@@ -754,7 +764,10 @@ fn redraw(
             ),
         );
     }
-    let at = page::of(model, row, shown.pairing.is_some(), &renderer.window());
+    let at = match shown.pairing.is_none() && overview.open {
+        true => page::house(),
+        false => page::of(model, row, shown.pairing.is_some(), &renderer.window()),
+    };
     let moved = said.say(at);
     let frame = renderer.panel();
     let Some((first, last)) = frame.take_dirty() else {
@@ -1113,6 +1126,8 @@ fn main() -> ! {
         word: node.word(),
         fault: None,
         map: map::Overlay::default(),
+        // The record's type (1532); a board without one shows the default.
+        overview: Overview::new(node.large_type().map_or(Size::DEFAULT, Size::of_large)),
     };
 
     // The seed the UI core draws client ids from (1493): entropy taken
@@ -1446,6 +1461,15 @@ fn main() -> ! {
                         wdt.feed();
                     }
                 }
+                FromUi::Type(size) => {
+                    // The reader's type into the client record (1532).
+                    let kept = match node.keep_type(size.large(), &mut stores) {
+                        Some(true) => "yes",
+                        Some(false) => "no reason=write",
+                        None => "no reason=no-record",
+                    };
+                    log.line("[STORE] ", format_args!("type={} kept={kept}", size.name()));
+                }
                 FromUi::Code(text) => {
                     stall::stage(Core::Io, Stage::Code);
                     match node.take_code(&text, &mut rng, &mut stores, batch, &mut log) {
@@ -1595,25 +1619,27 @@ fn ui_main(
     // where every scene and draw lives now (1493).
     let stack_floor = core::ptr::addr_of!(APP_CORE_STACK) as usize;
     let mut probe = BoardProbe::over(stack_floor);
-    for walked in fixture::SCREENS {
-        let budget = walked.budget();
-        let (walk_model, walk_row) = walked.walk();
-        match census::measure_at(&mut probe, &walk_model, walk_row, &mut renderer, &mut map) {
-            Ok(got) => log.line(
-                "[CENSUS] ",
-                alloc::format!(
-                    "{}",
-                    census::Line {
-                        screen: walked.name(),
-                        census: &got,
-                        budget: &budget,
-                    }
+    // Both type sizes (1532): the large one's lines say `<screen>-large`.
+    for size in Size::ALL {
+        for walked in fixture::SCREENS {
+            let budget = walked.budget();
+            let (mut walk_model, walk_row) = walked.walk();
+            house::set_size(size, &mut walk_model, &mut renderer);
+            let name = census::screen_name(walked.name(), size);
+            match census::measure_at(&mut probe, &walk_model, walk_row, &mut renderer, &mut map) {
+                Ok(got) => log.line(
+                    "[CENSUS] ",
+                    alloc::format!(
+                        "{}",
+                        census::Line {
+                            screen: &name,
+                            census: &got,
+                            budget: &budget,
+                        }
+                    ),
                 ),
-            ),
-            Err(_) => log.line(
-                "[CENSUS] ",
-                alloc::format!("screen={} draw=failed", walked.name()),
-            ),
+                Err(_) => log.line("[CENSUS] ", alloc::format!("screen={name} draw=failed")),
+            }
         }
     }
     // Core 0 may run again (1521b).
@@ -1632,6 +1658,11 @@ fn ui_main(
         id.copy_from_slice(&hash[..16]);
         id
     };
+
+    // The reader's type size, the record's (1532).
+    let size = shown.overview.size;
+    house::set_size(size, &mut model, &mut renderer);
+    log.line("[TYPE] ", alloc::format!("size={} via=boot", size.name()));
 
     // The M9's own cursor over a group's sheet or picker (slice six).
     let mut row = 0;
@@ -1706,6 +1737,10 @@ fn ui_main(
                     model = taken;
                     row = 0;
                     shown.pairing = None;
+                    // The size the reader chose before the code, set on
+                    // the new model and kept in the new record (1532).
+                    house::set_size(shown.overview.size, &mut model, &mut renderer);
+                    log.send(FromUi::Type(shown.overview.size));
                     dirty = true;
                 }
                 ToUi::Entries(entries, address) => {
@@ -1769,6 +1804,8 @@ fn ui_main(
                     }
                 }
                 ToUi::Dump(screen) => {
+                    // The goldens are the default size's (1532).
+                    renderer.set_size(Size::DEFAULT);
                     if let Some(walked) = screen.and_then(Screen::of) {
                         let (walk_model, walk_row) = walked.walk();
                         *model = walk_model;
@@ -1792,6 +1829,7 @@ fn ui_main(
                             word: None,
                             fault: None,
                             map: map::Overlay::default(),
+                            overview: Overview::default(),
                         };
                         redraw(
                             &mut renderer,
@@ -1811,6 +1849,7 @@ fn ui_main(
                         lines.push(String::from(line))
                     });
                     log.send(FromUi::Dump(lines));
+                    house::set_size(shown.overview.size, &mut model, &mut renderer);
                     dirty = true;
                 }
             }
@@ -1832,6 +1871,16 @@ fn ui_main(
                 Read::Code(code) => {
                     if let Some(key) = Key::of(code) {
                         log.raw(keyboard::key_line(ms, code, key));
+                        // The house key and the open overview (1532);
+                        // the pairing has the keys while it shows.
+                        let took = match shown.pairing {
+                            None => shown.overview.press(key, ms),
+                            Some(_) => None,
+                        };
+                        if let Some(did) = took {
+                            dirty |= switched(did, &mut model, &mut renderer, &mut log);
+                            continue;
+                        }
                         events.extend(key.event());
                         command = key.command();
                     }
@@ -1891,6 +1940,9 @@ fn ui_main(
         }
 
         stall::stage(Core::Ui, Stage::Draw);
+        // A house tap's gap, the switch's word (1532).
+        let did = shown.overview.tick(leviculum_esp::uptime_ms() as u32);
+        dirty |= switched(did, &mut model, &mut renderer, &mut log);
         dirty |= drawn.due(&model);
         // The map's words come and go by the clock (1531): a redraw when
         // they change, none while they stand.
@@ -1918,6 +1970,26 @@ fn ui_main(
         }
         core::hint::spin_loop();
     }
+}
+
+/// What the overview did (1532): the size set on the renderer and the
+/// model, said in a `[TYPE]` line and sent to the I/O core for the
+/// record. Whether the screen changed.
+fn switched(
+    did: Did,
+    model: &mut UiModel<Field>,
+    renderer: &mut Renderer<'_, Frame>,
+    log: &mut UiLog,
+) -> bool {
+    if let Some(size) = did.size {
+        house::set_size(size, model, renderer);
+        log.line(
+            "[TYPE] ",
+            alloc::format!("size={} via={}", size.name(), did.via),
+        );
+        log.send(FromUi::Type(size));
+    }
+    did.redraw
 }
 
 /// Every row owed again: `Ctrl-l`'s whole redraw.

@@ -422,6 +422,31 @@ impl Handheld {
             .map_or(0, |shelf| shelf.ring.entries())
     }
 
+    /// The reader's type size as the client record keeps it (1532): the
+    /// large one when its flag is set; none on a board that is no device
+    /// of a home, which has no record to keep it in.
+    pub fn large_type(&self) -> Option<bool> {
+        self.client.as_ref().map(|client| client.record.large_type)
+    }
+
+    /// Keep the reader's type size in the client record (1532), through
+    /// its two slots as a join's write. `Some(true)` kept, `Some(false)`
+    /// the write failed (counted unsaved, which the screen says), `None`
+    /// no record to keep it in. The record goes whole, with the cursor
+    /// it holds in memory, which the boot agrees with the store anyway.
+    pub fn keep_type(&mut self, large: bool, stores: &mut Stores<'_>) -> Option<bool> {
+        let client = self.client.as_mut()?;
+        if client.record.large_type == large {
+            return Some(true);
+        }
+        client.record.large_type = large;
+        let saved = stores.save_client(&client.record).is_ok();
+        if !saved {
+            client.drained.unsaved += 1;
+        }
+        Some(saved)
+    }
+
     /// What the screen's top bar says of the home.
     pub fn word(&self) -> Option<Word> {
         self.client.as_ref().map(|client| {
