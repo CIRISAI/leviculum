@@ -2880,8 +2880,10 @@ window-bench-selftest:
 
 # 1533: the M9 bench walk's verdicts on a simulated board behind the rig
 # proxy's files (a good walk passes and writes its dump as a PNG, a 150 ms
-# frame and a growing rx_lost fail), and the shipped walk file reads.
-# ~5 s, no build, no board.
+# frame and a growing rx_lost fail), and the shipped walk file reads; and
+# first the proxy itself (1542, scripts/m9-proxy.py) on a pty: the board's
+# bytes reach raw.bin, board.log and the link, tx.hex and the link reach
+# the board, STOP ends it. ~5 s, no build, no board.
 [doc('Check the M9 bench walk verdicts on a simulated board')]
 m9-walk-selftest:
     @bash scripts/m9-walk.sh --selftest
@@ -2889,10 +2891,12 @@ m9-walk-selftest:
 # 1533: walk the M9 on the bench without hands: flash `image` (the bench
 # ELF, `scripts/build-m9-image.sh --bench`) through the rig folder's proxy,
 # boot twice, run `walk` (scripts/m9-walks/bench.walk) and print the
-# VERDICT; walk.md and the dumps land in `<rig>/walk-<time>/`.
+# VERDICT; walk.md and the dumps land in `<rig>/walk-<time>/`. `proxy` is
+# the M9's tty for a bench whose rig folder has no proxy running (1542):
+# scripts/m9-proxy.py is started on it.
 [doc('Walk the M9 on the bench: flash, two boots, a walk file, a verdict')]
-m9-walk rig walk="scripts/m9-walks/bench.walk" image="":
-    bash scripts/m9-walk.sh --rig {{rig}} --walk {{walk}} {{ if image != "" { "--image " + image } else { "" } }}
+m9-walk rig walk="scripts/m9-walks/bench.walk" image="" proxy="":
+    bash scripts/m9-walk.sh --rig {{rig}} --walk {{walk}} {{ if image != "" { "--image " + image } else { "" } }} {{ if proxy != "" { "--start-proxy " + proxy } else { "" } }}
 
 # 1441: rewrite the baseline `window-bench` measures against, after a change
 # whose cost was measured and accepted in its commit message; the commit

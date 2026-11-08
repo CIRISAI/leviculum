@@ -2,10 +2,11 @@
 """Walk the ThinkNode M9 on the bench without hands (orders 1533, 1540).
 
 The board runs the bench image (`scripts/build-m9-image.sh --bench`, boot
-line `[BENCH] inject=on`). The rig folder's proxy (`m9-proxy.py`, the
-reviewer's reader) owns the M9's CH340: it appends every byte the board
-sends to `<rig>/raw.bin`, writes the hex lines it finds in `<rig>/tx.hex`
-to the board, and pulses EN when `<rig>/reset` appears. This walker speaks
+line `[BENCH] inject=on`). The rig folder's proxy (scripts/m9-proxy.py,
+its docstring the file protocol; `m9-walk.sh --start-proxy` starts one)
+owns the M9's CH340: it appends every byte the board sends to
+`<rig>/raw.bin`, writes the hex lines it finds in `<rig>/tx.hex` to the
+board, and pulses EN when `<rig>/reset` appears. This walker speaks
 through those three files only, so lnsd can keep the node link on the
 proxy's pty while a walk runs.
 

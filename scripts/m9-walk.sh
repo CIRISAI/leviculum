@@ -4,23 +4,28 @@
 # named image, boot it twice, run a walk file's keys through the bench
 # image's key injection, and hold what the board says to the bars. The
 # walk itself, its grammar and its bars are scripts/m9-walk.py's (its
-# docstring); this wrapper finds the rig folder's proxy, flashes, and hands
-# over.
+# docstring); this wrapper finds the rig folder's proxy (or starts one),
+# flashes, and hands over.
 #
 # The rig folder is the reviewer's (`/home/lew/rig-run/m9/<date>/` on the
-# bench host, but any folder works): the proxy `m9-proxy.py` running on it
-# owns the M9's CH340, appends the board's bytes to raw.bin, writes
+# bench host, but any folder works): the proxy scripts/m9-proxy.py running
+# on it (its docstring has the file protocol) owns the M9's CH340, appends the board's bytes to raw.bin, writes
 # tx.hex's hex lines to the board and pulses EN for a `reset` file. To
 # flash, the proxy is stopped through its STOP file, espflash writes the
 # image as `just flash-m9` does, and the proxy is started again with the
 # command line it had, detached, its output in <rig>/proxy.out. An lnsd on
 # the proxy's pty sees its pty go away and must be restarted by whoever
-# runs it.
+# runs it. With --start-proxy <dev> a bench without a proxy gets one: when
+# none runs on the rig folder, scripts/m9-proxy.py is started detached on
+# <dev> at 115200 baud, its link at <rig>/m9pty, its output in
+# <rig>/proxy.out, and the walk waits for its OPEN note; it keeps running
+# after the walk, as the reviewer's would. A proxy of another folder on the
+# same <dev> is refused: two readers would split the board's bytes.
 #
 #   VERDICT <PASS|FAIL> steps=.. boots=.. key_ms n=.. median=.. max=.. ...
 #
 # Usage:
-#   bash scripts/m9-walk.sh --rig DIR --walk FILE [--image ELF] [--out DIR] [--boots N]
+#   bash scripts/m9-walk.sh --rig DIR --walk FILE [--image ELF] [--out DIR] [--boots N] [--start-proxy DEV]
 #   bash scripts/m9-walk.sh --selftest
 #
 # --image is the ELF to flash, the bench one being
@@ -35,10 +40,11 @@ TAG="[m9-walk]"
 
 if [ "${1:-}" = "--selftest" ]; then
     mkdir -p "$ROOT/target/tmp"
+    M9_WALK_TMP="$ROOT/target/tmp" python3 -I "$ROOT/scripts/m9-proxy.py" --selftest || exit 1
     M9_WALK_TMP="$ROOT/target/tmp" exec python3 -I "$ROOT/scripts/m9-walk.py" --selftest
 fi
 
-rig="" walk="" image="" out="" boots=2
+rig="" walk="" image="" out="" boots=2 start_dev=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --rig) rig="${2:-}"; shift 2 ;;
@@ -46,7 +52,8 @@ while [ "$#" -gt 0 ]; do
         --image) image="${2:-}"; shift 2 ;;
         --out) out="${2:-}"; shift 2 ;;
         --boots) boots="${2:-}"; shift 2 ;;
-        *) echo "usage: $0 --rig DIR --walk FILE [--image ELF] [--out DIR] [--boots N] | --selftest" >&2; exit 2 ;;
+        --start-proxy) start_dev="${2:-}"; shift 2 ;;
+        *) echo "usage: $0 --rig DIR --walk FILE [--image ELF] [--out DIR] [--boots N] [--start-proxy DEV] | --selftest" >&2; exit 2 ;;
     esac
 done
 if [ ! -d "$rig" ] || [ ! -f "$walk" ]; then
@@ -70,7 +77,41 @@ proxy_pid() {
     return 1
 }
 
-pid="$(proxy_pid)" || { echo "$TAG FAIL no m9-proxy.py runs on $rig"; exit 1; }
+# start_proxy: scripts/m9-proxy.py on $start_dev for $rig, detached, and
+# its OPEN note in board.log within 10 s.
+start_proxy() {
+    local pid args lines
+    for pid in $(pgrep -f 'm9-proxy\.py'); do
+        args="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" || continue
+        case " $args " in
+            *" $start_dev "*) echo "$TAG FAIL m9-proxy.py $pid already owns $start_dev for another folder: $args"; return 1 ;;
+        esac
+    done
+    lines=0
+    [ -f "$rig/board.log" ] && lines="$(wc -l <"$rig/board.log")"
+    echo "$TAG starting scripts/m9-proxy.py on $start_dev for $rig"
+    setsid -f python3 -I "$ROOT/scripts/m9-proxy.py" "$start_dev" 115200 "$rig" "$rig/m9pty" \
+        >>"$rig/proxy.out" 2>&1 </dev/null
+    for _ in $(seq 100); do
+        if tail -n +"$((lines + 1))" "$rig/board.log" 2>/dev/null | grep -q " OPEN $start_dev "; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "$TAG FAIL the proxy started on $start_dev did not open it within 10 s (see $rig/board.log, $rig/proxy.out)"
+    return 1
+}
+
+if ! pid="$(proxy_pid)"; then
+    if [ -z "$start_dev" ]; then
+        echo "$TAG FAIL no m9-proxy.py runs on $rig (--start-proxy <dev> starts one)"
+        exit 1
+    fi
+    start_proxy || exit 1
+    pid="$(proxy_pid)" || { echo "$TAG FAIL the proxy started on $start_dev is gone"; exit 1; }
+elif [ -n "$start_dev" ]; then
+    echo "$TAG m9-proxy.py $pid already runs on $rig, using it"
+fi
 
 if [ -n "$image" ]; then
     [ -f "$image" ] || { echo "$TAG FAIL no image $image"; exit 1; }
