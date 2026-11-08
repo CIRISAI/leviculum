@@ -34,13 +34,13 @@ use loquax::ui::strings::Lang;
 use loquax::ui::{update, Pane, UiEffect, UiEvent, UiModel, NONE_OPEN};
 use loquax::when::WallTime;
 use loquax_m9::field::Field;
-use loquax_m9::font::CELL_PX;
+use loquax_m9::font::Size;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
 use loquax_m9::kbraw::{self, Read, MEASURED};
 use loquax_m9::keyboard::Key;
 use loquax_m9::keys::{event, M9Key};
 use loquax_m9::render::Renderer;
-use loquax_m9::screen::{self, Look, COLS, ENTRY_ROWS, ROWS};
+use loquax_m9::screen::{self, Look, ENTRY_ROWS};
 
 /// The reader: no conversation's peer.
 const OWN: usize = 0x30;
@@ -72,6 +72,8 @@ fn ugly_model(home: &Path) -> UiModel<Field> {
     update(&mut model, UiEvent::Clock(now()));
     model.restore(store.restore().expect("restore"));
     model.restore_positions(store.positions().expect("positions"));
+    // The board's screen (1532): its rows, no tab bar.
+    model.viewing = screen::viewing(Size::DEFAULT);
     model
 }
 
@@ -104,22 +106,38 @@ fn draw(scene: &Scene) -> Frame {
 
 /// `scene` drawn in `look` into a fresh frame by a fresh renderer.
 fn draw_in(scene: &Scene, look: &Look) -> Frame {
+    draw_sized(scene, look, Size::DEFAULT)
+}
+
+/// `scene` drawn in `look` and type `size` (1532).
+fn draw_sized(scene: &Scene, look: &Look, size: Size) -> Frame {
     let mut frame = Frame::new();
-    Renderer::new(&mut frame)
-        .expect("renderer")
-        .draw(scene, look)
-        .expect("draw");
+    let mut renderer = Renderer::new(&mut frame).expect("renderer");
+    renderer.set_size(size);
+    renderer.draw(scene, look).expect("draw");
+    drop(renderer);
     frame
 }
 
-/// What `model` shows on the M9, drawn fresh: its scene in its look.
+/// What `model` shows on the M9, drawn fresh: its scene in its look, in
+/// the size the model is viewed in.
 fn shown(model: &UiModel<Field>) -> Frame {
-    draw_in(&screen::scene(model), &Look::of(model))
+    draw_sized(
+        &screen::scene(model),
+        &Look::of(model),
+        screen::size_of(model),
+    )
+}
+
+/// The grid `model` is viewed in.
+fn grid(model: &UiModel<Field>) -> (usize, usize) {
+    screen::size_of(model).grid()
 }
 
 /// The screen's characters, a string a row, as the cells hold them.
 fn text_of(model: &UiModel<Field>) -> Vec<String> {
-    let lines = screen::lines(&screen::scene(model), &Look::of(model), COLS, ROWS);
+    let (cols, rows) = grid(model);
+    let lines = screen::lines(&screen::scene(model), &Look::of(model), cols, rows);
     lines.iter().map(row_text).collect()
 }
 
@@ -174,6 +192,40 @@ fn the_chats_list_is_the_golden_frame() {
     check("m9-chats-cursor.png", &draw(&with_cursor(scene, 13)));
 }
 
+/// 1532: the list and the open chat in the large size, the 10 x 20 of
+/// 1428, which the reader switches to; the small one is the default the
+/// goldens above draw. The control: the two sizes draw different frames
+/// and the small one shows more entries (7 against 5).
+#[test]
+fn the_list_and_the_chat_in_the_large_size_are_golden_frames() {
+    let home = tempfile::tempdir().expect("home");
+    let mut model = on_the_list(home.path());
+    model.viewing = screen::viewing(Size::Large);
+    assert_eq!(screen::size_of(&model), Size::Large);
+    let large = shown(&model);
+    check("m9-chats-large.png", &large);
+    let entries = |model: &UiModel<Field>| {
+        screen::scene(model)
+            .list
+            .map_or(0, |list| list.rows.len().min(model.viewing.list_rows))
+    };
+    assert_eq!(entries(&model), 5);
+    let mut small = model.clone();
+    small.viewing = screen::viewing(Size::Small);
+    assert_eq!(entries(&small), 7);
+    assert!(changed_rows(&large, &shown(&small)).is_some());
+    // No tab bar in either: the last row is an entry's, not "Chats".
+    for model in [&model, &small] {
+        let rows = text_of(model);
+        let last = rows.last().expect("a row");
+        assert!(!last.contains("Chats"), "{rows:#?}");
+        assert_eq!(rows.len(), grid(model).1);
+    }
+    press(&mut model, M9Key::Enter);
+    assert_eq!(model.focus, Pane::Messages);
+    check("m9-chat-large.png", &shown(&model));
+}
+
 /// The positive control: one row's time moved two days back changes the
 /// frame, and only in that row's band of pixels, so the byte comparison
 /// above sees a moved timestamp and the bands are where the layout says.
@@ -189,7 +241,7 @@ fn a_moved_timestamp_moves_its_row_and_nothing_else() {
     let (top, bottom) = changed_rows(&draw(&scene), &draw(&moved))
         .unwrap_or_else(|| panic!("moving {at:?}'s time changed no pixel"));
     // The top bar is one cell row, each entry ENTRY_ROWS more.
-    let cell = usize::from(CELL_PX.1);
+    let cell = usize::from(Size::DEFAULT.cell_px().1);
     let band = (cell + row * ENTRY_ROWS * cell)..(cell + (row + 1) * ENTRY_ROWS * cell);
     assert!(
         band.contains(&top) && band.contains(&bottom),
@@ -283,7 +335,10 @@ fn the_open_chat_is_the_golden_frame() {
 fn a_long_message_is_read_by_the_line_on_the_m9() {
     let peer = [0x4f; 16];
     let mut model = UiModel::<Field>::new(&[peer]);
-    update(&mut model, UiEvent::Viewing(screen::viewing()));
+    update(
+        &mut model,
+        UiEvent::Viewing(screen::viewing(screen::Size::DEFAULT)),
+    );
     update(&mut model, UiEvent::Clock(now()));
     let long: Vec<String> = (1..=40).map(|n| format!("line {n}")).collect();
     for (n, body) in ["short before", &long.join("\n"), "short after"]
@@ -416,7 +471,10 @@ fn a_long_message_is_read_by_the_line_on_the_m9() {
 fn a_held_ring_up_to_the_chats_top_still_shows_the_chat() {
     let peer = [0x4c; 16];
     let mut model = UiModel::<Field>::new(&[peer]);
-    update(&mut model, UiEvent::Viewing(screen::viewing()));
+    update(
+        &mut model,
+        UiEvent::Viewing(screen::viewing(screen::Size::DEFAULT)),
+    );
     clock(&mut model, 0);
     let receive = |model: &mut UiModel<Field>, id: u8, body: &str, fields| {
         update(
@@ -794,7 +852,7 @@ fn a_groups_one_and_two_ticks_are_the_golden_frame() {
     model.focus = Pane::Messages;
     let scene = model.scene(LayoutClass::Compact);
     let look = group_look(&model);
-    let rows: Vec<String> = screen::lines(&scene, &look, COLS, ROWS)
+    let rows: Vec<String> = screen::lines(&scene, &look, grid(&model).0, grid(&model).1)
         .iter()
         .map(row_text)
         .collect();
@@ -838,13 +896,16 @@ fn a_groups_one_and_two_ticks_are_the_golden_frame() {
 /// control takes the late mark and the names away: each changes the frame.
 #[test]
 fn a_group_chat_is_the_golden_frame() {
-    let model = group_model();
+    // The large size (1532): the screen whose rows this test counts, the
+    // digest's lines above its last screen; the small one holds them.
+    let mut model = group_model();
+    model.viewing = screen::viewing(Size::Large);
     let scene = model.scene(LayoutClass::Compact);
     let look = group_look(&model);
-    let lines = screen::lines(&scene, &look, COLS, ROWS);
+    let lines = screen::lines(&scene, &look, grid(&model).0, grid(&model).1);
     let rows: Vec<String> = lines.iter().map(row_text).collect();
     let has = |words: &str| rows.iter().any(|r| r.contains(words));
-    // The last screen, twelve rows: the newest lines from the bottom up.
+    // The last screen, twelve rows in the large size: the newest lines from the bottom up.
     for words in [
         "Anna",
         "Bob",
@@ -876,7 +937,7 @@ fn a_group_chat_is_the_golden_frame() {
             cursor: key,
             ..look
         };
-        let above: Vec<String> = screen::lines(&scene, &up, COLS, ROWS)
+        let above: Vec<String> = screen::lines(&scene, &up, grid(&model).0, grid(&model).1)
             .iter()
             .map(row_text)
             .collect();
@@ -891,7 +952,7 @@ fn a_group_chat_is_the_golden_frame() {
         .find(|r| r.contains("── ") && r.contains("Bob") && !r.contains("Today"))
         .unwrap_or_else(|| panic!("Bob leaving is a note line: {rows:#?}"));
     assert!(note.starts_with(' '), "centred: {note:?}");
-    let frame = draw_in(&scene, &look);
+    let frame = draw_sized(&scene, &look, Size::Large);
     check("m9-group.png", &frame);
 
     let mut on_time = scene.clone();
@@ -905,7 +966,7 @@ fn a_group_chat_is_the_golden_frame() {
         .count();
     assert_eq!(late, 1, "one line came late");
     assert!(
-        changed_rows(&frame, &draw_in(&on_time, &look)).is_some(),
+        changed_rows(&frame, &draw_sized(&on_time, &look, Size::Large)).is_some(),
         "the late mark is in the frame"
     );
     let mut unnamed = scene.clone();
@@ -913,7 +974,7 @@ fn a_group_chat_is_the_golden_frame() {
         group.named = false;
     }
     assert!(
-        changed_rows(&frame, &draw_in(&unnamed, &look)).is_some(),
+        changed_rows(&frame, &draw_sized(&unnamed, &look, Size::Large)).is_some(),
         "the writers' names are in the frame"
     );
 }

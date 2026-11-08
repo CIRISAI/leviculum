@@ -139,7 +139,7 @@ fn text(model: &loquax::ui::UiModel<loquax_m9::field::Field>) -> Vec<String> {
 /// The rows the list's window holds on the M9: what is on screen and as
 /// many again (`UiModel::list_window`).
 fn window() -> u32 {
-    2 * screen::viewing().list_rows as u32
+    2 * screen::viewing(screen::Size::DEFAULT).list_rows as u32
 }
 
 /// The restore the board runs at boot orders the list once and builds

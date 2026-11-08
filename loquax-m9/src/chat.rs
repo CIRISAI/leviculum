@@ -43,9 +43,7 @@ use loquax::ui::scene::{BubbleNode, Chat, Compose, Group};
 use loquax::ui::strings::{StrId, Text};
 use loquax::ui::{update, UiEffect, UiEvent, UiModel};
 
-use crate::screen::{
-    cut, fill, muted, narrow, painted, push, state_of, Look, BAR, COLS, NARROW, ROWS,
-};
+use crate::screen::{cut, fill, muted, narrow, painted, push, state_of, Look, BAR, NARROW};
 
 /// The chat's `rows` lines under the top bar, `cols` cells each: our
 /// share's chip, the bubbles, the compose line (or the line that the group
@@ -139,10 +137,12 @@ pub fn page<B: InputBuffer + Default>(model: &mut UiModel<B>, cmd: ScrollCmd) ->
         return Vec::new();
     };
     let look = Look::of(model);
-    let below = ROWS.saturating_sub(1 + usize::from(scene.tabs.is_some()));
-    let (head, foot) = parts(chat, &look, COLS);
+    // The grid of the size the board views it in (1532).
+    let (cols, rows) = crate::screen::size_of(model).grid();
+    let below = rows.saturating_sub(1 + usize::from(scene.tabs.is_some()));
+    let (head, foot) = parts(chat, &look, cols);
     let area = below.saturating_sub(head.len() + foot.len());
-    let (window, _) = window(chat, &look, COLS, area);
+    let (window, _) = window(chat, &look, cols, area);
     update(model, UiEvent::Lines { cmd, window })
 }
 

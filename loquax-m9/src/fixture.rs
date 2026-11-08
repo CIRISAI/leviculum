@@ -250,6 +250,8 @@ pub fn model() -> UiModel<Field> {
     model.restore(restored());
     map(&mut model);
     model.focus = Pane::Conversations;
+    // The board's screen, as a home's model has it (1532): no tab bar.
+    model.viewing = crate::screen::viewing(crate::font::Size::DEFAULT);
     model
 }
 

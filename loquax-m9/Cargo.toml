@@ -21,11 +21,10 @@ unsafe_code = "forbid"
 # checks it for thumbv7em-none-eabihf and the M9's xtensa-esp32s3-none-elf.
 [features]
 default = []
-# mousefood's own heap frame (153,600 B at 320x240) between the cells and the
-# panel. Off: cells draw straight into the caller's `DrawTarget`, the panel's
-# frame. Which of the two the SPI driver wants (DMA out of one frame against
-# per-cell writes) is measured on the board, so the switch stays.
-framebuffer = ["mousefood/framebuffer"]
+# No `framebuffer` (mousefood's own 153,600 B heap frame) since 1532: the
+# renderer makes mousefood's backend for each draw, in the size the draw is
+# set in, and a frame of mousefood's own would start blank on every one.
+# The cells draw straight into the caller's `DrawTarget`, the panel's frame.
 # The M9 on the host (1530): `loquax-m9-sim`, the board's screens, scene,
 # renderer and page and key logic over a memory flash, headless (`--keys`,
 # `--dump`, `--text`). `std` for the bin only; the library stays `no_std`

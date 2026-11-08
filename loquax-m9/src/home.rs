@@ -39,7 +39,7 @@ pub fn model(address: [u8; 16]) -> UiModel<Field> {
     model.list_apart = true;
     // The board's screen (1490): the scene builds its window, not the
     // store.
-    model.viewing = crate::screen::viewing();
+    model.viewing = crate::screen::viewing(crate::font::Size::DEFAULT);
     // The board's map, as the fixture has it (1476): without it the map
     // a home board opens is sized for a terminal, not the picture.
     crate::map::ready(&mut model);
@@ -285,9 +285,16 @@ impl Shelf {
 }
 
 /// The entries a conversation's first page loads when it opens (1521,
-/// 1490's rule): the chat's viewport twice over, as the scene builds it.
+/// 1490's rule): the chat's viewport twice over, as the scene builds it,
+/// in the size that shows the most rows (1532), so a switch of the size
+/// never finds the page short.
 pub fn page_entries() -> usize {
-    2 * crate::screen::viewing().chat_rows.max(1)
+    let rows = crate::font::Size::ALL
+        .iter()
+        .map(|&size| crate::screen::viewing(size).chat_rows)
+        .max()
+        .unwrap_or(1);
+    2 * rows.max(1)
 }
 
 /// [`restore_timed`] without a clock.

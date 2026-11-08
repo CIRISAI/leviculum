@@ -550,6 +550,11 @@ pub struct Viewing {
     /// the list is the screen. The terminal and the window show both
     /// panes at once and leave this off.
     pub apart: bool,
+    /// The scene carries the tab bar (1532). A target whose keys reach
+    /// the map and the list directly (the M9's map and house keys) turns
+    /// it off and gets the row for content; the core keeps the tabs for
+    /// the targets that draw them.
+    pub tabs: bool,
 }
 
 impl Viewing {
@@ -559,6 +564,7 @@ impl Viewing {
         list_rows: usize::MAX / 4,
         chat_rows: usize::MAX / 4,
         apart: false,
+        tabs: true,
     };
 }
 
@@ -568,6 +574,7 @@ impl Default for Viewing {
             list_rows: 14,
             chat_rows: 24,
             apart: false,
+            tabs: true,
         }
     }
 }

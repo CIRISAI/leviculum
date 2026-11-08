@@ -1,13 +1,15 @@
-//! The scene as styled lines on the M9's cell grid: 32 x 12 cells of the
-//! 10 x 20 atlas ([`crate::font`]) on the 320 x 240 panel. The chats list here,
+//! The scene as styled lines on the M9's cell grid: 35 x 16 cells of the
+//! 9 x 15 atlas or 32 x 12 of the 10 x 20, the reader's [`Size`]
+//! ([`crate::font`]), on the 320 x 240 panel. The chats list here,
 //! the open chat under its bar in [`crate::chat`].
 //!
 //! The scene is the one the phone and the window draw (`Scene`,
 //! `loquax::ui::scene`); this words and places it in cells, as the
 //! terminal's list does (`loquax::ui::layout::list`): two rows a
 //! conversation, the name and the time over the last line and its count.
-//! Its own lines are the top bar above and the tab bar below, which the
-//! terminal draws as pane borders and the M9 has no room for.
+//! Its own line is the top bar above, which the terminal draws as a pane
+//! border. The tab bar below is drawn only for a scene that carries one;
+//! the M9's does not (1532, [`viewing`]).
 //!
 //! The delivery marks stand on their ASCII ladder
 //! ([`leviculum_ui::delivery::DeliveryGlyph::ascii`]): the atlas has no
@@ -30,8 +32,9 @@ use loquax::ui::strings::{Lang, StrId, Text};
 use loquax::ui::{Pane, UiModel};
 use loquax::when::{list_time, WallTime};
 
-/// Cells across and rows, the atlas's grid ([`crate::font`]).
-pub use crate::font::{COLS, ROWS};
+/// Cells across and rows of the large size's grid ([`crate::font`]): the
+/// map's; every other screen takes its grid from the reader's [`Size`].
+pub use crate::font::{Size, COLS, ROWS};
 
 /// Below this many cells a grid is narrow (1428), the M9's 32: the top
 /// bar gives the home's word the room its title does not use, the title
@@ -77,17 +80,28 @@ impl Drawn {
     }
 }
 
-/// What the M9's screen shows (1490): the list's entries between the
-/// top bar and the tab bar, and in a chat at most one bubble row a cell
-/// row. The scene is built for this window and its margin, never for
-/// the whole store ([`loquax::ui::Viewing`]).
-pub fn viewing() -> loquax::ui::Viewing {
-    let below = ROWS - 2;
+/// What the M9's screen shows in `size` (1490): the list's entries under
+/// the top bar, and in a chat at most one bubble row a cell row. The
+/// scene is built for this window and its margin, never for the whole
+/// store ([`loquax::ui::Viewing`]). No tab bar (1532): the M9 has a key
+/// for the map and one for the house, and the bar's row is the content's.
+pub fn viewing(size: Size) -> loquax::ui::Viewing {
+    let below = size.grid().1 - 1;
     loquax::ui::Viewing {
         list_rows: below / ENTRY_ROWS,
         chat_rows: below,
         apart: true,
+        tabs: false,
     }
+}
+
+/// The size `model` is viewed in: the one whose [`viewing`] the board
+/// set on it (1532), [`Size::DEFAULT`] for a model no board set.
+pub fn size_of<B>(model: &UiModel<B>) -> Size {
+    Size::ALL
+        .into_iter()
+        .find(|&size| viewing(size) == model.viewing)
+        .unwrap_or(Size::DEFAULT)
 }
 
 /// The selection's bar in the margin, the terminal's (`layout::BAR`).

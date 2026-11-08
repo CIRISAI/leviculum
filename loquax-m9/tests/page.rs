@@ -74,7 +74,9 @@ fn a_walk_says_its_page_cursor_and_top_after_every_key() {
         Some("name=chats cursor=1 top=0")
     );
     // Down to the list's end: the top follows once the cursor leaves the
-    // five entries the screen holds.
+    // entries the screen holds, seven in the default size (1532).
+    let held = board.model.viewing.list_rows;
+    assert_eq!(held, 7);
     let total = board.model.conversations.len();
     for _ in 0..total {
         board.key(0xb6);
@@ -82,9 +84,9 @@ fn a_walk_says_its_page_cursor_and_top_after_every_key() {
     let bottom = board.draw(&mut renderer, &mut map).expect("moved");
     let at = page::of(&board.model, 0, false, &renderer.window());
     assert_eq!(at.name, "chats");
-    assert!(at.cursor >= 5, "{bottom}");
+    assert!(at.cursor >= held, "{bottom}");
     assert!(at.top > 0, "the list scrolled: {bottom}");
-    assert_eq!(at.top, at.cursor + 1 - 5, "{bottom}");
+    assert_eq!(at.top, at.cursor + 1 - held, "{bottom}");
     for _ in 0..total {
         board.key(0xb5);
     }

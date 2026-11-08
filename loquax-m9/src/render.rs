@@ -9,6 +9,15 @@
 //! The map is the one screen drawn in pixels over the cells
 //! ([`crate::map`], slice seven, 1375): [`Renderer::show`] draws whichever
 //! the model shows.
+//!
+//! Two sizes since 1532 ([`Size`]): mousefood sets its atlas when its
+//! backend is made and has no way to hand the panel back, so the renderer
+//! keeps ratatui's two buffers itself (what `Terminal` keeps) and makes
+//! the backend over the panel for each draw, in the size the draw is set
+//! in. Diffing against the last frame is as before; a draw in the other
+//! size clears the panel and draws whole. The map's cells are always the
+//! large size's grid ([`crate::map`]); the reader's size is everything
+//! else's.
 
 use embedded_graphics::mono_font::MonoFont;
 use embedded_graphics::pixelcolor::Rgb565;
@@ -20,8 +29,12 @@ use loquax::ui::UiModel;
 use mousefood::{
     ColorTheme, CursorConfig, EmbeddedBackend, EmbeddedBackendConfig, TerminalAlignment,
 };
-use ratatui::widgets::Paragraph;
-use ratatui::Terminal;
+use ratatui::backend::Backend;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::widgets::{Paragraph, Widget};
+
+use crate::font::Size;
 
 use crate::field::Field;
 use crate::map::{self, Map};
@@ -36,9 +49,18 @@ pub struct Renderer<'d, D>
 where
     D: DrawTarget<Color = Rgb565> + 'static,
 {
-    terminal: Terminal<EmbeddedBackend<'d, D, Rgb565>>,
-    /// The atlas the cells are set in, for the map's pins.
-    font: MonoFont<'static>,
+    panel: &'d mut D,
+    /// The last frame's cells and the one being drawn, ratatui's two
+    /// buffers, in the grid of `drawn`.
+    last: Buffer,
+    next: Buffer,
+    /// The size the buffers and the panel's cells are in; none before the
+    /// first draw.
+    drawn: Option<Size>,
+    /// The size the reader chose: everything but the map is set in it.
+    size: Size,
+    /// Each size's atlas, made once (each making leaks its table).
+    fonts: [Option<MonoFont<'static>>; 2],
     /// The last draw put the map's pixels over the cells.
     map_drawn: bool,
     /// Where the last draw's screen stood (1533).
@@ -65,14 +87,51 @@ impl<'d, D> Renderer<'d, D>
 where
     D: DrawTarget<Color = Rgb565> + 'static,
 {
-    /// A renderer over `panel`, in the 10 x 20 atlas ([`crate::font`]):
-    /// 32 x 12 cells on the M9's 320 x 240.
+    /// A renderer over `panel`, in [`Size::DEFAULT`]. The panel's frame
+    /// is cleared to the ground here, in memory: the cells draw only what
+    /// differs from the last frame, which starts blank, so whatever the
+    /// frame held (the power-on splash, 1485) would stay under every blank
+    /// cell. The panel keeps the splash until the first redraw flushes.
     pub fn new(panel: &'d mut D) -> Result<Self, DrawError> {
-        // Every field named: the config's `Default` would build (and leak)
-        // mousefood's own 6 x 10 atlas and keep its glyphs in the image.
+        let mut renderer = Self {
+            panel,
+            last: Buffer::empty(Rect::ZERO),
+            next: Buffer::empty(Rect::ZERO),
+            drawn: None,
+            size: Size::DEFAULT,
+            fonts: [None, None],
+            map_drawn: false,
+            window: screen::Window::default(),
+            clock: None,
+            map_stats: None,
+        };
+        renderer.set_grid(Size::DEFAULT)?;
+        Ok(renderer)
+    }
+
+    /// The size the reader chose (1532).
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    /// Set what follows in `size`: the next draw that is no map's.
+    pub fn set_size(&mut self, size: Size) {
+        self.size = size;
+    }
+
+    /// The atlas of `size`, made the first time it is asked.
+    fn font(&mut self, size: Size) -> MonoFont<'static> {
+        let slot = &mut self.fonts[usize::from(size.large())];
+        *slot.get_or_insert_with(|| size.atlas())
+    }
+
+    /// mousefood over the panel in `size`'s atlas, for one draw. Every
+    /// field named: the config's `Default` would build (and leak)
+    /// mousefood's own 6 x 10 atlas and keep its glyphs in the image.
+    fn backend(&mut self, size: Size) -> EmbeddedBackend<'_, D, Rgb565> {
         let config = EmbeddedBackendConfig {
             flush_callback: alloc::boxed::Box::new(|_| {}),
-            font_regular: crate::font::atlas(),
+            font_regular: self.font(size),
             font_bold: None,
             font_italic: None,
             vertical_alignment: TerminalAlignment::Start,
@@ -80,24 +139,19 @@ where
             color_theme: ColorTheme::default(),
             cursor: CursorConfig::default(),
         };
-        // The atlas leaks each time it is made; the config's is the one.
-        let font = config.font_regular;
-        let backend = EmbeddedBackend::new(panel, config);
-        let mut terminal = Terminal::new(backend).map_err(|_| DrawError)?;
-        // ratatui draws only the cells that differ from its last frame,
-        // which starts blank: whatever the panel's frame held (the
-        // power-on splash, 1485) would stay under every blank cell. The
-        // frame is cleared to the ground here, in memory; the panel keeps
-        // the splash until the first redraw flushes.
-        terminal.clear().map_err(|_| DrawError)?;
-        Ok(Self {
-            terminal,
-            font,
-            map_drawn: false,
-            window: screen::Window::default(),
-            clock: None,
-            map_stats: None,
-        })
+        EmbeddedBackend::new(&mut *self.panel, config)
+    }
+
+    /// The buffers and the panel in `size`'s grid: cleared to the ground
+    /// and blank, so the next draw draws every cell that is not blank.
+    fn set_grid(&mut self, size: Size) -> Result<(), DrawError> {
+        let (cols, rows) = size.grid();
+        let area = Rect::new(0, 0, cols as u16, rows as u16);
+        self.backend(size).clear().map_err(|_| DrawError)?;
+        self.last = Buffer::empty(area);
+        self.next = Buffer::empty(area);
+        self.drawn = Some(size);
+        Ok(())
     }
 
     /// Draw `scene` as [`screen::lines`] words it, at the grid's size.
@@ -143,6 +197,7 @@ where
             return self.draw(&screen::scene(model), look);
         };
         let attribution = map.credit();
+        let font = self.font(Size::Large);
         // No region under the view (1476): the cells say so, no picture,
         // and no credit, as nobody's data is shown.
         let bare = !map::covers(map.region.header(), &view);
@@ -155,10 +210,12 @@ where
         };
         let corner = credit.filter(|_| look.map.credit);
         self.window = screen::Window::default();
-        self.cells(|cols, rows| map::lines(look, bare, cols, rows))?;
+        // The map's cells are the large size's grid, whatever the reader
+        // chose: its picture, pins and names are laid on that grid (1531).
+        self.cells_in(Size::Large, |cols, rows| map::lines(look, bare, cols, rows))?;
         let clock = self.clock;
         let now = || clock.map_or(0, |c| c());
-        let panel = self.terminal.backend_mut().display_mut();
+        let panel = &mut *self.panel;
         let mut stats = MapStats {
             zoom: view.zoom(),
             ..MapStats::default()
@@ -174,14 +231,14 @@ where
             taken.extend(corner.map(map::credit_cells));
             let rows = (painted.size().1 / u32::from(map::CELL_PX.1)) as u16;
             let (names, found) = map::names(&map.region, &painted, rows, &taken);
-            map::draw_names(&names, &self.font, panel).map_err(|_| DrawError)?;
+            map::draw_names(&names, &font, panel).map_err(|_| DrawError)?;
             let t2 = now();
             stats.picture_us = t1.saturating_sub(t0);
             stats.names_us = t2.saturating_sub(t1);
             stats.names = found;
         }
-        map::pins(&pins, look, &self.font, panel).map_err(|_| DrawError)?;
-        map::words(bottom.as_deref(), corner, look, &self.font, panel).map_err(|_| DrawError)?;
+        map::pins(&pins, look, &font, panel).map_err(|_| DrawError)?;
+        map::words(bottom.as_deref(), corner, look, &font, panel).map_err(|_| DrawError)?;
         self.map_stats = Some(stats);
         self.map_drawn = true;
         Ok(())
@@ -199,32 +256,58 @@ where
     }
 
     /// Cells drawn after the map's pixels must all be drawn, not only those
-    /// ratatui saw change: its last frame holds the picture's rows blank.
+    /// the last frame saw change: it holds the picture's rows blank.
     fn leave_map(&mut self) -> Result<(), DrawError> {
         if self.map_drawn {
-            self.terminal.clear().map_err(|_| DrawError)?;
+            let size = self.drawn.unwrap_or(self.size);
+            self.set_grid(size)?;
             self.map_drawn = false;
         }
         Ok(())
     }
 
-    /// The lines `lines` makes for the grid's size, through ratatui.
+    /// The lines `lines` makes for the reader's size's grid.
     fn cells(
         &mut self,
         lines: impl FnOnce(usize, usize) -> alloc::vec::Vec<RLine>,
     ) -> Result<(), DrawError> {
-        self.terminal
-            .draw(|frame| {
-                let area = frame.area();
-                let lines = lines(area.width.into(), area.height.into());
-                frame.render_widget(Paragraph::new(to_ratatui_text(&lines)), area);
-            })
-            .map(|_| ())
-            .map_err(|_| DrawError)
+        self.cells_in(self.size, lines)
+    }
+
+    /// The lines `lines` makes for `size`'s grid, drawn as ratatui's
+    /// `Terminal::draw` does: rendered into the next buffer, only the
+    /// cells that differ from the last one sent to the panel, the two
+    /// swapped. A grid other than the last draw's starts from a cleared
+    /// panel.
+    fn cells_in(
+        &mut self,
+        size: Size,
+        lines: impl FnOnce(usize, usize) -> alloc::vec::Vec<RLine>,
+    ) -> Result<(), DrawError> {
+        if self.drawn != Some(size) {
+            self.set_grid(size)?;
+        }
+        let area = self.next.area;
+        let lines = lines(area.width.into(), area.height.into());
+        Paragraph::new(to_ratatui_text(&lines)).render(area, &mut self.next);
+        let last = core::mem::take(&mut self.last);
+        let next = core::mem::take(&mut self.next);
+        let drawn = {
+            let updates = last.diff(&next);
+            let mut backend = self.backend(size);
+            backend
+                .draw(updates.into_iter())
+                .and_then(|()| backend.flush())
+        };
+        let mut spare = last;
+        spare.reset();
+        self.last = next;
+        self.next = spare;
+        drawn.map_err(|_| DrawError)
     }
 
     /// The panel, to read back what was drawn.
     pub fn panel(&self) -> &D {
-        self.terminal.backend().display()
+        self.panel
     }
 }

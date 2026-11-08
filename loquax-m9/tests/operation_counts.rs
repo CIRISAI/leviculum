@@ -12,7 +12,7 @@ use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
 use loquax::ui::{update, Pane, UiEvent, UiModel};
 use loquax_m9::field::Field;
 use loquax_m9::keyboard::POLL_MS;
-use loquax_m9::screen::{self, ENTRY_ROWS, ROWS};
+use loquax_m9::screen::{self, ENTRY_ROWS};
 use real_store::bar;
 
 /// A key down the chats list on the M9 builds at most the list's entries
@@ -28,7 +28,10 @@ fn a_key_in_the_list_builds_the_rows_on_screen() {
     model.focus = Pane::Conversations;
     // As the board's model is built (loquax-m9/src/home.rs): the scene
     // is built for the M9's screen, not the store.
-    update(&mut model, UiEvent::Viewing(screen::viewing()));
+    update(
+        &mut model,
+        UiEvent::Viewing(screen::viewing(screen::Size::DEFAULT)),
+    );
     let _ = screen::scene(&model);
     update(
         &mut model,
@@ -37,7 +40,8 @@ fn a_key_in_the_list_builds_the_rows_on_screen() {
     let _ = screen::scene(&model);
     let counts = model.counters().expect("counting() said this build counts");
     println!("COUNTS m9.list_key {counts}");
-    let most = 2 * (ROWS / ENTRY_ROWS) as u32;
+    // The screen's entries in the size the board shows (1532).
+    let most = 2 * (screen::Size::DEFAULT.grid().1 / ENTRY_ROWS) as u32;
     bar(
         "m9.a_key_in_the_list_builds_the_rows_on_screen",
         counts.rows_built <= most && counts.bubbles_built == 0,
@@ -59,7 +63,10 @@ fn an_idle_board_draws_nothing() {
         return;
     }
     let mut model: UiModel<Field> = real_store::model();
-    update(&mut model, UiEvent::Viewing(screen::viewing()));
+    update(
+        &mut model,
+        UiEvent::Viewing(screen::viewing(screen::Size::DEFAULT)),
+    );
     let address = real_store::own();
     let mut drawn = screen::Drawn::default();
     let _ = screen::scene(&model);
