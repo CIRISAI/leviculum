@@ -710,7 +710,9 @@ the propagation node page's decision, or fills a gap they leave:
   announced name, then a space and the address's first four hex digits
   after a `·` (`Alice ·4f2a`); with neither, the address form
   `<9c31e0a2…>` as before. A name is cut before its hash, so the hash
-  always stays.
+  always stays. *Superseded 2026-11-08 (1452): the name alone, the tail
+  only on a collision, "Unknown" instead of the address form, and no `≈`;
+  see [the user interface page](loquax-ui.md), "Built 2026-10-26, names".*
 - **Sanitising** removes control characters, the bidi embeddings,
   overrides, isolates and marks, and the invisible code points (Unicode's
   default-ignorables: zero-width characters, the soft hyphen, the Hangul

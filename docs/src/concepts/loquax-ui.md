@@ -269,6 +269,37 @@ conversation, and the header says the trust state in words: `known`,
 `unknown` or `blocked`. Its section 5, "Built 2026-10-26, names", lists
 where it differs from the decision in [the mailbox page](loquax-mailbox.md).
 
+**Changed 2026-11-08 (1452): a name is a name.** Lew, on UI walk 1,
+finding 3: four hex digits after every name are noise nobody can remember.
+On every target (the window, the terminal, the phone, the M9), in lists,
+chats, bubbles, the map and the headers, a peer and a group are their name
+alone (`loquax/src/names.rs`, `Names::label`): the petname, else the
+address book's name, else the announced one. A peer without a name is
+"Unknown" ("Unbekannt"), its avatar a `?` in the colour its address gives,
+so two of them differ by colour; never hex. The own avatar takes the own
+name (the names' word for us, else the profile's from the mailbox).
+
+The short hash is a **collision marker, not an identifier**. It comes back
+only on the peers whose shown names collide (`Names::collisions`: the name
+the screen shows, petname, address book or announce, compared folded in
+case and white space, with the Cyrillic, Greek and digit look-alikes
+folded too), and two or more nameless peers with a conversation collide
+as well. Where they meet, the chat list's row and the chat header of each
+say it in words, "Zwei Kontakte heißen Lew" / "Two contacts are called
+Lew" (`Names::same_name`, catalogue strings `same_name_two`,
+`same_name_many`, `no_name_two`, `no_name_many`). The `≈` mark is gone. The
+window draws the sentence as a third line under the row and small under
+the header's name; the terminal and the M9, whose rows are one line of
+name, draw it after the name only when it fits whole, and the header
+always says it.
+
+**A peer is verified by its address, not by its tail.** The full address
+and its QR code live in the profile and the contact info, and a message's
+Info sheet names a relayed writer's short hash; that is where one looks a
+peer up and compares it, in full or by scanning the QR, never by four
+digits beside a name. The search still finds a conversation by its
+address in hex.
+
 ### Built 2026-10-27, history
 
 1049 (#232) is slice 6 of [keys, mouse and layout](loquax-keys-and-layout.md),
