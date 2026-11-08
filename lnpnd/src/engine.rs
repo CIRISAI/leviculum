@@ -690,6 +690,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 .as_ref()
                 .map_or(0, MailboxRuntime::config_bytes);
         let events_queued = self.events.queued();
+        let dup = ready.node.dup_counts();
         PnCensus {
             peers: peering.peers,
             store_index: store.index_bytes,
@@ -705,6 +706,13 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             stored: store.messages,
             peered: ready.peering.peer_count(),
             events_queued,
+            processed_ids: dup.processed,
+            departed_ids: dup.departed,
+            origin_ids: peering.origin_ids,
+            // An origin goes with its message (`Origins`), so the store's
+            // count bounds them.
+            dup_cap_ids: dup.processed_cap + dup.departed_cap + store.messages,
+            origin_slots: peering.origin_slots,
         }
     }
 
@@ -738,6 +746,9 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         if fresh.is_empty() {
             return;
         }
+        // The departures' count bound (order 1558) is the host's to keep:
+        // the role leaves the walk out of the board's image.
+        ready.node.bound_departures();
         self.departures_dirty = true;
         for (transient_id, reason) in fresh {
             // Its origin goes with it (LV-1003).

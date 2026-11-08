@@ -392,6 +392,9 @@ pub(crate) struct PeeringHeap {
     pub config: usize,
     /// The synced messages' origins ([`Origins`]).
     pub origins: usize,
+    /// Origins held, and the buckets of their hash table.
+    pub origin_ids: usize,
+    pub origin_slots: usize,
 }
 
 impl PeeringRuntime {
@@ -427,6 +430,8 @@ impl PeeringRuntime {
             links,
             config: self.static_paths_pending.capacity() * size_of::<[u8; 16]>(),
             origins: self.origins.heap_bytes(),
+            origin_ids: self.origins.by_id.len(),
+            origin_slots: self.origins.by_id.capacity(),
         }
     }
 

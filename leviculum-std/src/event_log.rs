@@ -956,7 +956,8 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["reason", "via"],
     },
     // lnpnd: the role's heap census, one byte estimate per table, every
-    // ten minutes and on SIGUSR1 (order 1515, LV-1000).
+    // ten minutes and on SIGUSR1 (order 1515, LV-1000), and the `dup`
+    // column's parts in ids against their bound (order 1558).
     EventSchema {
         name: "PN_CENSUS",
         required_keys: &[
@@ -974,6 +975,11 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "tables",
             "rss_kb",
             "stored",
+            "processed_ids",
+            "departed_ids",
+            "origin_ids",
+            "dup_cap_ids",
+            "origin_slots",
         ],
     },
     // lnpnd: the message store's limit at start, and whether it is the

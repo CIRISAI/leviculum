@@ -23,6 +23,12 @@
 //! | `config` | lists read from the config: allow lists, ignored, static peers |
 //! | `eventbuf` | engine events sent and not yet taken by the printer |
 //!
+//! After the columns and `tables` (their sum) come counts, not bytes:
+//! `rss_kb`, `stored`, `peered`, `events_queued`, and the `dup` column by
+//! its parts (order 1558): `processed_ids`, `departed_ids`, `origin_ids`,
+//! the bound the three are held to, `dup_cap_ids`, and the origins' hash
+//! table buckets, `origin_slots`, which name a table doubling.
+//!
 //! [`FIELD_COLUMNS`] maps every field of the structs that hold the daemon's
 //! state to the column that counts it, and a unit test reads the structs'
 //! source: a table added without a census column fails it.
@@ -144,6 +150,18 @@ pub struct PnCensus {
     pub peered: usize,
     /// Engine events sent and not yet taken.
     pub events_queued: usize,
+    /// The `dup` column by its parts, in ids (order 1558): processed ids
+    /// held, departures held, synced messages' origins held.
+    pub processed_ids: usize,
+    pub departed_ids: usize,
+    pub origin_ids: usize,
+    /// The bound the three are held to, in ids: the role's processed-id
+    /// and departure caps (`leviculum_lxmf::dup_caps`) and, for the
+    /// origins, one per stored message.
+    pub dup_cap_ids: usize,
+    /// Buckets of the origins' hash table: a jump in `dup` with this
+    /// doubled is the table resizing, not growth.
+    pub origin_slots: usize,
 }
 
 impl PnCensus {
@@ -175,12 +193,18 @@ impl PnCensus {
             line.push_str(&format!(" {name}={bytes}"));
         }
         line.push_str(&format!(
-            " tables={} rss_kb={} stored={} peered={} events_queued={}",
+            " tables={} rss_kb={} stored={} peered={} events_queued={} processed_ids={} \
+             departed_ids={} origin_ids={} dup_cap_ids={} origin_slots={}",
             self.tables(),
             self.rss_kb,
             self.stored,
             self.peered,
-            self.events_queued
+            self.events_queued,
+            self.processed_ids,
+            self.departed_ids,
+            self.origin_ids,
+            self.dup_cap_ids,
+            self.origin_slots,
         ));
         line
     }
@@ -205,6 +229,11 @@ impl PnCensus {
             stored = self.stored,
             peered = self.peered,
             events_queued = self.events_queued,
+            processed_ids = self.processed_ids,
+            departed_ids = self.departed_ids,
+            origin_ids = self.origin_ids,
+            dup_cap_ids = self.dup_cap_ids,
+            origin_slots = self.origin_slots,
         );
     }
 }

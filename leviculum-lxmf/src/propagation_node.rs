@@ -76,6 +76,47 @@ pub const PROCESSED_ID_EXPIRY_SECS: u64 = 6 * MESSAGE_EXPIRY_SECS;
 /// week longer only widens the duplicate window by a week.
 pub const PROCESSED_ID_PRUNE_SLACK_SECS: u64 = crate::processed_ids::PROCESSED_BUCKET_SECS;
 
+/// The duplicate list's count bound (order 1558, LV-1000): the processed-id
+/// cache holds at most this many ids per message the store holds, and the
+/// departures half as many ([`dup_caps`]).
+///
+/// **Deviation:** the reference bounds its duplicate set by time alone,
+/// six message expiries, 180 days (`clean_transient_id_caches`,
+/// `reference/LXMF/LXMF/LXMRouter.py:1018-1024`), and has no count bound:
+/// at the growth soak's 2148 accepts a minute that is about 50 MB of ids a
+/// day for 180 days, the field node's OOM candidate. An id is a duplicate
+/// for us while the store holds its message ([`PropagationStore::contains`])
+/// and, beyond that, only while a peer may still offer it back: a peer
+/// offers a message once, in its next round, so the window that matters is
+/// one sync round of every peer, not 180 days. Two ids per stored message
+/// remember about one store's worth of departed ids on top of the stored
+/// ones: on a full store that turns over in hours at the soak's rate and in
+/// days at the field's, both far past any peer's round. Wire is unchanged;
+/// semantics hold: an id forgotten that late and offered again is fetched
+/// and stored once more, which the recipient's own duplicate check absorbs
+/// (`locally_delivered_transient_ids`, `LXMRouter.py:1668`), as the
+/// reference itself does past 180 days.
+pub const DUP_IDS_PER_STORED: usize = 2;
+
+/// The duplicate list's bound on a near-empty store: so many ids are kept
+/// whatever the store holds, about a day of the field node's accepts, a
+/// megabyte of processed ids.
+pub const DUP_IDS_FLOOR: usize = 65_536;
+
+/// The count bounds for a store holding `stored` messages: the processed
+/// ids, then the departures ([`DUP_IDS_PER_STORED`]).
+pub const fn dup_caps(stored: usize) -> (usize, usize) {
+    let stored = if stored > DUP_IDS_FLOOR / DUP_IDS_PER_STORED {
+        stored
+    } else {
+        DUP_IDS_FLOOR / DUP_IDS_PER_STORED
+    };
+    (
+        stored.saturating_mul(DUP_IDS_PER_STORED),
+        stored.saturating_mul(DUP_IDS_PER_STORED) / 2,
+    )
+}
+
 /// How long one eviction walk's candidates serve later full appends: the
 /// reference weighs its store once per store job, `JOB_STORE_INTERVAL` 120
 /// times `PROCESSING_INTERVAL` 4 s (`reference/LXMF/LXMF/LXMRouter.py:31,876,899`),
@@ -488,6 +529,17 @@ impl Default for PropagationNodeConfig {
             prioritised_destinations: Vec::new(),
         }
     }
+}
+
+/// The duplicate list's counts against their bounds
+/// ([`PropagationNode::dup_counts`], [`dup_caps`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DupCounts {
+    pub processed: usize,
+    pub processed_cap: usize,
+    pub departed: usize,
+    /// 0 on a node that keeps no departures.
+    pub departed_cap: usize,
 }
 
 /// When and why one message left the store ([`PropagationNode::departures`]).
@@ -988,8 +1040,14 @@ pub struct PropagationNode<S> {
     /// `reference/LXMF/LXMF/LXMRouter.py:1581`).
     ///
     /// Week buckets of 16-byte id prefixes, exact for at least the
-    /// reference's window ([`crate::processed_ids`]).
+    /// reference's window ([`crate::processed_ids`]) and held to
+    /// [`dup_caps`] of the store's count.
     processed: crate::processed_ids::ProcessedIds,
+    /// The store's message count as last read, what the duplicate list's
+    /// count bound is taken from ([`dup_caps`]); 0, the floor's bound,
+    /// until the list is large enough for a bound to bind
+    /// ([`Self::update_dup_caps`]).
+    stored_for_caps: usize,
     /// Messages expired or displaced since the role was built, for a host's
     /// status line ([`Self::evicted_total`]).
     evicted_total: u64,
@@ -1045,17 +1103,105 @@ impl<S: PropagationStore> PropagationNode<S> {
         config.transfer_limit_kb = config.transfer_limit_kb.min(fit_kb);
         config.sync_limit_kb = config.sync_limit_kb.min(fit_kb);
         store.count_sizes_up_to(Self::largest_offered_size_under(&config));
-        Self {
+        let mut node = Self {
             store,
             config,
             processed: crate::processed_ids::ProcessedIds::new(),
+            stored_for_caps: 0,
             evicted_total: 0,
             eviction_candidates: Vec::new(),
             eviction_walked_at: 0,
             departed: None,
             compute_stamp_value: false,
             calendar_jump_floor: 0,
+        };
+        node.processed.set_cap(dup_caps(0).0);
+        node
+    }
+
+    /// Hold the duplicate list to the bounds the store's count gives
+    /// ([`dup_caps`]), on every [`Self::tick`]. The count is read only once
+    /// either half holds half its current bound: below that no bound can
+    /// bind, and a board's store counts by walking its region, which a tick
+    /// at rest must not read (`leviculum-nrf/pn-store`). A host's store
+    /// counts from its index.
+    fn update_dup_caps(&mut self) {
+        let (processed_cap, departed_cap) = dup_caps(self.stored_for_caps);
+        let departed = self.departed.as_ref().map_or(0, |d| d.left.len());
+        if self.processed.len() >= processed_cap / 2 || departed >= departed_cap / 2 {
+            self.refresh_dup_caps();
         }
+    }
+
+    /// Read the store's count and hold the processed ids to the bound it
+    /// gives now. The departures follow at the host's next
+    /// [`Self::bound_departures`].
+    fn refresh_dup_caps(&mut self) {
+        self.stored_for_caps = self.store.count().unwrap_or(self.stored_for_caps);
+        self.processed.set_cap(dup_caps(self.stored_for_caps).0);
+    }
+
+    /// Hold the departures to their bound ([`dup_caps`]), the store's count
+    /// read afresh first. A host that tracks departures calls it each time
+    /// it takes them ([`Self::take_fresh_departures`]); the role's own
+    /// paths do not, so a board, which keeps none, does not link the walk
+    /// that finds the cut (4.3 KiB on the Pocket image, measured by
+    /// `just nrf-flash-budget` with the walk in the role).
+    pub fn bound_departures(&mut self) {
+        let (_, cap) = dup_caps(self.stored_for_caps);
+        let held = self.departed.as_ref().map_or(0, |d| d.left.len());
+        if held <= cap.saturating_add(cap / 8) {
+            return;
+        }
+        self.refresh_dup_caps();
+        self.trim_departures();
+    }
+
+    /// The duplicate list's counts and bounds, for a host's census: held
+    /// processed ids, their cap, held departures, their cap.
+    pub fn dup_counts(&self) -> DupCounts {
+        let (processed_cap, departed_cap) = dup_caps(self.stored_for_caps);
+        DupCounts {
+            processed: self.processed.len(),
+            processed_cap,
+            departed: self.departed.as_ref().map_or(0, |d| d.left.len()),
+            departed_cap: if self.departed.is_some() {
+                departed_cap
+            } else {
+                0
+            },
+        }
+    }
+
+    /// Hold the departures to their bound ([`dup_caps`]), newest kept:
+    /// once they pass the bound by an eighth, the oldest go down to it, so
+    /// the walk that finds the cut is paid once per eighth of the bound
+    /// departures, not per departure.
+    fn trim_departures(&mut self) {
+        let (_, cap) = dup_caps(self.stored_for_caps);
+        let Some(departed) = self.departed.as_mut() else {
+            return;
+        };
+        let len = departed.left.len();
+        if len <= cap.saturating_add(cap / 8) {
+            return;
+        }
+        let mut times: Vec<u64> = departed.left.values().map(|left| left.at_secs).collect();
+        let (_, cut, _) = times.select_nth_unstable(len - cap);
+        let cut = *cut;
+        // Strictly older than the cut go, and of those at the cut only as
+        // many as the bound needs.
+        let mut at_cut_to_drop = len - cap - times.iter().filter(|at| **at < cut).count();
+        departed.left.retain(|_, left| {
+            if left.at_secs < cut {
+                return false;
+            }
+            if left.at_secs == cut && at_cut_to_drop > 0 {
+                at_cut_to_drop -= 1;
+                return false;
+            }
+            true
+        });
     }
 
     /// The largest limit, in the reference's kilobytes of 1000 bytes, whose
@@ -1748,6 +1894,11 @@ impl<S: PropagationStore> PropagationNode<S> {
     }
 
     fn remember_processed(&mut self, transient_id: TransientId, at_secs: u64) {
+        // Before the cache drops ids at its bound, the bound is taken from
+        // the store's count as it is now, not as the last tick read it.
+        if self.processed.len() >= self.processed.cap() {
+            self.refresh_dup_caps();
+        }
         self.processed.insert(&transient_id, at_secs);
     }
 
@@ -1842,6 +1993,8 @@ impl<S: PropagationStore> PropagationNode<S> {
         now_secs: u64,
     ) -> usize {
         self.track_departures();
+        // The bound a restore is held to is the store's, not the floor's.
+        self.refresh_dup_caps();
         let window = self.config.message_expiry_secs;
         let mut restored = 0;
         for (transient_id, departure) in entries {
@@ -1856,6 +2009,7 @@ impl<S: PropagationStore> PropagationNode<S> {
             }
             restored += 1;
         }
+        self.bound_departures();
         restored
     }
 
@@ -1948,6 +2102,7 @@ impl<S: PropagationStore> PropagationNode<S> {
         }
 
         self.processed.prune(now_secs, PROCESSED_ID_EXPIRY_SECS);
+        self.update_dup_caps();
         if let Some(departed) = self.departed.as_mut() {
             departed
                 .left
