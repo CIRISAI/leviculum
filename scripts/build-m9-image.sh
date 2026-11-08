@@ -16,12 +16,39 @@
 # off espflash's own "App/part. size: <used>/<partition> bytes" line.
 #
 # Two stacks since 1493 (the two-core split): the UI core's static stack
-# (the APP_CORE_STACK symbol in the ELF) carries every scene and draw
-# and is held to the open chat's census ceilings of
-# loquax-m9/src/census.rs added up, 184,000 B; core 0's `.stack` section
-# carries the node, the client and the flash, and is held to 111,000 B,
-# the top of the peak the same NodeCore paths measured on the LNode
-# (95-111 KiB, #50's stack follow-on).
+# (the APP_CORE_STACK symbol in the ELF) carries every scene and draw;
+# core 0's `.stack` section carries the node, the client and the flash.
+#
+# Core 0's floor is measured on this board since 1582 (it was the LNode's
+# node peak, 111,000 B, until then). The rule: the deepest core 0 use the
+# board's painted stack showed, plus a 16 KiB reserve. The reserve covers
+# what the bench did not drive and the paint cannot see:
+#   - the deepest static call chain of the same image is 10,032 B deeper
+#     than the measure (88,624 B: main -> Handheld::take_code ->
+#     Handheld::client -> home::rebuild -> home::model -> ... the open
+#     chat's bubbles, `scripts/m9-stack-frames.py`), a forget or a join
+#     while a chat is open;
+#   - two nested interrupts, 2,624 B: each the 256 B exception frame,
+#     128 B of dispatch and 928 B of the deepest handler (kb_tick);
+#   - 3,728 B for calls through a vtable or a fn pointer, which no static
+#     chain follows.
+# Provenance: ThinkNode M9 on the rig, bench image 2f5caa4a (1581;
+# thinknode_m9-bench.elf sha256 282655c5...), window 18, 2026-11-08
+# 23:00:12-23:00:16 CET: the join from an erased store (`[HOME]
+# code=taken`, `restore=rebuilt`, then the first 330-entry page of a
+# 4345-entry fixture pull, TLSF fold) took `stack_free=` from 72,564 to
+# 31,904 of a 111,008 B stack: 111,008 - 512 guard - 31,904 = 78,592 B.
+# Log: rig-run/m9/2026-11-07h/board.log (window 18 from the offset in
+# rig-run/m9/2026-11-08j/board-offset-after-flash.txt). Resumed boots,
+# the bench, hang and marks walks with their frame dumps and the map
+# stayed at or under 66,716 B.
+#
+# The UI core's floor is still the open chat's census ceilings of
+# loquax-m9/src/census.rs added up on the host (64-bit, debug), 184,000 B,
+# not a measure of this board: until 1582 nothing read the UI core's
+# stack. Its `[UART] ui_stack_free=` (1582) is the measure; the next
+# bench window turns it into a floor by the same rule. The static chain
+# of ui_main in 2f5caa4a is 62,288 B (the boot census's walk).
 #
 # Red when the image does not build, when fewer than 8 KiB of the partition
 # are free (the nRF floor, for the nRF reason), when the stack is below the
@@ -78,7 +105,8 @@ TAG="[m9-image]"
 CANON=/mnt/leviculum
 FLOOR=8192
 UI_STACK_NEED=184000
-IO_STACK_NEED=111000
+# 78,592 B measured + 16,384 B reserve (the rule and provenance above).
+IO_STACK_NEED=94976
 
 # verdict <used> <partition> <io_stack> <ui_stack>: the headroom lines;
 # 1 when any floor is undercut.
@@ -92,7 +120,7 @@ verdict() {
         rc=1
     fi
     if [ "$stack" -lt "$IO_STACK_NEED" ]; then
-        echo "$TAG FAIL $stack B of core 0 stack, below the $IO_STACK_NEED B the LNode-measured node peak needs."
+        echo "$TAG FAIL $stack B of core 0 stack, below the $IO_STACK_NEED B this board's measured peak and its reserve need."
         rc=1
     fi
     if [ "$ui_stack" -lt "$UI_STACK_NEED" ]; then
@@ -116,7 +144,7 @@ selftest() {
     rm -f "$log"
     verdict 927520 16384000 112000 188416 >/dev/null || { echo "$TAG selftest FAIL: a roomy image was refused"; rc=1; }
     verdict 16380000 16384000 112000 188416 >/dev/null && { echo "$TAG selftest FAIL: 4000 B free passed"; rc=1; }
-    verdict 927520 16384000 100000 188416 >/dev/null && { echo "$TAG selftest FAIL: a 100 kB core 0 stack passed"; rc=1; }
+    verdict 927520 16384000 90000 188416 >/dev/null && { echo "$TAG selftest FAIL: a 90 kB core 0 stack passed"; rc=1; }
     verdict 927520 16384000 112000 100000 >/dev/null && { echo "$TAG selftest FAIL: a 100 kB UI stack passed"; rc=1; }
     [ "$rc" -eq 0 ] && echo "$TAG selftest ok: the size line reads, every floor refuses"
     return "$rc"
