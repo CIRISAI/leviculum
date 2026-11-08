@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:320`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:349`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -525,7 +525,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   was a function of the cursor's place in the order alone, and a first
   pull's 61 pages made the cursor jump about the panel with no key
   pressed. Moving the cursor onto a chat loads its page behind the list
-  and reads nothing (`behind_the_list`, `loquax-m9/src/home.rs:82`); Enter
+  and reads nothing (`behind_the_list`, `loquax-m9/src/home.rs:292`); Enter
   reads, and an Enter before the page arrived names the row's kept unread
   ids. What a type size set asks of the model, the boot's cursor chat's
   page among it, is routed (`set_size`, `loquax-m9/src/house.rs:304`).
@@ -683,7 +683,7 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:354`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:383`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:905`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:914`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -708,7 +708,7 @@ draws is the scene the terminal, the window and the phone already draw.
 - **The keyboard:** the controller's answer is read as the community port
   reads it, register 0x01 of 0x6D, eight bytes a poll. Every answer goes
   out raw, `KBRAW <ms> <hex>`, one a 10 ms poll, and `parse_raw`
-  (`loquax-m9/src/kbraw.rs:279`) replays a capture on the host. Slice four
+  (`loquax-m9/src/kbraw.rs:285`) replays a capture on the host. Slice four
   first decoded the answer as a matrix bitmap; the capture that line made
   possible read the protocol (one code per press, 1427), and the board
   now reads it so (`MEASURED`, `loquax-m9/src/kbraw.rs:37`; `read`,
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:914`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:943`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:658`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:687`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1931,16 +1931,16 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2258`).
+both (`thinknode_m9.rs:2267`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
-(`CHANGED_WAIT_S`, `scripts/m9-walk.py:134`): T on the map flushes the
+(`CHANGED_WAIT_S`, `scripts/m9-walk.py:136`): T on the map flushes the
 hint's row first and says the zoom about 400 ms later. `key_ms` still
 measures the first flush after the key, and walk.md names its `rows=`.
 The house key opens the house page after its tap's 300 ms gap
 (`GAP_MS`, `loquax-m9/src/house.rs:43`), so its bar is that much longer
-(`HOUSE_GAP_MS`, `scripts/m9-walk.py:131`); `bench.walk` waits for
+(`HOUSE_GAP_MS`, `scripts/m9-walk.py:133`); `bench.walk` waits for
 `page=house` and leaves it with Back. An lnsd on the proxy's pty
 re-attaches by itself after a flash; a second one is refused with
 "shared-instance name already served" (`scripts/m9-walk.sh`).
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2270`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2279`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,7 +2035,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:811`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:820`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2043,7 +2043,7 @@ for everything before its end. `Store::open_after`
 (`loquax/src/home/board/store.rs:252`) reads only the frames after it,
 and the boot folds them into the model and the index as the live pull
 folded them, then writes the summary at the ring's end
-(`resume_tail`, `loquax-m9/src/home.rs:526`); `[STORE] index=summaries`
+(`resume_tail`, `loquax-m9/src/home.rs:736`); `[STORE] index=summaries`
 says `tail=<n>`. A state whose sector went round the ring, or an end the
 log does not reach, still rebuilds. On the host the fixture's 4000
 entries with a 360-entry tail resume in 22 ms decoding the 360, against
@@ -2109,14 +2109,50 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2325`), and the fold runs behind the list
-(`behind_the_list`, `loquax-m9/src/home.rs:82`), so no read mark is
+(`thinknode_m9.rs:2334`), and the fold runs behind the list
+(`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
 its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2090`, the
 a80038c2 rule); the cursor moves because the folded page gives the
 chat its real activity and the list re-sorts under a selection that
 follows the chat. A preload, not an open: nothing to stop for 1562/1564.
+
+### The drain yields to the keys (1575)
+
+Window 16b (bench image of 99b3b6ec, 4266 entries re-pulled) confirmed
+1569 on the board, flat `host=` and no reset, and showed what was left:
+108 of 111 `[LOOP] core=ui` lines in `stage=drain`, up to 836 ms
+folding one page of 234 entries before the loop looked at the keys.
+The drain takes the I/O core's messages in order into a backlog and
+folds a pulled page through `home::Folding`: entries until 25 ms of the
+turn are spent (`home::FOLD_BUDGET_US`) or a press waits in the
+keyboard's queue (`kb_waiting`, asked after every entry), each turn's
+entries one batch. The rest of the page waits for the next turn, and
+nothing behind it is taken before it is folded. The page counts as
+folded once, at its last entry, and the rows the turns said are held
+(`Folding::rows_due`) until that turn, so the summary log is written
+once a page as before. A time, not a count of entries: 16b's turns
+folded 234 entries in 836 ms and 55 in 536 to 620 ms, so no count
+bounds the turn.
+
+**Where a fold goes, on the host.** `loquax-android/tests/m9_fold_census.rs`
+splits a page into the unpack, the model's step, the batch's note and
+the route, by time and by allocator calls and bytes: per entry about 10
+calls and 0.4 KB for the unpack, 12 calls and 3.4 KB for the step, and
+per batch about 380 calls for the note, however few its entries. A
+split page pays the note per chunk. The bench image says each page's
+split on the board as `[FOLD]` (`thinknode_m9.rs`, 1575), with the
+allocator's time, calls and bytes on the UI core.
+
+**Shown on the sim and in a model test.** `loquax-m9/tests/drain.rs`
+plays the loop over a test clock at 3.6 ms an entry: the longest turn
+25.2 ms against 842.4 ms unbudgeted. The sim's `--store pulling`,
+`--fold-cost-us` and `pull <pages>` (`scripts/m9-sim-walks/pull.walk`,
+`just m9-sim-walk`) press the ring every 150 ms through twelve pages of
+234: `key_ms` at most 2 against 819 without the budget. The bench walk
+holds a `[LOOP] core=ui` line's `drain=` under 100 ms
+(`home::DRAIN_BAR_MS`), a dump's and a boot's own turns exempt.
 
 ### The bench never touches a real home (1562)
 
@@ -2137,13 +2173,13 @@ equal them. The arrival goes into one conversation the list calls
 - **A release image** restores with `Arrivals::Dropped`. The rebuild
   and the resumed tail skip the bench's entries, and a summary's
   "Bench" row and name are not listed (`listed`,
-  `loquax-m9/src/home.rs:654`). A release image never shows "Bench".
+  `loquax-m9/src/home.rs:864`). A release image never shows "Bench".
 - **Read marks.** The board leaves the bench's message ids out of the
   marks it sends its home (`route`). It keeps the read on the board
   itself.
 - **`bench forget`** (`TYPE_BENCH_FORGET` 0x1D, bench image only)
   takes the following out of the ring (`home::forget`,
-  `loquax-m9/src/home.rs:793`, over `Store::forget`,
+  `loquax-m9/src/home.rs:1003`, over `Store::forget`,
   `loquax/src/home/board/store.rs:286`):
   - the flagged entries;
   - 1540's unflagged entries, which have a zero signature and text
@@ -2178,7 +2214,7 @@ device=940b1536…` at 09:06). `scripts/m9-bench-home.sh` keeps a
 The board's `[HOME] client=yes` line names its home's address
 (`home=`). `m9-walk.py` refuses a walk that opens chats (Enter or
 `open`) before its first key unless that address is the bench home's
-(`refusal`, `scripts/m9-walk.py:746`). A board without a home, and a
+(`refusal`, `scripts/m9-walk.py:766`). A board without a home, and a
 walk without opens, run as before. Lew gets his own pairing back with
 `lnflash --home` or a code from his mailbox. The two never mix.
 
