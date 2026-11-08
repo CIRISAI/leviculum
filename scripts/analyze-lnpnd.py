@@ -53,6 +53,7 @@ KNOWN = {
     "PN_STORE",
     "PN_STORE_FULL",
     "PN_CENSUS",
+    "PN_STORE_LIMIT",
 }
 
 # The PN_CENSUS columns, heap bytes per table (lnpnd/src/census.rs), in the
@@ -124,6 +125,8 @@ class Stats:
         self.status_ids = 0
         self.store_full_rounds = 0
         self.store_full_dropped = 0
+        # The last start's PN_STORE_LIMIT line (order 1548), as read.
+        self.limit_line = None
 
         # Phase 4: capped at MAX_TRACKED_PEERS, never by traffic.
         self.peer_offers = defaultdict(lambda: defaultdict(int))
@@ -230,6 +233,14 @@ def consume(stats, line):
     elif name == "PN_REJECT":
         stats.rejected_by_reason[values.get("reason", "?")] += 1
         stats.rejected_via[values.get("via", "?")] += 1
+
+    elif name == "PN_STORE_LIMIT":
+        stats.limit_line = (
+            as_int(values, "bytes"),
+            values.get("source", "?").strip('"'),
+            as_int(values, "ram_mb"),
+            as_int(values, "index_mb"),
+        )
 
     elif name == "PN_STORE_FULL":
         stats.store_full_rounds += 1
@@ -372,6 +383,12 @@ def report(stats):
         )
     else:
         out("no PN_STORE line in this log -- store utilisation unknown\n")
+    if stats.limit_line is not None:
+        limit, source, ram_mb, index_mb = stats.limit_line
+        out(
+            f"limit at start   {human_bytes(limit)} ({source}), index {index_mb} MB "
+            f"when full, host RAM {ram_mb} MB\n"
+        )
     evicted = sum(stats.evicted.values())
     out(
         f"flow             {stats.accepted} accepted, {stats.get_served} delivered to clients, "

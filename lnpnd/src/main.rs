@@ -172,7 +172,8 @@ struct Args {
     sync_limit_kb: Option<u64>,
 
     /// Message store capacity in kilobytes (config:
-    /// message_storage_limit, which is in megabytes).
+    /// message_storage_limit, which is in megabytes). Unset, the default
+    /// of 500 MB is bounded by the host's RAM (lnpnd(1)).
     #[arg(long)]
     store_limit_kb: Option<u64>,
 
@@ -383,7 +384,8 @@ struct Effective {
     node_announce_at_start: bool,
     autopeer: bool,
     autopeer_maxdepth: u8,
-    store_limit_kb: u64,
+    /// The limit the config or a flag set, `None` for the default.
+    store_limit_kb: Option<u64>,
     transfer_limit_kb: u64,
     sync_limit_kb: u64,
     stamp_cost: u8,
@@ -417,6 +419,30 @@ fn peering_config(effective: &Effective) -> leviculum_lxmf::PeeringConfig {
         max_inbound_syncs: effective.max_inbound_syncs,
         from_static_only: effective.from_static_only,
         static_peers: effective.static_peers.clone(),
+    }
+}
+
+/// The store limit's line, and the warning when a configured limit's
+/// index would take more than the RAM rule allows (order 1548).
+fn log_store_limit(limit: &lnpnd::store_limit::StoreLimit) {
+    use lnpnd::store_limit::megabytes;
+    let ram_mb = limit.ram_bytes.map_or(0, megabytes);
+    let index_mb = megabytes(limit.index_bytes());
+    tracing::info!(
+        event = "PN_STORE_LIMIT",
+        bytes = limit.bytes,
+        source = limit.source.as_str(),
+        ram_mb = ram_mb,
+        index_mb = index_mb,
+    );
+    if limit.exceeds_ram_rule() {
+        tracing::warn!(
+            "lnpnd: the message store limit of {} MB needs about {index_mb} MB of RAM \
+             for its index when full, the host has {ram_mb} MB; a quarter of it \
+             holds a store of {} MB",
+            megabytes(limit.bytes),
+            limit.ram_bound_bytes.map_or(0, megabytes),
+        );
     }
 }
 
@@ -458,11 +484,13 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             .autopeer_maxdepth
             .or(file.get_u8("propagation", "autopeer_maxdepth")?)
             .unwrap_or(lnpnd::config::DEFAULT_AUTOPEER_MAXDEPTH),
-        store_limit_kb: args.store_limit_kb.unwrap_or(
-            file.get_u64("propagation", "message_storage_limit")?
-                .map(|megabytes| megabytes * 1000)
-                .unwrap_or(500_000),
-        ),
+        // `None` leaves the limit to the RAM rule (`lnpnd::store_limit`).
+        store_limit_kb: match args.store_limit_kb {
+            Some(kb) => Some(kb),
+            None => file
+                .get_u64("propagation", "message_storage_limit")?
+                .map(|megabytes| megabytes * 1000),
+        },
         transfer_limit_kb: args.transfer_limit_kb.unwrap_or(
             // Both spellings, newer one wins, as in `apply_config`
             // (`lxmd.py:165-177`).
@@ -637,11 +665,17 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
             store_dir.path.display()
         );
     }
-    let mut store =
-        match FilePropagationStore::open(&store_dir.path, effective.store_limit_kb * 1000) {
-            Ok(store) => store,
-            Err(error) => return failure(format!("message store: {error}")),
-        };
+    // The default store limit follows the host's RAM, so a full store's
+    // index cannot push the daemon into the OOM killer (order 1548).
+    let store_limit = lnpnd::store_limit::resolve(
+        effective.store_limit_kb.map(|kb| kb.saturating_mul(1000)),
+        lnpnd::store_limit::host_ram_bytes(),
+    );
+    log_store_limit(&store_limit);
+    let mut store = match FilePropagationStore::open(&store_dir.path, store_limit.bytes) {
+        Ok(store) => store,
+        Err(error) => return failure(format!("message store: {error}")),
+    };
     // Once per store, before the node exists (`lnpnd::reprice_stored_values`).
     if !store.stamp_values_true() {
         let started = std::time::Instant::now();
@@ -659,7 +693,7 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         "lnpnd: message store holds {} message(s), {} of {} kB free",
         store.len(),
         store_free_kb(&store),
-        effective.store_limit_kb
+        store_limit.bytes / 1000
     );
     // What the start cost, and whether the index file spared it the walk
     // (order 1376: 130 s at 323 597 messages before it did).
@@ -747,7 +781,7 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
             delivery_limit_kb: effective.delivery_limit_kb,
             ignored,
         }),
-        store_limit_bytes: effective.store_limit_kb * 1000,
+        store_limit_bytes: store_limit.bytes,
         delivery_limit_kb: effective.delivery_limit_kb,
     });
 
@@ -1094,6 +1128,24 @@ mod tests {
 [logging]\n\
   loglevel = 4\n";
 
+    /// No limit in the config and none on the command line leaves the
+    /// limit to the RAM rule; a flag wins over the file (order 1548).
+    #[test]
+    fn an_unset_store_limit_is_left_to_the_ram_rule() {
+        let empty = RawConfig::parse("[propagation]\n").expect("parses");
+        let args = Args::parse_from(["lnpnd"]);
+        assert_eq!(
+            resolve(&args, &empty).expect("resolves").store_limit_kb,
+            None
+        );
+        let file = RawConfig::parse(PUBLIC_NODE_CONFIG).expect("parses");
+        let args = Args::parse_from(["lnpnd", "--store-limit-kb", "2000"]);
+        assert_eq!(
+            resolve(&args, &file).expect("resolves").store_limit_kb,
+            Some(2000)
+        );
+    }
+
     #[test]
     fn the_public_node_config_resolves_key_for_key() {
         let file = RawConfig::parse(PUBLIC_NODE_CONFIG).expect("the live config shape parses");
@@ -1107,7 +1159,7 @@ mod tests {
         assert!(effective.autopeer);
         assert_eq!(effective.autopeer_maxdepth, 4);
         // Megabytes in the file, kilobytes in the daemon (`lxmd.py:158-159`).
-        assert_eq!(effective.store_limit_kb, 1_000_000);
+        assert_eq!(effective.store_limit_kb, Some(1_000_000));
         // The older of the two spellings; kilobytes either way.
         assert_eq!(effective.transfer_limit_kb, 256);
         assert!(!effective.auth_required);

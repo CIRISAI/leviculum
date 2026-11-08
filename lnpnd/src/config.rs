@@ -343,7 +343,9 @@ autopeer_maxdepth = 6
 # the propagation node message store,
 # specified in megabytes. Old and oversized
 # messages are removed first when the store
-# fills. Defaults to 500 megabytes.
+# fills. Defaults to 500 megabytes, less on
+# a host whose RAM cannot hold the index of
+# a full store in a quarter of it (lnpnd(1)).
 
 # message_storage_limit = 500
 

@@ -976,6 +976,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "stored",
         ],
     },
+    // lnpnd: the message store's limit at start, and whether it is the
+    // default bounded by the host's RAM or the config's (order 1548).
+    EventSchema {
+        name: "PN_STORE_LIMIT",
+        required_keys: &["bytes", "source", "ram_mb", "index_mb"],
+    },
     // lnpnd: an inbound sync batch had messages the store could not hold
     // even after eviction; `offered` is the batch, `dropped` what was lost.
     // The node declines offers until its next maintenance sweep (1294).

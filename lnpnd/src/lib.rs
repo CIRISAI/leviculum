@@ -34,6 +34,7 @@ pub(crate) mod hook_profile;
 pub mod identity;
 pub mod mailbox;
 pub(crate) mod peering;
+pub mod store_limit;
 pub(crate) mod validation;
 
 #[cfg(test)]

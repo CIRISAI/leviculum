@@ -204,6 +204,35 @@ fn assert_pn_census(text: &str) {
     assert!(rss.is_some_and(|kb| kb > 0), "{line}");
 }
 
+/// The start's store limit line (order 1548): one, before the census, the
+/// default's source on a config without a limit, every field a number.
+fn assert_store_limit_line(text: &str) {
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|l| l.contains("PN_STORE_LIMIT"))
+        .map(plain)
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one start, one PN_STORE_LIMIT; it said:\n{text}"
+    );
+    let line = lines[0].as_str();
+    assert!(line.contains("source=\"default\""), "{line}");
+    let field = |key: &str| {
+        line.split_whitespace()
+            .find_map(|f| f.strip_prefix(&format!("{key}=")))
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    let bytes = field("bytes").unwrap_or_else(|| panic!("no bytes= in {line}"));
+    assert!(
+        bytes > 0 && bytes <= lnpnd::store_limit::DEFAULT_STORE_LIMIT_BYTES,
+        "{line}"
+    );
+    assert!(field("ram_mb").is_some(), "no ram_mb= in {line}");
+    assert!(field("index_mb").is_some(), "no index_mb= in {line}");
+}
+
 /// `line` without the terminal colours the stderr formatter adds.
 fn plain(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
@@ -262,6 +291,7 @@ async fn sigusr1_prints_the_census_with_live_n_a() {
             .await;
     let gap = assert_census_shape(&text);
     assert_pn_census(&text);
+    assert_store_limit_line(&text);
     assert!(gap.contains("; - live n/a;"), "{gap}");
     assert_eq!(gap_term(&gap, "- live "), None, "{gap}");
     assert!(
@@ -281,6 +311,7 @@ async fn sigusr1_prints_measured_live_bytes_and_the_sampler() {
     .await;
     let gap = assert_census_shape(&text);
     assert_pn_census(&text);
+    assert_store_limit_line(&text);
     let live = gap_term(&gap, "- live ").unwrap_or_else(|| panic!("live not measured: {gap}"));
     assert!(live > 0, "{gap}");
     assert!(gap.contains("(model, not subtracted)"), "{gap}");

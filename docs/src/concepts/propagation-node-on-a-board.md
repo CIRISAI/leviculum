@@ -503,6 +503,17 @@ statement is "unnecessary", not "impossible". What remains impossible is
 the second row: the peer sets scale with peers, and we control neither
 how many peer with us nor, therefore, that number.
 
+The host daemon is the other way round. lnpnd keeps its store index in
+RAM, 289 bytes a message (`INDEX_BYTES_PER_MESSAGE`,
+`lnpnd/src/store_limit.rs`) against the field's mean message of 330
+bytes (`MEAN_MESSAGE_BYTES`), so a full store costs about 0.88 bytes of
+heap per byte of limit. Its sizing rule therefore follows the host: the
+default limit, lxmd's 500 MB, is lowered at start until a full store's
+index takes at most a quarter of `MemTotal`, which leaves 500 MB on any
+host from 1.75 GB up and gives a 1 GB host 285 MB. A configured limit
+is honoured and warned about when it breaks the rule (lnpnd(1),
+CONFIGURATION). The board has no index, so no such rule.
+
 **What a full scan costs.** `for_each`
 (`leviculum-nrf/record-log/src/lib.rs:555`) walks every page, reads each
 record's 42-byte header and then its body, because `probe_record`

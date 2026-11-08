@@ -373,7 +373,7 @@ lnpnd's 500 MB default.** The region is one linker number
 (`memory.x:93`, 16 pages); a record never straddles a page
 (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:241` = 4096 − 12 −
 42), and the peer records share the region. lnpnd defaults to 500 MB
-(`message_storage_limit`, `lnpnd/src/config.rs:348`); the reference
+(`message_storage_limit`, `lnpnd/src/config.rs:350`); the reference
 is unlimited until configured
 (`reference/LXMF/LXMF/LXMRouter.py:139`).
 What a peer sees: displacement evictions orders of magnitude
@@ -411,7 +411,7 @@ records keep tag 0 forever. The host closed both halves this week —
 it always computes (8f470aa7, leviculum#442 D6,
 `leviculum-lxmf/src/propagation_node.rs:449-456`) and re-prices an
 old store once at start (645e3580, `reprice_stored_values`,
-`lnpnd/src/validation.rs:114`, run at `lnpnd/src/main.rs:645-656`).
+`lnpnd/src/validation.rs:114`, run at `lnpnd/src/main.rs:679-690`).
 What a stock peer sees: a fresh board's whole early store never
 syncs out of it. The messages are served to their *recipients* on
 `/get` unharmed (the serve does not filter by value); what is lost
@@ -697,7 +697,7 @@ conformance cells already run, pointed at a board.
 
 **D18 — no client allow/ignore lists on the board.** lnpnd carries
 the reference's `auth_required`/`allowed` and `ignored` lists
-(`lnpnd/src/main.rs:682-697`); on the board every identified client
+(`lnpnd/src/main.rs:716-731`); on the board every identified client
 may `/get` its mailbox and anyone may upload.
 What an operator sees: a board mailbox cannot be restricted to a
 user set. Class: semantic. Price: 16 B flash per hash plus a lookup
@@ -850,7 +850,7 @@ of that at once does not answer the question.
    joined it; the authoritative derivation is the compile assert
    (`leviculum-nrf/heap-budget/src/lib.rs:330-337`, N ≤ 19) and the
    concept page says so
-   (`docs/src/concepts/propagation-node-on-a-board.md:942`). The
+   (`docs/src/concepts/propagation-node-on-a-board.md:953`). The
    cap 16 itself is right; the stated arithmetic beside it is the
    stale draft.
 
