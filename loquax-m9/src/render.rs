@@ -65,6 +65,9 @@ where
     map_drawn: bool,
     /// Where the last draw's screen stood (1533).
     window: screen::Window,
+    /// The keys of the chat's bubbles whose last line the last draw put on
+    /// screen (1541); none when it drew no chat.
+    seen: Option<alloc::vec::Vec<u64>>,
     /// The board's microsecond clock, which times the map's passes for
     /// the `[MAP]` line (1531); none on the host.
     clock: Option<fn() -> u64>,
@@ -123,6 +126,7 @@ where
             fonts: Size::ALL.map(Size::atlas),
             map_drawn: false,
             window: screen::Window::default(),
+            seen: None,
             clock: None,
             map_stats: None,
             names_kept: map::NameStats::default(),
@@ -178,12 +182,16 @@ where
     pub fn draw(&mut self, scene: &Scene, look: &Look) -> Result<(), DrawError> {
         self.leave_map()?;
         let mut window = screen::Window::default();
+        let mut seen = None;
+        self.seen = None;
         self.cells(|cols, rows| {
-            let (lines, at) = screen::lines_at(scene, look, cols, rows);
+            let (lines, at, keys) = screen::lines_seen(scene, look, cols, rows);
             window = at;
+            seen = keys;
             lines
         })?;
         self.window = window;
+        self.seen = seen;
         Ok(())
     }
 
@@ -192,6 +200,14 @@ where
     /// the board's own screens.
     pub fn window(&self) -> screen::Window {
         self.window
+    }
+
+    /// The keys of the open chat's bubbles whose last line the last draw
+    /// showed (1541), what the board says as the model's viewport
+    /// ([`crate::read::Reader::say`]); none when the last draw showed no
+    /// chat: the list, a sheet, the map, the board's own screens.
+    pub fn seen(&self) -> Option<&[u64]> {
+        self.seen.as_deref()
     }
 
     /// Time the map's passes with `clock`, microseconds since any start.
@@ -230,6 +246,7 @@ where
         };
         let corner = credit.filter(|_| look.map.credit);
         self.window = screen::Window::default();
+        self.seen = None;
         // The map's cells are the large size's grid, whatever the reader
         // chose: its picture, pins and names are laid on that grid (1531).
         self.cells_in(Size::Large, |cols, rows| map::lines(look, bare, cols, rows))?;
@@ -292,6 +309,7 @@ where
     ) -> Result<(), DrawError> {
         self.leave_map()?;
         self.window = screen::Window::default();
+        self.seen = None;
         self.cells(lines)
     }
 

@@ -227,17 +227,32 @@ pub fn lines(scene: &Scene, look: &Look, cols: usize, rows: usize) -> Vec<RLine>
 
 /// [`lines`], and where the screen stands ([`Window`]).
 pub fn lines_at(scene: &Scene, look: &Look, cols: usize, rows: usize) -> (Vec<RLine>, Window) {
+    let (lines, window, _) = lines_seen(scene, look, cols, rows);
+    (lines, window)
+}
+
+/// [`lines_at`], and the keys of the open chat's bubbles whose last line
+/// is on screen (1541, [`crate::read`]); none while no chat is drawn: the
+/// list, a group's sheet over the chat.
+pub fn lines_seen(
+    scene: &Scene,
+    look: &Look,
+    cols: usize,
+    rows: usize,
+) -> (Vec<RLine>, Window, Option<Vec<u64>>) {
     let mut window = Window::default();
+    let mut seen = None;
     if let Some(sheet) = crate::group::lines(scene, look, cols, rows) {
-        return (sheet, window);
+        return (sheet, window, seen);
     }
     let mut out = Vec::with_capacity(rows);
     out.push(top_bar(&scene.top, look, cols));
     let below = rows.saturating_sub(1 + usize::from(scene.tabs.is_some()));
     if let (None, Some(chat)) = (&scene.list, &scene.chat) {
-        let (chat_lines, top) = crate::chat::lines_at(chat, look, cols, below);
+        let (chat_lines, top, keys) = crate::chat::lines_at(chat, look, cols, below);
         out.extend(chat_lines);
         window.chat_top = top;
+        seen = Some(keys);
     }
     if let Some(list) = &scene.list {
         match list.rows.is_empty() {
@@ -285,7 +300,7 @@ pub fn lines_at(scene: &Scene, look: &Look, cols: usize, rows: usize) -> (Vec<RL
         out.push(fill(bar, cols, painted(look.tokens.chrome)));
     }
     out.truncate(rows);
-    (out, window)
+    (out, window, seen)
 }
 
 /// The top bar: the reader's avatar (or the chat's), the title.

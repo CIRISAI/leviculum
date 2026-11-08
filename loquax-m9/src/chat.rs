@@ -38,7 +38,7 @@ use leviculum_ui::style::{RLine, RStyle};
 use leviculum_ui::text::fit_width;
 use leviculum_ui::tokens::Paint;
 use loquax::ui::layout::{block_cap, date_line, note_line};
-use loquax::ui::pager::{Lines, Window};
+use loquax::ui::pager::{last_line_shown, Lines, Window};
 use loquax::ui::scene::{BubbleNode, Chat, Compose, Group};
 use loquax::ui::strings::{StrId, Text};
 use loquax::ui::{update, UiEffect, UiEvent, UiModel};
@@ -49,24 +49,28 @@ use crate::screen::{cut, fill, muted, narrow, painted, push, state_of, Look, BAR
 /// share's chip, the bubbles, the compose line (or the line that the group
 /// ended, or a group's invitation above the compose line).
 /// With them the key of the topmost bubble on screen, whole or cut
-/// (1533, the `[PAGE]` line's `top`); none while no bubble is.
+/// (1533, the `[PAGE]` line's `top`); none while no bubble is. And the
+/// keys of the bubbles whose last line is on screen (1541), in order: what
+/// the reader saw, by the read rule of 1529 (`loquax::ui::pager::
+/// last_line_shown`), which the board says as the model's viewport
+/// ([`crate::read`]).
 pub(crate) fn lines_at(
     chat: &Chat,
     look: &Look,
     cols: usize,
     rows: usize,
-) -> (Vec<RLine>, Option<u64>) {
+) -> (Vec<RLine>, Option<u64>, Vec<u64>) {
     let (head, foot) = parts(chat, look, cols);
     let area = rows.saturating_sub(head.len() + foot.len());
     let mut out = head;
-    let (rows_drawn, top) = match look.anchor {
+    let (rows_drawn, top, seen) = match look.anchor {
         Some(_) => windowed(chat, look, cols, area),
         None => bubbles(chat, look, cols, area),
     };
     out.extend(rows_drawn);
     out.extend(foot);
     out.truncate(rows);
-    (out, top)
+    (out, top, seen)
 }
 
 /// The rows above the bubbles (our share's chip) and under them (the
@@ -202,10 +206,23 @@ fn window(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Window, Vec<Ve
 
 /// The `area` rows of the scene's window from where the reader scrolled
 /// it by the line (1529, [`window`]); blank rows above when the chat is
-/// shorter; and the key of the topmost bubble on screen.
-fn windowed(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, Option<u64>) {
+/// shorter; the key of the topmost bubble on screen; and the keys of the
+/// bubbles whose last line is on screen (1541).
+fn windowed(
+    chat: &Chat,
+    look: &Look,
+    cols: usize,
+    area: usize,
+) -> (Vec<RLine>, Option<u64>, Vec<u64>) {
     let (window, laid) = window(chat, look, cols, area);
     let top = window.top;
+    let seen = window
+        .keys
+        .iter()
+        .zip(&window.lines)
+        .filter(|(_, lines)| last_line_shown(**lines, top, area))
+        .map(|(key, _)| *key)
+        .collect();
     let shown: Vec<RLine> = laid.into_iter().flatten().skip(top).take(area).collect();
     let mut rows = Vec::with_capacity(area);
     rows.extend((shown.len()..area).map(|_| fill(RLine::default(), cols, RStyle::default())));
@@ -215,7 +232,7 @@ fn windowed(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, 
             .map(|row| fill(row, cols, RStyle::default())),
     );
     let key = window.anchor(top).map(|anchor| anchor.key);
-    (rows, key)
+    (rows, key, seen)
 }
 
 /// How many rows stand above bubble `b` of group `g` before its own: the
@@ -235,8 +252,14 @@ fn head_of(chat: &Chat, g: usize, b: usize) -> usize {
 /// bubble there when it stands above the last screen; when the bubbles
 /// from the first to the cursor's do not fill the screen, the first at the
 /// top and the newer ones under it; blank rows above only when the chat
-/// is shorter; and the key of the topmost bubble drawn.
-fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, Option<u64>) {
+/// is shorter; the key of the topmost bubble drawn; and the keys of the
+/// bubbles whose last line is on screen (1541).
+fn bubbles(
+    chat: &Chat,
+    look: &Look,
+    cols: usize,
+    area: usize,
+) -> (Vec<RLine>, Option<u64>, Vec<u64>) {
     let at: Vec<(usize, usize)> = chat
         .groups
         .iter()
@@ -267,22 +290,26 @@ fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, O
         }
     }
     let mut drawn: Vec<Vec<RLine>> = Vec::new();
+    // The bubbles drawn, bottom-up first: by index, top to bottom below.
+    let mut order: Vec<usize> = Vec::new();
     let mut used = 0;
     let mut top = None;
     for k in (0..end).rev() {
         let rows = item(k);
         used += rows.len();
         drawn.push(rows);
+        order.push(k);
         let (g, b) = at[k];
         top = Some(chat.groups[g].bubbles[b].bubble.key);
         if used >= area {
             break;
         }
     }
+    order.reverse();
+    let mut lens: Vec<usize> = drawn.iter().rev().map(Vec::len).collect();
     let mut out: Vec<RLine> = drawn.into_iter().rev().flatten().collect();
-    if out.len() > area {
-        out.drain(..out.len() - area);
-    }
+    let cut = out.len().saturating_sub(area);
+    out.drain(..cut);
     // The screen that ends at the anchor reached the chat's first bubble
     // with rows to spare (1544): the view clamps to the first bubble, and
     // the newer ones fill the rows under the anchor. Blank rows stay only
@@ -291,7 +318,25 @@ fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, O
         if out.len() >= area {
             break;
         }
-        out.extend(item(k));
+        let rows = item(k);
+        order.push(k);
+        lens.push(rows.len());
+        out.extend(rows);
+    }
+    // What the reader sees (1541): the bubbles whose last line stands in
+    // the rows kept, `cut` down from the first row drawn, `area` of them.
+    let mut seen = Vec::new();
+    let mut start = 0;
+    for (&k, &len) in order.iter().zip(&lens) {
+        let (g, b) = at[k];
+        let lines = Lines {
+            start: (start + head_of(chat, g, b)).min(start + len),
+            end: start + len,
+        };
+        if last_line_shown(lines, cut, area) {
+            seen.push(chat.groups[g].bubbles[b].bubble.key);
+        }
+        start += len;
     }
     out.truncate(area);
     let blank = area - out.len();
@@ -301,7 +346,7 @@ fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, O
         out.into_iter()
             .map(|row| fill(row, cols, RStyle::default())),
     );
-    (rows, top)
+    (rows, top, seen)
 }
 
 /// Bubble `b` of group `g` and what stands above it: before a group's
