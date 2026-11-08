@@ -151,3 +151,165 @@ fn a_read_survives_the_sims_reboot() {
     );
     assert_eq!(unread(&board), before, "the list as it was");
 }
+
+/// A home's board after its first pull of the 1489 store, and the pull's
+/// log lines: `--store real`'s path.
+fn pulled() -> Board {
+    let mut flash = Flash::blank();
+    flash.home = Some(crate::real::address());
+    let mut board = Board::boot(flash, Log::default(), 1).expect("boot");
+    let archive = crate::real::archive().expect("the fixture's archive");
+    for page in archive.chunks(72) {
+        board.pull(page);
+        board.settle();
+    }
+    board
+}
+
+/// That board power-cycled: the store resumed from its summary log, no
+/// conversation's messages loaded.
+fn resumed() -> Board {
+    let (flash, log) = pulled().power_off();
+    let mut board = Board::boot(flash, log, 2).expect("the reboot");
+    // The loop's first turns, as `headless` runs them before a key.
+    board.settle();
+    assert!(
+        board.log.kept.iter().any(|l| l.contains("restore=resumed")),
+        "the second boot resumes from the summary log"
+    );
+    board
+}
+
+/// Press `code` at `ms`, and the log lines the press left.
+fn press(board: &mut Board, ms: u64, code: u8) -> Vec<String> {
+    let from = board.log.kept.len();
+    board::set_clock_ms(ms);
+    board.press(code);
+    board.settle();
+    board.log.kept[from..].to_vec()
+}
+
+/// The selected conversation's peer and unread.
+fn selected(board: &Board) -> ([u8; 16], usize) {
+    let model = board.model();
+    let c = &model.conversations[model.selected];
+    (c.peer, c.unread)
+}
+
+fn unread_of(board: &Board, peer: [u8; 16]) -> usize {
+    board
+        .model()
+        .conversations
+        .iter()
+        .find(|c| c.peer == peer)
+        .map_or(0, |c| c.unread)
+}
+
+fn marked(lines: &[String]) -> bool {
+    lines.iter().any(|l| l.starts_with("[STORE] marks="))
+}
+
+#[test]
+fn a_resumed_lists_cursor_reads_nothing_it_moves_onto() {
+    // 1546 item 1: ring down onto Anna (3 unread) with the list still up.
+    let mut board = resumed();
+    let lines = press(&mut board, 150, 0xb6);
+    let (anna, unread) = selected(&board);
+    assert!(
+        lines.iter().any(|l| l.starts_with("[PAGE] name=chats ")),
+        "the keys stay on the list: {lines:?}"
+    );
+    assert_eq!(unread, 3, "the cursor's chat keeps its unread: {lines:?}");
+    assert!(
+        !marked(&lines),
+        "no read mark for a chat not opened: {lines:?}"
+    );
+    // The positive control: Enter opens it, and that reads it.
+    let lines = press(&mut board, 300, 0x0d);
+    assert!(marked(&lines), "opening reads: {lines:?}");
+    assert_eq!(unread_of(&board, anna), 0);
+}
+
+#[test]
+fn a_group_opened_after_a_resume_is_marked_read_and_stays_read() {
+    // 1546 item 2: the list's first row after the boot, the group with 7.
+    let mut board = resumed();
+    let (group, unread) = selected(&board);
+    assert_eq!(unread, 7, "the boot's cursor stands on the group");
+    // Its newest page was read at boot, for the cursor's row, and marked
+    // nothing.
+    assert!(
+        board
+            .log
+            .kept
+            .iter()
+            .any(|l| l.starts_with("[STORE] page_read entries=")),
+        "the boot loads the cursor's chat"
+    );
+    assert!(!marked(&board.log.kept), "the boot marks nothing read");
+    assert_eq!(unread_of(&board, group), 7);
+    let lines = press(&mut board, 150, 0x0d);
+    assert!(
+        lines.iter().any(|l| l.starts_with("[PAGE] name=chat ")),
+        "Enter opened the chat: {lines:?}"
+    );
+    assert!(marked(&lines), "opening the group marks it read: {lines:?}");
+    assert_eq!(unread_of(&board, group), 0);
+    press(&mut board, 300, 0x86);
+    let (flash, log) = board.power_off();
+    let board = Board::boot(flash, log, 3).expect("the second reboot");
+    assert_eq!(
+        unread_of(&board, group),
+        0,
+        "the read survives the power cycle"
+    );
+}
+
+/// The list's cursor line on the panel: `cursor - top` of a `[PAGE]`
+/// line of the chats.
+fn line_of(page: &str) -> Option<usize> {
+    let field = |name: &str| -> Option<usize> {
+        page.split_whitespace()
+            .find_map(|w| w.strip_prefix(name))
+            .and_then(|v| v.parse().ok())
+    };
+    match page.starts_with("name=chats ") {
+        true => Some(field("cursor=")? - field("top=")?),
+        false => None,
+    }
+}
+
+#[test]
+fn a_pull_never_moves_the_lists_cursor() {
+    // 1546 item 3: 61 pages fold while the list is up and no key is
+    // pressed. The row under the cursor keeps it, on its line.
+    let mut flash = Flash::blank();
+    flash.home = Some(crate::real::address());
+    let mut board = Board::boot(flash, Log::default(), 1).expect("boot");
+    let archive = crate::real::archive().expect("the fixture's archive");
+    let mut held: Option<([u8; 16], usize)> = None;
+    let mut moved = Vec::new();
+    for (i, page) in archive.chunks(72).enumerate() {
+        board.pull(page);
+        board.settle();
+        if board.model().conversations.is_empty() {
+            continue;
+        }
+        let peer = selected(&board).0;
+        let line = board
+            .last_page
+            .as_deref()
+            .and_then(line_of)
+            .expect("the list's page line");
+        match held {
+            None => held = Some((peer, line)),
+            Some(was) if was != (peer, line) => moved.push(format!(
+                "page {i}: {:?} -> {:?}",
+                (&was.0[..3], was.1),
+                (&peer[..3], line)
+            )),
+            Some(_) => {}
+        }
+    }
+    assert!(moved.is_empty(), "the cursor moved by itself: {moved:?}");
+}

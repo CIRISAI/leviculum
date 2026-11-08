@@ -29,8 +29,8 @@
 //! shows before its first ask ends); the heap is the host's (no PSRAM, no
 //! census of its bytes); the boot's census of every screen is not run.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use leviculum_ui::input::{KeyCode, KeyEventKind};
 use loquax::home::ask::Verb;
@@ -55,14 +55,20 @@ use loquax_m9::{fixture, group, page};
 
 use crate::flash::Flash;
 
-/// The board's clock in the sim, microseconds since boot: the script's
-/// time in a headless run, the wall's in the window. A static because the
-/// renderer takes a `fn` for its map timing, as the board's does.
-static CLOCK_US: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// The board's clock in the sim, microseconds since boot: the script's
+    /// time in a headless run, the wall's in the window. Not a field
+    /// because the renderer takes a `fn` for its map timing, as the
+    /// board's does; the thread's own (1546), so the parity tests, each a
+    /// board on a thread of the harness, do not set each other's clocks
+    /// (a test that booted reset the map test's clock to 0, and the map's
+    /// words stood on its golden).
+    static CLOCK_US: Cell<u64> = const { Cell::new(0) };
+}
 
 /// Microseconds since boot.
 pub fn uptime_us() -> u64 {
-    CLOCK_US.load(Ordering::Relaxed)
+    CLOCK_US.with(Cell::get)
 }
 
 /// Milliseconds since boot.
@@ -72,7 +78,7 @@ pub fn uptime_ms() -> u64 {
 
 /// Set the clock.
 pub fn set_clock_ms(ms: u64) {
-    CLOCK_US.store(ms.saturating_mul(1000), Ordering::Relaxed);
+    CLOCK_US.with(|clock| clock.set(ms.saturating_mul(1000)));
 }
 
 /// A turn longer than this says where its time went, as the board's
@@ -333,6 +339,12 @@ impl Board {
         board.redraw();
         board.drawn.drawn(&board.model);
         Ok(board)
+    }
+
+    /// The model the board shows, for the tests.
+    #[cfg(test)]
+    pub fn model(&self) -> &UiModel<Field> {
+        &self.model
     }
 
     /// Power off: the flash and the log, for the next boot.
