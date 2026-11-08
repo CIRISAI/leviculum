@@ -1,0 +1,210 @@
+//! The boards' heap choices on the host (order 1569).
+//!
+//! The M9 starves its UI core during a full pull: both cores' stage
+//! times grow with the number of live messages and fall back to the
+//! baseline after a reset, while the fold itself is flat on the host
+//! (`loquax-m9/tests/turn.rs`, 1463). What differs between the two runs
+//! is the allocator: the firmware links `embedded_alloc`
+//! (`leviculum-esp/src/lib.rs`), and its `llff` choice is
+//! `linked_list_allocator` — a first-fit walk of one free list on every
+//! `alloc`, and an address-sorted insert walk on every `dealloc`, under
+//! the one cross-core critical section. The walk grows with the heap's
+//! churn; the host's system allocator shows none of it.
+//!
+//! This lab runs a closure under either of the two allocators
+//! `embedded_alloc` offers — [`Which::Llff`] (the choice before 1569)
+//! and [`Which::Tlsf`] (rlsf, constant-time segregated fit) — so a test
+//! can measure the same workload under both (`tests/pull.rs`). The
+//! global allocator here is a router: whatever mode is set serves the
+//! allocations, and every free goes to the heap that made the block,
+//! found by its address, so values may cross the mode boundary freely.
+//!
+//! A lab allocation the mode's heap has no room for is served by the
+//! system allocator and counted ([`spilled`]): a measurement that
+//! overflowed its region says so instead of measuring the fallback.
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::alloc::System;
+use std::sync::{Mutex, MutexGuard, Once};
+
+/// Each lab heap's region. Large enough for the pull workload on a
+/// 64-bit host (the board's is 8 MiB on a 32-bit one); virtual, so the
+/// pages cost nothing until touched.
+const REGION: usize = 256 << 20;
+
+/// One lab heap the firmware could link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Which {
+    /// `embedded_alloc::LlffHeap`'s inner `linked_list_allocator`.
+    Llff,
+    /// `embedded_alloc::TlsfHeap`'s inner `rlsf`.
+    Tlsf,
+}
+
+const MODE_SYSTEM: u8 = 0;
+const MODE_LLFF: u8 = 1;
+const MODE_TLSF: u8 = 2;
+
+/// Who serves the next `alloc`; frees route by address regardless.
+static MODE: AtomicU8 = AtomicU8::new(MODE_SYSTEM);
+/// Lab allocations the mode's heap refused, served by the system.
+static SPILLED: AtomicUsize = AtomicUsize::new(0);
+
+// The regions, `static` so their addresses bound the free-routing.
+// `u64` words for alignment the allocators need not then make up.
+static LLFF_MEM: Region = Region::new();
+static TLSF_MEM: Region = Region::new();
+
+struct Region(core::cell::UnsafeCell<[u64; REGION / 8]>);
+
+// SAFETY: the region's bytes are handed to exactly one allocator, once
+// (`Once` below); after that only that allocator touches them, under its
+// mutex.
+unsafe impl Sync for Region {}
+
+impl Region {
+    const fn new() -> Self {
+        Self(core::cell::UnsafeCell::new([0; REGION / 8]))
+    }
+
+    fn start(&self) -> usize {
+        self.0.get() as usize
+    }
+
+    fn holds(&self, ptr: *mut u8) -> bool {
+        let at = ptr as usize;
+        at >= self.start() && at < self.start() + REGION
+    }
+}
+
+type Tlsf = rlsf::Tlsf<'static, usize, usize, { usize::BITS as usize }, { usize::BITS as usize }>;
+
+/// The heaps hold raw pointers into their (static, 'static) regions;
+/// moving the guard between threads moves only the handle.
+struct Held<T>(T);
+
+// SAFETY: see `Held`; all access is under the router's mutexes.
+unsafe impl<T> Send for Held<T> {}
+
+struct Router {
+    llff: Mutex<Held<linked_list_allocator::Heap>>,
+    tlsf: Mutex<Held<Tlsf>>,
+}
+
+#[global_allocator]
+static ROUTER: Router = Router {
+    llff: Mutex::new(Held(linked_list_allocator::Heap::empty())),
+    tlsf: Mutex::new(Held(Tlsf::new())),
+};
+
+/// The guard, poison shrugged off: the allocator cannot panic while it
+/// holds the lock, so a poisoned one only says some other panic
+/// unwound past a `with`.
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn ensure_init(which: Which) {
+    static LLFF_INIT: Once = Once::new();
+    static TLSF_INIT: Once = Once::new();
+    match which {
+        Which::Llff => LLFF_INIT.call_once(|| {
+            // SAFETY: the region is static, unaliased (`Region`), and
+            // handed over exactly once.
+            unsafe {
+                locked(&ROUTER.llff)
+                    .0
+                    .init(LLFF_MEM.start() as *mut u8, REGION)
+            }
+        }),
+        Which::Tlsf => TLSF_INIT.call_once(|| {
+            let block = NonNull::slice_from_raw_parts(
+                NonNull::new(TLSF_MEM.start() as *mut u8).unwrap_or(NonNull::dangling()),
+                REGION,
+            );
+            // SAFETY: as above.
+            unsafe { locked(&ROUTER.tlsf).0.insert_free_block_ptr(block) };
+        }),
+    }
+}
+
+// SAFETY: every path serves a layout-correct block: the lab heaps via
+// their own invariants, the system via `System`. Frees go to the heap
+// whose region holds the pointer, so a block is always returned to the
+// allocator that made it, whatever the mode is by then.
+unsafe impl GlobalAlloc for Router {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let served = match MODE.load(Ordering::Relaxed) {
+            MODE_LLFF => locked(&self.llff)
+                .0
+                .allocate_first_fit(layout)
+                .map(NonNull::as_ptr)
+                .ok(),
+            MODE_TLSF => locked(&self.tlsf).0.allocate(layout).map(NonNull::as_ptr),
+            _ => None,
+        };
+        match (served, MODE.load(Ordering::Relaxed)) {
+            (Some(ptr), _) => ptr,
+            (None, MODE_SYSTEM) => {
+                // SAFETY: the caller's contract, passed through.
+                unsafe { System.alloc(layout) }
+            }
+            (None, _) => {
+                SPILLED.fetch_add(1, Ordering::Relaxed);
+                // SAFETY: as above.
+                unsafe { System.alloc(layout) }
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if LLFF_MEM.holds(ptr) {
+            if let Some(ptr) = NonNull::new(ptr) {
+                // SAFETY: the block came from this heap (its region
+                // holds it), with this layout.
+                unsafe { locked(&self.llff).0.deallocate(ptr, layout) };
+            }
+        } else if TLSF_MEM.holds(ptr) {
+            if let Some(ptr) = NonNull::new(ptr) {
+                // SAFETY: as above.
+                unsafe { locked(&self.tlsf).0.deallocate(ptr, layout.align()) };
+            }
+        } else {
+            // SAFETY: the system made it.
+            unsafe { System.dealloc(ptr, layout) };
+        }
+    }
+}
+
+/// Run `f` with its allocations served by `which`, whatever it
+/// allocates routed back to the right heap whenever it is freed. Not
+/// reentrant: a `with` inside a `with` serves the outer mode no more.
+pub fn with<R>(which: Which, f: impl FnOnce() -> R) -> R {
+    struct Back;
+    impl Drop for Back {
+        fn drop(&mut self) {
+            MODE.store(MODE_SYSTEM, Ordering::SeqCst);
+        }
+    }
+    ensure_init(which);
+    let _back = Back;
+    MODE.store(
+        match which {
+            Which::Llff => MODE_LLFF,
+            Which::Tlsf => MODE_TLSF,
+        },
+        Ordering::SeqCst,
+    );
+    f()
+}
+
+/// Lab allocations the mode's heap refused so far: a measurement is
+/// only one while this stayed where it began.
+pub fn spilled() -> usize {
+    SPILLED.load(Ordering::Relaxed)
+}
