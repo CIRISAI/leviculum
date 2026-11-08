@@ -327,7 +327,7 @@ fn a_home_opens_what_a_sender_encrypted_to_the_other_homes_ratchet() {
 /// The design's rule is that a phone home with an always-on home announces
 /// the identity on its mesh interfaces only, through
 /// `NodeCore::announce_destination_on_interface`
-/// (`leviculum-core/src/node/mod.rs:1008`); then this segment never hears
+/// (`leviculum-core/src/node/mod.rs:1010`); then this segment never hears
 /// B and the path stays on A. Today the home announces on every interface.
 #[test]
 #[ignore = "red until H3 (study 2.3): mesh-only announcing for a phone home beside an always-on home"]
