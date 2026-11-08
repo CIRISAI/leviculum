@@ -50,11 +50,11 @@ Enter run │ Esc clos└  previous conversation  Alt-↑───────�
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- naming
-┌  Loquax (attaching)────┐┌  <4ca16772…>───────────────────────────────────────┐
-│ <bebebebe…>            ││                                                    │
+┌  Loquax (attaching)────┐┌  Unknown ·4ca1  Two contacts have no name yet──────┐
+│ Unknown ·bebe          ││                                                    │
 │                   ┌ commands ────────────────────────────┐                   │
 │                   │>                                     │                   │
-│▌<4ca16772…>       │your name for <4ca16772…>             │                   │
+│▌Unknown ·4ca1     │your name for Unknown ·4ca1           │                   │
 │▌                  │Enter sets it, empty clears it        │                   │
 │                   └──────────────────────────────────────┘                   │
 │                        ││                                                    │
@@ -62,7 +62,7 @@ Enter run │ Esc close
 │                        ││                      ┌────────────────────────────┐│
 │                        ││                      │⚠ That is not a Loquax code.││
 │                        ││                  No m└────────────────────────────┘│
-│                        │├● to <4ca16772…>──── Enter send · Alt-Enter newline ┤
+│                        │├● to Unknown ·4ca1── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close

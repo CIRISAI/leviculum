@@ -97,7 +97,7 @@ pub fn terminal_line(
         return None;
     }
     let writer = writer_of(message, &conversation.peer)?;
-    let name = writer_name(names, &writer);
+    let name = writer_name(names, &writer, lang);
     let words = match orphan_reaction(conversation, message) {
         Some(content) => Text::Key(
             StrId::ReactedElsewhere,
@@ -111,18 +111,18 @@ pub fn terminal_line(
 
 /// The name a relayed post's writer goes by: the reader's own word for the
 /// address, else the relay's, else the address's label.
-pub fn writer_name(names: &Names, writer: &relay::Writer<'_>) -> String {
+pub fn writer_name(names: &Names, writer: &relay::Writer<'_>, lang: Lang) -> String {
     match names.shown(&writer.address) {
         Some(shown) => shown.into(),
         None if !writer.name.is_empty() => writer.name.clone(),
-        None => names.label(&writer.address),
+        None => names.label(&writer.address, lang),
     }
 }
 
 impl<B> UiModel<B> {
     /// [`writer_name`] by the reader's names.
     pub fn relayed_name(&self, writer: &relay::Writer<'_>) -> String {
-        writer_name(&self.names, writer)
+        writer_name(&self.names, writer, self.lang)
     }
 }
 

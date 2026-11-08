@@ -4,7 +4,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Familie ·5151"
+        "raw": "Familie"
       },
       "resource": "chat",
       "role": "chat",
@@ -14,7 +14,7 @@
       "a11y": {
         "enabled": true,
         "label": {
-          "raw": "Familie ·5151"
+          "raw": "Familie"
         },
         "resource": "chat_bar",
         "role": "bar",
@@ -44,7 +44,7 @@
         }
       },
       "title": {
-        "raw": "Familie ·5151"
+        "raw": "Familie"
       }
     },
     "compose": {
@@ -316,7 +316,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Lew ·4141, Lew invited you to Verein"
+            "raw": "Lew, Lew invited you to Verein"
           },
           "resource": "row_41414141414141414141414141414141",
           "role": "row",
@@ -373,7 +373,7 @@
           }
         ],
         "muted": false,
-        "name": "Lew ·4141",
+        "name": "Lew",
         "ours": false,
         "pinned": false,
         "position": null,
@@ -387,7 +387,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Verein ·5252"
+            "raw": "Verein"
           },
           "resource": "row_52525252525252525252525252525252",
           "role": "row",
@@ -452,7 +452,7 @@
           }
         ],
         "muted": false,
-        "name": "Verein ·5252",
+        "name": "Verein",
         "ours": false,
         "pinned": false,
         "position": null,
@@ -466,7 +466,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Familie ·5151, Anna: Danke!"
+            "raw": "Familie, Anna: Danke!"
           },
           "resource": "row_51515151515151515151515151515151",
           "role": "row",
@@ -533,7 +533,7 @@
           }
         ],
         "muted": false,
-        "name": "Familie ·5151",
+        "name": "Familie",
         "ours": false,
         "pinned": false,
         "position": null,
@@ -547,7 +547,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Bob ·4343"
+            "raw": "Bob"
           },
           "resource": "row_43434343434343434343434343434343",
           "role": "row",
@@ -604,7 +604,7 @@
           }
         ],
         "muted": false,
-        "name": "Bob ·4343",
+        "name": "Bob",
         "ours": false,
         "pinned": false,
         "position": null,
@@ -838,7 +838,7 @@
         "avatar": {
           "bg": "8e4b8a",
           "fg": "ffffff",
-          "initials": "30",
+          "initials": "?",
           "ring": null
         },
         "link": null,

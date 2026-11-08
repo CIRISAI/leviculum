@@ -1722,6 +1722,7 @@ impl<B> UiModel<B> {
         match self.conversations.iter().position(|c| c.peer == peer) {
             Some(index) => index,
             None => {
+                self.names.meet(peer);
                 self.conversations.push(Conversation::new(peer));
                 self.conversations.len() - 1
             }
@@ -4118,7 +4119,7 @@ fn peer_on_map<B: InputBuffer>(model: &mut UiModel<B>) {
     match model.positions.get(&peer).cloned() {
         Some(fix) => open_map_at(model, &fix),
         None => {
-            let who = model.names.label(&peer);
+            let who = model.names.label(&peer, model.lang);
             model.toast(ToastKind::Info, format!("no position from {who}"));
         }
     }
@@ -4787,7 +4788,7 @@ fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec
                 model.focus = Pane::Compose;
                 model.toast(
                     ToastKind::Info,
-                    format!("writing to {}", model.names.label(&peer)),
+                    format!("writing to {}", model.names.label(&peer, model.lang)),
                 );
                 Vec::new()
             }
@@ -5825,7 +5826,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             // reader told; it is no unread message and moves no cursor.
             if let Some((_, content)) = reaction {
                 if !blocked {
-                    let from = model.names.label(&source);
+                    let from = model.names.label(&source, model.lang);
                     model.toast(ToastKind::Info, format!("{from} reacted {content}"));
                 }
                 return effects;
@@ -5885,7 +5886,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 model.conversations[index].mark_new();
             }
             if raise {
-                let from = model.names.label(&source);
+                let from = model.names.label(&source, model.lang);
                 model.toast(ToastKind::Info, format!("message from {from}"));
             }
             return effects;
@@ -5932,7 +5933,7 @@ fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 1
         model.changed.insert((peer, message.activity));
     }
     if !valid {
-        let from = model.names.label(&source);
+        let from = model.names.label(&source, model.lang);
         model.toast(
             ToastKind::Error,
             format!("invalid signature on a message from {from}"),
@@ -6026,7 +6027,7 @@ impl<B> UiModel<B> {
         }
         map::pins_of(
             &shown,
-            |peer| self.names.label(peer),
+            |peer| self.names.label(peer, self.lang),
             |peer| self.is_nearby(peer),
             self.address,
             self.now.map(|now| now.unix_secs),
@@ -6822,19 +6823,22 @@ pub fn short(address: &[u8; 16]) -> String {
 }
 
 /// The header's title: the peer as [`Names::label`] says it, its trust
-/// state in words, then whose name it shares and what it announces beside a
-/// petname. The default state, a peer the reader has not named, takes no
+/// state in words, what it announces beside a petname, and the sentence of
+/// a shared name (1452). The default state, a peer the reader has not named, takes no
 /// word (1279, walk finding 21): "unknown" on every new chat read as a
 /// warning about nothing.
-pub fn header_title(names: &Names, peer: &[u8; 16]) -> String {
+pub fn header_title(names: &Names, peer: &[u8; 16], lang: strings::Lang) -> String {
     let mut words = match names.trust(peer) {
         Trust::Unknown => Vec::new(),
         trust => vec![trust.as_str().to_string()],
     };
     words.extend(names.header_notes(peer));
+    // Two peers of one name say so (1452), after the tails that tell them
+    // apart.
+    words.extend(names.same_name(peer).map(|sentence| sentence.resolve(lang)));
     match words.is_empty() {
-        true => names.label(peer),
-        false => format!("{}  {}", names.label(peer), words.join(" · ")),
+        true => names.label(peer, lang),
+        false => format!("{}  {}", names.label(peer, lang), words.join(" · ")),
     }
 }
 
@@ -6974,7 +6978,7 @@ pub fn message_detail<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option
 fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> {
     let conversation = model.conversations.get(c)?;
     let message = conversation.messages.get(m)?;
-    let who = model.names.label(&conversation.peer);
+    let who = model.names.label(&conversation.peer, model.lang);
     let offset = message.at.or(model.now).map_or(0, |at| at.offset_secs);
     let mut rows = vec![
         match message.outbound {
@@ -7327,11 +7331,15 @@ fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
         {
             strings::Text::Key(
                 strings::StrId::RelayedGroup,
-                vec![strings::Arg::Str(header_title(&model.names, &peer))],
+                vec![strings::Arg::Str(header_title(
+                    &model.names,
+                    &peer,
+                    model.lang,
+                ))],
             )
             .resolve(model.lang)
         }
-        Some(peer) => header_title(&model.names, &peer),
+        Some(peer) => header_title(&model.names, &peer, model.lang),
         None => "messages".to_string(),
     };
     let mailbox = mailbox_words(model);
@@ -7349,7 +7357,9 @@ fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
         .saturating_sub(leviculum_ui::text::fit_width(&messages_title) + 6);
     let short = position.as_ref().and_then(|words| words.last().cloned());
     let messages_title_right = match (wide, peer) {
-        (true, Some(peer)) => to_hex(&peer),
+        // Wide: the name alone (1452); the address is the detail view's
+        // and the profile's.
+        (true, Some(_)) => String::new(),
         // Narrow: the position's age before the mailbox, so the reader
         // knows there is one, then the mailbox alone where both do not fit.
         _ => {
@@ -7444,7 +7454,7 @@ fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
         messages.push(row);
     }
     let compose_title = match peer {
-        Some(peer) => format!("to {}", model.names.label(&peer)),
+        Some(peer) => format!("to {}", model.names.label(&peer, model.lang)),
         None => "compose".to_string(),
     };
     let ctx = model.ctx();
@@ -8193,7 +8203,7 @@ pub(crate) mod tests {
                 })
                 .map(|(_, value)| value)
         };
-        let who = model.names.label(&PEER);
+        let who = model.names.label(&PEER, model.lang);
         assert_eq!(state_row(Lang::En), Some(format!("On {who}'s device")));
         assert_eq!(
             state_row(Lang::De),
@@ -9077,7 +9087,7 @@ pub(crate) mod tests {
             .rposition(|m| m.outbound)
             .expect("ours");
         let rows = detail_view(&model, 0, m).expect("a detail view").rows;
-        let who = model.names.label(&PEER);
+        let who = model.names.label(&PEER, model.lang);
         assert!(
             rows.contains(&format!("{who} sends no read receipts")),
             "{rows:?}"
@@ -10606,7 +10616,7 @@ pub(crate) mod tests {
     fn the_view_draws_the_glyph_and_says_nothing_is_earlier() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         assert_eq!(shown(&model), ["No messages yet"]);
-        assert_eq!(view(&model).messages_title, "<abababab…>");
+        assert_eq!(view(&model).messages_title, "Unknown");
         sent(&mut model, "hi");
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
         assert_eq!(shown(&model), ["hi  ◷"]);
@@ -10614,10 +10624,7 @@ pub(crate) mod tests {
         assert_eq!(shown(&model)[0], "hi  ✓");
         model.ascii = true;
         assert_eq!(shown(&model)[0], "hi  v");
-        assert_eq!(
-            text(&view(&model).conversations[0]).trim_end(),
-            "▌<abababab…>"
-        );
+        assert_eq!(text(&view(&model).conversations[0]).trim_end(), "▌Unknown");
         assert_eq!(text(&view(&model).conversations[1]).trim_end(), "▌you: hi");
         // 1381, finding 22: the terminal's list speaks the reader's language.
         model.lang = strings::Lang::De;
@@ -11200,13 +11207,13 @@ pub(crate) mod tests {
         assert_eq!(
             detail.rows,
             [
-                "from you to <abababab…>",
+                "from you to Unknown",
                 "peer   abababababababababababababababab",
                 &format!("id     {}", "11".repeat(32)),
                 "size   5 bytes",
-                "state  arrived: <abababab…>'s mailbox or device has it",
+                "state  arrived: Unknown's mailbox or device has it",
                 // The peer never sent a message with the mark (1233).
-                "<abababab…> sends no read receipts",
+                "Unknown sends no read receipts",
                 "",
                 "on this device",
                 "14:02:00  queued",
@@ -11431,13 +11438,14 @@ pub(crate) mod tests {
             },
         );
         let wide = view(&model);
-        assert_eq!(wide.messages_title_right, to_hex(&PEER));
+        // Wide, the right end names no address any more (1452).
+        assert_eq!(wide.messages_title_right, "");
         assert_eq!(
             text(&wide.messages[0]).trim(),
             "propagation node 9c9c9c9c adopted · synced 14:03"
         );
         assert!(text(&wide.messages[1]).trim().chars().all(|c| c == '─'));
-        assert_eq!(wide.compose_title, "to <abababab…>");
+        assert_eq!(wide.compose_title, "to Unknown");
     }
 
     fn engine_says(model: &mut UiModel<Field>, event: OutboxEvent) -> Vec<UiEffect> {
@@ -12362,12 +12370,12 @@ pub(crate) mod tests {
         let shown = list_rows(&model);
         assert!(shown[2].starts_with(" MESSAGES"), "{shown:#?}");
         assert!(shown[2].ends_with(" 4"), "{shown:#?}");
-        assert_eq!(shown[3], " ▌you to <cdcdcdcd…>        14:07");
+        assert_eq!(shown[3], " ▌you to Unknown ·cdcd      14:07");
         assert_eq!(shown[4], " ▌a «tripod», and a tripod again");
         assert_eq!(shown[7], "  the «tripod» stays in the van");
-        assert_eq!(shown[9], "  you to <abababab…>        14:06");
+        assert_eq!(shown[9], "  you to Unknown ·abab      14:06");
         assert_eq!(shown[10], "  the «Tripod» fits");
-        assert_eq!(shown[12], "  <abababab…>               14:05");
+        assert_eq!(shown[12], "  Unknown ·abab             14:05");
         assert_eq!(shown[13], "  and the small «tripod» if it f…");
         typed(&mut model, "s");
         assert_eq!(list_rows(&model)[2], format!(" {}", search::NO_MATCHES));
@@ -12377,8 +12385,8 @@ pub(crate) mod tests {
         }
         let shown = list_rows(&model);
         assert_eq!(shown[0], " /");
-        assert!(shown[2].starts_with("▌<cdcdcdcd…>"), "{shown:#?}");
-        assert!(shown[5].starts_with(" <abababab…>"), "{shown:#?}");
+        assert!(shown[2].starts_with("▌Unknown ·cdcd "), "{shown:#?}");
+        assert!(shown[5].starts_with(" Unknown ·abab "), "{shown:#?}");
     }
 
     /// `Enter` on a message opens its conversation at it: the block selected
@@ -12431,7 +12439,7 @@ pub(crate) mod tests {
         assert!(rows(&model).iter().all(|r| !r.contains('«')));
         assert!(list_rows(&model)
             .iter()
-            .any(|r| r.starts_with("▌<abababab…>")));
+            .any(|r| r.starts_with("▌Unknown ·abab")));
     }
 
     /// `Ctrl-s` opens the search from every pane, compose included; while it
@@ -12533,18 +12541,18 @@ pub(crate) mod tests {
         );
     }
 
-    /// Slice 5: a peer's announced name replaces its address in the list,
-    /// the header, the compose box, the detail view and the toasts, with
-    /// its short hash beside it.
+    /// Slice 5: a peer's announced name replaces "Unknown" in the list,
+    /// the header, the compose box, the detail view and the toasts, alone
+    /// (1452): no hash beside it while nobody shares the name.
     #[test]
-    fn an_announced_name_is_drawn_with_its_short_hash_everywhere() {
+    fn an_announced_name_is_drawn_alone_everywhere() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         model.screen = (80, 24);
         announced(&mut model, PEER, "Alice\u{202e}\u{200b}");
         let shown = view(&model);
-        assert_eq!(shown.messages_title, "Alice ·abab");
-        assert_eq!(shown.compose_title, "to Alice ·abab");
-        assert_eq!(text(&shown.conversations[0]).trim_end(), "▌Alice ·abab");
+        assert_eq!(shown.messages_title, "Alice");
+        assert_eq!(shown.compose_title, "to Alice");
+        assert_eq!(text(&shown.conversations[0]).trim_end(), "▌Alice");
         engine(
             &mut model,
             OutboxEvent::Received {
@@ -12559,14 +12567,14 @@ pub(crate) mod tests {
         );
         assert_eq!(
             model.current_toast().map(|t| t.text.as_str()),
-            Some("message from Alice ·abab")
+            Some("message from Alice")
         );
         let detail = detail_view(&model, 0, 0).expect("a message");
-        assert_eq!(detail.rows[0], "from Alice ·abab to you");
+        assert_eq!(detail.rows[0], "from Alice to you");
     }
 
-    /// Two peers announcing names that look alike are both marked, and the
-    /// header says whose name the open one shares.
+    /// Two peers announcing names that look alike both carry their hash
+    /// tail (1452), and the header says in words that two share the name.
     #[test]
     fn a_shared_name_marks_both_peers() {
         let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
@@ -12574,17 +12582,20 @@ pub(crate) mod tests {
         announced(&mut model, OTHER, "АLICE");
         assert_eq!(
             view(&model).messages_title,
-            "Alice ·abab ≈  same name as ·cdcd"
+            "Alice ·abab  Two contacts are called Alice"
         );
         let rows: Vec<String> = view(&model).conversations.iter().map(text).collect();
         assert!(
-            rows.iter().any(|r| r.contains("Alice ·abab ≈")),
+            rows.iter().any(|r| r.trim_end().ends_with("Alice ·abab")),
             "{rows:#?}"
         );
         assert!(
-            rows.iter().any(|r| r.contains("АLICE ·cdcd ≈")),
+            rows.iter().any(|r| r.trim_end().ends_with("АLICE ·cdcd")),
             "{rows:#?}"
         );
+        // The clash gone, both are their names alone again.
+        announced(&mut model, OTHER, "Bob");
+        assert_eq!(view(&model).messages_title, "Alice");
     }
 
     /// A name change is said once, in the conversation, where it happened;
@@ -12600,7 +12611,7 @@ pub(crate) mod tests {
             shown(&model),
             ["hi  ◷", "── was Alice, now announces Ally ──"]
         );
-        assert_eq!(view(&model).messages_title, "Ally ·abab");
+        assert_eq!(view(&model).messages_title, "Ally");
         // Our own address names nobody.
         model.address = Some(OTHER);
         announced(&mut model, OTHER, "me");
@@ -12625,44 +12636,44 @@ pub(crate) mod tests {
             ))
             .expect("contacts"),
         );
-        assert_eq!(view(&model).messages_title, "Mum ·abab  known");
+        assert_eq!(view(&model).messages_title, "Mum  known");
         announced(&mut model, PEER, "Alice");
-        assert_eq!(
-            view(&model).messages_title,
-            "Mum ·abab  known · announces Alice"
-        );
-        assert_eq!(view(&model).compose_title, "to Mum ·abab");
+        assert_eq!(view(&model).messages_title, "Mum  known · announces Alice");
+        assert_eq!(view(&model).compose_title, "to Mum");
         // A blocked peer is opened from the `blocked` view.
         update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
         assert_eq!(model.selected, 1);
-        assert_eq!(view(&model).messages_title, "<cdcdcdcd…>  blocked");
+        assert_eq!(view(&model).messages_title, "Unknown  blocked");
     }
 
-    /// The search matches the name as shown and the short hash beside it.
+    /// The search matches the name as shown and the address in hex, which
+    /// the reader has from the contact info (1452).
     #[test]
-    fn the_search_matches_the_shown_name_and_the_short_hash() {
+    fn the_search_matches_the_shown_name_and_the_address() {
         let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
         announced(&mut model, PEER, "Alice");
         let order = model.order();
-        for query in ["alice", "ABAB", "e ·ab"] {
+        for query in ["alice", "ABAB", "abababab"] {
             assert_eq!(
                 search::hits(&model.conversations, &model.names, &order, query, &[]),
                 [search::Hit::Conversation(0)],
                 "{query}"
             );
         }
-        // The other has no name: its address form still matches.
+        // The other has no name: its address still matches.
         assert_eq!(
             search::hits(&model.conversations, &model.names, &order, "cdcdcdcd", &[]),
             [search::Hit::Conversation(1)]
         );
     }
 
-    /// A wide name is cut in cells on a narrow list row, the hash kept.
+    /// A wide name is cut in cells on a narrow list row; a colliding one
+    /// keeps its hash tail.
     #[test]
     fn a_wide_name_is_cut_in_cells_and_keeps_its_hash() {
-        let mut model = UiModel::<Field>::new(&[PEER]);
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
         announced(&mut model, PEER, &"龙".repeat(16));
+        announced(&mut model, OTHER, &"龙".repeat(16));
         let row = text(&view(&model).conversations[0]);
         let width = leviculum_ui::text::fit_width(&row);
         assert_eq!(width, usize::from(list_width(model.screen.0)) - 2, "{row}");
@@ -13354,7 +13365,7 @@ pub(crate) mod tests {
         assert_eq!(row.unread, 2);
         assert_eq!(row.last, "📍 live", "{row:?}");
         let told: Vec<&str> = model.toasts.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(told, ["message from <cdcdcdcd…>"; 2], "the texts alone");
+        assert_eq!(told, ["message from Unknown ·cdcd"; 2], "the texts alone");
         // The messages stay whole: the home's read marks name every one.
         assert_eq!(model.conversations[c].messages.len(), 18);
         assert_eq!(model.conversations[c].unread, 18);
@@ -13381,7 +13392,7 @@ pub(crate) mod tests {
         assert_eq!(model.positions[&PEER].location.latitude_e6, 52_000_000);
         assert_eq!(
             model.toasts.last().map(|t| t.text.as_str()),
-            Some("message from <abababab…>")
+            Some("message from Unknown")
         );
         let detail = detail_view(&model, 0, 0).expect("a detail view");
         assert!(
@@ -13746,7 +13757,7 @@ pub(crate) mod tests {
         assert_eq!(nearby.len(), 1, "{pins:?}");
         assert_eq!(nearby[0].peer, peer);
         assert!(
-            nearby[0].label.starts_with("Wanderer "),
+            nearby[0].label.starts_with("Wanderer"),
             "{}",
             nearby[0].label
         );
@@ -14027,8 +14038,8 @@ pub(crate) mod tests {
         // She is at the picture's right edge: her name is set left of her
         // marker, which stays on her cell.
         assert!(alice.stale, "{alice:?}");
-        assert_eq!(alice.text, "Alice ·cdcd · 3 h ago ◉");
-        assert!(alice.col + 23 <= map.area.x + map.area.width, "{alice:?}");
+        assert_eq!(alice.text, "Alice · 3 h ago ◉");
+        assert!(alice.col + 17 <= map.area.x + map.area.width, "{alice:?}");
         let last = map.pins.last().expect("pins");
         assert!(
             last.selected && last.text.contains('◉'),
@@ -14702,6 +14713,9 @@ pub(crate) mod tests {
     #[test]
     fn a_click_on_a_report_or_the_header_position_opens_the_map() {
         let mut model = reported();
+        // Named, so the narrow header has room for its position: two
+        // nameless peers would say so there (1452).
+        announced(&mut model, PEER, "Alice");
         // A relay, so the header has its words to tell from the position.
         update(
             &mut model,
@@ -14785,7 +14799,7 @@ pub(crate) mod tests {
         assert!(model.map.is_none());
         assert_eq!(
             model.toasts.last().map(|t| t.text.as_str()),
-            Some("no position from <cdcdcdcd…>")
+            Some("no position from Unknown")
         );
         assert!(cells(&model, |t| *t == hit::Target::Position).is_empty());
     }
@@ -14870,8 +14884,8 @@ pub(crate) mod tests {
         let v = view(&model);
         assert_eq!(v.conversations_title, BLOCKED_TITLE);
         assert_eq!(v.conversations_title_right, BLOCKED_RETURNS);
-        assert_eq!(v.messages_title, "<cdcdcdcd…>  blocked");
-        assert!(list_rows(&model).iter().any(|r| r.contains("cdcdcdcd")));
+        assert_eq!(v.messages_title, "Unknown  blocked");
+        assert!(list_rows(&model).iter().any(|r| r.contains("Unknown")));
         assert_eq!(model.messages_of_selected()[0].body, "still there? tripod");
         // Unblock: back in the list, open, with its history.
         let effects = palette(&mut model, "unblock");
@@ -14921,7 +14935,7 @@ pub(crate) mod tests {
         assert_eq!(model.order(), [1]);
         assert!(model
             .current_toast()
-            .is_some_and(|t| t.text.starts_with("blocked <abababab…>")));
+            .is_some_and(|t| t.text.starts_with("blocked Unknown ·abab")));
         // Again: said, not written.
         update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
         assert!(palette(&mut model, "block").is_empty());
@@ -15244,11 +15258,11 @@ pub(crate) mod tests {
                 blocked: false
             })]
         );
-        assert_eq!(model.names.label(&PEER), "Mutti ·abab");
+        assert_eq!(model.names.label(&PEER, model.lang), "Mutti");
         assert!(model.take_petnames().is_empty(), "never handed back");
         assert!(update(&mut model, pulled(Some("Mutti"))).is_empty());
         update(&mut model, pulled(None));
-        assert_eq!(model.names.label(&PEER), "Alice ·abab");
+        assert_eq!(model.names.label(&PEER, model.lang), "Alice");
     }
 
     /// `rename` asks in the palette, holding the petname to edit: `Enter`
@@ -15322,10 +15336,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             rows,
-            [
-                "your name for Alice ·abab",
-                "Enter sets it, empty clears it"
-            ]
+            ["your name for Alice", "Enter sets it, empty clears it"]
         );
         assert_eq!(view(&model).footer.len(), 2);
         typed(&mut model, "Mum ✓");
@@ -15341,11 +15352,11 @@ pub(crate) mod tests {
         assert!(model.palette.is_none());
         assert_eq!(
             view(&model).messages_title,
-            "Mum ? ·abab  known · announces Alice"
+            "Mum ?  known · announces Alice"
         );
         assert!(model
             .current_toast()
-            .is_some_and(|t| t.text == "named Mum ? ·abab"));
+            .is_some_and(|t| t.text == "named Mum ?"));
         // The palette holds the petname to edit; `Enter` unchanged writes
         // nothing.
         palette(&mut model, "rename");
@@ -15366,7 +15377,7 @@ pub(crate) mod tests {
                 blocked: false
             })]
         );
-        assert_eq!(view(&model).messages_title, "Alice ·abab");
+        assert_eq!(view(&model).messages_title, "Alice");
         // Nothing visible is refused, not written.
         palette(&mut model, "rename");
         typed(&mut model, "\u{200b}");
@@ -15497,7 +15508,7 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 model.current_toast().map(|t| t.text.clone()),
-                Some(format!("<abababab…> reacted {THUMBS}")),
+                Some(format!("Unknown reacted {THUMBS}")),
                 "{app}"
             );
             assert_eq!(
@@ -16080,7 +16091,7 @@ pub(crate) mod tests {
         let said =
             |lang| -> Vec<(String, String)> { info.rows.iter().map(|r| r.resolve(lang)).collect() };
         let de = said(strings::Lang::De);
-        let name = model.names.label(&PEER);
+        let name = model.names.label(&PEER, model.lang);
         assert_eq!(de[0], ("Von".to_string(), name.clone()));
         // Written and taken at once here: both rows say so (1445).
         assert_eq!(de[1], ("Gesendet".to_string(), "Heute · 14:00".to_string()));
@@ -16172,7 +16183,7 @@ pub(crate) mod tests {
         update(&mut model, UiEvent::Run(PaletteCommand::Forward));
         let ask = model.palette.as_ref().and_then(|p| p.ask);
         assert_eq!(ask, Some(contacts::Ask::Forward { from: PEER, key: 5 }));
-        let label = model.names.label(&OTHER);
+        let label = model.names.label(&OTHER, model.lang);
         let none = model.answer_ask(ask.expect("asked"), "nobody at all".to_string());
         assert!(sends(&none).is_empty(), "control: no such friend");
         let forwarded = model.answer_ask(ask.expect("asked"), label);

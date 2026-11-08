@@ -74,6 +74,11 @@
     <string name="mark_read">Als gelesen markieren</string>
     <string name="mark_unread">Als ungelesen markieren</string>
     <string name="delete">Löschen</string>
+    <string name="unknown_contact">Unbekannt</string>
+    <string name="same_name_two">Zwei Kontakte heißen %1$s</string>
+    <string name="same_name_many">%1$d Kontakte heißen %2$s</string>
+    <string name="no_name_two">Zwei Kontakte haben noch keinen Namen</string>
+    <string name="no_name_many">%1$d Kontakte haben noch keinen Namen</string>
     <string name="today">Heute</string>
     <string name="yesterday">Gestern</string>
     <string name="just_now">Jetzt</string>

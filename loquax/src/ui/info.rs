@@ -55,7 +55,7 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
         .iter()
         .position(|m| m.activity == key)?;
     let message = &conversation.messages[m];
-    let who = model.names.label(&conversation.peer);
+    let who = model.names.label(&conversation.peer, model.lang);
     let name = || Arg::Str(who.clone());
     let group = model.groups.contains_key(&conversation.peer);
     let mut rows = Vec::new();

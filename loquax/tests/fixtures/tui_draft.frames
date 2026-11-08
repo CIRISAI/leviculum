@@ -1,10 +1,10 @@
 === first ===
 --- frame 1: attached ---
-┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown ·61dd  Two contacts have no name yet──────┐
+│▌Unknown ·61dd          ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unknown ·5ec0          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -20,16 +20,16 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: typed ---
-┌  tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌  tui───────────────────┐┌  Unknown ·61dd  Two contacts have no name yet──────┐
+│▌Unknown ·61dd          ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unknown ·5ec0          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -45,16 +45,16 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├● to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││half a thought                                      │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: left ---
-┌  tui───────────────────┐┌● <5ec0ea2e…>───────────────────────────────────────┐
-│ <61ddb79a…>            ││                                                    │
+┌  tui───────────────────┐┌● Unknown ·5ec0  Two contacts have no name yet──────┐
+│ Unknown ·61dd          ││                                                    │
 │ Draft: half a thought  ││                                                    │
 │                        ││                                                    │
-│▌<5ec0ea2e…>            ││                                                    │
+│▌Unknown ·5ec0          ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -70,16 +70,16 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown ·5ec0── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: back ---
-┌  tui───────────────────┐┌● <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌  tui───────────────────┐┌● Unknown ·61dd  Two contacts have no name yet──────┐
+│▌Unknown ·61dd          ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unknown ·5ec0          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -95,14 +95,14 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││half a thought                                      │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === second ===
 --- frame 1: restarted ---
-┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown───────────────────────────────────────────┐
+│▌Unknown                ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -121,7 +121,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││half a thought                                      │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

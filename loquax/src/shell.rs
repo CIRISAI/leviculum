@@ -1587,7 +1587,9 @@ pub(crate) async fn start(
     model.history = model.home_client && loquax::home::client::history_owed(&home);
     model.own_code = own_code(&own_key);
     model.profile = profile_facts(&display_name.name, model.home_client);
-    model.names = loquax::names::Names::new(contacts);
+    // Only the contacts: the names already know the peers `Model::new`
+    // opened conversations with (1452, two nameless ones collide).
+    model.names.contacts = contacts;
     let (restored, names, last_key, positions, unverified, track_fixes, pn_asks) = history;
     // The messages an earlier run kept unverified: the engine checks each
     // once its sender's key is known, and asks for it until then.

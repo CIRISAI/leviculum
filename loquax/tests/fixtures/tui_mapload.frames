@@ -1,6 +1,6 @@
 --- frame 1: attached ---
-┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown───────────────────────────────────────────┐
+│▌Unknown                ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -19,13 +19,13 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: before the load ---
 ┌  tui───────────────────┐┌● map────────────────────────────────── loading map ┐
-│▌them ·61dd       14:00 ││  ·        · ·                        · ·        ·  │
+│▌them             14:00 ││  ·        · ·                        · ·        ·  │
 │▌◎ position · live   ⌖  ││ ·        ·             100 m            ·        · │
 │                        ││·       ·         · · ·      · · ·         ·       ·│
 │                        ││       ·        ·                  ·        ·       │
@@ -34,7 +34,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││    ·       ·       ·          ·       ·       ·    │
 │                        ││    ·      ·       ·            ·       ·      ·    │
 │                        ││    ·      ·      ·              ·      ·      ·    │
-│                        ││    ·      ·      ·       ◉ them ·61dd · 4 min ago  │
+│                        ││    ·      ·      ·       ◉ them · 4 min ago   ·    │
 │                        ││    ·      ·       ·            ·       ·      ·    │
 │                        ││    ·       ·       ··        ··       ·       ·    │
 │                        ││     ·       ·         · ·· ·         ·       ·     │
@@ -44,13 +44,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││ ·       ··             · ··             ··       · │
 │                        ││  ·         ·                          ·         ·  │
 │                        ││No map loaded for this area · Rings 50 m around them│
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: after the load ---
 ┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
-│▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
+│▌them             14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
 │▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
 │                        ││            ⠈⠁         ⢣             ⠘⣷⡀           ⢀│
@@ -59,7 +59,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                         ⠈⣆             ⠈⢿⣾⠟⠁       │
 │                        ││                          ⠈⢆             ⠈⣿⡀        │
 │                        ││                           ⠈⠳⡀            ⢹⣇        │
-│                        ││                          ◉ them ·61dd · 4 min ago  │
+│                        ││                          ◉ them · 4 min ago        │
 │                        ││                              ⢸           ⣼⠏        │
 │                        ││                            ⢀⡠⠜         ⢀⣼⠟         │
 │                        ││                         ⣀⠤⠚⠉         ⢀⣴⡿⠋          │
@@ -69,13 +69,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││         ⣀⣤⡶⠟⠋⠁              ⣠⣾⠟⠁                   │
 │                        ││     ⢀⣤⣶⠟⠋⠁               ⢀⣤⡾⠋                      │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: held already ---
 ┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
-│▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
+│▌them             14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
 │▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
 │                        ││            ⠈⠁         ⢣             ⠘⣷⡀           ⢀│
@@ -84,7 +84,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                         ⠈⣆             ⠈⢿⣾⠟⠁       │
 │                        ││                          ⠈⢆             ⠈⣿⡀        │
 │                        ││                           ⠈⠳⡀            ⢹⣇        │
-│                        ││                          ◉ them ·61dd · 4 min ago  │
+│                        ││                          ◉ them · 4 min ago        │
 │                        ││                              ⢸           ⣼⠏        │
 │                        ││                            ⢀⡠⠜         ⢀⣼⠟         │
 │                        ││                         ⣀⠤⠚⠉         ⢀⣴⡿⠋          │
@@ -94,13 +94,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││         ⣀⣤⡶⠟⠋⠁   ┌────────────────────────────────┐│
 │                        ││     ⢀⣤⣶⠟⠋⠁       │✓ the map here is loaded already││
 │                        ││                  └────────────────────────────────┘│
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: loading the area ---
 ┌  tui───────────────────┐┌● map────────────────────────────────── loading map ┐
-│▌them ·61dd       14:00 ││                                                    │
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -109,7 +109,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                          ◉ them ·61dd · 4 min ago  │
+│                        ││                          ◉ them · 4 min ago        │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -119,13 +119,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                      Natural Earth │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: the area loaded ---
 ┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
-│▌them ·61dd       14:00 ││                                                    │
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -134,7 +134,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                          ◉ them ·61dd · 4 min ago  │
+│                        ││                          ◉ them · 4 min ago        │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -144,7 +144,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit

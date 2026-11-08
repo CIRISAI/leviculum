@@ -1,29 +1,46 @@
 --- frame 1: attached ---
-┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown ·61dd  Two contacts have no name yet──────┐
+│▌Unknown ·61dd          ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unknown ·5ec0          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│ Carol ·8f77            ││                                                    │
+│ Carol                  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: named ---
-┌● tui───────────────────┐┌  Bob ·61dd─────────────────────────────────────────┐
+┌● tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│▌Bob                    ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ Unknown                ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Carol                  ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  No messages yet                   │
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: collision ---
+┌● tui───────────────────┐┌  Bob ·61dd  Two contacts are called Bob────────────┐
 │▌Bob ·61dd              ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ B0b ·5ec0              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│ Carol ·8f77            ││                                                    │
+│ Carol                  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -32,94 +49,77 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
---- frame 3: collision ---
-┌● tui───────────────────┐┌  Bob ·61dd ≈  same name as ·5ec0───────────────────┐
-│▌Bob ·61dd ≈            ││                                                    │
-│▌                       ││                                                    │
-│                        ││                                                    │
-│ B0b ·5ec0 ≈            ││                                                    │
-│                        ││                                                    │
-│                        ││                                                    │
-│ Carol ·8f77            ││                                                    │
-│                        ││                                                    │
-│                        ││                                                    │
-│                        ││                                                    │
-│                        ││                  No messages yet                   │
-│                        │├  to Bob ·61dd ≈──── Enter send · Alt-Enter newline ┤
-│                        ││                                                    │
-└────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: petname ---
-┌● tui───────────────────┐┌  Carol ·8f77  known · announces Caroline───────────┐
-│ Bob ·61dd ≈            ││                                                    │
+┌● tui───────────────────┐┌  Carol  known · announces Caroline─────────────────┐
+│ Bob ·61dd              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│ B0b ·5ec0 ≈            ││                                                    │
+│ B0b ·5ec0              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│▌Carol ·8f77            ││                                                    │
+│▌Carol                  ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to Carol ·8f77──── Enter send · Alt-Enter newline ┤
+│                        │├  to Carol────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: rename ---
-┌● tui───────────────────┐┌  Carol ·8f77  known · announces Caroline───────────┐
-│ Bob ·61dd ≈            ││                                                    │
+┌● tui───────────────────┐┌  Carol  known · announces Caroline─────────────────┐
+│ Bob ·61dd              ││                                                    │
 │                   ┌ commands ────────────────────────────┐                   │
 │                   │> Carol Meyer                         │                   │
-│ B0b ·5ec0 ≈       │your name for Carol ·8f77             │                   │
+│ B0b ·5ec0         │your name for Carol                   │                   │
 │                   │Enter sets it, empty clears it        │                   │
 │                   └──────────────────────────────────────┘                   │
-│▌Carol ·8f77            ││                                                    │
+│▌Carol                  ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to Carol ·8f77──── Enter send · Alt-Enter newline ┤
+│                        │├  to Carol────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- frame 6: renamed ---
-┌● tui───────────────────┐┌  Carol Meyer ·8f77  known · announces Caroline─────┐
-│ Bob ·61dd ≈            ││                                                    │
+┌● tui───────────────────┐┌  Carol Meyer  known · announces Caroline───────────┐
+│ Bob ·61dd              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│ B0b ·5ec0 ≈            ││                                                    │
+│ B0b ·5ec0              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│▌Carol Meyer ·8f77      ││                                                    │
+│▌Carol Meyer            ││                                                    │
 │▌                       ││                                                    │
-│                        ││                         ┌─────────────────────────┐│
-│                        ││                         │✓ named Carol Meyer ·8f77││
-│                        ││                  No mess└─────────────────────────┘│
-│                        │├  to Carol Meyer ·8f Enter send · Alt-Enter newline ┤
+│                        ││                               ┌───────────────────┐│
+│                        ││                               │✓ named Carol Meyer││
+│                        ││                  No messages y└───────────────────┘│
+│                        │├  to Carol Meyer──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 7: blocked ---
-┌● tui───────────────────┐┌  Bob ·61dd ≈  same name as ·5ec0───────────────────┐
-│▌Bob ·61dd ≈            ││                                                    │
+┌● tui───────────────────┐┌  Bob ·61dd  Two contacts are called Bob────────────┐
+│▌Bob ·61dd              ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
-│ B0b ·5ec0 ≈            ││                                                    │
+│ B0b ·5ec0              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│     ┌───────────────────────────────────────────────────────────────────────┐│
-│     │✓ blocked Carol Meyer ·8f77: its messages are kept, :blocked lists them││
-│     └───────────────────────────────────────────────────────────────────────┘│
-│                        │├  to Bob ·61dd ≈──── Enter send · Alt-Enter newline ┤
+│           ┌─────────────────────────────────────────────────────────────────┐│
+│           │✓ blocked Carol Meyer: its messages are kept, :blocked lists them││
+│           └─────────────────────────────────────────────────────────────────┘│
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 8: blocked view ---
-┌● Blocked───── :blocked ┐┌  Carol Meyer ·8f77  blocked · announces Caroline───┐
-│▌Carol Meyer ·8f77      ││                                                    │
+┌● Blocked───── :blocked ┐┌  Carol Meyer  blocked · announces Caroline─────────┐
+│▌Carol Meyer            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -130,7 +130,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                     ┌─────────────────────────────┐│
 │                        ││                     │✓ 1 blocked, :blocked returns││
 │                        ││                  No └─────────────────────────────┘│
-│                        │├  to Carol Meyer ·8f Enter send · Alt-Enter newline ┤
+│                        │├  to Carol Meyer──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

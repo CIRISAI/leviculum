@@ -4267,6 +4267,43 @@ mod tests {
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
     }
 
+    /// 1452: a second Bert writes, so both Berts carry their hash tail and
+    /// the sentence beside the name in the list; the open Bert's header
+    /// says it after the tail. Anna, whose name nobody shares, is her name
+    /// alone.
+    #[test]
+    fn a_shared_name_is_the_windows_golden() {
+        let (w, h) = (900, 560);
+        let other_bert = [0xbe; 16];
+        let mut model = chat_model();
+        model.names.remember(other_bert, "bert");
+        update(&mut model, UiEvent::Clock(at(30, 9, 50)));
+        received(
+            &mut model,
+            other_bert,
+            5,
+            "Which relay, the one by the lake?",
+        );
+        update(&mut model, UiEvent::Open { peer: BERT });
+        let scene = model.scene(LayoutClass::Wide);
+        let list = scene.list.as_ref().expect("the list");
+        let names: Vec<&str> = list.rows.iter().map(|r| r.row.name.as_str()).collect();
+        assert!(names.contains(&"Anna Schulz"), "{names:?}");
+        assert!(names.iter().any(|n| n.starts_with("Bert ·")), "{names:?}");
+        assert!(names.iter().any(|n| n.starts_with("bert ·")), "{names:?}");
+        let said: Vec<String> = list
+            .rows
+            .iter()
+            .filter_map(|r| r.same_name.as_ref().map(|t| t.resolve(Lang::En)))
+            .collect();
+        assert_eq!(said.len(), 2, "{said:?}");
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), None);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app.window = Size::new(w as f32, h as f32);
+        let shot = shoot(&app, w, h);
+        map::tests::same_as("gui-same-name.png", &shot, w, h);
+    }
+
     /// A key pressed with Ctrl, or alone (1444).
     fn chord(key: keyboard::Key, ctrl: bool) -> Message {
         Message::Key(keyboard::Event::KeyPressed {

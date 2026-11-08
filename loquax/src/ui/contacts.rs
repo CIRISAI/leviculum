@@ -123,7 +123,7 @@ impl<B> UiModel<B> {
         }
         match ask {
             Ask::Rename(peer) => vec![
-                format!("your name for {}", self.names.label(&peer)),
+                format!("your name for {}", self.names.label(&peer, self.lang)),
                 "Enter sets it, empty clears it".to_string(),
             ],
             Ask::React { peer, target } => self.react_rows(peer, target),
@@ -146,7 +146,7 @@ impl<B> UiModel<B> {
         let Some(peer) = self.open_peer() else {
             return Vec::new();
         };
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         if self.names.contacts.of(&peer).blocked == blocked {
             let state = match blocked {
                 true => "already blocked",
@@ -216,7 +216,7 @@ impl<B> UiModel<B> {
         if self.home_client {
             self.petnames.push((peer, petname));
         }
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         let text = match cleared {
             true => format!("no name of yours for {label}"),
             false => format!("named {label}"),

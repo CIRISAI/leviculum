@@ -1866,7 +1866,7 @@ impl Session {
                     .iter()
                     .map(|peer| schema::AddressRow {
                         peer: loquax::address::to_hex(peer),
-                        name: inner.model.names.label(peer),
+                        name: inner.model.names.label(peer, inner.lang),
                         announced: inner.model.names.announced(peer).map(str::to_string),
                     })
                     .collect(),
@@ -2942,7 +2942,14 @@ impl Inner {
             .map(|row| self.schema_row(row))
             .collect();
         let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
-            (loquax::address::to_hex(&own), self.initials(&own))
+            // The own avatar (1452 rule 4): the own name, the names' word
+            // for us else the profile's from the mailbox; never the hash.
+            let named = self
+                .model
+                .names
+                .shown(&own)
+                .or(Some(self.model.profile.name.as_str()).filter(|name| !name.is_empty()));
+            (loquax::address::to_hex(&own), chat::initials(named, &own))
         });
         schema::Conversations {
             v: VERSION,
@@ -2990,10 +2997,16 @@ impl Inner {
             .unwrap_or_default();
         let sharing = row.sharing;
         let group = row.group.clone();
+        let same_name = row
+            .same_name
+            .as_ref()
+            .map(|same| same.resolve(self.lang))
+            .unwrap_or_default();
         let row = row.row;
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
             name: row.name,
+            same_name,
             last: row.last,
             ours: row.ours,
             at: row.at.map_or(0, |at| at.unix_secs),
@@ -3257,7 +3270,13 @@ impl Inner {
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
-            name: self.model.names.label(&peer),
+            name: self.model.names.label(&peer, self.lang),
+            same_name: self
+                .model
+                .names
+                .same_name(&peer)
+                .map(|same| same.resolve(self.lang))
+                .unwrap_or_default(),
             relayed: relayed_title(&self.model, &peer, self.lang),
             messages: rows,
             initials: self.initials(&peer),
@@ -3276,10 +3295,19 @@ impl Inner {
                 && !self.just_added.contains(&peer),
             announced: names.announced(&peer).map(str::to_string),
             petname: names.petname(&peer).map(str::to_string),
+            // The contact's other addresses, in the contact info where an
+            // address is looked up: each with its short hash, which tells
+            // them apart while their names are one (1452).
             others: names
                 .same_contact(&peer)
                 .iter()
-                .map(|other| names.label(other))
+                .map(|other| {
+                    format!(
+                        "{} {}",
+                        names.label(other, self.lang),
+                        loquax::names::hash_suffix(other)
+                    )
+                })
                 .collect(),
             verified: self.model.verified(&peer),
             receipts: index.is_some_and(|c| self.model.conversations[c].flags.receipts),
@@ -3425,7 +3453,7 @@ impl Inner {
 pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
     let contacts = loquax::names::load_contacts(home).map_err(|error| error.to_string())?;
     let mut model = UiModel::<Line>::new(&[]);
-    model.names = loquax::names::Names::new(contacts);
+    model.names.contacts = contacts;
     for (peer, name) in store.names().map_err(|error| error.to_string())? {
         model.names.remember(peer, &name);
     }
@@ -3619,7 +3647,7 @@ pub fn relayed_title<B>(model: &UiModel<B>, peer: &[u8; 16], lang: Lang) -> Stri
     match relayed {
         true => Text::Key(
             StrId::RelayedGroup,
-            Vec::from([loquax::ui::strings::Arg::Str(model.names.label(peer))]),
+            Vec::from([loquax::ui::strings::Arg::Str(model.names.label(peer, lang))]),
         )
         .resolve(lang),
         false => String::new(),

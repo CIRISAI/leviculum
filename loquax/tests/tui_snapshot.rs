@@ -1020,7 +1020,8 @@ async fn the_chat_layout_draws_the_mockups_at_both_sizes() {
             detail.contains("arrived: proof received"),
             "{size}: {detail}"
         );
-        assert!(detail.contains("from you to them ·"), "{size}: {detail}");
+        assert!(detail.contains("from you to them"), "{size}: {detail}");
+        assert!(!detail.contains("from you to them ·"), "{size}: {detail}");
         all.push_str(&format!("=== {size} ===\n{}", without_ids(&frames)));
     }
     if all != EXPECTED_CHAT {
@@ -1180,7 +1181,7 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
     // The click on the second row opened it; the one on `send` sent, the
     // runner's first leg is in the log.
     assert!(
-        frame(&click, "second conversation").contains("│▌<5ec0ea2e…>"),
+        frame(&click, "second conversation").contains("│▌Unknown ·5ec0"),
         "{click}"
     );
     assert!(
@@ -1192,7 +1193,7 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
         "tui.log:\n{click_log}"
     );
     assert!(frame(&click, "message selected").contains("▌hello by mouse"));
-    assert!(frame(&click, "detail").contains("from you to <5ec0ea2e…>"));
+    assert!(frame(&click, "detail").contains("from you to Unknown ·5ec0"));
     assert!(!frame(&click, "closed").contains("from you to"));
     assert!(frame(&click, "help").contains("Loquax help"), "{click}");
 
@@ -1309,14 +1310,19 @@ async fn the_search_finds_opens_and_steps_in_place_at_both_sizes() {
         let both = frame(&frames, "both groups");
         assert!(both.contains("│ CONVERSATIONS "), "{size}: {both}");
         assert!(both.contains("│ MESSAGES "), "{size}: {both}");
-        assert!(both.contains("<«61dd»b79a…>"), "{size}: {both}");
+        // Found by its address, which the row shows as the tail of a
+        // shared "Unknown" (1452).
+        assert!(both.contains("Unknown ·«61dd»"), "{size}: {both}");
         // Closed: the list and its `/ search` back, nothing marked, the
         // conversation still the one the result opened.
         let closed = frame(&frames, "closed");
         assert!(closed.contains("● tui"), "{size}: {closed}");
         assert!(closed.contains(" / search "), "{size}: {closed}");
         assert!(!closed.contains('«'), "{size}: {closed}");
-        assert!(closed.contains("<61ddb79a…>──"), "{size}: {closed}");
+        assert!(
+            closed.contains("Unknown ·61dd  Two contacts"),
+            "{size}: {closed}"
+        );
         all.push_str(&format!("=== {size} ===\n{frames}"));
     }
     if all != EXPECTED_SEARCH {
@@ -1364,7 +1370,7 @@ key q
 ";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() {
+async fn names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_petname() {
     let daemon = daemon("tui-names", |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     std::fs::write(
@@ -1450,16 +1456,24 @@ async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() 
         Some(0),
         "stderr: {stderr}\nframes:\n{got}"
     );
+    // 1452: a name is the name alone until another peer shares it.
     let named = frame(&got, "named");
-    assert!(named.contains("Bob ·61dd──"), "{named}");
-    assert!(named.contains("to Bob ·61dd"), "{named}");
+    assert!(named.contains("Bob──"), "{named}");
+    assert!(named.contains("to Bob──"), "{named}");
+    assert!(!named.contains(" ·61dd"), "{named}");
     let collision = frame(&got, "collision");
-    assert!(collision.contains("same name as ·"), "{collision}");
-    // Both list rows, the header and the compose box.
-    assert_eq!(collision.matches(" ≈").count(), 4, "{collision}");
+    assert!(
+        collision.contains("Two contacts are called Bob"),
+        "{collision}"
+    );
+    // The tail on both list rows, the header and the compose box; no mark.
+    assert!(collision.contains("Bob ·61dd"), "{collision}");
+    assert!(collision.contains("B0b ·"), "{collision}");
+    assert!(collision.contains("to Bob ·61dd"), "{collision}");
+    assert!(!collision.contains('≈'), "{collision}");
     let petname = frame(&got, "petname");
     assert!(
-        petname.contains("Carol ·") && petname.contains("known · announces Caroline"),
+        petname.contains("Carol  known · announces Caroline"),
         "{petname}"
     );
     // The palette's rename asks with the petname to edit, and its answer
@@ -1467,10 +1481,10 @@ async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() 
     // `blocked` view lists her.
     let rename = frame(&got, "rename");
     assert!(rename.contains("> Carol Meyer"), "{rename}");
-    assert!(rename.contains("your name for Carol ·"), "{rename}");
+    assert!(rename.contains("your name for Carol "), "{rename}");
     let renamed = frame(&got, "renamed");
     assert!(
-        renamed.contains("Carol Meyer ·") && renamed.contains("known · announces Caroline"),
+        renamed.contains("Carol Meyer  known · announces Caroline"),
         "{renamed}"
     );
     let blocked = frame(&got, "blocked");
@@ -1480,10 +1494,10 @@ async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() 
             .all(|row| !row.starts_with("│ Carol") && !row.starts_with("│▌Carol")),
         "{blocked}"
     );
-    assert!(blocked.contains("blocked Carol Meyer ·"), "{blocked}");
+    assert!(blocked.contains("blocked Carol Meyer"), "{blocked}");
     let view = frame(&got, "blocked view");
     assert!(
-        view.contains("Blocked") && view.contains("Carol Meyer ·"),
+        view.contains("Blocked") && view.contains("Carol Meyer"),
         "{view}"
     );
     assert!(view.contains("blocked · announces Caroline"), "{view}");
@@ -1690,7 +1704,7 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         "the cut-off send is queued: {restarted}"
     );
     assert!(
-        restarted.contains("Bob ·61dd"),
+        restarted.contains("Bob") && !restarted.contains("Bob ·61dd"),
         "Bob's name from the first run: {restarted}"
     );
     assert!(
@@ -2219,7 +2233,9 @@ async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
 /// map ten cells left and three up under the pointer and opens nothing;
 /// zooming out past the region's shallowest zoom
 /// to z5 draws the world outline, the coast of Italy and San Marino's
-/// border; `0` fits again; `Enter` opens the selected
+/// border; `0` fits again; two `Tab`s, past our own pin, bring the
+/// selection back to the peer, which sorts before "Unknown" by name since
+/// 1452 (it sorted after the hex form before); `Enter` opens the selected
 /// peer's conversation; the map again and `Esc` bring the conversation
 /// back.
 const MAP_SCRIPT: &str = "\
@@ -2245,6 +2261,8 @@ key -
 key -
 frame outline
 key 0
+key tab
+key tab
 key enter
 frame opened
 key M
@@ -2359,8 +2377,9 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         // Tab: the selection moves from the first pin by name to the next.
         let next = frame(&frames, "next pin");
         assert!(
-            map.contains("· 3 h ago ◉") && next.contains("◉ them"),
-            "{next}"
+            // By name, "them" before "Unknown" (1452: no hex to sort first).
+            map.contains("◉ them") && next.contains("· 3 h ago ◉"),
+            "{map}\n{next}"
         );
         assert!(map.contains("· 3 h"), "the stale one with its age\n{map}");
         // The drag: every pin ten cells left and three up, the map open.
@@ -2368,7 +2387,7 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         assert!(dragged.contains("● map"), "nothing opened\n{dragged}");
         let at = |frame: &str| {
             frame.lines().enumerate().find_map(|(row, line)| {
-                line.find("◉ them")
+                line.find('◉')
                     .map(|byte| (line[..byte].chars().count(), row))
             })
         };

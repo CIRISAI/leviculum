@@ -2777,8 +2777,26 @@ public class ChatActivity extends Activity implements Events.Listener {
         // The verified mark after the name (1146), once the identity was compared.
         // A relay's chat says it is a group via a relay (1482).
         String relayed = Core.str(answer, "relayed");
-        title.setText((relayed.isEmpty() ? Core.str(answer, "name") : relayed)
-                + (Core.bool(answer, "verified") ? " \u2714" : ""));
+        String named = (relayed.isEmpty() ? Core.str(answer, "name") : relayed)
+                + (Core.bool(answer, "verified") ? " \u2714" : "");
+        // Two peers of one name (1452): the library's sentence under the
+        // name, small and quiet.
+        String same = Core.str(answer, "same_name");
+        if (same.isEmpty()) {
+            title.setMaxLines(1);
+            title.setText(named);
+        } else {
+            android.text.SpannableStringBuilder both = new android.text.SpannableStringBuilder(named);
+            both.append('\n');
+            int from = both.length();
+            both.append(same);
+            both.setSpan(new android.text.style.RelativeSizeSpan(0.65f), from, both.length(),
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            both.setSpan(new android.text.style.ForegroundColorSpan(getColor(R.color.text_secondary)),
+                    from, both.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            title.setMaxLines(2);
+            title.setText(both);
+        }
         avatar.show(peer, answer);
         banner.setVisibility(Core.bool(answer, "ask_link") ? View.VISIBLE : View.GONE);
         // The share's chip (1273): the library's words, or none.

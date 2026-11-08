@@ -1583,9 +1583,14 @@ impl Done {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationRow {
     pub peer: String,
-    /// The peer as every loquax screen names it: petname or announced name
-    /// with the short hash, or the address.
+    /// The peer as every loquax screen names it (1452): the petname, the
+    /// address book's or the announced name alone, "Unbekannt" without
+    /// one, and the short hash after it only while another peer shares it.
     pub name: String,
+    /// "Zwei Kontakte heißen Lew" while another peer shares the name, in
+    /// the phone's language; empty otherwise (1452).
+    #[serde(default)]
+    pub same_name: String,
     /// The last message's first line, a reaction as `reacted 👍`.
     pub last: String,
     /// Whether that message is ours.
@@ -1886,6 +1891,10 @@ pub struct Messages {
     pub v: u32,
     pub peer: String,
     pub name: String,
+    /// The header's sentence when another peer shares the name, as
+    /// [`ConversationRow::same_name`] (1452).
+    #[serde(default)]
+    pub same_name: String,
     /// A relay's chat (1482): the bar's title, "ReticulumNet NL · Gruppe
     /// über Relais"; empty for every other chat, whose title is the name.
     #[serde(default)]

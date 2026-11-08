@@ -1,9 +1,9 @@
 --- frame 1: attached ---
-┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd        ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unbekannt ·5ec0        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -19,16 +19,16 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││               Noch keine Nachrichten               │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: reading ---
-┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
-│▌them ·61dd       09:12 ││                                                    │
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             09:12 ││                                                    │
 │▌du: on my way          ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unbekannt              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -44,16 +44,16 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                                on my way  09:12 ✓  │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
-┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
-│▌them ·61dd       14:04 ││                                                    │
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             14:04 ││                                                    │
 │▌ok, bring the T114.    ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unbekannt              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -69,16 +69,16 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││ ───────────────────── 1 new ────────────────────── │
 │                        ││ ok, bring the T114.  14:04                         │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
-┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
-│▌them ·61dd       14:05 ││                                                    │
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             14:05 ││                                                    │
 │▌and the small tripod   ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unbekannt              ││                                                    │
 │                        ││                                                    │
 │                        ││             ── Saturday 24 October ──              │
 │                        ││▌are you at the field site tomorrow?  13:58         │
@@ -94,16 +94,16 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││ and the small tripod                               │
 │                        ││ if it fits in the bag  14:05                       │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
-┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
-│▌them ·61dd       14:05 ││                                                    │
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             14:05 ││                                                    │
 │▌and the small tripod   ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unbekannt              ││                                                    │
 │                        ││                                                    │
 │                        ││             ── Saturday 24 October ──              │
 │                        ││ are you at the field site tomorrow?  13:58         │
@@ -119,16 +119,16 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││▌and the small tripod                               │
 │                        ││▌if it fits in the bag  14:05                       │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
-┌  tui───────────────────┐┌  them ·61dd────────────────────────────────────────┐
-│▌them ·61dd       14:06 ││                                                    │
+┌  tui───────────────────┐┌  them──────────────────────────────────────────────┐
+│▌them             14:06 ││                                                    │
 │▌du: the tripod fits    ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││             ── Saturday 24 October ──              │
+│ Unbekannt              ││             ── Saturday 24 October ──              │
 │                        ││ are you at the field site tomorrow?  13:58         │
 │                        ││                                                    │
 │                        ││              yes, from ten. Shall I bring the T114 │
@@ -144,22 +144,22 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││ if it fits in the bag  14:05                       │
 │                        ││                                                    │
 │                        ││                          the tripod fits  14:06 ✓  │
-│                        │├● to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├● to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 7: detail ---
-┌  tui───────────────────┐┌● them ·61dd────────────────────────────────────────┐
-│▌them ·61dd       14:06 ││                                                    │
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             14:06 ││                                                    │
 │▌du: the tripod fits    ││                                                    │
 │                        ││                                                    │
 │ ┌ message ─────────────────────────────────────────────────────────────────┐ │
-│ │from you to them ·61dd                                                    │ │
+│ │from you to them                                                          │ │
 │ │peer   61ddb79ada973523799227bbaf41e204                                   │ │
 │ │id     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   │ │
 │ │size   59 bytes                                                           │ │
-│ │state  arrived: them ·61dd's mailbox or device has it                     │ │
-│ │them ·61dd sends no read receipts                                         │ │
+│ │state  arrived: them's mailbox or device has it                           │ │
+│ │them sends no read receipts                                               │ │
 │ │                                                                          │ │
 │ │on this device                                                            │ │
 │ │14:02:00  queued                                                          │ │
@@ -169,7 +169,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │ │14:02:00  arrived: proof received (direct)                                │ │
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ │
 │                        ││                          the tripod fits  14:06 ✓  │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

@@ -709,7 +709,7 @@ impl<B> UiModel<B> {
             );
             return;
         }
-        let label = self.names.label(&conversation.peer);
+        let label = self.names.label(&conversation.peer, self.lang);
         let confirm = Confirm::Conversation {
             peer: conversation.peer,
         };
@@ -961,7 +961,7 @@ impl<B> UiModel<B> {
     /// client of a home node from every device of the home when
     /// `everywhere`.
     pub(super) fn delete_conversation(&mut self, peer: [u8; 16], everywhere: bool) {
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         let Some(removed) = self.remove_conversation(peer) else {
             return;
         };
@@ -987,6 +987,7 @@ impl<B> UiModel<B> {
     pub(super) fn remove_conversation(&mut self, peer: [u8; 16]) -> Option<Conversation> {
         let c = self.conversations.iter().position(|c| c.peer == peer)?;
         let removed = self.conversations.remove(c);
+        self.names.part(&peer);
         for (sc, _) in self.sending.iter_mut() {
             if *sc > c && *sc != super::receipts::RECEIPT_SEND && *sc != super::groups::STATE_SEND {
                 *sc -= 1;
@@ -1035,7 +1036,7 @@ impl<B> UiModel<B> {
         let mut state = self.peer_state(&peer);
         state.pinned = !state.pinned;
         let effects = self.set_peer_state(peer, state);
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         let text = match state.pinned {
             true => format!("pinned {label}"),
             false => format!("unpinned {label}"),

@@ -4,7 +4,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Lew ·4141"
+        "raw": "Lew"
       },
       "resource": "chat",
       "role": "chat",
@@ -14,7 +14,7 @@
       "a11y": {
         "enabled": true,
         "label": {
-          "raw": "Lew ·4141"
+          "raw": "Lew"
         },
         "resource": "chat_bar",
         "role": "bar",
@@ -44,7 +44,7 @@
         }
       },
       "title": {
-        "raw": "Lew ·4141"
+        "raw": "Lew"
       }
     },
     "compose": {
@@ -124,7 +124,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Lew ·4141"
+            "raw": "Lew"
           },
           "resource": "group_2",
           "role": "group",
@@ -237,14 +237,14 @@
         "id": "group_2",
         "ours": false,
         "sender": {
-          "raw": "Lew ·4141"
+          "raw": "Lew"
         }
       },
       {
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Lew ·4141"
+            "raw": "Lew"
           },
           "resource": "group_7",
           "role": "group",
@@ -350,7 +350,7 @@
         "id": "group_7",
         "ours": false,
         "sender": {
-          "raw": "Lew ·4141"
+          "raw": "Lew"
         }
       }
     ],
@@ -370,7 +370,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Lew ·4141"
+        "raw": "Lew"
       },
       "resource": "chat_bar",
       "role": "bar",
@@ -400,7 +400,7 @@
       }
     },
     "title": {
-      "raw": "Lew ·4141"
+      "raw": "Lew"
     }
   },
   "whereabouts": null

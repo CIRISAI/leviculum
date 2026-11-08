@@ -974,6 +974,12 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             last.setText(draft.isEmpty() ? Ui.preview(ConversationsActivity.this, row) : draft);
             last.setTypeface(null, draft.isEmpty()
                     ? android.graphics.Typeface.NORMAL : android.graphics.Typeface.ITALIC);
+            // Two peers of one name (1452): the library's sentence under
+            // the row, both rows carrying their hash tail.
+            String same = Core.str(row, "same_name");
+            TextView sameName = (TextView) view.findViewById(R.id.same_name);
+            sameName.setText(same);
+            sameName.setVisibility(same.isEmpty() ? View.GONE : View.VISIBLE);
             TextView at = (TextView) view.findViewById(R.id.at);
             at.setText(Ui.listTime(ConversationsActivity.this, Core.num(row, "at"), Ui.nowSecs()));
             at.setTextColor(getColor(unread > 0 ? R.color.accent : R.color.text_secondary));

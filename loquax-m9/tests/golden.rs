@@ -192,6 +192,44 @@ fn the_chats_list_is_the_golden_frame() {
     check("m9-chats-cursor.png", &draw(&with_cursor(scene, 13)));
 }
 
+/// 1452: two peers called Lew collide, so both carry their hash tail on
+/// the list, and the open one's header says "Zwei Kontakte heißen Lew";
+/// Anna, whose name nobody shares, is her name alone, and nobody is hex.
+#[test]
+fn a_shared_name_is_the_golden_frame() {
+    let (lew, other, anna) = ([0x1e; 16], [0xe1; 16], [0xa0; 16]);
+    let mut model = UiModel::<Field>::new(&[lew, other, anna]);
+    model.lang = Lang::De;
+    model.address = Some([OWN as u8; 16]);
+    update(&mut model, UiEvent::Clock(now()));
+    for (peer, name) in [(lew, "Lew"), (other, "lew"), (anna, "Anna")] {
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Announced {
+                destination: peer,
+                name: Some(name.to_string()),
+                path_response: false,
+            }),
+        );
+    }
+    model.toasts.clear();
+    model.viewing = screen::viewing(Size::DEFAULT);
+    model.selected = NONE_OPEN;
+    let list = text_of(&model).join("\n");
+    assert!(list.contains("Lew ·1e1e"), "{list}");
+    assert!(list.contains("lew ·e1e1"), "{list}");
+    assert!(list.contains("Anna"), "{list}");
+    assert!(!list.contains("Anna ·"), "{list}");
+    check("m9-same-name-list.png", &shown(&model));
+    model.selected = 0;
+    model.focus = Pane::Conversations;
+    press(&mut model, M9Key::Enter);
+    assert_eq!(model.focus, Pane::Messages);
+    let chat = text_of(&model).join("\n");
+    assert!(chat.contains("Zwei Kontakte"), "{chat}");
+    check("m9-same-name-chat.png", &shown(&model));
+}
+
 /// 1532: the list and the open chat in the large size, the 10 x 20 of
 /// 1428, which the reader switches to; the small one is the default the
 /// goldens above draw. The control: the two sizes draw different frames

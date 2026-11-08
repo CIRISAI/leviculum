@@ -844,11 +844,23 @@ fn entry<B>(
     let title = names.label_in(
         &conversation.peer,
         room.saturating_sub(time.chars().count() + 1),
+        lang,
     );
-    let gap = room.saturating_sub(fit_width(&title) + time.chars().count());
+    // Two peers of one name (1452): the sentence after the name, muted,
+    // where the time leaves room for all of it; a cut sentence is noise,
+    // and the header says it whole.
+    let free = room.saturating_sub(fit_width(&title) + time.chars().count() + 1);
+    let same = names
+        .same_name(&conversation.peer)
+        .map(|sentence| format!("  {}", sentence.resolve(lang)))
+        .filter(|same| fit_width(same) <= free)
+        .unwrap_or_default();
+    let gap = room.saturating_sub(fit_width(&title) + fit_width(&same) + time.chars().count());
+    push(&mut top, &title, RStyle::default());
+    push(&mut top, &same, painted(model.tokens().muted));
     push(
         &mut top,
-        &format!("{title}{}{time} ", " ".repeat(gap)),
+        &format!("{}{time} ", " ".repeat(gap)),
         RStyle::default(),
     );
 

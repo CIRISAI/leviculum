@@ -547,6 +547,8 @@ fn messages() -> BoxedStrategy<Messages> {
             )| Messages {
                 v,
                 peer,
+                // An extreme text the relay's title draws too (1452).
+                same_name: relayed.clone(),
                 name,
                 relayed,
                 messages,
@@ -765,6 +767,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (group_members, group_words, _, group_invited, _),
             )| ConversationRow {
                 peer,
+                same_name: last.clone(),
                 name,
                 last,
                 ours,

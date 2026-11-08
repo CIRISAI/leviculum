@@ -1,6 +1,6 @@
 --- frame 1: attached ---
-┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown───────────────────────────────────────────┐
+│▌Unknown                ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -19,13 +19,13 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: live ---
-┌● tui───────────────────┐┌  them ·61dd──────────────────────────── pos <1 min ┐
-│▌them ·61dd       14:00 ││                                                    │
+┌● tui───────────────────┐┌  them────────────────────────────────── pos <1 min ┐
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -44,13 +44,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                    ── Today ──                     │
 │                        ││ ◎ position 43.77050 N 11.25600 E ·                 │
 │                        ││ live · every 10 min · now  14:00                   │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: recent ---
-┌● tui───────────────────┐┌  them ·61dd──────────────────────────── pos 25 min ┐
-│▌them ·61dd       14:00 ││                                                    │
+┌● tui───────────────────┐┌  them────────────────────────────────── pos 25 min ┐
+│▌them             14:00 ││                                                    │
 │▌◎ position · 25 mi… ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -69,13 +69,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                    ── Today ──                     │
 │                        ││ ◎ position 43.77050 N 11.25600 E ·                 │
 │                        ││ last position 25 min ago  14:00                    │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: stale ---
-┌● tui───────────────────┐┌  them ·61dd─────────────────────────────── pos 1 d ┐
-│▌them ·61dd         Mon ││                                                    │
+┌● tui───────────────────┐┌  them───────────────────────────────────── pos 1 d ┐
+│▌them               Mon ││                                                    │
 │▌◎ position · 25 h ago  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -94,7 +94,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││              ── Monday 26 October ──               │
 │                        ││ ◎ position 43.77050 N 11.25600 E ·                 │
 │                        ││ last position 25 h ago  14:00                      │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

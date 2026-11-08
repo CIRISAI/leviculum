@@ -731,7 +731,7 @@ impl<B> UiModel<B> {
                     .member(&rung.member)
                     .map(|m| m.name.clone())
                     .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| self.names.label(&rung.member));
+                    .unwrap_or_else(|| self.names.label(&rung.member, self.lang));
                 (name, rung)
             })
             .collect()
@@ -1205,7 +1205,7 @@ impl<B> UiModel<B> {
         let names = |peers: &[[u8; 16]]| {
             peers
                 .iter()
-                .map(|p| self.names.label(p))
+                .map(|p| self.names.label(p, self.lang))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -1243,15 +1243,15 @@ impl<B> UiModel<B> {
             }
             Ask::LeaveGroup(group) => alloc::vec![alloc::format!(
                 "leave {}? Enter leaves, Esc stays",
-                self.names.label(&group)
+                self.names.label(&group, self.lang)
             ),],
             Ask::DeleteGroup(group) => alloc::vec![alloc::format!(
                 "delete {} for everyone? Enter deletes, Esc keeps it",
-                self.names.label(&group)
+                self.names.label(&group, self.lang)
             ),],
             Ask::RemoveMember(group) => alloc::vec![alloc::format!(
                 "remove whom from {}? type a name, Enter",
-                self.names.label(&group)
+                self.names.label(&group, self.lang)
             ),],
             _ => Vec::new(),
         }
@@ -1266,7 +1266,7 @@ impl<B> UiModel<B> {
         match self.names.shown(&member.address) {
             Some(shown) => shown.to_string(),
             None if !member.name.is_empty() => member.name.clone(),
-            None => self.names.label(&member.address),
+            None => self.names.label(&member.address, self.lang),
         }
     }
 }
@@ -1369,9 +1369,12 @@ impl<B: Default> UiModel<B> {
     /// the list's order.
     fn find_candidate(&self, typed: &str) -> Option<[u8; 16]> {
         let lower = typed.to_lowercase();
-        self.group_candidates()
-            .into_iter()
-            .find(|peer| self.names.label(peer).to_lowercase().contains(&lower))
+        self.group_candidates().into_iter().find(|peer| {
+            self.names
+                .label(peer, self.lang)
+                .to_lowercase()
+                .contains(&lower)
+        })
     }
 
     /// Create: the home is asked, once, with the ticked friends under the
@@ -1513,7 +1516,9 @@ impl<B: Default> UiModel<B> {
                 })
                 .chain(draft.picked.iter().map(|peer| GroupMember {
                     address: *peer,
-                    name: self.names.label(peer),
+                    // The member's name as the reader shows it, no tail and
+                    // no "Unknown": it travels in the group's state (1452).
+                    name: self.names.shown(peer).unwrap_or_default().to_string(),
                     admin: false,
                     joined: false,
                     left: false,
@@ -1537,7 +1542,7 @@ impl<B: Default> UiModel<B> {
     pub(super) fn group_deleted(&mut self, deleted: Result<[u8; 16], String>) -> Vec<UiEffect> {
         match deleted {
             Ok(group) => {
-                let name = self.names.label(&group);
+                let name = self.names.label(&group, self.lang);
                 self.forget_group(group);
                 self.toast(
                     leviculum_ui::toast::ToastKind::Info,
@@ -1774,7 +1779,10 @@ mod tests {
         assert!(model.group_draft.is_none());
         let open = &model.conversations[model.selected];
         assert_eq!(open.peer, GROUP);
-        assert_eq!(model.names.label(&GROUP).split(' ').next(), Some("Familie"));
+        assert_eq!(
+            model.names.label(&GROUP, model.lang).split(' ').next(),
+            Some("Familie")
+        );
         let info = model.group(&GROUP).expect("the group");
         assert!(info.ours);
         assert_eq!(info.standing, Standing::Joined);
@@ -2409,7 +2417,7 @@ mod tests {
         assert_eq!(group.name, "Familie");
         assert!(again.conversations.iter().any(|c| c.peer == GROUP));
         assert_eq!(
-            again.names.label(&GROUP).split(' ').next(),
+            again.names.label(&GROUP, again.lang).split(' ').next(),
             Some("Familie"),
             "listed under its name, not its address"
         );

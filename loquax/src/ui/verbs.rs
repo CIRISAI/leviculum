@@ -179,7 +179,7 @@ impl<B> UiModel<B> {
             return Vec::new();
         };
         let effects = self.set_peer_state(peer, state);
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         let text = match muted {
             true => format!("{label} is no longer muted"),
             false => format!("muted {label}: messages count, nothing rings"),
@@ -402,10 +402,15 @@ impl<B: InputBuffer + Default> UiModel<B> {
                     .iter()
                     .map(|c| c.peer)
                     .filter(|peer| !typed.is_empty() && self.shows(peer))
-                    .find(|peer| self.names.label(peer).to_lowercase().contains(&lower));
+                    .find(|peer| {
+                        self.names
+                            .label(peer, self.lang)
+                            .to_lowercase()
+                            .contains(&lower)
+                    });
                 match to {
                     Some(to) => {
-                        let label = self.names.label(&to);
+                        let label = self.names.label(&to, self.lang);
                         let effects = self.forward(from, key, to);
                         self.toast(ToastKind::Info, format!("forwarded to {label}"));
                         effects

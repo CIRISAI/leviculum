@@ -1,6 +1,6 @@
 --- frame 1: attached ---
-┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown───────────────────────────────────────────┐
+│▌Unknown                ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -19,22 +19,22 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: octant ---
 ┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
-│▌them ·61dd       14:00 ││𜵢𜺨    ▛𜴁𜺨    𜺫𜴅𜴴𜴅𜴦𜺣    𜵰▘𜴗𜺨     𜵰𜴂▛𜺫𜺨𜴧𜺣𜴅𜴦🮅𜴦𜴂𜵩𜵀𜴘𜵄▞𜺨 ▛│
+│▌them             14:00 ││𜵢𜺨    ▛𜴁𜺨    𜺫𜴅𜴴𜴅𜴦𜺣    𜵰▘𜴗𜺨     𜵰𜴂▛𜺫𜺨𜴧𜺣𜴅𜴦🮅𜴦𜴂𜵩𜵀𜴘𜵄▞𜺨 ▛│
 │▌◎ position · live   ⌖  ││𜺨    ▛▀     𜵰𜺣  𜵰▀𜴷𜴦𜺣𜵰𜴂▛𜴦𜺣𜵰🮅𜵈   𜺫𜴅𜴦🮂𜴦𜺣 𜴃🯦𜺣𜴅𜴅𜴦𜺫𜴘𜴐𜺫🮂𜴏𜵰│
 │                        ││𜴸▀🮅 𜴏𜴂     𜴗𜺨▘▛▀𜴊𜺨𜴘𜴀𜴴𜺨𜴼𜵰𜴇𜴅𜴳𜴦𜺣      𜺫𜴅𜴦🯦𜵰𜴂𜴘▀𜴅𜴴𜴅𜴦𜴦🮅𜴂▛𜴈│
 │                        ││ 🮂▀𜺫🮂🮅𜺣   𜵊𜵰𜴦𜺫𜴃𜴉𜴘𜴖𜵰🮅𜴓𜺨𜴦𜺫𜴅𜺣𜺫𜺫▀𜵀𜴦         🮂𜴥𜴂  𜺫𜴅𜺣𜺨🯧𜺣 │
-│                        ││ 𜵰▘𜴏𜺫𜴅𜴦🮂▀𜺣 𜺨  𜵰𜵎𜴇𜵀▝𜴂    🮂𜴦𜺫<33333333…> · 3 h ago ◉🮅𜴅│
+│                        ││ 𜵰▘𜴏𜺫𜴅𜴦🮂▀𜺣 𜺨  𜵰𜵎𜴇𜵀▝𜴂    🮂𜴦𜺫𜴦𜺣𜺫𜺫Unknown · 3 h ago ●🮅𜴅│
 │                        ││𜵰𜺨𜴏  🮅𜺣𜺫𜴅𜴦𜴷𜴅🮅𜴏𜴂𜵯𜵙𜴂        𜺫𜴅𜴦𜺫▀𜺨 𜺫𜴤🯦𜴦𜺣       𜴏𜵰𜺨   𜺫│
 │                        ││𜺨𜴏  𜴏𜵰𜺨   𜵰▘𜵰𜴴𜴅𜴈𜺨    𜵰▀𜴦     𜺫𜴅𜴦𜴅𜴦▘𜴗𜴅🮅𜴅𜴦𜺣  𜵰𜴂𜴗𜺨     │
 │                        ││▘  𜵄▛𜺨   𜴗𜵯𜴂 𜴗𜵰▀𜴴𜴅𜴦𜺣 𜴦𜺣𜺫🮂𜴢𜺣     𜴗𜵰🮅𜴅𜴦𜺣𜺫𜴅𜴴𜴅🮅𜺨𜴏       │
 │                        ││  𜵰𜴵   𜵰𜺨𜴗𜺨𜵰▘𜵑𜵰𜵈 𜺫𜴅𜴴𜴅𜴦𜴃𜴦𜺣 𜺫𜴅𜴗𜴉𜵰▘𜴗𜺨 𜺫𜴅𜴷𜴅🮅 𜵏𜵰𜴂        │
-│                        ││   🮂𜺨𜵰𜴂▛𜺨 𜴗𜺨𜴯▘▌     ● them ·61dd · 4 min ago        │
+│                        ││   🮂𜺨𜵰𜴂▛𜺨 𜴗𜺨𜴯▘▌     ◉ them · 4 min ago𜺫𜴦𜺫 𜴶         │
 │                        ││    𜴗𜺨𜴯🮅▀𜵯▀🮂▀𜴂   ▛▀🮅   𜺫𜴅𜺫𜴅𜴦𜴂𜴗𜺨       𜵰▘𜴗🮂𜴦𜴷𜴅🮅      │
 │                        ││𜺣 𜵰𜺨𜴗🮂▀▀𜺨        𜺫🮂𜺨 🮅𜺣𜵰𜺨𜴏𜴕𜵰𜴦𜴅𜴦𜺣     𜴗𜺨𜴂𜵄▖▝𜴀🮂▀𜴷𜴅𜺣  𜵰│
 │                        ││▀𜺣 𜴶  𜵰𜴂𜴦𜴗𜺣        𜵰 𜴅𜴦𜵯𜵫𜴂 𜴥𜺣𜺫𜴅𜴦𜴅𜴦𜺣𜵰𜴏▛𜺨 𜺫      𜴄▀𜴶𜴅▘│
@@ -44,22 +44,22 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││𜵭▖       𜺫𜵥𜺫𜴅𜴅𜴦 𜴗🮂𜴝𜺫▛𜺨        𜴏𜵰𜺨 ▛𜵰𜺨  𜴅𜺫𜴦   𜵑𜺨𜴡𜺣   │
 │                        ││▝𜵫🮅🮅🮅🮅🮅🮅🮅▛𜴵▘𜺫𜴦𜺫𜴦𜴅𜵐𜴱𜴂🮅🮅🮅🮅🮅🮅🮅🮅🮅𜴏▛𜺨🮅▛𜴵▘🮅🮅🮅▘𜴏𜴦𜺫▖𜴉𜴵▘𜴅▖𜴵𜴱🮅│
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: blocks ---
 ┌  tui───────────────────┐┌● map─────────────────────────────────────── blocks ┐
-│▌them ·61dd       14:00 ││▛▘    ▛▛▇    ▝▀▂▅▃▁    ▛▘▀▘     ▁▘▛▇▀▅▂▅▃▃▃▊▞▅▆▃▞▘ ▂│
+│▌them             14:00 ││▛▘    ▛▛▇    ▝▀▂▅▃▁    ▛▘▀▘     ▁▘▛▇▀▅▂▅▃▃▃▊▞▅▆▃▞▘ ▂│
 │▌◎ position · live   ⌖  ││▘    ▛▛     ▛▁  ▛▀▞▀▁▛▘▛▀▁▁▃▖   ▇▅▂▆▀▖▝▀▅▖▅▅▃▝▂▂▘▆▛▛│
 │                        ││▇▀▂ ▛▛     ▛▇▘▛▘▃▘▅▎▁▇▘▛▇▀▆▂▁      ▇▅▃▌▛▘▛▅▀▂▅▃▃▁▘▛▃│
 │                        ││ ▆▀▇▆▂▁   ▛▛▀▝▝▝▂▃▘▅▛▇▃▇▅▂▇▇▅▆▃▁        ▇▃▀  ▝▀▖▘▌▁ │
-│                        ││ ▛▘▛▇▅▃▆▀▁ ▇  ▛▞▀▝▛▅    ▆▀▝<33333333…> · 3 h ago ◉▂▁│
+│                        ││ ▛▘▛▇▅▃▆▀▁ ▇  ▛▞▀▝▛▅    ▆▀▝▃▁▇▆Unknown · 3 h ago ●▂▁│
 │                        ││▛▘▘  ▂▁▇▅▀▆▅▁▘▅▁▘▘        ▇▅▃▆▀▁ ▆▃▌▃▁       ▃▛▘   ▆│
 │                        ││▘▘  ▘▛▘   ▛▘▛▁▅▃▘    ▛▀▃     ▇▅▃▅▃▘▀▀▂▅▃▁  ▛▘▛▇     │
 │                        ││▘  ▘▛▘   ▛▞▘ ▃▛▀▁▅▃▁ ▀▁▇▆▖▁     ▘▛▂▅▃▁▝▅▁▀▃▘▃       │
 │                        ││  ▁▂   ▛▘▀▘▛▘▁▊▖ ▝▀▂▅▃▝▃▁ ▇▅▃▖▛▘▛▘ ▇▅▞▀▂ ▌▛▘        │
-│                        ││   ▆▇▛▀▛▘ ▃▘▌▘▊     ● them ·61dd · 4 min ago        │
+│                        ││   ▆▇▛▀▛▘ ▃▘▌▘▊     ◉ them · 4 min ago▆▃▇ ▌         │
 │                        ││    ▀▘▂▂▀▁▃▅▃▅▇  ▛▀▂   ▝▀▇▅▃▘▃▘       ▛▘▛▆▃▁▅▂      │
 │                        ││▁ ▛▘▀▆▅▀▆        ▇▆▘ ▃▖▛▘▘▛▛▃▅▃▁     ▛▞▊▀▖▝▃▆▅▂▃▁  ▁│
 │                        ││▀▁ ▁  ▛▀▀▃▖        ▁▇▅▃▞▘▅ ▃▁▇▅▃▅▃▁▁▘▛▘ ▇▇     ▎▀▞▝▅│
@@ -69,13 +69,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││▖▎       ▇▖▇▀▅▃ ▛▆▞▇▛▘        ▛▛▘ ▛▛▘  ▝▝▅   ▛▘▊▁▁  │
 │                        ││▝▁▁▁▁▁▁▁▁▛▂▘▇▃▆▃▆▞▁▅▁▁▁▁▁▁▁▁▁▘▛▁▁▛▂▘▁▁▂▘▘▀▝▖▛▂▘▅▖▂▘▁│
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: halfblocks ---
 ┌  tui───────────────────┐┌● map─────────────────────────────────── halfblocks ┐
-│▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│▌them             14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position · live   ⌖  ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -84,7 +84,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
-│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀● them ·61dd · 4 min ago▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀◉ them · 4 min ago▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -94,22 +94,22 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: braille-thin ---
 ┌  tui───────────────────┐┌● map───────────────────────────────── braille-thin ┐
-│▌them ·61dd       14:00 ││⡿⠃    ⢠⡟      ⠙⠻⣦⣄     ⢀⣴⠏       ⣰⠏⠈⠛⠿⣷⣦⣀   ⢯⡙⠢⠤⡴⠁ ⢠│
+│▌them             14:00 ││⡿⠃    ⢠⡟      ⠙⠻⣦⣄     ⢀⣴⠏       ⣰⠏⠈⠛⠿⣷⣦⣀   ⢯⡙⠢⠤⡴⠁ ⢠│
 │▌◎ position · live   ⌖  ││⠁    ⢠⡟         ⢀⣽⢷⣦⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠑⠿⠷⣦⣀ ⠈⠢⠔⠁ ⣰⡟│
 │                        ││⢶⣄⡀ ⣰⠏        ⢀⣔⠟⠁⣠⠛⢿⣿⡃ ⠈⠙⠶⣄        ⠉⠻⠆    ⠙⠻⣦⣄  ⣴⠟ │
 │                        ││ ⠈⠙⣷⣯⣀        ⠰⢅⢠⠞⠁⣴⡟⠉⠛⢷⣄⡀ ⠈⠛⢦⣄               ⠙⢻⣾⣏  │
-│                        ││  ⣼⠏ ⠙⠳⢦⣄⡀    ⢠⡾⠛⣦⠞⠋    ⠈⠛⢶<33333333…> · 3 h ago ◉⢿⣦│
+│                        ││  ⣼⠏ ⠙⠳⢦⣄⡀    ⢠⡾⠛⣦⠞⠋    ⠈⠛⢶⣄  ⠈Unknown · 3 h ago ●⢿⣦│
 │                        ││ ⣼⠃     ⠉⠛⠶⣤⣀⣴⠟⢀⡴⠋         ⠉⠻⢦⣄  ⠉⠳⣦⣀        ⣠⡟⠁   ⠈│
 │                        ││⣾⠃         ⣸⠟⠷⣤⡞⠁             ⠉⠻⣦⣀⣴⠋⠙⠳⣦⣀    ⣰⠏      │
 │                        ││⠁        ⣠⡾⠋ ⣠⡟⠙⠳⣤⣀             ⣠⡿⠳⣦⣀  ⠙⠷⣤⣀⣼⠋       │
 │                        ││       ⢀⣴⠏  ⣴⢏⣿⠆  ⠙⠳⣦⣀         ⣴⠏  ⠈⠙⠷⣤⡀ ⢈⡿⠃        │
-│                        ││      ⣰⠟⠁ ⢠⣾⡃⣸⠏     ● them ·61dd · 4 min ago        │
+│                        ││      ⣰⠟⠁ ⢠⣾⡃⣸⠏     ◉ them · 4 min ago⠈⠙⣷⣿⣁         │
 │                        ││    ⣠⣾⣃⢀⣤⠶⠛⠉⠻⠃          ⠙⣳⣦⣀⣴⠟         ⣴⠏⠉⠻⢷⣦⣀      │
 │                        ││⡀ ⢀⣼⠋⠉⠉⠉⠁            ⣀ ⢀⣼⠋⢠⡿⠻⢦⣄      ⢀⡾⠣⢤⡀  ⠉⠻⢷⣦⣀   │
 │                        ││⠛⣷⣿⡁                 ⠉⠳⡾⠁⣰⢿⣅  ⠉⠻⢦⣄  ⣠⠟⠁        ⠉⠻⢿⣦⣾│
@@ -119,22 +119,22 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││⢻⡆        ⢙⡷⣄⡀  ⢀⣶⣜⣳⠟⠁        ⢠⡟⠁ ⢠⡿⠁  ⠙⣷⣄   ⢠⣾⣏    │
 │                        ││⠘⣷       ⢀⡾⠁⠈⠻⢦⡀⠉⢁⡼⠋         ⢰⡟  ⢠⡿⠁   ⣼⠃⠙⢧⡀⣰⣿⠋⠉⢳⡾  │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: mosaic ---
 ┌  tui───────────────────┐┌● map─────────────────────────────────────── mosaic ┐
-│▌them ·61dd       14:00 ││                                                    │
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                           <33333333…> · 3 h ago ◉  │
+│                        ││                               Unknown · 3 h ago ●  │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                    ● them ·61dd · 4 min ago        │
+│                        ││                    ◉ them · 4 min ago              │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -144,22 +144,22 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 7: braille ---
 ┌  tui───────────────────┐┌● map────────────────────────────────────── braille ┐
-│▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
+│▌them             14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
 │▌◎ position · live   ⌖  ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
 │                        ││ ⠈⠛⣷⣿⣀        ⠐⢅⢀⠞⠁⣰⠗⠉⠙⢷⣄⡀ ⠈⠙⢦⣄               ⠙⠻⣶⣏  │
-│                        ││  ⣴⠏⠈⠙⠳⢦⣄⡀    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶<33333333…> · 3 h ago ◉⢷⣦│
+│                        ││  ⣴⠏⠈⠙⠳⢦⣄⡀    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶⣄  ⠈Unknown · 3 h ago ●⢷⣦│
 │                        ││ ⣼⠃     ⠉⠛⠶⣤⣀⣴⠏ ⡴⠋         ⠉⠻⢦⣄  ⠈⠳⣦⣀        ⢠⡾⠁   ⠈│
 │                        ││⣼⠃         ⣨⠟⠷⣤⡞⠁             ⠉⠻⣦⣀⣴⠏⠙⠳⣦⣀    ⣰⠟      │
 │                        ││⠁        ⢠⡾⠋ ⣠⡾⠙⠳⣦⣀             ⢠⡿⠳⣦⣀ ⠈⠙⠷⣦⡀⣴⠏       │
 │                        ││       ⢀⣴⠏  ⣴⢏⣷⠆  ⠙⠳⣦⣀         ⣴⠏   ⠙⠳⣦⣀ ⢈⡿⠃        │
-│                        ││      ⣠⠟⠁ ⢀⣾⡃⣸⡏     ● them ·61dd · 4 min ago        │
+│                        ││      ⣠⠟⠁ ⢀⣾⡃⣸⡏     ◉ them · 4 min ago⠈⠙⣷⣿⣁         │
 │                        ││    ⢠⣾⣋⢀⣤⠶⠛⠉⠻⠃          ⠙⣳⣦⣀⣴⠟         ⣴⠏⠉⠻⢷⣦⣀      │
 │                        ││  ⢀⣴⠏⠉⠉⠛⠁            ⣀ ⢀⣼⠋⢀⡿⠳⣦⣀      ⢀⡾⠣⢄⡀  ⠉⠻⢷⣦⣀   │
 │                        ││⠛⣷⣿⡁                 ⠉⠳⡾⠁⣰⢿⣄  ⠉⠳⢦⣄  ⣠⡟⠁        ⠉⠛⢷⣦⣾│
@@ -169,22 +169,22 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││⢹⡄        ⢙⡷⣦⡀  ⢀⣶⣜⣷⠟⠁        ⢠⡿⠁ ⢠⡿⠁  ⠙⣷⣄   ⢀⣾⣏    │
 │                        ││⠈⠇        ⠾⠁⠈⠻⠦ ⠉⠁⠼⠋         ⠠⠟   ⠾⠁   ⠼⠃⠙⠧ ⠠⠿⠃⠉⠻⠾  │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 8: back to mosaic ---
 ┌  tui───────────────────┐┌● map─────────────────────────────────────── mosaic ┐
-│▌them ·61dd       14:00 ││                                                    │
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                           <33333333…> · 3 h ago ◉  │
+│                        ││                               Unknown · 3 h ago ●  │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                    ● them ·61dd · 4 min ago        │
+│                        ││                    ◉ them · 4 min ago              │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -194,22 +194,22 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 9: the name gone ---
 ┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
-│▌them ·61dd       14:00 ││                                                    │
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                           <33333333…> · 3 h ago ◉  │
+│                        ││                               Unknown · 3 h ago ●  │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                    ● them ·61dd · 4 min ago        │
+│                        ││                    ◉ them · 4 min ago              │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -219,13 +219,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 10: glyph test ---
 ┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
-│▌them ·61dd       14:00 ││                                                    │
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -244,22 +244,22 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 11: glyph test closed ---
 ┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
-│▌them ·61dd       14:00 ││                                                    │
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                           <33333333…> · 3 h ago ◉  │
+│                        ││                               Unknown · 3 h ago ●  │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                    ● them ·61dd · 4 min ago        │
+│                        ││                    ◉ them · 4 min ago              │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -269,7 +269,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit

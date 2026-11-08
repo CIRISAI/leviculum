@@ -1,6 +1,6 @@
 --- two reactions ---
-┌  Loquax (attaching)────┐┌  <4f4f4f4f…>───────────────────────────────────────┐
-│▌<4f4f4f4f…>      12:01 ││                                                    │
+┌  Loquax (attaching)────┐┌  Unknown───────────────────────────────────────────┐
+│▌Unknown          12:01 ││                                                    │
 │▌reacted ❤️              ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -19,13 +19,13 @@
 │                        ││                                                    │
 │                        ││                     yes, the usual place  12:01 ✓  │
 │                        ││                                             👍   ❤️  │
-│                        │├● to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        │├● to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- picker ---
-┌  Loquax (attaching)────┐┌● <4f4f4f4f…>───────────────────────────────────────┐
-│▌<4f4f4f4f…>      12:01 ││                                                    │
+┌  Loquax (attaching)────┐┌● Unknown───────────────────────────────────────────┐
+│▌Unknown          12:01 ││                                                    │
 │▌reacted ❤️         ┌ commands ────────────────────────────┐                   │
 │                   │>                                     │                   │
 │                   │react to: lunch at noon?              │                   │
@@ -44,13 +44,13 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││                     yes, the usual place  12:01 ✓  │
 │                        ││                                             👍   ❤️  │
-│                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- ours ---
-┌  Loquax (attaching)────┐┌● <4f4f4f4f…>───────────────────────────── no relay ┐
-│▌<4f4f4f4f…>      12:01 ││                                                    │
+┌  Loquax (attaching)────┐┌● Unknown───────────────────────────────── no relay ┐
+│▌Unknown          12:01 ││                                                    │
 │▌You reacted 👍          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -69,7 +69,7 @@ Enter run │ Esc close
 │                        ││                                                    │
 │                        ││                     yes, the usual place  12:01 ✓  │
 │                        ││                                             👍   ❤️  │
-│                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

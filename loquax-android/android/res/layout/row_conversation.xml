@@ -48,6 +48,20 @@
             android:maxLines="2"
             android:textColor="@color/text_secondary"
             android:textSize="15sp" />
+
+        <!-- 1452: "Zwei Kontakte heißen Lew" under a row whose name another
+             peer shares; gone for every other row. -->
+        <TextView
+            android:id="@+id/same_name"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp"
+            android:textStyle="italic"
+            android:visibility="gone" />
     </LinearLayout>
 
     <LinearLayout

@@ -4,7 +4,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Familie ·5151"
+        "raw": "Familie"
       },
       "resource": "chat",
       "role": "chat",
@@ -14,7 +14,7 @@
       "a11y": {
         "enabled": true,
         "label": {
-          "raw": "Familie ·5151"
+          "raw": "Familie"
         },
         "resource": "chat_bar",
         "role": "bar",
@@ -44,7 +44,7 @@
         }
       },
       "title": {
-        "raw": "Familie ·5151"
+        "raw": "Familie"
       }
     },
     "compose": {
@@ -339,7 +339,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Bob ·4343"
+            "raw": "Bob"
           },
           "resource": "pick_43434343434343434343434343434343",
           "role": "row",
@@ -352,7 +352,7 @@
           "ring": null
         },
         "id": "pick_43434343434343434343434343434343",
-        "name": "Bob ·4343",
+        "name": "Bob",
         "picked": true,
         "toggle": {
           "enabled": true,
@@ -382,7 +382,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Familie ·5151"
+        "raw": "Familie"
       },
       "resource": "chat_bar",
       "role": "bar",
@@ -412,7 +412,7 @@
       }
     },
     "title": {
-      "raw": "Familie ·5151"
+      "raw": "Familie"
     }
   },
   "whereabouts": null

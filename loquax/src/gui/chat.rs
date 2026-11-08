@@ -1180,10 +1180,7 @@ impl App {
         line = line.push(
             row![
                 avatar(avatar_of, size::BAR_AVATAR, t),
-                text(open.bar.title.resolve(self.lang))
-                    .size(size::BAR_NAME)
-                    .color(colour(t.text))
-                    .width(Length::Fill),
+                self.bar_title(&open.bar.title, t),
             ]
             .spacing(12)
             .align_y(Alignment::Center),
@@ -1205,6 +1202,35 @@ impl App {
                 ..container::Style::default()
             })
             .into()
+    }
+
+    /// The chat bar's title: the name, and under it, small, the sentence of
+    /// a name two peers share (1452), which the scene joins to the name.
+    fn bar_title<'a>(&self, title: &Text, t: Colours) -> Element<'a, Message> {
+        let line = |words: String| {
+            text(words)
+                .size(size::BAR_NAME)
+                .color(colour(t.text))
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::None)
+        };
+        match title {
+            Text::Join(parts) if parts.len() == 2 => column![
+                line(parts[0].resolve(self.lang)),
+                text(parts[1].resolve(self.lang))
+                    .size(size::ROW_TIME)
+                    .color(colour(t.text_secondary))
+                    .wrapping(text::Wrapping::None),
+            ]
+            .width(Length::Fill)
+            .clip(true)
+            .into(),
+            title => text(title.resolve(self.lang))
+                .size(size::BAR_NAME)
+                .color(colour(t.text))
+                .width(Length::Fill)
+                .into(),
+        }
     }
 
     /// A bar's back as a chevron.
@@ -2221,6 +2247,19 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
             })
             .wrapping(text::Wrapping::None),
     ]
+    // Two peers of one name (1452): a third line says so, quiet, whole;
+    // beside the name it would be cut mid-word at the list's width.
+    .extend(r.same_name.as_ref().map(|same| {
+        text(same.resolve(lang))
+            .size(size::ROW_TIME)
+            .color(colour(t.text_secondary))
+            .font(iced::Font {
+                style: iced::font::Style::Italic,
+                ..iced::Font::DEFAULT
+            })
+            .wrapping(text::Wrapping::None)
+            .into()
+    }))
     .spacing(2)
     .width(Length::Fill)
     .clip(true);

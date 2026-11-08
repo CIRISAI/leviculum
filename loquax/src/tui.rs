@@ -2322,6 +2322,38 @@ mod tests {
         same_text("tui-relay-group.txt", &screen);
     }
 
+    /// 1452: two peers called Lew collide, so both carry their hash tail
+    /// and the header of the open one says "Two contacts are called Lew";
+    /// Anna, whose name nobody shares, is her name alone. The terminal's
+    /// list is too narrow for the sentence, so only the header says it.
+    #[test]
+    fn a_shared_name_is_the_terminals_golden() {
+        let (lew, other, anna) = ([0x1e; 16], [0xe1; 16], [0xa0; 16]);
+        let mut model = Model::new(&[lew, other, anna]);
+        for (peer, name) in [(lew, "Lew"), (other, "lew "), (anna, "Anna")] {
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Announced {
+                    destination: peer,
+                    name: Some(name.to_string()),
+                    path_response: false,
+                }),
+            );
+        }
+        model.toasts.clear();
+        let narrow = whole_screen(&model);
+        assert!(
+            narrow.contains("Lew ·1e1e  Two contacts are called Lew"),
+            "{narrow}"
+        );
+        assert!(narrow.contains("▌Lew ·1e1e"), "{narrow}");
+        assert!(narrow.contains(" lew ·e1e1"), "{narrow}");
+        assert!(narrow.contains(" Anna "), "{narrow}");
+        assert!(!narrow.contains("Anna ·"), "{narrow}");
+        assert!(!narrow.contains('≈'), "{narrow}");
+        same_text("tui-same-name.txt", &narrow);
+    }
+
     /// 1450 (walk 1, finding 21): `S` opens the settings, the nine
     /// sections in the phone's order (the golden); a digit opens one, its
     /// rows run by their keys (Privacy's `r` turns read receipts off),
@@ -2755,9 +2787,9 @@ mod tests {
         let model = Model::new(&[[0xab; 16]]);
         let screen = render(&model);
         assert!(screen.contains("● Loquax (attaching)"), "{screen}");
-        assert!(screen.contains("▌<abababab…>"), "{screen}");
+        assert!(screen.contains("▌Unknown"), "{screen}");
         assert!(screen.contains("No messages yet"), "{screen}");
-        assert!(screen.contains("  to <abababab…>"), "{screen}");
+        assert!(screen.contains("  to Unknown"), "{screen}");
         assert!(screen.contains("Tab pane"), "{screen}");
     }
 
@@ -2921,7 +2953,7 @@ mod tests {
         let rows: Vec<&str> = screen.lines().collect();
         let top = rows
             .iter()
-            .position(|row| row.contains("● to <abababab…>"))
+            .position(|row| row.contains("● to Unknown"))
             .expect("the compose pane");
         // Five rows of text between the borders, the last five lines.
         let inner: Vec<&str> = rows[top + 1..top + 6]
@@ -3714,6 +3746,18 @@ mod tests {
         let bob = [0xb7; 16];
         let mut model = Model::new(&[alice, bob]);
         update(&mut model, UiEvent::Resize { width, height });
+        // Named as the mockup names them: two nameless peers would collide
+        // and say so in the header (1452), which is its own golden.
+        for (peer, name) in [(alice, "Alice"), (bob, "Bob")] {
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Announced {
+                    destination: peer,
+                    name: Some(name.to_string()),
+                    path_response: false,
+                }),
+            );
+        }
         update(
             &mut model,
             UiEvent::Engine(OutboxEvent::Ready {
@@ -3855,17 +3899,17 @@ mod tests {
             // The list: Alice on top with the reply's time and the bar, Bob
             // under her; the header without a trust word for the default
             // state (1279).
-            assert!(rows[1].starts_with("│▌<4f4f4f4f…>"), "{shot}");
+            assert!(rows[1].starts_with("│▌Alice "), "{shot}");
             assert!(rows[2].starts_with("│▌you: the tripod fits"), "{shot}");
-            assert!(rows[4].starts_with("│ <b7b7b7b7…>"), "{shot}");
-            assert!(rows[0].contains("<4f4f4f4f…>──"), "{shot}");
+            assert!(rows[4].starts_with("│ Bob "), "{shot}");
+            assert!(rows[0].contains("Alice──"), "{shot}");
             assert!(!rows[0].contains("unknown"), "{shot}");
             // The rule, the date line, ours right, theirs left.
             assert!(shot.contains("── Today ──"), "{shot}");
             assert!(shot.contains(" 2 new "), "{shot}");
             assert!(shot.contains("│ ok, bring the T114.  14:04 "), "{shot}");
             assert!(shot.contains(" the tripod fits  14:06 ⠋  │"), "{shot}");
-            assert!(shot.contains("to <4f4f4f4f…>"), "{shot}");
+            assert!(shot.contains("to Alice"), "{shot}");
         }
         let mut model = mockup(80, 24);
         model.focus = Pane::Messages;
@@ -4233,7 +4277,9 @@ mod tests {
             let shot = screen(&model, width, height);
             assert!(shot.contains("│ CONVERSATIONS"), "{shot}");
             assert!(shot.contains("│ MESSAGES"), "{shot}");
-            assert!(shot.contains("<«4f4f»4f4f…>"), "{shot}");
+            // Alice by her address, which her row no longer shows (1452),
+            // and the message that names it.
+            assert!(shot.contains("«4f4f»"), "{shot}");
             frames.push_str(&format!("--- {width} x {height}: both groups ---\n{shot}"));
             keys(&mut model, &["esc"]);
             let shot = screen(&model, width, height);

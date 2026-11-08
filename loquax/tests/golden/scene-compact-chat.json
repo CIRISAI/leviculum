@@ -4,7 +4,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Jürgen 🚲 ·1d0a"
+        "raw": "Jürgen 🚲"
       },
       "resource": "chat",
       "role": "chat",
@@ -14,7 +14,7 @@
       "a11y": {
         "enabled": true,
         "label": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         },
         "resource": "chat_bar",
         "role": "bar",
@@ -44,7 +44,7 @@
         }
       },
       "title": {
-        "raw": "Jürgen 🚲 ·1d0a"
+        "raw": "Jürgen 🚲"
       }
     },
     "compose": {
@@ -124,7 +124,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775809",
           "role": "group",
@@ -209,7 +209,7 @@
         "id": "group_9223372036854775809",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -302,7 +302,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775811",
           "role": "group",
@@ -371,7 +371,7 @@
         "id": "group_9223372036854775811",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -468,7 +468,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775813",
           "role": "group",
@@ -537,7 +537,7 @@
         "id": "group_9223372036854775813",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -630,7 +630,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775815",
           "role": "group",
@@ -699,7 +699,7 @@
         "id": "group_9223372036854775815",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -796,7 +796,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775817",
           "role": "group",
@@ -865,7 +865,7 @@
         "id": "group_9223372036854775817",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -964,7 +964,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775819",
           "role": "group",
@@ -1033,14 +1033,14 @@
         "id": "group_9223372036854775819",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775821",
           "role": "group",
@@ -1109,7 +1109,7 @@
         "id": "group_9223372036854775821",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -1202,7 +1202,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775823",
           "role": "group",
@@ -1274,7 +1274,7 @@
         "id": "group_9223372036854775823",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -1367,7 +1367,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775825",
           "role": "group",
@@ -1436,7 +1436,7 @@
         "id": "group_9223372036854775825",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -1529,7 +1529,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775827",
           "role": "group",
@@ -1633,7 +1633,7 @@
         "id": "group_9223372036854775827",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -1730,7 +1730,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775829",
           "role": "group",
@@ -1799,7 +1799,7 @@
         "id": "group_9223372036854775829",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -1896,7 +1896,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775831",
           "role": "group",
@@ -1977,7 +1977,7 @@
         "id": "group_9223372036854775831",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -2156,7 +2156,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775835",
           "role": "group",
@@ -2225,7 +2225,7 @@
         "id": "group_9223372036854775835",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -2322,7 +2322,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775837",
           "role": "group",
@@ -2391,7 +2391,7 @@
         "id": "group_9223372036854775837",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -2484,7 +2484,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775839",
           "role": "group",
@@ -2553,7 +2553,7 @@
         "id": "group_9223372036854775839",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -2646,7 +2646,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775841",
           "role": "group",
@@ -2715,7 +2715,7 @@
         "id": "group_9223372036854775841",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -2808,7 +2808,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775843",
           "role": "group",
@@ -2881,7 +2881,7 @@
         "id": "group_9223372036854775843",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -2978,7 +2978,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775845",
           "role": "group",
@@ -3047,7 +3047,7 @@
         "id": "group_9223372036854775845",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -3140,7 +3140,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a"
+            "raw": "Jürgen 🚲"
           },
           "resource": "group_9223372036854775847",
           "role": "group",
@@ -3209,7 +3209,7 @@
         "id": "group_9223372036854775847",
         "ours": false,
         "sender": {
-          "raw": "Jürgen 🚲 ·1d0a"
+          "raw": "Jürgen 🚲"
         }
       },
       {
@@ -3315,7 +3315,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Jürgen 🚲 ·1d0a"
+        "raw": "Jürgen 🚲"
       },
       "resource": "chat_bar",
       "role": "bar",
@@ -3345,7 +3345,7 @@
       }
     },
     "title": {
-      "raw": "Jürgen 🚲 ·1d0a"
+      "raw": "Jürgen 🚲"
     }
   },
   "whereabouts": null

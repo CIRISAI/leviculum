@@ -1,6 +1,6 @@
 === 80x24
-┌● Loquax (attaching)────┐┌  <abababab…>───────────────────────────── no relay ┐
-│▌<abababab…>      03:44 ││ ⌖ Sharing your position, 42 min left               │
+┌● Loquax (attaching)────┐┌  Unknown───────────────────────────────── no relay ┐
+│▌Unknown          03:44 ││ ⌖ Sharing your position, 42 min left               │
 │▌you: Position shared   ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -19,13 +19,13 @@
 │                        ││                                           03:26 ◷  │
 │                        ││                                                    │
 │                        ││                                           03:44 ◷  │
-│                        │├  to <abababab…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === 120x40
-┌● Loquax (attaching)──────────────┐┌  <abababab…>─────────────────────────────────── abababababababababababababababab ┐
-│▌<abababab…>                03:44 ││                                                                         no relay │
+┌● Loquax (attaching)──────────────┐┌  Unknown─────────────────────────────────────────────────────────────────────────┐
+│▌Unknown                    03:44 ││                                                                         no relay │
 │▌you: Position shared             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││ ⌖ Sharing your position, 42 min left · click to stop                             │
 │                                  ││                                                                                  │
@@ -60,7 +60,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  ││                                                                         03:26 ◷  │
 │                                  ││                                                                                  │
 │                                  ││                                                                         03:44 ◷  │
-│                                  │├  to <abababab…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  │├  to Unknown────────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

@@ -4,7 +4,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "<bffba8cb…>"
+        "raw": "Unknown"
       },
       "resource": "chat",
       "role": "chat",
@@ -14,7 +14,7 @@
       "a11y": {
         "enabled": true,
         "label": {
-          "raw": "<bffba8cb…>"
+          "raw": "Unknown"
         },
         "resource": "chat_bar",
         "role": "bar",
@@ -38,13 +38,13 @@
           "avatar": {
             "bg": "8a6420",
             "fg": "ffffff",
-            "initials": "BF",
+            "initials": "?",
             "ring": null
           }
         }
       },
       "title": {
-        "raw": "<bffba8cb…>"
+        "raw": "Unknown"
       }
     },
     "compose": {
@@ -560,7 +560,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "<bffba8cb…>"
+        "raw": "Unknown"
       },
       "resource": "chat_bar",
       "role": "bar",
@@ -584,13 +584,13 @@
         "avatar": {
           "bg": "8a6420",
           "fg": "ffffff",
-          "initials": "BF",
+          "initials": "?",
           "ring": null
         }
       }
     },
     "title": {
-      "raw": "<bffba8cb…>"
+      "raw": "Unknown"
     }
   },
   "whereabouts": null

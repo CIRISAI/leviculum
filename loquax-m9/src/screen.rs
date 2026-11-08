@@ -387,7 +387,25 @@ fn entry(row: &Row, look: &Look, cols: usize) -> [RLine; 2] {
             ..RStyle::default()
         },
     );
-    let gap = room.saturating_sub(fit_width(&name) + fit_width(&time));
+    // Two peers of one name (1452): the sentence after the name, muted,
+    // where the time leaves room for all of it; a cut sentence is noise,
+    // and the chat's header says it whole.
+    let free = room.saturating_sub(fit_width(&name) + fit_width(&time) + 1);
+    let same = row
+        .same_name
+        .as_ref()
+        .map(|sentence| format!(" {}", sentence.resolve(look.lang)))
+        .filter(|same| fit_width(same) <= free)
+        .unwrap_or_default();
+    push(
+        &mut top,
+        &same,
+        RStyle {
+            italic: true,
+            ..muted(look)
+        },
+    );
+    let gap = room.saturating_sub(fit_width(&name) + fit_width(&same) + fit_width(&time));
     push(&mut top, &" ".repeat(gap), RStyle::default());
     push(&mut top, &time, muted(look));
 

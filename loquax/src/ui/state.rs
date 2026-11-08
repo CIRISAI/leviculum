@@ -180,7 +180,7 @@ impl<B> UiModel<B> {
         }
         self.conversations[index].flags.verified = verified;
         self.changed_peers.insert(peer);
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         let text = match verified {
             true => format!("{label} verified"),
             false => format!("{label} no longer verified"),
@@ -242,7 +242,7 @@ impl<B> UiModel<B> {
         };
         let mut state = self.peer_state(&peer);
         state.archived = !state.archived;
-        let label = self.names.label(&peer);
+        let label = self.names.label(&peer, self.lang);
         let text = match state.archived {
             true => format!("archived {label}: :archived lists it"),
             false => format!("{label} is back in the list"),

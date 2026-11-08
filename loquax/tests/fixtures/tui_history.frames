@@ -1,10 +1,10 @@
 === first ===
 --- frame 1: attached ---
-┌● tui───────────────────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown ·61dd  Two contacts have no name yet──────┐
+│▌Unknown ·61dd          ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unknown ·5ec0          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -20,16 +20,16 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  No messages yet                   │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown ·61dd── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: delivered ---
-┌  tui───────────────────┐┌  Bob ·61dd─────────────────────────────────────────┐
-│▌Bob ·61dd        12:00 ││                                                    │
+┌  tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
 │▌you: are you at the f… ││                                                    │
 │                        ││                                                    │
-│ <5ec0ea2e…>            ││                                                    │
+│ Unknown                ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -45,16 +45,16 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││               are you at the field site?  12:00 ✓  │
-│                        │├● to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        │├● to Bob──────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: cut off ---
-┌  tui───────────────────┐┌  <5ec0ea2e…>───────────────────────────── no relay ┐
-│▌<5ec0ea2e…>      12:00 ││                                                    │
+┌  tui───────────────────┐┌  Unknown───────────────────────────────── no relay ┐
+│▌Unknown          12:00 ││                                                    │
 │▌you: leaving in ten    ││                                                    │
 │                        ││                                                    │
-│ Bob ·61dd        12:00 ││                                                    │
+│ Bob              12:00 ││                                                    │
 │ yes, from ten          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -67,20 +67,20 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                          ┌────────────────────────┐│
-│                        ││                    ── Tod│✓ message from Bob ·61dd││
-│                        ││              leaving in t└────────────────────────┘│
-│                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                ┌──────────────────┐│
+│                        ││                    ── Today ── │✓ message from Bob││
+│                        ││              leaving in ten  di└──────────────────┘│
+│                        │├● to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 === second ===
 --- frame 1: restarted ---
-┌● tui───────────────────┐┌  <5ec0ea2e…>───────────────────────────── no relay ┐
-│▌<5ec0ea2e…>      12:00 ││                                                    │
+┌● tui───────────────────┐┌  Unknown───────────────────────────────── no relay ┐
+│▌Unknown          12:00 ││                                                    │
 │▌you: leaving in ten    ││                                                    │
 │                        ││                                                    │
-│ Bob ·61dd        12:00 ││                                                    │
+│ Bob              12:00 ││                                                    │
 │ yes, from ten          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -96,18 +96,18 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                           leaving in ten  12:00 ◷  │
-│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: ledger ---
-┌  tui───────────────────┐┌● <5ec0ea2e…>───────────────────────────── no relay ┐
-│▌<5ec0ea2e…>      12:00 ││                                                    │
+┌  tui───────────────────┐┌● Unknown───────────────────────────────── no relay ┐
+│▌Unknown          12:00 ││                                                    │
 │▌you: leaving in ten    ││                                                    │
 │                        ││                                                    │
-│ Bob ·61dd        12:00 ││                                                    │
+│ Bob              12:00 ││                                                    │
 │ ┌ message ─────────────────────────────────────────────────────────────────┐ │
-│ │from you to <5ec0ea2e…>                                                   │ │
+│ │from you to Unknown                                                       │ │
 │ │peer   5ec0ea2ecbc35ac16053c86cc29663ec                                   │ │
 │ │id     none yet: the router has not queued it                             │ │
 │ │size   14 bytes                                                           │ │
@@ -121,16 +121,16 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││                          ▌leaving in ten  12:00 ◷  │
-│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: bob ---
-┌● tui───────────────────┐┌  Bob ·61dd─────────────────────────────────────────┐
-│ <5ec0ea2e…>      12:00 ││                                                    │
+┌● tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│ Unknown          12:00 ││                                                    │
 │ you: leaving in ten    ││                                                    │
 │                        ││                                                    │
-│▌Bob ·61dd        12:00 ││                                                    │
+│▌Bob              12:00 ││                                                    │
 │▌yes, from ten          ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -146,16 +146,16 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││               are you at the field site?  12:00 ✓  │
 │                        ││                                                    │
 │                        ││ yes, from ten  12:00                               │
-│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: pinned ---
-┌● tui───────────────────┐┌  Bob ·61dd─────────────────────────────────────────┐
-│▌Bob ·61dd        12:00 ││                                                    │
+┌● tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
 │▌yes, from ten          ││                                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
-│ <5ec0ea2e…>      12:00 ││                                                    │
+│ Unknown          12:00 ││                                                    │
 │ you: leaving in ten    ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -168,19 +168,19 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││               are you at the fi┌──────────────────┐│
-│                        ││                                │✓ pinned Bob ·61dd││
-│                        ││ yes, from ten  12:00           └──────────────────┘│
-│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││               are you at the field si┌────────────┐│
+│                        ││                                      │✓ pinned Bob││
+│                        ││ yes, from ten  12:00                 └────────────┘│
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 5: asked ---
-┌  tui───────────────────┐┌● Bob ·61dd─────────────────────────────────────────┐
-│▌Bob ·61dd        12:00 ││                                                    │
+┌  tui───────────────────┐┌● Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
 │▌yes, from ten          ││                                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
-│ <5ec0ea2e…>      12:00 ││                                                    │
+│ Unknown          12:00 ││                                                    │
 │ you: leaving in ten    ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -196,16 +196,16 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │   ┌─────────────────────────────────────────────────────────────────────────┐│
 │   │⚠ delete this message from this device? y deletes, any other key keeps it││
 │   └─────────────────────────────────────────────────────────────────────────┘│
-│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: deleted ---
-┌  tui───────────────────┐┌● Bob ·61dd─────────────────────────────────────────┐
-│▌Bob ·61dd        12:00 ││                                                    │
+┌  tui───────────────────┐┌● Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
 │▌you: are you at the f… ││                                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
-│ <5ec0ea2e…>      12:00 ││                                                    │
+│ Unknown          12:00 ││                                                    │
 │ you: leaving in ten    ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -221,17 +221,17 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                ┌──────────────────────────────────┐│
 │                        ││                │✓ message deleted from this device││
 │                        ││              ▌a└──────────────────────────────────┘│
-│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === third ===
 --- frame 1: again ---
-┌● tui───────────────────┐┌  Bob ·61dd─────────────────────────────────────────┐
-│▌Bob ·61dd        12:00 ││                                                    │
+┌● tui───────────────────┐┌  Bob───────────────────────────────────────────────┐
+│▌Bob              12:00 ││                                                    │
 │▌you: are you at the f… ││                                                    │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
-│ <5ec0ea2e…>      12:00 ││                                                    │
+│ Unknown          12:00 ││                                                    │
 │ you: leaving in ten    ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -247,7 +247,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││               are you at the field site?  12:00 ✓  │
-│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        │├  to Bob──────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

@@ -117,6 +117,13 @@ leviculum_ui::catalogue! {
     MarkRead = "mark_read", "Mark as read", "Als gelesen markieren";
     MarkUnread = "mark_unread", "Mark as unread", "Als ungelesen markieren";
     Delete = "delete", "Delete", "Löschen";
+    // Names (1452): the name alone, "Unknown" without one, and where two
+    // peers share a name, the sentence that says so beside the hash tails.
+    UnknownContact = "unknown_contact", "Unknown", "Unbekannt";
+    SameNameTwo = "same_name_two", "Two contacts are called %1$s", "Zwei Kontakte heißen %1$s";
+    SameNameMany = "same_name_many", "%1$d contacts are called %2$s", "%1$d Kontakte heißen %2$s";
+    NoNameTwo = "no_name_two", "Two contacts have no name yet", "Zwei Kontakte haben noch keinen Namen";
+    NoNameMany = "no_name_many", "%1$d contacts have no name yet", "%1$d Kontakte haben noch keinen Namen";
     // Times and the liveness words (1209).
     Today = "today", "Today", "Heute";
     Yesterday = "yesterday", "Yesterday", "Gestern";

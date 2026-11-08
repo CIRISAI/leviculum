@@ -180,7 +180,7 @@ fn admin_name<B>(model: &UiModel<B>, info: &GroupInfo) -> String {
         None if !info.admin_name.is_empty() => info.admin_name.clone(),
         None => info
             .inviter
-            .map(|i| model.names.label(&i))
+            .map(|i| model.names.label(&i, model.lang))
             .unwrap_or_default(),
     }
 }
@@ -256,7 +256,7 @@ pub fn new_group<B>(model: &UiModel<B>) -> Option<NewGroupNode> {
         .into_iter()
         .map(|peer| {
             let picked = draft.picked.contains(&peer);
-            let name = model.names.label(&peer);
+            let name = model.names.label(&peer, model.lang);
             let id = NodeId::PickRow(peer);
             let mut a11y = A11y::of(id, Role::Row, Text::Raw(name.clone()));
             a11y.selected = picked;
@@ -375,7 +375,7 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
                     Arg::Str(
                         info.member(&member)
                             .map(|m| model.member_name(m))
-                            .unwrap_or_else(|| model.names.label(&member)),
+                            .unwrap_or_else(|| model.names.label(&member, model.lang)),
                     ),
                     Arg::Str(info.name.clone()),
                 ]),

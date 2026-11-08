@@ -457,9 +457,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         );
         let chip = &messages.messages[0].chips[0];
         assert_eq!((chip.content.as_str(), chip.ours), ("\u{1F44D}", true));
-        // A peer without a name: the avatar shows its address's first byte,
-        // in the app's colour since it sent no icon appearance (1129).
-        assert_eq!(messages.initials, peer[..2].to_uppercase());
+        // A peer without a name: the avatar shows `?`, never its address
+        // (1452), in the app's colour since it sent no icon appearance (1129).
+        assert_eq!(messages.initials, "?");
         assert_eq!(
             (messages.icon_fg.as_deref(), messages.icon_bg.as_deref()),
             (None, None)
@@ -491,11 +491,16 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert_eq!(row.peer, peer);
         assert_eq!(row.last, "You reacted \u{1F44D}");
         assert!(row.ours);
-        assert_eq!(row.initials, peer[..2].to_uppercase());
+        assert_eq!(row.initials, "?", "no hex on a nameless avatar (1452)");
         // The row's mark (1130): ours is last, so a delivery word, a text.
         assert_eq!(row.kind, "reaction");
         assert!(!row.state.is_empty());
-        assert_eq!(list.initials.chars().count(), 2);
+        // The own avatar: the own name's initials, or `?`, never hex (1452).
+        assert!(
+            !list.initials.is_empty() && !list.address.to_uppercase().starts_with(&list.initials),
+            "{}",
+            list.initials
+        );
         assert_eq!(list.address.len(), 32);
 
         // The address book (1139): linked with what the picker gave, the
@@ -531,12 +536,10 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .expect("query"),
         )
         .expect("decode");
-        // The petname first, and the ugly store's other "Mum" marks both.
-        assert_eq!(
-            shown.name,
-            format!("Mum ·{short} {}", loquax::names::COLLISION),
-            "the petname first"
-        );
+        // The petname first, and the ugly store's other "Mum" gives both
+        // their hash tail and the header its sentence (1452).
+        assert_eq!(shown.name, format!("Mum ·{short}"), "the petname first");
+        assert_eq!(shown.same_name, "Two contacts are called Mum");
         assert!(shown.linked);
         assert_eq!(
             (shown.lookup.as_deref(), shown.contact_id),
@@ -590,7 +593,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
             .iter()
             .find(|row| row.peer == peer)
             .expect("listed");
-        assert_eq!(row.name, format!("Alice Schmidt ·{short}"));
+        // The name alone while nobody shares it (1452).
+        assert_eq!(row.name, "Alice Schmidt");
+        assert!(row.same_name.is_empty());
         assert_eq!(row.initials, "AS");
         assert_eq!(
             (row.linked, row.photo.as_deref()),
@@ -783,10 +788,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         .expect("decode");
         assert_eq!(messages.messages.len(), 2, "{messages:?}");
         assert_eq!(messages.messages[0].body, "hallo vom Telefon");
-        // The link outlived the session; unlinked, the address again and
-        // no photo kept.
-        let short = &peer[..4];
-        assert_eq!(messages.name, format!("Alice Schmidt ·{short}"));
+        // The link outlived the session; unlinked, nameless again ("Unknown",
+        // never the address, 1452) and no photo kept.
+        assert_eq!(messages.name, "Alice Schmidt");
         let photo = messages.photo.clone().expect("the photo kept");
         session
             .request(Request::Unlink { peer: peer.clone() })
@@ -797,7 +801,15 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .expect("query"),
         )
         .expect("decode");
-        assert_eq!(unlinked.name, format!("<{}…>", &peer[..8]));
+        assert!(
+            matches!(
+                unlinked.name.split(" ·").next(),
+                Some("Unknown" | "Unbekannt")
+            ),
+            "{}",
+            unlinked.name
+        );
+        assert!(!unlinked.name.contains(&peer[..8]), "{}", unlinked.name);
         assert!(!unlinked.linked && unlinked.photo.is_none() && unlinked.lookup.is_none());
         assert!(!Path::new(&photo).exists());
         // 1146: the pin and the verified mark outlived the session.
@@ -4743,7 +4755,7 @@ fn a_device_receipt_shows_two_ticks_on_the_phone_and_survives_the_store() {
             .map(|(_, value)| value)
             .expect("a status row")
     };
-    let who = model.names.label(&peer);
+    let who = model.names.label(&peer, Lang::En);
     assert_eq!(state_words(&model, Lang::En), format!("On {who}'s device"));
     assert_eq!(
         state_words(&model, Lang::De),

@@ -4,7 +4,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Verein ·5252"
+        "raw": "Verein"
       },
       "resource": "chat",
       "role": "chat",
@@ -14,7 +14,7 @@
       "a11y": {
         "enabled": true,
         "label": {
-          "raw": "Verein ·5252"
+          "raw": "Verein"
         },
         "resource": "chat_bar",
         "role": "bar",
@@ -44,7 +44,7 @@
         }
       },
       "title": {
-        "raw": "Verein ·5252"
+        "raw": "Verein"
       }
     },
     "compose": {
@@ -173,7 +173,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Verein ·5252"
+        "raw": "Verein"
       },
       "resource": "chat_bar",
       "role": "bar",
@@ -203,7 +203,7 @@
       }
     },
     "title": {
-      "raw": "Verein ·5252"
+      "raw": "Verein"
     }
   },
   "whereabouts": null

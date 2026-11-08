@@ -420,6 +420,9 @@ pub struct Row {
     /// A group's row (1307): its avatar is the member count, its line
     /// "Invitation" until the Join.
     pub group: Option<super::group_scene::GroupBadge>,
+    /// "Two contacts are called Lew" (1452): drawn quietly beside the name
+    /// while another peer shares it; both rows carry their hash tail then.
+    pub same_name: Option<Text>,
 }
 
 /// A row is its list item: `row.selected`, `row.activate`, `row.a11y`
@@ -1350,8 +1353,16 @@ impl List {
 /// The reader's bar over the list.
 fn me_bar<B>(model: &UiModel<B>) -> TopBar {
     let avatar = match model.address {
+        // The own name (1452 rule 4): the names' word for us, else the
+        // name the profile has from the mailbox; never the own hash.
         Some(own) => Avatar::of(
-            chat::initials(model.names.shown(&own), &own),
+            chat::initials(
+                model
+                    .names
+                    .shown(&own)
+                    .or(Some(model.profile.name.as_str()).filter(|n| !n.is_empty())),
+                &own,
+            ),
             &own,
             None,
             None,
@@ -1517,10 +1528,15 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         .draft
         .as_ref()
         .map(|line| Text::Key(StrId::DraftRow, Vec::from([Arg::Str(line.clone())])));
+    let same_name = model.names.same_name(peer);
     let spoken = match (&draft, row.last.is_empty()) {
         (Some(draft), _) => Text::Join(Vec::from([Text::Raw(row.name.clone()), draft.clone()])),
         (None, true) => Text::Raw(row.name.clone()),
         (None, false) => Text::Raw(format!("{}, {}", row.name, row.last)),
+    };
+    let spoken = match &same_name {
+        Some(sentence) => Text::Join(Vec::from([spoken, sentence.clone()])),
+        None => spoken,
     };
     let mut a11y = A11y::of(id, Role::Row, spoken);
     a11y.selected = selected;
@@ -1538,6 +1554,7 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         draft,
         sharing: model.share(peer).is_some(),
         group,
+        same_name,
         row,
     }
 }
@@ -1586,7 +1603,7 @@ pub fn share_rows<B>(model: &UiModel<B>) -> Vec<ShareRow> {
         .iter()
         .map(|(peer, share)| {
             let now = model.now.map_or(share.started_at, |now| now.unix_secs);
-            let name = model.names.label(peer);
+            let name = model.names.label(peer, model.lang);
             let words = share_words(share, now);
             let id = NodeId::ShareRow(*peer);
             ShareRow {
@@ -1609,11 +1626,18 @@ pub fn share_rows<B>(model: &UiModel<B>) -> Vec<ShareRow> {
 /// relay's chat (1482) without the words "group via relay", for the
 /// compose's hint and a quote's writer.
 pub fn peer_title(bar: &TopBar) -> Text {
-    match &bar.title {
+    name_of(&bar.title)
+}
+
+/// [`peer_title`] of a title: a shared name's sentence (1452) and a relay's
+/// words left off.
+fn name_of(title: &Text) -> Text {
+    match title {
         Text::Key(StrId::RelayedGroup, args) => match args.first() {
             Some(Arg::Str(name)) => Text::Raw(name.clone()),
-            _ => bar.title.clone(),
+            _ => title.clone(),
         },
+        Text::Join(parts) => parts.first().map_or_else(|| title.clone(), name_of),
         title => title.clone(),
     }
 }
@@ -1629,7 +1653,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
 /// what the fold builds for the viewport.
 pub(crate) fn chat_in<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Chat {
     let peer = model.conversations.get(c).map_or([0; 16], |c| c.peer);
-    let name = model.names.label(&peer);
+    let name = model.names.label(&peer, model.lang);
     let liveness = model.liveness(&peer);
     let badge = super::group_scene::badge(model, &peer);
     let avatar = Avatar::of(
@@ -1663,6 +1687,11 @@ pub(crate) fn chat_in<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -
     {
         true => Text::Key(StrId::RelayedGroup, Vec::from([Arg::Str(name.clone())])),
         false => Text::Raw(name.clone()),
+    };
+    // Two peers of one name (1452): the header says so after the name.
+    let title = match model.names.same_name(&peer) {
+        Some(sentence) => Text::Join(Vec::from([title, sentence])),
+        None => title,
     };
     let bar = TopBar {
         id: NodeId::ChatBar,
@@ -2222,6 +2251,9 @@ impl Row {
         });
         if let (Some(group), Value::Object(map)) = (&self.group, &mut value) {
             map.insert("group".into(), group.to_json());
+        }
+        if let (Some(same), Value::Object(map)) = (&self.same_name, &mut value) {
+            map.insert("same_name".into(), same.to_json());
         }
         value
     }

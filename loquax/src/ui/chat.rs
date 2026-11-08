@@ -222,9 +222,10 @@ pub fn list_ink(mark: Mark, colours: &Colours) -> u32 {
 }
 
 /// The initials for a peer (1129): the first letter of the name's first
-/// word and of its last, one letter for a name of one word, and the
-/// address's first two hex digits for a peer without a name.
-pub fn initials(name: Option<&str>, peer: &[u8; 16]) -> String {
+/// word and of its last, one letter for a name of one word, and `?` for a
+/// peer without a name (1452: never hex; its colour, from the address,
+/// tells two of them apart).
+pub fn initials(name: Option<&str>, _peer: &[u8; 16]) -> String {
     let first_letter = |word: &str| {
         word.chars()
             .find(|c| c.is_alphanumeric())
@@ -242,7 +243,7 @@ pub fn initials(name: Option<&str>, peer: &[u8; 16]) -> String {
             .collect(),
     };
     if letters.is_empty() {
-        return crate::address::to_hex(&peer[..1]).to_uppercase();
+        return "?".to_string();
     }
     letters.into_iter().flat_map(char::to_uppercase).collect()
 }
@@ -466,7 +467,7 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         let now = model.now.map(|now| now.unix_secs);
         return ListRow {
             peer: *peer,
-            name: model.names.label(peer),
+            name: model.names.label(peer, model.lang),
             last: match listing.kind {
                 super::listing::LastKind::Position => {
                     format!("{PIN} {}", liveness.list_words(now))
@@ -503,7 +504,7 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
     let now = model.now.map(|now| now.unix_secs);
     ListRow {
         peer: *peer,
-        name: model.names.label(peer),
+        name: model.names.label(peer, model.lang),
         last: last
             .map(|m| match m.is_report() {
                 true => format!("{PIN} {}", liveness.list_words(now)),
@@ -692,7 +693,10 @@ fn bubbles_of<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bu
         None => info
             .and_then(|g| g.member(address))
             .filter(|m| !m.name.is_empty())
-            .map_or_else(|| model.names.label(address), |m| m.name.clone()),
+            .map_or_else(
+                || model.names.label(address, model.lang),
+                |m| m.name.clone(),
+            ),
     };
     let to = to.min(conversation.messages.len());
     let from = from.min(to);
@@ -859,7 +863,7 @@ pub fn open<B>(model: &UiModel<B>) -> Option<Open> {
     let bubbles = bubbles(model, c);
     Some(Open {
         peer,
-        name: model.names.label(&peer),
+        name: model.names.label(&peer, model.lang),
         initials: initials(model.names.shown(&peer), &peer),
         icon: latest_appearance(&conversation.messages),
         placements: placements(&bubbles),
@@ -1135,9 +1139,10 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_without_a_name_shows_its_address() {
-        assert_eq!(initials(None, &PEER), "3F");
-        assert_eq!(initials(Some("   "), &PEER), "3F");
+    fn a_peer_without_a_name_shows_no_hex() {
+        // 1452: never the address; the avatar's colour tells two apart.
+        assert_eq!(initials(None, &PEER), "?");
+        assert_eq!(initials(Some("   "), &PEER), "?");
     }
 
     fn icon(name: &str, fg: &[u8], bg: &[u8]) -> Field {
