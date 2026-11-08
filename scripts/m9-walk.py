@@ -29,6 +29,14 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
                               row's flush)
     expect log "<words>"      the words in a board line since the last
                               action began
+    expect home "<words>"     the words in a line the bench home's
+                              mailbox.log gained since the last action
+                              began, waited for up to HOME_WAIT_S (1581:
+                              an open's read mark reaches the home as a
+                              `HOME mark` line)
+    expect no home "<words>"  none such line after HOME_QUIET_S: the
+                              mark guard's half (a Bench open asks the
+                              home nothing, 1562)
     dump <name>               a FRAME_DUMP of what is shown, decoded to
                               <out>/dumps/<name>.png
     reboot                    EN pulse, wait for the UI, note restore_ms
@@ -58,6 +66,9 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
                               waits for `[BENCH] forget=reopened`
                               (FORGET_WAIT_S), its long core-0 turn named
                               `forget_ms=` in walk.md, not failed
+    row <n>                   the list's cursor to row <n> by ring
+                              presses, waiting out a board behind its keys
+                              (1581)
     open longest [<rows>]     open each of the list's first rows (8) in
                               turn, back out, and open the one whose
                               [PAGE] top is largest: the chat with the
@@ -99,9 +110,13 @@ the boot says), and every expect and wait met. Output, in --out:
     VERDICT     the verdict line, also the last line of walk.md
 
 Usage:
-  m9-walk.py --rig DIR --walk FILE [--out DIR] [--boots N] [--bench-home HEX|FILE]
+  m9-walk.py --rig DIR --walk FILE [--out DIR] [--boots N] [--bench-home HEX|FILE] [--home-log FILE]
   m9-walk.py --rig DIR --home-code CODE [--bench-home HEX|FILE]
   m9-walk.py --selftest
+
+--home-log (1581): the bench home's mailbox.log, for `expect home`; by
+default the mailbox.log beside a --bench-home file (the bench home's
+folder, scripts/m9-bench-home.sh run writes it there).
 
 --home-code (1562, scripts/m9-bench-home.sh join): the code written to the
 board as TYPE_HOME_CODE; waits for `[HOME] code=taken` and the client
@@ -126,7 +141,7 @@ TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE, TYPE_BENCH_FORGET = 0x1B, 0x1C, 0x1D
 OWE_FLAGS = {None: 0x00, "erase-log": 0x01, "erase-ring": 0x02, "erase": 0x03}
 # The steps that do something; `expect ... changed` and `expect log` look
 # back to the last of them.
-ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep", "bench", "open")
+ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep", "bench", "open", "row")
 KEY_MS_BAR = 100
 # loquax-m9/src/house.rs, GAP_MS: a house tap opens the overview only once
 # this long passed without another press (1532), so its frame comes after.
@@ -148,6 +163,11 @@ BENCH_WAIT_S = 5.0
 # and rebuilds the store: a whole-ring rebuild took 57 s to 100 s on the
 # bench (handheld.rs, `client`'s feed).
 FORGET_WAIT_S = 240.0
+# `expect home` (1581): an open's read mark rides the board's ask queue
+# over the link to the home; the dwell (loquax::ui::receipts::SEEN_MS)
+# and a queue behind a page come first. `expect no home` watches as long.
+HOME_WAIT_S = 20.0
+HOME_QUIET_S = 10.0
 # The [OPEN] line's fields (1540; marks, sectors, unpack and alloc 1556),
 # in its order.
 OPEN_FIELDS = ("marks", "sectors", "wait_ms", "page_read_ms", "decode_ms", "unpack_ms", "alloc_ms",
@@ -162,7 +182,8 @@ NAMES = {
 }
 
 
-VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure", "bench", "allow", "open")
+VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure", "bench", "allow", "open",
+         "row")
 OPEN_ROWS = 8
 
 
@@ -192,6 +213,12 @@ def parse(steps):
             if verb == "allow":
                 if args[0] != "key_ms" or int(args[1]) <= 0:
                     raise ValueError("allow key_ms <ms>")
+            if verb == "expect" and args[:1] in (["home"], ["no"]):
+                if args[:1] not in (["home"], ["no"]) or args[-2:-1] != ["home"] or len(args) not in (2, 3):
+                    raise ValueError('expect [no] home "<words>"')
+            if verb == "row":
+                if len(args) != 1 or int(args[0]) < 0:
+                    raise ValueError("row <n>, n 0 or more")
             if verb == "open":
                 if args[:1] != ["longest"] or len(args) > 2 or (len(args) == 2 and not 0 < int(args[1]) <= 64):
                     raise ValueError("open longest [<rows>], rows 1 to 64")
@@ -411,9 +438,14 @@ class Rig:
 
 
 class Walk:
-    def __init__(self, rig, out, boots, bench_home=None):
+    def __init__(self, rig, out, boots, bench_home=None, home_log=None):
         self.rig = rig
         self.bench_home = bench_home
+        # The bench home's mailbox.log (1581) and its size when the last
+        # action began: `expect home` reads what it gained since.
+        self.home_log = home_log
+        self.home_at = 0
+        self.home_wait_s, self.home_quiet_s = HOME_WAIT_S, HOME_QUIET_S
         # The home the board's client record names, from its boot's
         # `[HOME] client=` line: "none" for a board without one, None
         # before any line said.
@@ -692,7 +724,15 @@ class Walk:
             cursor = int(self.page.get("cursor", -1))
             if cursor == row:
                 return True
+            start = self.mark()
             self.key(NAMES["ring_down"] if cursor < row else NAMES["ring_up"])
+            if int(self.page.get("cursor", -1)) == cursor:
+                # A board behind its keys says the move after a frame of
+                # an earlier turn (1581: window 17's 4 s turns, `open
+                # longest` gave up on row 0 and said "no rows"): its
+                # [PAGE] line is waited for before the list is at its end.
+                self.until(lambda l: l.startswith("[PAGE] ") and fields(l).get("cursor") != str(cursor),
+                           KEY_WAIT_S, start)
             if int(self.page.get("cursor", -1)) == cursor:
                 return False
         return False
@@ -735,7 +775,46 @@ class Walk:
             self.fail(f"open longest: row {pick} did not open the second time")
         return f"opened row {pick} top={self.page.get('top')}; {said}"
 
+    def home_size(self):
+        try:
+            return os.path.getsize(self.home_log) if self.home_log else 0
+        except OSError:
+            return 0
+
+    def home_lines(self):
+        """What the home's log gained since the last action began."""
+        try:
+            with open(self.home_log, "rb") as f:
+                f.seek(self.home_at)
+                return f.read().decode(errors="replace").splitlines()
+        except OSError:
+            return []
+
+    def expect_home(self, text, present):
+        """`expect [no] home` (1581): the words in what the home's log
+        gained since the action, waited for; or, for `no`, none in it
+        after the quiet time."""
+        if not self.home_log:
+            return False, "no home log known (--home-log, or the mailbox.log beside --bench-home)"
+        deadline = time.monotonic() + (self.home_wait_s if present else self.home_quiet_s)
+        while True:
+            hits = [l for l in self.home_lines() if text in l]
+            if present and hits:
+                return True, f"home: {hits[0].strip()[-120:]}"
+            if not present and hits:
+                return False, f"home has {text!r}: {hits[0].strip()[-120:]}"
+            if time.monotonic() >= deadline:
+                break
+            self.pump(0.2)
+        if present:
+            return False, f"home has no {text!r} within {self.home_wait_s:.0f} s"
+        return True, f"home quiet of {text!r} for {self.home_quiet_s:.0f} s"
+
     def expect(self, words):
+        if words[:1] == ["home"]:
+            return self.expect_home(" ".join(words[1:]), True)
+        if words[:2] == ["no", "home"]:
+            return self.expect_home(" ".join(words[2:]), False)
         if words[0] == "log":
             text = " ".join(words[1:])
             ok = any(text in l for l in self.step_lines[self.action_at:])
@@ -794,6 +873,7 @@ class Walk:
                 self.page_before = dict(self.page)
                 self.action_at = len(self.step_lines)
                 self.action_t = time.monotonic()
+                self.home_at = self.home_size()
             if verb == "key":
                 extra = self.key(key_code(args[0]))
             elif verb == "hold":
@@ -838,6 +918,10 @@ class Walk:
                 extra = f"key bar {self.key_bar} ms from here"
             elif verb == "open":
                 extra = self.open_longest(int(args[1]) if len(args) == 2 else OPEN_ROWS)
+            elif verb == "row":
+                if not self.wait_page("chats", 5000) or not self.cursor_to(int(args[0])):
+                    self.fail(f"row {args[0]}: the cursor did not get there ({self.page.get('cursor')})")
+                extra = f"cursor={self.page.get('cursor')}"
             else:
                 raise ValueError(f"no step {verb!r}")
             self.row(line, extra)
@@ -896,11 +980,14 @@ class FakeBoard(threading.Thread):
     [LOOP] turn as the board's does. 1554: the map key opens the map, T
     flushes the hint row at once and says the new zoom 400 ms later (as
     window 13's board did; `stuck_zoom` never moves it), and the house
-    key opens the house page after its tap's 300 ms gap."""
+    key opens the house page after its tap's 300 ms gap. 1581: `trail_ms`
+    is a board behind its keys, as window 17's: a key's flush comes at
+    once, its [PAGE] line `trail_ms` later. `marks` is what an open
+    writes into the rig's mailbox.log, the home's log (see __init__)."""
 
     def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
                  release=False, slow_turn=False, slow_drain=False, tops=(0, 5, 2), torn=False,
-                 stuck_zoom=False,
+                 stuck_zoom=False, trail_ms=0, marks="guarded",
                  home=None):
         super().__init__(daemon=True)
         # 1562: the home its client record names; None says client=none.
@@ -911,6 +998,12 @@ class FakeBoard(threading.Thread):
         self.release, self.slow_turn, self.tops = release, slow_turn, tops
         self.slow_drain = slow_drain
         self.torn, self.stuck_zoom = torn, stuck_zoom
+        self.trail_ms = trail_ms
+        # 1581: what an open tells the home's mailbox.log: "guarded" a
+        # read mark for a real chat and none for Bench, "none" never one,
+        # "leaky" one for Bench too.
+        self.marks = marks
+        self.bench_selected = False
         self.zoom = 13
         self.row = 0
         self.page = "chats"
@@ -983,12 +1076,17 @@ class FakeBoard(threading.Thread):
             self.say(f"KBRAW {at} {code:02x}", f"KEY {at} code={code:#04x} name=x")
             if code == 0xB6 and self.page == "chats":
                 self.cursor = min(self.cursor + 1, len(self.tops) - 1)
+                self.bench_selected = False
             elif code == 0xB5 and self.page == "chats":
                 self.cursor = max(self.cursor - 1, 0)
+                self.bench_selected = False
             if code == 0x0D and self.page == "chats":
                 self.page = "chat"
                 self.row = self.cursor
                 self.opens += 1
+                if self.marks == "leaky" or (self.marks == "guarded" and not self.bench_selected):
+                    with open(os.path.join(self.rig, "mailbox.log"), "a") as f:
+                        f.write(f"HOME mark read device=0a0b0c0d messages=1 seq={self.opens}\n")
             elif code == 0x86:
                 self.page = "chats"
             elif code == 0x85:
@@ -1008,6 +1106,7 @@ class FakeBoard(threading.Thread):
                 self.page = "house"
             time.sleep(self.slow_ms / 1000)
             self.say(f"[DISP] flush rows=0..239 ms=4.000 t={self.ms() + 20}")
+            time.sleep(self.trail_ms / 1000)
             self.page_line()
             if self.slow_turn:
                 self.say("[LOOP] turn_ms=400 stage=draw host=0 node=0 take=0 draw=400 keys=0 entries=40")
@@ -1038,6 +1137,7 @@ class FakeBoard(threading.Thread):
                 self.say("[BENCH] arrive=refused reason=malformed")
                 return
             self.arrived += 1
+            self.bench_selected = True
             self.say(f"[BENCH] arrive=sent peer=6c6f7175 named={'yes' if self.arrived > 1 else 'no'}",
                      "[STORE] kept=1 writes=1 erased=0 cursor=40 used=3 entries=41",
                      f"[BENCH] arrive=folded peer=6c6f7175 unread={self.arrived}")
@@ -1137,6 +1237,23 @@ bench forget
 wait page=chats
 """
 
+# 1581: marks.walk's control pair: a real chat's open reaches the home
+# as a read mark, a Bench open does not.
+SELFTEST_MARKS_WALK = """
+row 1
+key enter
+wait page=chat
+expect home "HOME mark"
+key back
+wait page=chats
+bench arrive
+key enter
+wait page=chat
+expect no home "HOME mark"
+key back
+wait page=chats
+"""
+
 SELFTEST_HOME = "0123456789abcdef0123456789abcdef"
 SELFTEST_OTHER = "fedcba9876543210fedcba9876543210"
 
@@ -1151,7 +1268,9 @@ def selftest():
             fake = FakeBoard(rig, **board)
             fake.start()
             out = os.path.join(rig, "out")
-            w = Walk(Rig(rig), out, boots=2, bench_home=bench_home)
+            w = Walk(Rig(rig), out, boots=2, bench_home=bench_home,
+                     home_log=os.path.join(rig, "mailbox.log"))
+            w.home_wait_s, w.home_quiet_s = 2.0, 1.0
             got = w.run(steps.splitlines())
             fake.stop = True
             w.fake = fake
@@ -1282,6 +1401,28 @@ def selftest():
         if got != 0 or len(w.opens) != 4:
             print("[m9-walk] selftest FAIL: open longest did not open row 1 after the three", w.fails, len(w.opens))
             rc = 1
+        # 1581: a board whose [PAGE] line trails its key's flush (window
+        # 17) is walked to the longest chat all the same.
+        got, w, _ = walk("trail", steps=SELFTEST_OPEN_WALK, trail_ms=600)
+        if got != 0 or len(w.opens) != 4:
+            print("[m9-walk] selftest FAIL: open longest gave up on a board behind its keys", w.fails, len(w.opens))
+            rc = 1
+        # 1581: the mark guard and its positive control: a real chat's
+        # open says `HOME mark` in the home's log, a Bench open none; a
+        # board that marks nothing fails the first, one that marks Bench
+        # the second.
+        got, w, _ = walk("marks", steps=SELFTEST_MARKS_WALK, trail_ms=300)
+        if got != 0:
+            print("[m9-walk] selftest FAIL: the mark control failed on a guarded board", w.fails)
+            rc = 1
+        got, w, _ = walk("nomarks", steps=SELFTEST_MARKS_WALK, marks="none")
+        if got == 0 or not any("home has no 'HOME mark'" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a board that told its home no mark passed", w.fails)
+            rc = 1
+        got, w, _ = walk("leaky", steps=SELFTEST_MARKS_WALK, marks="leaky")
+        if got == 0 or not any("home has 'HOME mark'" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a board that marked Bench at its home passed", w.fails)
+            rc = 1
         got, w, _ = walk("short", steps=SELFTEST_OPEN_WALK, tops=(0, 0, 0))
         if got == 0 or not any("more than one screen" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a list of one-screen chats passed open longest", w.fails)
@@ -1301,7 +1442,7 @@ def selftest():
         if got == 0 or not any("expect zoom changed" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a zoom that never moved passed", w.fails)
             rc = 1
-    for name in ("bench.walk", "hang.walk", "forget.walk"):
+    for name in ("bench.walk", "hang.walk", "forget.walk", "marks.walk"):
         shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "m9-walks", name)
         try:
             with open(shipped) as f:
@@ -1342,7 +1483,8 @@ def selftest():
         print("[m9-walk] selftest ok: a good walk passes and writes its dump, a slow frame and a growing rx_lost fail; "
               "the bench steps pass and count opens, a refused owe and a hang on an open fail; "
               "a release boot fails by name, the dump's turn is named and another slow turn fails, "
-              "open longest picks the longest chat and fails on a list of one-screen chats, "
+              "open longest picks the longest chat, on a board behind its keys too, and fails on a list "
+              "of one-screen chats, a real chat's open says HOME mark at the home and a Bench open none, "
               "a torn dump is named TORN with its lost lines and still drawn, "
               "a zoom said behind the hint row's flush is waited for and one that never moves fails; "
               "a walk with opens is refused on another home, with no bench home and on an image that "
@@ -1387,6 +1529,7 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--boots", type=int, default=2)
     ap.add_argument("--bench-home", help="the bench home's LXMF address, 32 hex, or a file that holds it")
+    ap.add_argument("--home-log", help="the bench home's mailbox.log, for `expect home`")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--check", metavar="WALK", help="only read the walk file")
     ap.add_argument("--home-code", metavar="CODE", help="write an admission code to the board")
@@ -1416,7 +1559,11 @@ def main():
     out = a.out or os.path.join(a.rig, "walk-" + time.strftime("%Y%m%d-%H%M%S"))
     with open(a.walk) as f:
         steps = f.read().splitlines()
-    return Walk(Rig(a.rig), out, a.boots, bench_home=bench_home).run(steps)
+    home_log = a.home_log
+    if home_log is None and a.bench_home and os.path.isfile(a.bench_home):
+        beside = os.path.join(os.path.dirname(os.path.abspath(a.bench_home)), "mailbox.log")
+        home_log = beside if os.path.exists(beside) else None
+    return Walk(Rig(a.rig), out, a.boots, bench_home=bench_home, home_log=home_log).run(steps)
 
 
 if __name__ == "__main__":

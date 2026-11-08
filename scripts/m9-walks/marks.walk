@@ -1,0 +1,34 @@
+# marks.walk (order 1581): the bench's mark guard and its positive
+# control. A Bench open asks the home no mark (1562: the bench's arrivals
+# never were the home's, `loquax_m9::home::route` keeps their marks on the
+# board); a real chat's open does, or the guard's silence proves nothing.
+# Both are read in the bench home's own log (mailbox.log, `expect home`).
+#
+# The real chat with an unread message comes first, the newest on the
+# list: the fixture's own unread are read after the first walk that
+# opened them, so the control makes its own. Right before the walk:
+#
+#   bash scripts/m9-bench-home.sh send "mark control"
+#   bash scripts/m9-walk.sh --rig <rig> --walk scripts/m9-walks/marks.walk [--image <bench elf>]
+#
+# and the walk waits for the board to pull it (row 0 is the newest chat).
+
+wait page=chats
+sleep 15000
+row 0
+
+# The control: the sender's chat opened, its message read on screen for
+# the dwell; the board asks its home a read mark.
+key enter
+wait page=chat
+expect home "HOME mark"
+key back
+wait page=chats
+
+# The guard: an arrival in Bench, Bench opened; the home hears nothing.
+bench arrive
+key enter
+wait page=chat
+expect no home "HOME mark"
+key back
+wait page=chats
