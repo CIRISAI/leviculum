@@ -233,11 +233,7 @@ impl Board {
                 let t0 = uptime_ms();
                 let boot = home::restore_timed(&mut flash.messages, address, &uptime_us)
                     .map_err(|e| format!("the store did not restore: {e:?}"))?;
-                let how = match boot.how {
-                    How::Resumed { .. } => "resumed",
-                    How::Rebuilt { .. } => "rebuilt",
-                    How::Whole => "whole",
-                };
+                let how = boot.how.word();
                 log.line(
                     "[STORE] ",
                     &format!(
@@ -252,6 +248,9 @@ impl Board {
                         uptime_ms().saturating_sub(t0)
                     ),
                 );
+                for line in boot.spent.lines(boot.how, boot.decoded) {
+                    log.line("[STORE] ", &line);
+                }
                 match boot.how {
                     How::Resumed { records } => log.line(
                         "[STORE] ",

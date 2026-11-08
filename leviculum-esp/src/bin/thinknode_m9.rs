@@ -64,7 +64,8 @@
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
 //! [STORE] sectors=896 used=<n> entries=<n> cursor=<seq> torn=<n> foreign=<n> asks=<n> restore=<resumed|rebuilt|whole> restore_ms=<ms>  (1476, 1521)
-//! [STORE] restore <how> decoded=<n> read_us=.. crc_us=.. decode_us=.. unpack_us=.. step_us=.. finish_us=.. rows_us=.. per_1000_ms ...  (1521, where the boot's time went)
+//! [STORE] restore.a <how> decoded=<n> read_us=.. crc_us=.. decode_us=.. unpack_us=.. step_us=.. finish_us=..  (1521, where the boot's time went)
+//! [STORE] restore.b <how> drain_us=.. rows_us=.. total_us=.. unnamed_us=.. per_1000_ms read=.. crc=.. decode=.. unpack=.. step=..  (1521c, the rest of it)
 //! [STORE] index=summaries records=<n> conversations=<n>   or index=rebuilt why=<no-state|ring-moved> ...  (1521)
 //! [HOME] store=empty cursor=reset was=<n> cursor=0   (1476, a record whose store is gone; or store=behind/ahead)
 //! [HOME] page ... taken=<n> of=<m> / pulled ... saved=store / joined=yes ... / failed ...   (as the client asks; the record is not written for a pull, 1463)

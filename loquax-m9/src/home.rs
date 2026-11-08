@@ -113,8 +113,11 @@ pub enum How {
 
 /// Where a boot's time went, in the units of the clock it was handed
 /// (1521): the ring's flash reads, CRCs and decodes, the entries'
-/// unpacking (`board::fold`), the model's steps, the batch's note, and
-/// the summary log's read and write.
+/// unpacking (`board::fold`), the model's steps, the batch's note, the
+/// drain of what the fold queued and the index's rows (1521c), and the
+/// summary log's read and write. `total` is the whole boot by the same
+/// clock: what the phases leave of it is time no phase names
+/// ([`Breakdown::unnamed`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Breakdown {
     pub read: u64,
@@ -123,7 +126,69 @@ pub struct Breakdown {
     pub unpack: u64,
     pub step: u64,
     pub finish: u64,
+    pub drain: u64,
     pub rows: u64,
+    pub total: u64,
+}
+
+impl Breakdown {
+    /// The phases summed.
+    pub fn named(&self) -> u64 {
+        self.read
+            + self.crc
+            + self.decode
+            + self.unpack
+            + self.step
+            + self.finish
+            + self.drain
+            + self.rows
+    }
+
+    /// What of `total` no phase names: the clock's own reads and the
+    /// steps between the phases.
+    pub fn unnamed(&self) -> u64 {
+        self.total.saturating_sub(self.named())
+    }
+
+    /// The breakdown as the two `[STORE]` lines a boot says (1521c), its
+    /// clock in microseconds, `decoded` entries read from the ring. One
+    /// line outgrew the board's log line and lost its tail (`per_1000_ms
+    /// read=0 crc`); two lines, each well inside it, carry every phase,
+    /// the total and what no phase names. The per-1000 figures are
+    /// milliseconds per 1000 entries, microseconds per entry.
+    pub fn lines(&self, how: How, decoded: u64) -> [String; 2] {
+        let per_k = |us: u64| us / decoded.max(1);
+        let how = how.word();
+        [
+            alloc::format!(
+                "restore.a {how} decoded={decoded} read_us={} crc_us={} decode_us={} unpack_us={} step_us={} finish_us={}",
+                self.read, self.crc, self.decode, self.unpack, self.step, self.finish,
+            ),
+            alloc::format!(
+                "restore.b {how} drain_us={} rows_us={} total_us={} unnamed_us={} per_1000_ms read={} crc={} decode={} unpack={} step={}",
+                self.drain,
+                self.rows,
+                self.total,
+                self.unnamed(),
+                per_k(self.read),
+                per_k(self.crc),
+                per_k(self.decode),
+                per_k(self.unpack),
+                per_k(self.step),
+            ),
+        ]
+    }
+}
+
+impl How {
+    /// The word a `[STORE]` line says for it.
+    pub fn word(&self) -> &'static str {
+        match self {
+            How::Resumed { .. } => "resumed",
+            How::Rebuilt { .. } => "rebuilt",
+            How::Whole => "whole",
+        }
+    }
 }
 
 /// What a board that is a device of the home at `address` shows at boot
@@ -355,8 +420,10 @@ pub fn restore_timed<S: Sectors>(
                     foreign: 0,
                 };
                 let asks = state.asks.clone();
+                let took = clock().saturating_sub(t0);
                 let spent = Breakdown {
-                    rows: clock().saturating_sub(t0),
+                    rows: took,
+                    total: took,
                     ..Breakdown::default()
                 };
                 return Ok(Boot {
@@ -377,6 +444,7 @@ pub fn restore_timed<S: Sectors>(
     let rows_read = clock().saturating_sub(t0);
     let mut boot = rebuild(dev, address, clock, ring_count, Some(log), how)?;
     boot.spent.rows += rows_read;
+    boot.spent.total = clock().saturating_sub(t0);
     Ok(boot)
 }
 
@@ -397,6 +465,7 @@ fn rebuild<S: Sectors>(
     log: Option<RowLog>,
     how: How,
 ) -> Result<Boot, S::Error> {
+    let start = clock();
     let mut shown = model(address);
     // No chat is on the panel at boot: the fold must not read anything
     // "where it arrived" ([`take`]'s rule; the restored read state is the
@@ -428,6 +497,7 @@ fn rebuild<S: Sectors>(
     let _ = batch.drop_rowless();
     batch.finish();
     let finish = clock().saturating_sub(t0);
+    let t0 = clock();
     shown.selected = top(&shown);
     let (ring, restored, asks, spent) = opened?;
     // The fold just said marks for what it restored as read; they are the
@@ -442,6 +512,7 @@ fn rebuild<S: Sectors>(
         }
     }
     index.all_loaded();
+    let drain = clock().saturating_sub(t0);
     let mut shelf = Shelf::new(ring, log, index, ring_count);
     let t0 = clock();
     if shelf.log.is_some() {
@@ -467,7 +538,9 @@ fn rebuild<S: Sectors>(
             unpack,
             step,
             finish,
+            drain,
             rows,
+            total: clock().saturating_sub(start),
         },
     })
 }

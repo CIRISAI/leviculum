@@ -284,11 +284,7 @@ impl Handheld {
                 Ok(boot) => {
                     let (model, store, restored, pending) =
                         (boot.model, boot.shelf, boot.restored, boot.asks);
-                    let how = match boot.how {
-                        How::Resumed { .. } => "resumed",
-                        How::Rebuilt { .. } => "rebuilt",
-                        How::Whole => "whole",
-                    };
+                    let how = boot.how.word();
                     log.line(
                         "[STORE] ",
                         format_args!(
@@ -304,28 +300,12 @@ impl Handheld {
                         ),
                     );
                     // Where the boot's time went (1521): per phase, in
-                    // microseconds, and per 1000 entries decoded.
-                    let spent = boot.spent;
-                    let per_k = |us: u64| us.saturating_mul(1000) / boot.decoded.max(1) / 1000;
-                    log.line(
-                        "[STORE] ",
-                        format_args!(
-                            "restore {how} decoded={} read_us={} crc_us={} decode_us={} unpack_us={} step_us={} finish_us={} rows_us={} per_1000_ms read={} crc={} decode={} unpack={} step={}",
-                            boot.decoded,
-                            spent.read,
-                            spent.crc,
-                            spent.decode,
-                            spent.unpack,
-                            spent.step,
-                            spent.finish,
-                            spent.rows,
-                            per_k(spent.read),
-                            per_k(spent.crc),
-                            per_k(spent.decode),
-                            per_k(spent.unpack),
-                            per_k(spent.step),
-                        ),
-                    );
+                    // microseconds, and per 1000 entries decoded, in two
+                    // lines of any length (1521c: one line outgrew
+                    // `LINE_MAX` and lost its tail).
+                    for line in boot.spent.lines(boot.how, boot.decoded) {
+                        log.text("[STORE] ", &line);
+                    }
                     match boot.how {
                         How::Resumed { records } => log.line(
                             "[STORE] ",

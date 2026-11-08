@@ -717,3 +717,66 @@ fn a_rebuilt_and_a_resumed_boot_count_the_same_conversations() {
     );
 }
 
+/// The microseconds since the first call, the clock a boot's breakdown
+/// runs on (the board's `uptime_us`).
+fn micros() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros() as u64
+}
+
+/// 1521c, the M9's bench: the breakdown line of a boot outgrew the
+/// board's log line (`LINE_MAX`, 160 bytes with its prefix and its `t=`)
+/// and lost `rows_us` and `per_1000_ms`, and the phases it printed summed
+/// to 49.5 s of a 100.2 s rebuild. Two lines now, each inside the log
+/// line, every phase in them, the total and what no phase names; no
+/// phase is counted twice, so the phases never sum past the total.
+#[test]
+fn a_boots_breakdown_says_every_phase_in_two_lines() {
+    let archive = Archive::new();
+    let mut flash = kept(&archive);
+    let rebuilt = home::restore_timed(&mut flash, archive.address, &micros).expect("rebuild");
+    let resumed = home::restore_timed(&mut flash, archive.address, &micros).expect("resume");
+    assert!(matches!(rebuilt.how, home::How::Rebuilt { .. }));
+    assert!(matches!(resumed.how, home::How::Resumed { .. }));
+    for boot in [&rebuilt, &resumed] {
+        let spent = boot.spent;
+        assert!(
+            spent.named() <= spent.total,
+            "the phases sum past the total, one is counted twice: {spent:?}"
+        );
+        let lines = spent.lines(boot.how, boot.decoded);
+        for line in &lines {
+            println!("[STORE] {line}");
+            // The board's line: prefix, body, " t=<u32>" and "\r\n".
+            let board = "[STORE] ".len() + line.len() + " t=4294967295\r\n".len();
+            assert!(board <= 160, "{board} bytes: {line}");
+        }
+        for key in [
+            "decoded=",
+            "read_us=",
+            "crc_us=",
+            "decode_us=",
+            "unpack_us=",
+            "step_us=",
+            "finish_us=",
+        ] {
+            assert!(lines[0].contains(key), "{key} in {}", lines[0]);
+        }
+        for key in [
+            "drain_us=",
+            "rows_us=",
+            "total_us=",
+            "unnamed_us=",
+            "per_1000_ms read=",
+            " step=",
+        ] {
+            assert!(lines[1].contains(key), "{key} in {}", lines[1]);
+        }
+    }
+    assert_eq!(rebuilt.decoded, MESSAGES);
+    assert!(rebuilt.spent.drain > 0 && rebuilt.spent.rows > 0);
+}
