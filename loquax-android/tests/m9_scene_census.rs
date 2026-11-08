@@ -281,10 +281,24 @@ fn census() {
     let ((drawn, chat_draw_held, chat_draw_peak), chat_draw_stack) =
         stack(|| counted(|| renderer.draw(&scene, &look)));
     drawn.expect("the chat's first draw");
+    // The renderer keeps the keys of the bubbles the frame showed (1541,
+    // `Renderer::seen`, what the board says the model after the draw):
+    // the first chat draw makes that list, the list's draws before kept
+    // none. Its bytes are the renderer's own state, not the draw's; the
+    // census held a chat draw to 0 B before 1541 and went red at 64 B:
+    // six keys of eight bytes in a list grown by push to room for eight
+    // (1581). Up to twice the keys' bytes are the list's; more is a leak.
+    let seen_bytes = renderer
+        .seen()
+        .map_or(0, core::mem::size_of_val) as isize;
     println!(
-        "open chat first draw: held {chat_draw_held} B, peak {chat_draw_peak} B, \
-         stack {chat_draw_stack} B"
+        "open chat first draw: held {chat_draw_held} B, {seen_bytes} B of them the keys it \
+         showed, peak {chat_draw_peak} B, stack {chat_draw_stack} B"
     );
+    let chat_draw_held = match chat_draw_held <= 2 * seen_bytes {
+        true => 0,
+        false => chat_draw_held,
+    };
     drop(scene);
     for _ in 0..12 {
         key(&mut model, KeyCode::Up);
