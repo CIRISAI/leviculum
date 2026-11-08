@@ -449,9 +449,21 @@ impl Handheld {
         };
         if !marks.is_empty() {
             if let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) {
-                if let Err(error) = m9home::keep_marks(store, &mut dev, marks) {
-                    client.drained.unsaved += 1;
-                    log.line("[STORE] ", format_args!("marks=unsaved error={error}"));
+                match m9home::keep_marks(store, &mut dev, marks) {
+                    // The ring's erase said (1542): a bench owe that
+                    // closed its tail proves here that the mark's write
+                    // opened the next sector.
+                    Ok(done) => log.line(
+                        "[STORE] ",
+                        format_args!(
+                            "marks={} writes={} erased={}",
+                            done.entries, done.writes, done.erased
+                        ),
+                    ),
+                    Err(error) => {
+                        client.drained.unsaved += 1;
+                        log.line("[STORE] ", format_args!("marks=unsaved error={error}"));
+                    }
                 }
             }
         }

@@ -65,6 +65,7 @@
 //! [HOME] code=typed / code=taken saved=yes / code=refused ...   (1415, a code taken in)
 //! [STORE] kept=<n> writes=<n> erased=<n> cursor=<seq> used=<n> entries=<n>   (1476, every page pulled)
 //! [STORE] summary records=<n> writes=<n> erased=<n>   (1521, the rows the folds changed, and the ring's state)
+//! [STORE] marks=<n> writes=<n> erased=<n>   (1542, the read marks a fold kept in the ring)
 //! [STORE] page_read entries=<n> earlier=<n> ms=<ms>   (1521, a conversation opened or scrolled to its top)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
