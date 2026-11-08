@@ -159,7 +159,7 @@ its fields (a 4-byte `char`, a 12-byte style, two 8-byte
 `Option<usize>`), arithmetic and not measured on the board: 634 KB for
 the README. The M9 has 512 KB of SRAM and 8 MB of PSRAM
 ([The ThinkNode M9](thinknode-m9.md), the hardware table); the ESP32 heap
-today is a 64 KiB placeholder (`HEAP_SIZE`, `leviculum-esp/src/lib.rs:165`).
+today is a 64 KiB placeholder (`HEAP_SIZE`, `leviculum-esp/src/lib.rs:234`).
 The nRF board's heap of `leviculum-nrf/heap-budget` (96 KiB, `HEAP_SIZE`,
 `leviculum-nrf/heap-budget/src/lib.rs:49`) is full but for 8 bytes
 ([The board heap budget](../firmware/heap-budget.md)) and hosts no UI;
@@ -683,7 +683,7 @@ terminal and window get no tab (the second question, answered no for now).
   address field as they are. An announce is kept while the tab is off.
 - **Chat and page hand over.** A NomadNet page link in a chat
   (`<hash>:/page/...`) opens the tab at that page where the host has the
-  tab (`loquax/src/ui.rs:4727`) and is copied for lnomad where not. A
+  tab (`loquax/src/ui.rs:4738`) and is copied for lnomad where not. A
   page's `lxmf@` link raises lnomad's new `Effect::Write`
   (`lnomad/src/app/model.rs:455`) when hosted
   (`lnomad/src/app/event.rs:1531`), and Loquax opens that chat for
@@ -817,9 +817,9 @@ as the phone, off by default until Lew flips it.
   the bookmarks and pins to their files. A write and a quit stay the
   core's (`effects_of`).
 - **The keys.** While the tab is in front the core hands keys and the
-  mouse to the browser (`loquax/src/ui.rs:3315`, `loquax/src/ui.rs:3363`),
+  mouse to the browser (`loquax/src/ui.rs:3326`, `loquax/src/ui.rs:3374`),
   so lnomad's whole key table works, its `q` leaves the tab, and the
-  terminal's screen size is the page's (`loquax/src/ui.rs:3361`). `B` and
+  terminal's screen size is the page's (`loquax/src/ui.rs:3372`). `B` and
   the palette's `browse` bring the tab to the front
   (`loquax/src/keys.rs:612`, `browse::open`, `loquax/src/ui/browse.rs:231`);
   with the tab off they say how to switch it on.

@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:165`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:234`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -518,7 +518,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   screen of one pane shows the pane the keys are in. That builds the Wide
   scene and drops its chat: the list's peak then carries the chat's.
 - **The list's cursor is the reader's** (1546, `list_top`,
-  `loquax/src/ui.rs:2233`). The model keeps the selected peer and the line
+  `loquax/src/ui.rs:2244`). The model keeps the selected peer and the line
   it stands on; while it stays selected, a pull or an arrival that sorts
   rows in above it moves the window, not the cursor. A key moves the line
   by as many rows as the selection moved in the order. Before, the window
@@ -683,7 +683,7 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:187`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:256`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:842`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:851`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -736,8 +736,8 @@ draws is the scene the terminal, the window and the phone already draw.
 - **The census** (`measure`, `loquax-m9/src/census.rs:50`), one routine
   for both: build the screen's scene, then draw it, each step's heap held,
   heap peak and stack below the probe. The budgets are this page's
-  ceilings (`CHATS`, `loquax-m9/src/census.rs:161`; `CHAT`,
-  `loquax-m9/src/census.rs:172`). The board prints a `[CENSUS]` line per
+  ceilings (`CHATS`, `loquax-m9/src/census.rs:175`; `CHAT`,
+  `loquax-m9/src/census.rs:187`). The board prints a `[CENSUS]` line per
   screen with its verdict; the host runs the same over the same model
   (`loquax-android/tests/m9_fixture_census.rs`, 64-bit, debug build):
 
@@ -880,13 +880,13 @@ shows the code in fives, wrapped at a group's end to the 53 cells
 (`Pairing::lines`, `loquax-m9/src/pair.rs:75`), and one verdict line.
 
 **The session's heap.** `census::session`
-(`loquax-m9/src/census.rs:253`) is a routine the board can run as it
+(`loquax-m9/src/census.rs:276`) is a routine the board can run as it
 runs the screen census. It drives a pull of fed answers with the
 platform's probe. The host runs it in `m9_fixture_census` over thirty
 LoRa pages of one 200-byte message each: `session=pull held=0 peak=392
 verdict=ok`. Between pages nothing is held, and a page costs what it
 carries. The ceilings are about double that (`SESSION_PEAK`, 1,000 B,
-`loquax-m9/src/census.rs:244`; `SESSION_HELD`, 256 B). The positive
+`loquax-m9/src/census.rs:267`; `SESSION_HELD`, 256 B). The positive
 control is the same archive in one page of the home's own bound: a
 63,225-byte answer, peak 84,576 B, refused. The page bound that keeps
 LoRa answers to one packet also keeps a pull's RAM to one page. On the
@@ -1004,7 +1004,7 @@ fresh draw after every key (`a_group_redraw_is_the_frame_a_fresh_draw_gives`).
 host, debug build), every screen of `SCREENS` with the M9's cursor, held
 to `Screen::budget` (`loquax-m9/src/fixture.rs:538`). The group's
 screens have a budget of their own (`SHEET`,
-`loquax-m9/src/census.rs:186`), about double the largest of them; the
+`loquax-m9/src/census.rs:202`), about double the largest of them; the
 board prints the same lines at boot:
 
 | screen | scene held | scene peak | scene stack | draw peak | draw stack | budget |
@@ -1178,7 +1178,7 @@ its cells when the screen leaves the map (`leave_map`,
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:5931`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:5942`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1234,8 +1234,8 @@ the clear on leaving the map disabled that test goes red after Back.
 
 **The census** (64-bit host, debug build): the map's scene step is its
 view and the pins placed, its draw the whole screen, held to a budget
-of its own (`MAP`, `loquax-m9/src/census.rs:201`), and the painter's
-storage to `PAINTER_HELD` (`loquax-m9/src/census.rs:212`); the board
+of its own (`MAP`, `loquax-m9/src/census.rs:218`), and the painter's
+storage to `PAINTER_HELD` (`loquax-m9/src/census.rs:230`); the board
 prints both lines at boot.
 
 | screen | scene held | scene peak | scene stack | draw peak | draw stack | budget |
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:747`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:816`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:491`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:560`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1416,7 +1416,7 @@ the cache those routines switch off.
 - **The batch** (`Batch`, `loquax/src/home/board.rs:56`): the page is
   the LoRa page while the board's session census keeps `SESSION_PEAK`,
   a smaller one in proportion when it does not (`census::batch`,
-  `loquax-m9/src/census.rs:334`); the board runs the census at boot and
+  `loquax-m9/src/census.rs:357`); the board runs the census at boot and
   picks its batch from what it measured. An answer longer than the
   board takes asks the same page smaller on the same link
   (`Ask::refit`, `loquax/src/home/ask.rs:500`) down to 64 B; a single
@@ -1931,7 +1931,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2102`).
+both (`thinknode_m9.rs:2110`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -1944,6 +1944,70 @@ The house key opens the house page after its tap's 300 ms gap
 `page=house` and leaves it with Back. An lnsd on the proxy's pty
 re-attaches by itself after a flash; a second one is refused with
 "shared-instance name already served" (`scripts/m9-walk.sh`).
+
+### A chat opens with its own marks (1556)
+
+**What the open cost.** 1521c left the Enter latency open: the host
+decoded a page of 30 entries in 224 µs, the board's `[OPEN]` said decode
+858 ms median (window 13). Window 15's line named it before any new
+probe: `entries=1761 ... earlier=0` for a chat of under 30 messages.
+`Index::page` handed on every mark of the ring from the page's oldest
+sector on, every chat's: about 1730 marks read from nearly all 284
+sectors (`page_read` 228 ms, also the `[LOOP] take=230` turn at boot,
+the cursor chat's read) and folded one by one through the scratch model
+on the UI core. The marks explain the size of both numbers; whether the
+first-fit heap adds to them is the new `alloc_ms` and `[OPEN_HEAP]`'s to
+say on the board.
+
+**A mark files under its conversation.** The index learns each
+message's id where the fold already unpacks it (`home::keep`, the
+rebuilt boot, and the page read itself, so the board's own read mark
+after a resumed boot has a home too, `Index::learn_event`,
+`loquax/src/home/board/rows.rs:365`). A mark naming a known message
+adds its sector to that conversation's sectors, which the summary log's
+ROW record already carries; one naming a message the index never saw
+stays in the ring-wide marks (`Index::take_mark`,
+`loquax/src/home/board/rows.rs:390`). A page reads the marks of its own
+sectors and of the unplaced ones from its oldest sector on, and hands on
+only those naming one of its messages (`Index::page`,
+`loquax/src/home/board/rows.rs:531`). The STATE record ends with a byte
+saying the marks are filed this way (`State::placed`,
+`loquax/src/home/board/rows.rs:174`); a state an older image wrote has
+none, and that boot folds the ring once (`[STORE] restore=rebuilt`,
+why `marks-unplaced`) to place them. Unplaced marks still cost the old
+read: those of messages pulled before a resumed boot and not opened
+since.
+
+`a_chat_opens_with_its_own_marks_only`
+(`loquax-m9/tests/restore_counts.rs:859`) keeps the archive with 1800
+read marks of another chat and a deleted mark of the small chat's: after
+a resumed boot the small chat's page is its 5 messages and the one mark
+from 8 sectors, its deleted message stays deleted, and the bubbles are
+the old page's. Host, release: the old page of 1806 entries decodes in
+1057 µs, the new one of 6 in 39 µs.
+
+**The bench's line.** `[OPEN]` now says `messages= marks= sectors=` of
+the read, and splits the decode into `unpack_ms` (in `Message::unpack`)
+and `alloc_ms` (inside the allocator during the decode and the fold, a
+cycle count per core in the bench image's allocator only,
+`leviculum_esp::alloc_clock`); `[OPEN_HEAP]` says the heap's free bytes
+and its largest block before the decode and after the fold
+(`heap_largest`, a halving search outside the clock). The bar is wait
+plus decode under 100 ms for the long chat, window 16's to prove.
+
+**An invitation keeps its row.** A group the reader is invited to that
+no message reached has the invitation's listing, "Einladung", from when
+the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:1979`);
+the index keeps the group's name from the invitation, so both boots
+name and list it alike.
+
+**The boot's census.** The release image's census leaves out the map
+and its pan (`thinknode_m9.rs:2122`): window 15's boot `[MAP] zoom=15
+picture_ms=241` before the list was the census's own pan draw, kept by
+no reader's map. The census's map stats are dropped after it. A chat's
+draw may keep the renderer's seen record (ea3ffd02), and the next screen
+gives it back: `draw_held` +64 / -64 B (+32 / -32 large) is within
+`SEEN_HELD` (`loquax-m9/src/census.rs:170`), more either way stays over.
 
 ### Tracks on the M9 (1385, not built)
 
