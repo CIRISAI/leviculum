@@ -133,6 +133,10 @@ pub enum Stage {
     Census = 24,
     /// Core 1: waiting for the panel's next frame or its tick (1507).
     UiIdle = 25,
+    /// Core 1: waiting for the last flush to reach the panel before the
+    /// frame is drawn into (1563): apart from the draw, so a record says
+    /// which of the two held the core.
+    Flush = 26,
 }
 
 impl Stage {
@@ -158,6 +162,7 @@ impl Stage {
             23 => "send",
             24 => "census",
             25 => "idle",
+            26 => "flush",
             _ => "?",
         }
     }

@@ -66,7 +66,9 @@
 //! [STORE] sectors=896 used=<n> entries=<n> cursor=<seq> torn=<n> foreign=<n> asks=<n> restore=<resumed|rebuilt|whole> restore_ms=<ms>  (1476, 1521)
 //! [STORE] restore.a <how> decoded=<n> read_us=.. crc_us=.. decode_us=.. unpack_us=.. step_us=.. finish_us=..  (1521, where the boot's time went)
 //! [STORE] restore.b <how> drain_us=.. rows_us=.. total_us=.. unnamed_us=.. per_1000_ms read=.. crc=.. decode=.. unpack=.. step=..  (1521c, the rest of it)
-//! [STORE] index=summaries records=<n> conversations=<n>   or index=rebuilt why=<no-state|ring-moved> ...  (1521)
+//! [STORE] index=summaries records=<n> tail=<n> conversations=<n>   or index=rebuilt why=<no-state|marks-unplaced|ring-moved> ...  (1521;
+//!                           tail: entries read after the summary's end, a
+//!                           reset's or a power cut's, 1563)
 //! [HOME] store=empty cursor=reset was=<n> cursor=0   (1476, a record whose store is gone; or store=behind/ahead)
 //! [HOME] page ... taken=<n> of=<m> / pulled ... saved=store / joined=yes ... / failed ...   (as the client asks; the record is not written for a pull, 1463)
 //! [HOME] code=typed / code=taken saved=yes / code=refused ...   (1415, a code taken in)
@@ -75,12 +77,14 @@
 //! [STORE] marks=<n> writes=<n> erased=<n>   (1542, the read marks a fold kept in the ring)
 //! [STORE] page_read entries=<n> earlier=<n> ms=<ms>   (1521, a conversation opened or scrolled to its top)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
-//! [DISP] flush rows=0..239 ms=<ms> runs=<n> bytes=<n> t=<ms>
+//! [DISP] flush rows=0..239 ms=<ms> runs=<n> bytes=<n> waited_ms=<ms> t=<ms>
 //!                           when a flush's last byte is out (1507): rows
 //!                           from the first run's first to the last's
 //!                           last, each run its own window, sent by DMA
 //!                           straight out of the frame in PSRAM; ms from
-//!                           its start to its end, the loop running on
+//!                           its start to its end, the loop running on;
+//!                           waited_ms of it its chunks waited for a flash
+//!                           op (1563, `loquax_m9::mspi`)
 //! [DISP] dma=bounce reason=<e>   the descriptors would not align: every
 //!                           flush goes through the driver's bounce buffer
 //! [DISP] flush=failed err=<spi:..|dma:..>   the frame is owed whole
@@ -619,6 +623,9 @@ struct Flush {
     /// from the first run's first to the last run's last, the runs, the
     /// bytes, and when it began, microseconds.
     report: Option<Sent>,
+    /// Since when the next chunk waits for the flash (1563): its DMA
+    /// found a flash op announced; `None` while none waits.
+    held_since: Option<u64>,
 }
 
 /// A flush, for its `[DISP] flush` line.
@@ -631,6 +638,9 @@ struct Sent {
     began_us: u64,
     /// Microseconds from begin to the last byte on the panel; 0 until then.
     us: u64,
+    /// Microseconds of it the chunks waited for the flash (1563,
+    /// `leviculum_esp::mspi`).
+    waited_us: u64,
 }
 
 /// The panel on SPI2 with DMA, its chip select and data/command line,
@@ -651,6 +661,9 @@ struct Panel<'d> {
     flush: Flush,
     /// The last flush that reached the panel, until the loop says it.
     done: Option<Sent>,
+    /// Chunks started since boot (1563): what a wait for the flush calls
+    /// progress, and feeds the UI core's watchdog by.
+    chunks: u32,
     /// The frame's memory refused a DMA ([`PanelError::Dma`]): the rows
     /// go through the driver's bounce buffer, as before 1507.
     bounce: bool,
@@ -756,6 +769,7 @@ impl Panel<'_> {
                     .sum(),
                 began_us: leviculum_esp::uptime_us(),
                 us: 0,
+                waited_us: 0,
             }),
             _ => None,
         };
@@ -765,13 +779,27 @@ impl Panel<'_> {
             open: false,
             base: frame.pixels().as_ptr() as usize,
             report,
+            held_since: None,
         };
         self.pump().map(|_| ())
     }
 
     /// Wait for the flush on its way to reach the panel.
     fn settle(&mut self) -> Result<(), PanelError> {
+        self.settle_fed(&|| {})
+    }
+
+    /// [`Panel::settle`], calling `fed` each time a chunk started (1563):
+    /// a flush that moves keeps the UI core's watchdog fed, one that
+    /// stopped does not. The wait for the flash is bounded per chunk by
+    /// the I/O core's yield (`loquax_m9::mspi`), so a flush always moves.
+    fn settle_fed(&mut self, fed: &dyn Fn()) -> Result<(), PanelError> {
+        let mut seen = self.chunks;
         while !self.pump()? {
+            if self.chunks != seen {
+                seen = self.chunks;
+                fed();
+            }
             core::hint::spin_loop();
         }
         Ok(())
@@ -839,8 +867,19 @@ impl Panel<'_> {
             if self.bounce {
                 self.bounced(rows)?;
             } else if !self.dma(rows)? {
+                // The flash holds the bus: the chunk waits, and the wait
+                // is said with the flush (1563).
+                if self.flush.held_since.is_none() {
+                    self.flush.held_since = Some(leviculum_esp::uptime_us());
+                }
                 return Ok(false);
             }
+            if let Some(since) = self.flush.held_since.take() {
+                if let Some(report) = self.flush.report.as_mut() {
+                    report.waited_us += leviculum_esp::uptime_us().saturating_sub(since);
+                }
+            }
+            self.chunks = self.chunks.wrapping_add(1);
             self.flush.at = (end < last).then_some(end + 1);
         }
     }
@@ -1068,10 +1107,14 @@ fn redraw(
     row: usize,
     shown: &Shown,
     said: &mut page::Said,
+    fed: &dyn Fn(),
     log: &mut UiLog,
 ) -> bool {
-    // The last flush reads the frame until it is out (1507).
-    let _ = flushed(panel, renderer.panel(), true, log);
+    // The last flush reads the frame until it is out (1507): its own
+    // stage, so a record names the wait apart from the draw (1563).
+    stall::stage(Core::Ui, Stage::Flush);
+    let _ = flushed(panel, renderer.panel(), true, fed, log);
+    stall::stage(Core::Ui, Stage::Draw);
     let look = screen::Look {
         row,
         home: shown.word,
@@ -1144,9 +1187,15 @@ fn redraw(
 /// and the backlight after the first frame that landed (1485). Its
 /// microseconds, when one landed. A flush that failed owes the frame
 /// whole: the panel's bytes are unknown now (1493).
-fn flushed(panel: &mut Panel<'_>, frame: &Frame, wait: bool, log: &mut UiLog) -> Option<u64> {
+fn flushed(
+    panel: &mut Panel<'_>,
+    frame: &Frame,
+    wait: bool,
+    fed: &dyn Fn(),
+    log: &mut UiLog,
+) -> Option<u64> {
     let moved = match wait {
-        true => panel.settle(),
+        true => panel.settle_fed(fed),
         false => panel.pump().map(|_| ()),
     };
     if let Err(e) = moved {
@@ -1158,13 +1207,15 @@ fn flushed(panel: &mut Panel<'_>, frame: &Frame, wait: bool, log: &mut UiLog) ->
     log.line(
         "[DISP] ",
         alloc::format!(
-            "flush rows={}..{} ms={}.{:03} runs={} bytes={}",
+            "flush rows={}..{} ms={}.{:03} runs={} bytes={} waited_ms={}.{:03}",
             sent.first,
             sent.last,
             sent.us / 1000,
             sent.us % 1000,
             sent.runs,
-            sent.bytes
+            sent.bytes,
+            sent.waited_us / 1000,
+            sent.waited_us % 1000
         ),
     );
     if !panel.lit {
@@ -1339,6 +1390,7 @@ fn main() -> ! {
         descriptors,
         flush: Flush::default(),
         done: None,
+        chunks: 0,
         cs,
         dc,
         backlight,
@@ -2189,6 +2241,8 @@ fn ui_main(
         row,
         &shown,
         &mut said,
+        // No watchdog is armed on this core yet.
+        &|| {},
         &mut log,
     );
     // What the panel shows (1491): a page that changed nothing draws
@@ -2362,6 +2416,7 @@ fn ui_main(
                             row,
                             &Shown::default(),
                             &mut said,
+                            &|| wdt.feed(),
                             &mut log,
                         );
                         log.line("[DUMP] ", alloc::format!("screen={}", walked.name()));
@@ -2382,6 +2437,7 @@ fn ui_main(
                             0,
                             &fresh,
                             &mut said,
+                            &|| wdt.feed(),
                             &mut log,
                         );
                         log.line("[DUMP] ", alloc::format!("screen={}", pair::DUMP_NAME));
@@ -2522,6 +2578,7 @@ fn ui_main(
                 row,
                 &shown,
                 &mut said,
+                &|| wdt.feed(),
                 &mut log,
             );
             pace.drew(edges, now);
@@ -2541,7 +2598,7 @@ fn ui_main(
         }
         // The flush on its way, moved on between the turns (1507); the
         // bench's `[OPEN]` waits for its last byte.
-        let landed = flushed(&mut panel, renderer.panel(), false, &mut log);
+        let landed = flushed(&mut panel, renderer.panel(), false, &|| {}, &mut log);
         #[cfg(m9_bench)]
         if let Some(us) = landed {
             bench::FLUSH_US.store(us as u32, Ordering::Relaxed);

@@ -68,6 +68,7 @@ pub mod kbraw;
 pub mod keyboard;
 pub mod keys;
 pub mod map;
+pub mod mspi;
 pub mod pace;
 pub mod page;
 pub mod pair;
