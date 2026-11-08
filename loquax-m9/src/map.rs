@@ -38,7 +38,7 @@ use leviculum_map::region::{Header, Region, RegionError};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
-use leviculum_mapfill::style::{MapTheme, Profile, Style};
+use leviculum_mapfill::style::{Profile, Style};
 use leviculum_ui::color::Ink as UiInk;
 use leviculum_ui::input::{InputBuffer, KeyCode, KeyEvent, KeyModifiers};
 use leviculum_ui::style::{RLine, RStyle};
@@ -71,9 +71,11 @@ pub const FIXTURE: &[u8] = include_bytes!("../../leviculum-map/fixtures/firenze.
 pub const OVERZOOM: u8 = 2;
 
 /// The map's finish on the M9: its square caps, no casings and no
-/// buildings, in the dark table under the dark UI.
+/// buildings, in the light table (1531: Lew read the dark one on the
+/// board as grey-brown and far too dark). The UI around it keeps its dark
+/// tokens until the house page's theme switch.
 pub fn style() -> Style {
-    Style::M9.in_theme(MapTheme::Dark)
+    Style::M9
 }
 
 /// What the board tells the model it draws the map with: a cell of the
