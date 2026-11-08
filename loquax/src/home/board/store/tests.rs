@@ -295,3 +295,47 @@ fn a_cut_ask_is_whole_or_gone() {
     assert_eq!(got, [1], "the entry before the cut still reads");
     assert!(asks.is_empty(), "half an ask is no ask");
 }
+
+/// 1563: a store read after an end it ended at once hands back what came
+/// after it alone, across sectors and with an entry that runs over two;
+/// an end whose sector the ring took back, or one past the log's end, is
+/// no place to read after.
+#[test]
+fn open_after_reads_the_tail_alone() {
+    let mut flash = MemFlash::new(8);
+    let (mut store, ..) = reopen(&mut flash, TAG);
+    let before: Vec<_> = (1..=10).map(|s| entry(s, 300)).collect();
+    store.append(&mut flash, &before, 10).expect("before");
+    let end = store.end();
+    let after: Vec<_> = (11..=30).map(|s| entry(s, 300)).collect();
+    store.append(&mut flash, &after, 31).expect("after");
+    let mut got = Vec::new();
+    let (tail, restored, asks, _, done) =
+        Store::open_after(&mut flash, TAG, end, &|| 0, |e, _| got.push(e))
+            .expect("read")
+            .expect("a place in the log");
+    assert_eq!(got, after);
+    assert_eq!(restored.entries, 20);
+    assert!(asks.is_empty() && done.is_empty());
+    assert_eq!(tail.cursor(), 31, "the tail's mark");
+    assert_eq!(tail.end(), store.end());
+    // Read at the log's end: nothing.
+    let mut none = Vec::new();
+    let (_, restored, ..) =
+        Store::open_after(&mut flash, TAG, store.end(), &|| 0, |e, _| none.push(e))
+            .expect("read")
+            .expect("the end is a place");
+    assert!(none.is_empty() && restored.entries == 0);
+    // Past the end, and a sector the ring never held.
+    let (seq, at) = store.end();
+    assert!(
+        Store::open_after(&mut flash, TAG, (seq, at + 4), &|| 0, |_, _| {})
+            .expect("read")
+            .is_none()
+    );
+    assert!(
+        Store::open_after(&mut flash, TAG, (seq + 5, 24), &|| 0, |_, _| {})
+            .expect("read")
+            .is_none()
+    );
+}

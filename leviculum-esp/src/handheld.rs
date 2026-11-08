@@ -318,10 +318,10 @@ impl Handheld {
                         log.text("[STORE] ", &line);
                     }
                     match boot.how {
-                        How::Resumed { records } => log.line(
+                        How::Resumed { records, tail } => log.line(
                             "[STORE] ",
                             format_args!(
-                                "index=summaries records={records} conversations={}",
+                                "index=summaries records={records} tail={tail} conversations={}",
                                 model.conversations.len()
                             ),
                         ),

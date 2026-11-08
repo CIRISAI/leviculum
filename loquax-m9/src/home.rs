@@ -101,6 +101,9 @@ pub enum How {
     Resumed {
         /// Records the summary log replayed.
         records: u64,
+        /// Entries read from the ring after the summary's end (1563):
+        /// none when the ring ended where the summary said.
+        tail: u64,
     },
     /// The ring folded whole, and the summary log written anew from it:
     /// a store from before 1521, or one whose ring went on past its
@@ -445,12 +448,44 @@ pub fn restore_timed<S: Sectors>(
                     asks,
                     how: How::Resumed {
                         records: replayed.records,
+                        tail: 0,
                     },
                     spent,
                     decoded: 0,
                 });
             }
-            How::Rebuilt { why: "ring-moved" }
+            // The ring went on past the summary (a reset or a power cut
+            // between a page and its state, 1563): the tail after the
+            // summary's end is read and folded as the live pull folded
+            // it, the rest stands as the summary says it.
+            if let Some(boot) = resume_tail(
+                dev,
+                address,
+                clock,
+                ring_count,
+                log,
+                replayed.index,
+                state,
+                replayed.records,
+                t0,
+            )? {
+                return Ok(boot);
+            }
+            // The tail did not read: no summary log to hand on, the log
+            // opened again for the rebuild.
+            let (log, _) = RowLog::open(&mut Window::new(&mut *dev, ring_count, rows_count), tag)?;
+            let rows_read = clock().saturating_sub(t0);
+            let mut boot = rebuild(
+                dev,
+                address,
+                clock,
+                ring_count,
+                Some(log),
+                How::Rebuilt { why: "ring-moved" },
+            )?;
+            boot.spent.rows += rows_read;
+            boot.spent.total = clock().saturating_sub(t0);
+            return Ok(boot);
         }
     };
     let rows_read = clock().saturating_sub(t0);
@@ -458,6 +493,130 @@ pub fn restore_timed<S: Sectors>(
     boot.spent.rows += rows_read;
     boot.spent.total = clock().saturating_sub(t0);
     Ok(boot)
+}
+
+/// A boot from the summary log whose ring went on past its state
+/// (1563): the rows listed as the summary keeps them, then the entries
+/// after the state's end ([`Store::open_after`]) folded into the model
+/// and the index as the live pull folds a page ([`take`], [`keep`]), and
+/// the summary written anew at the ring's end, so the next boot resumes
+/// outright. What it reads grows with the tail, never with the store: a
+/// watchdog reset during a pull of 4000 entries rebuilt the whole ring
+/// four times over before (13:11 to 13:16 on 2026-11-08, 12.6 s to
+/// 55.2 s). `None` when the tail does not read: the state's sector went
+/// round the ring, or the ring ends before it; the caller rebuilds.
+#[allow(clippy::too_many_arguments)]
+fn resume_tail<S: Sectors>(
+    dev: &mut S,
+    address: [u8; 16],
+    clock: &dyn Fn() -> u64,
+    ring_count: u32,
+    log: RowLog,
+    mut index: Index,
+    state: &State,
+    records: u64,
+    t0: u64,
+) -> Result<Option<Boot>, S::Error> {
+    let start = clock();
+    let mut tail: Vec<(Entry, store::Span)> = Vec::new();
+    let Some((mut ring, restored, tail_asks, spent, done)) = Store::open_after(
+        &mut Window::new(&mut *dev, 0, ring_count),
+        store::tag(&address),
+        state.end,
+        clock,
+        |entry, span| tail.push((entry, span)),
+    )?
+    else {
+        return Ok(None);
+    };
+    ring.resume_counts(
+        state.cursor.max(ring.cursor()),
+        state.entries + restored.entries,
+    );
+    index.marks = state.marks.clone();
+    index.prune(&ring);
+    let mut shown = model(address);
+    shown.restore_rows(index.rows(), index.names());
+    shown.keys_above(rows::live_floor(state.cursor));
+    let _ = shown.take_marks();
+    let _ = shown.take_touched();
+    // The tail as the pull kept it: each entry in the index of its
+    // conversation, loaded, and folded into the model with no chat on
+    // the panel ([`rebuild`]'s rule).
+    let mut unpack = 0u64;
+    let mut step = 0u64;
+    shown.selected = loquax::ui::NONE_OPEN;
+    let mut batch = Batch::new(&mut shown);
+    for (entry, span) in &tail {
+        let t = clock();
+        let event = board::fold(entry, &address);
+        let u = clock();
+        unpack += u.saturating_sub(t);
+        if let Some(event) = &event {
+            index.learn_event(entry, *span, event);
+        }
+        index.take(entry, *span, true);
+        if let Some(event) = event {
+            batch.fold(UiEvent::Engine(event));
+            step += clock().saturating_sub(u);
+        }
+    }
+    let t2 = clock();
+    // What the summary log cannot carry is not listed (1521c), as the
+    // rebuild has it: the two boots agree.
+    let _ = batch.drop_rowless();
+    batch.finish();
+    let finish = clock().saturating_sub(t2);
+    shown.selected = top(&shown);
+    // The fold's marks are the store's own entries played back.
+    let _ = shown.take_marks();
+    let _ = shown.take_touched();
+    shown.keys_above(rows::live_floor(ring.cursor()));
+    let t3 = clock();
+    let peers: Vec<[u8; 16]> = shown.conversations.iter().map(|c| c.peer).collect();
+    for peer in peers {
+        if let Some(row) = shown.row(&peer) {
+            index.row(row);
+        }
+    }
+    let mut asks = state.asks.clone();
+    asks.extend(tail_asks);
+    asks.retain(|ask| !done.contains(&ask.id));
+    let drain = clock().saturating_sub(t3);
+    let mut shelf = Shelf::new(ring, Some(log), index, ring_count);
+    let t4 = clock();
+    shelf.dirty = true;
+    let pending = asks.clone();
+    shelf.flush(dev, || pending)?;
+    let rows = clock().saturating_sub(t4) + start.saturating_sub(t0);
+    let decoded = restored.entries;
+    Ok(Some(Boot {
+        model: shown,
+        shelf,
+        restored: Restored {
+            entries: state.entries + restored.entries,
+            sectors: restored.sectors,
+            torn: restored.torn,
+            foreign: restored.foreign,
+        },
+        asks,
+        how: How::Resumed {
+            records,
+            tail: decoded,
+        },
+        spent: Breakdown {
+            read: spent.read,
+            crc: spent.crc,
+            decode: spent.decode + spent.each,
+            unpack,
+            step,
+            finish,
+            drain,
+            rows,
+            total: clock().saturating_sub(t0),
+        },
+        decoded,
+    }))
 }
 
 /// The conversation a boot selects: the list's first, where the cursor

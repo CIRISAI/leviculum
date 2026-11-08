@@ -218,8 +218,55 @@ impl Store {
         dev: &mut S,
         tag: [u8; 8],
         clock: &dyn Fn() -> u64,
-        mut each: impl FnMut(Entry, Span),
+        each: impl FnMut(Entry, Span),
     ) -> Result<(Self, Restored, Vec<PendingAsk>, Spent), S::Error> {
+        let (store, restored, asks, spent, _) = Self::scan(dev, tag, None, clock, each)?;
+        Ok((store, restored, asks, spent))
+    }
+
+    /// Open the log of the home tagged `tag` on `dev` and read only what
+    /// it holds after `from` (1563): a summary written at `from` stands
+    /// for everything before it, so a boot that finds the ring past its
+    /// summary reads the tail a reset or a power cut left unsummarised,
+    /// not the whole ring again. `each` gets the tail's entries with
+    /// their spans, oldest first. `None` when `from` is no place in this
+    /// log: its sector went round the ring, or the log ends before it.
+    ///
+    /// The store's cursor and entry count are the tail's alone: the
+    /// caller adds the summary's ([`Store::resume_counts`]). The asks are
+    /// the tail's owed ones; the ids are every done frame the tail holds,
+    /// which may end an ask the summary kept.
+    #[allow(clippy::type_complexity)]
+    pub fn open_after<S: Sectors>(
+        dev: &mut S,
+        tag: [u8; 8],
+        from: End,
+        clock: &dyn Fn() -> u64,
+        each: impl FnMut(Entry, Span),
+    ) -> Result<Option<(Self, Restored, Vec<PendingAsk>, Spent, Vec<[u8; 16]>)>, S::Error> {
+        // Where the log ends, read as a resume reads it: a scan begun
+        // at `from` would take any offset past the end for a frame's start.
+        let log = Self::resume(dev, tag)?;
+        if !log.seqs.contains_key(&from.0) || log.end < from {
+            return Ok(None);
+        }
+        let opened = Self::scan(dev, tag, Some(from), clock, each)?;
+        // A scan that ended elsewhere began off a frame's start.
+        if opened.0.end != log.end {
+            return Ok(None);
+        }
+        Ok(Some(opened))
+    }
+
+    /// The log's frames read from `from` on, or whole when `None`.
+    #[allow(clippy::type_complexity)]
+    fn scan<S: Sectors>(
+        dev: &mut S,
+        tag: [u8; 8],
+        from: Option<End>,
+        clock: &dyn Fn() -> u64,
+        mut each: impl FnMut(Entry, Span),
+    ) -> Result<(Self, Restored, Vec<PendingAsk>, Spent, Vec<[u8; 16]>), S::Error> {
         let mut spent = Spent::default();
         let mut t = clock();
         let mut lap = |into: &mut u64| {
@@ -258,6 +305,10 @@ impl Store {
         let mut previous: Option<u32> = None;
         lap(&mut spent.read);
         for &(seq, index) in &ours {
+            // The sectors a summary stands for are not read (1563).
+            if from.is_some_and(|(first, _)| seq < first) {
+                continue;
+            }
             // A sector missing between two: an entry cannot run across it.
             if previous.is_some_and(|p| p.wrapping_add(1) != seq) {
                 part = None;
@@ -266,7 +317,12 @@ impl Store {
             dev.read(index, 0, &mut buf)?;
             lap(&mut spent.read);
             restored.sectors += 1;
-            let mut at = HEADER;
+            // The summary's end is a frame's start: everything before it
+            // in its sector is the summary's too.
+            let mut at = match from {
+                Some((first, offset)) if seq == first => (offset as usize).max(HEADER),
+                _ => HEADER,
+            };
             let mut open = false;
             while at + FRAME <= SECTOR {
                 let frame = &buf[at..at + FRAME];
@@ -350,7 +406,7 @@ impl Store {
             }
         }
         asks.retain(|ask| !done.contains(&ask.id));
-        Ok((store, restored, asks, spent))
+        Ok((store, restored, asks, spent, done))
     }
 
     fn empty(tag: [u8; 8], count: u32) -> Self {

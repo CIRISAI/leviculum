@@ -435,12 +435,13 @@ fn a_conversation_opens_with_its_newest_page_alone() {
     assert_eq!(older, ours[ours.len() - 2 * want..ours.len() - want]);
 }
 
-/// 1521, the unhappy path: a page kept whose summary never got written
-/// (the power went between the two) leaves the ring past the summary's
-/// end; the boot reads the ring whole, shows the page, and the boot
-/// after resumes again.
+/// 1521, 1563: a page kept whose summary never got written (the power
+/// went between the two) leaves the ring past the summary's end; the
+/// boot reads the page the summary missed and nothing else, shows it,
+/// writes the summary at the ring's end, and the boot after resumes
+/// outright. Before 1563 this boot read the ring whole.
 #[test]
-fn a_ring_past_its_summary_is_read_whole_once() {
+fn a_ring_past_its_summary_reads_its_tail_alone() {
     let archive = Archive::new();
     let mut flash = summarised(&archive);
     let boot = home::restore(&mut flash, archive.address).expect("resume");
@@ -460,19 +461,207 @@ fn a_ring_past_its_summary_is_read_whole_once() {
     home::keep(&mut shelf, &mut flash, &[entry], &archive.address).expect("keep");
     // No flush: the power went.
     let after = home::restore(&mut flash, archive.address).expect("after the cut");
-    assert_eq!(after.how, home::How::Rebuilt { why: "ring-moved" });
+    assert!(
+        matches!(after.how, home::How::Resumed { tail: 1, .. }),
+        "{:?}",
+        after.how
+    );
+    assert_eq!(after.decoded, 1, "the tail alone is decoded");
     assert_eq!(after.shelf.cursor(), MESSAGES + 1);
+    assert_eq!(after.restored.entries, MESSAGES + 1);
     let peer = lxmf_address(&friend.public_key_bytes()).expect("address");
     let top = &after.model.conversations[after.model.order()[0]];
     assert_eq!(top.peer, peer, "the page the summary missed is shown");
     let again = home::restore(&mut flash, archive.address).expect("again");
     assert!(
-        matches!(again.how, home::How::Resumed { .. }),
+        matches!(again.how, home::How::Resumed { tail: 0, .. }),
         "{:?}",
         again.how
     );
     let top = &again.model.conversations[again.model.order()[0]];
     assert_eq!(top.peer, peer);
+}
+
+/// The entries a pull brings after the fixture: `pages` pages of 72,
+/// some to new peers, every fifth one the board's own send.
+fn more(archive: &Archive, newcomers: &[Identity], pages: usize) -> Vec<Entry> {
+    (1..=(pages * 72) as u64)
+        .map(|n| {
+            let seq = MESSAGES + n;
+            let friend = match n % 3 {
+                0 => &newcomers[n as usize % newcomers.len()],
+                _ => &archive.friends[friend_of(n)],
+            };
+            let theirs = lxmf_address(&friend.public_key_bytes()).expect("address");
+            let at = 1_762_100_000.0 + n as f64;
+            let (kind, packed) = match n % 5 {
+                0 => (
+                    KIND_SENT,
+                    pack(&archive.me, theirs, &format!("Neu {n}"), at),
+                ),
+                _ => (
+                    KIND_RECEIVED,
+                    pack(friend, archive.address, &format!("Neu {n}"), at),
+                ),
+            };
+            Entry {
+                seq,
+                kind,
+                at: at as i64,
+                packed,
+            }
+        })
+        .collect()
+}
+
+/// The summary log of `flash` erased: the boot that follows folds the
+/// ring whole, the control a resumed boot is held against.
+fn without_summary(flash: &MemFlash) -> MemFlash {
+    let mut erased = flash.clone();
+    let (ring, _) = loquax::home::board::rows::split(2048).expect("split");
+    for sector in ring..2048 {
+        erased.sectors[sector as usize].fill(0xFF);
+    }
+    erased
+}
+
+/// 1563, the M9's erase and pull of 2026-11-08: the board reset by its
+/// watchdog four times during a pull of 4258 entries, and every boot
+/// after a reset folded the whole ring (`why=ring-moved`, 12.6 s at 1714
+/// entries, 55.2 s at 4066), so each rebuild grew with the store. The
+/// summary written before the reset stands for everything before it: the
+/// boot reads the 360 entries the pull kept after it and not the 4000
+/// before, lists what the whole fold of the same ring lists, and writes
+/// the summary at the ring's end. On the host the tail boot is timed
+/// against the whole fold; on the board the bar is under 2 s.
+#[test]
+fn a_reset_mid_pull_resumes_from_the_summary() {
+    let archive = Archive::new();
+    let mut flash = summarised(&archive);
+    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let newcomers: Vec<Identity> = (0..5).map(|_| Identity::generate(&mut OsRng)).collect();
+    let pulled = more(&archive, &newcomers, 5);
+    for page in pulled.chunks(72) {
+        home::keep(&mut boot.shelf, &mut flash, page, &archive.address).expect("keep");
+    }
+    // The reset: no rows said, no state written.
+    let whole = home::restore(&mut without_summary(&flash), archive.address).expect("whole");
+    assert!(matches!(whole.how, home::How::Rebuilt { why: "no-state" }));
+    assert_eq!(whole.decoded, MESSAGES + pulled.len() as u64);
+
+    let started = std::time::Instant::now();
+    let after = home::restore_timed(&mut flash, archive.address, &micros).expect("after");
+    let took = started.elapsed();
+    println!(
+        "TIME m9.tail-resume {took:?} decoded={} total_us={} (whole fold decoded {})",
+        after.decoded, after.spent.total, whole.decoded
+    );
+    assert!(
+        matches!(after.how, home::How::Resumed { tail: 360, .. }),
+        "{:?}",
+        after.how
+    );
+    assert_eq!(after.decoded, pulled.len() as u64, "the tail alone");
+    assert_eq!(after.restored.entries, MESSAGES + pulled.len() as u64);
+    assert_eq!(after.shelf.cursor(), MESSAGES + pulled.len() as u64);
+    assert_eq!(
+        after.model.conversations.len(),
+        whole.model.conversations.len(),
+        "the newcomers are listed"
+    );
+    assert_eq!(
+        text(&after.model),
+        text(&whole.model),
+        "the list from the summary and its tail is the whole fold's"
+    );
+    for newcomer in &newcomers {
+        let peer = lxmf_address(&newcomer.public_key_bytes()).expect("address");
+        assert!(after.model.conversations.iter().any(|c| c.peer == peer));
+    }
+    // The summary went on to the ring's end: the next boot reads nothing.
+    let again = home::restore(&mut flash, archive.address).expect("again");
+    assert!(
+        matches!(again.how, home::How::Resumed { tail: 0, .. }),
+        "{:?}",
+        again.how
+    );
+    assert_eq!(again.decoded, 0);
+    assert_eq!(text(&again.model), text(&whole.model));
+}
+
+/// 1563, the asks across a reset: an ask the summary kept and whose done
+/// came after it is not queued again; an ask kept after the summary is.
+#[test]
+fn a_tail_resume_keeps_the_asks_its_tail_owes() {
+    let archive = Archive::new();
+    let mut flash = summarised(&archive);
+    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let (old, new) = ([1u8; 16], [2u8; 16]);
+    boot.shelf
+        .keep_ask(&mut flash, &old, 3, b"vor dem Reset")
+        .expect("keep the old ask");
+    let owed = vec![loquax::home::board::store::PendingAsk {
+        id: old,
+        tag: 3,
+        request: b"vor dem Reset".to_vec(),
+    }];
+    boot.shelf.flush(&mut flash, || owed).expect("flush");
+    let newcomers = [Identity::generate(&mut OsRng)];
+    for page in more(&archive, &newcomers, 1).chunks(72) {
+        home::keep(&mut boot.shelf, &mut flash, page, &archive.address).expect("keep");
+    }
+    boot.shelf
+        .keep_ask(&mut flash, &new, 4, b"nach dem Summary")
+        .expect("keep the new ask");
+    boot.shelf.ask_done(&mut flash, &old).expect("done");
+    let after = home::restore(&mut flash, archive.address).expect("after");
+    assert!(
+        matches!(after.how, home::How::Resumed { tail: 72, .. }),
+        "{:?}",
+        after.how
+    );
+    let ids: Vec<[u8; 16]> = after.asks.iter().map(|ask| ask.id).collect();
+    assert_eq!(
+        ids,
+        vec![new],
+        "the done ended the old ask, the new is owed"
+    );
+    let whole = home::restore(&mut without_summary(&flash), archive.address).expect("whole");
+    let whole_ids: Vec<[u8; 16]> = whole.asks.iter().map(|ask| ask.id).collect();
+    assert_eq!(ids, whole_ids, "as the whole fold has them");
+}
+
+/// 1563, the unhappy path: the sector the summary ended in is gone (the
+/// ring went round past it): no tail can be read after it, and the boot
+/// folds the ring whole, as before.
+#[test]
+fn a_summary_whose_sector_went_round_rebuilds() {
+    let archive = Archive::new();
+    let mut flash = summarised(&archive);
+    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let (end_seq, _) = boot.shelf.ring.end();
+    let newcomers = [Identity::generate(&mut OsRng)];
+    for page in more(&archive, &newcomers, 3).chunks(72) {
+        home::keep(&mut boot.shelf, &mut flash, page, &archive.address).expect("keep");
+    }
+    // The summary's sector, erased as the ring erases its oldest.
+    let (ring, _) = loquax::home::board::rows::split(2048).expect("split");
+    let sector = (0..ring as usize)
+        .find(|&i| {
+            let head = &flash.sectors[i];
+            &head[..4] == b"LQXM"
+                && u32::from_le_bytes([head[8], head[9], head[10], head[11]]) == end_seq
+        })
+        .expect("the summary's sector");
+    flash.sectors[sector].fill(0xFF);
+    let after = home::restore(&mut flash, archive.address).expect("after");
+    assert_eq!(after.how, home::How::Rebuilt { why: "ring-moved" });
+    let again = home::restore(&mut flash, archive.address).expect("again");
+    assert!(
+        matches!(again.how, home::How::Resumed { tail: 0, .. }),
+        "{:?}",
+        again.how
+    );
 }
 
 /// 1521: a page folded live, its rows said and flushed, comes back from

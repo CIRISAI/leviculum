@@ -252,10 +252,10 @@ impl Board {
                     log.line("[STORE] ", &line);
                 }
                 match boot.how {
-                    How::Resumed { records } => log.line(
+                    How::Resumed { records, tail } => log.line(
                         "[STORE] ",
                         &format!(
-                            "index=summaries records={records} conversations={}",
+                            "index=summaries records={records} tail={tail} conversations={}",
                             boot.model.conversations.len()
                         ),
                     ),
