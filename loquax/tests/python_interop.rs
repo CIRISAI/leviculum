@@ -76,6 +76,11 @@ fn held_rename_s() -> Option<f64> {
 /// LXMF inbox with its body and title intact, non-ASCII included.
 #[tokio::test(flavor = "multi_thread")]
 async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
+    // The in-process daemon's structured events (ANN_RX, PATH_ADD, ANN_PACED,
+    // ANN_TX, IFACE_DOWN), dumped to stderr if the test panics. The renamed
+    // announce went missing once under a loaded host (order 1584) and the
+    // run carried no line from the instance to say where.
+    let _instance_events = leviculum_std::test_support::event_log::init_event_log();
     let peer = PythonPeer::start();
     let python_address = peer.lxmf_init();
     let mut mesh = Mesh::start(peer.rns_port).await;
@@ -216,9 +221,17 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
+            // Each place the renamed announce can stop says what it holds:
+            // the second client's own events (did it announce?), the
+            // instance's on the panic dump above, and Python's interface
+            // (a held announce, an ingress burst) and path table.
             panic!(
-                "--from must reach the receiver verbatim; Python holds {known} and heard {}",
-                peer.rpc("lxmf_names_heard", serde_json::json!({}))
+                "--from must reach the receiver verbatim; Python holds {known} and heard {}\n\
+                 Python has a path to {source}: {}\nPython's interfaces: {}\n\
+                 the renamed send: {overridden}",
+                peer.rpc("lxmf_names_heard", serde_json::json!({})),
+                peer.rpc("has_path", serde_json::json!({ "hash": source })),
+                peer.rpc("get_interfaces", serde_json::json!({})),
             );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
