@@ -25,6 +25,7 @@ use std::time::Duration;
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder};
 use leviculum_std::{Error as StdError, ReticulumNode};
 
+pub mod census;
 pub mod client;
 pub mod config;
 pub mod departures;
@@ -33,6 +34,7 @@ pub(crate) mod hook_profile;
 pub mod identity;
 pub mod mailbox;
 pub(crate) mod peering;
+pub mod store_limit;
 pub(crate) mod validation;
 
 #[cfg(test)]

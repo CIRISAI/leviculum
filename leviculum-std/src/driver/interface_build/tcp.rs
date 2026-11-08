@@ -40,7 +40,15 @@ pub(super) fn build_client(
     // and retrying instead of ending the start (Codeberg #461; the reference
     // resolves inside `TCPInterface.connect` and keeps going). Only what the
     // config itself got wrong, above, is an error.
-    let target = TcpTarget::new(target_host.clone(), target_port);
+    //
+    // An automatic server slot (#471 step 3) starts on the entry the slot
+    // holds now, which after a fail-over is no longer the section's own
+    // target: a `bootstrap_only` slot re-attached later comes back on the
+    // entry that last worked.
+    let target = match config.server_slot.as_ref().and_then(|s| s.current()) {
+        Some(entry) => TcpTarget::new(entry.host, entry.port),
+        None => TcpTarget::new(target_host.clone(), target_port),
+    };
 
     let iface_name = format!("tcp_client_{}", idx);
     let id = InterfaceId(idx);
@@ -71,6 +79,7 @@ pub(super) fn build_client(
         shutdown: None,
         outbound_socket_hook: ctx.outbound_socket_hook.clone(),
         liveness,
+        failover: config.server_slot.clone(),
     });
     // The reference names this interface `TCPInterface[<name>/<host>:<port>]`
     // in every answer (D8 of the 2026-10-11 shared-instance audit); the

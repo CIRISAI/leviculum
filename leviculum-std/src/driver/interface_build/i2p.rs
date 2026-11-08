@@ -6,8 +6,8 @@ use std::time::Duration;
 use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::i2p::{
-    spawn_i2p_client, spawn_i2p_server, I2pClientConfig, I2pServerConfig, I2pTimeouts,
-    I2P_DEFAULT_BUFFER_SIZE, I2P_DEFAULT_RECONNECT_WAIT,
+    resolve_keyfile, spawn_i2p_client, spawn_i2p_server, I2pClientConfig, I2pServerConfig,
+    I2pTimeouts, I2P_DEFAULT_BUFFER_SIZE, I2P_DEFAULT_RECONNECT_WAIT,
 };
 use leviculum_core::transport::InterfaceId;
 
@@ -43,9 +43,12 @@ pub(super) fn build(
     // Server endpoint (accepts inbound I2P connections), spawning one
     // sub-interface per peer via new_iface_tx.
     if config.connectable.unwrap_or(false) {
-        let keyfile = storage_root
-            .join("i2p")
-            .join(format!("i2p_iface_{}.i2p", idx));
+        let keyfile = resolve_keyfile(
+            &storage_root.join("i2p"),
+            &config.name,
+            &ctx.identity_hash,
+            idx,
+        );
         spawn_i2p_server(I2pServerConfig {
             sam_address: sam_address.clone(),
             keyfile,

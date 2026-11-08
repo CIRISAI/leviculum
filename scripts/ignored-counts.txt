@@ -52,7 +52,8 @@
 # Four of these need hardware or a live service: two RNode cases wanting a
 # board on /dev/ttyACM0, two i2p cases wanting a running i2pd SAM bridge.
 # The i2p pair runs under `just i2p-live` (T-0009), which starts a private
-# i2pd for it; the reviewer runs that weekly beside `emulated-corpus`.
+# I2P network on loopback for it (1576, no internet); the reviewer runs that
+# beside `emulated-corpus`.
 #
 # 4 -> 5 (2026-09-21): append_cost, added by 20261fbb as the evidence behind
 # docs/src/concepts/core-lock-budget.md "A durable store append is inside the
@@ -230,3 +231,9 @@
 # in the same file, which runs in the suite. Run by hand with
 # LNPND_START_BENCH_STORE naming the fixture, after the bench above.
 1    -p lnpnd --test store_index_at_start
+# 0 -> 1 (2026-11-07, order 1515, LV-1000): pn_tables_stay_flat_once_the_store_is_full
+# is a 20-minute soak of the release daemon on a 300 000-message store with 14
+# peers, longer than any tier spends on one test; the census it reads is pinned
+# by sigusr1_census and census::tests, which run in the suite. Run it with
+# `just pn-growth-soak`.
+1    -p lnpnd --test pn_growth_soak

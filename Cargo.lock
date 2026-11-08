@@ -3411,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "lnomad"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "crossterm",
@@ -3442,7 +3442,7 @@ dependencies = [
 
 [[package]]
 name = "lnpnd"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "futures",

@@ -32,10 +32,12 @@ system packages must be installed (all apt-installable on Debian):
 - **i2pd** (optional) — provides the SAM bridge on 127.0.0.1:7656 that the
   `I2PInterface` live tests use. The default suite covers `I2PInterface` with an
   in-process mock SAM bridge, so i2pd is not needed to go green; it only gates
-  the `#[ignore]`d live tests. `just i2p-live` runs them against a private
-  i2pd it starts and stops itself (about a minute from a cold router, network
-  needed); against a running system i2pd, `cargo test -p leviculum-std
-  i2pd_live -- --ignored` with `sam.enabled = true` in `/etc/i2pd/i2pd.conf`.
+  the `#[ignore]`d live tests. `just i2p-live` runs them on a private I2P
+  network of five i2pd on loopback that it starts and stops itself
+  (`scripts/i2p-privnet.sh`, about 40 s, no internet); against a running
+  system i2pd, `cargo test -p leviculum-std i2pd_live -- --ignored` with
+  `sam.enabled = true` in `/etc/i2pd/i2pd.conf`. The bed script takes any
+  command, for A/B runs of rnsd and lnsd on it (see the I2P concept page).
 - **cargo-fuzz** + **nightly** (optional) — drive the wire-format parser fuzz
   harness under `leviculum-core/fuzz`, `leviculum-std/fuzz` and
   `leviculum-micron/fuzz` (see [Fuzzing
@@ -63,7 +65,7 @@ prove different things. The tier-2 nightly (03:37) runs `just complete`,
 containers on their own network namespaces: green, it proves the
 workspace, the fuzz targets and the docker corpora on the commit it
 tested, and nothing about radios. The published build is the forge's
-`nightly.yml` (cron 04:00 UTC, 06:00 CEST, or fired by the night's green
+`nightly.yml` (cron 09:05 UTC, 10:05 CET, or fired by the night's green
 ref): it proves `just ci-gate` and the package builds, and publishes only
 a commit a green night covers. Tier 3, despite its recipe being called
 `just nightly`, is the hourly rig cadence plus a full hardware run before

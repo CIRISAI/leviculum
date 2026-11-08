@@ -220,6 +220,21 @@ pub fn spawn_led_with_boot_blink(
     present(sink).store(true, Ordering::Relaxed);
 }
 
+/// [`spawn_led_with_boot_blink`] for a main LED that also pulses on LoRa
+/// activity (D4 of order 1085: the activity blink is a feature of a board
+/// with a free LED, through its feedback sink). The Pocket V2's green LED1:
+/// the boot blink first, then TX pulses between patterns.
+pub fn spawn_activity_led_with_boot_blink(
+    spawner: &Spawner,
+    led: Output<'static>,
+    active_high: bool,
+    sink: Sink,
+    activity: &'static Signal<CriticalSectionRawMutex, ()>,
+) {
+    spawner.must_spawn(led_task(led, active_high, sink, Some(activity), true));
+    present(sink).store(true, Ordering::Relaxed);
+}
+
 /// The T1000-E buzzer's tone: B3, 247 Hz, the note Meshtastic's own beep
 /// plays on this board (`playBeep`, `NOTE_B3`, `src/buzz/buzz.cpp`; its
 /// T1000-E variant drives `PIN_BUZZER` P0.25 as "pwm output" with

@@ -17,25 +17,29 @@
 //! player pulses on activity while no pattern plays, and a pattern takes
 //! the LED for its length.
 //!
+//! The green LED opens with the boot blink every board plays (D3 of order
+//! 1085, a timer and not a spin, `crate::feedback::led_task`); its TX
+//! pulses start once it is over.
+//!
 //! Module is gated on the same `display` feature as the rest of the
-//! baseboard tasks — no LEDs without the rest of the user-facing
-//! peripherals.
+//! baseboard tasks, the Pocket image's feature: the activity signals it
+//! waits on are (`leviculum_firmware::board_state`).
 
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::Output;
 
-use crate::feedback::{spawn_led, Sink};
+use crate::feedback::{spawn_activity_led_with_boot_blink, spawn_led, Sink};
 
 /// Convenience wrapper invoked from the bin file. Both LEDs are active
 /// high (`boards/rak4631.rs`).
 pub fn init(spawner: &Spawner, tx_led: Output<'static>, rx_led: Output<'static>) {
     crate::log::log_fmt("[LED] ", format_args!("tx_blink_task alive"));
-    spawn_led(
+    spawn_activity_led_with_boot_blink(
         spawner,
         tx_led,
         true,
         Sink::Led,
-        Some(&leviculum_firmware::board_state::LORA_TX_FLASH),
+        &leviculum_firmware::board_state::LORA_TX_FLASH,
     );
     crate::log::log_fmt("[LED] ", format_args!("rx_blink_task alive"));
     spawn_led(

@@ -82,11 +82,11 @@ its medium. For the phone that means the following:
 What already fits the seam:
 
 - **USB serial needs no new interface.** `RNodeChannelFactory`
-  (`leviculum-std/src/interfaces/rnode.rs:3576`) exists for exactly this
+  (`leviculum-std/src/interfaces/rnode.rs:3627`) exists for exactly this
   case: a host that never sees `/dev/ttyACM*`, Android named. The phone
   supplies `open`. The KISS detection and configuration, the airtime
   bucket and the reconnect loop stay the host RNode interface's own, and
-  `spawn_rnode_channel_interface` (`leviculum-std/src/driver/mod.rs:2668`)
+  `spawn_rnode_channel_interface` (`leviculum-std/src/driver/mod.rs:2703`)
   hot-plugs the radio when the cable goes in.
 - **BLE needs a second carrier binding, not a second interface.** The
   host BLE interface is split into a pure half, `links` (admission,

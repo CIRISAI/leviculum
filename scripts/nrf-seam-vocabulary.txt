@@ -32,6 +32,8 @@ src/gnss.rs: vext doc x2
 src/gnss.rs: vext::wait_ready x1
 src/led.rs: feedback doc x1
 src/led.rs: feedback::Sink x1
+src/led.rs: feedback::led_task doc x1
+src/led.rs: feedback::spawn_activity_led_with_boot_blink x1
 src/led.rs: feedback::spawn_led x1
 src/lora.rs: radio x1 doc x1
 src/lora.rs: radio::Error::Crc x1
@@ -76,6 +78,9 @@ src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1
 src/pn.rs: record_store::region x1
 src/pn.rs: usb doc x1
+src/power.rs: boards::BoardConfig x1
+src/power.rs: button doc x1
+src/power.rs: usb::softdevice_enabled x1
 src/radio.rs: boards doc x1
 src/radio.rs: boards::BoardConfig::lora_tcxo_voltage_reg doc x1
 src/radio.rs: sx1262 doc x1

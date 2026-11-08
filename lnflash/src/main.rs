@@ -25,13 +25,20 @@ use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
     about = "Flash an LNode board from the bundle beside this binary",
     long_about = "Finds attached boards, brings each into its bootloader, confirms what it is \
                   from the bootloader itself, checks the SoftDevice precondition, and writes \
-                  our firmware.\n\n\
-                  Once a board is back up it is offered the eu868 radio defaults (ReticulumNet \
-                  consensus), a preset menu (eu868, us915, au915, custom), or the settings the \
-                  --radio-preset / --radio-* flags name. The board stores what it is given, so \
-                  it comes back up on that frequency after a reset and after the next flash.\n\n\
-                  It then asks whether the board should send telemetry. The default is no, and \
-                  a yes needs exactly one input: the LXMF address to report to. Telemetry is \
+                  our firmware. It asks nothing: starting it is the decision to flash every \
+                  board it recognises, and --dry-run shows what that would do.\n\n\
+                  Once a board is back up its radio is settled without a question: a board \
+                  that runs stored settings other than the shipped eu868 profile keeps them, \
+                  and otherwise it is sent the preset the host's time zone (or, without one, \
+                  its locale) names: eu868 in CEPT Europe, us915 in the US, Canada and Mexico, \
+                  au915 in Australia and New Zealand, the shipped eu868 anywhere else. The \
+                  --radio-preset / --radio-* flags name settings instead. The board stores \
+                  what it is given, so it comes back up on that frequency after a reset and \
+                  after the next flash.\n\n\
+                  Telemetry and remote management stay off. --ask puts every one of those \
+                  decisions as a question instead: the overwrite, the radio menu, telemetry \
+                  and remote management. The default is no for telemetry, and a yes needs \
+                  exactly one input: the LXMF address to report to. Telemetry is \
                   configuration rather than firmware, so --set-telemetry does the same thing \
                   later without reflashing.\n\n\
                   Needs root: the bootloader's drive is a root:disk block device and \
@@ -68,6 +75,12 @@ struct Cli {
     /// rather than waits if a board needs a physical double-tap.
     #[arg(long)]
     yes: bool,
+
+    /// Ask instead of deciding: put the overwrite question for every board,
+    /// offer the radio menu, and ask about telemetry and remote management.
+    /// Without it a flash run asks nothing (#476).
+    #[arg(long)]
+    ask: bool,
 
     /// Print less.
     #[arg(long, short)]
@@ -609,7 +622,13 @@ fn radio_plan(cli: &Cli) -> Result<RadioPlan, Box<dyn std::error::Error>> {
         return Ok(RadioPlan::Fixed(RadioChoice::Preset(radio::preset(name)?)));
     }
     if !given.iter().any(|given| *given) {
-        return Ok(RadioPlan::Ask);
+        return Ok(if cli.ask {
+            RadioPlan::Ask
+        } else {
+            RadioPlan::Estimate(lnflash::region::estimate(
+                &lnflash::region::Place::from_host(),
+            ))
+        });
     }
     // Every field the flags did not name keeps its EU868 value. Ignoring a
     // --radio-sf given without --radio-freq would be worse than either
@@ -1088,14 +1107,23 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         boards: cli.board.clone(),
         dry_run: cli.dry_run,
         radio,
-        telemetry,
-        // The flags above exit before any flashing, so what reaches a flash
-        // run is the question or the refusal to ask it.
-        management: if cli.no_management {
-            lnflash::mgmt::MgmtPlan::Skip
-        } else {
-            lnflash::mgmt::MgmtPlan::Ask
+        // The question is put only under --ask, or when --telemetry-profile
+        // already said a cadence and only the address is missing. Without
+        // either a flash run sends nothing, the default answer (#476).
+        telemetry: match telemetry {
+            TelemetryPlan::Ask { .. } if !cli.ask && cli.telemetry_profile.is_none() => {
+                TelemetryPlan::Skip
+            }
+            other => other,
         },
+        // The flags above exit before any flashing, so what reaches a flash
+        // run is the question under --ask, or nothing sent.
+        management: if cli.ask && !cli.no_management {
+            lnflash::mgmt::MgmtPlan::Ask
+        } else {
+            lnflash::mgmt::MgmtPlan::Skip
+        },
+        ask: cli.ask,
         ..Options::default()
     };
 
@@ -1382,9 +1410,12 @@ mod tests {
     }
 
     #[test]
-    fn no_radio_flag_leaves_the_choice_to_the_prompt() {
-        assert_eq!(plan(&[]).unwrap(), RadioPlan::Ask);
-        assert_eq!(plan(&["--yes"]).unwrap(), RadioPlan::Ask);
+    fn no_radio_flag_estimates_and_ask_brings_the_prompt_back() {
+        // #476: no flag is no question; the estimate is the host's.
+        assert!(matches!(plan(&[]).unwrap(), RadioPlan::Estimate(_)));
+        assert!(matches!(plan(&["--yes"]).unwrap(), RadioPlan::Estimate(_)));
+        assert_eq!(plan(&["--ask"]).unwrap(), RadioPlan::Ask);
+        assert_eq!(plan(&["--ask", "--yes"]).unwrap(), RadioPlan::Ask);
     }
 
     #[test]

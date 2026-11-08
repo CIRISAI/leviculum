@@ -52,7 +52,7 @@ keyed off the per-board USB PID:
 (Symlink names and PIDs: `leviculum-nrf/udev/99-leviculum.rules`. The
 firmware-side USB VID/PID constants:
 `leviculum-nrf/src/boards/t114.rs:189-190` for `1209:0001`,
-`leviculum-nrf/src/boards/rak4631.rs:184-185` for `1209:0002`.)
+`leviculum-nrf/src/boards/rak4631.rs:210-211` for `1209:0002`.)
 
 > **Multiple boards of the same kind.** The short symlinks
 > (`/dev/leviculum-transport`) land on whichever device udev sees first.
@@ -199,7 +199,7 @@ implements no RNode KISS command set — there is no `CMD_DETECT`,
 > `SerialInterface` honours [the LoRa keys] too and configures the
 > attached LNode's radio over the serial port — the LNode frames HDLC,
 > so it cannot be driven by the KISS-framed `RNodeInterface`.
-> (`docs/src/guide/configuration.md:526-535`)
+> (`docs/src/guide/configuration.md:551-560`)
 
 ```ini
 [interfaces]

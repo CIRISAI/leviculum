@@ -755,7 +755,7 @@ method before the entry disappears. "The propagation node refused this message" 
 different fixes.
 
 **Handle the restart discontinuity honestly.** `restore` resets every
-queued message to `Outbound` (`leviculum-lxmf/src/router.rs:2324-2327`). So
+queued message to `Outbound` (`leviculum-lxmf/src/router.rs:2339-2342`). So
 after a restart, a message that was "sending" is "queued" again, and the UI
 must show that rather than a frozen progress bar. NomadNet's equivalent,
 forcing a stale mid-flight message to `FAILED` on load (NomadNet's
@@ -898,9 +898,9 @@ Show what a message will cost before it is sent, next to the send action:
 The pieces exist. `leviculum_core::rnode::airtime_ms`
 (`leviculum-core/src/rnode.rs:1107`) and `packet_airtime_ms`
 (`leviculum-core/src/rnode.rs:1701`) are public, interfaces report a
-`bitrate` (`leviculum-std/src/interfaces/mod.rs:697-699`) computed from
+`bitrate` (`leviculum-std/src/interfaces/mod.rs:700-702`) computed from
 spreading factor, coding rate and bandwidth
-(`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:3441`), and
+(`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:3451`), and
 `fetch_remote_status` (`leviculum-std/src/remote_status.rs:187`) retrieves
 the interface list from the daemon, which is how `lnstatus` works. Note two
 honesty constraints: `fetch_remote_status` needs the management authkey,

@@ -213,6 +213,40 @@ pub const PANIC_LED_PORT: u8 = 1;
 pub const PANIC_LED_PIN: u8 = 3;
 pub const PANIC_LED_ACTIVE_LOW: bool = true;
 
+/// The button, LED and off pins of the 8 s off and the boot-time factory
+/// reset (order 1511, `crate::power`). Off: the panel's own rail (VTFT,
+/// P0.03) and backlight (LEDA, P0.15), both active low, go high; the VEXT
+/// rail (P0.21, active high) that feeds the panel chain and the L76K goes
+/// low; the LED (P1.03, active low) goes high. The SX1262 has no switch
+/// on this board and stays powered.
+#[cfg(feature = "softdevice")]
+pub const POWER: crate::power::PowerFacts = crate::power::PowerFacts {
+    button_active_high: false,
+    led: (PANIC_LED_PORT, PANIC_LED_PIN, PANIC_LED_ACTIVE_LOW),
+    off_pins: &[
+        crate::power::OffPin {
+            port: 0,
+            pin: 3,
+            high: true,
+        },
+        crate::power::OffPin {
+            port: 0,
+            pin: 15,
+            high: true,
+        },
+        crate::power::OffPin {
+            port: 0,
+            pin: 21,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 1,
+            pin: 3,
+            high: true,
+        },
+    ],
+};
+
 // Module names, for the spawn lines (D7 of order 1085: every board says
 // `<task> task spawned (<module>)` with the module from its board file).
 /// The status panel.

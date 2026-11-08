@@ -68,7 +68,7 @@ Nothing is written before all of that has been shown and confirmed.
 device, and `lnflash` mounts it itself rather than assuming a desktop
 automounter that a headless host does not have. Without root it will
 identify the attached boards and then stop.
-(`lnflash/src/main.rs:37-38`)
+(`lnflash/src/main.rs:44-45`)
 
 **One key press is sometimes unavoidable.** Getting into the bootloader
 by software has to be implemented by whatever firmware is currently
@@ -98,13 +98,13 @@ waits when a board needs the manual double-tap. Radio settings can be
 given at flash time with `--radio-preset` (`eu868`, `us915`, `au915`) or
 the individual `--radio-freq`, `--radio-bw`, `--radio-sf`, `--radio-cr`
 and `--radio-txpower` flags; `--no-radio` leaves the board's stored
-configuration alone. (`lnflash/src/main.rs:42-490`. The board keeps what
+configuration alone. (`lnflash/src/main.rs:49-503`. The board keeps what
 it is given across resets and across the next flash, so this is part of
 the flash rather than a later configuration step.)
 
 The bundle is looked for in this order: `--bundle PATH`, then
 `$LNFLASH_BUNDLE`, then the directory holding the binary, then
-`/usr/share/lnflash`. (`lnflash/src/main.rs:42-45`)
+`/usr/share/lnflash`. (`lnflash/src/main.rs:49-52`)
 
 The full user-facing text ships inside the bundle as its `README`
 (`lnflash/payload/README-bundle.md`), including what the alarming but
@@ -309,7 +309,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:2196-2198`, `Justfile:2260-2269`. See
+automatically. (`Justfile:2196-2198`, `Justfile:2265-2274`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -349,18 +349,20 @@ LEVICULUM_FLASH_ONLY=<PORT> bash scripts/nrf-flash.sh t114 bsp-t114
 
 (`Justfile:2180-2185`; usage forms `leviculum-nrf/README.md:31-36`)
 
-### `just flash-rak4631` — every RAK4631 (bare module)
+### `just flash-rak4631` — every RAK4631
 
-Flashes every attached RAK4631 / WisMesh Pocket V2 with the bare-module
-build (no baseboard peripherals).
+Flashes every attached RAK4631 / WisMesh Pocket V2 with the baseboard
+build, the one the `lnflash` bundle ships. Until 2026-10-28 this recipe
+flashed the bare-module build; Lew retired that build then (D5 of the
+node-loop diff), since the baseboard image runs on a bare module unharmed.
 
 ```sh
 LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  bash scripts/nrf-flash.sh rak4631 bsp-rak4631
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2199-2201`)
+(`Justfile:2197-2205`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -376,16 +378,17 @@ Expands to:
 ```sh
 LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  bash scripts/nrf-flash.sh rak4631 bsp-rak4631
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2203-2207`)
+(`Justfile:2207-2211`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
 Flashes with all RAK19026 baseboard peripherals enabled (display, GNSS,
 battery). `--features rak-baseboard` aggregates the three baseboard
-features. Use this for a complete WisMesh Pocket V2.
+features. The same image `just flash-rak4631` flashes since the bare
+build was retired; the name stays for the hands and scripts that know it.
 
 ```sh
 LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
@@ -393,7 +396,7 @@ LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2209-2215`; `rak-baseboard` aggregate
+(`Justfile:2213-2221`; `rak-baseboard` aggregate
 `leviculum-nrf/Cargo.toml:453`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
@@ -416,7 +419,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:2260-2269`)
+(`Justfile:2265-2274`)
 
 ### SenseCAP T1000-E: serial DFU
 
@@ -488,9 +491,11 @@ Debian's `esptool` 4.7.0 lacks the ESP32-S3 stub and fails with
 `stub_flasher_32s3.json` not found, so give it `--no-stub` or use
 `espflash` or the pinned `esptool` that `scripts/install-esptool.sh`
 installs. On the M9 keep the line at 230400 baud; its CH340K loses bytes
-at 460800 and above. `lnflash` has the transport (`lnflash/src/esp.rs`)
-but no ESP32 board in its catalogue yet, so these boards are flashed by
-hand or by recipe for now.
+at 460800 and above. `lnflash` does not flash ESP32 boards: it names
+one it finds on the bus and leaves it alone. Its ROM-loader transport,
+which no board ever reached, was removed with #476 and can be restored
+from commit 39071420 when the M9 entry lands; until then these boards
+are flashed by hand or by recipe.
 
 ## A note on disconnecting consumers
 

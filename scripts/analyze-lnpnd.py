@@ -24,7 +24,8 @@ Phases, in the order an operator asks the questions:
                              departures by reason, /lev/status queries
   4. Peers                -- offer and sync rounds per peer, with outcome
   5. Clients              -- mailbox requests served, own mail received
-  6. Liveness             -- gaps in the PN_STORE heartbeat
+  6. Liveness             -- gaps in the PN_STORE heartbeat, and the
+                             PN_CENSUS heap tables from first to last line
   7. Format health        -- lines that do not parse, events not in the list
 
 The log format is `NAME key=value ... t=<ms>` (docs/src/structured-event-logs.md),
@@ -51,7 +52,25 @@ KNOWN = {
     "PN_MAILBOX",
     "PN_STORE",
     "PN_STORE_FULL",
+    "PN_CENSUS",
+    "PN_STORE_LIMIT",
 }
+
+# The PN_CENSUS columns, heap bytes per table (lnpnd/src/census.rs), in the
+# order the line prints them.
+CENSUS_COLUMNS = (
+    "peers",
+    "store_index",
+    "store_writer",
+    "sync_out",
+    "sync_in",
+    "dup",
+    "links",
+    "mailbox",
+    "config",
+    "eventbuf",
+    "tables",
+)
 
 # A heartbeat gap worth naming. PN_STORE fires every STORE_MAINTENANCE_SECS
 # (480 s, lnpnd/src/engine.rs:69), so anything past twice that is either a
@@ -106,6 +125,8 @@ class Stats:
         self.status_ids = 0
         self.store_full_rounds = 0
         self.store_full_dropped = 0
+        # The last start's PN_STORE_LIMIT line (order 1548), as read.
+        self.limit_line = None
 
         # Phase 4: capped at MAX_TRACKED_PEERS, never by traffic.
         self.peer_offers = defaultdict(lambda: defaultdict(int))
@@ -130,6 +151,11 @@ class Stats:
         self.last_heartbeat_t = None
         self.heartbeat_gaps = 0
         self.heartbeat_gap_max = 0
+        # The first and last heap census and the resident peak; two lines,
+        # never a series.
+        self.census_first = None
+        self.census_last = None
+        self.census_rss_max = 0
 
     def track(self, peer):
         """Whether this peer is one of the tracked ones; counts it if not."""
@@ -208,6 +234,14 @@ def consume(stats, line):
         stats.rejected_by_reason[values.get("reason", "?")] += 1
         stats.rejected_via[values.get("via", "?")] += 1
 
+    elif name == "PN_STORE_LIMIT":
+        stats.limit_line = (
+            as_int(values, "bytes"),
+            values.get("source", "?").strip('"'),
+            as_int(values, "ram_mb"),
+            as_int(values, "index_mb"),
+        )
+
     elif name == "PN_STORE_FULL":
         stats.store_full_rounds += 1
         stats.store_full_dropped += as_int(values, "dropped")
@@ -235,6 +269,16 @@ def consume(stats, line):
                     stats.heartbeat_gaps += 1
                     stats.heartbeat_gap_max = max(stats.heartbeat_gap_max, gap)
             stats.last_heartbeat_t = t
+
+    elif name == "PN_CENSUS":
+        census = {key: as_int(values, key) for key in CENSUS_COLUMNS}
+        census["rss_kb"] = as_int(values, "rss_kb")
+        census["stored"] = as_int(values, "stored")
+        census["t"] = t
+        if stats.census_first is None:
+            stats.census_first = census
+        stats.census_last = census
+        stats.census_rss_max = max(stats.census_rss_max, census["rss_kb"])
 
     elif name == "PN_OFFER":
         # The totals are counted for every peer; only the per-peer
@@ -339,6 +383,12 @@ def report(stats):
         )
     else:
         out("no PN_STORE line in this log -- store utilisation unknown\n")
+    if stats.limit_line is not None:
+        limit, source, ram_mb, index_mb = stats.limit_line
+        out(
+            f"limit at start   {human_bytes(limit)} ({source}), index {index_mb} MB "
+            f"when full, host RAM {ram_mb} MB\n"
+        )
     evicted = sum(stats.evicted.values())
     out(
         f"flow             {stats.accepted} accepted, {stats.get_served} delivered to clients, "
@@ -425,6 +475,19 @@ def report(stats):
             out("  cross-check against the journal for a restart\n")
     else:
         out("no PN_STORE line -- liveness cannot be distinguished from a quiet node\n")
+    if stats.census_first is not None:
+        first, last = stats.census_first, stats.census_last
+        span_min = max(last["t"] - first["t"], 0) / 60_000
+        out(f"heap census      {stats.by_event['PN_CENSUS']} PN_CENSUS line(s) over {span_min:.1f} min, "
+            f"rss {first['rss_kb']} -> {last['rss_kb']} kB (peak {stats.census_rss_max} kB), "
+            f"stored {first['stored']} -> {last['stored']}\n")
+        for key in CENSUS_COLUMNS:
+            delta_kb = (last[key] - first[key]) / 1000
+            slope = f"{delta_kb / span_min:+.1f} kB/min" if span_min > 0 else "n/a"
+            out(f"  {key:<14} {first[key] / 1000:>10.1f} -> {last[key] / 1000:>10.1f} kB  {slope}\n")
+        out("  a restart in the span resets every column; read the journal before a slope\n")
+    else:
+        out("no PN_CENSUS line -- the heap tables are unknown (lnpnd before order 1515)\n")
 
     out("\n== 7. Format health ==\n")
     out(f"unparsed lines   {stats.unparsed}\n")

@@ -26,9 +26,9 @@
 //! 8. [`run`]: telemetry, the propagation role, the announce gate, and the
 //!    main loop, which never returns.
 //!
-//! The T114 is the first binary on it (order 1085); the solar node, the
-//! T1000-E and the RAK4631 follow one order each. Until they have moved,
-//! their binaries still carry their own copy of everything here.
+//! The T114 (order 1085) and the RAK4631 (order 1572) run it; the solar
+//! node and the T1000-E follow, one order each, and until then their
+//! binaries carry their own copy of everything here.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -1412,14 +1412,14 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// separately rather than having to infer it from the numbers.
 ///
 /// The per-board part of telemetry is exactly this function: which
-/// peripherals exist. The T114 has the L76K (#69), so a fix contributes
+/// peripherals exist, by the `gnss` and `battery` features. The T114 has
+/// the L76K (#69) and the Pocket V2 the ZOE-M8Q, so a fix contributes
 /// position, speed, bearing and the HDOP the accuracy gate reads.
 ///
 /// The battery field is filled from the same ADC task the panel and the
 /// `BATTERY` log line read (#380). A pack voltage on the air is the one
 /// reading that reaches an operator who is still in the field, which is
-/// the situation #380 exists for. Same source and same shape as the V2
-/// at `bin/rak4631.rs`, so the two boards report the field alike.
+/// the situation #380 exists for. One source, one shape on every board.
 ///
 /// The die temperature it does have: every nRF52840 carries one and the
 /// SoftDevice is enabled on both boards, so it is read here through the

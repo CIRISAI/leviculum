@@ -21,6 +21,11 @@ pub struct Config {
     /// defaults in [`Config::rnsd_default`]. lnsd reads it, rnsd ignores it.
     #[serde(default)]
     pub auto: crate::auto_layer::AutoMedia,
+    /// `[auto] server_list` (#471 step 3): `host:port` entries that replace
+    /// the shipped server list, dialled in their order. `None` without the
+    /// key. lnsd reads it, rnsd ignores it.
+    #[serde(default)]
+    pub auto_server_list: Option<Vec<String>>,
     /// The decision lnsd took from [`Self::auto`], the host marker and the
     /// environment ([`crate::auto_layer::apply`]); `None` for a node built in
     /// code, which has no automatic layer. Not a config key.
@@ -1212,6 +1217,12 @@ pub struct InterfaceConfig {
     #[serde(skip)]
     pub prebound_tcp_listener:
         Option<std::sync::Arc<std::sync::Mutex<Option<std::net::TcpListener>>>>,
+    /// The automatic layer's server slot this TCP client dials (#471 step
+    /// 3, [`crate::auto_servers`]): the entry it starts on, and where it
+    /// fails over to. Never a config-file key, skipped by serde like the
+    /// listener above; `None` for every configured section.
+    #[serde(skip)]
+    pub server_slot: Option<crate::auto_servers::ServerSlot>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -1377,6 +1388,7 @@ impl Default for InterfaceConfig {
             tcp_keepalive_probes: None,
             tcp_user_timeout_secs: None,
             prebound_tcp_listener: None,
+            server_slot: None,
         }
     }
 }
@@ -1746,7 +1758,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             "reticulum logging interfaces auto\n\
              Default Interface\n\
-             lan=yes servers=no bluetooth=no serial=no\n"
+             lan=yes servers=yes bluetooth=yes serial=yes\n"
         );
     }
 

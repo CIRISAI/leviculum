@@ -518,3 +518,225 @@ fn the_i2p_keyfile_is_owner_only() {
     assert_eq!(load_keyfile(&path).as_deref(), Some("a2V5"));
     assert_eq!(mode(&path), 0o600);
 }
+
+// --- 1576: the reference's signature type and key file name ------------------
+
+/// The node identity hash the key file tests run with, and the two names the
+/// reference derives from it for a section called `I2P`. Computed with the
+/// reference's own `RNS.Identity.full_hash` and `RNS.hexrep` over
+/// `server_tunnel`'s expressions
+/// (`reference/Reticulum/RNS/Interfaces/I2PInterface.py:269-273`), so the
+/// names are the ones an rnsd on the same storage directory reads and writes.
+const KEY_ID_HASH: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+const KEY_SECTION: &str = "I2P";
+const REFERENCE_OLD_FORMAT: &str =
+    "1773daac0b85211719376f2e5c589ff25b351b46012d5c39635f260b494853c6.i2p";
+const REFERENCE_NEW_FORMAT: &str =
+    "42e8ea23de56f4915ab1dd48967906591e9d8f7dd553aebdb9d66c9c5bc5f5e2.i2p";
+
+/// A SAM bridge that records every command line and answers it without ever
+/// connecting a stream: `SESSION CREATE` with the golden key, the session
+/// socket held open, `STREAM ACCEPT` and `STREAM CONNECT` with `OK` and then
+/// silence. Enough to watch what a session asks SAM for.
+async fn start_recording_sam(seen: Arc<std::sync::Mutex<Vec<String>>>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                match sam::read_line(&mut sock).await {
+                    Ok(l) if l.starts_with("HELLO") => {}
+                    _ => return,
+                }
+                let _ = sock.write_all(b"HELLO REPLY RESULT=OK VERSION=3.1\n").await;
+                let Ok(cmd) = sam::read_line(&mut sock).await else {
+                    return;
+                };
+                seen.lock().unwrap().push(cmd.clone());
+                let reply = if cmd.starts_with("SESSION CREATE") {
+                    format!("SESSION STATUS RESULT=OK DESTINATION={GOLDEN_PRIV}\n")
+                } else if cmd.starts_with("NAMING LOOKUP") {
+                    format!("NAMING REPLY RESULT=OK NAME=x VALUE={GOLDEN_PUB}\n")
+                } else {
+                    "STREAM STATUS RESULT=OK\n".to_string()
+                };
+                let _ = sock.write_all(reply.as_bytes()).await;
+                let mut scratch = [0u8; 256];
+                while let Ok(n) = sock.read(&mut scratch).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+fn server_config(
+    sam: SocketAddr,
+    keyfile: PathBuf,
+) -> (I2pServerConfig, mpsc::Receiver<InterfaceHandle>) {
+    let (new_tx, new_rx) = mpsc::channel::<InterfaceHandle>(8);
+    (
+        I2pServerConfig {
+            sam_address: sam.to_string(),
+            keyfile,
+            buffer_size: 32,
+            name_prefix: "srv".to_string(),
+            reconnect_wait: Duration::from_millis(200),
+            timeouts: I2pTimeouts::default(),
+            next_id: Arc::new(AtomicUsize::new(100)),
+            new_interface_tx: new_tx,
+            ifac: None,
+            ingress_control: false,
+            outbound_socket_hook: None,
+        },
+        new_rx,
+    )
+}
+
+fn session_creates(seen: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.starts_with("SESSION CREATE"))
+        .cloned()
+        .collect()
+}
+
+/// A peer's session asks SAM for an Ed25519 destination, as the reference's
+/// `DEST GENERATE SIGNATURE_TYPE=7` does; without the option i2pd made lnsd a
+/// DSA-SHA1 one (1568).
+#[tokio::test]
+async fn a_peer_session_asks_for_an_ed25519_destination() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sam_addr = start_recording_sam(Arc::clone(&seen)).await;
+    let _client = spawn_i2p_client(I2pClientConfig {
+        id: InterfaceId(1),
+        name: "cli".to_string(),
+        sam_address: sam_addr.to_string(),
+        peer: "somepeer.b32.i2p".to_string(),
+        buffer_size: 32,
+        reconnect_wait: Duration::from_millis(200),
+        timeouts: I2pTimeouts::default(),
+        ifac: None,
+        reconnect_notify: None,
+        ingress_control: false,
+        outbound_socket_hook: None,
+    });
+    assert!(
+        wait_until(Duration::from_secs(5), || !session_creates(&seen)
+            .is_empty())
+        .await,
+        "the client never created a session"
+    );
+    let create = &session_creates(&seen)[0];
+    assert!(
+        create.contains("DESTINATION=TRANSIENT SIGNATURE_TYPE=7"),
+        "{create}"
+    );
+}
+
+/// rnsd first, then lnsd, on one storage directory: lnsd finds the key the
+/// reference wrote under the reference's name and opens its session with it,
+/// so the node keeps rnsd's address. A stored key is sent with no signature
+/// type, so a DSA key an older lnsd made stays the key it is.
+#[tokio::test]
+async fn lnsd_takes_over_the_key_rnsd_wrote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_dir = tmp.path().join("i2p");
+    std::fs::create_dir_all(&key_dir).unwrap();
+    // The reference writes the bare base64 private key, no newline
+    // (I2PInterface.py:285-287).
+    std::fs::write(key_dir.join(REFERENCE_NEW_FORMAT), GOLDEN_PRIV).unwrap();
+
+    let keyfile = resolve_keyfile(&key_dir, KEY_SECTION, &KEY_ID_HASH, 0);
+    assert_eq!(keyfile, key_dir.join(REFERENCE_NEW_FORMAT));
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sam_addr = start_recording_sam(Arc::clone(&seen)).await;
+    let (config, _rx) = server_config(sam_addr, keyfile);
+    spawn_i2p_server(config);
+    assert!(
+        wait_until(Duration::from_secs(5), || !session_creates(&seen)
+            .is_empty())
+        .await,
+        "the endpoint never created a session"
+    );
+    let create = &session_creates(&seen)[0];
+    assert!(
+        create.contains(&format!("DESTINATION={GOLDEN_PRIV} ")),
+        "the endpoint must open its session with rnsd's key: {create}"
+    );
+    assert!(!create.contains("SIGNATURE_TYPE"), "{create}");
+}
+
+/// lnsd first, then rnsd: lnsd on a fresh directory asks for an Ed25519 key
+/// and stores what SAM made under the reference's new-format name, which is
+/// the file rnsd opens for the same section and transport identity.
+#[tokio::test]
+async fn rnsd_finds_the_key_lnsd_wrote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_dir = tmp.path().join("i2p");
+    let keyfile = resolve_keyfile(&key_dir, KEY_SECTION, &KEY_ID_HASH, 0);
+    assert_eq!(keyfile, key_dir.join(REFERENCE_NEW_FORMAT));
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sam_addr = start_recording_sam(Arc::clone(&seen)).await;
+    let (config, _rx) = server_config(sam_addr, keyfile.clone());
+    spawn_i2p_server(config);
+    assert!(
+        wait_until(Duration::from_secs(5), || keyfile.is_file()).await,
+        "the endpoint stored no key"
+    );
+    let create = &session_creates(&seen)[0];
+    assert!(
+        create.contains("DESTINATION=TRANSIENT SIGNATURE_TYPE=7"),
+        "{create}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&keyfile).unwrap().trim(),
+        GOLDEN_PRIV
+    );
+}
+
+/// The reference prefers its old `sha256(sha256(name))` file when present
+/// (I2PInterface.py:276-279), over a new-format one.
+#[test]
+fn the_old_format_key_is_preferred_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_dir = tmp.path();
+    std::fs::write(key_dir.join(REFERENCE_OLD_FORMAT), GOLDEN_PRIV).unwrap();
+    std::fs::write(key_dir.join(REFERENCE_NEW_FORMAT), "other").unwrap();
+    assert_eq!(
+        resolve_keyfile(key_dir, KEY_SECTION, &KEY_ID_HASH, 0),
+        key_dir.join(REFERENCE_OLD_FORMAT)
+    );
+}
+
+/// An lnsd before 1576 kept its key as `i2p_iface_<index>.i2p`. That file is
+/// renamed to the reference's name once, with its content, so the node keeps
+/// its address; the next start finds the new name and renames nothing.
+#[test]
+fn an_index_named_key_is_adopted_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key_dir = tmp.path();
+    let legacy = key_dir.join("i2p_iface_3.i2p");
+    std::fs::write(&legacy, GOLDEN_PRIV).unwrap();
+
+    let adopted = resolve_keyfile(key_dir, KEY_SECTION, &KEY_ID_HASH, 3);
+    assert_eq!(adopted, key_dir.join(REFERENCE_NEW_FORMAT));
+    assert!(!legacy.exists(), "the old name must be gone");
+    assert_eq!(std::fs::read_to_string(&adopted).unwrap(), GOLDEN_PRIV);
+
+    // A second section's index-named file is not taken by this one.
+    let other = key_dir.join("i2p_iface_4.i2p");
+    std::fs::write(&other, "other").unwrap();
+    assert_eq!(
+        resolve_keyfile(key_dir, KEY_SECTION, &KEY_ID_HASH, 4),
+        key_dir.join(REFERENCE_NEW_FORMAT)
+    );
+    assert!(other.exists(), "the name is taken, so nothing is adopted");
+}

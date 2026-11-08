@@ -408,3 +408,24 @@ pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
 pub const PANIC_LED_PORT: u8 = 0;
 pub const PANIC_LED_PIN: u8 = 19;
 pub const PANIC_LED_ACTIVE_LOW: bool = false;
+
+/// The button, LED and off pins of the 8 s off and the boot-time factory
+/// reset (order 1511, `crate::power`). Off: both LEDs (P0.19, P0.15,
+/// active high) go low. The board has no display.
+#[cfg(feature = "softdevice")]
+pub const POWER: crate::power::PowerFacts = crate::power::PowerFacts {
+    button_active_high: false,
+    led: (PANIC_LED_PORT, PANIC_LED_PIN, PANIC_LED_ACTIVE_LOW),
+    off_pins: &[
+        crate::power::OffPin {
+            port: 0,
+            pin: 19,
+            high: false,
+        },
+        crate::power::OffPin {
+            port: 0,
+            pin: 15,
+            high: false,
+        },
+    ],
+};

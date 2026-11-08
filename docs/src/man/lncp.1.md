@@ -26,6 +26,9 @@ In send mode, **lncp** sends *file* to the node identified by *destination* (a 3
 **--config** *dir*
 :   Path to alternative Reticulum configuration directory.
 
+**--no-start**
+:   Fail when no shared instance answers, as the tools did before the zero-config step 4, instead of starting **lnsd**(1) as a child. Without it, **lncp** looks for a running shared instance (the abstract socket `@rns/`*instance*, then TCP loopback at the configured `shared_instance_port`, else 37428, for the instance `default` or a configured port) and, when none answers, starts `lnsd -c` *dir* on the same configuration directory and waits until it accepts. The daemon is **lncp**'s child and goes when **lncp** exits; its output goes to `lnsd.log` in the configuration directory. One line on standard error says which, `INSTANCE started=yes via=unix pid=`*pid* after a start, and with **-v** also `INSTANCE found=yes via=unix pid=none`. A configuration with `share_instance = No` starts nothing. The **lnsd** started is `$LEVICULUM_LNSD`, else the one beside **lncp**, else the one on `PATH`.
+
 **-v**, **--verbose**
 :   Increase verbosity. Repeat for more detail.
 

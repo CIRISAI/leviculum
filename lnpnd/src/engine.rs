@@ -54,6 +54,7 @@ use leviculum_lxmf::{
 
 use leviculum_std::file_propagation_store::SettledWrites;
 
+use crate::census::{CensusHandle, EventSender, PnCensus, CENSUS_PERIOD_MS};
 use crate::hook_profile::{HookProfile, HookTimes, Section};
 use crate::mailbox::{MailboxConfig, MailboxRuntime};
 use crate::peering::{InboundSync, InboundSyncStart, PeeringRuntime, SyncSender};
@@ -165,6 +166,12 @@ pub trait WriteBehind {
     fn writes_outstanding(&self) -> bool {
         false
     }
+
+    /// What the store holds in RAM, for `PN_CENSUS` ([`crate::census`]).
+    /// A store that cannot say reports nothing.
+    fn heap_census(&self) -> leviculum_std::StoreHeapCensus {
+        leviculum_std::StoreHeapCensus::default()
+    }
 }
 
 impl WriteBehind for leviculum_std::FilePropagationStore {
@@ -178,6 +185,10 @@ impl WriteBehind for leviculum_std::FilePropagationStore {
 
     fn writes_outstanding(&self) -> bool {
         leviculum_std::FilePropagationStore::writes_outstanding(self)
+    }
+
+    fn heap_census(&self) -> leviculum_std::StoreHeapCensus {
+        leviculum_std::FilePropagationStore::heap_census(self)
     }
 }
 
@@ -324,7 +335,7 @@ pub enum EngineEvent {
 
 pub struct Engine<S> {
     state: State<S>,
-    events: std::sync::mpsc::Sender<EngineEvent>,
+    events: crate::census::EventSender,
     /// Proof hashes awaiting their data event, per link, in emission order.
     pending_proofs: HashMap<LinkId, VecDeque<[u8; 32]>>,
     /// Links peers and clients opened to the propagation destination,
@@ -382,6 +393,12 @@ pub struct Engine<S> {
     /// When each open link last asked `/lev/status`
     /// ([`LEV_STATUS_MIN_SPACING_MS`]); dropped with the link.
     status_asked_at: HashMap<LinkId, u64>,
+    /// The SIGUSR1 request and the event printer's count
+    /// ([`crate::census`]).
+    census: CensusHandle,
+    /// When the next periodic `PN_CENSUS` line is due; 0 until the first
+    /// tick books it [`CENSUS_PERIOD_MS`] on.
+    next_census_at: u64,
 }
 
 /// An accepted upload whose proof waits until its append is durable.
@@ -448,6 +465,26 @@ impl Verdicts {
 }
 
 impl Pending {
+    /// Heap bytes the queued payload pins, for `PN_CENSUS sync_in=`.
+    fn heap_bytes(&self) -> usize {
+        let verdicts = |verdicts: &Verdicts| match verdicts {
+            Verdicts::Ground(map) => crate::census::hash_table_bytes(
+                map.capacity(),
+                std::mem::size_of::<(TransientId, Option<u16>)>(),
+            ),
+            Verdicts::Inline { .. } => 0,
+        };
+        match self {
+            Pending::Packet {
+                data, verdicts: v, ..
+            }
+            | Pending::Resource {
+                data, verdicts: v, ..
+            } => data.capacity() + verdicts(v),
+            Pending::Sync { job, verdicts: v } => job.heap_bytes() + verdicts(v),
+        }
+    }
+
     /// A finished validation, ready for the store.
     fn from_validated(done: ValidationDone) -> Self {
         let ValidationDone {
@@ -515,7 +552,7 @@ pub(crate) fn log_reject_sized(reason: &'static str, via: &'static str, bytes: u
 /// operator sees at the default log level. Client uploads, maintenance and
 /// peer sync all come through here, so a cull is never logged in two
 /// shapes.
-pub(crate) fn log_evictions(evicted: &[Eviction], events: &std::sync::mpsc::Sender<EngineEvent>) {
+pub(crate) fn log_evictions(evicted: &[Eviction], events: &crate::census::EventSender) {
     for eviction in evicted {
         tracing::debug!(
             event = "PN_EVICT",
@@ -546,6 +583,8 @@ fn full_hex(bytes: &[u8]) -> String {
 impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
     pub fn new(config: EngineConfig<S>) -> (Self, std::sync::mpsc::Receiver<EngineEvent>) {
         let (events, receiver) = std::sync::mpsc::channel();
+        let events = EventSender::from(events);
+        let census = CensusHandle::new(&events);
         let announce_interval_secs = config.announce_interval_secs;
         let announce_delay_secs = config.announce_delay_secs;
         let start_announce_owed = config.announce_at_start;
@@ -572,9 +611,17 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
                 departures_path: None,
                 departures_dirty: false,
                 status_asked_at: HashMap::new(),
+                census,
+                next_census_at: 0,
             },
             receiver,
         )
+    }
+
+    /// The handle the daemon's main loop asks for a census through, and
+    /// marks the events it took (`PN_CENSUS`, [`crate::census`]).
+    pub fn census_handle(&self) -> CensusHandle {
+        self.census.clone()
     }
 
     /// Space outbound sync rounds by `interval` instead of the reference's
@@ -608,6 +655,88 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         }
     }
 
+    /// The heap census of the role (order 1515, [`crate::census`]): one
+    /// byte estimate per table the engine holds. Walks the store's index
+    /// once for its paths, so it runs on the census cadence, not per hook.
+    fn census(&self, ready: &Ready<S>) -> PnCensus {
+        use crate::census::hash_table_bytes;
+        use leviculum_core::heap_census::vec_deque_bytes;
+        use std::mem::size_of;
+        let store = ready.node.store().heap_census();
+        let peering = ready.peering.heap_census();
+        let pending: usize = vec_deque_bytes(&self.pending)
+            + self.pending.iter().map(Pending::heap_bytes).sum::<usize>();
+        let links = hash_table_bytes(
+            self.pending_proofs.capacity(),
+            size_of::<LinkId>() + size_of::<VecDeque<[u8; 32]>>(),
+        ) + self
+            .pending_proofs
+            .values()
+            .map(|proofs| proofs.capacity() * 32)
+            .sum::<usize>()
+            + hash_table_bytes(self.inbound_links.capacity(), size_of::<LinkId>())
+            + vec_deque_bytes(&self.unproven)
+            + hash_table_bytes(
+                self.status_asked_at.capacity(),
+                size_of::<LinkId>() + size_of::<u64>(),
+            )
+            + peering.links;
+        let config = (ready.control_allowed.capacity()
+            + ready.auth_allowed.as_ref().map_or(0, Vec::capacity))
+            * 16
+            + peering.config
+            + ready
+                .mailbox
+                .as_ref()
+                .map_or(0, MailboxRuntime::config_bytes);
+        let events_queued = self.events.queued();
+        let dup = ready.node.dup_counts();
+        PnCensus {
+            peers: peering.peers,
+            store_index: store.index_bytes,
+            store_writer: store.writer_bytes,
+            sync_out: peering.sync_out,
+            sync_in: pending + self.validation.bytes_in_flight(),
+            dup: ready.node.heap_bytes() + peering.origins,
+            links,
+            mailbox: ready.mailbox.as_ref().map_or(0, MailboxRuntime::heap_bytes),
+            config,
+            eventbuf: events_queued * size_of::<EngineEvent>(),
+            rss_kb: crate::census::rss_kb(),
+            stored: store.messages,
+            peered: ready.peering.peer_count(),
+            events_queued,
+            processed_ids: dup.processed,
+            departed_ids: dup.departed,
+            origin_ids: peering.origin_ids,
+            // An origin goes with its message (`Origins`), so the store's
+            // count bounds them.
+            dup_cap_ids: dup.processed_cap + dup.departed_cap + store.messages,
+            origin_slots: peering.origin_slots,
+        }
+    }
+
+    /// Whether a peer's sync batch is in progress: arrived as a resource
+    /// and not yet all stored, whether it waits for the stamp worker, for
+    /// its turn in the queue, or for its next slice. Gates `/offer` as the
+    /// reference's sequential validation does
+    /// ([`PeeringRuntime::answer_offer_request`]).
+    fn batch_in_progress(&self) -> bool {
+        self.validation.resources_in_flight() > 0
+            || self
+                .pending
+                .iter()
+                .any(|queued| matches!(queued, Pending::Resource { .. } | Pending::Sync { .. }))
+    }
+
+    /// The census of a registered engine, `None` before it registered.
+    pub fn census_now(&self) -> Option<PnCensus> {
+        match &self.state {
+            State::Ready(ready) => Some(self.census(ready)),
+            _ => None,
+        }
+    }
+
     /// One `PN_DEPART` line per id that left the store since the last
     /// hook, whichever path removed it (a `/get` confirmation, an own-
     /// mailbox delivery, an eviction during an upload or a peer's sync, an
@@ -617,8 +746,13 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         if fresh.is_empty() {
             return;
         }
+        // The departures' count bound (order 1558) is the host's to keep:
+        // the role leaves the walk out of the board's image.
+        ready.node.bound_departures();
         self.departures_dirty = true;
         for (transient_id, reason) in fresh {
+            // Its origin goes with it (LV-1003).
+            ready.peering.origins_mut().forget(&transient_id);
             tracing::debug!(
                 event = "PN_DEPART",
                 id = full_hex(&transient_id),
@@ -1720,6 +1854,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         let settled = ready.node.store_mut().settle_writes();
         for transient_id in &settled.failed {
             ready.node.forget_processed(transient_id);
+            ready.peering.origins_mut().forget(transient_id);
             log_reject("store_failed", "writer");
             self.emit(EngineEvent::Rejected {
                 detail: format!("store write failed for {}", short_hex(transient_id)),
@@ -2067,9 +2202,14 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
                 data,
                 ..
             } if destination_hash == &ready.destination_hash && path == OFFER_REQUEST_PATH => {
-                let response = ready
-                    .peering
-                    .answer_offer_request(core, &ready.node, link_id, data);
+                let batch_in_progress = self.batch_in_progress();
+                let response = ready.peering.answer_offer_request(
+                    core,
+                    &ready.node,
+                    link_id,
+                    data,
+                    batch_in_progress,
+                );
                 self.respond(core, link_id, request_id, &response, &mut out);
             }
             NodeEvent::RequestReceived {
@@ -2170,6 +2310,17 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
             log_evictions(&evicted, &self.events);
         }
         if sweep_due {
+            // Every removal reports a departure, which drops its origin;
+            // more origins than messages means one did not, and only then
+            // is the map walked (LV-1003, `Origins::prune`).
+            let stored = ready.node.store().count().unwrap_or(0);
+            let expiry = ready.node.config().message_expiry_secs;
+            ready
+                .peering
+                .origins_mut()
+                .prune_if_above(stored, unix_secs(), expiry);
+        }
+        if sweep_due {
             // The store's own line: how full it is against its limit, and
             // -- because it fires on a fixed cadence whether or not any
             // traffic arrived -- the log's liveness heartbeat. A quiet node
@@ -2186,6 +2337,19 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
             // the engine does not see, is on disk within one period.
             self.save_departures(&ready, true);
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
+        }
+        // The heap census (order 1515): booked a period after the first
+        // tick, and at once when SIGUSR1 asked for it.
+        if self.next_census_at == 0 {
+            self.next_census_at = now_ms + CENSUS_PERIOD_MS;
+        }
+        let requested = self.census.take_request();
+        if requested || now_ms >= self.next_census_at {
+            self.census(&ready)
+                .log(if requested { "signal" } else { "periodic" });
+            if !requested {
+                self.next_census_at = now_ms + CENSUS_PERIOD_MS;
+            }
         }
         self.profile.lap(Section::Tick);
 
@@ -4172,6 +4336,244 @@ mod tests {
     /// answers `ERROR_THROTTLED` (`offer_request`, `:2286-2291`). Without
     /// it the remote can resubmit at link rate, each attempt a full stamp
     /// validation on this node.
+    /// LV-1000 (order 1515): a peer's sync batch that has arrived and is
+    /// not yet all stored postpones every other non-static peer's `/offer`
+    /// with `ERROR_THROTTLED`, as the reference's sequential validation
+    /// does (`reference/LXMF/LXMF/LXMRouter.py:2273-2278`). Without the gate
+    /// 14 peers queued batches faster than the store took them, and the
+    /// queue grew from 6.8 to 37 MB in seven minutes of the growth soak.
+    #[test]
+    fn a_peer_batch_in_progress_postpones_the_next_offer() {
+        use leviculum_lxmf::{OfferResponse, PeerSyncEnvelope};
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: cost_free(),
+            store: MemoryPropagationStore::new(4_000_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 4_000_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        // A validated peer's batch of 50 messages, arrived and queued.
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let batch_link = LinkId::new([0x42; 16]);
+        ready
+            .peering
+            .validate_link_for_tests(batch_link, [0x17; 16]);
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: (0..50u32)
+                .map(|seed| {
+                    let mut message = vec![0x11u8; leviculum_lxmf::constants::LXMF_OVERHEAD + 240];
+                    message[16..20].copy_from_slice(&seed.to_be_bytes());
+                    message.extend_from_slice(&[0x5b; STAMP_SIZE]);
+                    message
+                })
+                .collect(),
+        }
+        .encode();
+        engine.on_inbound_resource_completed(&mut ready, &server, &batch_link, &envelope);
+        engine.state = State::Ready(ready);
+        assert!(
+            engine.batch_in_progress(),
+            "the batch must be queued, or the test proves nothing"
+        );
+
+        // Another peer, identified on its own link, offers.
+        let sender = leviculum_std::generate_identity();
+        let link_id = identified_link(
+            &mut engine,
+            &mut server,
+            &mut client,
+            destination_hash,
+            &signing_key,
+            &sender,
+        );
+        let offer = |engine: &mut Engine<MemoryPropagationStore>,
+                     server: &mut leviculum_std::driver::StdNodeCore,
+                     client: &mut leviculum_std::driver::StdNodeCore| {
+            let (_, out) = client
+                .send_request(&link_id, OFFER_REQUEST_PATH, Some(&[0xc0]), None)
+                .expect("request");
+            let (events, _) = converse(engine, server, client, out);
+            events
+                .into_iter()
+                .find_map(|event| match event {
+                    NodeEvent::ResponseReceived { response_data, .. } => {
+                        OfferResponse::decode(&response_data).ok()
+                    }
+                    _ => None,
+                })
+                .expect("the node must answer the offer")
+        };
+        assert_eq!(
+            offer(&mut engine, &mut server, &mut client),
+            OfferResponse::Error(PeerError::Throttled),
+            "an offer while a batch is in progress is postponed"
+        );
+
+        // The batch stored, the same offer passes the gate (and fails later,
+        // on the key it does not carry).
+        let mut rounds = 0;
+        while engine.batch_in_progress() {
+            rounds += 1;
+            assert!(rounds < 1000, "the batch did not drain");
+            let now = server.now_ms();
+            let _ = engine.on_tick(&mut server, now);
+        }
+        assert_ne!(
+            offer(&mut engine, &mut server, &mut client),
+            OfferResponse::Error(PeerError::Throttled),
+            "with no batch in progress the gate must not postpone"
+        );
+    }
+
+    /// LV-1003, finding 1: a message this node received, delivered and
+    /// purged is not wanted back when a peer offers it. Before, `/offer`
+    /// asked the store alone, wanted it, and the bodies crossed the wire to
+    /// be dropped at ingest as duplicates (1524's cell
+    /// `lnpnd_delivered_not_wanted_back`: `offered=5 wanted=5`, then five
+    /// `dup=true via="sync"`). The message arrives by a peer's sync, so the
+    /// engine's origin record is checked on the way. Positive control: a
+    /// fresh id in the same offer is wanted.
+    #[test]
+    fn a_message_delivered_and_purged_here_is_not_wanted_back() {
+        use leviculum_lxmf::{OfferResponse, PeerOffer, PeerSyncEnvelope};
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: cost_free(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            // At cost 0 any peering key passes, so the offer reaches the
+            // membership answer.
+            peering: PeeringConfig {
+                peering_cost: 0,
+                ..PeeringConfig::default()
+            },
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        // A peer's sync stores one message here.
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let from_peer = [0x17; 16];
+        let batch_link = LinkId::new([0x42; 16]);
+        ready.peering.validate_link_for_tests(batch_link, from_peer);
+        let message = synced_message(0x31);
+        let transient_id =
+            leviculum_core::crypto::full_hash(&message[..message.len() - STAMP_SIZE]);
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![message],
+        }
+        .encode();
+        engine.on_inbound_resource_completed(&mut ready, &server, &batch_link, &envelope);
+        let mut out = TickOutput::empty();
+        absorb(&mut engine, &mut ready, &mut server, &mut out);
+        assert!(
+            ready.node.store().contains(&transient_id).expect("store"),
+            "the message must be stored, or the test proves nothing"
+        );
+        assert!(
+            ready
+                .peering
+                .origins_mut()
+                .came_from(&transient_id, &from_peer),
+            "the engine records which peer a synced message came from"
+        );
+
+        // Delivered and purged, as the engine's local delivery does.
+        assert!(ready.node.store_mut().purge(&transient_id).expect("purge"));
+        ready
+            .node
+            .note_delivered_locally(&transient_id, unix_secs());
+        engine.log_departures(&mut ready);
+        assert!(
+            !ready
+                .peering
+                .origins_mut()
+                .came_from(&transient_id, &from_peer),
+            "the origin goes with the message"
+        );
+        engine.state = State::Ready(ready);
+
+        // A peer offers it back, beside one this node never saw.
+        let sender = leviculum_std::generate_identity();
+        let link_id = identified_link(
+            &mut engine,
+            &mut server,
+            &mut client,
+            destination_hash,
+            &signing_key,
+            &sender,
+        );
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let fresh = [0x99; 32];
+        let offer = PeerOffer {
+            peering_key: [0; 32],
+            transient_ids: vec![transient_id, fresh],
+        }
+        .encode();
+        let response =
+            ready
+                .peering
+                .answer_offer_request(&mut server, &ready.node, &link_id, &offer, false);
+        engine.state = State::Ready(ready);
+        assert_eq!(
+            OfferResponse::decode(&response).ok(),
+            Some(OfferResponse::Wanted(vec![fresh])),
+            "the delivered message is not wanted back, the fresh one is"
+        );
+    }
+
     #[test]
     fn an_invalid_stamp_upload_throttles_its_identified_sender() {
         use leviculum_lxmf::peering::PN_STAMP_THROTTLE_SECS;
@@ -4257,9 +4659,10 @@ mod tests {
             State::Ready(ready) => ready,
             _ => panic!("engine must be ready"),
         };
-        let response = ready
-            .peering
-            .answer_offer_request(&mut server, &ready.node, &second, &[]);
+        let response =
+            ready
+                .peering
+                .answer_offer_request(&mut server, &ready.node, &second, &[], false);
         assert_eq!(
             OfferResponse::decode(&response).ok(),
             Some(OfferResponse::Error(PeerError::Throttled)),
@@ -4506,9 +4909,10 @@ mod tests {
                 State::Ready(ready) => ready,
                 _ => panic!("engine must be ready"),
             };
-            let response = ready
-                .peering
-                .answer_offer_request(server, &ready.node, &link_id, &[]);
+            let response =
+                ready
+                    .peering
+                    .answer_offer_request(server, &ready.node, &link_id, &[], false);
             engine.state = State::Ready(ready);
             OfferResponse::decode(&response).ok()
         };

@@ -6,7 +6,7 @@ an `EXTERNAL_FLASH_DEVICES` line that is a template default on both
 vendors, and three units answered nothing to a JEDEC read (081522b2; the
 evidence sits in the board files, `CONFIG`,
 `leviculum-nrf/src/boards/t114.rs:188` and `CONFIG`,
-`leviculum-nrf/src/boards/rak4631.rs:182`). So the store went where there
+`leviculum-nrf/src/boards/rak4631.rs:208`). So the store went where there
 is flash: **16 pages of the nRF52840's own flash between the firmware
 image and the persistence pages** (`STORE`, `leviculum-nrf/memory.x:93`,
 landed in 81fcb46e; the log format chosen in 59c36129). Every capacity,
@@ -467,7 +467,7 @@ given size, bounded at 1 000 records of 1 024 B
 (`STORE_STORM_MAX_BYTES`, `leviculum-core/src/envelope.rs:286`) and
 tagged so a later batch can purge exactly those (`TAG_BENCH`,
 `leviculum-nrf/firmware/src/record_store.rs:78`); `lnflash --store-storm
-COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:157`).
+COUNT[,BYTES]` sends it (`--store-storm`, `lnflash/src/main.rs:170`).
 The numbers owed are a connected phone's throughput and a LoRa link's
 delivery rate across a storm, measured against the same run without one.
 
@@ -502,6 +502,17 @@ claimants and the scan that replaces it is cheap — but the honest
 statement is "unnecessary", not "impossible". What remains impossible is
 the second row: the peer sets scale with peers, and we control neither
 how many peer with us nor, therefore, that number.
+
+The host daemon is the other way round. lnpnd keeps its store index in
+RAM, 289 bytes a message (`INDEX_BYTES_PER_MESSAGE`,
+`lnpnd/src/store_limit.rs`) against the field's mean message of 330
+bytes (`MEAN_MESSAGE_BYTES`), so a full store costs about 0.88 bytes of
+heap per byte of limit. Its sizing rule therefore follows the host: the
+default limit, lxmd's 500 MB, is lowered at start until a full store's
+index takes at most a quarter of `MemTotal`, which leaves 500 MB on any
+host from 1.75 GB up and gives a 1 GB host 285 MB. A configured limit
+is honoured and warned about when it breaks the rule (lnpnd(1),
+CONFIGURATION). The board has no index, so no such rule.
 
 **What a full scan costs.** `for_each`
 (`leviculum-nrf/record-log/src/lib.rs:555`) walks every page, reads each
@@ -860,7 +871,7 @@ default under a comment denying one. Neither board answered a JEDEC read
 on any unit we own; both sets of pin aliases are gone and the reasons
 are in the board files (`CONFIG`,
 `leviculum-nrf/src/boards/t114.rs:188`; `CONFIG`,
-`leviculum-nrf/src/boards/rak4631.rs:182`).
+`leviculum-nrf/src/boards/rak4631.rs:208`).
 
 The larger correction was this page's own premise. It costed a store on
 two parts that do not exist, and the recommendation rested on figures
@@ -1023,12 +1034,27 @@ Three cursor semantics the build pinned down, tested in
   conformance cells drive this path explicitly (`lxmf_pn_reoffer`).
 
 What a Python peer observes: offers that may include ids it already
-holds — including messages it itself sent us, since a cursor cannot
-encode the reference's `from_peer` exclusion
-(`flush_peer_distribution_queue`, `LXMRouter.py:2484`). That is
-wire-legal and self-limiting: `offer_request` answers out of its own
-store membership (`:2317-2318`) and declines them, and the cost is
-offer-list bytes, not message bodies. The round-robin page reclaim
+holds. A cursor alone cannot encode the reference's `from_peer`
+exclusion (`flush_peer_distribution_queue`, `LXMRouter.py:2484`), and
+offering a message back to the peer it came from cost more than
+offer-list bytes: `offer_request` answers out of its own store
+membership (`:2317-2318`), so a peer that had delivered and purged the
+message wanted it back and the bodies crossed again, to be dropped at
+ingest as duplicates (LV-1003, measured by the periculum cell
+`lnpnd_delivered_not_wanted_back` on both stacks). Two changes on the
+host close it. lnpnd records, for every message a peer's sync stores,
+which peer it came from (`Origins` in `lnpnd/src/peering.rs`, about 47
+bytes a stored message in RAM, dropped when the message leaves) and
+steps the offer toward that peer past it for good, as a permanent skip
+(`OfferBuilder::skip_held_by_peer`). The record lives in lnpnd, not in
+the role: in the role it cost the rak4631 3.5 KiB of flash for code the
+board never runs. And lnpnd's own `/offer` answer
+asks `PropagationNode::knows`: the store, the processed-id cache and
+the store's departures, so a message it delivered and let go is not
+wanted back from anyone. The second is a deviation from the reference's
+store-only answer with no wire effect; an unwanted id is one the peer
+keeps. The board records no origin and still offers back; its peer
+declines what it knows. The round-robin page reclaim
 also means a cursor's page can be erased and reused while the cursor
 still names the old sequence; page sequences are monotone, so a
 cursor pointing into a reclaimed page simply reads as "older than

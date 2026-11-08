@@ -20,6 +20,14 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- I2P (#99, #284, 1576): lnsd's `I2PInterface` now makes the destination
+  the reference makes, Ed25519 instead of i2pd's DSA-SHA1 default, and keeps
+  its key under the reference's file name, so rnsd and lnsd on one config
+  directory publish one `.b32.i2p` address. A key an older lnsd stored as
+  `i2p_iface_<n>.i2p` is renamed once and keeps its address and type. The
+  interface is behind a Cargo feature `i2p`, on by default. `just i2p-live`
+  runs on a private I2P network on loopback (`scripts/i2p-privnet.sh`) and
+  needs no internet.
 - loquax reactions (#232, 1104): the LXMF `FIELD_REACTION` as Columba,
   Ratspeak and MeshChatX send it, drawn under the message it reacts to with
   a count and yours marked, never as a message of its own; a reaction that
@@ -511,6 +519,18 @@ Toolchain: Rust 1.97.1
   here. Refs #381.
 
 ### Changed
+
+- `lnflash` asks nothing (#476, 1573): starting it flashes every board it
+  recognises. The overwrite question is gone; the radio is estimated
+  (stored settings other than the shipped eu868 are kept, otherwise the
+  preset of the host's country, read from the time zone and then the
+  locale: eu868, us915 or au915, eu868 where none applies); telemetry and
+  remote management are not asked and stay off. A board that ran our own
+  image settles a shared Board-ID without the name question. `--ask` puts
+  every question back. Unknown serial devices (an M9, an ESP32 RNode) get
+  one line and are left alone, a port lnsd or another program holds is
+  named with its holder instead of read half-blind, and a missing bundle
+  says where to get one. The ESP32 transport no run reached is removed.
 
 - Loss-aware path choice is the default on radio interfaces (Codeberg
   #230, 1380). With no `path_choice` in `[reticulum]`, an RNode interface

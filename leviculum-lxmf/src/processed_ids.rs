@@ -38,6 +38,16 @@
 //! prunes with and at most one bucket longer
 //! ([`crate::propagation_node::PROCESSED_ID_PRUNE_SLACK_SECS`], a day
 //! before this order, when the map was walked once a day).
+//!
+//! **The count cap (order 1558, LV-1000).** The window alone bounds the
+//! cache by time, not by size: at the soak's 2148 accepts a minute it
+//! grows by about 50 MB a day for 180 days. [`ProcessedIds::set_cap`]
+//! holds it to a count as well, oldest first: a week is then cut into
+//! parts of an eighth of the cap each, and while the cache holds more than
+//! the cap the oldest part goes whole, so the cache keeps between seven
+//! eighths of the cap and the cap, and a lookup searches at most about
+//! nine parts more than the weeks it spans. Without a cap (the default)
+//! a week is one part and nothing changes.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -205,11 +215,36 @@ impl Day {
 /// running bucket stays mostly sorted and the merge stays short.
 const OPEN_SEAL_LEN: usize = 4096;
 
+/// A capped cache is cut into about this many parts (module docs, "The
+/// count cap"): dropping the oldest drops an eighth of the cap at most.
+const PARTS_PER_CAP: usize = 8;
+
+/// A bucket's parts are numbered in the low bits of its map key
+/// ([`part_key`]): the key stays one integer, and a week holds up to 2^24
+/// parts.
+const PART_BITS: u32 = 24;
+
+/// The map key of `part` of bucket `day`: bucket in the high bits, so keys
+/// order by bucket, then part.
+const fn part_key(day: u64, part: u64) -> u64 {
+    (day << PART_BITS) | part
+}
+
+/// The bucket a map key belongs to.
+const fn day_of(key: u64) -> u64 {
+    key >> PART_BITS
+}
+
 /// The processed-id cache (module docs).
 pub struct ProcessedIds {
+    /// Keyed by bucket (`at_secs / bucket_secs`) and part within it
+    /// ([`part_key`]).
     days: BTreeMap<u64, Day>,
     len: usize,
     bucket_secs: u64,
+    /// The most ids held ([`Self::set_cap`]); `usize::MAX` holds every id
+    /// the window keeps.
+    cap: usize,
 }
 
 impl Default for ProcessedIds {
@@ -232,22 +267,68 @@ impl ProcessedIds {
             days: BTreeMap::new(),
             len: 0,
             bucket_secs: if bucket_secs == 0 { 1 } else { bucket_secs },
+            cap: usize::MAX,
         }
+    }
+
+    /// Hold at most `cap` ids (at least one), oldest dropped first by
+    /// whole parts (module docs, "The count cap"); a cache above the new
+    /// cap drops its oldest parts now. Returns the ids dropped.
+    pub fn set_cap(&mut self, cap: usize) -> usize {
+        self.cap = cap.max(1);
+        self.trim_to_cap()
+    }
+
+    /// The count the cache is held to, `usize::MAX` without a cap.
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    /// The most ids one part takes before the next is opened.
+    fn part_len(&self) -> usize {
+        if self.cap == usize::MAX {
+            usize::MAX
+        } else {
+            (self.cap / PARTS_PER_CAP).max(1)
+        }
+    }
+
+    fn trim_to_cap(&mut self) -> usize {
+        let mut dropped = 0;
+        while self.len > self.cap {
+            let Some((_, gone)) = self.days.pop_first() else {
+                break;
+            };
+            dropped += gone.len();
+            self.len -= gone.len();
+        }
+        dropped
     }
 
     /// Remember `transient_id` as processed at `at_secs`. An id already
     /// remembered in that bucket is not stored twice; one remembered in
     /// another is, and is answered for until the later bucket is pruned.
+    ///
+    /// With a cap, an id already held in any part of its bucket is not
+    /// stored again, a full part opens the next, and the oldest parts go
+    /// while the cache holds more than the cap.
     pub fn insert(&mut self, transient_id: &TransientId, at_secs: u64) {
-        let day = at_secs / self.bucket_secs;
-        if self
-            .days
-            .entry(day)
-            .or_default()
-            .insert(key_of(transient_id))
-        {
+        // A time past what a key can number shares the last bucket.
+        let day = (at_secs / self.bucket_secs).min((u64::MAX >> PART_BITS) - 1);
+        let key = key_of(transient_id);
+        let last_of_day = part_key(day + 1, 0) - 1;
+        let mut parts = self.days.range(part_key(day, 0)..=last_of_day);
+        let at = match parts.next_back() {
+            None => part_key(day, 0),
+            Some((_, newest)) if newest.contains(&key) => return,
+            Some(_) if parts.any(|(_, older)| older.contains(&key)) => return,
+            Some((&last, newest)) if newest.len() >= self.part_len() => (last + 1).min(last_of_day),
+            Some((&last, _)) => last,
+        };
+        if self.days.entry(at).or_default().insert(key) {
             self.len += 1;
         }
+        self.trim_to_cap();
     }
 
     /// Whether `transient_id` was remembered and not yet pruned: one fence
@@ -274,7 +355,8 @@ impl ProcessedIds {
     /// those a merge copies. Returns the ids dropped.
     pub fn prune(&mut self, now_secs: u64, window: u64) -> usize {
         let mut dropped = 0;
-        while let Some((&day, _)) = self.days.first_key_value() {
+        while let Some((&first, _)) = self.days.first_key_value() {
+            let day = day_of(first);
             let last_second = day
                 .saturating_mul(self.bucket_secs)
                 .saturating_add(self.bucket_secs - 1);
@@ -287,8 +369,9 @@ impl ProcessedIds {
         }
         self.len -= dropped;
         let today = now_secs / self.bucket_secs;
+        let part_len = self.part_len();
         for (&key, day) in self.days.iter_mut() {
-            if key < today || day.open.len() >= OPEN_SEAL_LEN {
+            if day_of(key) < today || day.open.len() >= OPEN_SEAL_LEN || day.len() >= part_len {
                 day.seal();
             }
         }
@@ -415,7 +498,7 @@ mod tests {
             cache.insert(id, 10 * BUCKET + 5);
         }
         cache.prune(11 * BUCKET, WINDOW);
-        let day = cache.days.get(&10).expect("the bucket");
+        let day = cache.days.get(&part_key(10, 0)).expect("the bucket");
         assert!(day.open.is_empty(), "an ended bucket is sealed");
         assert_eq!(day.fence_bits, 9, "5000 ids over 512 slots");
         assert!(ids.iter().all(|id| cache.contains(id)));
@@ -443,6 +526,46 @@ mod tests {
         assert_eq!(cache.prune(100 * BUCKET + BUCKET + WINDOW, WINDOW), 2);
         assert!(cache.is_empty() && !cache.contains(&early));
         assert_eq!(cache.heap_bytes(), 0);
+    }
+
+    /// Order 1558: a capped cache never holds more than its cap, keeps at
+    /// least seven eighths of it once full, forgets the oldest ids first,
+    /// and answers for every id it still holds; one held in an earlier
+    /// part of its week is not stored twice.
+    #[test]
+    fn a_capped_cache_holds_its_cap_and_forgets_the_oldest_first() {
+        let mut state = 0x5be0_cd19_137e_2179;
+        let mut cache = ProcessedIds::new();
+        assert_eq!(cache.set_cap(800), 0);
+        let ids: Vec<TransientId> = (0..5_000).map(|_| random_id(&mut state)).collect();
+        for (n, id) in ids.iter().enumerate() {
+            // All inside one week: only the cap can drop anything.
+            cache.insert(id, 10 * BUCKET + n as u64);
+            assert!(
+                cache.len() <= 800,
+                "{} ids held over a cap of 800",
+                cache.len()
+            );
+            if n >= 800 {
+                assert!(cache.len() >= 700, "only {} ids held", cache.len());
+            }
+            if n % 997 == 0 {
+                cache.prune(10 * BUCKET + n as u64, WINDOW);
+            }
+        }
+        let held = cache.len();
+        assert!(ids[ids.len() - held..].iter().all(|id| cache.contains(id)));
+        assert!(ids[..ids.len() - held].iter().all(|id| !cache.contains(id)));
+        // The newest part holds the last id; inserting it again adds none,
+        // nor does an id from an older part of the same week.
+        cache.insert(&ids[ids.len() - 1], 10 * BUCKET + 9_000);
+        cache.insert(&ids[ids.len() - held], 10 * BUCKET + 9_001);
+        assert_eq!(cache.len(), held);
+        // A lower cap drops the oldest parts at once.
+        let dropped = cache.set_cap(100);
+        assert_eq!(cache.len(), held - dropped);
+        assert!(cache.len() <= 100);
+        assert!(cache.contains(&ids[ids.len() - 1]));
     }
 
     /// The cache keeps 16 bytes of the id: two ids that share them are one.
@@ -508,7 +631,10 @@ mod tests {
             let held = cache.len();
             let (dropped, prune_visits) = visits(|| cache.prune(now + BUCKET, WINDOW));
             assert!(dropped > 0, "the oldest bucket goes");
-            let sealed = cache.days.get(&(now / BUCKET)).map_or(0, Day::len) as u64;
+            let sealed = cache
+                .days
+                .get(&part_key(now / BUCKET, 0))
+                .map_or(0, Day::len) as u64;
             assert_eq!(sealed, week.len() as u64);
             assert_eq!(
                 prune_visits, sealed,

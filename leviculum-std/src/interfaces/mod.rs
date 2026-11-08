@@ -25,8 +25,11 @@ pub use firmware_request::{
     request_firmware_media_silence, request_firmware_reset, FirmwareRequest,
     FIRMWARE_ANNOUNCE_SIGNAL, FIRMWARE_MEDIA_RESTORE_SIGNAL, FIRMWARE_MEDIA_SILENCE_SIGNAL,
 };
+pub(crate) mod goodbye;
 pub mod hdlc;
+#[cfg(feature = "i2p")]
 pub(crate) mod i2p;
+pub(crate) use goodbye::{RadioGoodbyes, GOODBYE_BOUND};
 pub(crate) mod inventory;
 pub(crate) mod ipc;
 pub use ipc::{set_shared_instance_transport, shared_instance_transport, SharedInstanceTransport};

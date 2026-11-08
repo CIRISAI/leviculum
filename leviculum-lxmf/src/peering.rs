@@ -26,12 +26,16 @@
 //! answers with "want none" for what it already holds.
 //!
 //! What a Python peer observes from the cursor design: offers that may
-//! include ids it already holds, including messages it itself sent us (a
-//! cursor cannot encode the reference's `from_peer` exclusion,
-//! `flush_peer_distribution_queue`, `LXMRouter.py:2484`). That is
-//! wire-legal and self-limiting: `offer_request` answers out of its own
-//! store membership (`LXMRouter.py:2318`) and declines them; the cost is
-//! offer-list bytes, never message bodies.
+//! include ids it already holds. A cursor alone cannot encode the
+//! reference's `from_peer` exclusion (`flush_peer_distribution_queue`,
+//! `LXMRouter.py:2484`), and offering a message back to the peer it came
+//! from cost message bodies, not only offer-list bytes, whenever that peer
+//! had delivered and purged it since: `offer_request` answers out of its
+//! own store membership (`LXMRouter.py:2318`) and wants it back (LV-1003).
+//! A host therefore records each synced message's origin beside the store
+//! (lnpnd's peering runtime) and steps past it in the offer toward that
+//! peer ([`OfferBuilder::skip_held_by_peer`]); the board keeps no such
+//! record and still offers it back.
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::ops::ControlFlow;
@@ -1549,6 +1553,12 @@ pub struct InboundGate {
 }
 
 impl InboundGate {
+    /// Estimated heap bytes of the throttle map (a host census, lnpnd's
+    /// `PN_CENSUS peers=`).
+    pub fn heap_bytes(&self) -> usize {
+        leviculum_core::heap_census::btree_map_bytes(&self.throttled)
+    }
+
     /// Every gate the reference applies before looking at the offer
     /// itself (`offer_request`, `LXMRouter.py:2266-2295`), in its order:
     /// sequential stamp validation, concurrent inbound syncs, the
@@ -1596,10 +1606,11 @@ impl InboundGate {
     }
 }
 
-/// Answer the membership half of an `/offer`: wanted = ids not in the
-/// store (`offer_request`, `LXMRouter.py:2318-2329`). Store membership is
-/// the only filter, as in the reference — a drained id is re-accepted and
-/// re-deduplicated at ingest.
+/// Answer the membership half of an `/offer`: wanted = ids `known` does not
+/// name (`offer_request`, `LXMRouter.py:2318-2329`). The reference asks its
+/// store alone, so a drained id is wanted back and dropped at ingest; a
+/// host passes [`crate::PropagationNode::knows`], which also names what it
+/// processed and let go (LV-1003).
 pub fn answer_offer(
     transient_ids: &[TransientId],
     contains: impl Fn(&TransientId) -> bool,
@@ -1711,6 +1722,21 @@ impl OfferBuilder {
         self.cumulative += transfer_size;
         self.plan.ids.push(entry.transient_id);
         self.plan.cursor_target = entry.sequence;
+        ControlFlow::Continue(())
+    }
+
+    /// Step past `entry` without offering it: the peer the offer goes to is
+    /// the one it came from, as the host recorded at ingest (LV-1003). A permanent skip like oversize and low value, so the cursor
+    /// moves past it; the reference never offers a message to its
+    /// `from_peer` either (`flush_peer_distribution_queue`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:2484`).
+    pub fn skip_held_by_peer(&mut self, entry: &StoredMessage) -> ControlFlow<()> {
+        if self.stopped {
+            return ControlFlow::Break(());
+        }
+        if entry.sequence > self.initial_cursor {
+            self.plan.cursor_target = entry.sequence;
+        }
         ControlFlow::Continue(())
     }
 

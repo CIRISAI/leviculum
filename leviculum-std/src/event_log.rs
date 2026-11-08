@@ -955,6 +955,39 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PN_REJECT",
         required_keys: &["reason", "via"],
     },
+    // lnpnd: the role's heap census, one byte estimate per table, every
+    // ten minutes and on SIGUSR1 (order 1515, LV-1000), and the `dup`
+    // column's parts in ids against their bound (order 1558).
+    EventSchema {
+        name: "PN_CENSUS",
+        required_keys: &[
+            "occasion",
+            "peers",
+            "store_index",
+            "store_writer",
+            "sync_out",
+            "sync_in",
+            "dup",
+            "links",
+            "mailbox",
+            "config",
+            "eventbuf",
+            "tables",
+            "rss_kb",
+            "stored",
+            "processed_ids",
+            "departed_ids",
+            "origin_ids",
+            "dup_cap_ids",
+            "origin_slots",
+        ],
+    },
+    // lnpnd: the message store's limit at start, and whether it is the
+    // default bounded by the host's RAM or the config's (order 1548).
+    EventSchema {
+        name: "PN_STORE_LIMIT",
+        required_keys: &["bytes", "source", "ram_mb", "index_mb"],
+    },
     // lnpnd: an inbound sync batch had messages the store could not hold
     // even after eviction; `offered` is the batch, `dropped` what was lost.
     // The node declines offers until its next maintenance sweep (1294).
@@ -1278,7 +1311,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["key", "value", "rnsd"],
     },
     // Which configuration lnsd runs (`lnsd.rs`, #471): the file at `path`,
-    // or the built-in default because there is none. Once at startup.
+    // or the built-in default because there is none, and whether lnsd wrote
+    // that default to `path` on this start (`written=yes|no|failed`, open
+    // question 1). Once at startup.
     EventSchema {
         name: "CONFIG",
         required_keys: &["source", "path"],
@@ -1296,6 +1331,45 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "AUTO_LAYER",
         required_keys: &["state", "reason", "lan", "servers", "bluetooth", "serial"],
+    },
+    // The servers medium's choice (`auto_servers.rs`, #471 step 3): which
+    // list entry slot `slot` dials (`chosen`, `host:port`), why
+    // (`persisted`, `drawn`, `pinned`, `failover`, or `empty` with
+    // `chosen=none` for a list of none), and the entry a fail-over left
+    // (`from`, else `none`). Once per slot at startup, again per fail-over.
+    EventSchema {
+        name: "AUTO_SERVER",
+        required_keys: &["slot", "chosen", "reason", "from"],
+    },
+    // The Bluetooth medium's verdict (`auto_bluetooth.rs`, #471 step 6):
+    // the adapter BlueZ named (`none` else), why (`present`, `no_adapter`,
+    // `powered_off`, `configured`, `not_built`), whether a section was
+    // attached and its name. Once, again when the verdict changes.
+    EventSchema {
+        name: "AUTO_BLUETOOTH",
+        required_keys: &["adapter", "reason", "attached", "section"],
+    },
+    // The serial medium's verdict on one by-id entry (`auto_serial.rs`,
+    // #471 step 5): the board an LNode names (`none` else), the by-id name
+    // (`port`), `kind` (`lnode`, `rnode`, `bootloader`, `other`), why
+    // (`name`, `detect`, `debug_port`, `bootloader`, `not_candidate`,
+    // `held`, `talking`, `no_answer`, `configured`, `no_access`,
+    // `open_failed`, `not_built`), whether a section was attached and its
+    // name, and who holds the port (`pid:comm`, `unknown`, `none` when not
+    // `held`; 1567). Once per entry, again when the verdict changes.
+    EventSchema {
+        name: "AUTO_SERIAL",
+        required_keys: &[
+            "board", "port", "kind", "reason", "attached", "section", "holder",
+        ],
+    },
+    // A client tool's attach (`instance.rs`, `find_or_start`, #471 step 4):
+    // `found=yes` when a shared instance answered, `started=yes` with the
+    // child lnsd's pid when none did and the tool started one, and the
+    // channel (`via=unix|tcp`). Once per tool start.
+    EventSchema {
+        name: "INSTANCE",
+        required_keys: &["via", "pid"],
     },
     EventSchema {
         name: "LOCK_DEPTH_OVERFLOW",
@@ -1758,7 +1832,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4933`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4971`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

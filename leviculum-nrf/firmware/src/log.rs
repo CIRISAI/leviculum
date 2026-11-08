@@ -156,7 +156,7 @@ pub static LOG_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 ///
 /// It is *meaningful* from every logging context too, because every
 /// firmware entry point calls `embassy_nrf::init` — which starts RTC1 —
-/// at the start of `main`, before any log call (`bin/rak4631.rs:43`;
+/// at the start of `main`, before any log call (`bin/solarnode.rs:67`;
 /// on the shared loop `node_loop::enter`, `src/node_loop.rs:187`). The panic handler
 /// (`lib.rs:715`) and the `HardFault` exception (`lib.rs:955`) never log:
 /// both write their evidence to `.uninit` RAM and `sys_reset`, and it is

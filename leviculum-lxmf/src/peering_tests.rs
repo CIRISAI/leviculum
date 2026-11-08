@@ -1061,6 +1061,38 @@ fn build_offer_takes_everything_above_the_cursor_in_order() {
     assert_eq!(plan.cursor_target, 3);
 }
 
+/// LV-1003: an entry the peer itself sent us is stepped past like a
+/// permanent skip, not below the cursor, and not after a resumable stop.
+#[test]
+fn an_entry_held_by_the_peer_is_skipped_forever_via_the_cursor() {
+    let peer = peer_at(1);
+    let entries = [entry(1, 300, 16), entry(2, 300, 16), entry(3, 300, 16)];
+
+    let mut builder = OfferBuilder::new(&peer, OFFER_BYTES_LIMIT);
+    assert!(builder.skip_held_by_peer(&entries[0]).is_continue());
+    assert!(builder.skip_held_by_peer(&entries[1]).is_continue());
+    assert!(builder.push(&entries[2]).is_continue());
+    let plan = builder.finish().unwrap();
+    assert_eq!(plan.ids, vec![entries[2].transient_id]);
+    assert_eq!(plan.cursor_target, 3);
+
+    // Alone it still concludes the cursor, so the next round moves on.
+    let mut builder = OfferBuilder::new(&peer, OFFER_BYTES_LIMIT);
+    let _ = builder.skip_held_by_peer(&entries[1]);
+    assert_eq!(builder.finish().unwrap().cursor_target, 2);
+
+    // Below the cursor it changes nothing.
+    let mut builder = OfferBuilder::new(&peer, OFFER_BYTES_LIMIT);
+    let _ = builder.skip_held_by_peer(&entries[0]);
+    assert_eq!(builder.finish(), None);
+
+    // After a resumable stop it moves nothing either.
+    let mut builder = OfferBuilder::new(&peer, offer_encoded_len(0));
+    assert!(builder.push(&entries[1]).is_break());
+    assert!(builder.skip_held_by_peer(&entries[2]).is_break());
+    assert_eq!(builder.finish(), None);
+}
+
 #[test]
 fn low_value_and_oversize_entries_are_skipped_forever_via_the_cursor() {
     // Peer requires stamp value ≥ 13 (announce fixture); transfer limit

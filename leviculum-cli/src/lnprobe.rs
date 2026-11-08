@@ -63,6 +63,11 @@ struct Args {
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
 
+    /// Fail when no shared instance answers instead of starting lnsd as a
+    /// child (zero-config, #471)
+    #[arg(long)]
+    no_start: bool,
+
     /// Full destination name in dotted notation
     full_name: Option<String>,
 
@@ -171,6 +176,23 @@ async fn run(args: Args) -> i32 {
         .unwrap_or_else(Config::default_config_dir);
     let config = daemon_rpc::load_config(&config_dir);
     let instance_name = daemon_rpc::resolve_instance_name(None, config.as_ref());
+    // Find the shared instance, or start lnsd as our child (#471 step 4),
+    // held to the end of `run`: the daemon it started goes with us. A
+    // started lnsd wrote its first-start file into an empty directory, so
+    // the config is read again.
+    let _instance = match leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance_name,
+        args.no_start,
+        leviculum_std::instance::Report::from_verbose(args.verbose > 0),
+    ) {
+        Ok(instance) => instance,
+        Err(e) => {
+            eprintln!("lnprobe: {e}");
+            return EXIT_NO_PATH;
+        }
+    };
+    let config = config.or_else(|| daemon_rpc::load_config(&config_dir));
     // The authkey is only needed for the informational RPC verbs
     // (first_hop_timeout, next_hop); probing itself runs over the packet
     // path. Missing identity file degrades those verbs, never the probe.

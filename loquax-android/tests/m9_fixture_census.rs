@@ -2,7 +2,8 @@
 //! host over the same fixture model and held to the same budgets
 //! ([`loquax_m9::census`]), and the client session's pull (slice five,
 //! 1363). Its own test binary, its two tests one at a time ([`SERIAL`]),
-//! so nothing else allocates while the allocator counts; here beside
+//! and the allocator counts only a thread that takes a census
+//! ([`counted`]), so nothing else is counted while it does; here beside
 //! `m9_scene_census.rs` and not in `loquax-m9` for that file's reason: a
 //! counting allocator is `unsafe` code, which `loquax-m9` forbids.
 
@@ -23,24 +24,53 @@ struct Counting;
 static LIVE: AtomicIsize = AtomicIsize::new(0);
 static PEAK: AtomicIsize = AtomicIsize::new(0);
 
+std::thread_local! {
+    /// Whether this thread's allocations are counted. Const-initialised, so
+    /// reading it from inside the allocator allocates nothing.
+    static COUNTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Count this thread's allocations from here on, and no other thread's.
+///
+/// [`SERIAL`] alone kept the two tests apart, not the harness: when one
+/// test ends, libtest's main thread records its result and captured
+/// output while the other test is inside its measurement, and the
+/// process-wide count took those bytes as the census's. The session pull
+/// then read `held=522`, then `held=1431`, against a 256-byte budget, in
+/// about one run in twenty with the default test threads, never with
+/// `--test-threads=1` and never with the pull alone (`held=0`).
+fn counted() {
+    COUNTED.with(|counted| counted.set(true));
+}
+
+fn counts_here() -> bool {
+    COUNTED.with(std::cell::Cell::get)
+}
+
 // The one unsafe here: a GlobalAlloc that counts and hands every call to
 // the system's, as `loquax-android/tests/m9_scene_census.rs` does.
 #[allow(unsafe_code)]
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let live =
-            LIVE.fetch_add(layout.size() as isize, Ordering::SeqCst) + layout.size() as isize;
-        PEAK.fetch_max(live, Ordering::SeqCst);
+        if counts_here() {
+            let live =
+                LIVE.fetch_add(layout.size() as isize, Ordering::SeqCst) + layout.size() as isize;
+            PEAK.fetch_max(live, Ordering::SeqCst);
+        }
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE.fetch_sub(layout.size() as isize, Ordering::SeqCst);
+        if counts_here() {
+            LIVE.fetch_sub(layout.size() as isize, Ordering::SeqCst);
+        }
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new: usize) -> *mut u8 {
-        let delta = new as isize - layout.size() as isize;
-        let live = LIVE.fetch_add(delta, Ordering::SeqCst) + delta;
-        PEAK.fetch_max(live, Ordering::SeqCst);
+        if counts_here() {
+            let delta = new as isize - layout.size() as isize;
+            let live = LIVE.fetch_add(delta, Ordering::SeqCst) + delta;
+            PEAK.fetch_max(live, Ordering::SeqCst);
+        }
         unsafe { System.realloc(ptr, layout, new) }
     }
 }
@@ -103,6 +133,7 @@ fn every_screen_keeps_the_boards_budgets() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counted();
     let mut probe = HostProbe { before: 0, low: 0 };
     let mut panel = Frame::new();
     let before = LIVE.load(Ordering::SeqCst);
@@ -150,6 +181,7 @@ fn a_client_sessions_pull_keeps_its_budget_in_lora_pages() {
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    counted();
     let mut probe = HostProbe { before: 0, low: 0 };
     let home = leviculum_core::Identity::generate(&mut rand_core::OsRng).public_key_bytes();
     let all = census::archive(30, 200);

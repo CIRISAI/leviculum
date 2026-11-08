@@ -205,8 +205,13 @@ const SOURCE_CRATES: &[&str] = &[
 /// ordinary string literal. A blocklist rather than an extension allowlist on
 /// purpose: an allowlist silently drops a citation into a file type nobody
 /// thought of, this can only produce visible noise.
+///
+/// `network` is our own server's top-level domain, the shipped server list's
+/// first entry (`auto_servers.rs`, #471 step 3); `example` and `invalid` are
+/// the RFC 2606 and RFC 6761 names tests and cells dial.
 const NON_FILE_EXTENSIONS: &[&str] = &[
-    "com", "net", "org", "io", "dev", "local", "onion", "i2p", "de",
+    "com", "net", "org", "io", "dev", "local", "onion", "i2p", "de", "network", "example",
+    "invalid",
 ];
 
 /// Directories never walked, for either the corpus or the resolution index.

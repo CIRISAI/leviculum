@@ -13,7 +13,10 @@
 #![warn(unreachable_pub)]
 
 pub mod api;
+pub mod auto_bluetooth;
 pub mod auto_layer;
+pub mod auto_serial;
+pub mod auto_servers;
 pub(crate) mod autoconnect;
 pub(crate) mod clock;
 pub mod config;
@@ -51,6 +54,7 @@ pub mod fuzz;
 /// not install it as the global allocator.
 pub mod heap_accounting;
 pub(crate) mod ini_config;
+pub mod instance;
 pub mod interfaces;
 pub(crate) mod known_destinations;
 pub mod local_time;
@@ -98,7 +102,7 @@ pub use driver::{
 pub use error::{Error, Result};
 pub use file_lxmf_store::FileLxmfStorage;
 pub use file_peer_store::FilePeerStore;
-pub use file_propagation_store::FilePropagationStore;
+pub use file_propagation_store::{FilePropagationStore, StoreHeapCensus};
 pub use file_ratchet_store::dest_ratchet_keys_path;
 pub use reticulum::Reticulum;
 /// Client for the shared-instance RPC socket (`rnstatus`/`rnpath` protocol).

@@ -6,7 +6,7 @@ lnsd -- Reticulum network daemon
 
 ## SYNOPSIS
 
-**lnsd** [**-c** *dir*] [**--storage** *dir*] [**-s**] [**--exampleconfig**] [**--writeconfig**] [**-v**...] [**-q**...]
+**lnsd** [**-c** *dir*] [**--storage** *dir*] [**--instance-name** *name*] [**-s**] [**--exampleconfig**] [**--writeconfig**] [**-v**...] [**-q**...]
 
 ## DESCRIPTION
 
@@ -14,7 +14,7 @@ lnsd -- Reticulum network daemon
 
 The drop-in does not hold in one place, where the same config file gives a different daemon (docs/src/audits/2026-10-11-shared-instance-rpc.md, D12). A config that omits `share_instance` gets no shared instance under **lnsd** (default `false`, **rnsd** `true`); one that omits `enable_transport` gets transport under **lnsd** (default `true`, **rnsd** `false`); an interface section without `enabled` is live under **lnsd** and skipped by **rnsd**. Configs written by `lnsd --exampleconfig` set the three defaulted keys explicitly.
 
-On startup, **lnsd** reads `config` from the configuration directory, opens all configured interfaces, and begins routing packets. When the directory holds no `config`, **lnsd** runs the configuration **rnsd** writes on its first start, held in memory and written nowhere: transport off, a shared instance named `default`, and one AutoInterface, `[[Default Interface]]`, in the default group. It logs which one it runs, `CONFIG source=file|default path=<file>`, and one `IFACE_CONFIG name= type= enabled= origin=configured|default` line per interface section. Before those it states which media it may start on its own, the `[auto]` section of the file (every medium off when the file has none) or the shipped defaults without a file: `AUTO_LAYER state=on|off reason=config|default|marker|env lan= servers= bluetooth= serial=`. `[auto] lan = yes` adds the AutoInterface of **rnsd**'s first-start file to a configuration that names none. It keeps running until it receives SIGINT or SIGTERM.
+On startup, **lnsd** reads `config` from the configuration directory, opens all configured interfaces, and begins routing packets. When the directory holds no `config`, **lnsd** runs the configuration **rnsd** writes on its first start (transport off, a shared instance named `default`, and one AutoInterface, `[[Default Interface]]`, in the default group) and writes it into the directory, as **rnsd** does: the bytes **--writeconfig** writes, `[auto]` section included. From the next start on it reads that file; a Python tool pointed at the directory finds it and writes no file of its own. A directory it may not write into is a warning, not a failed start. It logs which one it runs, `CONFIG source=file|default path=<file> written=yes|no|failed`, and one `IFACE_CONFIG name= type= enabled= origin=configured|default` line per interface section. Before those it states which media it may start on its own, the `[auto]` section of the file (every medium off when the file has none) or the shipped defaults without a file: `AUTO_LAYER state=on|off reason=config|default|marker|env lan= servers= bluetooth= serial=`. `[auto] lan = yes` adds the AutoInterface of **rnsd**'s first-start file to a configuration that names none. `[auto] servers = yes` dials up to two entries of the shipped server list (first **leviculum.network:4242**) as `bootstrap_only` TCP clients, raises an `autoconnect_discovered_interfaces` of `0` to two, moves a slot whose entry failed three connects in a row to the next entry with its backoff running on, keeps the choice in `<storage>/auto_servers`, and logs every choice as `AUTO_SERVER slot= chosen=<host:port> reason=persisted|drawn|pinned|failover from=`. `[auto] server_list = host:port, ...` replaces the shipped list and is dialled in its order. `[auto] serial = yes` reads */dev/serial/by-id* at start and every 5 s after: an LNode (our firmware's `leviculum` USB strings on a pid.codes `1209` id, its `if02` port) becomes a `SerialInterface` with `interface_mode = gateway` without being written to first, and an RNode candidate (a CP210x, CH9102 or Espressif USB bridge) is listened to for one second and, if it stayed silent or sent nothing but RNode status frames, sent one `CMD_DETECT`; one that answers becomes an `RNodeInterface`. A board keeps its section while **lnsd** runs: one that is unplugged and comes back is reopened by its interface, never given a second section. Both get the shipped LoRa settings (869463000 Hz, 125 kHz, SF8, CR5) in a section named `Auto Serial <n>`. A board in its bootloader, a port another process holds, a port the file names and any other device are left alone; each entry is logged once as `AUTO_SERIAL board= port= kind=lnode|rnode|bootloader|other reason= attached=yes|no section= holder=`. On SIGINT or SIGTERM every RNode is sent radio off and leave, and **lnsd** waits for those writes, at most 2 s, before it exits. `[auto] bluetooth = yes` asks BlueZ over D-Bus for an adapter at start, the default one or the one `LEVICULUM_AUTO_BLUETOOTH_ADAPTER` names: a powered adapter, or one **lnsd** can power, becomes a `BLEInterface` with its shipped defaults in a section named `Auto Bluetooth`, Columba-compatible; a missing adapter, an unreachable BlueZ or an adapter **lnsd** cannot power is one warning, the start goes on, and **lnsd** asks again every 5 s until one appears. A file with an enabled `BLEInterface` section of its own gets none added. The verdict is logged once, again when it changes, as `AUTO_BLUETOOTH adapter= reason=present|no_adapter|powered_off|configured|not_built attached=yes|no section=`. It keeps running until it receives SIGINT or SIGTERM.
 
 Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 
@@ -25,6 +25,9 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 
 **--storage** *dir*
 :   Storage directory path. Overrides the config file's `storage_path`, which in turn overrides the default `<config_dir>/storage`. It moves the daemon alone — the client tools read `storage_path` from the config — so a storage directory shared with `lnstatus`, `lncp`, `lnpath` or `lnprobe` belongs in the config file. Long-only on purpose: in `rnsd`, `-s` means `--service`, so the short letter stays reserved for that and the storage override is a Leviculum extension.
+
+**--instance-name** *name*
+:   Serve the shared instance under *name* instead of the config's `instance_name` (`default` without one); the file is not rewritten. A client tool that starts **lnsd** for an instance its configuration does not name passes it, so the daemon it started answers where it waits. A Leviculum extension: `rnsd` has no such option.
 
 **-s**, **--service**
 :   Declare that the daemon is running as a service, accepted for compatibility with `rnsd -s`. **lnsd** keeps logging to standard output, which journald captures; it does not redirect to a log file.
@@ -46,13 +49,25 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 **RUST_LOG**
 :   Overrides the verbosity flags. See the `tracing-subscriber` documentation for filter syntax.
 
+**LEVICULUM_AUTO_SERVERS**
+:   `host:port` entries separated by commas, replacing the server list and dialled in their order. Set but empty is a list of none.
+
+**LEVICULUM_AUTO_SERIAL_DIR**
+:   The directory `[auto] serial = yes` reads boards from, instead of */dev/serial/by-id*.
+
+**LEVICULUM_AUTO_BLUETOOTH_ADAPTER**
+:   The one adapter `[auto] bluetooth = yes` may take (`hci1`), instead of BlueZ's default adapter. A name BlueZ does not list is no adapter.
+
 **LEVICULUM_NO_AUTO**
 :   `1` turns every medium of the automatic layer off, whatever the `[auto]` section says (`reason=env`). `0` lifts the host marker */etc/leviculum/no-auto*. Interfaces the file names are never touched.
 
 ## FILES
 
 */etc/reticulum/config*
-:   System-wide configuration, used when it exists. The Debian package installs one here, which is also what lets Python clients find the running daemon without extra flags.
+:   System-wide configuration, used when it exists. The Debian package's unit runs **lnsd -c /etc/reticulum**, so its first start writes one here, which is also what lets Python clients find the running daemon without extra flags. The package itself ships none.
+
+*<storage>/auto_servers*
+:   The server entries the automatic layer dials, one `host:port` per slot, kept across starts while the list still names them.
 
 *~/.config/reticulum/config*
 :   Per-user configuration, used when the system-wide file is absent.

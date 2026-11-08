@@ -56,14 +56,16 @@ if [ ${#MISSING[@]} -gt 0 ]; then
     exit 1
 fi
 
-# Optional test dependency: i2pd provides the SAM bridge (127.0.0.1:7656) the
-# I2PInterface live tests need. The default suite covers I2PInterface with an
-# in-process mock SAM bridge, so i2pd is not required to go green; it only gates
-# the `#[ignore]`d live tests in leviculum-std (interfaces::i2p::i2pd_live). Warn
-# rather than fail when it is absent.
+# Optional test dependency: i2pd provides the SAM bridges the I2PInterface
+# live tests need. `just i2p-live` runs them on a private I2P network of five
+# i2pd on loopback (scripts/i2p-privnet.sh, 1576), so no internet either. The
+# default suite covers I2PInterface with an in-process mock SAM bridge, so
+# i2pd is not required to go green; it only gates the `#[ignore]`d live tests
+# in leviculum-std (interfaces::i2p::i2pd_live). Warn rather than fail when it
+# is absent.
 if ! command -v i2pd >/dev/null 2>&1; then
     echo "[install-ci] Note: optional test dependency 'i2pd' not found"
-    echo "[install-ci] Hint: sudo apt install i2pd (needed only for the ignored I2P live tests)"
+    echo "[install-ci] Hint: sudo apt install i2pd (needed only for just i2p-live and the I2P bed)"
 fi
 
 # Test dependency: the reference codecs the voice message round trip makes
@@ -598,8 +600,9 @@ fi
 #     package carries the S3 stub (step 6d's venv does; Debian's 4.7.0 does
 #     not and dies on stub_flasher_32s3.json without --no-stub). Steps 6c
 #     and 6d install both, so this only fires when one of them failed or
-#     was skipped; lnflash's esp transport searches the same places
-#     (lnflash/src/esp.rs, find_flasher).
+#     was skipped. lnflash does not flash ESP32 boards (#476 removed its
+#     unreached ROM-loader transport; commit 39071420 holds it), so these
+#     tools serve the recipes and hand flashing.
 ESP_STUB_CHECK='import esptool, os, sys
 want = {"stub_flasher_32s3.json", "esp32s3.json"}
 root = os.path.join(os.path.dirname(esptool.__file__), "targets", "stub_flasher")

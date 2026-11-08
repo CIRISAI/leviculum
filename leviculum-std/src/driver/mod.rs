@@ -1025,6 +1025,7 @@ fn reattach_bootstrap_interfaces(
         identity_hash,
         auto_peer_count,
         host_resolver,
+        goodbyes,
     } = bootstrap;
     let ctx = interface_build::InterfaceBuildCtx {
         next_id,
@@ -1040,6 +1041,7 @@ fn reattach_bootstrap_interfaces(
         transport_enabled,
         default_announce_rate: default_announce_rate.clone(),
         identity_hash: *identity_hash,
+        goodbyes: goodbyes.clone(),
     };
     for b in ifaces.iter_mut() {
         if !b.ids.is_empty() {
@@ -1160,6 +1162,8 @@ struct BootstrapWiring {
     /// The node's TCP target resolver, so a re-attached client resolves the
     /// way it did at start.
     host_resolver: Option<crate::resolver::HostResolver>,
+    /// The node's goodbye count, for a re-attached radio (1567).
+    goodbyes: crate::interfaces::RadioGoodbyes,
 }
 
 /// One `bootstrap_only` section under management.
@@ -1502,6 +1506,9 @@ pub struct ReticulumNode {
     /// so listeners live here and nowhere else; `interface_stats` reports the
     /// union of the two, which is the collection a Python `rnsd` reports.
     inventory: crate::interfaces::inventory::SharedInventory,
+    /// The radio interfaces that still owe their board a goodbye; `stop()`
+    /// waits for them, bounded (1567).
+    goodbyes: crate::interfaces::RadioGoodbyes,
     /// Live shared-instance client count, shared with the local accept loop.
     /// The reference labels an accepted IPC client with this count at accept
     /// time (LocalInterface.py:441/355).
@@ -1689,6 +1696,7 @@ impl ReticulumNode {
             iface_stats_map: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             radio_cache: crate::rpc::radio_cache::shared(),
             inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+            goodbyes: crate::interfaces::RadioGoodbyes::new(),
             local_client_count: Arc::new(AtomicUsize::new(0)),
             iface_ready_map: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
             runtime: None,
@@ -2217,6 +2225,7 @@ impl ReticulumNode {
             identity_hash: self.identity_hash(),
             auto_peer_count: self.auto_peer_count.clone(),
             host_resolver: self.host_resolver.clone(),
+            goodbyes: self.goodbyes.clone(),
         });
 
         // A previous stop() closed the completion registry when its event loop
@@ -2326,6 +2335,7 @@ impl ReticulumNode {
                 transport_enabled: self.is_transport_enabled(),
                 default_announce_rate: self.default_announce_rate(),
                 identity_hash: self.identity_hash(),
+                goodbyes: self.goodbyes.clone(),
             };
             {
                 // Every section once, enabled or not, before anything is
@@ -2410,6 +2420,7 @@ impl ReticulumNode {
                         jitter_arm,
                         subslot_arm,
                         identity_hash: self.identity_hash(),
+                        goodbye: Some(self.goodbyes.token()),
                     },
                     // Construction-time interface: lives for the node's
                     // lifetime, no caller-driven shutdown handle.
@@ -2528,6 +2539,30 @@ impl ReticulumNode {
             handle
                 .await
                 .map_err(|e| Error::Config(format!("runner panicked: {}", e)))?;
+        }
+
+        // The event loop is gone, so every radio interface is writing its
+        // board the goodbye (radio off, leave) on its own task. Let those
+        // writes land before the runtime below is torn down: on the rig
+        // (1567) a stop without this wait reached two RNodes of four, and the
+        // other two kept their radios on.
+        // The wait runs on the node's own runtime: the host's may have no
+        // timer (an embedder's IO-only runtime), and a node without radios
+        // asks no timer at all.
+        if let Some(runtime) = self.runtime.as_ref() {
+            if self.goodbyes.outstanding() > 0 {
+                let goodbyes = self.goodbyes.clone();
+                let waited = runtime
+                    .spawn(async move { goodbyes.wait(crate::interfaces::GOODBYE_BOUND).await })
+                    .await;
+                if let Ok(Err(left)) = waited {
+                    tracing::warn!(
+                        "{} radio interface(s) did not say goodbye within {} ms; stopping anyway",
+                        left,
+                        crate::interfaces::GOODBYE_BOUND.as_millis()
+                    );
+                }
+            }
         }
 
         // Persist state to disk
@@ -2708,6 +2743,7 @@ impl ReticulumNode {
                     jitter_arm,
                     subslot_arm,
                     identity_hash: self.identity_hash(),
+                    goodbye: Some(self.goodbyes.token()),
                 },
                 Some(shutdown_rx),
             )
@@ -2792,6 +2828,7 @@ impl ReticulumNode {
                 shutdown: Some(shutdown_rx),
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
                 liveness: TcpLiveness::default(),
+                failover: None,
             })
         };
 
@@ -2896,6 +2933,7 @@ impl ReticulumNode {
             transport_enabled: self.is_transport_enabled(),
             default_announce_rate: self.default_announce_rate(),
             identity_hash: self.identity_hash(),
+            goodbyes: self.goodbyes.clone(),
         };
 
         let built = {
@@ -5811,6 +5849,7 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
             shutdown: None,
             outbound_socket_hook: self.outbound_socket_hook.clone(),
             liveness: TcpLiveness::default(),
+            failover: None,
         });
         // A discovered peer we dialled ourselves comes up as a gateway while
         // this node routes for others, and stays `Full` otherwise: Python

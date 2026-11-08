@@ -42,7 +42,7 @@ constraint on peripheral handling, not a hope:
   when nothing answers, the task logs and exits
   (`DetectedKind::None`, `leviculum-nrf/src/display.rs:160-166`).
 - **Fail into the harmless state.** The user button is pulled to its
-  released level (`leviculum-nrf/src/button.rs:46`), so an absent button
+  released level (`leviculum-nrf/src/button.rs:48`), so an absent button
   reads as not pressed rather than as noise.
 - **Park rather than spin.** The GNSS task awaits a UART that simply
   stays silent when no receiver is fitted.

@@ -300,6 +300,29 @@ fn expiry_purges_only_what_is_older_than_thirty_days() {
     assert!(node.store().contains(&fresh).unwrap());
 }
 
+/// LV-1003: `knows` is the one reading behind both the ingest's duplicate
+/// test and the `/offer` answer. A message held is known, and so is one
+/// collected and purged; one never seen is not.
+#[test]
+fn a_collected_message_stays_known_after_it_left_the_store() {
+    let mut node = node(64 * 1024);
+    let held = accepted_id(&node.handle_upload(&envelope(7, 1), 100, stamp_of_value_zero));
+    let collected = accepted_id(&node.handle_upload(&envelope(7, 2), 100, stamp_of_value_zero));
+    assert!(node.store_mut().purge(&collected).unwrap());
+    node.note_confirmed_deletion(&collected, 200);
+
+    assert!(node.knows(&held, 300), "held in the store");
+    assert!(!node.store().contains(&collected).unwrap());
+    assert!(node.knows(&collected, 300), "collected and purged");
+    assert!(!node.knows(&[0x99; 32], 300), "never seen");
+
+    // The ingest agrees: offered again, it is a duplicate.
+    match node.handle_upload(&envelope(7, 2), 300, stamp_of_value_zero) {
+        UploadOutcome::Accepted { duplicate, .. } => assert!(duplicate),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn a_full_store_displaces_by_age_times_size() {
     // Room for roughly two field-sized messages.
@@ -2328,4 +2351,107 @@ fn only_a_node_that_serves_the_status_announces_it() {
         announce.metadata.retain(|(key, _)| *key != PN_META_CUSTOM);
         announce.encode().unwrap().len()
     }
+}
+
+/// Order 1558 (LV-1000): the duplicate list is bounded by count, not only
+/// by time. On a near-empty store the floor holds: past it the oldest
+/// processed ids and departures go, the newest stay duplicates and keep
+/// their `/lev/status` answer, and neither half ever holds more than its
+/// bound plus the departures' eighth of slack, the departures held by the
+/// host's [`PropagationNode::bound_departures`].
+#[test]
+fn the_duplicate_list_is_held_to_its_count_bound() {
+    use crate::lev_status::MessageStatus;
+
+    let mut node = node(64 * 1024);
+    node.track_departures();
+    let (processed_cap, departed_cap) = dup_caps(0);
+    assert_eq!(processed_cap, DUP_IDS_FLOOR);
+    let id_of = |n: u32| {
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        id[4..8].copy_from_slice(&n.wrapping_mul(0x9e37_79b9).to_be_bytes());
+        id
+    };
+    let total = (DUP_IDS_FLOOR + DUP_IDS_FLOOR / 4) as u32;
+    for n in 0..total {
+        node.note_delivered_locally(&id_of(n), 1_000 + u64::from(n));
+        // As a host does each time it takes the departures.
+        node.bound_departures();
+        let counts = node.dup_counts();
+        assert!(counts.processed <= processed_cap, "{counts:?}");
+        assert!(
+            counts.departed <= departed_cap + departed_cap / 8,
+            "{counts:?}"
+        );
+    }
+    let counts = node.dup_counts();
+    assert_eq!(counts.processed_cap, processed_cap);
+    assert_eq!(counts.departed_cap, departed_cap);
+    assert!(
+        counts.processed >= processed_cap - processed_cap / 8,
+        "{counts:?}"
+    );
+    assert!(counts.departed >= departed_cap, "{counts:?}");
+    let newest = id_of(total - 1);
+    let now = 1_000 + u64::from(total);
+    assert!(node.knows(&newest, now));
+    assert_eq!(node.status_of(&newest), MessageStatus::Delivered);
+    let oldest = id_of(0);
+    assert!(
+        !node.knows(&oldest, now),
+        "the oldest id outlived the bound"
+    );
+    assert_eq!(node.status_of(&oldest), MessageStatus::Unknown);
+
+    // A restore of more departures than the bound keeps the newest.
+    let mut restarted = self::node(64 * 1024);
+    let departures = (0..total).map(|n| {
+        (
+            id_of(n),
+            Departure {
+                at_secs: 1_000 + u64::from(n),
+                reason: crate::lev_status::DepartureReason::Delivered,
+            },
+        )
+    });
+    restarted.restore_departures(departures, now);
+    let counts = restarted.dup_counts();
+    assert!(
+        counts.departed <= departed_cap + departed_cap / 8,
+        "{counts:?}"
+    );
+    assert!(counts.processed <= processed_cap, "{counts:?}");
+    assert!(restarted.knows(&newest, now));
+}
+
+/// Order 1558: the bound follows the store's count as it is when the list
+/// reaches it, not as a tick last read it. A store holding more than the
+/// floor's worth gets its two ids a message without any tick.
+#[test]
+fn the_duplicate_bound_follows_the_store_without_a_tick() {
+    let stored = DUP_IDS_FLOOR / 2 + 8_192;
+    let mut store = MemoryPropagationStore::new(u64::MAX / 4);
+    for n in 0..stored as u32 {
+        let mut body = vec![0u8; MIN_BODY_LEN];
+        body[..4].copy_from_slice(&n.to_be_bytes());
+        let mut id = [0xeeu8; 32];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        store.append(&id, 1_000, 0, &body).unwrap();
+    }
+    // No departures tracked, so only the processed ids' own path can read
+    // the count.
+    let mut node = PropagationNode::new(store, cost_free());
+    let (processed_cap, _) = dup_caps(stored);
+    assert!(processed_cap > DUP_IDS_FLOOR);
+    for n in 0..processed_cap as u32 {
+        let mut id = [0x11u8; 32];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        node.note_delivered_locally(&id, 2_000 + u64::from(n));
+    }
+    let counts = node.dup_counts();
+    assert_eq!(counts.processed_cap, processed_cap, "{counts:?}");
+    assert_eq!(counts.departed_cap, 0, "{counts:?}");
+    assert!(counts.processed > DUP_IDS_FLOOR, "{counts:?}");
+    assert!(counts.processed <= processed_cap, "{counts:?}");
 }

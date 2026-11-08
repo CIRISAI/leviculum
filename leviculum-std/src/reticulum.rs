@@ -105,6 +105,17 @@ impl Reticulum {
         compose_diagnostic_dump(self.node.diagnostic_dump())
     }
 
+    /// Attach an interface to the running node, the way a section of the
+    /// configuration is attached at start. The serial medium of the
+    /// automatic layer hands a board found after the start through here
+    /// (#471 step 5). See [`ReticulumNode::spawn_interface`].
+    pub fn spawn_interface(
+        &self,
+        config: crate::config::InterfaceConfig,
+    ) -> Result<Vec<leviculum_core::transport::InterfaceId>> {
+        self.node.spawn_interface(config)
+    }
+
     /// Take the event receiver (can only be called once)
     pub fn take_event_receiver(&mut self) -> Option<EventReceiver> {
         self.node.take_event_receiver()

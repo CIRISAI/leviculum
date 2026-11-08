@@ -23,7 +23,6 @@
 pub mod dfu;
 pub mod entry;
 pub mod envelope;
-pub mod esp;
 pub mod flow;
 pub mod home;
 pub mod ihex;
@@ -35,6 +34,7 @@ pub mod name;
 pub mod pn_list;
 pub mod position;
 pub mod radio;
+pub mod region;
 pub mod softdevice;
 pub mod summarize;
 pub mod sys;

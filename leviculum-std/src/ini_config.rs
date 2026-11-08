@@ -75,6 +75,8 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
     let mut interfaces: HashMap<String, InterfaceConfig> = HashMap::new();
     // Every key `no` unless the file's `[auto]` section says otherwise (#471).
     let mut auto = AutoMedia::NONE;
+    // `[auto] server_list`, the pinned server list (#471 step 3).
+    let mut auto_server_list: Option<Vec<String>> = None;
 
     let mut current_section = String::new();
     let mut current_subsection: Option<String> = None;
@@ -174,6 +176,11 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
                     "reticulum" => apply_reticulum_key(&mut reticulum, key, value)
                         .map_err(|e| format!("config line {number}: {e}"))?,
                     "logging" => apply_logging_key(&mut reticulum, key, value),
+                    "auto" if key == "server_list" => {
+                        let list = crate::auto_servers::parse_list(value)
+                            .map_err(|e| format!("config line {number}: [auto] server_list: {e}"))?;
+                        auto_server_list = Some(list.iter().map(ToString::to_string).collect());
+                    }
                     "auto" => apply_auto_key(&mut auto, key, value)
                         .map_err(|e| format!("config line {number}: {e}"))?,
                     // A key in a section nobody reads. Python keeps it in the
@@ -358,6 +365,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         reticulum,
         interfaces: supported,
         auto,
+        auto_server_list,
         auto_layer: None,
         origin: crate::config::InterfaceOrigin::Configured,
     })
@@ -396,7 +404,7 @@ pub(crate) fn promote_discoverable_modes(interfaces: &mut HashMap<String, Interf
         };
         iface.mode = Some(mode.to_string());
         // Python logs this at NOTICE; our levels fold notice into info
-        // (lnsd.rs:343-345). The wording is the reference's, because the point
+        // (lnsd.rs:454-456). The wording is the reference's, because the point
         // is the same: the operator must be able to see in the log why the
         // mode is not what the config file says.
         tracing::info!(
@@ -718,7 +726,8 @@ fn apply_logging_key(config: &mut ReticulumConfig, key: &str, value: &str) {
 /// never reads the section, so its values are ours to define: the four
 /// media as booleans. A value that is no boolean refuses the file, as it does
 /// in `[reticulum]`: a switch that keeps the automatic layer out must not be
-/// guessed. An unknown key is warned about and ignored.
+/// guessed. An unknown key is warned about and ignored. `server_list`, the
+/// one key that is no medium, is read beside this in [`parse_ini`].
 fn apply_auto_key(auto: &mut AutoMedia, key: &str, value: &str) -> Result<(), String> {
     let slot = match key {
         "lan" => &mut auto.lan,
@@ -727,8 +736,8 @@ fn apply_auto_key(auto: &mut AutoMedia, key: &str, value: &str) -> Result<(), St
         "serial" => &mut auto.serial,
         other => {
             tracing::warn!(
-                "'{}' in [auto] is not a medium lnsd knows (lan, servers, bluetooth, serial) \
-                 and is ignored",
+                "'{}' in [auto] is not a key lnsd knows (lan, servers, bluetooth, serial, \
+                 server_list) and is ignored",
                 other
             );
             return Ok(());
@@ -3662,6 +3671,31 @@ mod tests {
         // An unknown medium is warned about; it neither refuses nor sets.
         let config = parse_ini("[auto]\nwifi = yes\n").expect("parses");
         assert_eq!(config.auto, AutoMedia::NONE);
+    }
+
+    /// `[auto] server_list` (#471 step 3) pins the server list; an entry
+    /// that is no `host:port` refuses the file, absent is `None`.
+    #[test]
+    fn the_auto_server_list_pins_the_servers() {
+        let config =
+            parse_ini("[auto]\n  servers = yes\n  server_list = a.example:4242, [::1]:7\n")
+                .expect("parses");
+        assert_eq!(
+            config.auto_server_list,
+            Some(vec!["a.example:4242".to_string(), "[::1]:7".to_string()])
+        );
+        assert!(config.auto.servers);
+        assert_eq!(
+            parse_ini("[auto]\nlan = yes\n")
+                .expect("parses")
+                .auto_server_list,
+            None
+        );
+        let err = parse_ini("[auto]\nserver_list = nowhere\n").expect_err("refused");
+        assert!(
+            err.contains("config line 2") && err.contains("server_list"),
+            "{err}"
+        );
     }
 
     /// A switch that keeps the automatic layer out is not guessed.

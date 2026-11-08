@@ -633,6 +633,21 @@ where
 }
 
 impl LxmfRouter {
+    /// Estimated heap bytes of the router's id tables and queues, for a
+    /// host daemon's census (lnpnd's `PN_CENSUS mailbox=`, order 1515): the
+    /// map spines by the census's B-tree model, the held proofs' ring. The
+    /// messages behind the outbound entries are not followed.
+    pub fn heap_bytes(&self) -> usize {
+        use leviculum_core::heap_census::{btree_map_bytes, btree_set_bytes, vec_deque_bytes};
+        btree_map_bytes(&self.outbound)
+            + btree_set_bytes(&self.builds_outstanding)
+            + btree_map_bytes(&self.delivered_ids)
+            + btree_map_bytes(&self.processed_ids)
+            + btree_set_bytes(&self.ignored)
+            + btree_set_bytes(&self.preemptive_path_requests)
+            + vec_deque_bytes(&self.held_proofs)
+    }
+
     pub fn new(node: LxmfNode, identity_hash: [u8; 16], config: RouterConfig) -> Self {
         Self {
             node,

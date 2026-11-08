@@ -605,7 +605,7 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   picture's fitted size, not its cell box, in which iced centred it.
 
 **Slice 4a, built 2026-11-02 (1303).** The core is `no_std` plus `alloc`;
-`just lnomad-core-no-std` (`Justfile:2578`) holds it.
+`just lnomad-core-no-std` (`Justfile:2597`) holds it.
 
 - **`leviculum-micron` is `no_std` always** (`leviculum-micron/src/lib.rs:25`):
   a parser has no use for a file or a clock, and its `std` paths were
@@ -824,8 +824,8 @@ as the phone, off by default until Lew flips it.
   (`loquax/src/keys.rs:620`, `browse::open`, `loquax/src/ui/browse.rs:231`);
   with the tab off they say how to switch it on.
 - **The terminal** draws the tab with lnomad's terminal view over the
-  whole screen (`draw_screen`, `loquax/src/tui.rs:1689`), in the
-  messenger's theme and colour depth (`loquax/src/tui.rs:1955`). It asks
+  whole screen (`draw_screen`, `loquax/src/tui.rs:1707`), in the
+  messenger's theme and colour depth (`loquax/src/tui.rs:1973`). It asks
   for no pictures (`no_images`): the map owns the terminal's picture
   protocol, and two pickers on one terminal is a later question.
 - **The window** draws it with lnomad's window view beside the rail

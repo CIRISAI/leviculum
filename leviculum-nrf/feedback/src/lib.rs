@@ -11,6 +11,8 @@
 //! | one blip | a held button has reached 2 s: release now | [`release_now`] |
 //! | two short | the report a double press sent was proven delivered | [`report_delivered`] |
 //! | one short, one blip | the announces a double press made have left the radio | [`announce_sent`] |
+//! | one long, one short, one blip | a held button has reached 8 s: the board switches off at the release | [`power_off`] |
+//! | fast flicker, three seconds | the button held through the boot is about to wipe the board: let go to keep it | [`reset_warning`] |
 //!
 //! A [`Pattern`] is a short list of [`Step`]s, each an on time and the
 //! off time after it, and it is the same list for every sink: the LED, the
@@ -96,6 +98,11 @@ pub const RELEASE_BLIP_MS: u16 = 60;
 /// Under the counting gap, so the pair reads as one figure, a short with a
 /// click after it, and not as a count of two.
 pub const FIGURE_GAP_MS: u16 = SHORT_ON_MS;
+/// How many flicker blinks the factory reset's warning plays: three
+/// seconds, half again the error's two, so the warning is the flicker the
+/// user knows as "something is wrong" and long enough to let go during it
+/// (order 1511).
+pub const RESET_WARNING_FLASHES: usize = 30;
 
 const SHORT: Step = Step {
     on_ms: SHORT_ON_MS,
@@ -116,6 +123,21 @@ static BLIP: [Step; 1] = [Step {
     on_ms: RELEASE_BLIP_MS,
     off_ms: 0,
 }];
+static WARNING_FLICKERS: [Step; RESET_WARNING_FLASHES] = [FLICKER; RESET_WARNING_FLASHES];
+static RUN_DOWN: [Step; 3] = [
+    Step {
+        on_ms: LONG_ON_MS,
+        off_ms: FIGURE_GAP_MS,
+    },
+    Step {
+        on_ms: SHORT_ON_MS,
+        off_ms: FIGURE_GAP_MS,
+    },
+    Step {
+        on_ms: RELEASE_BLIP_MS,
+        off_ms: 0,
+    },
+];
 static SHORT_BLIP: [Step; 2] = [
     Step {
         on_ms: SHORT_ON_MS,
@@ -137,7 +159,10 @@ pub enum Mode {
 }
 
 /// The mode blink: three short for Tracker, one long for Mesh. Nothing
-/// plays it yet; it waits for the mode switch.
+/// plays it yet, and order 1511 left it so on purpose: it waits for the
+/// 2 s mode switch, which comes with the order that builds Tracker mode
+/// (#466, after the PPK2 current baseline Lew asked for before any tracker
+/// code; `docs/src/concepts/operating-modes.md`).
 pub fn mode(mode: Mode) -> Pattern {
     match mode {
         Mode::Tracker => Pattern {
@@ -336,6 +361,34 @@ pub fn release_now() -> Pattern {
     Pattern {
         name: "release-now",
         steps: &BLIP,
+    }
+}
+
+/// A held button has reached 8 s, the very long press (order 1511): one
+/// long, one short, one blip, the light running down. The board switches
+/// off when the button is released.
+///
+/// Each blink shorter than the one before it, so the figure reads as a
+/// light going out, and with the figure gap between them as one figure,
+/// not as a count. None of its parts alone is new (the long is Mesh, the
+/// short a battery quarter, the blip "release now"), and their sequence is
+/// none of the others: a user who held through the 2 s blip sees a
+/// different answer at 8 s.
+pub fn power_off() -> Pattern {
+    Pattern {
+        name: "power-off",
+        steps: &RUN_DOWN,
+    }
+}
+
+/// The button has been held through the boot for the factory reset's
+/// hold (order 1511): [`RESET_WARNING_FLASHES`] blinks at 10 Hz. The wipe
+/// comes at its end if the button is still held; letting go during it
+/// keeps everything.
+pub fn reset_warning() -> Pattern {
+    Pattern {
+        name: "reset-warning",
+        steps: &WARNING_FLICKERS,
     }
 }
 
@@ -635,6 +688,28 @@ mod tests {
     };
 
     #[test]
+    fn power_off_is_one_long_one_short_one_blip_each_shorter() {
+        let p = power_off();
+        assert_eq!(p.name, "power-off");
+        let ons: [u16; 3] = [p.steps[0].on_ms, p.steps[1].on_ms, p.steps[2].on_ms];
+        assert_eq!(ons, [LONG_ON_MS, SHORT_ON_MS, RELEASE_BLIP_MS]);
+        assert!(ons[0] > ons[1] && ons[1] > ons[2]);
+        // One figure: the gaps inside it are under half the counting gap.
+        assert!(p.steps[..2].iter().all(|s| 2 * s.off_ms < COUNT_GAP_MS));
+        assert_eq!(p.total_ms(), 1_000 + 150 + 150 + 150 + 60);
+    }
+
+    #[test]
+    fn the_reset_warning_is_three_seconds_of_flicker() {
+        let p = reset_warning();
+        assert_eq!(p.steps.len(), RESET_WARNING_FLASHES);
+        assert!(p.steps.iter().all(|s| *s == FLICKER));
+        assert_eq!(p.total_ms(), 30 * 50 + 29 * 50);
+        // Longer than the error, so the two are not the same signal.
+        assert!(p.total_ms() > error().total_ms());
+    }
+
+    #[test]
     fn the_pattern_names_are_distinct_tokens() {
         let all = [
             mode(Mode::Tracker),
@@ -648,6 +723,8 @@ mod tests {
             release_now(),
             report_delivered(),
             announce_sent(),
+            power_off(),
+            reset_warning(),
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(a
@@ -694,6 +771,8 @@ mod tests {
             release_now(),
             report_delivered(),
             announce_sent(),
+            power_off(),
+            reset_warning(),
         ] {
             let p = Playback::new(pattern, 0);
             let total = u64::from(pattern.total_ms());

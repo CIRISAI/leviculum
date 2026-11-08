@@ -78,7 +78,7 @@ path's interface changes. Nothing medium-aware enters transport
 - **Mechanism.** When Loquax and the mailbox run on one computer, both
   are clients of the same daemon's shared instance, an abstract AF_UNIX
   socket `\0rns/<instance_name>` (`shared_instance`,
-  `leviculum-std/src/config.rs:91-110`); TCP loopback only where a
+  `leviculum-std/src/config.rs:96-115`); TCP loopback only where a
   configuration asks for it, as Python does
   (`reference/Reticulum/RNS/Reticulum.py:683`). The path request and the
   link run inside the daemon over its local interfaces: zero network
@@ -87,7 +87,7 @@ path's interface changes. Nothing medium-aware enters transport
   `hops=0`.
 - **What the code does today (read 2026-11-04, not yet measured).** A
   desktop Loquax that is a client of a mailbox attaches to the shared
-  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1561`;
+  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1576`;
   `Upstream::Shared`, `loquax/src/engine/shell.rs:433`) and dials
   nothing: the only callers of the rendezvous rotation (`dial`,
   `loquax/src/engine/shell.rs:616`) are the leaf, the phone's own

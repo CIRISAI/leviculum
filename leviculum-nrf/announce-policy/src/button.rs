@@ -500,6 +500,92 @@ impl ButtonGate {
     }
 }
 
+/// How long the button must be held through the boot before the factory
+/// reset warns (`one-button.md`, "button held at boot, 10 s"; order 1511).
+pub const FACTORY_RESET_HOLD_MS: u64 = 10_000;
+
+/// What a button held at boot asks for next ([`BootHold::step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootHoldStep {
+    /// Keep watching; nothing changes before `until_ms` unless the level
+    /// does.
+    Hold {
+        /// The next moment the answer can change on its own.
+        until_ms: u64,
+    },
+    /// The hold is complete: play the warning now. It ends at `until_ms`,
+    /// and letting go before then keeps everything.
+    Warn {
+        /// When the warning ends and the wipe is due.
+        until_ms: u64,
+    },
+    /// The warning has played with the button still held: wipe.
+    Wipe,
+    /// The button was let go before the wipe: boot as if nothing was held.
+    Abort {
+        /// How long it was held, from the first look to the release.
+        held_ms: u64,
+    },
+}
+
+/// The factory reset's hold at boot (order 1511): the button held for
+/// [`FACTORY_RESET_HOLD_MS`] from the first look, then a warning of
+/// `warning_ms` (the feedback grammar's `reset-warning`), then the wipe if
+/// it is still held. A release that lasts [`BUTTON_DEBOUNCE_MS`] at any
+/// moment before the wipe aborts, so a bounce does not, and a short press
+/// that woke a switched-off board is over long before the hold is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootHold {
+    start_ms: u64,
+    warning_ms: u64,
+    warned_at: Option<u64>,
+    released_at: Option<u64>,
+}
+
+impl BootHold {
+    /// A button found pressed at `start_ms`.
+    pub const fn new(start_ms: u64, warning_ms: u64) -> Self {
+        Self {
+            start_ms,
+            warning_ms,
+            warned_at: None,
+            released_at: None,
+        }
+    }
+
+    /// The level `pressed` read at `now_ms`. After [`BootHoldStep::Wipe`]
+    /// or [`BootHoldStep::Abort`] the caller stops asking.
+    pub fn step(&mut self, now_ms: u64, pressed: bool) -> BootHoldStep {
+        if pressed {
+            self.released_at = None;
+        } else {
+            let since = *self.released_at.get_or_insert(now_ms);
+            if now_ms.saturating_sub(since) >= BUTTON_DEBOUNCE_MS {
+                return BootHoldStep::Abort {
+                    held_ms: since.saturating_sub(self.start_ms),
+                };
+            }
+        }
+        let bounce_end = self.released_at.map(|at| at + BUTTON_DEBOUNCE_MS);
+        let hold_end = self.start_ms + FACTORY_RESET_HOLD_MS;
+        match self.warned_at {
+            None if now_ms >= hold_end && pressed => {
+                self.warned_at = Some(now_ms);
+                BootHoldStep::Warn {
+                    until_ms: now_ms + self.warning_ms,
+                }
+            }
+            None => BootHoldStep::Hold {
+                until_ms: bounce_end.map_or(hold_end, |at| at.min(hold_end)),
+            },
+            Some(at) if now_ms >= at + self.warning_ms && pressed => BootHoldStep::Wipe,
+            Some(at) => BootHoldStep::Hold {
+                until_ms: bounce_end.unwrap_or(at + self.warning_ms),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,5 +1008,65 @@ mod tests {
         assert_eq!(PressAction::Debounced.as_str(), "debounced");
         assert_eq!(PressAction::Long.as_str(), "long");
         assert_eq!(PressAction::Hold8.as_str(), "hold8");
+    }
+
+    /// Walk a boot hold over `levels` (`(t_ms, pressed)`, each held until
+    /// the next) at 10 ms ticks, the firmware's poll, and return what it
+    /// asked for, warning start included.
+    fn boot_hold(levels: &[(u64, bool)], until_ms: u64) -> (Option<u64>, BootHoldStep) {
+        let mut hold = BootHold::new(0, 2_950);
+        let mut warned = None;
+        let mut t = 0;
+        while t <= until_ms {
+            let pressed = levels
+                .iter()
+                .rev()
+                .find(|(at, _)| *at <= t)
+                .is_some_and(|(_, p)| *p);
+            match hold.step(t, pressed) {
+                BootHoldStep::Warn { .. } => warned = Some(t),
+                BootHoldStep::Hold { .. } => {}
+                end => return (warned, end),
+            }
+            t += 10;
+        }
+        (warned, BootHoldStep::Hold { until_ms: t })
+    }
+
+    #[test]
+    fn a_boot_hold_through_ten_seconds_and_the_warning_wipes() {
+        let (warned, end) = boot_hold(&[(0, true)], 20_000);
+        assert_eq!(warned, Some(FACTORY_RESET_HOLD_MS));
+        assert_eq!(end, BootHoldStep::Wipe);
+    }
+
+    #[test]
+    fn a_release_before_the_warning_aborts_and_says_how_long() {
+        let (warned, end) = boot_hold(&[(0, true), (4_000, false)], 20_000);
+        assert_eq!(warned, None);
+        assert_eq!(end, BootHoldStep::Abort { held_ms: 4_000 });
+    }
+
+    #[test]
+    fn a_release_during_the_warning_still_aborts() {
+        let (warned, end) = boot_hold(&[(0, true), (11_000, false)], 20_000);
+        assert_eq!(warned, Some(FACTORY_RESET_HOLD_MS));
+        assert_eq!(end, BootHoldStep::Abort { held_ms: 11_000 });
+    }
+
+    #[test]
+    fn a_bounce_shorter_than_the_debounce_does_not_abort() {
+        let (warned, end) = boot_hold(&[(0, true), (5_000, false), (5_030, true)], 20_000);
+        assert_eq!(warned, Some(FACTORY_RESET_HOLD_MS));
+        assert_eq!(end, BootHoldStep::Wipe);
+    }
+
+    #[test]
+    fn a_wake_press_is_over_long_before_the_hold() {
+        // The press that wakes a switched-off board is still down at the
+        // first look; it ends as an abort, and nothing is wiped.
+        let (warned, end) = boot_hold(&[(0, true), (300, false)], 20_000);
+        assert_eq!(warned, None);
+        assert_eq!(end, BootHoldStep::Abort { held_ms: 300 });
     }
 }

@@ -66,8 +66,10 @@ const SETTLE_MS: u64 = 1_000;
 /// clock, so its frames are the same on every run.
 const SCRIPT_CLOCK: (i64, u32, u32, u32, u32) = (2026, 10, 26, 12, 0);
 
-/// The log file's filter without `RUST_LOG`.
-const LOG_FILTER: &str = "warn,loquax=info";
+/// The log file's filter without `RUST_LOG`: Loquax's own lines, and the
+/// `INSTANCE` line that says whether the daemon was found or started, and
+/// its pid (1570; the man page promised it, the filter dropped it).
+const LOG_FILTER: &str = "warn,loquax=info,leviculum_std::instance=info";
 
 /// What a frontend tells the shell it starts.
 pub(crate) struct ShellOptions {
@@ -86,6 +88,9 @@ pub(crate) struct ShellOptions {
     pub scripted: bool,
     /// The file beside the identity the log goes to: `tui.log`, `gui.log`.
     pub log_file: &'static str,
+    /// `--no-start`: fail when no shared instance answers instead of
+    /// starting lnsd as a child (#471 step 4).
+    pub no_start: bool,
 }
 
 /// Effects for the runners and the stamp worker: their lines become toasts,
@@ -203,6 +208,9 @@ pub(crate) struct Shell {
     /// the log.
     store_failed: bool,
     attached: Attached,
+    /// The shared instance found or started (#471 step 4): a daemon this
+    /// shell started goes when it is dropped, after the engine detached.
+    daemon: Option<leviculum_std::instance::Instance>,
     fanout: Fanout,
     /// The engine's outbox is lent to the terminal's reader thread
     /// ([`Shell::lend_engine`], 1492): the reads come in through
@@ -1524,14 +1532,21 @@ pub(crate) async fn start(
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
     let display_name = display_name::from_process(None).map_err(crate::usage)?;
-    let config_dir = options
-        .config
-        .clone()
-        .unwrap_or_else(leviculum_std::config::Config::default_config_dir);
+    let config_dir = crate::daemon_config_dir(options.config.clone());
     let instance = options
         .instance
         .clone()
         .unwrap_or_else(|| crate::instance_name(&config_dir));
+    // The terminal and the window attach to a shared instance; where none
+    // answers they start lnsd as their child (#471 step 4), which goes when
+    // they do. Quiet: the screen is stderr, the line goes to the log file.
+    let daemon = leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance,
+        options.no_start,
+        leviculum_std::instance::Report::Quiet,
+    )
+    .map_err(|error| crate::no_start(error, &instance))?;
     let storage_dir =
         crate::storage_dir(&home).map_err(|error| crate::failure(error, "no-daemon"))?;
 
@@ -1749,6 +1764,7 @@ pub(crate) async fn start(
         store,
         store_failed: false,
         attached,
+        daemon,
         fanout: Fanout::default(),
         lent: false,
         context: RunContext {
@@ -1798,6 +1814,7 @@ pub(crate) async fn finish(mut shell: Shell, outcome: Result<(), String>) -> Exi
     shell.settle().await;
     let Shell {
         attached,
+        daemon,
         afterwards,
         watch,
         ..
@@ -1806,6 +1823,7 @@ pub(crate) async fn finish(mut shell: Shell, outcome: Result<(), String>) -> Exi
         task.abort();
     }
     attached.stop().await;
+    drop(daemon);
     for line in afterwards {
         eprintln!("loquax: {line}");
     }

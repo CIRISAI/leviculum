@@ -29,7 +29,7 @@ things are called "nightly", and each proves something different:
   `refs/nightly/green/*` ref for it. It flashes no board and radiates
   nothing.
 - **The published build** is the forge's `nightly.yml`, on its cron at
-  04:00 UTC (06:00 CEST) or fired early by the green ref (see [What fires
+  09:05 UTC (10:05 CET) or fired early by the green ref (see [What fires
   the publish](#what-fires-the-publish)). It proves that `just ci-gate`
   passes and that the .debs and the lnflash bundle build, and it publishes
   only a commit a green ref covers. It runs no corpus.
@@ -181,18 +181,26 @@ after `gate`, `build-amd64`, `build-arm64` and `build-lnflash`; a red
 step before them stops them, because a step's default `when:` is
 success-only. `publish` runs `scripts/publish-nightly.sh`, which asks
 `scripts/check-nightly-green.sh` first and refuses master HEAD when no
-green ref covers it. The cron is `0 4 * * *` UTC (06:00 CEST). The
-nightly's own ref is usually pushed later than that (the refs on the
-remote are stamped 04:14Z and 04:16Z on ordinary nights), so a
-clock-fired run reads yesterday's ref, which covers HEAD only when
-nothing landed since the night before. That is the refusal pipelines
-455 and 458 met. Since 2026-09-24 the reviewer host polls the forge
-every ten minutes and fires this cron through the Woodpecker API as
-soon as a new `refs/nightly/green/*` appears (`lev-nightly-publish-trigger`,
-reviewer-host tooling: it is not in this repo, and the API token stays on
-that host on purpose). That run is the one that normally publishes; the
-04:00 run is the fallback, and both on one day is harmless, because the
-release is rolling and `scripts/publish-nightly.sh` writes the same
+green ref covers it. The cron is `5 9 * * *` UTC (10:05 CET; 1513).
+The time is set by the forge, not by the nightly: Codeberg's Woodpecker
+server restarts every three hours on the full hour and cancels what is
+running, and a full run is about 75 minutes, so it starts five minutes
+after a three-hour mark (the note above the cron in `nightly.yml`, and
+`scripts/forge-cron-schedule.sh` to set it). The tier-2 nightly has no
+fixed end, so a clock-fired run sees the same night's ref only when that
+night finished before 09:05: the refs on the remote are stamped 05:07Z to
+07:15Z on such nights
+(`20261019T050710Z`, `20261029T071557Z`, `20261105T071415Z`). It covers
+HEAD only when nothing landed between that ref and 09:05, and a night that
+ends later reads the night before (`20261021T132124Z`,
+`20261103T193322Z`, `20261106T132853Z`), which is the refusal pipelines
+455 and 458 met under an earlier 04:00 cron. Since 2026-09-24 the reviewer
+host polls the forge every ten minutes and fires this cron through the
+Woodpecker API as soon as a new `refs/nightly/green/*` appears
+(`lev-nightly-publish-trigger`, reviewer-host tooling: it is not in this
+repo, and the API token stays on that host on purpose). That run is the one
+that normally publishes; the 09:05 run is the fallback, and both on one day
+is harmless, because the release is rolling and `scripts/publish-nightly.sh` writes the same
 `nightly` tag with its assets overwritten.
 
 The overwrite keeps one generation (#323): before its uploads a run
@@ -201,7 +209,7 @@ renames every asset it replaces to `<name>.previous.<ext>`
 `.previous` set that displaced, so a bad build that passed the gates still
 leaves the build before it downloadable. A failed run undoes its renames.
 A run whose commit the `nightly` tag already names (the trigger and the
-04:00 fallback on a day nothing landed) renames nothing and replaces the
+09:05 fallback on a day nothing landed) renames nothing and replaces the
 current set in place, so the second publish of one commit cannot push the
 fallback out.
 

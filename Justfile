@@ -1612,7 +1612,7 @@ fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check
 # NOT an alias for `fast`, because `fast` cannot run in that pipeline's
 # container, and not for want of a package:
 #   check-submodules      — the pipeline clones with `submodules: false`
-#                           (nightly.yml:103-108), so every pin is "missing".
+#                           (nightly.yml:168), so every pin is "missing".
 #   lint-nrf              — leviculum-nrf is its own workspace, needs the
 #                           thumbv7em target plus flip-link as its linker.
 #   nrf-stack-frames      — reads a linked firmware ELF that is never built here.
@@ -2196,21 +2196,26 @@ rak4631_env := 'LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF
 
 # First flash from Meshtastic / blank firmware needs a manual RESET
 # double-tap (the stock app has no 1200-baud-touch handler). Subsequent
-# flashes use the touch path automatically.
+# flashes use the touch path automatically. The image is the baseboard one,
+# the build lnflash ships: the bare-module build is no target any more (D5,
+# Lew 2026-10-28), and a bare module runs this image unharmed
+# (docs/src/concepts/board-support-scope.md).
 [doc('Flash every attached RAK4631 (WisMesh Pocket V2) with our firmware')]
 flash-rak4631:
-    {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631
+    {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 
 #   just flash-rak4631-one /dev/ttyACM0
 #   just flash-rak4631-one /dev/leviculum-rak-transport
 [doc('Flash a single RAK4631 by port path or udev symlink')]
 flash-rak4631-one PORT:
-    LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631
+    LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 
 # Flash with all RAK19026 baseboard peripherals enabled — the WisMesh
 # Pocket V2 build. `--features rak-baseboard` aggregates the three
 # baseboard features (display, gnss, battery). This is the build the lnflash
-# bundle ships for this board (docs/src/concepts/board-support-scope.md).
+# bundle ships for this board (docs/src/concepts/board-support-scope.md),
+# and since D5 the one `flash-rak4631` flashes too; the name stays for the
+# hands and scripts that know it.
 [doc('Flash a RAK4631 with the WisMesh Pocket V2 baseboard peripherals')]
 flash-rak4631-pocket:
     {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
@@ -2408,6 +2413,20 @@ site-check:
 site-unpack-docs-selftest:
     @bash scripts/test-site-unpack-docs.sh
 
+# 1515 (LV-1000): lnpnd's growth soak, the minimal test for "what keeps
+# growing". The release daemon on a store prefilled to `messages` (the field's
+# 300 000 by default, cached under the soak directory so a rerun skips the
+# fill), 14 in-process peers syncing with it, a PN_CENSUS every minute, and a
+# PN_GROWTH line per table at the end; red when a table still grows once the
+# store is full. 20 minutes by default, longer than a coder command may run:
+# a pass shortens it with `secs`, the reviewer runs the default. Never under
+# /tmp: the soak directory is the target dir's tmp unless LNPND_SOAK_DIR says
+# otherwise (lnpnd/tests/pn_growth_soak.rs).
+[doc('lnpnd growth soak: does a table grow once the store is full (20 min)')]
+pn-growth-soak secs="1200" messages="300000" peers="14":
+    LNPND_SOAK_SECS={{secs}} LNPND_SOAK_MESSAGES={{messages}} LNPND_SOAK_PEERS={{peers}} \
+        cargo test --release -p lnpnd --test pn_growth_soak -- --ignored --nocapture
+
 # The forge runner is a shared machine, and a test whose pass depends on the
 # host being fast is a red waiting for a slow day (672: lnpnd's stamp worker
 # against a ten second wall budget lost the first landing in three days). This
@@ -2483,12 +2502,12 @@ check-third-party:
 
 # T-0009: the two #[ignore]d live I2P tests (interfaces::i2p::i2pd_live) were
 # the only coverage of I2PInterface against a real SAM bridge, and nothing
-# started the i2pd they need. This starts a private one in a temporary data
-# directory (own SAM and transport ports, every other service off, so a system
-# i2pd is untouched), runs both tests against it and stops it. Needs the
-# network: a cold router reseeds and builds tunnels. Not a tier; the reviewer
-# runs it weekly beside `emulated-corpus`.
-[doc('Run the live I2P tests against a private, freshly started i2pd')]
+# started the i2pd they need. This starts a private I2P network of five i2pd
+# on loopback (scripts/i2p-privnet.sh, 1576: own netid, own data directories,
+# own ports, no reseed server, so a system i2pd is untouched and no internet is
+# needed), runs both tests on two of its routers and stops it. About 40 s
+# after the build. Not a tier; the reviewer runs it beside `emulated-corpus`.
+[doc('Run the live I2P tests on a private I2P network on loopback')]
 i2p-live:
     bash scripts/run-i2p-live.sh
 
@@ -2621,8 +2640,10 @@ m9-render-no-std:
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
 # 1167); where the reference is checked out they run.
+# build-integ-bins: tui_snapshot starts the checkout's release lnsd as the
+# messenger's daemon (1570), and refuses one older than its sources.
 [doc('Lint and test loquax with its tui feature (#232)')]
-loquax-tui:
+loquax-tui: build-integ-bins
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
     {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh loquax/device_receipts loquax/relay_group loquax/operation_counts -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts --test relay_group --test operation_counts
 

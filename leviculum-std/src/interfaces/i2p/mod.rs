@@ -448,9 +448,11 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
 
     let dest = Destination::from_private_base64(&priv_key)?;
     tracing::info!(
-        "{}: I2P endpoint reachable at {}.b32.i2p",
+        "{}: I2P endpoint reachable at {}.b32.i2p (signature type {}, key {})",
         config.name_prefix,
-        dest.base32()
+        dest.base32(),
+        dest.sig_type(),
+        config.keyfile.display()
     );
 
     // Accept loop. Each STREAM ACCEPT socket handles exactly one inbound
@@ -687,6 +689,69 @@ async fn i2p_stream_task(
             }
         }
     }
+}
+
+/// The key file of a `connectable` I2P interface, named as the reference names
+/// it so an rnsd and an lnsd on one config directory publish one address.
+///
+/// The reference keeps the key in `<storage>/i2p/<hex>.i2p`, where `<hex>` is
+/// `sha256(sha256(name) + sha256(transport_identity.hash))` and `name` the
+/// config section's name; an older `sha256(sha256(name))` file is preferred
+/// when present (`server_tunnel`,
+/// `reference/Reticulum/RNS/Interfaces/I2PInterface.py:269-279`). Both are
+/// looked for here in that order.
+///
+/// lnsd before 1576 kept the key as `i2p_iface_<legacy_index>.i2p`, keyed by
+/// the section's position in the file. Such a file, when neither reference
+/// name exists, is renamed to the new-format name once and the rename logged,
+/// so a running lnsd keeps its address. A rename that fails leaves the old
+/// file in use: the address is worth more than the name.
+pub(crate) fn resolve_keyfile(
+    key_dir: &std::path::Path,
+    name: &str,
+    transport_identity_hash: &[u8; 16],
+    legacy_index: usize,
+) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let name_hash = Sha256::digest(name.as_bytes());
+    let old_format = Sha256::digest(name_hash);
+    let mut new_input = name_hash.to_vec();
+    new_input.extend_from_slice(&Sha256::digest(transport_identity_hash));
+    let new_format = Sha256::digest(&new_input);
+    let named = |hash: &[u8]| key_dir.join(format!("{}.i2p", crate::storage::hex_encode(hash)));
+    let old_path = named(&old_format);
+    let new_path = named(&new_format);
+
+    if old_path.is_file() {
+        return old_path;
+    }
+    if new_path.is_file() {
+        return new_path;
+    }
+    let legacy = key_dir.join(format!("i2p_iface_{legacy_index}.i2p"));
+    if legacy.is_file() {
+        return match std::fs::rename(&legacy, &new_path) {
+            Ok(()) => {
+                tracing::info!(
+                    "I2P key adopted: {} renamed to {} (interface '{}'), the address is unchanged",
+                    legacy.display(),
+                    new_path.display(),
+                    name
+                );
+                new_path
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "I2P key {} could not be renamed to {}: {}; keeping the old name",
+                    legacy.display(),
+                    new_path.display(),
+                    e
+                );
+                legacy
+            }
+        };
+    }
+    new_path
 }
 
 /// Load a persisted base64 private key, trimming whitespace. Returns `None` if

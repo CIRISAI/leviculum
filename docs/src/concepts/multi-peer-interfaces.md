@@ -25,29 +25,29 @@ on the interface's side of the boundary.
 
 The listener binds and accepts; every accepted connection becomes its
 own `InterfaceHandle` with its own id, drawn from the shared counter
-(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:557`). The
+(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:563`). The
 child is built from the already-connected stream
 (`spawn_tcp_interface_from_stream`,
-`leviculum-std/src/interfaces/tcp.rs:686`), inherits IFAC, mode and
+`leviculum-std/src/interfaces/tcp.rs:692`), inherits IFAC, mode and
 ingress control from the listener, and is handed to the event loop,
 which registers it in the routing map like any other interface
-(`registry`, `leviculum-std/src/driver/mod.rs:5335`).
+(`registry`, `leviculum-std/src/driver/mod.rs:5373`).
 
 The listener itself is deliberately **not** in that map. It carries no
 packets, so it would be a send target that cannot send; it is recorded
 in the reporting inventory instead, where the child registers its
 display identity and its parent link (`add_spawned`,
-`leviculum-std/src/interfaces/tcp.rs:673`; `listener_id`,
-`leviculum-std/src/interfaces/tcp.rs:681`). The split between the
+`leviculum-std/src/interfaces/tcp.rs:679`; `listener_id`,
+`leviculum-std/src/interfaces/tcp.rs:687`). The split between the
 routing map and the reporting inventory is the point of that module
 (`interface_names`, `leviculum-std/src/interfaces/inventory.rs:7`).
 
 Teardown runs through the ordinary disconnect path: the event loop
 notices the channel closed, calls `handle_interface_down`
-(`leviculum-std/src/driver/mod.rs:4937-4938`) to cull the routing entries,
+(`leviculum-std/src/driver/mod.rs:4975-4976`) to cull the routing entries,
 and the child's byte counters are folded into its parent's departed
 totals so the listener's reported traffic does not shrink when a client
-leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4404`).
+leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4442`).
 
 ### AutoInterface, I2P, shared instance: the same shape
 
@@ -58,7 +58,7 @@ leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4404`).
   `InterfaceHandle`,
   `leviculum-std/src/interfaces/auto_interface/orchestrator.rs:943`).
 - Every accepted I2P stream becomes a handle
-  (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:498`).
+  (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:500`).
 - Every accepted shared-instance IPC client becomes a handle
   (`add_spawned`, `leviculum-std/src/interfaces/local.rs:222`).
 
@@ -125,8 +125,7 @@ disappears (`handle_packet_from_peer`,
 `leviculum-nrf/src/node_loop.rs:1303`;
 `handle_interface_peer_lost`, `leviculum-nrf/src/node_loop.rs:1335`;
 `handle_interface_peer_up`, `leviculum-nrf/src/node_loop.rs:1347`; the
-same three in `handle_packet_from_peer`,
-`leviculum-nrf/src/bin/rak4631.rs:1196`), the core stamps the peer onto
+T114 and the RAK4631 run that loop), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
 `leviculum-core/src/transport.rs:6292`). So the identity-shaped
@@ -333,7 +332,7 @@ parent to lean on. Measured against the tree, not assumed:
 | Machinery | Per | Where it belongs |
 |---|---|---|
 | Airtime credit bucket (`AirtimeCredit`, `leviculum-std/src/interfaces/airtime.rs:23`) | **medium** — one radio, one duty cycle | parent |
-| Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:361`) | **medium** — contention is on the air | parent |
+| Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:369`) | **medium** — contention is on the air | parent |
 | Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:3263`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:3551`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
 | Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:3577`) | **medium** | parent |
 | Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:1547`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1758`) | **medium** — one adapter | parent |

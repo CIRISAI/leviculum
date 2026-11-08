@@ -365,7 +365,7 @@ WARN level, on the same target as `LORA_TX` and `LORA_CHTM`, and
 counted as `tx_unaccounted` in the interface stats. Every ambiguity
 resolves away from the accusation, because a false one would poison the
 instrument (`judge_airtime`,
-`leviculum-std/src/interfaces/rnode.rs:1497`): any rise at all counts as
+`leviculum-std/src/interfaces/rnode.rs:1505`): any rise at all counts as
 keyed, a falling ledger is read as a bin ageing out of the two-bin
 window rather than as a swallowed frame, a rise in `airtime_long`
 absolves even when the short window has not moved, a DCD busy fraction
@@ -631,7 +631,7 @@ Python's `initRadio` does
 every readback echoed as asked while the board stays on its EEPROM PHY:
 it decodes nothing from the cell and sends at 22 dBm where the cell asked
 for 2 (peers read it up to +3 dBm). Our lnsd is immune, because it sends
-`RADIO_STATE_OFF` first (`leviculum-std/src/interfaces/rnode.rs:1975`);
+`RADIO_STATE_OFF` first (`leviculum-std/src/interfaces/rnode.rs:1985`);
 raw KISS drivers that do not, and periculum's listener after a fresh
 boot, were hit. "Works again after minutes" was whichever run first
 turned the radio off and on.
