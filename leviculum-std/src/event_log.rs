@@ -1341,6 +1341,17 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "AUTO_SERVER",
         required_keys: &["slot", "chosen", "reason", "from"],
     },
+    // The serial medium's verdict on one by-id entry (`auto_serial.rs`,
+    // #471 step 5): the board an LNode names (`none` else), the by-id name
+    // (`port`), `kind` (`lnode`, `rnode`, `bootloader`, `other`), why
+    // (`name`, `detect`, `debug_port`, `bootloader`, `not_candidate`,
+    // `held`, `talking`, `no_answer`, `configured`, `no_access`,
+    // `open_failed`, `not_built`), whether a section was attached and its
+    // name. Once per entry, again when the verdict changes.
+    EventSchema {
+        name: "AUTO_SERIAL",
+        required_keys: &["board", "port", "kind", "reason", "attached", "section"],
+    },
     // A client tool's attach (`instance.rs`, `find_or_start`, #471 step 4):
     // `found=yes` when a shared instance answered, `started=yes` with the
     // child lnsd's pid when none did and the tool started one, and the

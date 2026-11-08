@@ -244,6 +244,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(&storage_path),
     )?;
     config.reticulum.storage_path = Some(storage_path);
+    // The serial medium (#471 step 5): the boards present now become
+    // sections before the node is built, so they are logged and reported
+    // like any other default section; a board plugged in later is found by
+    // the rescan below.
+    let mut auto_serial = leviculum_std::auto_serial::for_layer(auto_layer, &config);
+    if let Some(scanner) = auto_serial.as_mut() {
+        leviculum_std::auto_serial::apply(scanner, &mut config);
+    }
 
     // Resource receive-window policy (Codeberg #85): env var, not a config
     // key, because the config format is shared with Python rnsd.
@@ -253,6 +261,32 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     rns.start().await?;
 
     info!("Reticulum daemon running");
+
+    // The serial rescan: every `RESCAN` a blocking pass over the by-id
+    // directory, its finds handed to the loop below, which attaches them.
+    let (serial_tx, mut serial_rx) =
+        tokio::sync::mpsc::channel::<leviculum_std::config::InterfaceConfig>(16);
+    if let Some(mut scanner) = auto_serial {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(leviculum_std::auto_serial::RESCAN).await;
+                let pass = tokio::task::spawn_blocking(move || {
+                    let found = scanner.scan();
+                    (scanner, found)
+                })
+                .await;
+                let Ok((back, found)) = pass else { return };
+                scanner = back;
+                for section in found {
+                    if serial_tx.send(section).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    } else {
+        drop(serial_tx);
+    }
 
     // Wait for shutdown signal (SIGINT or SIGTERM), dump diagnostics on
     // SIGUSR1, command a firmware reset on SIGUSR2, and command an
@@ -310,6 +344,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => { info!("Received SIGINT"); break; }
                 _ = sigterm.recv() => { info!("Received SIGTERM"); break; }
+                Some(section) = serial_rx.recv() => {
+                    let name = section.name.clone();
+                    match rns.spawn_interface(section) {
+                        Ok(ids) => info!("Attached [[{}]] ({} interface(s))", name, ids.len()),
+                        Err(e) => warn!("Could not attach [[{}]]: {}", name, e),
+                    }
+                }
                 _ = sigusr1.recv() => {
                     let dump = rns.diagnostic_dump();
                     eprint!("{}", dump);

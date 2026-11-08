@@ -10,5 +10,6 @@
   servers = yes
   # BLE when an adapter is present (not built yet).
   bluetooth = no
-  # LNodes and RNodes on USB serial ports (not built yet).
-  serial = no
+  # LNodes by their USB strings, RNodes after a second of
+  # silence and one detect request, on USB serial ports.
+  serial = yes
