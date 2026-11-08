@@ -60,6 +60,7 @@ use esp_hal::{
 
 use boards::BoardConfig;
 use leviculum_serial_mux::rx::{RxCounts, RxKeep};
+use leviculum_serial_mux::tx::TxRing;
 
 /// The build identity this image carries, as ONE contiguous string
 /// literal.
@@ -371,8 +372,20 @@ impl<'d> UsbLog<'d> {
 /// 2026-11-06 lost three `/sync` answers so
 /// (`leviculum_serial_mux::rx`, whose host model pins it). Every loss is
 /// now counted and said as a `[UART]` line ([`UartLog::say_rx_counts`]).
+///
+/// Since 1507 the send side is an interrupt's too: a write goes into
+/// [`TX_RING`] bytes of memory and the UART's TX-done interrupt feeds the
+/// FIFO from there, so the loop never waits for the line
+/// (`leviculum_serial_mux::tx`, whose host model pins the ring). A full
+/// ring drops its oldest whole record, counted and said as `tx_drop=` on
+/// the `[UART]` line; a writer that must not lose (the boot's lines, a
+/// frame dump) waits for room instead ([`UartLog::set_lossy`]).
 pub struct UartLog<'d> {
-    tx: UartTx<'d, Blocking>,
+    /// The UART's send half, for a log that writes and waits (a panic's);
+    /// `None` when the interrupt owns the UART.
+    tx: Option<UartTx<'d, Blocking>>,
+    /// A full ring drops the oldest record rather than wait.
+    lossy: bool,
     /// Frames the board's HDLC reader dropped, as the loop reports them.
     deframe_drop: u32,
     /// The longest the loop went between two reads since the last
@@ -381,6 +394,8 @@ pub struct UartLog<'d> {
     last_read_ms: Option<u64>,
     /// The counts the last `[UART]` line said.
     said: Option<RxCounts>,
+    /// The send ring's drops the last `[UART]` line said (1507).
+    tx_said: u32,
     /// The last write was a frame, which ends on its flag and no line end
     /// (1521b): the next line starts on a line of its own, or a reader
     /// that splits on line ends finds it glued to the frame's tail.
@@ -401,9 +416,24 @@ pub const RX_KEEP: usize = 8 * 1024;
 /// 115200 baud, behind a critical section before a byte is lost.
 pub const RX_FIFO_THRESHOLD: u16 = 64;
 
-/// The receive half of the log's UART, the interrupt's once
-/// [`UartLog::new`] handed it over.
-static RX_PORT: Mutex<RefCell<Option<UartRx<'static, Blocking>>>> = Mutex::new(RefCell::new(None));
+/// The bytes the board writes and the UART has not taken: 8 KiB, 0.7 s of
+/// the line, the boot's census burst whole (1507).
+pub const TX_RING: usize = 8 * 1024;
+/// The records it holds at most: a line or a frame each.
+pub const TX_RECORDS: usize = 512;
+
+/// The log's UART, the interrupt's once [`UartLog::new`] handed it over:
+/// its receive half empties the FIFO into [`RX_BYTES`], its send half
+/// fills the FIFO from [`TX_BYTES`] (1507).
+static PORT: Mutex<RefCell<Option<Uart<'static, Blocking>>>> = Mutex::new(RefCell::new(None));
+/// The send ring's type.
+type Ring = TxRing<TX_RING, TX_RECORDS>;
+
+/// What the board wrote that the UART has not taken: on the heap once it
+/// is up ([`UartLog::start_ring`]), not in internal RAM, whose every
+/// static byte comes off core 0's stack (the M9's floor, 111,000 B).
+/// Before, a write waits for the FIFO as it always did.
+static TX_BYTES: Mutex<RefCell<Option<alloc::boxed::Box<Ring>>>> = Mutex::new(RefCell::new(None));
 /// What the host sent and the loop has not read.
 static RX_BYTES: Mutex<RefCell<RxKeep<RX_KEEP>>> = Mutex::new(RefCell::new(RxKeep::new()));
 /// FIFO overflows seen, and bytes the UART flagged.
@@ -430,12 +460,38 @@ fn pull_rx(rx: &mut UartRx<'static, Blocking>, keep: &mut RxKeep<RX_KEEP>) {
     }
 }
 
-/// The UART0 interrupt: the FIFO passed [`RX_FIFO_THRESHOLD`].
+/// Move what the ring holds into the send FIFO, as much as it takes now;
+/// never waits (esp-hal's `write` spins only on a full FIFO, which
+/// `write_ready` rules out). The TX-done interrupt is listened to only
+/// while bytes wait in the ring: an empty ring has nothing to feed, and
+/// an idle line must never keep the interrupt coming.
+fn feed_tx(uart: &mut Uart<'static, Blocking>, ring: &mut Ring) {
+    while !ring.is_empty() && uart.write_ready() {
+        match uart.write(ring.peek()) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => ring.consume(n),
+        }
+    }
+    match ring.is_empty() {
+        true => uart.unlisten(UartInterrupt::TxDone),
+        false => uart.listen(UartInterrupt::TxDone),
+    }
+}
+
+/// The UART0 interrupt: the receive FIFO passed [`RX_FIFO_THRESHOLD`], or
+/// the send FIFO ran empty (1507).
 #[esp_hal::handler]
 fn uart0_rx() {
     stall::isr(stall::Isr::Uart);
     critical_section::with(|cs| {
-        if let Some(rx) = RX_PORT.borrow_ref_mut(cs).as_mut() {
+        if let Some(uart) = PORT.borrow_ref_mut(cs).as_mut() {
+            if uart.interrupts().contains(UartInterrupt::TxDone) {
+                uart.clear_interrupts(UartInterrupt::TxDone.into());
+            }
+            if let Some(ring) = TX_BYTES.borrow_ref_mut(cs).as_mut() {
+                feed_tx(uart, ring);
+            }
+            let (rx, _) = uart.split_mut();
             pull_rx(rx, &mut RX_BYTES.borrow_ref_mut(cs));
         }
     });
@@ -457,13 +513,13 @@ impl UartLog<'static> {
         uart.set_interrupt_handler(uart0_rx);
         // Listened to and handed over with interrupts off, so the
         // interrupt never finds a full FIFO and no port to empty it.
-        let tx = critical_section::with(|cs| {
+        critical_section::with(|cs| {
             uart.listen(UartInterrupt::RxFifoFull);
-            let (rx, tx) = uart.split();
-            RX_PORT.borrow_ref_mut(cs).replace(rx);
-            tx
+            PORT.borrow_ref_mut(cs).replace(uart);
         });
-        Self::tx(tx)
+        let mut log = Self::with(None);
+        log.lossy = false;
+        log
     }
 }
 
@@ -471,19 +527,45 @@ impl<'d> UartLog<'d> {
     /// A log that only writes, for a panic: no interrupt, nothing read.
     pub fn tx_only(uart: Uart<'d, Blocking>) -> Self {
         let (_rx, tx) = uart.split();
-        Self::tx(tx)
+        Self::with(Some(tx))
     }
 
-    fn tx(tx: UartTx<'d, Blocking>) -> Self {
+    fn with(tx: Option<UartTx<'d, Blocking>>) -> Self {
         Self {
             tx,
+            lossy: false,
             deframe_drop: 0,
             gap_max_ms: 0,
             last_read_ms: None,
             said: None,
+            tx_said: 0,
             after_frame: false,
             stack_free: None,
         }
+    }
+
+    /// Whether a write into a full ring drops the oldest record (`true`,
+    /// the loop's way: it never waits for the line) or waits for room
+    /// (`false`, the boot's and a frame dump's: every byte is wanted).
+    pub fn set_lossy(&mut self, lossy: bool) {
+        self.lossy = lossy;
+    }
+
+    /// Records the full ring dropped, and their bytes (1507).
+    pub fn tx_dropped(&self) -> (u32, u32) {
+        critical_section::with(|cs| {
+            TX_BYTES
+                .borrow_ref(cs)
+                .as_ref()
+                .map_or((0, 0), |ring| (ring.dropped(), ring.dropped_bytes()))
+        })
+    }
+
+    /// Send through the ring from here on (1507): once the heap is up,
+    /// which the ring lives on.
+    pub fn start_ring(&mut self) {
+        let ring = alloc::boxed::Box::new(Ring::new());
+        critical_section::with(|cs| TX_BYTES.borrow_ref_mut(cs).replace(ring));
     }
 
     /// What the next `[UART]` line says as `stack_free=` (1521b).
@@ -518,15 +600,26 @@ impl<'d> UartLog<'d> {
     /// always when `always` (the banner's turn); the gap starts again.
     pub fn say_rx_counts(&mut self, always: bool) {
         let counts = self.rx_counts();
-        let changed = self.said.is_none_or(|said| counts.losses_differ(&said));
+        let (tx_drop, tx_drop_bytes) = self.tx_dropped();
+        let changed =
+            self.said.is_none_or(|said| counts.losses_differ(&said)) || tx_drop != self.tx_said;
         if !(always || changed) {
             return;
         }
         self.said = Some(counts);
+        self.tx_said = tx_drop;
         self.gap_max_ms = 0;
         match self.stack_free {
-            Some(free) => self.line("[UART] ", format_args!("{counts} stack_free={free}")),
-            None => self.line("[UART] ", format_args!("{counts}")),
+            Some(free) => self.line(
+                "[UART] ",
+                format_args!(
+                    "{counts} stack_free={free} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes}"
+                ),
+            ),
+            None => self.line(
+                "[UART] ",
+                format_args!("{counts} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes}"),
+            ),
         }
     }
 
@@ -604,15 +697,53 @@ impl<'d> UartLog<'d> {
         self.after_frame = true;
     }
 
-    /// All of `bytes`: esp-hal's `write` places what fits in the FIFO and
-    /// says how much. A TX error drops the rest of the write, never the
-    /// boot. The receive side is the interrupt's and needs nothing here.
+    /// All of `bytes`, one record. Into the send ring, the interrupt's
+    /// (1507): at once when the log is lossy, a full ring dropping its
+    /// oldest record; else once the ring has room, which the FIFO is fed
+    /// from here as well, so the wait ends with interrupts off too. A log
+    /// that owns its send half (a panic's) writes and waits, as before.
     fn write_all(&mut self, mut bytes: &[u8]) {
-        while !bytes.is_empty() {
-            match self.tx.write(bytes) {
-                Ok(n) => bytes = &bytes[n..],
-                Err(_) => return,
+        if let Some(tx) = self.tx.as_mut() {
+            while !bytes.is_empty() {
+                match tx.write(bytes) {
+                    Ok(n) => bytes = &bytes[n..],
+                    Err(_) => return,
+                }
             }
+            return;
+        }
+        let lossy = self.lossy || bytes.len() > Ring::max_record();
+        loop {
+            let left = critical_section::with(|cs| {
+                let mut port = PORT.borrow_ref_mut(cs);
+                let Some(uart) = port.as_mut() else {
+                    return 0;
+                };
+                let mut ring = TX_BYTES.borrow_ref_mut(cs);
+                let Some(ring) = ring.as_mut() else {
+                    // No ring yet: what the FIFO takes now, the rest on
+                    // the next pass.
+                    if !uart.write_ready() {
+                        return bytes.len();
+                    }
+                    let n = uart.write(bytes).unwrap_or(bytes.len());
+                    return bytes.len() - n;
+                };
+                let kept = (lossy || ring.fits(bytes.len())) && {
+                    ring.push(bytes);
+                    true
+                };
+                feed_tx(uart, ring);
+                match kept {
+                    true => 0,
+                    false => bytes.len(),
+                }
+            });
+            if left == 0 {
+                return;
+            }
+            bytes = &bytes[bytes.len() - left..];
+            core::hint::spin_loop();
         }
     }
 
@@ -627,8 +758,8 @@ impl<'d> UartLog<'d> {
         self.last_read_ms = Some(now);
         critical_section::with(|cs| {
             let mut keep = RX_BYTES.borrow_ref_mut(cs);
-            if let Some(rx) = RX_PORT.borrow_ref_mut(cs).as_mut() {
-                pull_rx(rx, &mut keep);
+            if let Some(uart) = PORT.borrow_ref_mut(cs).as_mut() {
+                pull_rx(uart.split_mut().0, &mut keep);
             }
             keep.pop_into(buf)
         })

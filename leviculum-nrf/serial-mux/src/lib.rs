@@ -35,6 +35,7 @@
 //! The framing itself is `leviculum_core::framing::hdlc`, unchanged.
 
 pub mod rx;
+pub mod tx;
 
 use leviculum_core::framing::hdlc::{max_framed_size, ESCAPE_XOR};
 pub use leviculum_core::framing::hdlc::{ESCAPE, FLAG};

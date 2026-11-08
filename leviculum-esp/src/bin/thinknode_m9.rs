@@ -87,10 +87,13 @@
 //!                           after the draw, when the page or its cursor
 //!                           moved (1533, `loquax_m9::page`): what a bench
 //!                           walk asserts without a dump
-//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> t=<ms>
+//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> t=<ms>
 //!                           on every loss and every five seconds (1440);
 //!                           stack_free is core 0's stack never touched
-//!                           since the boot's census, above the guard (1521b)
+//!                           since the boot's census, above the guard (1521b);
+//!                           tx_drop the records the send ring dropped, its
+//!                           oldest first, while the loop wrote faster than
+//!                           the line took (1507)
 //! [PREV_RUN] reason=<wdt0|wdt1|panic|power|..> core0_stage=.. core0_lock=.. core0_isr=.. core1_stage=.. core1_lock=.. peer=.. turns=<c0>/<c1>
 //!                           at boot: where each core was when the last run
 //!                           stopped (1534, `leviculum_esp::stall`); a power
@@ -1158,6 +1161,8 @@ fn main() -> ! {
         "[HEAP] ",
         format_args!("region=psram start={start:p} bytes={bytes}"),
     );
+    // The line's send ring on the heap, now that there is one (1507).
+    log.start_ring();
     let (stack_end, stack_start) = stack_bounds();
     log.line(
         "[STACK] ",
@@ -1514,6 +1519,10 @@ fn main() -> ! {
     // the messages of a long one (1534): a frame dump's lines took 4.6 s
     // of one turn on the bench (2026-11-07f), all of it the UART's.
     let mut wdt: Watchdog<TIMG0<'static>> = Watchdog::arm(wdt0);
+    // After the first turn the loop never waits for the line (1507): a
+    // full send ring drops its oldest record, counted on the `[UART]`
+    // line. The first turn writes the UI core's census lines, all of them.
+    let mut first_turn = true;
     log.line(
         "[WATCHDOG] ",
         format_args!(
@@ -1772,12 +1781,15 @@ fn main() -> ! {
                 }
                 // Every line before anything else is written (1533): the
                 // 4.6 s of a dump fed line by line to the watchdog.
+                // Every line of it, waiting for the ring's room (1507).
                 FromUi::Dump(lines) => {
                     stall::stage(Core::Io, Stage::Line);
+                    log.set_lossy(false);
                     for line in lines {
                         log.raw(&line);
                         wdt.feed();
                     }
+                    log.set_lossy(true);
                 }
                 FromUi::Type(size) => {
                     // The reader's type into the client record (1532).
@@ -1833,6 +1845,9 @@ fn main() -> ! {
 
         turn.take = uptime_ms().saturating_sub(t_take);
         turn.say(&mut log, node.entries());
+        if core::mem::take(&mut first_turn) {
+            log.set_lossy(true);
+        }
     }
 }
 
