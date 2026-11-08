@@ -114,9 +114,16 @@ Usage:
   m9-walk.py --rig DIR --home-code CODE [--bench-home HEX|FILE]
   m9-walk.py --selftest
 
+--bench-home (1562): the bench home's LXMF address, 32 hex characters, or
+the `address` file scripts/m9-bench-home.sh setup writes into the bench
+home's folder.
+
 --home-log (1581): the bench home's mailbox.log, for `expect home`; by
 default the mailbox.log beside a --bench-home file (the bench home's
-folder, scripts/m9-bench-home.sh run writes it there).
+folder, scripts/m9-bench-home.sh run writes it there), and for a
+--bench-home given as hex the one in the bench home's default folder
+(${XDG_STATE_HOME:-~/.local/state}/leviculum/m9-bench-home) when its
+`address` file names the same home (1591).
 
 --home-code (1562, scripts/m9-bench-home.sh join): the code written to the
 board as TYPE_HOME_CODE; waits for `[HOME] code=taken` and the client
@@ -185,6 +192,10 @@ NAMES = {
 VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure", "bench", "allow", "open",
          "row")
 OPEN_ROWS = 8
+
+# The presses `cursor_to` makes at most (1591): the 1489 fixture's 302
+# rows and a margin, so row 0 is reached from the list's end.
+CURSOR_PRESSES = 400
 
 
 def parse(steps):
@@ -310,9 +321,46 @@ def read_home(value):
     return word.lower()
 
 
+def bench_home_dir():
+    """The folder scripts/m9-bench-home.sh keeps the bench home in by
+    default."""
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(state, "leviculum", "m9-bench-home")
+
+
+def home_log_of(given, address, folder=None):
+    """The bench home's mailbox.log for --bench-home `given` (its address
+    `address`): beside a file given, or in the bench home's folder when
+    its `address` file names the hex given (1591: window 18's
+    --bench-home <hex> found no log and `expect home` said so). None
+    when there is none."""
+    if not given:
+        return None
+    if os.path.isfile(given):
+        beside = os.path.join(os.path.dirname(os.path.abspath(given)), "mailbox.log")
+        return beside if os.path.exists(beside) else None
+    folder = folder or bench_home_dir()
+    try:
+        named = read_home(os.path.join(folder, "address"))
+    except ValueError:
+        return None
+    log = os.path.join(folder, "mailbox.log")
+    return log if named and named == address and os.path.exists(log) else None
+
+
 def fields(line):
     """The key=value words of a board line."""
     return dict(m.groups() for m in re.finditer(r"(\w+)=(\S+)", line))
+
+
+def number(f, key):
+    """Field `key` of `f` as an int, 0 when it is not there, None when it
+    is no number: a line a reset tore (1591, window 18: the flash's reset
+    cut a `[LOOP]` line inside `turn_ms=` and the walker crashed on it)."""
+    try:
+        return int(f.get(key, 0))
+    except ValueError:
+        return None
 
 
 def png(path, width, height, pixels):
@@ -439,6 +487,8 @@ class Rig:
 
 class Walk:
     def __init__(self, rig, out, boots, bench_home=None, home_log=None):
+        # `[LOOP]` lines a reset tore, read past (1591).
+        self.torn_lines = 0
         self.rig = rig
         self.bench_home = bench_home
         # The bench home's mailbox.log (1581) and its size when the last
@@ -515,12 +565,18 @@ class Walk:
                 # that core by design and are exempt.
                 if self.dumping or self.booting:
                     return
-                drain = int(f.get("drain", 0))
+                drain = number(f, "drain")
+                if drain is None:
+                    self.torn_lines += 1
+                    return
                 self.ui_drain_max = max(self.ui_drain_max, drain)
                 if drain > UI_DRAIN_MS_BAR:
                     self.fail(f"[LOOP] core=ui drain={drain} over {UI_DRAIN_MS_BAR}: {line}")
                 return
-            ms = int(f.get("turn_ms", 0))
+            ms = number(f, "turn_ms")
+            if ms is None:
+                self.torn_lines += 1
+                return
             if self.forgetting:
                 self.forget_turn = max(self.forget_turn or 0, ms)
                 return
@@ -717,8 +773,10 @@ class Walk:
 
     def cursor_to(self, row):
         """The list's cursor to `row` by ring presses; False at the
-        list's end (a press that moved nothing) or off the list."""
-        for _ in range(2 * OPEN_ROWS * 8):
+        list's end (a press that moved nothing) or off the list. At most
+        CURSOR_PRESSES (1591: window 18's 128 never reached row 0 from
+        row 300; the firmware has no key to the top)."""
+        for _ in range(CURSOR_PRESSES):
             if self.page.get("name") != "chats":
                 return False
             cursor = int(self.page.get("cursor", -1))
@@ -988,7 +1046,7 @@ class FakeBoard(threading.Thread):
     def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
                  release=False, slow_turn=False, slow_drain=False, tops=(0, 5, 2), torn=False,
                  stuck_zoom=False, trail_ms=0, marks="guarded",
-                 home=None):
+                 home=None, torn_loop=False):
         super().__init__(daemon=True)
         # 1562: the home its client record names; None says client=none.
         self.home = SELFTEST_HOME if home is None else home
@@ -997,6 +1055,7 @@ class FakeBoard(threading.Thread):
         self.refuse_owe, self.hang_on = refuse_owe, hang_on
         self.release, self.slow_turn, self.tops = release, slow_turn, tops
         self.slow_drain = slow_drain
+        self.torn_loop = torn_loop
         self.torn, self.stuck_zoom = torn, stuck_zoom
         self.trail_ms = trail_ms
         # 1581: what an open tells the home's mailbox.log: "guarded" a
@@ -1110,6 +1169,10 @@ class FakeBoard(threading.Thread):
             self.page_line()
             if self.slow_turn:
                 self.say("[LOOP] turn_ms=400 stage=draw host=0 node=0 take=0 draw=400 keys=0 entries=40")
+            if self.torn_loop:
+                # Window 18: a reset cut the line inside its numbers.
+                self.say("[LOOP] turn_ms=3ESP-ROM:esp32s3-20210327",
+                         "[LOOP] core=ui turn_ms=12 stage=drain drain=8rst:0x1 (POWERON)")
             if self.slow_drain:
                 # Window 16b's drain: a page folded whole before the keys.
                 self.say("[LOOP] core=ui turn_ms=918 stage=drain drain=836 keys=0 send=0 draw=82 "
@@ -1391,6 +1454,26 @@ def selftest():
         if got == 0 or not any("[LOOP] core=ui drain=836 over 100" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: an 836 ms UI drain passed its 100 ms bar", w.fails)
             rc = 1
+        # 1591: a [LOOP] line a reset tore is read past and counted.
+        got, w, _ = walk("tornloop", torn_loop=True)
+        if got != 0 or w.torn_lines == 0:
+            print("[m9-walk] selftest FAIL: a torn [LOOP] line failed the walk or went uncounted",
+                  got, w.torn_lines, w.fails)
+            rc = 1
+        # 1591: --bench-home as hex finds the mailbox.log of the bench
+        # home's folder when its address file names it, and none for
+        # another home.
+        folder = os.path.join(base, "benchhome")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "address"), "w") as f:
+            f.write(SELFTEST_HOME + "\n")
+        open(os.path.join(folder, "mailbox.log"), "w").close()
+        if home_log_of(SELFTEST_HOME, SELFTEST_HOME, folder) != os.path.join(folder, "mailbox.log"):
+            print("[m9-walk] selftest FAIL: --bench-home <hex> found no mailbox.log in its folder")
+            rc = 1
+        if home_log_of(SELFTEST_OTHER, SELFTEST_OTHER, folder) is not None:
+            print("[m9-walk] selftest FAIL: --bench-home <hex> of another home took the folder's log")
+            rc = 1
         got, w, _ = walk("slowturn", slow_turn=True)
         if got == 0 or not any("[LOOP] turn_ms=400 over" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a 400 ms turn outside a dump passed the 250 ms bar")
@@ -1559,10 +1642,7 @@ def main():
     out = a.out or os.path.join(a.rig, "walk-" + time.strftime("%Y%m%d-%H%M%S"))
     with open(a.walk) as f:
         steps = f.read().splitlines()
-    home_log = a.home_log
-    if home_log is None and a.bench_home and os.path.isfile(a.bench_home):
-        beside = os.path.join(os.path.dirname(os.path.abspath(a.bench_home)), "mailbox.log")
-        home_log = beside if os.path.exists(beside) else None
+    home_log = a.home_log if a.home_log is not None else home_log_of(a.bench_home, bench_home)
     return Walk(Rig(a.rig), out, a.boots, bench_home=bench_home, home_log=home_log).run(steps)
 
 
