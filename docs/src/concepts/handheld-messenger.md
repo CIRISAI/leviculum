@@ -216,7 +216,7 @@ messenger core holds the same types a board will.
 Lew, 2026-11-02: Loquax is the M9's UI. The board's facts are in one
 place on [The ThinkNode M9](thinknode-m9.md), "The board as the UI sees
 it"; the frontend renders the scene the other three targets already
-render (`Scene`, `loquax/src/ui/scene.rs:999`), and this section records
+render (`Scene`, `loquax/src/ui/scene.rs:1002`), and this section records
 what was measured for the plan, the budgets, and the slices. The host
 numbers below are 64-bit figures from a counting allocator, upper bounds
 for the 32-bit board (the 1337 pattern); the spike code ran under
@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:537`).
+  (`narrow`, `loquax-m9/src/screen.rs:555`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:481`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:499`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -518,7 +518,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   screen of one pane shows the pane the keys are in. That builds the Wide
   scene and drops its chat: the list's peak then carries the chat's.
 - **The list's cursor is the reader's** (1546, `list_top`,
-  `loquax/src/ui.rs:2292`). The model keeps the selected peer and the line
+  `loquax/src/ui.rs:2293`). The model keeps the selected peer and the line
   it stands on; while it stays selected, a pull or an arrival that sorts
   rows in above it moves the window, not the cursor. A key moves the line
   by as many rows as the selection moved in the order. Before, the window
@@ -1028,7 +1028,7 @@ grows by 17,248 B to 944,768 B (`just build-m9`).
 board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 (`/groupdelete`, its `Ok` the group it deleted), and `State`, the
 member's Join, Leave or the admin's Remove, which the model makes a state
-message to the group (`group_state`, `loquax/src/ui/groups.rs:1575`) and
+message to the group (`group_state`, `loquax/src/ui/groups.rs:1580`) and
 the home sends as any message (`/send`). `ask_of`
 (`loquax-m9/src/group.rs:318`) turns the model's effect into that verb,
 with the board's fresh client id; a plain message is no group's ask.
@@ -1178,7 +1178,7 @@ its cells when the screen leaves the map (`leave_map`,
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:6001`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:6002`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1307,7 +1307,7 @@ is not, because its renderer is still host-only. On the renderer it needs
 a branch in `lines` (`loquax-m9/src/screen.rs:224`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:711`), which
 the model already returns while the tab is in front (`rooms_scene`,
-`loquax/src/ui/scene.rs:1178`), and its tab in the tab bar the screen
+`loquax/src/ui/scene.rs:1181`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
 list (name, unread count) or the open room's one live line and its lines
 as `who text`, and one input line at the bottom on the chat's editor
@@ -1935,12 +1935,12 @@ both (`thinknode_m9.rs:2267`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
-(`CHANGED_WAIT_S`, `scripts/m9-walk.py:136`): T on the map flushes the
+(`CHANGED_WAIT_S`, `scripts/m9-walk.py:151`): T on the map flushes the
 hint's row first and says the zoom about 400 ms later. `key_ms` still
 measures the first flush after the key, and walk.md names its `rows=`.
 The house key opens the house page after its tap's 300 ms gap
 (`GAP_MS`, `loquax-m9/src/house.rs:43`), so its bar is that much longer
-(`HOUSE_GAP_MS`, `scripts/m9-walk.py:133`); `bench.walk` waits for
+(`HOUSE_GAP_MS`, `scripts/m9-walk.py:148`); `bench.walk` waits for
 `page=house` and leaves it with Back. An lnsd on the proxy's pty
 re-attaches by itself after a flash; a second one is refused with
 "shared-instance name already served" (`scripts/m9-walk.sh`).
@@ -1997,7 +1997,7 @@ plus decode under 100 ms for the long chat, window 16's to prove.
 
 **An invitation keeps its row.** A group the reader is invited to that
 no message reached has the invitation's listing, "Einladung", from when
-the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:2027`);
+the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:2028`);
 the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
@@ -2113,7 +2113,7 @@ the model, the model asks the cursor chat's page
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
-its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2090`, the
+its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2091`, the
 a80038c2 rule); the cursor moves because the folded page gives the
 chat its real activity and the list re-sorts under a selection that
 follows the chat. A preload, not an open: nothing to stop for 1562/1564.
@@ -2214,9 +2214,91 @@ device=940b1536…` at 09:06). `scripts/m9-bench-home.sh` keeps a
 The board's `[HOME] client=yes` line names its home's address
 (`home=`). `m9-walk.py` refuses a walk that opens chats (Enter or
 `open`) before its first key unless that address is the bench home's
-(`refusal`, `scripts/m9-walk.py:766`). A board without a home, and a
+(`refusal`, `scripts/m9-walk.py:845`). A board without a home, and a
 walk without opens, run as before. Lew gets his own pairing back with
 `lnflash --home` or a code from his mailbox. The two never mix.
+
+### A name's collision is a lookup, not a walk over every name (1581)
+
+Window 17 (2026-11-08, the bench image of 1562) pulled the 1489 fixture
+into the board from the bench home: 4379 entries, 276 conversations. The
+first pull took 28 min with 91 `TG1WDT_SYS_RST`, every record
+`core1_stage=draw`. The UI core's `[LOOP]` line said `draw=` 833, 2278,
+2942, 4021 and 4967 ms as the entries came in, and after the pull a key
+on the list still took about 4 s. The 16b window, Lew's data with 16
+conversations, pulled in 110 s without one reset.
+
+**Measured on the host first.** `loquax-m9/examples/list_measure.rs`
+cuts the fixture to its first `n` conversations (copied under other
+peers past its 300), pulls it into a board's model page by page
+(`home::take`), and times a key down the list and every step of the
+draw that answers it (`cargo run --release -p loquax-m9 --example
+list_measure`). The list's sort, its window, the glyphs and the blit
+were flat; what grew was the window's rows built afresh, and of that
+the names (microseconds on the host, median of 21):
+
+| conversations | key | rows built | of them, the names | scene | draw |
+|---|---|---|---|---|---|
+| 16 | 55 | 109 | 33 | 4 | 136 |
+| 64 | 168 | 149 | 130 | 5 | 110 |
+| 128 | 357 | 331 | 285 | 6 | 111 |
+| 276 | 805 | 751 | 712 | 8 | 105 |
+| 1000 | 4088 | 3962 | 3866 | 22 | 123 |
+
+**The mechanism.** `Names::collisions` (`loquax/src/names.rs:780`) took
+the folded name, a `String` built for it, of every other named peer,
+on every call. A list row calls it twice, for its name (`Names::label_in`,
+`loquax/src/names.rs:861`, from `chat::list_row`) and for its "two
+contacts are called" sentence (`Names::same_name`,
+`loquax/src/names.rs:879`, from `scene::row`). The M9's window is 32
+rows, so one window over 276 conversations allocated about 17 600
+strings. A fold builds the window again whenever a page moves a row,
+a key moves the selection or the reader's viewport is said after a draw
+(`read::Reader::say`, inside the draw stage on the board), and every
+pulled message's fold asks for a label too (`on_engine`). On the host
+that is microseconds; on the board each allocation crosses the
+allocator's lock with core 0 busy writing the pull, which is the
+`alloc_ms1` of up to 1789 ms per 5 s window 17 measured. The draw
+stage outlived the 5 s watchdog.
+
+**The fix.** The names keep an index of who looks like whom
+(`Looks`, built once by `build_looks`, `loquax/src/names.rs:812`):
+every named peer under its look, each peer's place in it, and the met
+peers without a name. A row's question is a map lookup and allocates
+nothing. Every `&mut self` change of a heard, linked or met name drops
+the index (`meet` and `part` update the nameless set in place, an
+announce of the same name keeps it), and the petnames it was built
+under are compared on every question, because the contacts are a public
+field changed without a word to the names. The names' share of the
+model's look fingerprint is an edition number taken afresh on each such
+change instead of a hash over every name (`Names::fingerprint`,
+`loquax/src/names.rs:718`), the next O(n) in the profile. After:
+
+| conversations | key | rows built | of them, the names | say | tick |
+|---|---|---|---|---|---|
+| 16 | 30 | 98 | 1 | 3 | 2 |
+| 276 | 60 | 20 | 1 | 29 | 14 |
+| 1000 | 151 | 36 | 1 | 108 | 54 |
+
+What is still linear is the batch's note over every conversation
+(`UiModel::note_changes`: each row's fingerprint and summary) and the
+order cache's check, hashing without allocating, about 0.15 µs a
+conversation on the host. The pull of 1000 conversations went from
+1840 ms to 279 ms on the host.
+
+**The bench's side items.** A chat the keys open whose page the model
+held already (the bench's own chat, its arrivals folded as they came)
+says its `[OPEN]` line too, with nothing read (`Open::held`,
+`thinknode_m9.rs`); the hang walk of window 17 had one line for 38
+opens. `open longest` in `bench.walk` said "no rows" because
+`cursor_to` took a board behind its keys for the list's end: the key's
+flush came, its `[PAGE]` line four seconds later. It now waits for that
+line (`cursor_to`, `scripts/m9-walk.py:718`); the fixture's first rows
+hold the group and Anna (the sim's `--store real` list). The mark guard
+has its positive control, `scripts/m9-walks/marks.walk`: a real chat
+with an unread message (`m9-bench-home.sh send` right before) opened
+must say `HOME mark` in the bench home's own log, a Bench open must not
+(`expect [no] home`, `scripts/m9-walk.py:793`).
 
 ### Tracks on the M9 (1385, not built)
 
