@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:914`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:917`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:943`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:960`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:687`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:691`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1931,7 +1931,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2267`).
+both (`thinknode_m9.rs:2302`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2279`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2314`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,7 +2035,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:820`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:823`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2109,7 +2109,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2334`), and the fold runs behind the list
+(`thinknode_m9.rs:2375`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2299,6 +2299,87 @@ has its positive control, `scripts/m9-walks/marks.walk`: a real chat
 with an unread message (`m9-bench-home.sh send` right before) opened
 must say `HOME mark` in the bench home's own log, a Bench open must not
 (`expect [no] home`, `scripts/m9-walk.py:793`).
+
+### The M9's own stack floor, measured (1582)
+
+Until 1582 the image script held core 0's stack to 111,000 B, the
+LNode's node peak (#50), not anything measured on the M9; 1521c left
+that open. The images sat between 8 and 368 B above it, and 1569's
+fell under it (its TLSF control block in `.bss`). The floor is now this board's own.
+
+**What the board measured.** Core 0's `[UART] stack_free=` is the
+painted stack never touched since the session census, so its depth is
+the `[STACK] bytes=` less the 512 B guard less `stack_free`. Read off
+every boot of the rig's proxy log since 2026-11-07 (`rig-run/m9/
+2026-11-07h/board.log`), the bench image of 1581 (2f5caa4a, TLSF,
+111,008 B of stack):
+
+| load (window 18, 2026-11-08) | stack_free | core 0 depth |
+|---|---:|---:|
+| boot to the list, idle on the pairing | 72,624 | 37,872 |
+| the join from an erased store: `[HOME] code=taken`, `restore=rebuilt`, the first 330-entry page of the 4345-entry fixture pull, folded | 31,904 | **78,592** |
+| the rest of that pull (177 folds) | 31,904 | 78,592 |
+| a resumed boot of the pulled store, 4345 entries | 44,144 | 66,352 |
+| bench walk: list, chat pages, map, zoom, house, reboot, ten frame dumps | 44,144 | 66,352 |
+| marks walk, hang walk (fifty opens with the flash owed) | 43,780 | 66,716 |
+
+1575's image (4351fa75) showed the same shape the evening before:
+77,648 B at its join, 65,552 to 66,076 B for every resumed boot and
+pull after. The deep moment is the join, not the fold: the 5 s window
+that holds `code=taken` takes 40 KB off the paint, the window of the
+pull's next 4000 entries nothing more. No window ran a bench `forget`:
+its depth is not measured. Its code has no symbol of its own (inlined
+into `main`), so the static chain from `main` below covers it.
+
+**What the image says it can reach.** `scripts/m9-stack-frames.py`
+(`just m9-stack-frames`) reads every `entry a1, <frame>` of the linked
+ELF, plus the `l32r`/`sub`/`movsp a1` that grows a frame past entry's
+reach, and walks the calls (`call8`, and `callx8` through an `l32r`
+literal, which is how the Xtensa backend calls far). Calls through a
+vtable or a fn pointer are not followed, cycles and the panic paths are
+cut. On 2f5caa4a:
+
+- the largest frames: `Handheld::client` 32,832 B (one frame, a third
+  of the deepest chain), `main` 22,464 B, `UiModel::content_scene_of`
+  12,880 B, `ui_main` 11,248 B, `home::rebuild` 10,992 B;
+- core 0's deepest chain, 88,624 B: `main` → `Handheld::take_code` →
+  `Handheld::client` → `home::rebuild` → `home::model` → `map::ready` →
+  `ui::update` → `refresh_scene` → `scene::chat_in` → the bubbles →
+  `Names::collisions` → a sort. That is a join or a rebuild while a chat
+  is open, which the bench did not drive; the measured 78,592 B is the
+  same path down to the list;
+- the UI core's, 62,288 B: `ui_main` → `fixture::Screen::walk` (the boot
+  census) → `group::press` → `screen::scene` → `content_scene_of` → the
+  same bubbles;
+- the interrupts: the deepest handler is the keyboard's `kb_tick`,
+  928 B (an I2C read inside the interrupt), on top of the 256 B
+  exception frame and 128 B of dispatch.
+
+**The rule.** A core's floor is the deepest use measured on this board
+plus 16 KiB. For core 0 the reserve holds the static chain's 10,032 B
+past the measure, two nested interrupts (2 × 1,312 B), and 3,728 B for
+the indirect calls no static chain sees: 78,592 + 16,384 = **94,976 B**
+(`IO_STACK_NEED`, `scripts/build-m9-image.sh`, with this provenance in
+its header). `just m9-gates` on 6d53d28c (1581's lines at 2f5caa4a
+were the same two stacks: the UI watch's two statics cost none):
+
+| image (6d53d28c) | stack | old need | headroom under it | need now | headroom now |
+|---|---:|---:|---:|---:|---:|
+| release | 111,124 | 111,000 | 124 | 94,976 | 16,148 |
+| bench | 111,008 | 111,000 | 8 | 94,976 | 16,032 |
+
+The lever for more is one frame: `Handheld::client` holds 32 KB of
+locals across the join.
+
+**The UI core.** Nothing on the board read its stack before 1582; its
+floor, 184,000 B, is the host census's ceilings added up (64-bit, debug
+build). The UI core now paints its stack after its census and core 0
+says `ui_stack_free=` on every `[UART]` line (`unset` before the paint).
+The next bench window measures it under the same loads, and the floor
+becomes that depth plus 16 KiB; until then it stays 184,000 B, and the
+static chain (62,288 B) and the board census's own lines (scene stack
+at most 22,723 B, draw stack at most 10,403 B below the probe) say it
+will come down by more than half.
 
 ### Tracks on the M9 (1385, not built)
 
