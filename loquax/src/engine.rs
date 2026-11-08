@@ -237,6 +237,18 @@ struct Unheard {
     path_requests: u32,
 }
 
+impl Unheard {
+    /// The held messages' heap: the list and every message's bytes.
+    fn heap_bytes(&self) -> usize {
+        self.messages.capacity() * core::mem::size_of::<([u8; 32], Vec<u8>)>()
+            + self
+                .messages
+                .iter()
+                .map(|(_, packed)| packed.capacity())
+                .sum::<usize>()
+    }
+}
+
 /// A selection waiting for the daemon's announce replays.
 struct PendingSelection {
     routes: Vec<Route>,
@@ -735,6 +747,10 @@ impl Engine {
                     }
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                Command::Census => {
+                    let census = self.census(ready.router.heap_bytes());
+                    self.emit(OutboxEvent::Census(census));
+                }
                 Command::AnnouncePosition { position } => {
                     self.announce_position(ready, core, &position, out)
                 }
@@ -946,6 +962,10 @@ impl Engine {
                     });
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                Command::Census => {
+                    let census = self.census(0);
+                    self.emit(OutboxEvent::Census(census));
+                }
                 // A client receives nothing over the mesh, so it holds no proof.
                 Command::Prove { .. } => {}
                 Command::HomeAccepted { message_id } => {
@@ -1955,6 +1975,35 @@ impl Engine {
         let repeat = last.as_ref() == Some(random);
         *last = Some(*random);
         repeat.then_some(destination)
+    }
+
+    /// The engine's own tables beside `router_bytes`, its router's
+    /// (order 1585).
+    fn census(&self, router_bytes: usize) -> crate::outbox::EngineCensus {
+        use leviculum_core::heap_census::{btree_map_bytes, vec_deque_bytes};
+        let engine_bytes = vec_deque_bytes(&self.events)
+            + vec_deque_bytes(&self.commands)
+            + vec_deque_bytes(&self.stamps)
+            + vec_deque_bytes(&self.stamp_answers)
+            + self.resolves.capacity() * core::mem::size_of::<Resolve>()
+            + btree_map_bytes(&self.tracked)
+            + btree_map_bytes(&self.failures)
+            + btree_map_bytes(&self.mining)
+            + btree_map_bytes(&self.unheard)
+            + self
+                .unheard
+                .values()
+                .map(Unheard::heap_bytes)
+                .sum::<usize>()
+            + btree_map_bytes(&self.recipients);
+        crate::outbox::EngineCensus {
+            router_bytes,
+            engine_bytes,
+            tracked: self.tracked.len(),
+            recipients: self.recipients.len(),
+            unheard: self.unheard.len(),
+            events_queued: self.events.len(),
+        }
     }
 
     /// The periodic slot: commands, finished stamps, resolves and the

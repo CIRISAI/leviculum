@@ -323,6 +323,17 @@ impl Outgoing {
         self.items.len()
     }
 
+    /// The messages held and their heap bytes, each packed message's
+    /// included, for the mailbox's census (order 1585).
+    pub fn heap_bytes(&self) -> usize {
+        self.items.capacity() * core::mem::size_of::<Item>()
+            + self
+                .items
+                .iter()
+                .map(|item| item.packed.capacity())
+                .sum::<usize>()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

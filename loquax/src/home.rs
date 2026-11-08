@@ -45,6 +45,8 @@ pub mod relation;
 pub mod wake;
 pub mod wire;
 
+#[cfg(feature = "history")]
+pub mod census;
 #[cfg(feature = "std")]
 pub mod client;
 #[cfg(feature = "history")]

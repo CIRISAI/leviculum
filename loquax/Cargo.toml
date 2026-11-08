@@ -179,6 +179,11 @@ history = ["std", "dep:rusqlite"]
 # every debug build counts anyway, a release one only with this. Off, the
 # counters are a zero-sized type and `counters()` answers `None`.
 counters = []
+# The measured live heap beside the mailbox census's estimate (order 1585):
+# with it, the binary installs `leviculum_std::heap_accounting::CountingAllocator`
+# as lnpnd's heap-accounting build does, and `LEVICULUM_HEAP_SAMPLE` samples
+# the call sites. Off by default.
+heap-accounting = ["std", "leviculum-std/heap-accounting"]
 # The map's picture (`loquax::picture`): the region files and one view of
 # them drawn into a frame, for the terminal and the GUI alike.
 picture = [
@@ -480,6 +485,12 @@ required-features = ["history"]
 # 1266: `loquax mailbox setup`, the five steps, by flags and by typed answers.
 [[test]]
 name = "mailbox_setup"
+required-features = ["tui"]
+
+# The SIGUSR1 census of `loquax mailbox run` (1585), the real binary
+# beside an in-process shared instance.
+[[test]]
+name = "mailbox_census"
 required-features = ["tui"]
 
 # A throwaway: the samples and cost table of

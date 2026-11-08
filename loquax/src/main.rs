@@ -986,6 +986,14 @@ fn gui_args(args: &Args) -> GuiArgs {
     }
 }
 
+/// Measured live heap for the mailbox census, under the default-off
+/// `heap-accounting` feature (order 1585): lnpnd's shim
+/// (`lnpnd/src/main.rs`), counting and forwarding to `System`.
+#[cfg(feature = "heap-accounting")]
+#[global_allocator]
+static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
+    leviculum_std::heap_accounting::CountingAllocator;
+
 /// The starter first (1469): on an x86-64-v3 CPU the packaged baseline
 /// build hands the process to the v3 build before a thread or a runtime
 /// exists ([`cpu`]); everything else is [`messenger`].
