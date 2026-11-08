@@ -254,15 +254,15 @@ media it may start is the `[auto]` section, four yes/no keys, read by
 [auto]
   lan = yes          # an AutoInterface when the file names none
   servers = yes      # the shipped server list
-  bluetooth = no     # BLE when an adapter is present (not built yet)
+  bluetooth = yes    # BLE when an adapter is present
   serial = yes       # LNodes by their USB strings, RNodes after a probe
 ```
 
 - **A file without `[auto]` starts nothing automatic.** Every key is
   `no`, so a file means exactly what it says.
-- **No file at all** runs the shipped defaults: `lan`, `servers` and
-  `serial` `yes`, `bluetooth` `no` until its step lands. `lnsd --writeconfig` writes those
-  defaults as an `[auto]` section after rnsd's first-start file.
+- **No file at all** runs the shipped defaults: all four `yes`.
+  `lnsd --writeconfig` writes those defaults as an `[auto]` section after
+  rnsd's first-start file.
 - **`lan = yes`** adds the AutoInterface of rnsd's first-start file,
   `[[Default Interface]]` in the default group, when the configuration
   names no AutoInterface section (enabled or not). A file that names one
@@ -277,6 +277,16 @@ media it may start is the `[auto]` section, four yes/no keys, read by
   125 kHz, SF8, CR5) as `[[Auto Serial <n>]]`. Bootloaders, ports another
   process holds and every other device are left alone, and every entry
   gets one `AUTO_SERIAL` line saying why.
+- **`bluetooth = yes`** asks BlueZ for an adapter at start: the default
+  adapter (`hci0`, else the lowest name), or the one
+  `LEVICULUM_AUTO_BLUETOOTH_ADAPTER` names. A powered adapter, or one lnsd
+  can power, becomes `[[Auto Bluetooth]]`, a `BLEInterface` with its
+  shipped defaults (below). No adapter, no BlueZ, or an adapter lnsd cannot
+  power is one warning, the start goes on, and lnsd asks again every 5 s
+  until one appears. A file whose own enabled `BLEInterface` section exists
+  keeps it and gets none added. The verdict is one `AUTO_BLUETOOTH
+  adapter= reason=present|no_adapter|powered_off|configured|not_built
+  attached=yes|no section=` line.
 - A value that is not a boolean refuses the file, as in `[reticulum]`; an
   unknown key is warned about and ignored.
 
@@ -478,8 +488,10 @@ links. Requires a BlueZ (`bluetoothd`) host with a BLE-capable adapter;
 if the adapter is missing or powered off at startup the interface keeps
 retrying rather than failing the daemon.
 
-The interface is off unless a `[[BLE Interface]]` section exists in the
-config; the daemon never brings BLE up on its own. The advertised name
+With a configuration file the interface is off unless a section names
+it, or the file's `[auto]` section says `bluetooth = yes`; without a file
+lnsd brings it up on its own when an adapter is present (`[[Auto
+Bluetooth]]`, see [The `[auto]` section](#the-auto-section)). The advertised name
 is derived from the daemon identity as `LN-<hex8>` exactly like the
 firmware's, so scanner listings show lnsd and boards the same way.
 

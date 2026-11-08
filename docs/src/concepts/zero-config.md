@@ -240,7 +240,7 @@ lnsd states its decision once at start (as built in step 2, above):
 
 ```
 AUTO_LAYER state=off reason=config lan=no servers=no bluetooth=no serial=no
-AUTO_LAYER state=on reason=default lan=yes servers=no bluetooth=no serial=no
+AUTO_LAYER state=on reason=default lan=yes servers=yes bluetooth=yes serial=yes
 ```
 
 `lnsd --writeconfig` writes the file lnsd would otherwise hold in memory,
@@ -273,7 +273,14 @@ schneckenschreck have Bluetooth adapters and boards on USB:
    cells set it.
 
 Step 6 measures the guard itself: a rig host without the marker must not
-join the room.
+join the room. The cells add a third fence of their own: every subject
+the zero-config fixture starts names an adapter BlueZ never lists
+(`LEVICULUM_AUTO_BLUETOOTH_ADAPTER`), because a netns node's bus relay
+reaches the host's bluetoothd, whose default adapter on a rig host is the
+real one. Only the cell that hands its subject a btvirt controller names
+another (Step 6, as built). The twin on the rig hosts themselves, an
+unmarked lnsd with `LEVICULUM_NO_AUTO=0` joining the Columba room and a
+marked one not, is the reviewer's.
 
 ## The server list, and what the first entry owes
 
@@ -450,7 +457,73 @@ never reaches its boards.
 On when an adapter is present (step 6), Columba-compatible. A missing or
 powered-off adapter is a warning, not a failed start. `[auto] bluetooth =
 no` keeps it off with any other content of the file, which the cell
-`ble_room_auto_start` asserts in its second arm today.
+`ble_room_auto_start` asserts in its second arm.
+
+## Step 6, as built
+
+The medium is `leviculum-std/src/auto_bluetooth.rs`; lnsd calls it after
+the serial medium, before the node is built.
+
+- **The adapter rule.** lnsd asks BlueZ over D-Bus, bounded by 3 s
+  (`QUERY_TIMEOUT`), for the adapter the BLE interface itself would take:
+  BlueZ's default (`hci0` when there is one, else the lowest name,
+  `bluer::Session::default_adapter`), or the one
+  `LEVICULUM_AUTO_BLUETOOTH_ADAPTER` names. A powered adapter is
+  `present`; one that is off is powered on the spot, as the interface's
+  own session would, and one that refuses (rfkill) is `powered_off`. No
+  adapter, a name BlueZ does not list, a BlueZ that is not reachable or
+  does not answer in time is `no_adapter`. Both are one WARN line, and the
+  start goes on.
+- **The section.** `present` adds `[[Auto Bluetooth]]`, origin `default`:
+  a `BLEInterface` with every key at the interface's shipped default (both
+  GATT roles, four links, no allow-lists), `device` unset, so the
+  interface takes the same default adapter, or `device` the adapter the
+  variable names. Nothing new on the air: it is the interface a
+  configured section with no keys starts. A configuration with an enabled
+  `BLEInterface` section of its own keeps it and gets none added
+  (`reason=configured`); a file that already uses the section name keeps
+  its own, with a warning.
+- **Later.** A missing or powered-off adapter is asked for again every
+  5 s (`RESCAN`), and the section is handed to the running node once one
+  is there (`Reticulum::spawn_interface`, as the serial medium does).
+  After that the interface's own retry loop owns the adapter: its session
+  retries every 10 s after a failed setup and re-resolves a lost adapter
+  every scan interval (`interfaces/ble/mod.rs`, `ADAPTER_RETRY` and the
+  lost-adapter path). The unit test
+  `a_missing_adapter_is_asked_again_and_logged_once_until_it_appears`
+  holds the sequence.
+- **The line**, catalogued, once and again only when the verdict changes:
+  `AUTO_BLUETOOTH adapter=<hciN|none> reason=present|no_adapter|powered_off|configured|not_built
+  attached=yes|no section=<name|none>`. `AUTO_LAYER` reads `bluetooth=yes`
+  whenever the medium is on, adapter or not.
+- **The switch.** `AutoMedia::SHIPPED.bluetooth` is `yes`, and the
+  first-start file says so. A build without the `ble` feature (the
+  minimal lnsd, and every build off Linux) states `reason=not_built` and
+  attaches nothing.
+
+The cell's node shape: `alpha` and `beta` hold a `ble` link, and `alpha`
+carries `ble_spare_controller = true`, one more btvirt controller in the
+run's air that `alpha`'s own rendered file does not name. The runner
+writes its `hciN` into `alpha`'s directory beside the bus relay, and the
+subject, a second lnsd inside `alpha` with no file, is handed it through
+the variable. Chosen over a third node whose file carries only `[auto]`:
+every periculum node is rendered a file with its link's `[[BLE Link]]`,
+so that shape needs a second exception in the renderer, while the subject
+already lives in `alpha` and reaches bluetoothd through `alpha`'s relay.
+The subject cannot link with `alpha` or `beta`, whose allow-lists name
+each other only, so the control shows its interface up on the spare and
+scanning: a scan decision on `beta`'s address.
+
+The cell, in netns on 2026-11-08 (docker owed: the land gate held the
+docker lock), all three arms asserted:
+
+- `arm=no_config ... ble=up origin=default bt_reason=present
+  bt_attached=yes bt_lines=1 iface_origin=default layer_bluetooth=yes
+  warn=no sighted_link_peer=yes ble_up_on=hci3 sighted=2 bt_adapter=hci3`
+- `arm=auto_bluetooth_no shared_instance=yes interfaces=0 ble=absent
+  origin=configured bt_reason=absent ... layer_bluetooth=no`
+- `arm=no_adapter ... ble=absent bt_reason=no_adapter bt_attached=no
+  bt_lines=1 iface_origin=none layer_bluetooth=yes warn=yes`
 
 ## The embedded daemon in the tools
 
@@ -528,7 +601,7 @@ line today and gaining its `expect` when its step lands. Their lines on
 | (built) | lnsd writes its first-start file (open question 1) | `zero_config_first_start_file` | `file=yes equals_writeconfig=yes rnstatus_wrote=none config_unchanged=yes control_wrote=yes` (asserted) |
 | 4 (built) | "find the instance or start one" in `leviculum-std`, then lnomad and the other tools | `zero_config_tool_starts_the_daemon`; `zero_config_tool_finds_the_daemon` | before: `instance=none daemon_parent=none ... tool_exit=1`; `instance=none`; since step 4: `before=none instance=started via=unix daemon_parent=tool daemon_after_tool=gone socket_after_tool=closed config_written=yes daemon_log=yes`; `instance=found via=unix lnsd_on_dir=1 tool_children=0 subject_after_tool=alive` (asserted) |
 | 5 (built) | serial: LNodes by string, RNodes by silence plus `CMD_DETECT`, `TIOCEXCL`, bootloader ids, hotplug | `serial_probe_writes_nothing_to_strangers`; `zero_config_serial_lnode`; `zero_config_serial_held` | before: `strangers=0 quiet=0 talker=0 rnode=0 rnode_probe=absent`; since 1555: `strangers=0 quiet=0 talker=0 rnode_probe=seen lnode_attached=0 rnode_attached=1`; `attached=1 verdict=lnode:name interface=yes up=yes phy=869463000/125000/8/5 debug_bytes=0`; `written=0 attached=0 held=2` (asserted) |
-| 6 | BLE on when an adapter is present, the lab guard measured | `ble_room_auto_start` | `arm=no_config shared_instance=no interfaces=0 ble=absent`; `arm=auto_bluetooth_no ... ble=absent` (asserted) |
+| 6 (built) | BLE on when an adapter is present, the lab guard measured | `ble_room_auto_start` | before: `arm=no_config shared_instance=no interfaces=0 ble=absent`; since 1566: `arm=no_config ... ble=up ... bt_reason=present bt_attached=yes iface_origin=default layer_bluetooth=yes sighted_link_peer=yes`; `arm=auto_bluetooth_no ... ble=absent`; `arm=no_adapter ... bt_reason=no_adapter warn=yes layer_bluetooth=yes` (asserted); the rig twin is the reviewer's |
 | (built) | the Debian package ships no stock configuration | `just verify-deb` | `ships no /etc/reticulum/config` |
 | | the first server entry's monitoring, privacy statement and consent | none, an operating duty | |
 
@@ -550,10 +623,9 @@ the first four carries a control arm that reads the positive answer today
 (rnsd's first-start file finds the LAN neighbour by path request; one
 configured TCP client connects and stores the second server's discovery;
 an RNodeInterface on the candidate pty writes the detect request), so a
-`none` is the daemon's and not the script's. `ble_room_auto_start` has no
-such control yet: the only controller its subject can reach is the one
-its node's own daemon holds, and step 6 needs a node shape that gives a
-daemon a controller without a configured BLE interface.
+`none` is the daemon's and not the script's. `ble_room_auto_start` got
+its control with step 6: a spare btvirt controller its node's own daemon
+does not name (Step 6, as built).
 
 ## Open questions
 
@@ -584,6 +656,9 @@ daemon a controller without a configured BLE interface.
   an `[auto]` section in the upstream file; no format of our own.
 - 2026-10-23, Lew: BLE on by default in the shipped builds; the lab is
   protected by configuration and a host marker, not by a test build.
+  Built as step 6 (1566): `[auto] bluetooth = yes` is a shipped default;
+  the adapter is the BLE interface's own default, a missing one is
+  asked for again every 5 s.
 - 2026-10-23, Lew: further server operators only with their consent.
 - 2026-10-23, Lew: serial boards are part of zero-config; the lab guard
   (a configuration present means only the configuration) stays. Built as
