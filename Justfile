@@ -2493,12 +2493,12 @@ check-third-party:
 
 # T-0009: the two #[ignore]d live I2P tests (interfaces::i2p::i2pd_live) were
 # the only coverage of I2PInterface against a real SAM bridge, and nothing
-# started the i2pd they need. This starts a private one in a temporary data
-# directory (own SAM and transport ports, every other service off, so a system
-# i2pd is untouched), runs both tests against it and stops it. Needs the
-# network: a cold router reseeds and builds tunnels. Not a tier; the reviewer
-# runs it weekly beside `emulated-corpus`.
-[doc('Run the live I2P tests against a private, freshly started i2pd')]
+# started the i2pd they need. This starts a private I2P network of five i2pd
+# on loopback (scripts/i2p-privnet.sh, 1576: own netid, own data directories,
+# own ports, no reseed server, so a system i2pd is untouched and no internet is
+# needed), runs both tests on two of its routers and stops it. About 40 s
+# after the build. Not a tier; the reviewer runs it beside `emulated-corpus`.
+[doc('Run the live I2P tests on a private I2P network on loopback')]
 i2p-live:
     bash scripts/run-i2p-live.sh
 

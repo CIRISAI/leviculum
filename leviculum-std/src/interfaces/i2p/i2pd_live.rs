@@ -2,8 +2,10 @@
 //!
 //! Prerequisite: i2pd running with `sam.enabled = true` (SAM on
 //! 127.0.0.1:7656, or wherever `LEVICULUM_I2P_SAM` points). See
-//! `docs/src/development-testing.md`. `just i2p-live` starts a private i2pd
-//! for the run (scripts/run-i2p-live.sh) and points the tests at it.
+//! `docs/src/development-testing.md`. `just i2p-live` starts a private I2P
+//! network on loopback for the run (scripts/run-i2p-live.sh on
+//! scripts/i2p-privnet.sh, no internet) and points the tests at two of its
+//! routers: `LEVICULUM_I2P_SAM` and `LEVICULUM_I2P_SAM_PEER`.
 //!
 //! What is covered here vs the deterministic mock-SAM tests in `tests.rs`:
 //!
@@ -33,14 +35,25 @@ use super::sam::{self, Destination};
 const SAM: &str = "127.0.0.1:7656";
 
 /// The SAM bridge under test: `LEVICULUM_I2P_SAM` if set, i2pd's default
-/// otherwise. `just i2p-live` sets it to the private router it starts, so a
-/// system i2pd on the default port is neither used nor disturbed.
+/// otherwise. `just i2p-live` sets it to a router of the private net it
+/// starts, so a system i2pd on the default port is neither used nor disturbed.
 fn sam_addr() -> String {
     std::env::var("LEVICULUM_I2P_SAM").unwrap_or_else(|_| SAM.to_string())
 }
 
+/// The bridge the loopback test's connecting side uses:
+/// `LEVICULUM_I2P_SAM_PEER` if set, so on the private net the stream crosses
+/// from one router to another; the same bridge as [`sam_addr`] otherwise.
+fn peer_sam_addr() -> String {
+    std::env::var("LEVICULUM_I2P_SAM_PEER").unwrap_or_else(|_| sam_addr())
+}
+
 async fn sam_socket() -> TcpStream {
-    let mut s = TcpStream::connect(sam_addr())
+    sam_socket_at(&sam_addr()).await
+}
+
+async fn sam_socket_at(addr: &str) -> TcpStream {
+    let mut s = TcpStream::connect(addr)
         .await
         .expect("connect to i2pd SAM (is i2pd running with sam.enabled?)");
     sam::handshake(&mut s, sam::SAM_COMMAND_TIMEOUT)
@@ -74,12 +87,23 @@ async fn live_session_create_matches_dialect() {
         .expect("generated private key parses into a destination");
     let b32 = dest.base32();
     assert_eq!(b32.len(), 52, "b32 label must be 52 chars, got {b32}");
-    println!("live i2pd session destination: {b32}.b32.i2p");
+    // 1576: a TRANSIENT session asks for Ed25519, the reference's type; i2pd
+    // answered the request without it with a DSA-SHA1 (type 0) destination.
+    assert_eq!(
+        dest.sig_type(),
+        sam::SIGNATURE_TYPE_ED25519,
+        "the router made a destination of another signature type"
+    );
+    println!(
+        "live i2pd session destination: {b32}.b32.i2p signature type {}",
+        dest.sig_type()
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires a running i2pd SAM bridge; builds real tunnels (minutes)"]
 async fn live_loopback_stream_crosses() {
+    let t0 = std::time::Instant::now();
     // Server session with a persistent (transient-then-known) destination.
     let mut srv_ctrl = sam_socket().await;
     let reply = sam::command(
@@ -92,7 +116,11 @@ async fn live_loopback_stream_crosses() {
     assert!(reply.ok(), "server SESSION CREATE: {}", reply.result());
     let srv_dest = Destination::from_private_base64(reply.get("DESTINATION").unwrap()).unwrap();
     let srv_full = srv_dest.public_base64();
-    println!("server reachable at {}.b32.i2p", srv_dest.base32());
+    println!(
+        "server reachable at {}.b32.i2p, session after {:.1} s",
+        srv_dest.base32(),
+        t0.elapsed().as_secs_f64()
+    );
 
     // Server accept task: waits for the inbound connection, reads the peer
     // destination line, then the HDLC frame.
@@ -119,8 +147,10 @@ async fn live_loopback_stream_crosses() {
     // Give the accept a moment to register before connecting.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Client session + STREAM CONNECT to the server's full destination.
-    let mut cli_ctrl = sam_socket().await;
+    // Client session + STREAM CONNECT to the server's full destination, on
+    // the peer router when there is one.
+    let peer_sam = peer_sam_addr();
+    let mut cli_ctrl = sam_socket_at(&peer_sam).await;
     let reply = sam::command(
         &mut cli_ctrl,
         &sam::session_create("STREAM", "reticulum-cli", sam::TRANSIENT_DESTINATION, ""),
@@ -129,8 +159,12 @@ async fn live_loopback_stream_crosses() {
     .await
     .expect("client SESSION CREATE");
     assert!(reply.ok(), "client SESSION CREATE: {}", reply.result());
+    println!(
+        "client session on {peer_sam} after {:.1} s",
+        t0.elapsed().as_secs_f64()
+    );
 
-    let mut stream = sam_socket().await;
+    let mut stream = sam_socket_at(&peer_sam).await;
     // Building the path to a brand-new destination can take a while; retry the
     // connect until the tunnels are up.
     let connect = tokio::time::timeout(Duration::from_secs(240), async {
@@ -146,7 +180,7 @@ async fn live_loopback_stream_crosses() {
                 break;
             }
             // Reconnect a fresh socket and retry.
-            stream = sam_socket().await;
+            stream = sam_socket_at(&peer_sam).await;
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     })
@@ -155,6 +189,7 @@ async fn live_loopback_stream_crosses() {
         connect.is_ok(),
         "STREAM CONNECT did not succeed within timeout"
     );
+    println!("stream connected after {:.1} s", t0.elapsed().as_secs_f64());
 
     // Send an HDLC-framed packet over the live tunnel.
     use leviculum_core::framing::hdlc;
@@ -178,4 +213,5 @@ async fn live_loopback_stream_crosses() {
         })
         .collect();
     assert_eq!(frames, vec![b"live-i2p-crossing".to_vec()]);
+    println!("frame across after {:.1} s", t0.elapsed().as_secs_f64());
 }

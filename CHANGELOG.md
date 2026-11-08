@@ -20,6 +20,14 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- I2P (#99, #284, 1576): lnsd's `I2PInterface` now makes the destination
+  the reference makes, Ed25519 instead of i2pd's DSA-SHA1 default, and keeps
+  its key under the reference's file name, so rnsd and lnsd on one config
+  directory publish one `.b32.i2p` address. A key an older lnsd stored as
+  `i2p_iface_<n>.i2p` is renamed once and keeps its address and type. The
+  interface is behind a Cargo feature `i2p`, on by default. `just i2p-live`
+  runs on a private I2P network on loopback (`scripts/i2p-privnet.sh`) and
+  needs no internet.
 - loquax reactions (#232, 1104): the LXMF `FIELD_REACTION` as Columba,
   Ratspeak and MeshChatX send it, drawn under the message it reacts to with
   a count and yours marked, never as a message of its own; a reaction that
