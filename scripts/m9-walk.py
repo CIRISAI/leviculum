@@ -22,7 +22,11 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
     expect <field><op><value> page, cursor, top, zoom against the last
                               [PAGE] line; op one of = != < >
     expect <field> changed    the field moved since the last action
-                              (key, hold, dump, reboot, idle, sleep)
+                              (key, hold, dump, reboot, idle, sleep);
+                              waits for a [PAGE] line that moves it up to
+                              1 s after the action began (1554: the map's
+                              zoom is said 397 ms after T, behind the hint
+                              row's flush)
     expect log "<words>"      the words in a board line since the last
                               action began
     dump <name>               a FRAME_DUMP of what is shown, decoded to
@@ -58,7 +62,10 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
                               took 1.7 s in window 10, 1507's to fix)
 
 The walk's verdict is held to the bars of order 1533: key to frame under
-100 ms (a KEY line's board time to the next `[DISP] flush` line's t=),
+100 ms (a KEY line's board time to the next `[DISP] flush` line's t=;
+walk.md names that flush's rows=, the first after the key whatever it
+draws, 1554; the house key's bar is HOUSE_GAP_MS longer, the time its tap
+waits to tell itself from a hold before the overview opens),
 a resumed restore under 2 s on every boot after the first, no `[LOOP]`
 turn over 250 ms (a dump step's own turn, core 0 writing the dump's lines,
 is exempt and named `dump_ms=` in walk.md instead), no `[PREV_RUN]` line that carries a record (a watchdog
@@ -97,6 +104,12 @@ OWE_FLAGS = {None: 0x00, "erase-log": 0x01, "erase-ring": 0x02, "erase": 0x03}
 # back to the last of them.
 ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep", "bench", "open")
 KEY_MS_BAR = 100
+# loquax-m9/src/house.rs, GAP_MS: a house tap opens the overview only once
+# this long passed without another press (1532), so its frame comes after.
+HOUSE_GAP_MS = 300
+# How long `expect <field> changed` waits for a [PAGE] line that moves the
+# field, from the action's start (1554).
+CHANGED_WAIT_S = 1.0
 RESTORE_MS_BAR = 2000
 LOOP_MS_BAR = 250
 KEY_WAIT_S = 2.0
@@ -354,6 +367,7 @@ class Walk:
         # `expect log` and `changed` look back to it.
         self.step_lines = []
         self.action_at = 0
+        self.action_t = time.monotonic()
         self.keys = []
         self.restores = []
         self.boots = 0
@@ -487,10 +501,12 @@ class Walk:
             self.keys.append((code, None))
             return "no frame"
         ms = int(fields(flush)["t"]) - pressed
+        rows = fields(flush).get("rows", "?")
         self.keys.append((code, ms))
-        if ms >= self.key_bar:
-            self.fail(f"key {code:#04x}: {ms} ms to its frame, the bar is under {self.key_bar}")
-        return f"key_ms={ms}"
+        bar = self.key_bar + (HOUSE_GAP_MS if code == NAMES["home"] else 0)
+        if ms >= bar:
+            self.fail(f"key {code:#04x}: {ms} ms to its frame (rows={rows}), the bar is under {bar}")
+        return f"key_ms={ms} rows={rows}"
 
     def dump(self, name):
         self.dumping, self.dump_turn = True, None
@@ -613,8 +629,15 @@ class Walk:
             return ok, f"log has {text!r}"
         if len(words) == 2 and words[1] == "changed":
             name = words[0]
-            ok = self.page.get(name) != self.page_before.get(name)
-            return ok, f"{name} {self.page_before.get(name)} -> {self.page.get(name)}"
+            before = self.page_before.get(name)
+            if self.page.get(name) == before:
+                # The [PAGE] line that moves it may come after the key's
+                # first flush (1554): wait for it, from the action's start.
+                left = CHANGED_WAIT_S - (time.monotonic() - self.action_t)
+                self.until(lambda l: l.startswith("[PAGE] ") and fields(l).get(name) != before,
+                           max(0.0, left), self.action_at)
+            ok = self.page.get(name) != before
+            return ok, f"{name} {before} -> {self.page.get(name)}"
         m = re.fullmatch(r"(page|name|cursor|top|zoom)(=|!=|<|>)(\S+)", "".join(words))
         if not m:
             raise ValueError(f"expect what? {' '.join(words)}")
@@ -638,6 +661,7 @@ class Walk:
                 self.pump(0.0)
                 self.page_before = dict(self.page)
                 self.action_at = len(self.step_lines)
+                self.action_t = time.monotonic()
             if verb == "key":
                 extra = self.key(key_code(args[0]))
             elif verb == "hold":
@@ -737,15 +761,19 @@ class FakeBoard(threading.Thread):
     the bench's and the watchdog's lines, `slow_turn` says a 400 ms
     [LOOP] turn after every key, `tops` is each chat's top when opened
     (the list has as many rows), and every dump ends with its 4400 ms
-    [LOOP] turn as the board's does."""
+    [LOOP] turn as the board's does. 1554: the map key opens the map, T
+    flushes the hint row at once and says the new zoom 400 ms later (as
+    window 13's board did; `stuck_zoom` never moves it), and the house
+    key opens the house page after its tap's 300 ms gap."""
 
     def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
-                 release=False, slow_turn=False, tops=(0, 5, 2), torn=False):
+                 release=False, slow_turn=False, tops=(0, 5, 2), torn=False, stuck_zoom=False):
         super().__init__(daemon=True)
         self.rig, self.slow_ms, self.grow_rx = rig, slow_ms, grow_rx
         self.refuse_owe, self.hang_on = refuse_owe, hang_on
         self.release, self.slow_turn, self.tops = release, slow_turn, tops
-        self.torn = torn
+        self.torn, self.stuck_zoom = torn, stuck_zoom
+        self.zoom = 13
         self.row = 0
         self.page = "chats"
         self.opens = 0
@@ -765,7 +793,8 @@ class FakeBoard(threading.Thread):
 
     def page_line(self):
         top = self.tops[self.row] if self.page == "chat" else max(0, self.cursor - 4)
-        self.say(f"[PAGE] name={self.page} cursor={self.cursor} top={top} t={self.ms()}")
+        zoom = f" zoom={self.zoom}" if self.page == "map" else ""
+        self.say(f"[PAGE] name={self.page} cursor={self.cursor} top={top}{zoom} t={self.ms()}")
 
     def run(self):
         tx, rst = os.path.join(self.rig, "tx.hex"), os.path.join(self.rig, "reset")
@@ -819,6 +848,21 @@ class FakeBoard(threading.Thread):
                 self.opens += 1
             elif code == 0x86:
                 self.page = "chats"
+            elif code == 0x85:
+                self.page = "map"
+            elif code == 0x74 and self.page == "map":
+                # The hint row's flush first, the zoom's [PAGE] after.
+                self.say(f"[DISP] flush rows=220..239 ms=3.000 t={self.ms() + 20}")
+                time.sleep(0.4)
+                if not self.stuck_zoom:
+                    self.zoom += 1
+                self.say(f"[DISP] flush rows=0..239 ms=14.000 t={self.ms()}")
+                self.page_line()
+                return
+            elif code == 0x82:
+                # The tap waits out its gap before the overview opens.
+                time.sleep(0.3)
+                self.page = "house"
             time.sleep(self.slow_ms / 1000)
             self.say(f"[DISP] flush rows=0..239 ms=4.000 t={self.ms() + 20}")
             self.page_line()
@@ -882,6 +926,19 @@ open longest
 expect page=chat
 expect top=5
 dump chat
+key back
+wait page=chats
+"""
+
+# 1554: bench.walk's map and house steps: the zoom said behind the hint
+# row's flush, the house page behind its tap's gap.
+SELFTEST_MAP_WALK = """
+key map
+wait page=map
+key t
+expect zoom changed
+key home
+wait page=house
 key back
 wait page=chats
 """
@@ -993,6 +1050,21 @@ def selftest():
         if got == 0 or not any("more than one screen" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a list of one-screen chats passed open longest", w.fails)
             rc = 1
+        # 1554: the zoom's [PAGE] line 400 ms after the key's first flush
+        # is waited for, walk.md names that flush's rows, and the house
+        # key's frame after its gap passes; a zoom that never moves fails.
+        got, w, out = walk("late", steps=SELFTEST_MAP_WALK)
+        if got != 0:
+            print("[m9-walk] selftest FAIL: a zoom said behind the hint row's flush failed", w.fails)
+            rc = 1
+        with open(os.path.join(out, "walk.md")) as f:
+            if "rows=220..239" not in f.read():
+                print("[m9-walk] selftest FAIL: walk.md does not name the key's flush rows")
+                rc = 1
+        got, w, _ = walk("stuck", steps=SELFTEST_MAP_WALK, stuck_zoom=True)
+        if got == 0 or not any("expect zoom changed" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a zoom that never moved passed", w.fails)
+            rc = 1
     for name in ("bench.walk", "hang.walk"):
         shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "m9-walks", name)
         try:
@@ -1032,7 +1104,8 @@ def selftest():
               "the bench steps pass and count opens, a refused owe and a hang on an open fail; "
               "a release boot fails by name, the dump's turn is named and another slow turn fails, "
               "open longest picks the longest chat and fails on a list of one-screen chats, "
-              "a torn dump is named TORN with its lost lines and still drawn")
+              "a torn dump is named TORN with its lost lines and still drawn, "
+              "a zoom said behind the hint row's flush is waited for and one that never moves fails")
     return rc
 
 

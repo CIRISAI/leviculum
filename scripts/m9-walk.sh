@@ -14,8 +14,9 @@
 # flash, the proxy is stopped through its STOP file, espflash writes the
 # image as `just flash-m9` does, and the proxy is started again with the
 # command line it had, detached, its output in <rig>/proxy.out. An lnsd on
-# the proxy's pty sees its pty go away and must be restarted by whoever
-# runs it. With --start-proxy <dev> a bench without a proxy gets one: when
+# the proxy's pty re-attaches to the new pty by itself: leave it running.
+# Do not start a second one; it refuses with "shared-instance name already
+# served" while the first holds the name (window 13 of order 1554). With --start-proxy <dev> a bench without a proxy gets one: when
 # none runs on the rig folder, scripts/m9-proxy.py is started detached on
 # <dev> at 115200 baud, its link at <rig>/m9pty, its output in
 # <rig>/proxy.out, and the walk waits for its OPEN note; it keeps running

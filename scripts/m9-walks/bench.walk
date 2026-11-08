@@ -41,7 +41,9 @@ wait page=chats
 expect log "[PAGE] name=chats"
 
 # The map, zoomed twice with T and Y (the keys the 2026-11-07 decisions
-# give the zoom; until they are bound the zoom expects fail, and say so).
+# give the zoom). The key's first flush may be the hint row's; the zoom's
+# [PAGE] line comes after it, and `expect zoom changed` waits up to 1 s
+# for it (1554).
 key map
 wait page=map
 dump 06-map
@@ -54,10 +56,13 @@ dump 08-map-zoom-y
 key back
 wait page=chats
 
-# The house page: the list until the overview screen exists.
+# The house page (1532): the house key's tap opens the overview after
+# its 300 ms gap; Back leaves it for the list.
 key home
-wait page=chats
+wait page=house
 dump 09-house
+key back
+wait page=chats
 
 # A reboot, and the list again.
 reboot
