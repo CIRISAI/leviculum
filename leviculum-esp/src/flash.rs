@@ -62,7 +62,7 @@ fn parked<R>(f: impl FnOnce() -> R) -> R {
 
 /// What the flash ops cost the UI core (1569): each op holds the
 /// cross-core critical section and parks the other core (AutoPark), so
-/// the time inside [`parked`]'s section is the longest the UI core can
+/// the time inside `parked`'s section is the longest the UI core can
 /// have been held per op. Cumulative counters; a reader takes deltas
 /// (`[IDLE]` prints them per window), and the longest single park is
 /// taken, not read, so each window says its own.

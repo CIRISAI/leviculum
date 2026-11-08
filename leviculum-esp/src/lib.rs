@@ -819,7 +819,7 @@ impl<'d> UartLog<'d> {
 
     /// One line of any length (1521b): `body` whole, shaped as
     /// [`UartLog::line`] shapes it, in a buffer the size of the line. For
-    /// lines that arrive formatted and outgrow [`LINE_MAX`]: the UI
+    /// lines that arrive formatted and outgrow `LINE_MAX`: the UI
     /// core's census lines were cut at it (`verdict=over o t=`).
     pub fn text(&mut self, prefix: &str, body: &str) {
         let mut buf = alloc::vec![0u8; prefix.len() + body.len() + 32];
