@@ -11,7 +11,7 @@ The hands-on introduction is the [tutorial](rust-api-tutorial.md); the layer
 overview is [Choosing a layer](choosing-a-layer.md).
 
 All `leviculum-std` types are re-exported from the crate root
-(`leviculum-std/src/lib.rs:76-104`), so `use leviculum_std::{NodeEvent, LinkHandle,
+(`leviculum-std/src/lib.rs:77-105`), so `use leviculum_std::{NodeEvent, LinkHandle,
 …}` works without naming submodules.
 
 ## `leviculum-std` (std / tokio)

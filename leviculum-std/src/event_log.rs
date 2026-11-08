@@ -1335,6 +1335,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "AUTO_SERVER",
         required_keys: &["slot", "chosen", "reason", "from"],
     },
+    // A client tool's attach (`instance.rs`, `find_or_start`, #471 step 4):
+    // `found=yes` when a shared instance answered, `started=yes` with the
+    // child lnsd's pid when none did and the tool started one, and the
+    // channel (`via=unix|tcp`). Once per tool start.
+    EventSchema {
+        name: "INSTANCE",
+        required_keys: &["via", "pid"],
+    },
     EventSchema {
         name: "LOCK_DEPTH_OVERFLOW",
         required_keys: &["max_depth", "tripwire"],

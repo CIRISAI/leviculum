@@ -95,6 +95,7 @@ skip  lblogd          watch_posts                # filesystem watcher: tokio run
 skip  lblogd          web_plain                  # binds a TCP socket under a tokio runtime
 skip  leviculum-cli   client_tools               # spawns lnsd and the client tools
 skip  leviculum-cli   lnsd_instance_conflict     # spawns two daemons and waits for one to refuse
+skip  leviculum-cli   find_or_start              # spawns lnsd through find_or_start and dials its socket
 skip  leviculum-cli   lnsd_without_interface_features # spawns lnsd built without ble or serial (just lnsd-minimal)
 skip  leviculum-cli   selftest_ratchet_message_count # spawns lnsd and runs the selftest binary twice against it
 skip  leviculum-cli   storage_path_from_config   # spawns lnsd against a temp-dir config

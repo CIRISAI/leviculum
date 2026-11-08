@@ -52,6 +52,7 @@ pub mod fuzz;
 /// not install it as the global allocator.
 pub mod heap_accounting;
 pub(crate) mod ini_config;
+pub mod instance;
 pub mod interfaces;
 pub(crate) mod known_destinations;
 pub mod local_time;
