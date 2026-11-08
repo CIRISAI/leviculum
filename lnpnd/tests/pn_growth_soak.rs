@@ -28,17 +28,31 @@
 //! PN_GROWTH table=store_index kb_per_min=0.0 first_kb=... last_kb=...
 //! ```
 //!
-//! **Red** when a table's slope over the full-store window is above
-//! [`FLAT_KB_PER_MIN`], or the store never filled (then the soak proved
-//! nothing). Full is full in bytes: eviction takes the heaviest messages
-//! first, so the count may still rise at the limit, and `store_index` may
-//! rise by what those messages cost, the window's count slope times the
-//! index's bytes a message. `dup` is judged against the growth it has by design: every
-//! accepted id is remembered for the reference's 180-day window
-//! (`leviculum-lxmf/src/processed_ids.rs`), [`DUP_BYTES_PER_ACCEPT`] bytes an
-//! id at most, every synced one's origin while the message is held,
-//! [`DUP_BYTES_PER_SYNCED_ORIGIN`], and every evicted one for the message
-//! expiry, [`DUP_BYTES_PER_EVICTION`]. `rss_kb` is printed beside the tables, not judged: the
+//! **The verdict** (order 1558) judges a table by its design bound where
+//! it has one, and by its slope only where it has none:
+//!
+//! - `dup` by count at every sample: the processed ids, departures and
+//!   origins it holds against `dup_cap_ids`, the bound the role and the
+//!   peering runtime hold them to (`leviculum_lxmf::dup_caps`, two
+//!   processed ids and one departure per stored message, one origin per
+//!   stored message). Below the bound it grows by design, and a soak of
+//!   minutes does not reach it, so its slope is printed, not judged.
+//! - `sync_in`, the sync batches in flight, as a bounded transient: its
+//!   peak against [`SYNC_LIMIT_BYTES`] per peer, and whether it drained
+//!   back to its floor at least once in the full-store window. A slope
+//!   over samples that land inside or between batches says nothing.
+//! - every other column by its least-squares slope over the full-store
+//!   window, red above [`FLAT_KB_PER_MIN`]; `store_index` may rise by what
+//!   the count still rising at the byte limit costs (eviction takes the
+//!   heaviest messages first), the window's count slope times the index's
+//!   bytes a message.
+//! - `tables`, their sum, through its columns; a jump that is the origins'
+//!   hash table doubling is named (`PN_GROWTH resize`).
+//!
+//! Red too when the store never filled: then the soak proved nothing.
+//! Every sample's whole census is printed (`PN_SOAK_SAMPLE`), and on red
+//! the node's event log is kept beside the store cache, named in the
+//! failure. `rss_kb` is printed beside the tables, not judged: the
 //! allocator keeps what it once had, and what to fix is the table.
 //!
 //! Run it with `just pn-growth-soak` (release, 20 minutes, 300 000
@@ -72,29 +86,14 @@ use lnpnd::engine::{Engine, EngineConfig};
 /// emptied by the rounds in flight at the sample.
 const FLAT_KB_PER_MIN: f64 = 1.0;
 
-/// The duplicate list's designed growth per accepted id: 16 bytes of key in
-/// a sealed bucket, about 27 in an open one by the census's B-tree model.
-const DUP_BYTES_PER_ACCEPT: f64 = 32.0;
-
 /// One peer's store: room for its fresh messages (10 000 at most 600 bytes)
 /// and for what the node forwards it, which it evicts as it goes.
 const PEER_STORE_BYTES: u64 = 8_000_000;
 
-/// The departure the duplicate list remembers for every message that left
-/// the store, for the message expiry (`Departures`,
-/// `leviculum-lxmf/src/propagation_node.rs`): a 32-byte id and its time
-/// and reason in a B-tree, about 78 bytes by the census's model.
-const DUP_BYTES_PER_EVICTION: f64 = 80.0;
-
-/// The origin the peering runtime keeps for every message a peer's sync
-/// stored, so the offer toward that peer leaves it out (`Origins`,
-/// `lnpnd/src/peering.rs`, LV-1003): a 16-byte id prefix, the peer and the
-/// receive time in a hash table, about 47 bytes by the census's model,
-/// counted in `dup`. Every accept in this soak arrives by a peer's sync. It
-/// goes when its message is evicted, so it is bounded by the store's count,
-/// but the prefilled messages the node evicts first carry none: until they
-/// are gone the column grows by this much an accept.
-const DUP_BYTES_PER_SYNCED_ORIGIN: f64 = 48.0;
+/// The node's per-sync limit, lnpnd's default (`DEFAULT_SYNC_LIMIT_KB`,
+/// lxmd's `SYNC_LIMIT`, `lnpnd/src/main.rs`): what one peer's sync batch
+/// may hold, the `sync_in` bound per peer.
+const SYNC_LIMIT_BYTES: f64 = 256.0 * 40.0 * 1000.0;
 
 /// The line lnpnd prints once its propagation destination is up.
 const READY: &str = "lnpnd: propagation node ready";
@@ -431,12 +430,12 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
                     minute: started.elapsed().as_secs_f64() / 60.0,
                     values,
                 };
+                // The whole census, every column, so a red soak can be
+                // read sample by sample after the fact (order 1558).
                 eprintln!(
-                    "PN_SOAK_SAMPLE minute={:.1} stored={} tables_kb={:.0} rss_kb={}",
+                    "PN_SOAK_SAMPLE minute={:.1} {}",
                     sample.minute,
-                    sample.get("stored"),
-                    sample.get("tables") / 1000.0,
-                    sample.get("rss_kb"),
+                    census_line(&sample)
                 );
                 samples.push(sample);
                 break;
@@ -509,34 +508,129 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
         .max(samples.len() / 2)
         .min(samples.len());
     let window = &samples[full_from..];
-    assert!(
-        evicted > 0 && window.len() >= 3,
-        "the store never evicted, or too late to leave three samples ({} of them): \
-         a flat table over a filling store proves nothing",
-        window.len()
-    );
+    if evicted == 0 || window.len() < 3 {
+        panic!(
+            "the store never evicted, or too late to leave three samples ({} of them): \
+             a flat table over a filling store proves nothing; events.log {}",
+            window.len(),
+            keep_event_log(&event_log, &base)
+        );
+    }
 
     let span = (last.minute - first.minute).max(1e-9);
-    let accepts_per_min = accepted as f64 / span;
     let stored_per_min = slope(window, "stored").max(0.0);
     let index_per_message = last.get("store_index") / last.get("stored").max(1.0);
     let index_allowance = stored_per_min * index_per_message / 1000.0;
-    let evictions_per_min = evicted as f64 / span;
-    let dup_allowance = (accepts_per_min * (DUP_BYTES_PER_ACCEPT + DUP_BYTES_PER_SYNCED_ORIGIN)
-        + evictions_per_min * DUP_BYTES_PER_EVICTION)
-        / 1000.0;
     let mut red = Vec::new();
-    for table in lnpnd::census::COLUMNS.iter().chain(&["tables"]) {
+
+    // A table's hash map doubling shows as one jump between two samples;
+    // name it, so the jump is not read as growth.
+    for pair in samples.windows(2) {
+        let (before, after) = (pair[0].get("origin_slots"), pair[1].get("origin_slots"));
+        if after > before && before > 0.0 {
+            println!(
+                "PN_GROWTH resize table=origins minute={:.1} slots={before}->{after} \
+                 dup_jump_kb={:.1}",
+                pair[1].minute,
+                (pair[1].get("dup") - pair[0].get("dup")) / 1000.0
+            );
+        }
+    }
+
+    // `dup` is judged by its design bound, in ids, at every sample
+    // (`leviculum_lxmf::dup_caps`, order 1558), not by a slope: below the
+    // bound it grows by design, and a soak of minutes never reaches it.
+    let dup_held =
+        |s: &Sample| s.get("processed_ids") + s.get("departed_ids") + s.get("origin_ids");
+    let fullest = samples
+        .iter()
+        .max_by(|a, b| {
+            let fill = |s: &Sample| dup_held(s) / s.get("dup_cap_ids").max(1.0);
+            fill(a).total_cmp(&fill(b))
+        })
+        .expect("a sample");
+    for sample in &samples {
+        let held =
+            sample.get("processed_ids") + sample.get("departed_ids") + sample.get("origin_ids");
+        if held > sample.get("dup_cap_ids") {
+            red.push(format!(
+                "dup {held} ids over its bound {} at minute {:.1}",
+                sample.get("dup_cap_ids"),
+                sample.minute
+            ));
+            break;
+        }
+    }
+    println!(
+        "PN_GROWTH table=dup judged=bound fullest_held_ids={} cap_ids={} at_minute={:.1} \
+         processed={} departed={} origins={} first_kb={:.1} last_kb={:.1} kb_per_min={:.2}",
+        dup_held(fullest),
+        fullest.get("dup_cap_ids"),
+        fullest.minute,
+        last.get("processed_ids"),
+        last.get("departed_ids"),
+        last.get("origin_ids"),
+        first.get("dup") / 1000.0,
+        last.get("dup") / 1000.0,
+        slope(window, "dup") / 1000.0,
+    );
+
+    // `sync_in` holds the sync batches in flight, each at most the node's
+    // per-sync limit, one per peer at most: a bounded transient. It is
+    // judged by its peak against that bound and by its return to the floor
+    // at the end, not by a slope over samples that land in or between
+    // batches.
+    let sync_in_bound = SYNC_LIMIT_BYTES * peer_count as f64;
+    let sync_in_peak = samples.iter().map(|s| s.get("sync_in")).fold(0.0, f64::max);
+    let sync_in_floor = samples
+        .iter()
+        .map(|s| s.get("sync_in"))
+        .fold(f64::MAX, f64::min);
+    // Back to the floor: the queue drained at least once in the full-store
+    // window. A queue that grows never does; the last sample alone may
+    // land inside a batch.
+    let sync_in_drained = window
+        .iter()
+        .any(|s| s.get("sync_in") <= sync_in_floor + FLAT_KB_PER_MIN * 1000.0);
+    println!(
+        "PN_GROWTH table=sync_in judged=transient peak_kb={:.1} bound_kb={:.1} floor_kb={:.1} \
+         last_kb={:.1} drained={sync_in_drained} kb_per_min={:.2}",
+        sync_in_peak / 1000.0,
+        sync_in_bound / 1000.0,
+        sync_in_floor / 1000.0,
+        last.get("sync_in") / 1000.0,
+        slope(window, "sync_in") / 1000.0,
+    );
+    if sync_in_peak > sync_in_bound {
+        red.push(format!(
+            "sync_in peak {:.1} kB over its bound {:.1} kB",
+            sync_in_peak / 1000.0,
+            sync_in_bound / 1000.0
+        ));
+    }
+    if !sync_in_drained {
+        red.push(format!(
+            "sync_in never back at its floor {:.1} kB in the full-store window",
+            sync_in_floor / 1000.0
+        ));
+    }
+
+    // Every other column has no bound but time, and is judged by its slope
+    // over the full-store window; `store_index` may rise by what the
+    // count still rising at the byte limit costs.
+    for table in lnpnd::census::COLUMNS {
+        if matches!(*table, "dup" | "sync_in") {
+            continue;
+        }
         let kb_per_min = slope(window, table) / 1000.0;
         let allowed = FLAT_KB_PER_MIN
-            + match *table {
-                "dup" => dup_allowance,
-                "store_index" => index_allowance,
-                "tables" => dup_allowance + index_allowance,
-                _ => 0.0,
+            + if *table == "store_index" {
+                index_allowance
+            } else {
+                0.0
             };
         println!(
-            "PN_GROWTH table={table} kb_per_min={kb_per_min:.2} allowed={allowed:.2} \
+            "PN_GROWTH table={table} judged=slope kb_per_min={kb_per_min:.2} allowed={allowed:.2} \
              first_kb={:.1} last_kb={:.1}",
             first.get(table) / 1000.0,
             last.get(table) / 1000.0
@@ -546,6 +640,12 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
         }
     }
     println!(
+        "PN_GROWTH table=tables judged=by_column kb_per_min={:.2} first_kb={:.1} last_kb={:.1}",
+        slope(window, "tables") / 1000.0,
+        first.get("tables") / 1000.0,
+        last.get("tables") / 1000.0
+    );
+    println!(
         "PN_GROWTH table=rss kb_per_min={:.2} first_kb={} last_kb={} (printed, not judged)",
         slope(window, "rss_kb"),
         first.get("rss_kb"),
@@ -553,14 +653,28 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     );
     println!(
         "PN_GROWTH window_from_minute={:.1} samples={} evicted={evicted} accepted={accepted} \
-         stored_per_min={stored_per_min:.1} index_bytes_per_message={index_per_message:.0}",
+         accepts_per_min={:.0} stored_per_min={stored_per_min:.1} \
+         index_bytes_per_message={index_per_message:.0}",
         window[0].minute,
-        window.len()
+        window.len(),
+        accepted as f64 / span,
     );
-    assert!(
-        red.is_empty(),
-        "tables still growing with the store full: {red:?}"
-    );
+    if !red.is_empty() {
+        panic!(
+            "tables still growing with the store full: {red:?}; events.log {}",
+            keep_event_log(&event_log, &base)
+        );
+    }
+}
+
+/// Keep the node's event log beside the store cache for the reading after
+/// the fact: the run directory goes with the test. Says where it went.
+fn keep_event_log(event_log: &Path, base: &Path) -> String {
+    let kept = base.join(format!("events-red-{}.log", unix_secs()));
+    match std::fs::copy(event_log, &kept) {
+        Ok(_) => kept.display().to_string(),
+        Err(error) => format!("could not be kept ({error})"),
+    }
 }
 
 fn census_line(sample: &Sample) -> String {
