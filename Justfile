@@ -1612,7 +1612,7 @@ fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check
 # NOT an alias for `fast`, because `fast` cannot run in that pipeline's
 # container, and not for want of a package:
 #   check-submodules      — the pipeline clones with `submodules: false`
-#                           (nightly.yml:103-108), so every pin is "missing".
+#                           (nightly.yml:168), so every pin is "missing".
 #   lint-nrf              — leviculum-nrf is its own workspace, needs the
 #                           thumbv7em target plus flip-link as its linker.
 #   nrf-stack-frames      — reads a linked firmware ELF that is never built here.

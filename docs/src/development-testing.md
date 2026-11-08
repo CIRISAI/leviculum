@@ -63,7 +63,7 @@ prove different things. The tier-2 nightly (03:37) runs `just complete`,
 containers on their own network namespaces: green, it proves the
 workspace, the fuzz targets and the docker corpora on the commit it
 tested, and nothing about radios. The published build is the forge's
-`nightly.yml` (cron 04:00 UTC, 06:00 CEST, or fired by the night's green
+`nightly.yml` (cron 09:05 UTC, 10:05 CET, or fired by the night's green
 ref): it proves `just ci-gate` and the package builds, and publishes only
 a commit a green night covers. Tier 3, despite its recipe being called
 `just nightly`, is the hourly rig cadence plus a full hardware run before

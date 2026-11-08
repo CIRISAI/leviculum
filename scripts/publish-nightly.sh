@@ -473,7 +473,7 @@ fi
 # Which commit the current assets were built from: the tag, which this script
 # moves only after a complete swap, so it names the build the release holds
 # even after a failed run. When it is the commit about to be published, the
-# current set is the same code again (the triggered publish and the 04:00
+# current set is the same code again (the triggered publish and the 09:05
 # fallback cron both fire on a day nothing landed), and renaming it would
 # replace the one fallback a bad build leaves with a copy of that bad build.
 # Then the current set is replaced in place and `.previous` stays. An
