@@ -122,7 +122,7 @@ fn every_screen_keeps_the_boards_budgets() {
         for screen in SCREENS {
             let budget = screen.budget();
             let (mut model, row) = screen.walk();
-            loquax_m9::house::set_size(size, &mut model, &mut renderer);
+            let _ = loquax_m9::house::set_size(size, &mut model, &mut renderer);
             let got: Census =
                 census::measure_at(&mut probe, &model, row, &mut renderer, &mut map).expect("draw");
             let name = census::screen_name(screen.name(), size);

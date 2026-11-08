@@ -188,6 +188,9 @@ pub struct Board {
     pub frames: u64,
     /// A redraw the next turn owes (a frame dump drew over the screen).
     owed: bool,
+    /// What a size set asked of the model (1546), routed by the next
+    /// turn as the board's loop routes it.
+    asked: Vec<loquax::ui::UiEffect>,
 }
 
 impl Board {
@@ -314,6 +317,7 @@ impl Board {
             last_page: None,
             frames: 0,
             owed: false,
+            asked: Vec::new(),
         };
         // The record's type (1532), as the board reads it at boot; a board
         // without a record shows the default.
@@ -322,7 +326,7 @@ impl Board {
             None => Size::DEFAULT,
         };
         board.overview.restore(size);
-        house::set_size(size, &mut board.model, &mut board.renderer);
+        board.asked = house::set_size(size, &mut board.model, &mut board.renderer);
         board
             .log
             .line("[TYPE] ", &format!("size={} via=boot", size.name()));
@@ -359,7 +363,8 @@ impl Board {
         self.renderer.set_size(Size::DEFAULT);
         let name = self.dump_screen(byte);
         self.overview = kept_overview;
-        house::set_size(self.overview.size, &mut self.model, &mut self.renderer);
+        let asked = house::set_size(self.overview.size, &mut self.model, &mut self.renderer);
+        self.asked.extend(asked);
         name
     }
 
@@ -400,7 +405,12 @@ impl Board {
             let busy_io = self.io_turn();
             let take = t1.elapsed().as_millis() as u64;
             self.say_turn(draw_ms, keys_ms, take);
-            if !busy_ui && !busy_io && self.to_ui.is_empty() && self.from_ui.is_empty() {
+            if !busy_ui
+                && !busy_io
+                && self.to_ui.is_empty()
+                && self.from_ui.is_empty()
+                && self.asked.is_empty()
+            {
                 // A quiet turn: the store erases ahead (`node.quiet`).
                 self.quiet();
                 return;
@@ -526,6 +536,12 @@ impl Board {
         let mut dirty = false;
         let mut busy = false;
         let mut wants = Wants::default();
+        // What the last size set asked (1546): the boot's among them.
+        let asked = std::mem::take(&mut self.asked);
+        if !asked.is_empty() {
+            busy = true;
+            dirty |= self.route_out(asked, &mut wants);
+        }
         while let Some(message) = self.to_ui.pop_front() {
             busy = true;
             match message {
@@ -656,7 +672,8 @@ impl Board {
     /// Whether the screen changed.
     fn did(&mut self, did: Did) -> bool {
         if let Some(size) = did.size {
-            house::set_size(size, &mut self.model, &mut self.renderer);
+            let asked = house::set_size(size, &mut self.model, &mut self.renderer);
+            self.asked.extend(asked);
             self.log
                 .line("[TYPE] ", &format!("size={} via={}", size.name(), did.via));
             self.from_ui.push_back(FromUi::Type(size));

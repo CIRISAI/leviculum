@@ -1624,7 +1624,9 @@ fn ui_main(
         for walked in fixture::SCREENS {
             let budget = walked.budget();
             let (mut walk_model, walk_row) = walked.walk();
-            house::set_size(size, &mut walk_model, &mut renderer);
+            // The walk's model is the fixture's, no home's: nothing it
+            // asks has a store to go to.
+            let _ = house::set_size(size, &mut walk_model, &mut renderer);
             let name = census::screen_name(walked.name(), size);
             match census::measure_at(&mut probe, &walk_model, walk_row, &mut renderer, &mut map) {
                 Ok(got) => log.line(
@@ -1661,7 +1663,10 @@ fn ui_main(
 
     // The reader's type size, the record's (1532).
     let size = shown.overview.size;
-    house::set_size(size, &mut model, &mut renderer);
+    // What a size set asks of the model (1546): the selected chat's page
+    // among it, routed by the loop's next turn. Dropped before, the
+    // boot's cursor chat never loaded and opened with no read mark.
+    let mut asked = house::set_size(size, &mut model, &mut renderer);
     log.line("[TYPE] ", alloc::format!("size={} via=boot", size.name()));
 
     // The M9's own cursor over a group's sheet or picker (slice six).
@@ -1730,6 +1735,12 @@ fn ui_main(
             routed.redraw
         };
 
+        // What the last size set asked (1546).
+        let owed = core::mem::take(&mut asked);
+        if !owed.is_empty() && route_out(&mut model, owed, &mut ids, &mut log, &mut wants) {
+            dirty = true;
+        }
+
         // What the I/O core brought.
         for message in ui_drain() {
             match message {
@@ -1739,7 +1750,11 @@ fn ui_main(
                     shown.pairing = None;
                     // The size the reader chose before the code, set on
                     // the new model and kept in the new record (1532).
-                    house::set_size(shown.overview.size, &mut model, &mut renderer);
+                    asked.extend(house::set_size(
+                        shown.overview.size,
+                        &mut model,
+                        &mut renderer,
+                    ));
                     log.send(FromUi::Type(shown.overview.size));
                     dirty = true;
                 }
@@ -1849,7 +1864,11 @@ fn ui_main(
                         lines.push(String::from(line))
                     });
                     log.send(FromUi::Dump(lines));
-                    house::set_size(shown.overview.size, &mut model, &mut renderer);
+                    asked.extend(house::set_size(
+                        shown.overview.size,
+                        &mut model,
+                        &mut renderer,
+                    ));
                     dirty = true;
                 }
             }
@@ -1878,7 +1897,8 @@ fn ui_main(
                             Some(_) => None,
                         };
                         if let Some(did) = took {
-                            dirty |= switched(did, &mut model, &mut renderer, &mut log);
+                            dirty |=
+                                switched(did, &mut model, &mut renderer, &mut log, &mut asked);
                             continue;
                         }
                         events.extend(key.event());
@@ -1942,7 +1962,7 @@ fn ui_main(
         stall::stage(Core::Ui, Stage::Draw);
         // A house tap's gap, the switch's word (1532).
         let did = shown.overview.tick(leviculum_esp::uptime_ms() as u32);
-        dirty |= switched(did, &mut model, &mut renderer, &mut log);
+        dirty |= switched(did, &mut model, &mut renderer, &mut log, &mut asked);
         dirty |= drawn.due(&model);
         // The map's words come and go by the clock (1531): a redraw when
         // they change, none while they stand.
@@ -1974,15 +1994,17 @@ fn ui_main(
 
 /// What the overview did (1532): the size set on the renderer and the
 /// model, said in a `[TYPE]` line and sent to the I/O core for the
-/// record. Whether the screen changed.
+/// record, what the model asked back kept in `asked` for the next turn's
+/// route (1546). Whether the screen changed.
 fn switched(
     did: Did,
     model: &mut UiModel<Field>,
     renderer: &mut Renderer<'_, Frame>,
     log: &mut UiLog,
+    asked: &mut Vec<loquax::ui::UiEffect>,
 ) -> bool {
     if let Some(size) = did.size {
-        house::set_size(size, model, renderer);
+        asked.extend(house::set_size(size, model, renderer));
         log.line(
             "[TYPE] ",
             alloc::format!("size={} via={}", size.name(), did.via),

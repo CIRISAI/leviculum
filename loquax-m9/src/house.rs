@@ -295,20 +295,26 @@ impl Overview {
 }
 
 /// Set `size` on what draws (1532): the renderer's cells and the
-/// model's window, which the scene is built for.
+/// model's window, which the scene is built for. What the model asks
+/// back is the caller's to route (`home::route`): the fold asks the
+/// selected conversation's page from the ring when none of it is loaded,
+/// once (1546; dropped here before, the boot's cursor chat never loaded
+/// and opened with no read mark).
+#[must_use = "the model's asks, a page read among them, go to home::route"]
 pub fn set_size<D>(
     size: Size,
     model: &mut loquax::ui::UiModel<crate::field::Field>,
     renderer: &mut crate::render::Renderer<'_, D>,
-) where
+) -> alloc::vec::Vec<loquax::ui::UiEffect>
+where
     D: embedded_graphics::draw_target::DrawTarget<Color = embedded_graphics::pixelcolor::Rgb565>
         + 'static,
 {
     renderer.set_size(size);
-    let _ = loquax::ui::update(
+    loquax::ui::update(
         model,
         loquax::ui::UiEvent::Viewing(crate::screen::viewing(size)),
-    );
+    )
 }
 
 #[cfg(test)]
