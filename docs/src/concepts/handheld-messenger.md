@@ -525,7 +525,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   was a function of the cursor's place in the order alone, and a first
   pull's 61 pages made the cursor jump about the panel with no key
   pressed. Moving the cursor onto a chat loads its page behind the list
-  and reads nothing (`behind_the_list`, `loquax-m9/src/home.rs:81`); Enter
+  and reads nothing (`behind_the_list`, `loquax-m9/src/home.rs:82`); Enter
   reads, and an Enter before the page arrived names the row's kept unread
   ids. What a type size set asks of the model, the boot's cursor chat's
   page among it, is routed (`set_size`, `loquax-m9/src/house.rs:304`).
@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:891`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:905`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1342,7 +1342,7 @@ sends as the home's identity. This pass is the first of two; typing the
 code on the board and the bench walk are 1415.
 
 **The node in the image.** `thinknode_m9` now carries a `leviculum-core`
-node (`Handheld`, `leviculum-esp/src/handheld.rs:103`): its identity in a
+node (`Handheld`, `leviculum-esp/src/handheld.rs:110`): its identity in a
 flash sector of its own, saved on the first boot and loaded on every
 later one, said as `[IDENTITY] identity=<hash> ... source=<flash|generated>
 stored=<yes|no>`; one interface, the host's serial line
@@ -1478,7 +1478,7 @@ compares the panel with the same file. Written: `lnflash --home <code> --port <t
 as text with or without its rendezvous list. The M9 has no transport
 CDC, so the session opens the port it is named, which resets the board,
 and asks for the capability report until the boot is through (60 s at
-most). Both end in `Handheld::take_code` (`leviculum-esp/src/handheld.rs:222`):
+most). Both end in `Handheld::take_code` (`leviculum-esp/src/handheld.rs:229`):
 a new device identity, the pending record in flash before the ack, the
 client that joins with it. A text that is no code is refused
 `REFUSE_VALUE`, a record flash did not take `REFUSE_PERSIST`.
@@ -1540,7 +1540,7 @@ rendezvous, the home behind it. lnsd's serial interface to the M9 needs
 from the board for the home is not discovered onwards
 (`leviculum-core/src/transport.rs:12753`, only access point, gateway
 and roaming re-originate), and the join ends in `NoPath`. The M9 sets
-its own end to Gateway already (`leviculum-esp/src/handheld.rs:203`).
+its own end to Gateway already (`leviculum-esp/src/handheld.rs:210`).
 
 1. Build and flash: `just build-m9`, then `just flash-m9
    /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0` (it carries the
@@ -1931,16 +1931,16 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2222`).
+both (`thinknode_m9.rs:2258`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
-(`CHANGED_WAIT_S`, `scripts/m9-walk.py:112`): T on the map flushes the
+(`CHANGED_WAIT_S`, `scripts/m9-walk.py:134`): T on the map flushes the
 hint's row first and says the zoom about 400 ms later. `key_ms` still
 measures the first flush after the key, and walk.md names its `rows=`.
 The house key opens the house page after its tap's 300 ms gap
 (`GAP_MS`, `loquax-m9/src/house.rs:43`), so its bar is that much longer
-(`HOUSE_GAP_MS`, `scripts/m9-walk.py:109`); `bench.walk` waits for
+(`HOUSE_GAP_MS`, `scripts/m9-walk.py:131`); `bench.walk` waits for
 `page=house` and leaves it with Back. An lnsd on the proxy's pty
 re-attaches by itself after a flash; a second one is refused with
 "shared-instance name already served" (`scripts/m9-walk.sh`).
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2234`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2270`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,15 +2035,15 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:797`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:811`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
 for everything before its end. `Store::open_after`
-(`loquax/src/home/board/store.rs:240`) reads only the frames after it,
+(`loquax/src/home/board/store.rs:252`) reads only the frames after it,
 and the boot folds them into the model and the index as the live pull
 folded them, then writes the summary at the ring's end
-(`resume_tail`, `loquax-m9/src/home.rs:509`); `[STORE] index=summaries`
+(`resume_tail`, `loquax-m9/src/home.rs:526`); `[STORE] index=summaries`
 says `tail=<n>`. A state whose sector went round the ring, or an end the
 log does not reach, still rebuilds. On the host the fixture's 4000
 entries with a 360-entry tail resume in 22 ms decoding the 360, against
@@ -2109,14 +2109,78 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2289`), and the fold runs behind the list
-(`behind_the_list`, `loquax-m9/src/home.rs:81`), so no read mark is
+(`thinknode_m9.rs:2325`), and the fold runs behind the list
+(`behind_the_list`, `loquax-m9/src/home.rs:82`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
 its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2090`, the
 a80038c2 rule); the cursor moves because the folded page gives the
 chat its real activity and the list re-sorts under a selection that
 follows the chat. A preload, not an open: nothing to stop for 1562/1564.
+
+### The bench never touches a real home (1562)
+
+On 2026-11-08 the last few dozen messages in Lew's real chats on the
+M9 were called `bench arrival <n>`. Two bench mistakes were behind
+them, and both are now closed by how the code is built, not by care.
+
+**Arrivals live in "Bench".** 1540's `TYPE_BENCH_ARRIVE` wrote the
+synthetic message into the chat at a row of the list and kept it in
+the flash ring like a pulled page. Nothing went out, but it stayed in
+his chats across every boot. Now every arrival comes from one
+synthetic peer, `BENCH_PEER` (`loquax-m9/src/bench.rs:32`). Those are
+sixteen ASCII bytes, and no identity's SHA-256 hash can be made to
+equal them. The arrival goes into one conversation the list calls
+"Bench", and its signature field holds the bench's flag
+(`bench::SIGNATURE`). The frame no longer carries a row. Rules:
+
+- **A release image** restores with `Arrivals::Dropped`. The rebuild
+  and the resumed tail skip the bench's entries, and a summary's
+  "Bench" row and name are not listed (`listed`,
+  `loquax-m9/src/home.rs:654`). A release image never shows "Bench".
+- **Read marks.** The board leaves the bench's message ids out of the
+  marks it sends its home (`route`). It keeps the read on the board
+  itself.
+- **`bench forget`** (`TYPE_BENCH_FORGET` 0x1D, bench image only)
+  takes the following out of the ring (`home::forget`,
+  `loquax-m9/src/home.rs:793`, over `Store::forget`,
+  `loquax/src/home/board/store.rs:286`):
+  - the flagged entries;
+  - 1540's unflagged entries, which have a zero signature and text
+    starting `bench arrival ` (`is_unflagged`,
+    `loquax-m9/src/bench.rs:160`);
+  - read marks that name nothing else.
+
+  `Store::forget` rewrites only the sectors that hold such a frame,
+  keeping their other frames verbatim. The summary log is then
+  erased, and core 0 rebuilds the store and hands the UI core the
+  new model. The board does not reset, so no `[PREV_RUN]` record
+  appears. A power cut between a sector's erase and its rewrite
+  loses that sector's entries, the same as a ring that went round.
+
+`scripts/m9-walks/forget.walk` is the clean-up. It opens no chat, so it
+runs on a board joined to any home.
+
+**The bench pairs with a mailbox of its own.** The walks of windows 11
+to 15 ran on Lew's M9 joined to his mailbox. They opened his chats, and
+the board sent read marks for messages he never read (`HOME mark read
+device=940b1536…` at 09:06). `scripts/m9-bench-home.sh` keeps a
+`loquax mailbox` for the bench on the bench host:
+
+- `setup` gives it an identity of its own and the 1489 fixture as its
+  archive (`loquax-m9-sim --seed-home`,
+  `loquax-m9/src/bin/loquax-m9-sim/seed.rs:30`), written under that
+  identity's address.
+- `run` starts it beside lnsd.
+- `join` writes a fresh code that this mailbox issued to the board.
+- `send` delivers a live arrival from the reference LXMF client.
+
+The board's `[HOME] client=yes` line names its home's address
+(`home=`). `m9-walk.py` refuses a walk that opens chats (Enter or
+`open`) before its first key unless that address is the bench home's
+(`refusal`, `scripts/m9-walk.py:746`). A board without a home, and a
+walk without opens, run as before. Lew gets his own pairing back with
+`lnflash --home` or a code from his mailbox. The two never mix.
 
 ### Tracks on the M9 (1385, not built)
 
