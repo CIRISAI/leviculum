@@ -270,7 +270,11 @@ fn reboot(board: Board, boots: u64, save: Option<&Path>) -> Result<Board, String
     if let Some(save) = save {
         flash.save(save)?;
     }
-    Board::boot(flash, log, boots)
+    let mut board = Board::boot(flash, log, boots)?;
+    // The loop turns before a key, as after the first power-on: what the
+    // boot asked (1546, the cursor chat's page) is read at t=0.
+    board.settle();
+    Ok(board)
 }
 
 /// `<stem>-f<frame>.png` beside `dump`.
