@@ -56,30 +56,42 @@ pub fn take(
     entries: &[Entry],
     address: &[u8; 16],
 ) -> (usize, Vec<UiEffect>) {
-    // The Compact scene shows the list or the chat, never both (1493):
-    // while the keys are on the list the selected chat is not on the
-    // panel, and an arrival there must not be marked "read where it
-    // arrived" — the fold sees no open conversation, as a phone's closed
-    // chat does. The desktop's rule stands where the chat is shown.
-    let hidden = model.focus == Pane::Conversations;
+    behind_the_list(model, |model| {
+        let mut taken = 0;
+        let mut batch = Batch::new(model);
+        for event in entries
+            .iter()
+            .filter_map(|entry| board::fold(entry, address))
+        {
+            batch.fold(UiEvent::Engine(event));
+            taken += 1;
+        }
+        (taken, batch.finish())
+    })
+}
+
+/// Run `fold` with the list's cursor hidden from it while the keys are
+/// on the list. The Compact scene shows the list or the chat, never both
+/// (1493): the conversation under the cursor is selected but not on the
+/// panel, and what reaches it now, an arrival ([`take`]) or its page
+/// from the ring ([`page_in`], 1546), must not be marked "read where it
+/// arrived": the fold sees no open conversation, as a phone's closed
+/// chat does. The desktop's rule stands where the chat is shown. A fold
+/// that opened a conversation itself keeps it open.
+fn behind_the_list<R>(
+    model: &mut UiModel<Field>,
+    fold: impl FnOnce(&mut UiModel<Field>) -> R,
+) -> R {
+    if model.focus != Pane::Conversations {
+        return fold(model);
+    }
     let was = model.selected;
-    if hidden {
-        model.selected = loquax::ui::NONE_OPEN;
-    }
-    let mut taken = 0;
-    let mut batch = Batch::new(model);
-    for event in entries
-        .iter()
-        .filter_map(|entry| board::fold(entry, address))
-    {
-        batch.fold(UiEvent::Engine(event));
-        taken += 1;
-    }
-    let effects = batch.finish();
-    if hidden {
+    model.selected = loquax::ui::NONE_OPEN;
+    let out = fold(model);
+    if model.selected == loquax::ui::NONE_OPEN {
         model.selected = was;
     }
-    (taken, effects)
+    out
 }
 
 /// How a boot read the message store (1521).
@@ -500,14 +512,19 @@ pub fn page_in(
     address: &[u8; 16],
 ) -> Vec<UiEffect> {
     let messages = rows::messages::<Field>(entries, address, peer);
-    update(
-        model,
-        UiEvent::Earlier {
-            peer,
-            messages,
-            earlier,
-        },
-    )
+    // The cursor's chat loads while the list is up (1521: the move asks
+    // its page): its first fill reads only once Enter opened it (1546;
+    // before, the list's cursor moved onto an unread chat marked it read).
+    behind_the_list(model, |model| {
+        update(
+            model,
+            UiEvent::Earlier {
+                peer,
+                messages,
+                earlier,
+            },
+        )
+    })
 }
 
 /// What a fold's output becomes on the board (1493): the verbs for the
