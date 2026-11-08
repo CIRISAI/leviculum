@@ -91,6 +91,8 @@ pub struct TuiOptions {
     pub script: Option<PathBuf>,
     pub frames: Option<PathBuf>,
     pub size: (u16, u16),
+    /// `--no-start`: fail when no shared instance answers (#471 step 4).
+    pub no_start: bool,
 }
 
 /// `loquax tui`.
@@ -106,6 +108,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         no_mouse: options.no_mouse,
         scripted: options.script.is_some(),
         log_file: "tui.log",
+        no_start: options.no_start,
     })
     .await
     {

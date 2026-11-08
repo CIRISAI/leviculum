@@ -173,6 +173,11 @@ struct Args {
     #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
     verbose: u8,
 
+    /// fail when no shared instance answers instead of starting lnsd as a
+    /// child (zero-config, #471)
+    #[arg(long)]
+    no_start: bool,
+
     /// only display interfaces with names including filter
     filter: Option<String>,
 
@@ -300,6 +305,26 @@ async fn main() {
                 .map(|c| c.reticulum.instance_name.clone())
         })
         .unwrap_or_else(|| "default".to_string());
+
+    // --- Find the shared instance, or start lnsd as our child (#471 step
+    // 4). Held to the end of `main`: a daemon it started goes with us, so a
+    // one-shot status shows a fresh daemon and `-m` keeps it while it
+    // watches. A started lnsd wrote its first-start file and its identity,
+    // so the config is read again before the authkey is derived. ---
+    let _instance = match leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance_name,
+        args.no_start,
+        leviculum_std::instance::Report::from_verbose(args.verbose > 0),
+    ) {
+        Ok(instance) => instance,
+        Err(e) => {
+            eprintln!("No shared RNS instance available to get status from");
+            eprintln!("({e})");
+            std::process::exit(1);
+        }
+    };
+    let loaded_config = loaded_config.or_else(|| daemon_rpc::load_config(&config_dir));
 
     // --- Discovered interfaces (-d/-D): read the local registry over the
     // shared-instance RPC and render it. Matches rnstatus, which handles the

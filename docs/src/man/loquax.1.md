@@ -56,6 +56,9 @@ The packages for amd64 and arm64 carry both frontends in one binary; the armhf p
 **--config** *dir*
 :   Reticulum config directory; only its instance name and RPC key are read. Default: the platform default.
 
+**--no-start**
+:   The window and the terminal: fail when no shared instance answers, as the tools did before the zero-config step 4, instead of starting **lnsd**(1) as a child. Without it, **loquax** looks for a running shared instance (the abstract socket `@rns/`*instance*, then TCP loopback at the configured `shared_instance_port`, else 37428, for the instance `default` or a configured port) and, when none answers, starts `lnsd -c` *dir* on the same configuration directory and waits until it accepts. The daemon is **loquax**'s child and goes when **loquax** exits; its output goes to `lnsd.log` in the configuration directory. The window and the terminal log which in their log file (`INSTANCE found=yes` or `INSTANCE started=yes`). A configuration with `share_instance = No` starts nothing. The other subcommands do not start a daemon. The **lnsd** started is `$LEVICULUM_LNSD`, else the one beside **loquax**, else the one on `PATH`.
+
 **--verbose**
 :   When no daemon answers, print the instance it looked for and what the stack said instead of the one sentence. Before or after a subcommand.
 

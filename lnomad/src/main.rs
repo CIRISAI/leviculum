@@ -104,6 +104,11 @@ struct Args {
     /// theme.
     #[arg(long, conflicts_with = "print")]
     gui: bool,
+
+    /// Fail when no shared instance answers instead of starting lnsd as a
+    /// child, which goes when the browser does (zero-config, #471).
+    #[arg(long)]
+    no_start: bool,
 }
 
 /// The `--images` choice.
@@ -228,6 +233,24 @@ async fn main() -> ExitCode {
         .config
         .clone()
         .unwrap_or_else(Config::default_config_dir);
+    // Find the shared instance, or start lnsd as our child (#471 step 4).
+    // Held for the browser's life: a daemon it started goes with it.
+    let instance_name = {
+        let config = leviculum_std::daemon_rpc::load_config(&config_dir);
+        leviculum_std::daemon_rpc::resolve_instance_name(args.instance.as_deref(), config.as_ref())
+    };
+    let _instance = match leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance_name,
+        args.no_start,
+        leviculum_std::instance::Report::Started,
+    ) {
+        Ok(instance) => instance,
+        Err(err) => {
+            eprintln!("lnomad: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     let connect = match &args.instance {
         Some(name) => Session::connect_to(name, config_dir.join("storage")).await,
         None => Session::connect(&config_dir).await,

@@ -86,6 +86,9 @@ pub(crate) struct ShellOptions {
     pub scripted: bool,
     /// The file beside the identity the log goes to: `tui.log`, `gui.log`.
     pub log_file: &'static str,
+    /// `--no-start`: fail when no shared instance answers instead of
+    /// starting lnsd as a child (#471 step 4).
+    pub no_start: bool,
 }
 
 /// Effects for the runners and the stamp worker: their lines become toasts,
@@ -203,6 +206,9 @@ pub(crate) struct Shell {
     /// the log.
     store_failed: bool,
     attached: Attached,
+    /// The shared instance found or started (#471 step 4): a daemon this
+    /// shell started goes when it is dropped, after the engine detached.
+    daemon: Option<leviculum_std::instance::Instance>,
     fanout: Fanout,
     context: RunContext,
     /// Sends not yet started, oldest first. They run one at a time: the
@@ -1464,6 +1470,16 @@ pub(crate) async fn start(
         .instance
         .clone()
         .unwrap_or_else(|| crate::instance_name(&config_dir));
+    // The terminal and the window attach to a shared instance; where none
+    // answers they start lnsd as their child (#471 step 4), which goes when
+    // they do. Quiet: the screen is stderr, the line goes to the log file.
+    let daemon = leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance,
+        options.no_start,
+        leviculum_std::instance::Report::Quiet,
+    )
+    .map_err(|error| crate::failure(error, "no-daemon"))?;
     let storage_dir =
         crate::storage_dir(&home).map_err(|error| crate::failure(error, "no-daemon"))?;
 
@@ -1656,6 +1672,7 @@ pub(crate) async fn start(
         store,
         store_failed: false,
         attached,
+        daemon,
         fanout: Fanout::default(),
         context: RunContext {
             home,
@@ -1704,6 +1721,7 @@ pub(crate) async fn finish(mut shell: Shell, outcome: Result<(), String>) -> Exi
     shell.settle().await;
     let Shell {
         attached,
+        daemon,
         afterwards,
         watch,
         ..
@@ -1712,6 +1730,7 @@ pub(crate) async fn finish(mut shell: Shell, outcome: Result<(), String>) -> Exi
         task.abort();
     }
     attached.stop().await;
+    drop(daemon);
     for line in afterwards {
         eprintln!("loquax: {line}");
     }

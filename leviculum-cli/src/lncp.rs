@@ -39,6 +39,11 @@ struct Args {
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
 
+    /// Fail when no shared instance answers instead of starting lnsd as a
+    /// child (zero-config, #471)
+    #[arg(long)]
+    no_start: bool,
+
     /// Decrease verbosity
     #[arg(short, long, action = ArgAction::Count)]
     quiet: u8,
@@ -168,6 +173,18 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Determine instance name and storage directory from config
     let config = daemon_rpc::load_config(&config_dir);
     let instance_name = daemon_rpc::resolve_instance_name(None, config.as_ref());
+
+    // Find the shared instance, or start lnsd as our child (#471 step 4).
+    // Held to the end of `run`: the daemon it started goes with us.
+    let _instance = leviculum_std::instance::for_tool(
+        &config_dir,
+        &instance_name,
+        args.no_start,
+        leviculum_std::instance::Report::from_verbose(args.verbose > 0),
+    )
+    .map_err(|e| format!("lncp: {e}"))?;
+    // A started lnsd wrote its first-start file into an empty directory.
+    let config = config.or_else(|| daemon_rpc::load_config(&config_dir));
     let storage_path = daemon_rpc::resolve_storage_path(&config_dir, config.as_ref());
 
     // Connect to daemon

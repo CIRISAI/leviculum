@@ -162,9 +162,9 @@ raw ANSI page text and nothing else: no link markers, no legend, and with
 (`lnomad/src/render.rs:149-152`). There is no JSON output anywhere in the
 crate: `serde_json` is not a dependency. Non-interactive detection is
 automatic: `interactive = args.gui || (!args.print && stdin().is_terminal() &&
-stdout().is_terminal())` (`lnomad/src/main.rs:180-181`), so piping never
+stdout().is_terminal())` (`lnomad/src/main.rs:185-186`), so piping never
 blocks on the UI. Exit codes: 0 success, 1 operational failure, 2 argument
-or URL error (`lnomad/src/main.rs:191`, `:188`, `:222`, `:238`).
+or URL error (`lnomad/src/main.rs:196`, `:188`, `:222`, `:238`).
 
 `lnomad` has no settings file at all. `--config` points at the *Reticulum*
 config directory; the `lnomad/` directory holds only data. The theme is
@@ -844,7 +844,7 @@ opportunity: "send me a message when the backup finishes" is a real use and
 needs no UI at all.
 
 Non-interactive subcommands from the start, following `lnomad`'s automatic
-non-tty detection (`lnomad/src/main.rs:180-181`) and its exit-code
+non-tty detection (`lnomad/src/main.rs:185-186`) and its exit-code
 convention (0, 1, 2):
 
 ```

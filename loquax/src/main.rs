@@ -373,6 +373,11 @@ struct GuiArgs {
     /// second in the log while it draws. `LOQUAX_FPS=1` does the same.
     #[arg(long)]
     fps: bool,
+
+    /// Fail when no shared instance answers instead of starting lnsd as a
+    /// child, which goes when loquax does (zero-config, #471).
+    #[arg(long)]
+    no_start: bool,
 }
 
 #[cfg(feature = "tui")]
@@ -410,6 +415,11 @@ struct TuiArgs {
     /// out it syncs more often for a while, never less often.
     #[arg(long, value_name = "INTERVAL")]
     sync_interval: Option<String>,
+
+    /// Fail when no shared instance answers instead of starting lnsd as a
+    /// child, which goes when loquax does (zero-config, #471).
+    #[arg(long)]
+    no_start: bool,
 
     /// Draw the delivery marks in ASCII (`.` `*` `o` `^` `v` `x`).
     #[arg(long)]
@@ -1034,6 +1044,7 @@ async fn run_gui(args: GuiArgs) -> ExitCode {
         no_mouse: false,
         scripted: false,
         log_file: "gui.log",
+        no_start: args.no_start,
     })
     .await
 }
@@ -1084,6 +1095,7 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
         script: args.script,
         frames: args.frames,
         size,
+        no_start: args.no_start,
     })
     .await
 }
