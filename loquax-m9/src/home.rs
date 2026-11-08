@@ -308,6 +308,7 @@ impl Shelf {
             entries: self.ring.entries(),
             marks: self.index.marks.clone(),
             asks: asks(),
+            placed: true,
         });
         let (first, count) = (self.ring_count, dev.count() - self.ring_count);
         let done = log.write(
@@ -354,10 +355,16 @@ impl Shelf {
         dev: &mut S,
         peer: [u8; 16],
         want: usize,
+        address: &[u8; 16],
     ) -> Result<(Vec<Entry>, usize), S::Error> {
         let ring_count = self.ring_count;
-        self.index
-            .page(&self.ring, &mut Window::new(dev, 0, ring_count), peer, want)
+        self.index.page(
+            &self.ring,
+            &mut Window::new(dev, 0, ring_count),
+            peer,
+            want,
+            address,
+        )
     }
 }
 
@@ -400,6 +407,11 @@ pub fn restore_timed<S: Sectors>(
     let (log, replayed) = RowLog::open(&mut Window::new(&mut *dev, ring_count, rows_count), tag)?;
     let how = match replayed.state.as_ref() {
         None => How::Rebuilt { why: "no-state" },
+        // An older image's index kept every mark apart (1556): fold the
+        // ring once to file them by conversation.
+        Some(state) if !state.placed => How::Rebuilt {
+            why: "marks-unplaced",
+        },
         Some(state) => {
             let mut ring = Store::resume(&mut Window::new(&mut *dev, 0, ring_count), tag)?;
             if ring.end() == state.end {
@@ -480,11 +492,16 @@ fn rebuild<S: Sectors>(
         store::tag(&address),
         clock,
         |entry, span| {
-            index.take(&entry, span, true);
             let t0 = clock();
             let event = board::fold(&entry, &address);
             let t1 = clock();
             unpack += t1.saturating_sub(t0);
+            // The message's id before the entry: a mark later in the
+            // ring files under its conversation (1556).
+            if let Some(event) = &event {
+                index.learn_event(&entry, span, event);
+            }
+            index.take(&entry, span, true);
             if let Some(event) = event {
                 batch.fold(UiEvent::Engine(event));
                 step += clock().saturating_sub(t1);
@@ -558,17 +575,21 @@ pub fn keep<S: Sectors>(
     let Some(last) = entries.iter().map(|entry| entry.seq).max() else {
         return Ok(Appended::default());
     };
-    let kept: Vec<Entry> = entries
-        .iter()
-        .filter(|entry| board::fold(entry, address).is_some())
-        .cloned()
-        .collect();
+    let mut kept: Vec<Entry> = Vec::new();
+    let mut events = Vec::new();
+    for entry in entries {
+        if let Some(event) = board::fold(entry, address) {
+            events.push(event);
+            kept.push(entry.clone());
+        }
+    }
     let ring_count = shelf.ring_count;
     let (done, spans) =
         shelf
             .ring
             .append_spans(&mut Window::new(dev, 0, ring_count), &kept, last)?;
-    for (entry, span) in kept.iter().zip(spans) {
+    for ((entry, span), event) in kept.iter().zip(spans).zip(&events) {
+        shelf.index.learn_event(entry, span, event);
         shelf.index.take(entry, span, true);
     }
     shelf.dirty = true;
@@ -587,11 +608,35 @@ pub fn page_in(
     earlier: usize,
     address: &[u8; 16],
 ) -> Vec<UiEffect> {
-    let messages = rows::messages::<Field>(entries, address, peer);
+    page_in_timed(model, peer, entries, earlier, address, &|| 0).0
+}
+
+/// Where [`page_in`]'s time went, in `clock`'s unit (1556, the bench's
+/// `[OPEN]` line): the entries decoded into messages, the unpack inside
+/// that decode, and the model's fold of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageSpent {
+    pub decode: u64,
+    pub unpack: u64,
+    pub fold: u64,
+}
+
+/// [`page_in`], timed by `clock`.
+pub fn page_in_timed(
+    model: &mut UiModel<Field>,
+    peer: [u8; 16],
+    entries: &[Entry],
+    earlier: usize,
+    address: &[u8; 16],
+    clock: &dyn Fn() -> u64,
+) -> (Vec<UiEffect>, PageSpent) {
+    let t0 = clock();
+    let (messages, unpack) = rows::messages_timed::<Field>(entries, address, peer, clock);
+    let t1 = clock();
     // The cursor's chat loads while the list is up (1521: the move asks
     // its page): its first fill reads only once Enter opened it (1546;
     // before, the list's cursor moved onto an unread chat marked it read).
-    behind_the_list(model, |model| {
+    let effects = behind_the_list(model, |model| {
         update(
             model,
             UiEvent::Earlier {
@@ -600,7 +645,13 @@ pub fn page_in(
                 earlier,
             },
         )
-    })
+    });
+    let spent = PageSpent {
+        decode: t1.saturating_sub(t0),
+        unpack,
+        fold: clock().saturating_sub(t1),
+    };
+    (effects, spent)
 }
 
 /// What a fold's output becomes on the board (1493): the verbs for the

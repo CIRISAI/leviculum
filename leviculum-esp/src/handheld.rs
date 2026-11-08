@@ -572,13 +572,17 @@ impl Handheld {
             return None;
         };
         let t0 = crate::uptime_ms();
-        match store.page(&mut dev, peer, want) {
+        match store.page(&mut dev, peer, want, &client.address) {
             Ok((entries, earlier)) => {
+                let cost = store.index.last_page;
                 log.line(
                     "[STORE] ",
                     format_args!(
-                        "page_read entries={} earlier={earlier} ms={}",
+                        "page_read entries={} messages={} marks={} sectors={} earlier={earlier} ms={}",
                         entries.len(),
+                        cost.messages,
+                        cost.marks,
+                        cost.sectors,
                         crate::uptime_ms().saturating_sub(t0)
                     ),
                 );
@@ -589,6 +593,16 @@ impl Handheld {
                 None
             }
         }
+    }
+
+    /// What the last [`Handheld::load`] read (1556): the conversation's
+    /// entries, the marks among them, the ring sectors.
+    pub fn last_page(&self) -> loquax::home::board::rows::PageCost {
+        self.client
+            .as_ref()
+            .and_then(|client| client.store.as_ref())
+            .map(|store| store.index.last_page)
+            .unwrap_or_default()
     }
 
     /// What the client has for the loop since the last call.

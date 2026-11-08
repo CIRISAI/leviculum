@@ -117,8 +117,10 @@ READY_WAIT_S = 90.0
 DUMP_WAIT_S = 20.0
 DUMP_LOOP_WAIT_S = 1.0
 BENCH_WAIT_S = 5.0
-# The [OPEN] line's fields (1540), in its order.
-OPEN_FIELDS = ("wait_ms", "page_read_ms", "decode_ms", "fold_ms", "scene_ms", "draw_ms", "flush_ms")
+# The [OPEN] line's fields (1540; marks, sectors, unpack and alloc 1556),
+# in its order.
+OPEN_FIELDS = ("marks", "sectors", "wait_ms", "page_read_ms", "decode_ms", "unpack_ms", "alloc_ms",
+               "fold_ms", "scene_ms", "draw_ms", "flush_ms")
 
 # loquax-m9/src/keyboard.rs, SPECIALS and Key::of.
 NAMES = {
@@ -878,8 +880,10 @@ class FakeBoard(threading.Thread):
                              "[WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow t=950")
                     self.page_line()
                     return
-                self.say("[OPEN] peer=0a0b0c0d entries=24 wait_ms=12.500 page_read_ms=9.000 decode_ms=30.250 "
+                self.say("[OPEN] peer=0a0b0c0d entries=24 messages=23 marks=1 sectors=6 wait_ms=12.500 "
+                         "page_read_ms=9.000 decode_ms=30.250 unpack_ms=10.000 alloc_ms=5.000 "
                          "fold_ms=40.000 scene_ms=20.000 draw_ms=35.000 flush_ms=14.000",
+                         "[OPEN_HEAP] peer=0a0b0c0d heap_free=8000000/7990000 heap_largest=7000000/6990000",
                          "[DISP] flush rows=24..239 ms=14.000 t=%d" % self.ms())
         elif kind == TYPE_BENCH_OWE:
             flags = payload[0] if payload else 0

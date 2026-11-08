@@ -881,15 +881,20 @@ impl Board {
 
     /// `Handheld::load`: a conversation's next page from the ring.
     fn load(&mut self, peer: [u8; 16], want: usize) -> Option<(Vec<Entry>, usize)> {
+        let address = self.flash.home?;
         let shelf = self.shelf.as_mut()?;
         let t0 = uptime_ms();
-        match shelf.page(&mut self.flash.messages, peer, want) {
+        match shelf.page(&mut self.flash.messages, peer, want, &address) {
             Ok((entries, earlier)) => {
+                let cost = shelf.index.last_page;
                 self.log.line(
                     "[STORE] ",
                     &format!(
-                        "page_read entries={} earlier={earlier} ms={}",
+                        "page_read entries={} messages={} marks={} sectors={} earlier={earlier} ms={}",
                         entries.len(),
+                        cost.messages,
+                        cost.marks,
+                        cost.sectors,
                         uptime_ms().saturating_sub(t0)
                     ),
                 );

@@ -377,7 +377,10 @@ fn a_conversation_opens_with_its_newest_page_alone() {
     let peer = lxmf_address(&archive.friends[0].public_key_bytes()).expect("address");
     let ours: Vec<u64> = (1..=MESSAGES).filter(|&seq| friend_of(seq) == 0).collect();
     let want = home::page_entries();
-    let (entries, earlier) = boot.shelf.page(&mut flash, peer, want).expect("page");
+    let (entries, earlier) = boot
+        .shelf
+        .page(&mut flash, peer, want, &archive.address)
+        .expect("page");
     let seqs: Vec<u64> = entries
         .iter()
         .filter(|e| e.kind != loquax::home::KIND_MARK)
@@ -420,7 +423,10 @@ fn a_conversation_opens_with_its_newest_page_alone() {
     assert_eq!(loaded.earlier, ours.len() - want);
 
     // The next page is the one before, never the same again.
-    let (older, _) = boot.shelf.page(&mut flash, peer, want).expect("older");
+    let (older, _) = boot
+        .shelf
+        .page(&mut flash, peer, want, &archive.address)
+        .expect("older");
     let older: Vec<u64> = older
         .iter()
         .filter(|e| e.kind != loquax::home::KIND_MARK)
@@ -779,4 +785,148 @@ fn a_boots_breakdown_says_every_phase_in_two_lines() {
     }
     assert_eq!(rebuilt.decoded, MESSAGES);
     assert!(rebuilt.spent.drain > 0 && rebuilt.spent.rows > 0);
+}
+
+/// The archive with a mark after it per message of the long chat's
+/// partner (friend 1): `n` read marks of one id each, as a board that
+/// opened that chat again and again leaves them (the rig's ring at
+/// 1556: 1730 marks of 4657 entries), then a deleted mark naming
+/// `deleted`. Sequences go on after the messages.
+fn with_marks(archive: &Archive, n: usize, deleted: [u8; 32]) -> Vec<Entry> {
+    use loquax::home::wire::{mark_request, Mark, MarkFlag};
+    let mut entries = archive.entries();
+    let ids: Vec<[u8; 32]> = entries
+        .iter()
+        .filter(|e| friend_of(e.seq) == 1)
+        .filter_map(|e| board::rows::entry_id(e, &archive.address))
+        .collect();
+    let mut seq = MESSAGES;
+    let mut mark = |flag: MarkFlag, id: [u8; 32]| {
+        seq += 1;
+        Entry {
+            seq,
+            kind: loquax::home::KIND_MARK,
+            at: 0,
+            packed: mark_request(&Mark {
+                flag,
+                ids: vec![id],
+            }),
+        }
+    };
+    let marks: Vec<Entry> = ids
+        .iter()
+        .cycle()
+        .take(n)
+        .map(|&id| mark(MarkFlag::Read, id))
+        .collect();
+    entries.extend(marks);
+    entries.push(mark(MarkFlag::Deleted, deleted));
+    entries
+}
+
+/// 1556: a chat opens with its own marks, not the ring's. At 1521 a
+/// page carried every mark of the ring from its oldest sector on: on the
+/// rig a chat of under 30 messages opened with 1730 marks, read from 284
+/// sectors (page_read 228 ms) and folded on the UI core (decode 858 ms
+/// median, 1521c). Here a small chat, spread over the whole ring, opens
+/// after 1800 marks of another chat: its page holds its own messages and
+/// the one mark that names one of them, its deleted message stays
+/// deleted after a resumed boot, and a mark the board sets after the
+/// open files under the chat too. The host times the decode of the old
+/// page against the new one.
+#[test]
+fn a_chat_opens_with_its_own_marks_only() {
+    let archive = Archive::new();
+    // Friend 30: a few messages from entry 2620 on, the ring's newest
+    // sectors between them.
+    let peer = lxmf_address(&archive.friends[30].public_key_bytes()).expect("address");
+    let ours: Vec<Entry> = archive
+        .entries()
+        .into_iter()
+        .filter(|e| friend_of(e.seq) == 30)
+        .collect();
+    assert!(ours.len() >= 3, "the fixture's small chat: {}", ours.len());
+    let deleted = board::rows::entry_id(&ours[1], &archive.address).expect("id");
+    let entries = with_marks(&archive, 1800, deleted);
+    let mut flash = MemFlash::new(2048);
+    let home::Boot {
+        shelf: mut store, ..
+    } = home::restore(&mut flash, archive.address).expect("boot");
+    for page in entries.chunks(72) {
+        home::keep(&mut store, &mut flash, page, &archive.address).expect("keep");
+    }
+    store.dirty = true;
+    store.flush(&mut flash, Vec::new).expect("flush");
+    assert_eq!(store.index.marks, Vec::<u32>::new(), "every mark placed");
+
+    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    assert!(
+        matches!(boot.how, home::How::Resumed { .. }),
+        "{:?}",
+        boot.how
+    );
+    let want = home::page_entries();
+    let (page, earlier) = boot
+        .shelf
+        .page(&mut flash, peer, want, &archive.address)
+        .expect("page");
+    let cost = boot.shelf.index.last_page;
+    println!("PAGE m9.small_chat {cost:?} earlier={earlier}");
+    assert_eq!(earlier, 0);
+    assert_eq!(cost.messages, ours.len());
+    assert_eq!(cost.marks, 1, "the one mark that names the chat");
+    assert_eq!(page.len(), ours.len() + 1);
+
+    // The old page: the same messages and every mark of the ring from
+    // the page's oldest sector on.
+    let old: Vec<Entry> = ours
+        .iter()
+        .cloned()
+        .chain(
+            entries
+                .iter()
+                .filter(|e| e.kind == loquax::home::KIND_MARK)
+                .cloned(),
+        )
+        .collect();
+    let time = |page: &[Entry]| {
+        let t0 = std::time::Instant::now();
+        let messages =
+            board::rows::messages::<loquax_m9::field::Field>(page, &archive.address, peer);
+        (messages, t0.elapsed().as_micros())
+    };
+    let (before, before_us) = time(&old);
+    let (after, after_us) = time(&page);
+    println!(
+        "DECODE m9.small_chat old_entries={} old_us={before_us} new_entries={} new_us={after_us}",
+        old.len(),
+        page.len()
+    );
+    let bodies =
+        |m: &[loquax::ui::Message]| -> Vec<String> { m.iter().map(|m| m.body.clone()).collect() };
+    assert_eq!(bodies(&after), bodies(&before), "the same bubbles");
+    assert_eq!(after.len(), ours.len() - 1, "the deleted one stays deleted");
+    assert!(
+        after_us * 10 < before_us,
+        "the page's decode ({after_us} µs) is a tenth of the old one's ({before_us} µs) or less"
+    );
+
+    // A mark the board sets after the open files under the chat: the
+    // page taught the index its ids.
+    let read = board::rows::entry_id(&ours[0], &archive.address).expect("id");
+    let sectors_before = boot.shelf.index.kept[&peer].sectors.len();
+    home::keep_marks(
+        &mut boot.shelf,
+        &mut flash,
+        &[loquax::home::wire::Mark {
+            flag: loquax::home::wire::MarkFlag::Read,
+            ids: vec![read],
+        }],
+    )
+    .expect("mark");
+    assert!(
+        boot.shelf.index.marks.is_empty(),
+        "the board's mark is placed"
+    );
+    assert!(boot.shelf.index.kept[&peer].sectors.len() >= sectors_before);
 }

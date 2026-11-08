@@ -21,7 +21,8 @@
 //!    4  0            STATE: the ring's end (u32 sequence, u32 offset),
 //!                    cursor (u64), entries (u64), u32 m and m sectors
 //!                    holding marks, u32 k and k asks (id 16, tag 1,
-//!                    u32 n, n request bytes)
+//!                    u32 n, n request bytes), then 1 when marks are
+//!                    filed by conversation (1556, absent before)
 //!    5  sequence     SNAP: a snapshot begins in the log's sector of
 //!                    this sequence
 //! ```
@@ -166,6 +167,11 @@ pub struct State {
     pub marks: Vec<u32>,
     /// The asks still owed the home, oldest first.
     pub asks: Vec<PendingAsk>,
+    /// The index that wrote it files a mark under the conversations it
+    /// names (1556), a byte after the asks. A state without it is from
+    /// an image that kept every mark in `marks`: the boot folds the ring
+    /// once to place them, or every open reads them all again.
+    pub placed: bool,
 }
 
 impl State {
@@ -183,6 +189,7 @@ impl State {
             out.extend_from_slice(&(ask.request.len() as u32).to_le_bytes());
             out.extend_from_slice(&ask.request);
         }
+        out.push(u8::from(self.placed));
         out
     }
 
@@ -201,12 +208,15 @@ impl State {
             let request = take.bytes(len)?.to_vec();
             asks.push(PendingAsk { id, tag, request });
         }
+        // An older image wrote no byte here, and reads past it.
+        let placed = take.bytes(1).is_some_and(|b| b[0] == 1);
         Some(State {
             end,
             cursor,
             entries,
             marks,
             asks,
+            placed,
         })
     }
 }
@@ -264,6 +274,48 @@ pub struct Index {
     owed: alloc::collections::BTreeSet<[u8; 16]>,
     /// Peers whose name is owed the log.
     names_owed: alloc::collections::BTreeSet<[u8; 16]>,
+    /// Message ids this boot has seen, by their first eight bytes: the
+    /// conversation each is in and the ring sector it starts in (1556).
+    /// A mark naming one files its sector under that conversation
+    /// ([`Index::take`]), so an open reads its own marks, not the ring's.
+    ids: BTreeMap<u64, ([u8; 16], u32)>,
+    /// What the last [`Index::page`] read.
+    pub last_page: PageCost,
+}
+
+/// What a page read cost (1556, the `[OPEN]` line): the conversation's
+/// entries it hands on, the marks among them, and the ring sectors read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PageCost {
+    pub messages: usize,
+    pub marks: usize,
+    pub sectors: usize,
+}
+
+/// A message id's key in [`Index`]'s map: its first eight bytes. Two ids
+/// that share them file a mark under both conversations, which costs a
+/// read, never a mark.
+fn id_key(id: &[u8; 32]) -> u64 {
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&id[..8]);
+    u64::from_le_bytes(head)
+}
+
+/// The id of the message an entry carries, as the board's fold reads it
+/// (`board::fold`); `None` for a mark, a name, or what the fold drops.
+pub fn entry_id(entry: &Entry, address: &[u8; 16]) -> Option<[u8; 32]> {
+    event_id(&super::fold(entry, address)?)
+}
+
+/// The id of the message a fold's event carries, `None` for the rest.
+pub fn event_id(event: &crate::outbox::OutboxEvent) -> Option<[u8; 32]> {
+    use crate::outbox::OutboxEvent;
+    match event {
+        OutboxEvent::Received { message_id, .. } | OutboxEvent::HomeSent { message_id, .. } => {
+            Some(*message_id)
+        }
+        _ => None,
+    }
 }
 
 impl Index {
@@ -271,7 +323,7 @@ impl Index {
     /// folds it too, so the conversation counts it loaded.
     pub fn take(&mut self, entry: &Entry, span: Span, live: bool) {
         match entry.kind {
-            KIND_MARK => add_span(&mut self.marks, span),
+            KIND_MARK => self.take_mark(entry, span),
             KIND_NAME => {
                 if let Ok((peer, name)) = crate::home::wire::read_name_entry(&entry.packed) {
                     if self.names.get(&peer) != Some(&name) {
@@ -294,6 +346,60 @@ impl Index {
                     loaded.1 += 1;
                 }
             }
+        }
+    }
+
+    /// The message `id` of `entry`, at `span` of the ring, is one of
+    /// its conversation's (1556): a mark that names it later files under
+    /// that conversation. Learn it before the marks that name it.
+    pub fn learn(&mut self, entry: &Entry, span: Span, id: &[u8; 32]) {
+        if let Some(peer) = wire_peer(entry) {
+            self.ids.insert(id_key(id), (peer, span.0));
+        }
+    }
+
+    /// What the fold made of `entry` at `span` (1556): its message's id
+    /// learnt ([`Index::learn`]). Call before [`Index::take`].
+    pub fn learn_event(&mut self, entry: &Entry, span: Span, event: &crate::outbox::OutboxEvent) {
+        if let Some(id) = event_id(event) {
+            self.learn(entry, span, &id);
+        }
+    }
+
+    /// A mark at `span`: its sector joins the sectors of every
+    /// conversation whose message it names (1556), so that conversation's
+    /// page reads it with its own entries. A mark naming a message this
+    /// boot has not seen, or one it cannot read, stays in [`Index::marks`],
+    /// which every page reads from its oldest sector on: the old cost,
+    /// for what the index cannot place.
+    fn take_mark(&mut self, entry: &Entry, span: Span) {
+        let ids = match crate::home::wire::read_mark(&entry.packed) {
+            Ok(mark) => mark.ids,
+            Err(_) => Vec::new(),
+        };
+        let mut unplaced = ids.is_empty();
+        let mut peers: Vec<[u8; 16]> = Vec::new();
+        for id in &ids {
+            match self.ids.get(&id_key(id)) {
+                Some(&(peer, _)) if self.kept.contains_key(&peer) => {
+                    if !peers.contains(&peer) {
+                        peers.push(peer);
+                    }
+                }
+                _ => unplaced = true,
+            }
+        }
+        for peer in peers {
+            if let Some(kept) = self.kept.get_mut(&peer) {
+                let before = kept.sectors.len();
+                add_span(&mut kept.sectors, span);
+                if kept.sectors.len() != before {
+                    self.owed.insert(peer);
+                }
+            }
+        }
+        if unplaced {
+            add_span(&mut self.marks, span);
         }
     }
 
@@ -330,6 +436,7 @@ impl Index {
             kept.sectors.retain(|&seq| ring.holds(seq));
         }
         self.marks.retain(|&seq| ring.holds(seq));
+        self.ids.retain(|_, (_, seq)| ring.holds(*seq));
     }
 
     /// Owe the log every conversation's record and every name again
@@ -393,16 +500,28 @@ impl Index {
 
     /// The next page of conversation `peer` the model has not loaded:
     /// its `want` newest entries older than what it holds, oldest first,
-    /// then the marks of the sectors from the page's oldest on (a mark
-    /// is never older than the message it names), and how many older
-    /// still wait in the ring. Counts the page loaded.
+    /// then the marks that name one of them, and how many older still
+    /// wait in the ring. Counts the page loaded.
+    ///
+    /// The marks come from the conversation's own sectors (a mark files
+    /// there when it names a message the index knows, [`Index::take`])
+    /// and from the sectors of [`Index::marks`], the ones it could not
+    /// place, each from the page's oldest sector on (a mark is never
+    /// older than the message it names). Before 1556 every mark of the
+    /// ring from there on came along: a chat of 30 entries opened with
+    /// 1730 marks, read from nearly every sector of the ring. The page's
+    /// ids are learnt on the way, so a mark this board sets after the
+    /// open files under the conversation too. What it read:
+    /// [`Index::last_page`].
     pub fn page<S: Sectors>(
         &mut self,
         ring: &Store,
         dev: &mut S,
         peer: [u8; 16],
         want: usize,
+        address: &[u8; 16],
     ) -> Result<(Vec<Entry>, usize), S::Error> {
+        self.last_page = PageCost::default();
         let Some(kept) = self.kept.get(&peer) else {
             return Ok((Vec::new(), 0));
         };
@@ -413,7 +532,12 @@ impl Index {
             .copied()
             .filter(|&seq| ring.holds(seq))
             .collect();
+        let kept_entries = kept.entries;
         let mut found: BTreeMap<u64, (Entry, Span)> = BTreeMap::new();
+        // The marks in the conversation's own sectors, each read once:
+        // by the chunk whose own sectors it starts in.
+        let mut own_marks: Vec<(Entry, Span)> = Vec::new();
+        let mut sectors_read = 0usize;
         let mut end = seqs.len();
         // Newest sectors first, four at a time, each chunk read with the
         // sector after it, so an entry that runs on across the chunk's
@@ -421,8 +545,14 @@ impl Index {
         while end > 0 && found.len() < want {
             let start = end.saturating_sub(4);
             let upto = (end + 1).min(seqs.len());
+            let own = &seqs[start..end];
+            sectors_read += upto - start;
             ring.read_seqs(dev, &seqs[start..upto], |entry, span| {
-                if entry.seq < below && wire_peer(&entry) == Some(peer) {
+                if entry.kind == KIND_MARK {
+                    if own.binary_search(&span.0).is_ok() {
+                        own_marks.push((entry, span));
+                    }
+                } else if entry.seq < below && wire_peer(&entry) == Some(peer) {
                     found.insert(entry.seq, (entry, span));
                 }
             })?;
@@ -430,16 +560,39 @@ impl Index {
         }
         let skip = found.len().saturating_sub(want);
         let page: Vec<(Entry, Span)> = found.into_values().skip(skip).collect();
+        let mut ids: Vec<u64> = Vec::new();
+        for (entry, span) in &page {
+            if let Some(id) = entry_id(entry, address) {
+                self.learn(entry, *span, &id);
+                ids.push(id_key(&id));
+            }
+        }
+        ids.sort_unstable();
+        let names_page = |entry: &Entry| match crate::home::wire::read_mark(&entry.packed) {
+            Ok(mark) => mark
+                .ids
+                .iter()
+                .any(|id| ids.binary_search(&id_key(id)).is_ok()),
+            Err(_) => false,
+        };
         let mut marks: Vec<Entry> = Vec::new();
         if let Some(&(_, (from, _))) = page.first() {
+            for (entry, span) in own_marks {
+                if span.0 >= from && names_page(&entry) {
+                    marks.push(entry);
+                }
+            }
+            // The unplaced marks' sectors the conversation's own did not
+            // already read.
             let mark_seqs: Vec<u32> = self
                 .marks
                 .iter()
                 .copied()
-                .filter(|&seq| seq >= from && ring.holds(seq))
+                .filter(|&seq| seq >= from && ring.holds(seq) && seqs.binary_search(&seq).is_err())
                 .collect();
+            sectors_read += mark_seqs.len();
             ring.read_seqs(dev, &mark_seqs, |entry, _| {
-                if entry.kind == KIND_MARK {
+                if entry.kind == KIND_MARK && names_page(&entry) {
                     marks.push(entry);
                 }
             })?;
@@ -449,7 +602,12 @@ impl Index {
         self.loaded.insert(peer, (oldest, taken));
         let earlier = match end == 0 && skip == 0 {
             true => 0,
-            false => kept.entries.saturating_sub(taken).max(1) as usize,
+            false => kept_entries.saturating_sub(taken).max(1) as usize,
+        };
+        self.last_page = PageCost {
+            messages: page.len(),
+            marks: marks.len(),
+            sectors: sectors_read,
         };
         let mut out: Vec<Entry> = page.into_iter().map(|(entry, _)| entry).collect();
         out.extend(marks);
@@ -530,6 +688,18 @@ pub fn messages<B: InputBuffer + Default>(
     address: &[u8; 16],
     peer: [u8; 16],
 ) -> Vec<Message> {
+    messages_timed::<B>(entries, address, peer, &|| 0).0
+}
+
+/// [`messages`], and the time `clock` counted inside the fold's unpack
+/// of the entries (`board::fold`, 1556's `[OPEN] unpack_ms`).
+pub fn messages_timed<B: InputBuffer + Default>(
+    entries: &[Entry],
+    address: &[u8; 16],
+    peer: [u8; 16],
+    clock: &dyn Fn() -> u64,
+) -> (Vec<Message>, u64) {
+    let mut unpack = 0u64;
     // On the heap: the board's UI core runs this on a census-sized stack.
     let mut scratch = alloc::boxed::Box::new(UiModel::<B>::new(&[]));
     scratch.address = Some(*address);
@@ -539,7 +709,10 @@ pub fn messages<B: InputBuffer + Default>(
     scratch.focus = crate::ui::Pane::Conversations;
     scratch.keys_above(SCRATCH);
     for entry in entries {
-        let Some(event) = super::fold(entry, address) else {
+        let t0 = clock();
+        let event = super::fold(entry, address);
+        unpack += clock().saturating_sub(t0);
+        let Some(event) = event else {
             continue;
         };
         let _ = update(&mut scratch, UiEvent::Engine(event));
@@ -554,11 +727,12 @@ pub fn messages<B: InputBuffer + Default>(
             }
         }
     }
-    core::mem::take(&mut scratch.conversations)
+    let messages = core::mem::take(&mut scratch.conversations)
         .into_iter()
         .find(|c| c.peer == peer)
         .map(|c| c.messages)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    (messages, unpack)
 }
 
 /// The summary log, open.

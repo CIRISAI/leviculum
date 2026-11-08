@@ -134,11 +134,20 @@
 //!                           `TYPE_BENCH_ARRIVE` (1540): a message came into
 //!                           the chat at that row, kept and folded as a
 //!                           pulled one, its chat selected
-//! [OPEN] peer=<8 hex> entries=<n> wait_ms=.. page_read_ms=.. decode_ms=.. fold_ms=.. scene_ms=.. draw_ms=.. flush_ms=..
+//! [OPEN] peer=<8 hex> entries=<n> messages=<n> marks=<n> sectors=<n> wait_ms=.. page_read_ms=.. decode_ms=.. unpack_ms=.. alloc_ms=.. fold_ms=.. scene_ms=.. draw_ms=.. flush_ms=..
 //!                           bench image only (1540): where an opened
 //!                           chat's page went, from the load asked to the
 //!                           frame flushed; wait is the load's way through
-//!                           core 0, page_read the ring read inside it
+//!                           core 0, page_read the ring read inside it;
+//!                           what the read handed on, its messages, the
+//!                           marks naming them, the ring sectors read
+//!                           (1556); unpack the decode's time in
+//!                           `Message::unpack`, alloc the decode's and
+//!                           the fold's time inside the allocator
+//! [OPEN_HEAP] peer=<8 hex> heap_free=<before>/<after> heap_largest=<before>/<after>
+//!                           after it (1556): the heap's free bytes and
+//!                           its largest block before the decode and
+//!                           after the fold, from a walk outside the clock
 //! [CORES] census=done waited_ms=<n>   core 0 held still while the UI
 //!                           core's census ran (1521b), or census=late;
 //!                           the reader's type size only, both in the
@@ -1837,8 +1846,7 @@ fn main() -> ! {
                         (node.address(), node.load(peer, want, &mut stores, &mut log))
                     {
                         #[cfg(m9_bench)]
-                        bench::READ_US
-                            .store(t_read.elapsed().as_micros() as u32, Ordering::Relaxed);
+                        bench::read(t_read.elapsed().as_micros() as u32, node.last_page());
                         to_ui(ToUi::Page {
                             peer,
                             entries,
@@ -2667,12 +2675,26 @@ mod bench {
     use core::sync::atomic::{AtomicU32, Ordering};
     use esp_hal::time::Instant;
     use loquax::home::board::rows;
-    use loquax::ui::{update, Pane, UiEffect, UiEvent};
+    use loquax::ui::{Pane, UiEffect};
     use loquax_m9::frame::Frame;
+    use loquax_m9::home;
     use loquax_m9::kbraw::Inject;
 
-    /// The last open's ring read on core 0, microseconds (1540).
-    pub static READ_US: AtomicU32 = AtomicU32::new(0);
+    /// The last open's ring read on core 0, microseconds (1540), and
+    /// what it read (1556): the conversation's entries, the marks among
+    /// them, the ring sectors.
+    static READ_US: AtomicU32 = AtomicU32::new(0);
+    static PAGE_MESSAGES: AtomicU32 = AtomicU32::new(0);
+    static PAGE_MARKS: AtomicU32 = AtomicU32::new(0);
+    static PAGE_SECTORS: AtomicU32 = AtomicU32::new(0);
+
+    /// Core 0 read an open's page in `us`.
+    pub fn read(us: u32, cost: rows::PageCost) {
+        READ_US.store(us, Ordering::Relaxed);
+        PAGE_MESSAGES.store(cost.messages as u32, Ordering::Relaxed);
+        PAGE_MARKS.store(cost.marks as u32, Ordering::Relaxed);
+        PAGE_SECTORS.store(cost.sectors as u32, Ordering::Relaxed);
+    }
     /// The last draw's scene build, its cells drawn, and its flush, each
     /// on the UI core, microseconds.
     static SCENE_US: AtomicU32 = AtomicU32::new(0);
@@ -2821,9 +2843,22 @@ mod bench {
     #[derive(Default)]
     pub struct Open {
         asked: Option<([u8; 16], Instant)>,
-        /// The page folded and not said yet: peer, entries, wait,
-        /// decode and fold, microseconds.
-        folded: Option<([u8; 16], usize, u64, u64, u64)>,
+        /// The page folded and not said yet.
+        folded: Option<Folded>,
+    }
+
+    /// What an open's fold cost (1556), microseconds and bytes.
+    struct Folded {
+        peer: [u8; 16],
+        entries: usize,
+        wait: u64,
+        spent: home::PageSpent,
+        /// Inside the allocator during the decode and the fold.
+        alloc: u64,
+        /// The heap's free bytes and its largest block, before the
+        /// decode and after the fold.
+        free: (usize, usize),
+        largest: (usize, usize),
     }
 
     impl Open {
@@ -2832,8 +2867,9 @@ mod bench {
             self.asked = Some((peer, Instant::now()));
         }
 
-        /// `home::page_in`, its two halves timed: the entries decoded
-        /// into messages (`rows::messages`) and the model's fold of them.
+        /// `home::page_in`, timed (1556): the entries decoded into
+        /// messages, the unpack inside the decode, the model's fold of
+        /// them, the allocator's share of both, and the heap around them.
         pub fn page_in(
             &mut self,
             model: &mut UiModel<Field>,
@@ -2846,26 +2882,41 @@ mod bench {
                 Some((asked, at)) if asked == peer => at.elapsed().as_micros(),
                 _ => 0,
             };
-            let t0 = Instant::now();
-            let messages = rows::messages::<Field>(entries, address, peer);
-            let t1 = Instant::now();
-            let effects = update(
-                model,
-                UiEvent::Earlier {
-                    peer,
-                    messages,
-                    earlier,
-                },
-            );
-            let decode = (t1 - t0).as_micros();
-            let fold = t1.elapsed().as_micros();
-            self.folded = Some((peer, entries.len(), wait, decode, fold));
+            // The heap's walk before the clock starts, and after it stops.
+            let free_before = leviculum_esp::heap_free();
+            let largest_before = leviculum_esp::heap_largest();
+            let start = Instant::now();
+            let clock = || start.elapsed().as_micros();
+            let cycles0 = leviculum_esp::alloc_clock::now();
+            let alloc0 = leviculum_esp::alloc_clock::cycles();
+            let (effects, spent) =
+                home::page_in_timed(model, peer, entries, earlier, address, &clock);
+            let alloc_cycles = leviculum_esp::alloc_clock::cycles().wrapping_sub(alloc0);
+            let all_cycles = leviculum_esp::alloc_clock::now().wrapping_sub(cycles0);
+            let all_us = clock();
+            // The allocator's cycles as a share of the window's, in its
+            // microseconds: no clock rate assumed.
+            let alloc = match all_cycles {
+                0 => 0,
+                n => u64::from(alloc_cycles) * all_us / u64::from(n),
+            };
+            self.folded = Some(Folded {
+                peer,
+                entries: entries.len(),
+                wait,
+                spent,
+                alloc,
+                free: (free_before, leviculum_esp::heap_free()),
+                largest: (largest_before, leviculum_esp::heap_largest()),
+            });
             effects
         }
 
-        /// The `[OPEN]` line, after the draw that showed the page.
+        /// The `[OPEN]` line, after the draw that showed the page, and
+        /// the heap's around its fold (`[OPEN_HEAP]`, a line of its own
+        /// that the walk does not count as an open).
         pub fn say(&mut self, log: &mut UiLog) {
-            let Some((peer, entries, wait, decode, fold)) = self.folded.take() else {
+            let Some(f) = self.folded.take() else {
                 return;
             };
             let ms = |us: u64| format!("{}.{:03}", us / 1000, us % 1000);
@@ -2873,15 +2924,32 @@ mod bench {
             log.line(
                 "[OPEN] ",
                 format!(
-                    "peer={} entries={entries} wait_ms={} page_read_ms={} decode_ms={} fold_ms={} scene_ms={} draw_ms={} flush_ms={}",
-                    short(&peer),
-                    ms(wait),
+                    "peer={} entries={} messages={} marks={} sectors={} wait_ms={} page_read_ms={} decode_ms={} unpack_ms={} alloc_ms={} fold_ms={} scene_ms={} draw_ms={} flush_ms={}",
+                    short(&f.peer),
+                    f.entries,
+                    load(&PAGE_MESSAGES),
+                    load(&PAGE_MARKS),
+                    load(&PAGE_SECTORS),
+                    ms(f.wait),
                     ms(load(&READ_US)),
-                    ms(decode),
-                    ms(fold),
+                    ms(f.spent.decode),
+                    ms(f.spent.unpack),
+                    ms(f.alloc),
+                    ms(f.spent.fold),
                     ms(load(&SCENE_US)),
                     ms(load(&DRAW_US)),
                     ms(load(&FLUSH_US)),
+                ),
+            );
+            log.line(
+                "[OPEN_HEAP] ",
+                format!(
+                    "peer={} heap_free={}/{} heap_largest={}/{}",
+                    short(&f.peer),
+                    f.free.0,
+                    f.free.1,
+                    f.largest.0,
+                    f.largest.1,
                 ),
             );
         }

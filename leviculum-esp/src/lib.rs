@@ -110,20 +110,89 @@ struct CountedHeap {
 // bookkeeping beside it and never decide what is handed out.
 unsafe impl GlobalAlloc for CountedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        #[cfg(m9_bench)]
+        let t0 = alloc_clock::now();
         // SAFETY: the caller's contract, passed through.
         let ptr = unsafe { self.heap.alloc(layout) };
         if !ptr.is_null() {
             let live = self.live.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
             self.peak.fetch_max(live, Ordering::Relaxed);
         }
+        #[cfg(m9_bench)]
+        alloc_clock::spent(t0);
         ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        #[cfg(m9_bench)]
+        let t0 = alloc_clock::now();
         self.live.fetch_sub(layout.size(), Ordering::Relaxed);
         // SAFETY: the caller's contract, passed through.
-        unsafe { self.heap.dealloc(ptr, layout) }
+        unsafe { self.heap.dealloc(ptr, layout) };
+        #[cfg(m9_bench)]
+        alloc_clock::spent(t0);
     }
+}
+
+/// The time each core spent inside the allocator, in CPU cycles (1556,
+/// the M9 bench's `[OPEN] alloc_ms`): the bench image only, so the
+/// release image's allocator pays nothing for it. A cycle count wraps
+/// every 17.9 s at 240 MHz; a reader takes the difference of two reads
+/// a moment apart, never the count itself.
+#[cfg(m9_bench)]
+pub mod alloc_clock {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static SPENT: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+    /// The cycle counter of the core that runs this.
+    #[inline(always)]
+    pub fn now() -> u32 {
+        esp_hal::xtensa_lx::timer::get_cycle_count()
+    }
+
+    fn core() -> usize {
+        match esp_hal::system::Cpu::current() {
+            esp_hal::system::Cpu::ProCpu => 0,
+            _ => 1,
+        }
+    }
+
+    pub(crate) fn spent(t0: u32) {
+        SPENT[core()].fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
+    }
+
+    /// The cycles this core spent in the allocator so far.
+    pub fn cycles() -> u32 {
+        SPENT[core()].load(Ordering::Relaxed)
+    }
+}
+
+/// The largest block the allocator hands out now, found by halving
+/// between nothing and [`heap_free`] (1556, the M9 bench's `[OPEN]`
+/// line): about 23 tries, each a walk of the free list, the block taken
+/// and given back at once and never counted. A fragmented heap shows a
+/// largest block far below its free bytes.
+#[cfg(m9_bench)]
+pub fn heap_largest() -> usize {
+    let (mut fits, mut fails) = (0usize, heap_free() + 1);
+    while fails - fits > 64 {
+        let size = fits + (fails - fits) / 2;
+        let Ok(layout) = Layout::from_size_align(size, 4) else {
+            break;
+        };
+        // SAFETY: a layout of non-zero size; a block handed out is given
+        // back at once with the same layout.
+        let ptr = unsafe { HEAP.heap.alloc(layout) };
+        if ptr.is_null() {
+            fails = size;
+        } else {
+            // SAFETY: as above.
+            unsafe { HEAP.heap.dealloc(ptr, layout) };
+            fits = size;
+        }
+    }
+    fits
 }
 
 #[global_allocator]
