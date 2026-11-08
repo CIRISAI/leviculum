@@ -1102,7 +1102,7 @@ fn a_chat_opens_with_its_own_marks_only() {
     let time = |page: &[Entry]| {
         let t0 = std::time::Instant::now();
         let messages =
-            board::rows::messages::<loquax_m9::field::Field>(page, &archive.address, peer);
+            board::rows::messages::<loquax_m9::field::Field>(page, &archive.address, peer, None);
         (messages, t0.elapsed().as_micros())
     };
     let (before, before_us) = time(&old);
@@ -1139,4 +1139,147 @@ fn a_chat_opens_with_its_own_marks_only() {
         "the board's mark is placed"
     );
     assert!(boot.shelf.index.kept[&peer].sectors.len() >= sectors_before);
+}
+
+/// One press of the board's key `code` as `ui_main` takes it (the
+/// role's command, the key's event through the group table), and every
+/// page the press asked read from the shelf and folded in as the board
+/// folds it (`home::page_in` behind the list), until nothing is asked.
+fn press_and_preload(
+    boot: &mut home::Boot,
+    flash: &mut MemFlash,
+    address: &[u8; 16],
+    row: &mut usize,
+    code: u8,
+) -> usize {
+    use loquax_m9::keyboard::Key;
+    let key = Key::of(code).expect("a key");
+    let mut effects = Vec::new();
+    if let Some(command) = key.command() {
+        effects.extend(loquax_m9::keyboard::run(&mut boot.model, row, command));
+    }
+    if let Some(event) = key.event() {
+        effects.extend(loquax_m9::group::press(&mut boot.model, row, &event));
+    }
+    let mut ids = || [0u8; 16];
+    let mut pages = 0;
+    loop {
+        let routed = home::route(&mut boot.model, effects, &mut ids);
+        if routed.loads.is_empty() {
+            return pages;
+        }
+        effects = Vec::new();
+        for peer in routed.loads {
+            let (entries, earlier) = boot
+                .shelf
+                .page(flash, peer, home::page_entries(), address)
+                .expect("page");
+            effects.extend(home::page_in(
+                &mut boot.model,
+                peer,
+                &entries,
+                earlier,
+                address,
+            ));
+            pages += 1;
+        }
+    }
+}
+
+/// The selected conversation's place in the list's order: what the
+/// board's `[PAGE]` line says as `cursor=`.
+fn cursor(model: &loquax::ui::UiModel<loquax_m9::field::Field>) -> usize {
+    model
+        .order()
+        .iter()
+        .position(|&i| i == model.selected)
+        .expect("the selection is listed")
+}
+
+/// 1591, window 18: on a board booted from its summaries every row the
+/// ring's cursor reaches preloads its page (1546), and the page's fold
+/// gave its messages no time (the scratch fold knew none), so the row
+/// sank to the list's end under the cursor: 0.6 rows a press, the walker
+/// never reached the top from row 300. Twenty presses down move the
+/// cursor exactly twenty rows, each a page read, and the list's order is
+/// the one the summaries gave: on a boot that knows the time (the
+/// preloaded messages carry their writers' times) and on one that does
+/// not yet (the kept rows hold the order).
+#[test]
+fn twenty_presses_down_move_the_cursor_twenty_rows() {
+    let archive = Archive::new();
+    let flash = summarised(&archive);
+    let clock = loquax::when::WallTime {
+        unix_secs: 1_800_000_000,
+        offset_secs: 0,
+    };
+    for now in [Some(clock), None] {
+        walk_twenty(&archive, flash.clone(), now);
+    }
+}
+
+fn walk_twenty(archive: &Archive, mut flash: MemFlash, now: Option<loquax::when::WallTime>) {
+    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    assert!(matches!(boot.how, home::How::Resumed { .. }));
+    // The board's case: its rows were written by a pull that knew the
+    // time (the home says it before it hands a page), so each row's
+    // `moved` is its newest message's.
+    boot.model.now = now;
+    let mut newest_of = std::collections::BTreeMap::new();
+    for conversation in &mut boot.model.conversations {
+        let friend = archive
+            .friends
+            .iter()
+            .position(|f| {
+                lxmf_address(&f.public_key_bytes()).expect("address") == conversation.peer
+            })
+            .expect("a friend's");
+        let newest = (1..=MESSAGES)
+            .filter(|&seq| friend_of(seq) == friend)
+            .max()
+            .expect("a message");
+        let moved = 1_762_000_000 + newest as i64;
+        newest_of.insert(conversation.peer, moved);
+        let listing = conversation.listing.as_mut().expect("listed from its row");
+        listing.moved = Some(moved);
+    }
+    let peers = |model: &loquax::ui::UiModel<loquax_m9::field::Field>| -> Vec<[u8; 16]> {
+        model
+            .order()
+            .into_iter()
+            .map(|i| model.conversations[i].peer)
+            .collect()
+    };
+    let before = peers(&boot.model);
+    assert_eq!(before.len(), CONVERSATIONS);
+    let start = cursor(&boot.model);
+    let mut row = 0;
+    let mut read = 0;
+    for press in 1..=20 {
+        read += press_and_preload(&mut boot, &mut flash, &archive.address, &mut row, 0xb6);
+        assert_eq!(
+            cursor(&boot.model),
+            start + press,
+            "press {press} of the ring down, the time known: {}",
+            now.is_some()
+        );
+    }
+    assert!(read >= 20, "each row reached preloads its page: {read}");
+    assert_eq!(
+        peers(&boot.model),
+        before,
+        "reading the pages moved no row in the list"
+    );
+    // A boot that knows the time gives the preloaded messages theirs.
+    let selected = &boot.model.conversations[boot.model.selected];
+    let newest = selected
+        .messages
+        .iter()
+        .filter_map(|m| m.at)
+        .map(|at| at.unix_secs)
+        .max();
+    match now {
+        Some(_) => assert_eq!(newest, newest_of.get(&selected.peer).copied()),
+        None => assert_eq!(newest, None),
+    }
 }

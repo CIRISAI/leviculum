@@ -698,12 +698,19 @@ const SCRATCH: u64 = 1 << 62;
 /// (`board::fold`), in a model of their own, so a message comes out as
 /// a restore that folded the whole ring made it, keyed by its entry
 /// ([`key`]). What the board answers [`crate::ui::history::StoreRead::Earlier`] with.
+///
+/// `now` is the time the model the messages go into knows (1591): a
+/// received message's time is its writer's, held to `now`
+/// (`written_time`), and a fold that knows no time gives it none. The
+/// scratch fold knew none before 1591, so every preloaded page's
+/// messages came out without a time on a board that had one.
 pub fn messages<B: InputBuffer + Default>(
     entries: &[Entry],
     address: &[u8; 16],
     peer: [u8; 16],
+    now: Option<crate::when::WallTime>,
 ) -> Vec<Message> {
-    messages_timed::<B>(entries, address, peer, &|| 0).0
+    messages_timed::<B>(entries, address, peer, now, &|| 0).0
 }
 
 /// [`messages`], and the time `clock` counted inside the fold's unpack
@@ -712,12 +719,14 @@ pub fn messages_timed<B: InputBuffer + Default>(
     entries: &[Entry],
     address: &[u8; 16],
     peer: [u8; 16],
+    now: Option<crate::when::WallTime>,
     clock: &dyn Fn() -> u64,
 ) -> (Vec<Message>, u64) {
     let mut unpack = 0u64;
     // On the heap: the board's UI core runs this on a census-sized stack.
     let mut scratch = alloc::boxed::Box::new(UiModel::<B>::new(&[]));
     scratch.address = Some(*address);
+    scratch.now = now;
     scratch.home_client = true;
     scratch.list_apart = true;
     scratch.selected = crate::ui::NONE_OPEN;

@@ -698,15 +698,20 @@ impl Conversation {
     /// the conversation has nothing else; a group's invitation or making
     /// counts by when it came ([`Conversation::touched`]). `None` while
     /// nothing has a time.
+    ///
+    /// A conversation listed from its kept row (1521) answers no earlier
+    /// than the row said (1591): reading its pages never moves it down
+    /// the list. Window 18's board decoded a preloaded page before it
+    /// knew the time, its messages came out with none, and every row the
+    /// ring's cursor reached sank to the list's end under the cursor.
     pub fn last_written(&self) -> Option<i64> {
+        let kept = self.listing.as_ref().and_then(|listing| listing.moved);
         // Nothing loaded: the store's row answers (1490, schema 17).
-        if self.messages.is_empty() {
-            if let Some(listing) = &self.listing {
-                return listing.moved.max(self.touched);
-            }
+        if self.messages.is_empty() && self.listing.is_some() {
+            return kept.max(self.touched);
         }
         if let Some(newest) = self.summary.newest(&self.messages) {
-            return newest.max(self.touched);
+            return newest.max(self.touched).max(kept);
         }
         let newest = |moves: bool| {
             self.messages
@@ -715,7 +720,10 @@ impl Conversation {
                 .filter_map(|m| m.at.map(|at| at.unix_secs))
                 .max()
         };
-        newest(true).or_else(|| newest(false)).max(self.touched)
+        newest(true)
+            .or_else(|| newest(false))
+            .max(self.touched)
+            .max(kept)
     }
 
     fn new(peer: [u8; 16]) -> Self {

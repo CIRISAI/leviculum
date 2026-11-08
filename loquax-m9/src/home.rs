@@ -1101,7 +1101,8 @@ pub fn page_in_timed(
     clock: &dyn Fn() -> u64,
 ) -> (Vec<UiEffect>, PageSpent) {
     let t0 = clock();
-    let (messages, unpack) = rows::messages_timed::<Field>(entries, address, peer, clock);
+    let (messages, unpack) =
+        rows::messages_timed::<Field>(entries, address, peer, model.now, clock);
     let t1 = clock();
     // The cursor's chat loads while the list is up (1521: the move asks
     // its page): its first fill reads only once Enter opened it (1546;
