@@ -463,16 +463,26 @@ pub const BENCH_OWE_ERASE_RING: u8 = 0x02;
 /// Every flag [`TYPE_BENCH_OWE`] knows.
 pub const BENCH_OWE_FLAGS: u8 = BENCH_OWE_ERASE_LOG | BENCH_OWE_ERASE_RING;
 
-/// Host → board (order 1540): a message arrives in a conversation, with
-/// no network and no mailbox, so the next open has an unread to mark:
-/// Lew's case (an unread chat, Enter, the read mark and the rows written
-/// while the UI core folds). Payload is one byte, the conversation's row
-/// in the list as shown, counted modulo the rows there are, so a walk can
-/// cycle through every chat without knowing how many there are. The board
-/// keeps the message in its ring as a pulled page is kept and folds it the
-/// same way, and selects its chat. Any other length is refused
-/// [`REFUSE_MALFORMED`]. Only the M9's bench image accepts it.
+/// Host → board (orders 1540, 1562): a message arrives, with no network
+/// and no mailbox, so the next open has an unread to mark: Lew's case (an
+/// unread chat, Enter, the read mark and the rows written while the UI
+/// core folds). It comes from the bench's own synthetic peer into one
+/// conversation, "Bench", never into a real chat (1562; 1540 took a row
+/// of the list and wrote into that chat). The board keeps the message in
+/// its ring, flagged as the bench's, folds it as a pulled one, and puts
+/// the list's cursor on "Bench". Payload is empty; anything else is
+/// refused [`REFUSE_MALFORMED`] (1540's one-byte row among it). Only the
+/// M9's bench image accepts it.
 pub const TYPE_BENCH_ARRIVE: u8 = 0x1C;
+
+/// Host → board (order 1562): take the bench's arrivals out of the
+/// message store: the flagged ones, and 1540's unflagged ones (a zero
+/// signature and words that start `bench arrival `), with the read marks
+/// that name nothing else; then erase the summary log and restart, so the
+/// boot rebuilds the list from the ring. The board acks, says `[BENCH]
+/// forget=done ...` and restarts. Payload is empty; anything else is
+/// refused [`REFUSE_MALFORMED`]. Only the M9's bench image accepts it.
+pub const TYPE_BENCH_FORGET: u8 = 0x1D;
 
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
@@ -963,13 +973,10 @@ pub fn decode_bench_owe_payload(payload: &[u8]) -> Option<u8> {
     }
 }
 
-/// Decode a [`TYPE_BENCH_ARRIVE`] payload (order 1540): the row; `None`
-/// (malformed) for any length but one byte.
-pub fn decode_bench_arrive_payload(payload: &[u8]) -> Option<u8> {
-    match payload {
-        [row] => Some(*row),
-        _ => None,
-    }
+/// Whether a [`TYPE_BENCH_ARRIVE`] or [`TYPE_BENCH_FORGET`] payload
+/// reads (order 1562): it is empty.
+pub fn decode_bench_empty_payload(payload: &[u8]) -> Option<()> {
+    payload.is_empty().then_some(())
 }
 
 /// Decode a [`TYPE_HOME_CODE`] payload: the code's text, `None`
@@ -4798,10 +4805,10 @@ mod tests {
         );
     }
 
-    /// 1540: the bench's owe and arrive frames read their payloads, and
+    /// 1540, 1562: the bench's owe, arrive and forget frames read their payloads, and
     /// no board that lists its types here takes them.
     #[test]
-    fn the_bench_owe_and_arrive_frames_read_and_no_other_board_takes_them() {
+    fn the_bench_owe_arrive_and_forget_frames_read_and_no_other_board_takes_them() {
         assert_eq!(decode_bench_owe_payload(&[]), Some(0));
         assert_eq!(
             decode_bench_owe_payload(&[BENCH_OWE_ERASE_LOG]),
@@ -4809,18 +4816,23 @@ mod tests {
         );
         assert_eq!(decode_bench_owe_payload(&[1, 2]), None);
         assert_eq!(BENCH_OWE_FLAGS & !0x03, 0);
-        assert_eq!(decode_bench_arrive_payload(&[7]), Some(7));
-        assert_eq!(decode_bench_arrive_payload(&[]), None);
-        assert_eq!(decode_bench_arrive_payload(&[1, 2]), None);
+        // 1562: arrive and forget carry nothing; 1540's row is refused.
+        assert_eq!(decode_bench_empty_payload(&[]), Some(()));
+        assert_eq!(decode_bench_empty_payload(&[7]), None);
+        assert_eq!(decode_bench_empty_payload(&[1, 2]), None);
         assert_eq!(
             encode_frame(TYPE_BENCH_OWE, &[BENCH_OWE_ERASE_LOG]),
             [0xA4, 0xA5, 0x1B, 0, 1, 0x01]
         );
         assert_eq!(
-            encode_frame(TYPE_BENCH_ARRIVE, &[3]),
-            [0xA4, 0xA5, 0x1C, 0, 1, 3]
+            encode_frame(TYPE_BENCH_ARRIVE, &[]),
+            [0xA4, 0xA5, 0x1C, 0, 0]
         );
-        for frame_type in [TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE] {
+        assert_eq!(
+            encode_frame(TYPE_BENCH_FORGET, &[]),
+            [0xA4, 0xA5, 0x1D, 0, 0]
+        );
+        for frame_type in [TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE, TYPE_BENCH_FORGET] {
             assert!(!CAPABILITY_FACT_RANGE.contains(&frame_type));
             assert_eq!(
                 classify_control_frame(&encode_frame(frame_type, &[0]), ACCEPTED),

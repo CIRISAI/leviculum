@@ -62,7 +62,10 @@
 //!                           picture back, a page switch or a key that moved
 //!                           no view and no pin (1507), and its ms are 0
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
-//! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
+//! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=... page=.. max_answer=.. home=<32 hex>
+//!                           home: the LXMF address of the home the client
+//!                           record names (1562), what `m9-walk.py` holds
+//!                           against the bench home's
 //! [STORE] sectors=896 used=<n> entries=<n> cursor=<seq> torn=<n> foreign=<n> asks=<n> restore=<resumed|rebuilt|whole> restore_ms=<ms>  (1476, 1521)
 //! [STORE] restore.a <how> decoded=<n> read_us=.. crc_us=.. decode_us=.. unpack_us=.. step_us=.. finish_us=..  (1521, where the boot's time went)
 //! [STORE] restore.b <how> drain_us=.. rows_us=.. total_us=.. unnamed_us=.. per_1000_ms read=.. crc=.. decode=.. unpack=.. step=..  (1521c, the rest of it)
@@ -134,10 +137,20 @@
 //!                           which store's write erases a sector first; it
 //!                           fires on the open's Load, read mark or read
 //!                           row, whichever comes first (1542)
-//! [BENCH] arrive=<sent|refused|folded> row=<n> of=<n> peer=<8 hex> [unread=<n>]
-//!                           `TYPE_BENCH_ARRIVE` (1540): a message came into
-//!                           the chat at that row, kept and folded as a
-//!                           pulled one, its chat selected
+//! [BENCH] arrive=<sent|folded> peer=<8 hex> [unread=<n>]
+//!                           `TYPE_BENCH_ARRIVE` (1540, 1562): a message came
+//!                           from the bench's own peer into "Bench", never a
+//!                           real chat, kept flagged and folded as a pulled
+//!                           one, "Bench" selected
+//! [BENCH] arrive=refused reason=no-home
+//!                           the same on a board that is no home's device
+//! [BENCH] forget=done flagged=<n> unflagged=<n> marks=<n> entries=<n> frames=<n> sectors=<n> summary_erased=<n> ms=<n>
+//!                           `TYPE_BENCH_FORGET` (1562): the arrivals out of
+//!                           the ring (flagged, 1540's unflagged, and marks of
+//!                           nothing else), the summary log erased; then the
+//!                           store's restore lines again (a rebuild) and
+//! [BENCH] forget=reopened   the UI core given the model rebuilt from the ring
+//! [BENCH] forget=<refused reason=no-home|no-store|failed error=..>
 //! [OPEN] peer=<8 hex> entries=<n> messages=<n> marks=<n> sectors=<n> wait_ms=.. page_read_ms=.. decode_ms=.. unpack_ms=.. alloc_ms=.. fold_ms=.. scene_ms=.. draw_ms=.. flush_ms=..
 //!                           bench image only (1540): where an opened
 //!                           chat's page went, from the load asked to the
@@ -434,9 +447,9 @@ enum ToUi {
         earlier: usize,
         address: [u8; 16],
     },
-    /// The bench's arrival (1540): the row of the list it goes to.
+    /// The bench's arrival (1540, 1562), into "Bench".
     #[cfg(m9_bench)]
-    BenchArrive(u8),
+    BenchArrive,
 }
 
 /// What the UI core hands the I/O core.
@@ -466,10 +479,11 @@ enum FromUi {
     Load([u8; 16]),
     /// The reader switched the type (1532): the client record keeps it.
     Type(Size),
-    /// The bench's arrival (1540): the chat's peer and the time it is
-    /// written at, for the I/O core to keep and hand back.
+    /// The bench's arrival (1540, 1562): when it is written and whether
+    /// the model lists "Bench" already, for the I/O core to keep and
+    /// hand back.
     #[cfg(m9_bench)]
-    BenchArrive { peer: [u8; 16], at: i64 },
+    BenchArrive(loquax_m9::bench::Arrival),
 }
 
 static TO_UI: Mutex<RefCell<VecDeque<ToUi>>> = Mutex::new(RefCell::new(VecDeque::new()));
@@ -1837,17 +1851,39 @@ fn main() -> ! {
                 #[cfg(m9_bench)]
                 if frame.frame_type == envelope::TYPE_BENCH_ARRIVE {
                     stall::stage(Core::Io, Stage::Line);
-                    let answer = match envelope::decode_bench_arrive_payload(frame.payload) {
+                    let answer = match envelope::decode_bench_empty_payload(frame.payload) {
                         None => envelope::encode_refusal(
                             envelope::TYPE_BENCH_ARRIVE,
                             envelope::REFUSE_MALFORMED,
                         ),
-                        Some(row) => {
-                            to_ui(ToUi::BenchArrive(row));
+                        Some(()) => {
+                            to_ui(ToUi::BenchArrive);
                             envelope::encode_ack(envelope::TYPE_BENCH_ARRIVE)
                         }
                     };
                     log.frame(&answer);
+                    continue;
+                }
+                #[cfg(m9_bench)]
+                if frame.frame_type == envelope::TYPE_BENCH_FORGET {
+                    stall::stage(Core::Io, Stage::Line);
+                    if envelope::decode_bench_empty_payload(frame.payload).is_none() {
+                        log.frame(&envelope::encode_refusal(
+                            envelope::TYPE_BENCH_FORGET,
+                            envelope::REFUSE_MALFORMED,
+                        ));
+                        continue;
+                    }
+                    log.frame(&envelope::encode_ack(envelope::TYPE_BENCH_FORGET));
+                    if node.bench_forget(&mut stores, &mut log, &|| wdt.feed()) {
+                        if let Some(model) =
+                            node.bench_reopen(&mut stores, &mut log, &|| wdt.feed())
+                        {
+                            to_ui(ToUi::Model(Box::new(model)));
+                            to_ui(ToUi::Word(node.word()));
+                        }
+                        log.line("[BENCH] ", format_args!("forget=reopened"));
+                    }
                     continue;
                 }
                 if frame.frame_type == envelope::TYPE_FRAME_DUMP {
@@ -1972,10 +2008,10 @@ fn main() -> ! {
                     node.bench_fire(&mut stores, &mut log);
                 }
                 #[cfg(m9_bench)]
-                FromUi::BenchArrive { peer, at } => {
+                FromUi::BenchArrive(arrival) => {
                     stall::stage(Core::Io, Stage::Line);
                     arrivals += 1;
-                    if !node.bench_arrive(peer, at, arrivals, &mut stores, &mut log) {
+                    if !node.bench_arrive(arrival, arrivals, &mut stores, &mut log) {
                         log.line("[BENCH] ", format_args!("arrive=refused reason=no-home"));
                     }
                 }
@@ -2327,7 +2363,7 @@ fn ui_main(
     let mut open = bench::Open::default();
     // The peer of the bench's arrival on its way to the fold (1540).
     #[cfg(m9_bench)]
-    let mut arriving: Option<[u8; 16]> = None;
+    let mut arriving = false;
 
     // The map's words by the clock (1531): the key hint after it opens
     // and after a key it does not know, the credit once a boot.
@@ -2422,12 +2458,10 @@ fn ui_main(
                         dirty = true;
                     }
                     #[cfg(m9_bench)]
-                    if let Some(peer) = arriving {
-                        if bench::carries(&entries, &peer) {
-                            arriving = None;
-                            bench::folded(&model, &peer, &mut log);
-                            dirty = true;
-                        }
+                    if arriving && bench::carries(&entries) {
+                        arriving = false;
+                        bench::folded(&mut model, &mut log);
+                        dirty = true;
                     }
                 }
                 ToUi::Answer(answer) => {
@@ -2452,11 +2486,9 @@ fn ui_main(
                     dirty = true;
                 }
                 #[cfg(m9_bench)]
-                ToUi::BenchArrive(row) => {
-                    if let Some(peer) = bench::arrive(&mut model, row, &mut log) {
-                        arriving = Some(peer);
-                        dirty = true;
-                    }
+                ToUi::BenchArrive => {
+                    bench::arrive(&model, &mut log);
+                    arriving = true;
                 }
                 ToUi::Word(word) => {
                     if word != shown.word {
@@ -2819,6 +2851,8 @@ fn control(data: &[u8], log: &mut UartLog<'_>) {
                     envelope::TYPE_BENCH_OWE,
                     #[cfg(m9_bench)]
                     envelope::TYPE_BENCH_ARRIVE,
+                    #[cfg(m9_bench)]
+                    envelope::TYPE_BENCH_FORGET,
                 ],
                 &[envelope::FACT_SERIAL_MUX],
             ));
@@ -2852,7 +2886,7 @@ mod bench {
     use core::sync::atomic::{AtomicU32, Ordering};
     use esp_hal::time::Instant;
     use loquax::home::board::rows;
-    use loquax::ui::{Pane, UiEffect};
+    use loquax::ui::UiEffect;
     use loquax_m9::frame::Frame;
     use loquax_m9::home;
     use loquax_m9::kbraw::Inject;
@@ -2940,54 +2974,43 @@ mod bench {
         )
     }
 
-    /// A `TYPE_BENCH_ARRIVE` on the UI core (1540): the chat at `row`
-    /// selected while the list shows, and its peer and time sent to the
-    /// I/O core, which keeps the message and hands it back as a page.
-    pub fn arrive(model: &mut UiModel<Field>, row: u8, log: &mut UiLog) -> Option<[u8; 16]> {
-        let Some(arrival) = loquax_m9::bench::arrival(model, row) else {
-            log.line(
-                "[BENCH] ",
-                format!("arrive=refused row={row} of=0 reason=no-chats"),
-            );
-            return None;
-        };
-        if model.focus == Pane::Conversations {
-            model.selected = arrival.index;
-        }
+    /// A `TYPE_BENCH_ARRIVE` on the UI core (1540, 1562): the arrival's
+    /// time and whether "Bench" is listed, sent to the I/O core, which
+    /// keeps the message and hands it back as a page.
+    pub fn arrive(model: &UiModel<Field>, log: &mut UiLog) {
+        let arrival = loquax_m9::bench::arrival(model);
         log.line(
             "[BENCH] ",
             format!(
-                "arrive=sent row={} of={} peer={}",
-                arrival.row,
-                arrival.of,
-                short(&arrival.peer)
+                "arrive=sent peer={} named={}",
+                short(&loquax_m9::bench::BENCH_PEER),
+                if arrival.named { "yes" } else { "no" }
             ),
         );
-        log.send(FromUi::BenchArrive {
-            peer: arrival.peer,
-            at: arrival.at,
-        });
-        Some(arrival.peer)
+        log.send(FromUi::BenchArrive(arrival));
     }
 
-    /// Whether a pulled page carries a message from `peer`: the packed
-    /// LXMF message's source, bytes 16 to 32.
-    pub fn carries(entries: &[Entry], peer: &[u8; 16]) -> bool {
+    /// Whether a pulled page carries an arrival: a message from the
+    /// bench's peer (the packed message's source, bytes 16 to 32).
+    pub fn carries(entries: &[Entry]) -> bool {
         entries
             .iter()
-            .any(|entry| entry.packed.get(16..32) == Some(&peer[..]))
+            .any(|entry| entry.packed.get(16..32) == Some(&loquax_m9::bench::BENCH_PEER[..]))
     }
 
-    /// The arrival folded: its chat's unread, which the walk's open marks.
-    pub fn folded(model: &UiModel<Field>, peer: &[u8; 16], log: &mut UiLog) {
-        let unread = model
-            .conversations
-            .iter()
-            .find(|c| c.peer == *peer)
+    /// The arrival folded: "Bench" under the list's cursor, and its
+    /// unread, which the walk's open marks.
+    pub fn folded(model: &mut UiModel<Field>, log: &mut UiLog) {
+        loquax_m9::bench::select(model);
+        let unread = loquax_m9::bench::index(model)
+            .and_then(|at| model.conversations.get(at))
             .map_or(0, |c| c.unread);
         log.line(
             "[BENCH] ",
-            format!("arrive=folded peer={} unread={unread}", short(peer)),
+            format!(
+                "arrive=folded peer={} unread={unread}",
+                short(&loquax_m9::bench::BENCH_PEER)
+            ),
         );
     }
 

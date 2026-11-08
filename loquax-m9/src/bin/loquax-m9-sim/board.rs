@@ -52,6 +52,7 @@ use loquax_m9::read::Reader;
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ROWS};
 
+use loquax_m9::bench::{self, Arrivals};
 use loquax_m9::{fixture, group, page};
 
 use crate::flash::Flash;
@@ -200,23 +201,45 @@ pub struct Board {
     asked: Vec<loquax::ui::UiEffect>,
     /// What the reader saw, said to the model, and its clocks (1541).
     reader: Reader,
+    /// The image: bench or release (1562).
+    pub arrivals: Arrivals,
+    /// The bench's arrivals since boot, each its own number.
+    arrived: u32,
 }
 
 impl Board {
     /// Power on over `flash`: the store restored for its home, or the
     /// pairing over the fixture on a board without one, and the first
     /// frame drawn. `boots` makes the client ids of each boot its own.
-    pub fn boot(mut flash: Flash, mut log: Log, boots: u64) -> Result<Self, String> {
+    #[cfg(test)]
+    pub fn boot(flash: Flash, log: Log, boots: u64) -> Result<Self, String> {
+        Self::boot_as(flash, log, boots, Arrivals::Dropped)
+    }
+
+    /// [`Board::boot`] as the image `arrivals` names (1562): the bench
+    /// image ([`Arrivals::Shown`]) lists "Bench" and takes `bench arrive`
+    /// and `bench forget`, a release image ([`Arrivals::Dropped`]) does
+    /// neither.
+    pub fn boot_as(
+        mut flash: Flash,
+        mut log: Log,
+        boots: u64,
+        arrivals: Arrivals,
+    ) -> Result<Self, String> {
         set_clock_ms(0);
         log.line(
             "[SIM] ",
             &format!(
-                "board=M9 loquax-m9={} sectors={} home={} boot={boots}",
+                "board=M9 loquax-m9={} sectors={} home={} boot={boots} image={}",
                 env!("CARGO_PKG_VERSION"),
                 flash.messages.sectors.len(),
                 flash
                     .home
                     .map_or_else(|| String::from("none"), |a| hex8(&a)),
+                match arrivals {
+                    Arrivals::Shown => "bench",
+                    Arrivals::Dropped => "release",
+                },
             ),
         );
         let mut outgoing = Outgoing::default();
@@ -230,59 +253,13 @@ impl Board {
                 (fixture::model(), None, shown)
             }
             Some(address) => {
-                let t0 = uptime_ms();
-                let boot = home::restore_timed(&mut flash.messages, address, &uptime_us)
-                    .map_err(|e| format!("the store did not restore: {e:?}"))?;
-                let how = boot.how.word();
-                log.line(
-                    "[STORE] ",
-                    &format!(
-                        "sectors={} used={} entries={} cursor={} torn={} foreign={} asks={} restore={how} restore_ms={}",
-                        boot.shelf.ring.sectors(),
-                        boot.shelf.used(),
-                        boot.restored.entries,
-                        boot.shelf.cursor(),
-                        boot.restored.torn,
-                        boot.restored.foreign,
-                        boot.asks.len(),
-                        uptime_ms().saturating_sub(t0)
-                    ),
-                );
-                for line in boot.spent.lines(boot.how, boot.decoded) {
-                    log.line("[STORE] ", &line);
-                }
-                match boot.how {
-                    How::Resumed { records, tail } => log.line(
-                        "[STORE] ",
-                        &format!(
-                            "index=summaries records={records} tail={tail} conversations={}",
-                            boot.model.conversations.len()
-                        ),
-                    ),
-                    How::Rebuilt { why } => log.line(
-                        "[STORE] ",
-                        &format!(
-                            "index=rebuilt why={why} conversations={}",
-                            boot.model.conversations.len()
-                        ),
-                    ),
-                    How::Whole => {}
-                }
-                for ask in boot.asks {
-                    match board::ask_verb(ask.tag, &ask.request) {
-                        Some(verb) => outgoing.push(ask.id, verb),
-                        None => log.line("[HOME] ", &format!("ask=unread tag={}", ask.tag)),
-                    }
-                }
-                log.line(
-                    "[HOME] ",
-                    &format!("client=sim link=none waiting={}", outgoing.len()),
-                );
+                let (model, shelf) =
+                    open_store(&mut flash, address, arrivals, &mut log, &mut outgoing)?;
                 let shown = Shown {
                     word: Some(Word::of(&Session::new(), true, None)),
                     ..Shown::default()
                 };
-                (boot.model, Some(boot.shelf), shown)
+                (model, Some(shelf), shown)
             }
         };
         // The panel's frame lives as long as the run: the renderer borrows
@@ -327,6 +304,8 @@ impl Board {
             owed: false,
             asked: Vec::new(),
             reader: Reader::default(),
+            arrivals,
+            arrived: 0,
         };
         // The record's type (1532), as the board reads it at boot; a board
         // without a record shows the default.
@@ -490,6 +469,102 @@ impl Board {
         shelf.pages_owed += 1;
         self.to_ui
             .push_back(ToUi::Entries(entries.to_vec(), address));
+    }
+
+    /// `bench arrive` (1540, 1562) as the bench image does it: the UI
+    /// side's arrival, the I/O side's entries kept and handed back as a
+    /// page ([`Board::pull`]), "Bench" under the cursor once folded.
+    pub fn bench_arrive(&mut self) -> Result<(), String> {
+        if self.arrivals != Arrivals::Shown {
+            return Err(String::from(
+                "bench arrive: a release image refuses TYPE_BENCH_ARRIVE (--bench)",
+            ));
+        }
+        let (Some(address), Some(cursor)) =
+            (self.flash.home, self.shelf.as_ref().map(Shelf::cursor))
+        else {
+            self.log.line("[BENCH] ", "arrive=refused reason=no-home");
+            return Err(String::from("bench arrive: the board is no home's device"));
+        };
+        self.arrived += 1;
+        let arrival = bench::arrival(&self.model);
+        self.log.line(
+            "[BENCH] ",
+            &format!(
+                "arrive=sent peer={} named={}",
+                hex8(&bench::BENCH_PEER),
+                if arrival.named { "yes" } else { "no" }
+            ),
+        );
+        let entries = bench::entries(address, arrival, self.arrived, cursor);
+        self.pull(&entries);
+        self.settle();
+        bench::select(&mut self.model);
+        let unread = bench::index(&self.model)
+            .and_then(|at| self.model.conversations.get(at))
+            .map_or(0, |c| c.unread);
+        self.log.line(
+            "[BENCH] ",
+            &format!(
+                "arrive=folded peer={} unread={unread}",
+                hex8(&bench::BENCH_PEER)
+            ),
+        );
+        self.owed = true;
+        self.settle();
+        Ok(())
+    }
+
+    /// `bench forget` (1562) as the bench image does it: the arrivals
+    /// out of the store (`home::forget`), and the store opened again from
+    /// the flash, its model in place of the old one
+    /// (`Handheld::bench_reopen`).
+    pub fn bench_forget(&mut self) -> Result<(), String> {
+        if self.arrivals != Arrivals::Shown {
+            return Err(String::from(
+                "bench forget: a release image refuses TYPE_BENCH_FORGET (--bench)",
+            ));
+        }
+        let Some(address) = self.flash.home else {
+            self.log.line("[BENCH] ", "forget=refused reason=no-home");
+            return Err(String::from("bench forget: the board is no home's device"));
+        };
+        let done = home::forget(&mut self.flash.messages, address, &|| ())
+            .map_err(|e| format!("bench forget: {e:?}"))?;
+        self.log.line(
+            "[BENCH] ",
+            &format!(
+                "forget=done flagged={} unflagged={} marks={} entries={} frames={} sectors={} summary_erased={}",
+                done.flagged,
+                done.unflagged,
+                done.marks,
+                done.store.entries,
+                done.store.frames,
+                done.store.sectors,
+                done.summary_erased
+            ),
+        );
+        let mut outgoing = Outgoing::default();
+        let (model, shelf) = open_store(
+            &mut self.flash,
+            address,
+            self.arrivals,
+            &mut self.log,
+            &mut outgoing,
+        )?;
+        *self.model = model;
+        self.shelf = Some(shelf);
+        self.outgoing = outgoing;
+        self.row = 0;
+        self.asked.extend(house::set_size(
+            self.overview.size,
+            &mut self.model,
+            &mut self.renderer,
+        ));
+        self.log.line("[BENCH] ", "forget=reopened");
+        self.owed = true;
+        self.settle();
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -953,6 +1028,68 @@ impl Board {
 }
 
 /// A client id: the boot's seed and a counter, hashed (`ui_main`'s `ids`).
+/// The store restored for the home at `address` (the board's
+/// `Handheld::client`): the restore's lines said, the asks it kept queued
+/// again in `outgoing`, the model and the shelf. At boot, and again after
+/// a `bench forget` (1562, `Handheld::bench_reopen`).
+fn open_store(
+    flash: &mut Flash,
+    address: [u8; 16],
+    arrivals: Arrivals,
+    log: &mut Log,
+    outgoing: &mut Outgoing,
+) -> Result<(UiModel<Field>, Shelf), String> {
+    let t0 = uptime_ms();
+    let boot = home::restore_shown(&mut flash.messages, address, &uptime_us, arrivals)
+        .map_err(|e| format!("the store did not restore: {e:?}"))?;
+    let how = boot.how.word();
+    log.line(
+        "[STORE] ",
+        &format!(
+            "sectors={} used={} entries={} cursor={} torn={} foreign={} asks={} restore={how} restore_ms={}",
+            boot.shelf.ring.sectors(),
+            boot.shelf.used(),
+            boot.restored.entries,
+            boot.shelf.cursor(),
+            boot.restored.torn,
+            boot.restored.foreign,
+            boot.asks.len(),
+            uptime_ms().saturating_sub(t0)
+        ),
+    );
+    for line in boot.spent.lines(boot.how, boot.decoded) {
+        log.line("[STORE] ", &line);
+    }
+    match boot.how {
+        How::Resumed { records, tail } => log.line(
+            "[STORE] ",
+            &format!(
+                "index=summaries records={records} tail={tail} conversations={}",
+                boot.model.conversations.len()
+            ),
+        ),
+        How::Rebuilt { why } => log.line(
+            "[STORE] ",
+            &format!(
+                "index=rebuilt why={why} conversations={}",
+                boot.model.conversations.len()
+            ),
+        ),
+        How::Whole => {}
+    }
+    for ask in boot.asks {
+        match board::ask_verb(ask.tag, &ask.request) {
+            Some(verb) => outgoing.push(ask.id, verb),
+            None => log.line("[HOME] ", &format!("ask=unread tag={}", ask.tag)),
+        }
+    }
+    log.line(
+        "[HOME] ",
+        &format!("client=sim link=none waiting={}", outgoing.len()),
+    );
+    Ok((boot.model, boot.shelf))
+}
+
 fn id_of(seed: &[u8; 32], counter: u64) -> [u8; 16] {
     let mut buf = [0u8; 40];
     buf[..32].copy_from_slice(seed);

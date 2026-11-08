@@ -18,6 +18,7 @@ use loquax::ui::history::StoreRead;
 use loquax::ui::listing::Row;
 use loquax::ui::{groups, update, Batch, Pane, UiEffect, UiEvent, UiModel};
 
+use crate::bench::{Arrivals, Forgetting, BENCH_PEER};
 use crate::field::Field;
 
 /// The model of a board that is a device of the home whose LXMF address
@@ -389,22 +390,35 @@ pub fn restore<S: Sectors>(dev: &mut S, address: [u8; 16]) -> Result<Boot, S::Er
     restore_timed(dev, address, &|| 0)
 }
 
+/// [`restore_shown`] as a release image restores: the bench's arrivals
+/// dropped ([`Arrivals::Dropped`]).
+pub fn restore_timed<S: Sectors>(
+    dev: &mut S,
+    address: [u8; 16],
+    clock: &dyn Fn() -> u64,
+) -> Result<Boot, S::Error> {
+    restore_shown(dev, address, clock, Arrivals::Dropped)
+}
+
 /// What a board that is a device of the home at `address` shows at boot
 /// (1476, 1521). From the summary log when its state says the ring ends
 /// where it does: the rows listed, no message read, each conversation's
 /// messages loaded when it opens ([`Shelf::page`]). Otherwise the ring is
 /// folded whole as one batch (1514), the summary log written anew from
 /// the model it made (`[STORE] index=rebuilt`), and the next boot
-/// resumes. `clock` times the phases ([`Breakdown`]).
-pub fn restore_timed<S: Sectors>(
+/// resumes. `clock` times the phases ([`Breakdown`]). `arrivals` says
+/// whether the bench's own entries are listed (1562, [`Arrivals`]): a
+/// release image passes [`Arrivals::Dropped`] and never shows "Bench".
+pub fn restore_shown<S: Sectors>(
     dev: &mut S,
     address: [u8; 16],
     clock: &dyn Fn() -> u64,
+    arrivals: Arrivals,
 ) -> Result<Boot, S::Error> {
     let tag = store::tag(&address);
     let Some((ring_count, rows_count)) = rows::split(dev.count()) else {
         let count = dev.count();
-        return rebuild(dev, address, clock, count, None, How::Whole);
+        return rebuild(dev, address, clock, count, None, How::Whole, arrivals);
     };
     let t0 = clock();
     let (log, replayed) = RowLog::open(&mut Window::new(&mut *dev, ring_count, rows_count), tag)?;
@@ -423,7 +437,8 @@ pub fn restore_timed<S: Sectors>(
                 index.marks = state.marks.clone();
                 index.prune(&ring);
                 let mut shown = model(address);
-                shown.restore_rows(index.rows(), index.names());
+                let (rows, names) = listed(&index, arrivals);
+                shown.restore_rows(rows, names);
                 shown.selected = top(&shown);
                 shown.keys_above(rows::live_floor(state.cursor));
                 let _ = shown.take_marks();
@@ -468,6 +483,7 @@ pub fn restore_timed<S: Sectors>(
                 state,
                 replayed.records,
                 t0,
+                arrivals,
             )? {
                 return Ok(boot);
             }
@@ -482,6 +498,7 @@ pub fn restore_timed<S: Sectors>(
                 ring_count,
                 Some(log),
                 How::Rebuilt { why: "ring-moved" },
+                arrivals,
             )?;
             boot.spent.rows += rows_read;
             boot.spent.total = clock().saturating_sub(t0);
@@ -489,7 +506,7 @@ pub fn restore_timed<S: Sectors>(
         }
     };
     let rows_read = clock().saturating_sub(t0);
-    let mut boot = rebuild(dev, address, clock, ring_count, Some(log), how)?;
+    let mut boot = rebuild(dev, address, clock, ring_count, Some(log), how, arrivals)?;
     boot.spent.rows += rows_read;
     boot.spent.total = clock().saturating_sub(t0);
     Ok(boot)
@@ -516,6 +533,7 @@ fn resume_tail<S: Sectors>(
     state: &State,
     records: u64,
     t0: u64,
+    arrivals: Arrivals,
 ) -> Result<Option<Boot>, S::Error> {
     let start = clock();
     let mut tail: Vec<(Entry, store::Span)> = Vec::new();
@@ -524,7 +542,11 @@ fn resume_tail<S: Sectors>(
         store::tag(&address),
         state.end,
         clock,
-        |entry, span| tail.push((entry, span)),
+        |entry, span| {
+            if shows(&entry, arrivals) {
+                tail.push((entry, span));
+            }
+        },
     )?
     else {
         return Ok(None);
@@ -536,7 +558,8 @@ fn resume_tail<S: Sectors>(
     index.marks = state.marks.clone();
     index.prune(&ring);
     let mut shown = model(address);
-    shown.restore_rows(index.rows(), index.names());
+    let (listed_rows, names) = listed(&index, arrivals);
+    shown.restore_rows(listed_rows, names);
     shown.keys_above(rows::live_floor(state.cursor));
     let _ = shown.take_marks();
     let _ = shown.take_touched();
@@ -619,6 +642,24 @@ fn resume_tail<S: Sectors>(
     }))
 }
 
+/// Whether a restore folds `entry` (1562): a release image leaves the
+/// bench's own out.
+fn shows(entry: &Entry, arrivals: Arrivals) -> bool {
+    arrivals == Arrivals::Shown || !crate::bench::is_bench(entry)
+}
+
+/// The rows and names a summary lists (1562): a release image leaves
+/// "Bench" out. The index keeps them: what it says is the ring's.
+#[allow(clippy::type_complexity)]
+fn listed(index: &Index, arrivals: Arrivals) -> (Vec<(Row, usize)>, Vec<([u8; 16], String)>) {
+    let (mut rows, mut names) = (index.rows(), index.names());
+    if arrivals == Arrivals::Dropped {
+        rows.retain(|(row, _)| row.peer != BENCH_PEER);
+        names.retain(|(peer, _)| *peer != BENCH_PEER);
+    }
+    (rows, names)
+}
+
 /// The conversation a boot selects: the list's first, where the cursor
 /// stands when the list shows (1521; before, the first conversation the
 /// store held, wherever the list put it).
@@ -635,6 +676,7 @@ fn rebuild<S: Sectors>(
     ring_count: u32,
     log: Option<RowLog>,
     how: How,
+    arrivals: Arrivals,
 ) -> Result<Boot, S::Error> {
     let start = clock();
     let mut shown = model(address);
@@ -651,6 +693,9 @@ fn rebuild<S: Sectors>(
         store::tag(&address),
         clock,
         |entry, span| {
+            if !shows(&entry, arrivals) {
+                return;
+            }
             let t0 = clock();
             let event = board::fold(&entry, &address);
             let t1 = clock();
@@ -718,6 +763,62 @@ fn rebuild<S: Sectors>(
             rows,
             total: clock().saturating_sub(start),
         },
+    })
+}
+
+/// What `bench forget` did (1562): the ring's entries taken out, by what
+/// they were, and the summary log's sectors erased so the next boot
+/// rebuilds from the ring.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Forgot {
+    pub store: store::Forgot,
+    /// The bench's flagged entries (messages and the name).
+    pub flagged: u64,
+    /// 1540's arrivals, before the flag.
+    pub unflagged: u64,
+    /// Read marks of nothing but arrivals.
+    pub marks: u64,
+    /// Summary log sectors erased: all of them when anything went, none
+    /// otherwise.
+    pub summary_erased: u32,
+}
+
+/// Take the bench's arrivals out of the message store of the home at
+/// `address` on `dev` ([`Forgetting`], `Store::forget`), and when any
+/// went, erase the summary log: its rows still say "bench arrival" in a
+/// chat's last line and count entries no longer there, and a boot with
+/// no summary rebuilds the list from the ring, which is the truth. The
+/// board restarts after it; nothing in memory stands for the store any
+/// more. `feed` is called per sector, for the caller's watchdog.
+pub fn forget<S: Sectors>(
+    dev: &mut S,
+    address: [u8; 16],
+    feed: &dyn Fn(),
+) -> Result<Forgot, S::Error> {
+    let count = dev.count();
+    let (ring_count, rows_count) = rows::split(count).unwrap_or((count, 0));
+    let mut forgetting = Forgetting::default();
+    let store = Store::forget(
+        &mut Window::new(&mut *dev, 0, ring_count),
+        store::tag(&address),
+        |entry| forgetting.drops(entry),
+        feed,
+    )?;
+    let mut summary_erased = 0;
+    if store.entries > 0 {
+        let mut log = Window::new(dev, ring_count, rows_count);
+        for sector in 0..rows_count {
+            feed();
+            log.erase(sector)?;
+            summary_erased += 1;
+        }
+    }
+    Ok(Forgot {
+        store,
+        flagged: forgetting.flagged,
+        unflagged: forgetting.unflagged,
+        marks: forgetting.marks,
+        summary_erased,
     })
 }
 
@@ -856,8 +957,22 @@ pub fn route(
     ids: &mut impl FnMut() -> [u8; 16],
 ) -> Routed {
     let mut out = Routed::default();
+    // The home never had the bench's arrivals (1562): their marks are
+    // kept on the board and never asked of it.
+    let bench = crate::bench::ids(model);
     for mark in model.take_marks() {
-        out.verbs.push(Verb::Mark(mark.clone()));
+        let home = Mark {
+            flag: mark.flag,
+            ids: mark
+                .ids
+                .iter()
+                .filter(|id| !bench.contains(*id))
+                .copied()
+                .collect(),
+        };
+        if !home.ids.is_empty() {
+            out.verbs.push(Verb::Mark(home));
+        }
         out.marks.push(mark);
     }
     // What the store would write (1521): the conversations the fold

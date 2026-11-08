@@ -20,6 +20,11 @@
 //!                     (`chats`, `chat`, `groups`, ..., `pan`, or
 //!                     `pairing`): walked and drawn in place of the
 //!                     model, written as a PNG, as the goldens are
+//! bench arrive        TYPE_BENCH_ARRIVE (1562): a message into "Bench",
+//!                     the bench's own conversation, never a real chat;
+//!                     needs `--bench` and a home (`--store real`)
+//! bench forget        TYPE_BENCH_FORGET (1562): every arrival out of the
+//!                     store, the store opened again
 //! ```
 //!
 //! Every press advances the clock [`STEP_MS`] unless the file waits.
@@ -45,6 +50,10 @@ pub enum Step {
     /// A `FRAME_DUMP` of the fixture's screen with this byte, as a PNG at
     /// this path.
     Screen(u8, String),
+    /// `bench arrive` (1562).
+    BenchArrive,
+    /// `bench forget` (1562).
+    BenchForget,
 }
 
 /// The `FRAME_DUMP` byte of the screen named `name`.
@@ -127,6 +136,11 @@ pub fn file(text: &str) -> Result<Vec<Step>, String> {
         let key = |word: &str| code(word).ok_or_else(|| at(format!("no M9 key is named {word:?}")));
         match verb {
             "key" => steps.push(Step::Key(key(rest)?)),
+            "bench" => match rest {
+                "arrive" => steps.push(Step::BenchArrive),
+                "forget" => steps.push(Step::BenchForget),
+                other => return Err(at(format!("bench arrive|forget, not {other:?}"))),
+            },
             "hold" => {
                 let (name, held) = rest
                     .split_once(char::is_whitespace)

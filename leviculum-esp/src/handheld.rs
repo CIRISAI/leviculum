@@ -43,6 +43,13 @@ use loquax::ui::listing::Row;
 use loquax::ui::UiModel;
 use loquax_m9::field::Field;
 use loquax_m9::home as m9home;
+
+/// What a restore does with the bench's arrivals (1562): the bench image
+/// lists "Bench", a release image never does.
+#[cfg(m9_bench)]
+const ARRIVALS: loquax_m9::bench::Arrivals = loquax_m9::bench::Arrivals::Shown;
+#[cfg(not(m9_bench))]
+const ARRIVALS: loquax_m9::bench::Arrivals = loquax_m9::bench::Arrivals::Dropped;
 use loquax_m9::home::{Answer, How, Outgoing, Shelf};
 
 use crate::flash::Stores;
@@ -288,10 +295,15 @@ impl Handheld {
                 );
                 (m9home::model(address), None)
             }
-            Some(mut dev) => match m9home::restore_timed(&mut dev, address, &|| {
-                feed();
-                crate::uptime_us()
-            }) {
+            Some(mut dev) => match m9home::restore_shown(
+                &mut dev,
+                address,
+                &|| {
+                    feed();
+                    crate::uptime_us()
+                },
+                ARRIVALS,
+            ) {
                 Ok(boot) => {
                     let (model, store, restored, pending) =
                         (boot.model, boot.shelf, boot.restored, boot.asks);
@@ -361,14 +373,23 @@ impl Handheld {
         }
         match record.device_identity() {
             Ok(device) => {
+                // The home's LXMF address (1562): the bench's walker
+                // refuses to open chats on a board joined to any home
+                // but the bench's own.
+                let mut home = [0u8; 32];
+                for (i, byte) in address.iter().enumerate() {
+                    home[2 * i] = hex(byte >> 4);
+                    home[2 * i + 1] = hex(byte & 0x0f);
+                }
                 log.line(
                     "[HOME] ",
                     format_args!(
-                        "client=yes admitted={} cursor={} page={} max_answer={}",
+                        "client=yes admitted={} cursor={} page={} max_answer={} home={}",
                         if record.admitted() { "yes" } else { "no" },
                         record.cursor,
                         batch.page_bytes,
-                        batch.max_answer
+                        batch.max_answer,
+                        core::str::from_utf8(&home).unwrap_or("?")
                     ),
                 );
                 let mut session = Session::new();
@@ -859,14 +880,14 @@ impl Handheld {
         client.flush(stores, log);
     }
 
-    /// A message from `peer` arrives (`TYPE_BENCH_ARRIVE`), the `n`th:
-    /// kept in the ring and handed to the model as a pulled page is
+    /// The bench's `n`th arrival (`TYPE_BENCH_ARRIVE`, 1562): from the
+    /// bench's own peer into "Bench" (`loquax_m9::bench::entries`), kept
+    /// in the ring and handed to the model as a pulled page is
     /// ([`Handheld::drain`]). False on a board that is no device of a
     /// home.
     pub fn bench_arrive(
         &mut self,
-        peer: [u8; 16],
-        at: i64,
+        arrival: loquax_m9::bench::Arrival,
         n: u32,
         stores: &mut Stores<'_>,
         log: &mut UartLog<'_>,
@@ -875,8 +896,7 @@ impl Handheld {
             return false;
         };
         let seq = client.store.as_ref().map_or(0, |store| store.cursor());
-        let entry = loquax_m9::bench::entry(peer, client.address, at, n, seq);
-        let entries = [entry];
+        let entries = loquax_m9::bench::entries(client.address, arrival, n, seq);
         if let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) {
             match m9home::keep(store, &mut dev, &entries, &client.address) {
                 Ok(done) => log.line(
@@ -897,9 +917,69 @@ impl Handheld {
                 }
             }
         }
-        let [entry] = entries;
-        client.drained.entries.push(entry);
+        client.drained.entries.extend(entries);
         true
+    }
+
+    /// After a forget (1562): the client made again from its record, the
+    /// store restored from the flash (a rebuild, the summary being
+    /// erased), and the model the UI core takes in place of its own.
+    pub fn bench_reopen(
+        &mut self,
+        stores: &mut Stores<'_>,
+        log: &mut UartLog<'_>,
+        feed: &dyn Fn(),
+    ) -> Option<UiModel<Field>> {
+        let client = self.client.take()?;
+        self.client(client.record, client.batch, stores, log, feed)
+    }
+
+    /// `TYPE_BENCH_FORGET` (1562): the bench's arrivals out of the
+    /// message store and the summary log erased (`m9home::forget`), `feed`
+    /// per sector for the watchdog. Whether the store must be opened
+    /// again ([`Handheld::bench_reopen`]): the one in memory no longer
+    /// stands for the flash. False, and a refusal said, on a board with
+    /// no home or no store.
+    pub fn bench_forget(
+        &mut self,
+        stores: &mut Stores<'_>,
+        log: &mut UartLog<'_>,
+        feed: &dyn Fn(),
+    ) -> bool {
+        let Some(client) = self.client.as_ref() else {
+            log.line("[BENCH] ", format_args!("forget=refused reason=no-home"));
+            return false;
+        };
+        let Some(mut dev) = stores.messages() else {
+            log.line("[BENCH] ", format_args!("forget=refused reason=no-store"));
+            return false;
+        };
+        let t0 = crate::uptime_ms();
+        match m9home::forget(&mut dev, client.address, feed) {
+            Ok(done) => {
+                log.line(
+                    "[BENCH] ",
+                    format_args!(
+                        "forget=done flagged={} unflagged={} marks={} entries={} frames={} sectors={} summary_erased={} ms={}",
+                        done.flagged,
+                        done.unflagged,
+                        done.marks,
+                        done.store.entries,
+                        done.store.frames,
+                        done.store.sectors,
+                        done.summary_erased,
+                        crate::uptime_ms().saturating_sub(t0)
+                    ),
+                );
+                true
+            }
+            Err(error) => {
+                // Sectors may be written again already: open the store
+                // again all the same, from what the flash holds.
+                log.line("[BENCH] ", format_args!("forget=failed error={error:?}"));
+                true
+            }
+        }
     }
 }
 

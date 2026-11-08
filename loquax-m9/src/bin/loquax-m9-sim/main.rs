@@ -2,7 +2,7 @@
 //! as the board draws it, driven by its keys, in a window or headless.
 //!
 //! ```text
-//! loquax-m9-sim [--store fixture|real|<image>] [--save <image>]
+//! loquax-m9-sim [--store fixture|real|<image>] [--save <image>] [--bench]
 //!               [--keys "down down enter" | --script <file>]
 //!               [--reboot-after <n>] [--dump <png>] [--dump-every <n>]
 //!               [--text] [--window [--scale 2|3]]
@@ -14,6 +14,9 @@
 //!   of a home whose store a first pull of the 1489 fixture filled (300
 //!   conversations, 4000 messages). Anything else is a flash image a run
 //!   saved with `--save`.
+//! - `--bench`: the bench image (1562): "Bench" listed, `bench arrive`
+//!   and `bench forget` in a script taken. Without it the board is a
+//!   release image, which restores no "Bench" and refuses both.
 //! - `--save`: write the flash image at the end (and at each reboot), so
 //!   the next run's `--store <image>` is a power cycle.
 //! - `--keys`, `--script`: the presses ([`script`]).
@@ -44,6 +47,7 @@ use std::process::ExitCode;
 
 use board::{Board, Log};
 use flash::Flash;
+use loquax_m9::bench::Arrivals;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
 use script::Step;
 
@@ -52,6 +56,7 @@ use script::Step;
 struct Args {
     store: Option<String>,
     save: Option<PathBuf>,
+    bench: bool,
     steps: Vec<Step>,
     reboot_after: Option<usize>,
     dump: Option<PathBuf>,
@@ -62,7 +67,7 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "usage: loquax-m9-sim [--store fixture|real|<image>] [--save <image>] \
+    "usage: loquax-m9-sim [--store fixture|real|<image>] [--save <image>] [--bench] \
      [--keys \"down enter\" | --script <file>] [--reboot-after <n>] \
      [--dump <png>] [--dump-every <n>] [--text] [--window [--scale 2|3]]"
 }
@@ -103,6 +108,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 args.dump_every = Some(n);
             }
             "--text" => args.text = true,
+            "--bench" => args.bench = true,
             "--window" => args.window = true,
             "--scale" => {
                 let n = value("--scale")?;
@@ -150,14 +156,15 @@ fn main() -> ExitCode {
     }
 }
 
-/// The board at power-on over the flash `--store` names.
-fn power_on(store: Option<&str>) -> Result<Board, String> {
+/// The board at power-on over the flash `--store` names, as the image
+/// `arrivals` says.
+fn power_on(store: Option<&str>, arrivals: Arrivals) -> Result<Board, String> {
     match store.unwrap_or("fixture") {
-        "fixture" => Board::boot(Flash::blank(), Log::default(), 1),
+        "fixture" => Board::boot_as(Flash::blank(), Log::default(), 1, arrivals),
         "real" => {
             let mut flash = Flash::blank();
             flash.home = Some(real::address());
-            let mut board = Board::boot(flash, Log::default(), 1)?;
+            let mut board = Board::boot_as(flash, Log::default(), 1, arrivals)?;
             let archive = real::archive()?;
             // The pull's pages, as many entries as a LoRa page's census
             // (`restore_counts.rs` keeps 72 a page).
@@ -175,12 +182,20 @@ fn power_on(store: Option<&str>) -> Result<Board, String> {
             );
             Ok(board)
         }
-        image => Board::boot(Flash::load(Path::new(image))?, Log::default(), 1),
+        image => Board::boot_as(Flash::load(Path::new(image))?, Log::default(), 1, arrivals),
+    }
+}
+
+/// The image `--bench` names.
+fn arrivals(args: &Args) -> Arrivals {
+    match args.bench {
+        true => Arrivals::Shown,
+        false => Arrivals::Dropped,
     }
 }
 
 fn run(args: &Args) -> Result<(), String> {
-    let board = power_on(args.store.as_deref())?;
+    let board = power_on(args.store.as_deref(), arrivals(args))?;
     if args.window {
         #[cfg(feature = "sim-window")]
         return window::run(board, args.scale, args.save.as_deref());
@@ -230,6 +245,8 @@ fn headless(mut board: Board, args: &Args) -> Result<(), String> {
                 write_png(board.frame(), Path::new(path))?;
                 board.settle();
             }
+            Step::BenchArrive => board.bench_arrive()?,
+            Step::BenchForget => board.bench_forget()?,
         }
         if let (Some(every), Some(dump)) = (args.dump_every, args.dump.as_ref()) {
             if board.frames / every > frames_dumped / every {
@@ -266,11 +283,12 @@ fn headless(mut board: Board, args: &Args) -> Result<(), String> {
 
 /// Power the board off and on again over the flash it wrote.
 fn reboot(board: Board, boots: u64, save: Option<&Path>) -> Result<Board, String> {
+    let arrivals = board.arrivals;
     let (flash, log) = board.power_off();
     if let Some(save) = save {
         flash.save(save)?;
     }
-    let mut board = Board::boot(flash, log, boots)?;
+    let mut board = Board::boot_as(flash, log, boots, arrivals)?;
     // The loop turns before a key, as after the first power-on: what the
     // boot asked (1546, the cursor chat's page) is read at t=0.
     board.settle();
@@ -317,5 +335,140 @@ mod tests {
         assert!(parse(&bad).is_err(), "the negative: an unknown option");
         let every: Vec<String> = vec!["--dump-every".into(), "2".into()];
         assert!(parse(&every).is_err(), "--dump-every without --dump");
+    }
+}
+
+/// The bench never touches a real chat (1562), on the 1489 fixture as a
+/// first pull leaves it (`--store real`).
+#[cfg(test)]
+mod bench_tests {
+    use super::*;
+    use leviculum_lxmf::msgpack;
+    use loquax::home::wire::Entry;
+    use loquax::home::KIND_RECEIVED;
+    use loquax::ui::UiModel;
+    use loquax_m9::bench::{self, BENCH_PEER};
+    use loquax_m9::field::Field;
+
+    /// Every real conversation's list row as the reader sees it: the
+    /// peer, the unread, the preview and its time.
+    fn rows(model: &UiModel<Field>) -> Vec<String> {
+        let mut rows: Vec<String> = model
+            .conversations
+            .iter()
+            .filter(|c| c.peer != BENCH_PEER)
+            .filter_map(|c| model.row(&c.peer))
+            .map(|row| format!("{:02x?} {} {:?}", row.peer, row.unread, row.listing))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// A 1540 arrival: into the real chat of `peer`, its signature zero.
+    fn unflagged(peer: [u8; 16], address: [u8; 16], at: i64, n: u32, seq: u64) -> Entry {
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&address);
+        packed.extend_from_slice(&peer);
+        packed.extend_from_slice(&[0u8; 64]);
+        msgpack::array(&mut packed, 4);
+        msgpack::f64(&mut packed, at as f64);
+        msgpack::bin(&mut packed, b"");
+        msgpack::bin(&mut packed, format!("bench arrival {n}").as_bytes());
+        msgpack::map(&mut packed, 0);
+        Entry {
+            seq,
+            kind: KIND_RECEIVED,
+            at,
+            packed,
+        }
+    }
+
+    /// `bench arrive` three times on the bench image: "Bench" at the
+    /// list's top under the cursor with three unread, every real row as
+    /// it was. The same flash booted as a release image lists no
+    /// "Bench" and the same real rows; and a release image refuses the
+    /// arrival outright.
+    #[test]
+    fn an_arrival_lands_in_bench_only_and_a_release_boot_shows_none() {
+        let mut board = power_on(Some("real"), Arrivals::Shown).expect("power on");
+        board.settle();
+        let before = rows(board.model());
+        assert!(before.len() >= 299, "{}", before.len());
+        for _ in 0..3 {
+            board.bench_arrive().expect("arrive");
+        }
+        assert_eq!(rows(board.model()), before, "no real row moved");
+        let at = bench::index(board.model()).expect("Bench");
+        assert_eq!(board.model().conversations[at].unread, 3);
+        assert_eq!(board.model().order()[0], at);
+        let text = board.text().join("\n");
+        assert!(text.contains("Bench"), "{text}");
+        assert!(text.contains("bench arrival 3"), "{text}");
+
+        let (flash, log) = board.power_off();
+        let mut release = Board::boot_as(flash, log, 2, Arrivals::Dropped).expect("release");
+        release.settle();
+        assert_eq!(bench::index(release.model()), None);
+        let text = release.text().join("\n");
+        assert!(!text.contains("Bench"), "{text}");
+        assert_eq!(rows(release.model()), before, "the same real rows");
+        assert!(
+            release.bench_arrive().is_err(),
+            "a release image refuses it"
+        );
+        // The control: the same flash on the bench image lists it.
+        let (flash, log) = release.power_off();
+        let shown = Board::boot_as(flash, log, 3, Arrivals::Shown).expect("bench");
+        assert!(bench::index(shown.model()).is_some());
+    }
+
+    /// The clean-up on the host fixture: a board that ran 1540's image
+    /// (unflagged arrivals in five real chats, one of them opened and
+    /// read) and then this one (three in "Bench"). `bench forget` leaves
+    /// no arrival anywhere and every real row as it was before 1540
+    /// wrote into it, after the reopen and after a reboot.
+    #[test]
+    fn bench_forget_cleans_a_store_1540_wrote_into() {
+        let mut board = power_on(Some("real"), Arrivals::Shown).expect("power on");
+        board.settle();
+        let before = rows(board.model());
+        let address = real::address();
+        let peers: Vec<[u8; 16]> = board
+            .model()
+            .order()
+            .iter()
+            .take(5)
+            .map(|&i| board.model().conversations[i].peer)
+            .collect();
+        // 1540 kept an arrival under the store's cursor: the pull's last.
+        let cursor = real::archive().expect("archive").len() as u64;
+        for (n, peer) in peers.iter().enumerate() {
+            let at = 1_800_000_000 + n as i64;
+            board.pull(&[unflagged(*peer, address, at, n as u32 + 1, cursor)]);
+            board.settle();
+        }
+        assert_ne!(
+            rows(board.model()),
+            before,
+            "the control: 1540 moved real rows"
+        );
+        for _ in 0..3 {
+            board.bench_arrive().expect("arrive");
+        }
+        board.bench_forget().expect("forget");
+        let forgot = board
+            .log
+            .kept
+            .iter()
+            .find(|line| line.contains("forget=done"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(forgot.contains("flagged=4 unflagged=5"), "{forgot}");
+        assert_eq!(bench::index(board.model()), None);
+        assert_eq!(rows(board.model()), before, "every real row as before 1540");
+        let (flash, log) = board.power_off();
+        let again = Board::boot_as(flash, log, 2, Arrivals::Shown).expect("reboot");
+        assert_eq!(rows(again.model()), before, "and after a reboot");
+        assert!(!again.text().join("\n").contains("bench arrival"));
     }
 }
