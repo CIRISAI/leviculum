@@ -527,6 +527,34 @@ Goldens: `loquax/tests/golden/gui-profile-light.png`,
 `loquax/tests/golden/scene-profile.json` and the phone's answer
 `loquax-android/tests/golden/profile-words.json`.
 
+### Built 2026-11-08, one settings structure
+
+Walk 1, finding 21: the phone had its settings in the ⋮ menu with nine
+sections, the window a gear with a flat page and a light/dark button in
+its bar, the terminal and the M9 none. Since 1450 the sections are one
+list in the core, `loquax/src/ui/settings.rs` (`SECTIONS`): Profile,
+Mailbox, Appearance, Chats, Notifications, Privacy, Maps, Backup,
+Advanced, in that order, their titles and summaries the catalogue's.
+Every target lists them from there and enters them its own way:
+
+- the phone: the ⋮ menu opens `SettingsActivity`, whose list is the
+  facade's `Query::Settings` (`session::settings_list`); each entry opens
+  its page by the section's key, the pages stay Android's;
+- the window: the gear opens the list, a section its page; light or dark
+  is Appearance's switch, the bar has no theme button any more;
+- the terminal: `S` (and the palette's `settings`) opens the list as a
+  detail view, `1` to `9` a section, a row's key runs it (`r` read
+  receipts, `t` light or dark, `f` the photo size and so on), `q` goes
+  back a step;
+- the M9: none yet, which `PLACES` says per section with what it takes
+  (a menu screen in `loquax-m9` and the key that opens it).
+
+`PLACES` in the same file says per section and target where it is drawn
+(a file and a token, as the inventory's cells) or why not; its test is
+the guard that every target draws every section it does not mark
+missing or n/a, and that a phone, a window and a terminal draw all nine.
+The inventory's `Settings` row points to it.
+
 ### The intent inventory
 
 Every user action as the intent it raises, and per target whether it is
@@ -637,6 +665,7 @@ it). A missing cell is the next order.
 | `Import` | import from another messenger | **missing**: the phone imports nothing | **missing**: the window imports nothing | built (palette) | n/a: the board takes its history from the home |
 | `ReadReceipts` | the switch "Send read receipts" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no settings on the M9 |
 | `DeleteAllRegions` | the Maps page's Delete all | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
+| `Settings` | the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (key) | **missing**: no menu screen and no key for it on the M9 (super::settings::PLACES) |
 <!-- intent-inventory:end -->
 
 ## 2. Decision: what honesty about delivery looks like

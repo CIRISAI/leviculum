@@ -2322,6 +2322,47 @@ mod tests {
         same_text("tui-relay-group.txt", &screen);
     }
 
+    /// 1450 (walk 1, finding 21): `S` opens the settings, the nine
+    /// sections in the phone's order (the golden); a digit opens one, its
+    /// rows run by their keys (Privacy's `r` turns read receipts off),
+    /// `q` goes back to the list and closes it.
+    #[test]
+    fn s_opens_the_nine_settings_sections_and_a_key_runs_a_row() {
+        use loquax::ui::settings::{Section, SECTIONS};
+        let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let mut model = Model::new(&[]);
+        update(&mut model, key('S'));
+        assert_eq!(model.settings, Some(None));
+        let shown = whole_screen(&model);
+        let mut at = 0;
+        for section in SECTIONS {
+            let title = section.title().text(model.lang);
+            let found = shown[at..]
+                .find(title)
+                .unwrap_or_else(|| panic!("{title} after the one before\n{shown}"));
+            at += found + title.len();
+        }
+        same_text("tui-settings.txt", &shown);
+        update(&mut model, key('6'));
+        assert_eq!(model.settings, Some(Some(Section::Privacy)));
+        let privacy = whole_screen(&model);
+        assert!(privacy.contains("r  Send read receipts: On"), "{privacy}");
+        assert!(model.reading.on);
+        update(&mut model, key('r'));
+        assert!(!model.reading.on, "the row's key runs it");
+        assert!(whole_screen(&model).contains("Send read receipts: Off"));
+        update(&mut model, key('q'));
+        assert_eq!(model.settings, Some(None), "back to the list");
+        // The Profile section opens the profile over the list; q closes
+        // the profile and leaves the list.
+        update(&mut model, key('1'));
+        assert!(model.profile_open);
+        update(&mut model, key('q'));
+        assert_eq!((model.profile_open, model.settings), (false, Some(None)));
+        update(&mut model, key('q'));
+        assert_eq!(model.settings, None, "closed");
+    }
+
     /// 1379: the Rooms tab in the terminal: `R` brings it and asks the
     /// shell to link to the hub; the hub's welcome, a join, Bob's line, his
     /// action, the hub's notice and the echo of our own line make the

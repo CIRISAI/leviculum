@@ -207,12 +207,8 @@
     <string name="backup_file_head">Loquax backup of an address. Restore it at the first start with "I already have a Loquax address" and the passphrase.</string>
     <string name="backup_paper_head">Loquax: the backup of your address.\nRestore it at the first start with "I already have a Loquax address".\nYou need the passphrase too; keep it somewhere else.</string>
     <string name="print">Print</string>
-    <string name="mailbox">Mailbox</string>
     <string name="mailbox_here">Your mailbox is on this phone.</string>
     <string name="mailbox_away">Your mailbox is on another device; this phone reads it.</string>
-    <string name="advanced">Advanced</string>
-    <string name="propagation_node">Relay</string>
-    <string name="propagation_node_text">While your mailbox is offline, mail for you waits at a relay in the network, which Loquax chooses by itself.</string>
     <string name="here_running">Your mailbox is running on this phone</string>
     <string name="scan_code">Scan the code</string>
     <string name="scan_backup">Scan the paper backup</string>
@@ -222,26 +218,11 @@
     <!-- The main views and the settings (1199). -->
     <string name="help">Help</string>
     <string name="help_url">https://leviculum.network/help</string>
-    <string name="settings_profile">Profile</string>
-    <string name="settings_profile_summary">Name, address, QR code</string>
-    <string name="settings_mailbox_summary">Where it lives</string>
-    <string name="settings_appearance">Appearance</string>
-    <string name="settings_appearance_summary">Map: like the phone, light or dark</string>
-    <string name="settings_notifications">Notifications</string>
-    <string name="settings_notifications_summary">New messages, muted chats, the connection notice</string>
     <string name="settings_notifications_text">Loquax tells you of every new message. To mute one chat, hold it in the list, then Mute. Sound and vibration are in Android\'s settings for Loquax.</string>
     <!-- 1345: the row that opens the connection notice's channel page. -->
     <string name="connection_notice">Connection notice</string>
     <string name="connection_notice_text">Minimise it or turn it off in Android\'s settings; Loquax stays connected.</string>
-    <string name="settings_chats">Chats</string>
-    <string name="settings_chats_summary">Photo size</string>
-    <string name="settings_privacy">Privacy</string>
-    <string name="settings_privacy_summary">Read receipts, blocked contacts, positions you shared</string>
-    <string name="settings_maps_summary">Maps on this phone, automatic download</string>
-    <string name="settings_backup">Backup</string>
-    <string name="settings_backup_summary">Back up the mailbox</string>
     <string name="settings_backup_away">Your mailbox is on another device. Back it up there.</string>
-    <string name="settings_advanced_summary">Relay, map glide, stop the service</string>
     <string name="settings_map_theme">Map</string>
     <string name="map_theme_auto">Like the phone</string>
     <string name="map_theme_light">Light</string>

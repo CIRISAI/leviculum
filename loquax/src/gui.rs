@@ -129,6 +129,9 @@ pub struct Seen {
     pub receipts: bool,
     /// The reader's photo size (1220), the settings' row (1371).
     pub photo_size: loquax::ui::photos::PhotoSize,
+    /// Where the mailbox is and how it is reached (1450): the settings'
+    /// Mailbox section, the profile's words.
+    pub mailbox: Vec<loquax::ui::strings::Text>,
     /// The photo a press on a bubble's photo last asked to see whole
     /// (1269), decoded by the shell: a new one opens the viewer.
     pub photo: Option<viewer::Picture>,
@@ -173,6 +176,13 @@ impl std::fmt::Debug for Browsed {
     }
 }
 
+/// The mailbox's line and the line on how it is reached, as the profile
+/// says them (1450).
+fn mailbox_lines(model: &crate::shell::Model) -> Vec<loquax::ui::strings::Text> {
+    let (line, state) = loquax::ui::profile::mailbox_words(&model.profile.mailbox);
+    std::iter::once(line).chain(state).collect()
+}
+
 impl Seen {
     fn of(shell: &Shell) -> Self {
         Self::of_model(&shell.model, shell.maps.epoch(), &shell.browsing)
@@ -199,6 +209,7 @@ impl Seen {
             now: model.now,
             receipts: model.reading.on,
             photo_size: model.photo_size,
+            mailbox: mailbox_lines(model),
             photo: None,
             browse: match (model.browse.showing(), &browsing.pictures) {
                 (true, Some(pictures)) => Some(Browsed {
@@ -968,6 +979,8 @@ struct App {
     /// all downloaded maps" was asked once.
     maps_usage: (usize, u64),
     maps_asked: bool,
+    /// The settings' open section (1450), none for their list.
+    settings_at: Option<loquax::ui::settings::Section>,
     /// The language the scene's words are said in: the desktop's locale.
     lang: Lang,
     /// The scene of [`Seen`] in the window's class: what is drawn.
@@ -1028,6 +1041,7 @@ impl App {
                 now: None,
                 receipts: true,
                 photo_size: loquax::ui::photos::PhotoSize::default(),
+                mailbox: Vec::new(),
                 photo: None,
                 browse: None,
                 copied: None,
@@ -1079,6 +1093,7 @@ impl App {
             clips: Vec::new(),
             maps_usage: (0, 0),
             maps_asked: false,
+            settings_at: None,
             lang: Lang::En,
             scene: empty,
             viewer: None,
@@ -1393,6 +1408,8 @@ impl App {
                     self.deleting = None;
                 }
                 (None, Screen::Settings) if self.maps_asked => self.maps_asked = false,
+                // A section goes back to the settings' list (1450).
+                (None, Screen::Settings) if self.settings_at.is_some() => self.settings_at = None,
                 (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
                 (None, Screen::Browse | Screen::Rooms) => {
                     self.leave_browse();
@@ -1408,6 +1425,23 @@ impl App {
                 }
             },
             Intent::Theme => self.flipped = !self.flipped,
+            // The settings (1450): the gear's list, a section from it.
+            // Profile is the avatar's layer, opened over the list.
+            Intent::Settings(at) => {
+                self.screen = Screen::Settings;
+                self.menu = None;
+                self.maps_asked = false;
+                match at {
+                    Some(loquax::ui::settings::Section::Profile) => {
+                        self.settings_at = None;
+                        self.tell(UiEvent::Profile { open: true });
+                    }
+                    _ => {
+                        self.settings_at = at;
+                        self.maps_usage = self.maps().usage();
+                    }
+                }
+            }
             // The group verbs (1307) are the model's own; the window draws
             // the picker and the sheet from the scene.
             Intent::Group(verb) => {
@@ -2038,6 +2072,7 @@ impl App {
             }
             Message::Settings => {
                 self.screen = Screen::Settings;
+                self.settings_at = None;
                 self.menu = None;
                 self.maps_asked = false;
                 self.maps_usage = self.maps().usage();
@@ -3260,6 +3295,7 @@ mod tests {
             now: None,
             receipts: true,
             photo_size: loquax::ui::photos::PhotoSize::default(),
+            mailbox: Vec::new(),
             photo: None,
             browse: None,
             copied: None,
@@ -3515,6 +3551,7 @@ mod tests {
             now: model.now,
             receipts: model.reading.on,
             photo_size: model.photo_size,
+            mailbox: mailbox_lines(model),
             photo: None,
             browse: None,
             copied: None,
@@ -5477,19 +5514,32 @@ mod tests {
         assert_eq!(app.scene.top.id, NodeId::TopBar);
     }
 
-    /// The settings page (1233): the gear opens it, its read receipts
-    /// row shows the model's switch, a toggle tells the model the other
-    /// value, the model's answer turns the row, and Back returns to the
-    /// chats. Pixel for pixel the golden, light.
+    /// The settings page (1233, one structure since 1450): the gear opens
+    /// the list of the nine sections (the golden), Privacy holds read
+    /// receipts (its golden): the row shows the model's switch, a toggle
+    /// tells the model the other value, the model's answer turns the row;
+    /// Back goes to the list, then to the chats. Appearance holds light
+    /// or dark, which the bar no longer does.
     #[test]
     fn the_settings_page_switches_read_receipts_in_the_model() {
+        use loquax::ui::settings::Section;
         let (w, h) = (900, 560);
         let (mut app, mut rx) = chat_window();
         app.window = Size::new(w as f32, h as f32);
         let _ = app.update(Message::Settings);
         assert_eq!(app.screen, Screen::Settings);
-        assert!(app.seen.receipts, "on by default");
+        assert_eq!(app.settings_at, None, "the list");
         map::tests::same_as("gui-settings-light.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Appearance))));
+        assert_eq!(app.settings_at, Some(Section::Appearance));
+        assert!(!app.dark());
+        let _ = app.update(Message::Intent(Intent::Theme));
+        assert!(app.dark(), "Appearance's switch");
+        let _ = app.update(Message::Intent(Intent::Theme));
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Privacy))));
+        assert_eq!(app.settings_at, Some(Section::Privacy));
+        assert!(app.seen.receipts, "on by default");
+        map::tests::same_as("gui-settings-privacy-light.png", &shoot(&app, w, h), w, h);
         let _ = app.update(Message::Intent(Intent::ReadReceipts {
             on: loquax::ui::intent::Switch::Off,
         }));
@@ -5509,6 +5559,16 @@ mod tests {
             on: loquax::ui::intent::Switch::Toggle,
         }));
         assert_eq!(told(&mut rx), [UiEvent::ReadReceipts(true)]);
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert_eq!(
+            (app.screen, app.settings_at),
+            (Screen::Settings, None),
+            "a section goes back to the list"
+        );
+        // Profile opens the avatar's layer over the list.
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Profile))));
+        assert_eq!(told(&mut rx), [UiEvent::Profile { open: true }]);
+        assert_eq!(app.settings_at, None);
         let _ = app.update(Message::Intent(Intent::Back));
         assert_eq!(app.screen, Screen::Chats);
     }
@@ -5531,6 +5591,9 @@ mod tests {
         app.seen.autoload = true;
         assert_eq!(app.setup.regions.len(), 3);
         let _ = app.update(Message::Settings);
+        let _ = app.update(Message::Intent(Intent::Settings(Some(
+            loquax::ui::settings::Section::Maps,
+        ))));
         assert_eq!(app.maps_usage, (3, 3 * len));
         assert!(!app.maps_asked);
 

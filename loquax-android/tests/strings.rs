@@ -139,7 +139,16 @@ fn the_contact_screen_speaks_of_the_name_they_chose_and_of_no_hash() {
 #[test]
 fn advanced_says_relay_for_the_propagation_node() {
     for (dir, relay) in [("values", "Relay"), ("values-de", "Relais")] {
-        let xml = resources(dir);
+        // The relay's words and the settings' sections are the core's
+        // catalogue since 1450, which `strings_scene.xml` carries.
+        let scene = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("android/res")
+                .join(dir)
+                .join("strings_scene.xml"),
+        )
+        .expect("strings_scene.xml");
+        let xml = resources(dir) + &scene;
         assert_eq!(
             string(&xml, "propagation_node").as_deref(),
             Some(relay),

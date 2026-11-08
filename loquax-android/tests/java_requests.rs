@@ -943,6 +943,11 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             java_map(&[("t", Java::Str("rooms"))]),
             Query::Rooms,
         ),
+        (
+            "settingsList",
+            java_map(&[("t", Java::Str("settings"))]),
+            Query::Settings,
+        ),
     ]
 }
 

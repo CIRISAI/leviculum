@@ -25,10 +25,11 @@ import java.util.Map;
 
 /**
  * The settings (1199), after the modern messenger cut: one list, each
- * entry a page of its own, this screen again with PAGE. Profile, Mailbox,
- * Appearance, Notifications, Privacy, Maps, Backup, Advanced; a page that
- * has no controls yet says what exists today. Profile opens the screen
- * behind the avatar (ProfileActivity, 1187).
+ * entry a page of its own, this screen again with PAGE. The list is the
+ * library's (1450): Profile, Mailbox, Appearance, Chats, Notifications,
+ * Privacy, Maps, Backup, Advanced, the same sections in the same order on
+ * every target; a page that has no controls yet says what exists today.
+ * Profile opens the screen behind the avatar (ProfileActivity, 1187).
  *
  * Appearance holds the map's theme, which the map screen's moon held
  * before: like the phone, light or dark, the config's `map_theme` (1133).
@@ -53,33 +54,24 @@ import java.util.Map;
  * contacts.
  */
 public class SettingsActivity extends Activity implements Events.Listener {
-    /** The extra naming the page; absent for the list. */
+    /** The extra naming the page by its section's key; absent for the list. */
     static final String PAGE = "page";
-
-    /** The pages in the list's order, by their title's string. */
-    private static final int[] PAGES = {
-        R.string.settings_profile, R.string.mailbox, R.string.settings_appearance,
-        R.string.settings_chats, R.string.settings_notifications, R.string.settings_privacy,
-        R.string.settings_maps, R.string.settings_backup, R.string.advanced,
-    };
-    /** What each page holds, one line under its title in the list. */
-    private static final int[] SUMMARIES = {
-        R.string.settings_profile_summary, R.string.settings_mailbox_summary,
-        R.string.settings_appearance_summary, R.string.settings_chats_summary,
-        R.string.settings_notifications_summary,
-        R.string.settings_privacy_summary, R.string.settings_maps_summary,
-        R.string.settings_backup_summary, R.string.settings_advanced_summary,
-    };
+    /** The extra carrying the page's title, as the list said it. */
+    static final String PAGE_TITLE = "page_title";
 
     private LinearLayout body;
-    /** The page shown, a string of PAGES; 0 for the list. */
-    private int page;
+    /**
+     * The page shown, its section's key (1450): the list's entries are the
+     * library's one list of every target ({@link Core#settingsList}); null
+     * for the list.
+     */
+    private String page;
     private final ServiceLink link = new ServiceLink(this);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        page = getIntent().getIntExtra(PAGE, 0);
+        page = getIntent().getStringExtra(PAGE);
         LinearLayout screen = new LinearLayout(this);
         screen.setOrientation(LinearLayout.VERTICAL);
         screen.setFitsSystemWindows(true);
@@ -99,7 +91,9 @@ public class SettingsActivity extends Activity implements Events.Listener {
             }
         });
         bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        TextView title = text(getString(page == 0 ? R.string.settings : page), 20, R.color.text);
+        String named = getIntent().getStringExtra(PAGE_TITLE);
+        TextView title = text(page == null || named == null ? getString(R.string.settings) : named,
+                20, R.color.text);
         title.setPadding(dp(12), 0, 0, 0);
         bar.addView(title);
         screen.addView(bar, new LinearLayout.LayoutParams(
@@ -150,55 +144,75 @@ public class SettingsActivity extends Activity implements Events.Listener {
 
     private void refresh() {
         body.removeAllViews();
-        if (page == R.string.mailbox) {
+        if ("mailbox".equals(page)) {
             mailbox();
-        } else if (page == R.string.settings_appearance) {
+        } else if ("appearance".equals(page)) {
             appearance();
-        } else if (page == R.string.settings_chats) {
+        } else if ("chats".equals(page)) {
             chats();
-        } else if (page == R.string.settings_notifications) {
+        } else if ("notifications".equals(page)) {
             notifications();
-        } else if (page == R.string.settings_privacy) {
+        } else if ("privacy".equals(page)) {
             privacy();
-        } else if (page == R.string.settings_maps) {
+        } else if ("maps".equals(page)) {
             maps(null, null);
-        } else if (page == R.string.settings_backup) {
+        } else if ("backup".equals(page)) {
             backup();
-        } else if (page == R.string.advanced) {
+        } else if ("advanced".equals(page)) {
             advanced();
         } else {
             entries();
         }
     }
 
-    /** The list: each page's title and what it holds. */
+    /**
+     * The list: each section's title and what it holds, in the order of
+     * the library's one list (1450), the same nine as the window's gear
+     * and the terminal's `S`.
+     */
     private void entries() {
-        for (int i = 0; i < PAGES.length; i++) {
-            final int target = PAGES[i];
-            LinearLayout entry = new LinearLayout(this);
-            entry.setOrientation(LinearLayout.VERTICAL);
-            entry.setPadding(dp(16), dp(12), dp(16), dp(12));
-            entry.setBackgroundResource(android.R.drawable.list_selector_background);
-            entry.setId(R.id.settings_entry);
-            TextView title = text(getString(target), 16, R.color.text);
-            title.setId(R.id.settings_entry_title);
-            entry.addView(title);
-            TextView summary = text(getString(SUMMARIES[i]), 14, R.color.text_secondary);
-            summary.setId(R.id.settings_entry_summary);
-            entry.addView(summary);
-            entry.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    // Profile is the screen behind the avatar (1187), not a page of its own.
-                    startActivity(target == R.string.settings_profile
-                            ? new Intent(SettingsActivity.this, ProfileActivity.class)
-                            : new Intent(SettingsActivity.this, SettingsActivity.class)
-                                    .putExtra(PAGE, target));
+        section(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.settingsList();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                for (Map<String, Object> section : Core.list(answer, "sections")) {
+                    entry(Core.str(section, "key"), Core.str(section, "title"),
+                            Core.str(section, "summary"));
                 }
-            });
-            body.addView(entry, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
+            }
+        });
+    }
+
+    /** One section of the list; a tap opens its page. */
+    private void entry(final String target, final String named, String said) {
+        LinearLayout entry = new LinearLayout(this);
+        entry.setOrientation(LinearLayout.VERTICAL);
+        entry.setPadding(dp(16), dp(12), dp(16), dp(12));
+        entry.setBackgroundResource(android.R.drawable.list_selector_background);
+        entry.setId(R.id.settings_entry);
+        entry.setTag("settings_" + target);
+        TextView title = text(named, 16, R.color.text);
+        title.setId(R.id.settings_entry_title);
+        entry.addView(title);
+        TextView summary = text(said, 14, R.color.text_secondary);
+        summary.setId(R.id.settings_entry_summary);
+        entry.addView(summary);
+        entry.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                // Profile is the screen behind the avatar (1187), not a page of its own.
+                startActivity("profile".equals(target)
+                        ? new Intent(SettingsActivity.this, ProfileActivity.class)
+                        : new Intent(SettingsActivity.this, SettingsActivity.class)
+                                .putExtra(PAGE, target).putExtra(PAGE_TITLE, named));
+            }
+        });
+        body.addView(entry, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /**
@@ -512,7 +526,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (page != R.string.settings_maps || isFinishing()) {
+                        if (!"maps".equals(page) || isFinishing()) {
                             return;
                         }
                         if (!Core.bool(answer, "ok") && (delete != null || autoload != null)) {

@@ -155,6 +155,9 @@ pub enum Command {
     /// Read a friend's code from a picture of its QR: the palette takes
     /// the picture's path.
     CodeFromPicture,
+    /// The settings' nine sections (Loquax 1450), as the phone's menu and
+    /// the window's gear open them.
+    Settings,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -169,7 +172,7 @@ pub struct PaletteEntry {
 /// The table, in the order the palette lists it unfiltered. A first user's
 /// two commands stand right under `send`, where an open palette shows them
 /// (1263), and the code a friend adds us by right after them (1279).
-pub const COMMANDS: [PaletteEntry; 59] = [
+pub const COMMANDS: [PaletteEntry; 60] = [
     entry("send", Command::Send),
     entry("new conversation", Command::NewConversation),
     entry("add contact", Command::AddContact),
@@ -229,6 +232,7 @@ pub const COMMANDS: [PaletteEntry; 59] = [
     entry("send picture", Command::SendPicture),
     entry("send file", Command::SendFile),
     entry("code in a picture", Command::CodeFromPicture),
+    entry("settings", Command::Settings),
 ];
 
 /// The entry that runs `command`.

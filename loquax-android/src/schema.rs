@@ -850,6 +850,9 @@ pub enum Query {
     Browse,
     /// The Rooms tab (1384); answered as [`RoomsScreen`].
     Rooms,
+    /// The settings' sections (1450), the one list every target shows
+    /// (`loquax::ui::settings`); answered as [`SettingsList`].
+    Settings,
     /// The `index`th file of the message `key` of `peer`'s conversation,
     /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
     /// the name made safe) for the open or share intent (1221). Answered
@@ -2236,6 +2239,26 @@ pub struct RoomsScreen {
     /// With no room open, where the room would be: how to join one.
     #[serde(default)]
     pub empty: String,
+}
+
+/// What [`Query::Settings`] answers (1450, walk 1 finding 21): the
+/// settings' sections in the order every target lists them, in the
+/// phone's language. Java draws an entry per section and opens its page
+/// by the key; what a page holds stays Android's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsList {
+    pub v: u32,
+    pub sections: Vec<SettingsSection>,
+}
+
+/// One section of [`SettingsList`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsSection {
+    /// `profile`, `mailbox`, `appearance`, `chats`, `notifications`,
+    /// `privacy`, `maps`, `backup` or `advanced`: the page's key.
+    pub key: String,
+    pub title: String,
+    pub summary: String,
 }
 
 /// A room of [`RoomsScreen`]'s list.

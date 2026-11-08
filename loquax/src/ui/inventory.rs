@@ -880,6 +880,14 @@ pub const INVENTORY: &[Row] = &[
         terminal: PALETTE,
         m9: na("the board carries its regions"),
     },
+    Row {
+        intent: "Settings",
+        action: "the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn",
+        phone: at(JAVA_LIST, "SettingsActivity.class"),
+        window: at(GUI, "Intent::Settings"),
+        terminal: KEY,
+        m9: missing("no menu screen and no key for it on the M9 (super::settings::PLACES)"),
+    },
 ];
 
 /// A cell as the page shows it.

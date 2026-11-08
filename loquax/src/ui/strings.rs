@@ -72,6 +72,34 @@ leviculum_ui::catalogue! {
     RoomsPeopleNote = "rooms_people_note", "Everyone who came in or wrote while you were here.", "Alle, die hereinkamen oder schrieben, während du hier warst.";
     RoomsLeave = "rooms_leave", "Leave room", "Raum verlassen";
     Settings = "settings", "Settings", "Einstellungen";
+    // 1450 (walk 1, finding 21): the settings' nine sections, one list on
+    // every target (`super::settings`), in the phone's order.
+    SettingsProfile = "settings_profile", "Profile", "Profil";
+    SettingsProfileSummary = "settings_profile_summary", "Name, address, QR code", "Name, Adresse, QR-Code";
+    Mailbox = "mailbox", "Mailbox", "Postfach";
+    SettingsMailboxSummary = "settings_mailbox_summary", "Where it lives", "Wo es liegt";
+    SettingsAppearance = "settings_appearance", "Appearance", "Darstellung";
+    SettingsAppearanceSummary = "settings_appearance_summary", "Light or dark, the map", "Hell oder dunkel, die Karte";
+    SettingsChats = "settings_chats", "Chats", "Chats";
+    SettingsChatsSummary = "settings_chats_summary", "Photo size", "Fotogröße";
+    SettingsNotifications = "settings_notifications", "Notifications", "Benachrichtigungen";
+    SettingsNotificationsSummary = "settings_notifications_summary", "New messages, muted chats", "Neue Nachrichten, stumme Chats";
+    SettingsPrivacy = "settings_privacy", "Privacy", "Privatsphäre";
+    SettingsPrivacySummary = "settings_privacy_summary", "Read receipts, blocked contacts, positions you shared", "Lesebestätigungen, blockierte Kontakte, geteilte Positionen";
+    SettingsMapsSummary = "settings_maps_summary", "Maps on this device, automatic download", "Karten auf diesem Gerät, automatisch laden";
+    SettingsBackup = "settings_backup", "Backup", "Sicherung";
+    SettingsBackupSummary = "settings_backup_summary", "Back up the mailbox", "Das Postfach sichern";
+    Advanced = "advanced", "Advanced", "Erweitert";
+    SettingsAdvancedSummary = "settings_advanced_summary", "Relay and more", "Relais und mehr";
+    PropagationNode = "propagation_node", "Relay", "Relais";
+    PropagationNodeText = "propagation_node_text", "While your mailbox is offline, mail for you waits at a relay in the network, which Loquax chooses by itself.", "Solange dein Postfach offline ist, wartet Post für dich bei einem Relais im Netz, das Loquax selbst wählt.";
+    SettingsLight = "settings_light", "Light", "Hell";
+    SettingsDark = "settings_dark", "Dark", "Dunkel";
+    SettingsOn = "settings_on", "On", "An";
+    SettingsOff = "settings_off", "Off", "Aus";
+    SettingsNotificationsDesktop = "settings_notifications_desktop", "Loquax tells you of every new message with a notification of the desktop; a muted chat stays quiet. To mute one, open its menu in the list.", "Loquax meldet jede neue Nachricht mit einer Benachrichtigung des Desktops; ein stummer Chat bleibt still. Zum Stummschalten öffne sein Menü in der Liste.";
+    SettingsBackupDesktop = "settings_backup_desktop", "On a computer, loquax export writes your address, contacts and history to a folder, and loquax import reads them back.", "Auf einem Computer schreibt loquax export deine Adresse, deine Kontakte und den Verlauf in einen Ordner, loquax import liest sie wieder ein.";
+    SettingsNothingHere = "settings_nothing_here", "Nothing to set here on this device yet.", "Auf diesem Gerät gibt es hier noch nichts einzustellen.";
     MailboxConnected = "mailbox_connected", "You. Your mailbox is connected.", "Du. Dein Postfach ist verbunden.";
     MailboxNotConnected = "mailbox_not_connected", "You. Your mailbox is not connected.", "Du. Dein Postfach ist nicht verbunden.";
     Search = "search", "Search", "Suchen";

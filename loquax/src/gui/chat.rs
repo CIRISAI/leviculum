@@ -235,8 +235,8 @@ impl App {
     }
 
     /// The scene's top bar over the list: the reader's avatar with the
-    /// link's dot, the title, the bar's actions; then the window's own
-    /// theme toggle.
+    /// link's dot, the title, the bar's actions, and the gear. Light or
+    /// dark is the settings' Appearance since 1450, no button of the bar.
     fn top_bar<'a>(&'a self, t: Colours) -> Element<'a, Message> {
         let top = &self.scene.top;
         let lead = match &top.lead {
@@ -265,12 +265,6 @@ impl App {
                 t,
             ));
         }
-        actions.push(self.icon_action(
-            Icon::Theme,
-            self.word(Intent::Theme.label()),
-            Message::Intent(Intent::Theme),
-            t,
-        ));
         actions.push(self.icon_action(
             Icon::Settings,
             self.word(StrId::Settings),
@@ -333,11 +327,17 @@ impl App {
         Some(chrome::tabs(items, rail, palette(t)))
     }
 
-    /// The settings page (1233): a bar with its back, and the row the
-    /// phone's Privacy page has first, "Send read receipts" with its line
-    /// and the switch as the model holds it.
+    /// The settings (1233, one structure since 1450, walk 1 finding 21):
+    /// the nine sections of `loquax::ui::settings`, in the phone's order,
+    /// each its title over what it holds; a press opens its page, Back
+    /// goes to the list, then to the chats.
     pub(super) fn settings_pane(&self) -> Element<'_, Message> {
+        use loquax::ui::settings::{self, Target};
         let t = self.tokens();
+        let title = match self.settings_at {
+            Some(section) => self.word(section.title()),
+            None => self.word(StrId::Settings),
+        };
         let bar = row![
             self.icon_action(
                 Icon::Back,
@@ -345,26 +345,145 @@ impl App {
                 Message::Intent(Intent::Back),
                 t
             ),
-            text(self.word(StrId::Settings))
+            text(title)
                 .size(22)
                 .color(colour(t.text))
                 .width(Length::Fill),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
+        let body: Element<'_, Message> = match self.settings_at {
+            None => settings::entries(Target::Window)
+                .into_iter()
+                .fold(column![], |list, entry| {
+                    let words = column![
+                        text(entry.title.resolve(self.lang))
+                            .size(16)
+                            .color(colour(t.text)),
+                        text(entry.summary.resolve(self.lang))
+                            .size(14)
+                            .color(colour(t.text_secondary)),
+                    ]
+                    .spacing(2);
+                    list.push(chrome::list_item(
+                        container(words).padding([10, 16]).width(Length::Fill),
+                        false,
+                        Message::Intent(entry.open.intent),
+                        palette(t),
+                    ))
+                })
+                .into(),
+            Some(section) => self.settings_page(section, t),
+        };
+        container(
+            column![
+                container(bar)
+                    .height(size::BAR)
+                    .padding([0, 12])
+                    .align_y(Alignment::Center),
+                scrollable(body).height(Length::Fill),
+            ]
+            .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(colour(t.background))),
+            ..container::Style::default()
+        })
+        .into()
+    }
+
+    /// One section's page in the window: its switches as the window has
+    /// them, the words the core says for the rest.
+    fn settings_page(
+        &self,
+        section: loquax::ui::settings::Section,
+        t: Colours,
+    ) -> Element<'_, Message> {
+        use loquax::ui::settings::Section;
+        let say = |words: String| {
+            container(text(words).size(15).color(colour(t.text)))
+                .padding([12, 16])
+                .width(Length::Fill)
+        };
+        let quiet = |words: String| {
+            container(text(words).size(14).color(colour(t.text_secondary)))
+                .padding([0, 16])
+                .width(Length::Fill)
+        };
+        match section {
+            Section::Profile => container(link(
+                self.word(StrId::ProfileTitle),
+                Message::Intent(Intent::Profile),
+                t,
+            ))
+            .padding([12, 16])
+            .into(),
+            Section::Mailbox => self
+                .seen
+                .mailbox
+                .iter()
+                .fold(column![], |page, line| {
+                    page.push(say(line.resolve(self.lang)))
+                })
+                .into(),
+            Section::Appearance => {
+                let switch = self.switch_row(
+                    self.word(StrId::SettingsDark),
+                    self.word(StrId::Theme),
+                    self.dark(),
+                    |_| Message::Intent(Intent::Theme),
+                    t,
+                );
+                column![switch].into()
+            }
+            Section::Chats => self.photo_rows(t),
+            Section::Notifications => {
+                say(self.word(StrId::SettingsNotificationsDesktop).to_string()).into()
+            }
+            Section::Privacy => self.switch_row(
+                self.word(StrId::ReadReceipts),
+                self.word(StrId::ReadReceiptsText),
+                self.seen.receipts,
+                |on| Message::Intent(Intent::ReadReceipts { on: Switch::of(on) }),
+                t,
+            ),
+            Section::Maps => self.maps_rows(t),
+            Section::Backup => say(self.word(StrId::SettingsBackupDesktop).to_string()).into(),
+            Section::Advanced => column![
+                say(self.word(StrId::PropagationNode).to_string()),
+                quiet(self.word(StrId::PropagationNodeText).to_string()),
+                container(link(
+                    self.word(StrId::Help),
+                    Message::Intent(Intent::Help),
+                    t
+                ))
+                .padding([12, 16]),
+            ]
+            .into(),
+        }
+    }
+
+    /// A row of words and a switch, on in the accent as the phone's.
+    fn switch_row(
+        &self,
+        title: &str,
+        line: &str,
+        on: bool,
+        toggled: fn(bool) -> Message,
+        t: Colours,
+    ) -> Element<'_, Message> {
         let words = column![
-            text(self.word(StrId::ReadReceipts))
-                .size(16)
-                .color(colour(t.text)),
-            text(self.word(StrId::ReadReceiptsText))
+            text(title.to_string()).size(16).color(colour(t.text)),
+            text(line.to_string())
                 .size(14)
                 .color(colour(t.text_secondary)),
         ]
         .spacing(2)
         .width(Length::Fill);
-        let switch = toggler(self.seen.receipts)
-            .on_toggle(|on| Message::Intent(Intent::ReadReceipts { on: Switch::of(on) }))
-            // On in the accent, as the phone's switch; off as iced draws it.
+        let switch = toggler(on)
+            .on_toggle(toggled)
             .style(move |theme: &Theme, status| {
                 let mut style = toggler::default(theme, status);
                 // Every state toggled: before its first event iced calls
@@ -377,41 +496,11 @@ impl App {
                 }
                 style
             });
-        let receipts = row![words, switch]
+        row![words, switch]
             .spacing(12)
             .align_y(Alignment::Center)
-            .padding([12, 16]);
-        container(
-            column![
-                container(bar)
-                    .height(size::BAR)
-                    .padding([0, 12])
-                    .align_y(Alignment::Center),
-                receipts,
-                self.photo_rows(t),
-                self.maps_rows(t),
-                container(
-                    column![
-                        link(
-                            self.word(StrId::ProfileTitle),
-                            Message::Intent(Intent::Profile),
-                            t
-                        ),
-                        link(self.word(StrId::Help), Message::Intent(Intent::Help), t),
-                    ]
-                    .spacing(4)
-                )
-                .padding([12, 16]),
-            ]
-            .width(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_: &Theme| container::Style {
-            background: Some(Background::Color(colour(t.background))),
-            ..container::Style::default()
-        })
-        .into()
+            .padding([12, 16])
+            .into()
     }
 
     /// The Rooms tab (1379), a room as a chat (1450, walk 1 finding 20):

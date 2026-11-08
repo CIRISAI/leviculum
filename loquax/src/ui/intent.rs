@@ -79,6 +79,7 @@
 //! | (new) the profile's "Share my address" (1443) | `ShareCode` |
 //! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
 //! | the Maps page's last row (1290), `Request::DeleteRegions` | `DeleteAllRegions` (`confirmed` tells the asked from the asking) |
+//! | the window's gear (`Message::Settings`), the phone's ⋮ menu, `Command::Settings`, `S` (1450) | `Settings` |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
 //! | `keys::Action::Newline`, `ClearDraft` | the same names |
@@ -490,6 +491,9 @@ pub enum Intent {
     DeleteAllRegions {
         confirmed: bool,
     },
+    /// The settings (1450): the list of the nine sections with `None`,
+    /// one of them opened with its section (`super::settings`).
+    Settings(Option<super::settings::Section>),
 }
 
 impl Intent {
@@ -671,6 +675,8 @@ impl Intent {
             Intent::Import => StrId::Import,
             Intent::ReadReceipts { .. } => StrId::ReadReceipts,
             Intent::DeleteAllRegions { .. } => StrId::DeleteAllRegionsYes,
+            Intent::Settings(None) => StrId::Settings,
+            Intent::Settings(Some(section)) => section.title(),
         }
     }
 }
@@ -819,6 +825,7 @@ impl From<Command> for Intent {
             Command::SharePosition => Intent::ShareFix { peer: [0; 16] },
             Command::StopSharing => Intent::StopShare { peer: [0; 16] },
             Command::DeleteAllMaps => Intent::DeleteAllRegions { confirmed: false },
+            Command::Settings => Intent::Settings(None),
             Command::SendPicture => Intent::SendPhoto {
                 peer: [0; 16],
                 data: Vec::new(),

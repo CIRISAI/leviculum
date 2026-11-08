@@ -164,6 +164,7 @@ pub mod rooms;
 pub mod scene;
 pub mod search;
 pub mod selection;
+pub mod settings;
 pub mod share;
 pub mod state;
 pub mod strings;
@@ -1068,6 +1069,10 @@ pub struct UiModel<B> {
     /// Whether the profile is up (1443): what a tap on the avatar and
     /// `my code` open, the scene's [`profile::ProfileScreen`] while it is.
     pub profile_open: bool,
+    /// The settings (1450): `Some(None)` their list of sections,
+    /// `Some(Some(section))` one section, as the terminal's detail view;
+    /// none while they are not up.
+    pub settings: Option<Option<settings::Section>>,
     /// What the shell knows of the reader for the profile: the name the
     /// announce carries, the mailbox, the devices.
     pub profile: profile::ProfileFacts,
@@ -1427,6 +1432,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             detail: None,
             own_code: None,
             profile_open: false,
+            settings: None,
             profile: profile::ProfileFacts::default(),
             detail_scroll: 0,
             mailbox: MailboxShown::default(),
@@ -1589,15 +1595,42 @@ impl<B: InputBuffer> UiModel<B> {
 }
 
 impl<B> UiModel<B> {
-    /// Whether a detail view is up: a message's, or `my code`'s.
+    /// Whether a detail view is up: a message's, the profile's, or the
+    /// settings'.
     pub fn detail_open(&self) -> bool {
-        self.detail.is_some() || self.profile_open
+        self.detail.is_some() || self.profile_open || self.settings.is_some()
     }
 
-    /// Close the detail view up, whichever it is.
+    /// Close the detail view up, one step: a message's or the profile
+    /// over the settings goes and leaves the settings; a section goes
+    /// back to their list, the list closes them.
     pub fn close_detail(&mut self) {
+        self.detail_scroll = 0;
+        if self.detail.is_some() || self.profile_open {
+            self.detail = None;
+            self.profile_open = false;
+            return;
+        }
+        self.settings = match self.settings {
+            Some(Some(_)) => Some(None),
+            _ => None,
+        };
+    }
+
+    /// Open the settings (1450): their list with `None`, a section with
+    /// it, over whatever detail view was up.
+    pub fn show_settings(&mut self, at: Option<settings::Section>) -> Vec<UiEffect> {
         self.detail = None;
         self.profile_open = false;
+        self.detail_scroll = 0;
+        if at == Some(settings::Section::Profile) {
+            // The profile is a screen of its own (the phone's activity,
+            // the window's layer): the section opens it over the list.
+            self.settings = Some(None);
+            return self.show_profile(true);
+        }
+        self.settings = Some(at);
+        Vec::new()
     }
 
     /// `peer`'s message went out: its draft goes, from the store at once,
@@ -3864,6 +3897,16 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
         if model.profile_open && key.code == KeyCode::Char('s') {
             return model.share_code();
         }
+        // The settings' keys (1450), under no profile or message.
+        if let (Some(at), false, None, KeyCode::Char(c)) =
+            (model.settings, model.profile_open, model.detail, key.code)
+        {
+            if c != 'q' {
+                if let Some(effects) = settings_key(model, at, c) {
+                    return effects;
+                }
+            }
+        }
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Enter) {
             model.close_detail();
         } else if let Some(cmd) = keys::overlay_scroll(&key, model.ctx()) {
@@ -5419,6 +5462,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             confirmed: false,
         }),
         PaletteCommand::MyCode => model.show_profile(true),
+        PaletteCommand::Settings => model.show_settings(None),
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -7045,12 +7089,101 @@ fn profile_view(screen: &profile::ProfileScreen, lang: strings::Lang) -> DetailV
 /// The light margin a scanner needs around a QR code, in modules.
 const QR_QUIET: u32 = 4;
 
-/// The detail view up, the profile's or a message's.
+/// The detail view up: the profile's, a message's, or the settings'.
 fn shown_detail<B>(model: &UiModel<B>) -> Option<DetailView> {
-    match model.profile_screen() {
-        Some(screen) => Some(profile_view(&screen, model.lang)),
-        None => model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+    if let Some(screen) = model.profile_screen() {
+        return Some(profile_view(&screen, model.lang));
     }
+    if let Some(view) = model.detail.and_then(|(c, m)| detail_view(model, c, m)) {
+        return Some(view);
+    }
+    model.settings.map(|at| settings_view(model, at))
+}
+
+/// The settings in the terminal's detail view (1450): the nine sections
+/// of [`settings::SECTIONS`] numbered as the phone lists them, or one
+/// section's rows, each with the key that runs it and the value in force.
+fn settings_view<B>(model: &UiModel<B>, at: Option<settings::Section>) -> DetailView {
+    use settings::Section;
+    let lang = model.lang;
+    let screen = settings::screen(model, settings::Target::Terminal, at);
+    let mut rows = Vec::new();
+    let foot = match at {
+        None => {
+            for entry in &screen.entries {
+                rows.push(format!("{}  {}", entry.key, entry.title.resolve(lang)));
+                rows.push(format!("   {}", entry.summary.resolve(lang)));
+            }
+            "1-9 open a section · q close"
+        }
+        Some(section) => {
+            for row in &screen.rows {
+                let label = row.label.resolve(lang);
+                let value = row
+                    .value
+                    .as_ref()
+                    .map(|v| format!(": {}", v.resolve(lang)))
+                    .unwrap_or_default();
+                rows.push(match row.key {
+                    Some(key) => format!("{key}  {label}{value}"),
+                    None => format!("{label}{value}"),
+                });
+            }
+            match section {
+                // The section opens the profile itself; this is the line
+                // under it once the profile closes over the list.
+                Section::Profile => "p your profile · q back",
+                Section::Mailbox | Section::Notifications | Section::Backup => "q back",
+                Section::Appearance
+                | Section::Chats
+                | Section::Privacy
+                | Section::Maps
+                | Section::Advanced => "a row's key runs it · q back",
+            }
+        }
+    };
+    rows.push(String::new());
+    rows.push(foot.to_string());
+    DetailView {
+        title: screen.title.resolve(lang),
+        rows,
+        fixed: Vec::new(),
+    }
+}
+
+/// A letter or a digit while the settings are the detail view up: a
+/// digit opens its section from the list, a row's key runs the row as
+/// its palette command does. What leaves for another screen (the
+/// blocked list, the map's drawing) closes the settings first.
+fn settings_key<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    at: Option<settings::Section>,
+    c: char,
+) -> Option<Vec<UiEffect>> {
+    let screen = settings::screen(model, settings::Target::Terminal, at);
+    if at.is_none() {
+        let entry = screen.entries.iter().find(|e| e.key == c)?;
+        return Some(model.show_settings(Some(entry.section)));
+    }
+    let row = screen.rows.iter().find(|r| r.key == Some(c))?;
+    let command = match row.action.as_ref()?.intent {
+        intent::Intent::Profile => PaletteCommand::MyCode,
+        intent::Intent::Theme => PaletteCommand::Theme,
+        intent::Intent::PhotoSize(_) => PaletteCommand::PhotoSize,
+        intent::Intent::SendOnEnter => PaletteCommand::SendOnEnter,
+        intent::Intent::ReadReceipts { .. } => PaletteCommand::ReadReceipts,
+        intent::Intent::Help => PaletteCommand::Help,
+        intent::Intent::ShowBlocked => {
+            model.settings = None;
+            PaletteCommand::Blocked
+        }
+        intent::Intent::MapDrawing => {
+            model.settings = None;
+            PaletteCommand::MapDrawing
+        }
+        _ => return None,
+    };
+    Some(run(model, command))
 }
 
 /// Why a message of ours shown delivered will not turn read (1233,

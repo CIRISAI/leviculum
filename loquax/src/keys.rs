@@ -334,6 +334,14 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("my code")
         .note("for a friend to scan or paste"),
+        // The settings (1450): the phone's ⋮ menu and the window's gear;
+        // here `S`, beside the profile's `P`.
+        Row::new(
+            "settings: profile, mailbox, appearance, chats, privacy and more",
+            CONVERSATIONS,
+            &[&[key(Char('S'), Mods::Plain, run(C::Settings), COMMAND_PANES)]],
+        )
+        .palette("settings"),
         Row::new("import from another messenger", CONVERSATIONS, &[])
             .palette("import")
             .note("contacts and history; the identity: loquax import"),

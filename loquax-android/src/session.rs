@@ -1920,6 +1920,8 @@ impl Session {
             schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
             // The Rooms tab (1384).
             schema::Query::Rooms => crate::rooms::encode(&inner.model, inner.lang, VERSION),
+            // The settings' sections (1450).
+            schema::Query::Settings => schema::encode(&settings_list(inner.lang)),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -4536,8 +4538,53 @@ pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
     loquax::address::parse_id(text).ok_or_else(|| format!("'{text}' is not a message id"))
 }
 
+/// The settings' sections as the phone lists them (1450): the core's one
+/// list for the phone (`loquax::ui::settings::entries`), in `lang`.
+pub fn settings_list(lang: Lang) -> schema::SettingsList {
+    use loquax::ui::settings::{entries, Target};
+    schema::SettingsList {
+        v: VERSION,
+        sections: entries(Target::Phone)
+            .iter()
+            .map(|entry| schema::SettingsSection {
+                key: entry.section.key().to_string(),
+                title: entry.title.resolve(lang),
+                summary: entry.summary.resolve(lang),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// 1450 (walk 1, finding 21): the phone's settings list is the core's
+    /// one list, the nine sections in their order, in the phone's
+    /// language, each by the key `SettingsActivity` opens its page by.
+    #[test]
+    fn the_settings_list_is_the_cores_nine_in_their_order() {
+        use loquax::ui::settings::SECTIONS;
+        let list = settings_list(Lang::De);
+        let keys: Vec<&str> = list.sections.iter().map(|s| s.key.as_str()).collect();
+        let want: Vec<&str> = SECTIONS.iter().map(|s| s.key()).collect();
+        assert_eq!(keys, want);
+        let titles: Vec<&str> = list.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Profil",
+                "Postfach",
+                "Darstellung",
+                "Chats",
+                "Benachrichtigungen",
+                "Privatsphäre",
+                "Karten",
+                "Sicherung",
+                "Erweitert"
+            ]
+        );
+        assert!(list.sections.iter().all(|s| !s.summary.is_empty()));
+    }
     use super::*;
 
     /// 1471: a code with three servers joins over all three, in the code's

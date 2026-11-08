@@ -277,6 +277,11 @@ final class Core {
         return query(map("t", "rooms"));
     }
 
+    /** The settings' sections (1450), the one list of every target: `sections` with `key`, `title`, `summary`. */
+    static Map<String, Object> settingsList() {
+        return query(map("t", "settings"));
+    }
+
     /**
      * One question; its answer. Waits on the session's lock as a command
      * does: never on the UI thread, where {@link Engine#offMain} guards it;
