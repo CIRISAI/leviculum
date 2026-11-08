@@ -2783,6 +2783,29 @@ m9-gates:
     LEVICULUM_M9_BENCH=1 bash scripts/build-m9-image.sh --bench
     just m9-reproducible
 
+# The M9 image's stack frames and deepest static call chains (1582): the
+# `entry` frames of the Xtensa windowed ABI read out of the linked ELF,
+# the call graph walked from core 0's main, the UI core's ui_main and the
+# interrupt handlers. A report, not a gate: the floors in
+# scripts/build-m9-image.sh are the board's measured peaks plus a reserve
+# this sizes. Reads the ELF build-m9 left (or the one named); without
+# the Xtensa fork it says SKIP.
+[doc('Print the M9 image largest stack frames and deepest static call chains')]
+m9-stack-frames elf="":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    python3 -I scripts/m9-stack-frames.py --selftest || exit 1
+    if [ ! -f "$HOME/export-esp.sh" ]; then
+        echo "[m9-stack-frames] SKIP no esp toolchain on this host (~/export-esp.sh)"
+        exit 0
+    fi
+    # shellcheck disable=SC1091
+    source "$HOME/export-esp.sh" >/dev/null
+    source scripts/cargo-target-dir.sh
+    elf="{{elf}}"
+    [ -n "$elf" ] || elf="$(cargo_target_dir leviculum-esp)/xtensa-esp32s3-none-elf/release/thinknode_m9"
+    python3 -I scripts/m9-stack-frames.py "$elf"
+
 # The nRF images are the same bytes from any clone of the same commit (1460,
 # #474): builds the T114 image in this tree and in a clone of HEAD under a
 # throwaway path, both through scripts/nrf-rustflags.sh's fixed-path wrapper,
