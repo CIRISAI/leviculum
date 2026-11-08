@@ -658,7 +658,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
     /// The heap census of the role (order 1515, [`crate::census`]): one
     /// byte estimate per table the engine holds. Walks the store's index
     /// once for its paths, so it runs on the census cadence, not per hook.
-    fn census(&self, ready: &Ready<S>) -> PnCensus {
+    fn census(&self, ready: &Ready<S>, transport: crate::census::TransportCensus) -> PnCensus {
         use crate::census::hash_table_bytes;
         use leviculum_core::heap_census::vec_deque_bytes;
         use std::mem::size_of;
@@ -713,6 +713,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             // count bounds them.
             dup_cap_ids: dup.processed_cap + dup.departed_cap + store.messages,
             origin_slots: peering.origin_slots,
+            transport,
         }
     }
 
@@ -732,7 +733,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
     /// The census of a registered engine, `None` before it registered.
     pub fn census_now(&self) -> Option<PnCensus> {
         match &self.state {
-            State::Ready(ready) => Some(self.census(ready)),
+            State::Ready(ready) => Some(self.census(ready, Default::default())),
             _ => None,
         }
     }
@@ -2345,7 +2346,8 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
         }
         let requested = self.census.take_request();
         if requested || now_ms >= self.next_census_at {
-            self.census(&ready)
+            let transport = crate::census::TransportCensus::of(core.storage());
+            self.census(&ready, transport)
                 .log(if requested { "signal" } else { "periodic" });
             if !requested {
                 self.next_census_at = now_ms + CENSUS_PERIOD_MS;

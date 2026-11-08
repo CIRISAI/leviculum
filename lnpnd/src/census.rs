@@ -29,6 +29,15 @@
 //! the bound the three are held to, `dup_cap_ids`, and the origins' hash
 //! table buckets, `origin_slots`, which name a table doubling.
 //!
+//! After them, the node's transport tables (order 1586): `transport`, the
+//! core storage's own byte estimate (the SIGUSR1 dump's tracked total),
+//! `transport_entries` across its tables, `transport_unbounded`, the
+//! tables with no ceiling, and `transport_over`, the tables above theirs.
+//! The tables are the core's, not the engine's, so they are not a column:
+//! [`FIELD_COLUMNS`] counts the engine's fields. A `PN_TRANSPORT` line
+//! beside the census names each table with its fill and its ceiling
+//! ([`TransportCensus`]).
+//!
 //! [`FIELD_COLUMNS`] maps every field of the structs that hold the daemon's
 //! state to the column that counts it, and a unit test reads the structs'
 //! source: a table added without a census column fails it.
@@ -162,6 +171,71 @@ pub struct PnCensus {
     /// Buckets of the origins' hash table: a jump in `dup` with this
     /// doubled is the table resizing, not growth.
     pub origin_slots: usize,
+    /// The node's transport tables (order 1586, [`TransportCensus`]).
+    pub transport: TransportCensus,
+}
+
+/// The node's transport tables: what the core storage holds, table by
+/// table, beside the ceiling it holds each to (order 1586).
+///
+/// lnpnd attaches to the host's shared instance and runs the local client
+/// profile (`TableCaps::local_client`, order 1585); before that it carried
+/// a full copy of the instance's tables, which no line of `PN_CENSUS`
+/// showed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TransportCensus {
+    /// The storage's own byte estimate, the dump's tracked total.
+    pub bytes: u64,
+    /// Every table: name, entries, ceiling.
+    pub tables: Vec<(&'static str, usize, Option<usize>)>,
+}
+
+impl TransportCensus {
+    /// Read the census off a core storage.
+    pub fn of(storage: &impl leviculum_core::traits::Storage) -> Self {
+        Self {
+            bytes: storage.diagnostic_dump().1,
+            tables: storage
+                .collection_counts()
+                .into_iter()
+                .map(|row| (row.name, row.entries, row.capacity))
+                .collect(),
+        }
+    }
+
+    /// Entries across every table.
+    pub fn entries(&self) -> usize {
+        self.tables.iter().map(|(_, entries, _)| entries).sum()
+    }
+
+    /// Tables with no ceiling.
+    pub fn unbounded(&self) -> usize {
+        self.tables
+            .iter()
+            .filter(|(_, _, cap)| cap.is_none())
+            .count()
+    }
+
+    /// Tables holding more than their ceiling.
+    pub fn over(&self) -> usize {
+        self.tables
+            .iter()
+            .filter(|(_, entries, cap)| cap.is_some_and(|cap| *entries > cap))
+            .count()
+    }
+
+    /// `name:entries/ceiling` per table, `-` for no ceiling, comma
+    /// separated: one whitespace-free token the event log keeps as is.
+    pub fn detail(&self) -> String {
+        self.tables
+            .iter()
+            .map(|(name, entries, cap)| match cap {
+                Some(cap) => format!("{name}:{entries}/{cap}"),
+                None => format!("{name}:{entries}/-"),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 impl PnCensus {
@@ -194,7 +268,8 @@ impl PnCensus {
         }
         line.push_str(&format!(
             " tables={} rss_kb={} stored={} peered={} events_queued={} processed_ids={} \
-             departed_ids={} origin_ids={} dup_cap_ids={} origin_slots={}",
+             departed_ids={} origin_ids={} dup_cap_ids={} origin_slots={} transport={} \
+             transport_entries={} transport_unbounded={} transport_over={}",
             self.tables(),
             self.rss_kb,
             self.stored,
@@ -205,6 +280,10 @@ impl PnCensus {
             self.origin_ids,
             self.dup_cap_ids,
             self.origin_slots,
+            self.transport.bytes,
+            self.transport.entries(),
+            self.transport.unbounded(),
+            self.transport.over(),
         ));
         line
     }
@@ -234,6 +313,19 @@ impl PnCensus {
             origin_ids = self.origin_ids,
             dup_cap_ids = self.dup_cap_ids,
             origin_slots = self.origin_slots,
+            transport = self.transport.bytes,
+            transport_entries = self.transport.entries(),
+            transport_unbounded = self.transport.unbounded(),
+            transport_over = self.transport.over(),
+        );
+        tracing::info!(
+            event = "PN_TRANSPORT",
+            occasion = occasion,
+            bytes = self.transport.bytes,
+            entries = self.transport.entries(),
+            unbounded = self.transport.unbounded(),
+            over = self.transport.over(),
+            tables = self.transport.detail().as_str(),
         );
     }
 }
@@ -462,6 +554,55 @@ mod tests {
         );
         assert!(line.contains(" dup=3 "), "{line}");
         assert!(line.contains(" tables=6 rss_kb=4 "), "{line}");
+    }
+
+    /// Order 1586: the line carries the transport block, and the detail
+    /// names every table with its fill and its ceiling.
+    #[test]
+    fn the_line_carries_the_transport_tables_and_their_bounds() {
+        let census = PnCensus {
+            transport: TransportCensus {
+                bytes: 4096,
+                tables: vec![
+                    ("known_identities", 812, Some(4096)),
+                    ("path_table", 5000, Some(4096)),
+                    ("remembered_at", 3, None),
+                ],
+            },
+            ..PnCensus::default()
+        };
+        let line = census.line();
+        assert!(
+            line.ends_with(
+                " transport=4096 transport_entries=5815 transport_unbounded=1 transport_over=1"
+            ),
+            "{line}"
+        );
+        assert_eq!(
+            census.transport.detail(),
+            "known_identities:812/4096,path_table:5000/4096,remembered_at:3/-"
+        );
+    }
+
+    /// The census of a real client storage: every table bounded, none
+    /// over (the local client profile, order 1585).
+    #[test]
+    fn a_client_storage_reports_every_table_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = leviculum_std::driver::StdStorage::new_with_caps(
+            dir.path(),
+            leviculum_core::memory_storage::TableCaps::local_client(),
+        )
+        .expect("storage");
+        let transport = TransportCensus::of(&storage);
+        assert!(transport.tables.len() > 10, "{transport:?}");
+        assert_eq!(transport.unbounded(), 0, "{}", transport.detail());
+        assert_eq!(transport.over(), 0);
+        assert!(
+            transport.detail().contains("known_identities:0/2048"),
+            "{}",
+            transport.detail()
+        );
     }
 
     #[test]

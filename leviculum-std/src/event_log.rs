@@ -980,6 +980,24 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "origin_ids",
             "dup_cap_ids",
             "origin_slots",
+            "transport",
+            "transport_entries",
+            "transport_unbounded",
+            "transport_over",
+        ],
+    },
+    // lnpnd: its node's transport tables beside the census, each as
+    // `name:entries/ceiling` (order 1586): a local client keeps a client's
+    // tables, and the line names the one that grows.
+    EventSchema {
+        name: "PN_TRANSPORT",
+        required_keys: &[
+            "occasion",
+            "bytes",
+            "entries",
+            "unbounded",
+            "over",
+            "tables",
         ],
     },
     // lnpnd: the message store's limit at start, and whether it is the

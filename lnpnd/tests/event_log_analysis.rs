@@ -159,6 +159,14 @@ fn the_analysis_reads_what_the_writer_writes() {
             store_index,
             rss_kb,
             stored: 2,
+            // Order 1586: the transport tables beside it, one over none.
+            transport: lnpnd::census::TransportCensus {
+                bytes: store_index as u64,
+                tables: vec![
+                    ("known_identities", store_index, Some(4096)),
+                    ("remembered_at", 3, None),
+                ],
+            },
             ..lnpnd::census::PnCensus::default()
         }
         .log("periodic");
@@ -214,6 +222,16 @@ fn the_analysis_reads_what_the_writer_writes() {
     );
     assert!(
         field(&report, "store_index ").contains("1.0 ->        3.0 kB"),
+        "{report}"
+    );
+    let transport = field(&report, "transport tables");
+    assert!(transport.contains("2 PN_TRANSPORT line(s)"), "{report}");
+    assert!(
+        field(&report, "known_identities ").contains("1000 ->     3000 of 4096"),
+        "{report}"
+    );
+    assert!(
+        field(&report, "remembered_at ").contains("NO CEILING"),
         "{report}"
     );
     assert!(

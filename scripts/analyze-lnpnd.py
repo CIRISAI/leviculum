@@ -25,7 +25,9 @@ Phases, in the order an operator asks the questions:
   4. Peers                -- offer and sync rounds per peer, with outcome
   5. Clients              -- mailbox requests served, own mail received
   6. Liveness             -- gaps in the PN_STORE heartbeat, and the
-                             PN_CENSUS heap tables from first to last line
+                             PN_CENSUS heap tables from first to last line,
+                             and the node's transport tables (PN_TRANSPORT)
+                             against their ceilings
   7. Format health        -- lines that do not parse, events not in the list
 
 The log format is `NAME key=value ... t=<ms>` (docs/src/structured-event-logs.md),
@@ -54,6 +56,7 @@ KNOWN = {
     "PN_STORE_FULL",
     "PN_CENSUS",
     "PN_STORE_LIMIT",
+    "PN_TRANSPORT",
 }
 
 # The PN_CENSUS columns, heap bytes per table (lnpnd/src/census.rs), in the
@@ -156,6 +159,10 @@ class Stats:
         self.census_first = None
         self.census_last = None
         self.census_rss_max = 0
+        # The first and last PN_TRANSPORT (order 1586): the node's transport
+        # tables as {name: (entries, ceiling or None)}, two lines, no series.
+        self.transport_first = None
+        self.transport_last = None
 
     def track(self, peer):
         """Whether this peer is one of the tracked ones; counts it if not."""
@@ -279,6 +286,18 @@ def consume(stats, line):
             stats.census_first = census
         stats.census_last = census
         stats.census_rss_max = max(stats.census_rss_max, census["rss_kb"])
+
+    elif name == "PN_TRANSPORT":
+        tables = {}
+        for item in values.get("tables", "").split(","):
+            table, _, fill = item.partition(":")
+            entries, _, cap = fill.partition("/")
+            if table and entries.isdigit():
+                tables[table] = (int(entries), int(cap) if cap.isdigit() else None)
+        transport = {"t": t, "bytes": as_int(values, "bytes"), "tables": tables}
+        if stats.transport_first is None:
+            stats.transport_first = transport
+        stats.transport_last = transport
 
     elif name == "PN_OFFER":
         # The totals are counted for every peer; only the per-peer
@@ -488,6 +507,17 @@ def report(stats):
         out("  a restart in the span resets every column; read the journal before a slope\n")
     else:
         out("no PN_CENSUS line -- the heap tables are unknown (lnpnd before order 1515)\n")
+    if stats.transport_first is not None:
+        first, last = stats.transport_first, stats.transport_last
+        out(f"transport tables {stats.by_event['PN_TRANSPORT']} PN_TRANSPORT line(s), "
+            f"{first['bytes'] / 1000:.1f} -> {last['bytes'] / 1000:.1f} kB est\n")
+        for table, (entries, cap) in sorted(last["tables"].items()):
+            before = first["tables"].get(table, (0, cap))[0]
+            bound = "NO CEILING" if cap is None else f"of {cap}"
+            flag = "  OVER" if cap is not None and entries > cap else ""
+            out(f"  {table:<26} {before:>8} -> {entries:>8} {bound}{flag}\n")
+    else:
+        out("no PN_TRANSPORT line -- the transport tables are unknown (lnpnd before order 1586)\n")
 
     out("\n== 7. Format health ==\n")
     out(f"unparsed lines   {stats.unparsed}\n")

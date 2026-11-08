@@ -48,6 +48,14 @@
 //!   bytes a message.
 //! - `tables`, their sum, through its columns; a jump that is the origins'
 //!   hash table doubling is named (`PN_GROWTH resize`).
+//! - `transport`, the node's own transport tables (order 1586), by their
+//!   ceilings at every sample: red when one has none
+//!   (`transport_unbounded`) or holds more than its own
+//!   (`transport_over`). An announcer on the shared instance sends
+//!   [`ANNOUNCES_PER_MIN`] fresh destinations a minute, the public mesh
+//!   miauhaus relays to its clients, so the tables reach their ceilings
+//!   within the run; the last `PN_TRANSPORT` line, every table with its
+//!   fill and ceiling, is printed at the end.
 //!
 //! Red too when the store never filled: then the soak proved nothing.
 //! Every sample's whole census is printed (`PN_SOAK_SAMPLE`), and on red
@@ -57,6 +65,7 @@
 //!
 //! Run it with `just pn-growth-soak` (release, 20 minutes, 300 000
 //! messages). Knobs: `LNPND_SOAK_MESSAGES`, `LNPND_SOAK_PEERS`,
+//! `LNPND_SOAK_ANNOUNCES_PER_MIN`,
 //! `LNPND_SOAK_SECS`, `LNPND_SOAK_SAMPLE_SECS`, `LNPND_SOAK_PEER_MESSAGES`,
 //! `LNPND_SOAK_DIR` (a directory on a real disk, the target dir's tmp by
 //! default; never `/tmp`, a tmpfs every lane shares).
@@ -94,6 +103,11 @@ const PEER_STORE_BYTES: u64 = 8_000_000;
 /// lxmd's `SYNC_LIMIT`, `lnpnd/src/main.rs`): what one peer's sync batch
 /// may hold, the `sync_in` bound per peer.
 const SYNC_LIMIT_BYTES: f64 = 256.0 * 40.0 * 1000.0;
+
+/// Fresh destinations the announcer sends a minute (order 1586): 20
+/// minutes of it is 8 000, four times the local client profile's 2 048
+/// identities and destinations (order 1585).
+const ANNOUNCES_PER_MIN: u64 = 400;
 
 /// The line lnpnd prints once its propagation destination is up.
 const READY: &str = "lnpnd: propagation node ready";
@@ -295,6 +309,56 @@ async fn start_peers(
     peers
 }
 
+/// A client on the shared instance announcing `per_min` fresh destinations
+/// a minute, each under a new identity, until `stop` is set: the mesh's
+/// announces as the instance relays them to its local clients (order
+/// 1586). Returns how many it announced.
+fn start_announcer(
+    instance: &str,
+    storage: PathBuf,
+    per_min: u64,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<usize> {
+    let instance = instance.to_string();
+    tokio::spawn(async move {
+        use std::sync::atomic::Ordering;
+        std::fs::create_dir_all(&storage).expect("announcer storage");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(false)
+            .connect_to_shared_instance(&instance)
+            .storage_path(storage)
+            .without_events()
+            .build()
+            .await
+            .expect("build the announcer");
+        node.start().await.expect("start the announcer");
+        let mut sent = 0usize;
+        if per_min == 0 {
+            node.stop().await.ok();
+            return sent;
+        }
+        let spacing = Duration::from_millis(60_000 / per_min);
+        while !stop.load(Ordering::Relaxed) {
+            let destination = Destination::new(
+                Some(leviculum_std::generate_identity()),
+                leviculum_core::Direction::In,
+                leviculum_core::DestinationType::Single,
+                "soak",
+                &["announcer"],
+            )
+            .expect("a destination");
+            let hash = *destination.hash();
+            node.register_destination(destination);
+            if node.announce_destination(&hash, None).await.is_ok() {
+                sent += 1;
+            }
+            tokio::time::sleep(spacing).await;
+        }
+        node.stop().await.ok();
+        sent
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a 20-minute soak (order 1515): run with `just pn-growth-soak`"]
 async fn pn_tables_stay_flat_once_the_store_is_full() {
@@ -303,6 +367,7 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     let soak_secs = knob("LNPND_SOAK_SECS", 1200);
     let sample_secs = knob("LNPND_SOAK_SAMPLE_SECS", 60).max(1);
     let fresh = knob("LNPND_SOAK_PEER_MESSAGES", 10_000) as usize;
+    let announces_per_min = knob("LNPND_SOAK_ANNOUNCES_PER_MIN", ANNOUNCES_PER_MIN);
     let base = std::env::var_os("LNPND_SOAK_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pn-growth-soak"));
@@ -310,7 +375,7 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     let run = tempfile::tempdir_in(&base).expect("a run directory");
     eprintln!(
         "PN_SOAK dir={} messages={messages} peers={peer_count} secs={soak_secs} \
-         sample_secs={sample_secs} fresh_per_peer={fresh}",
+         sample_secs={sample_secs} fresh_per_peer={fresh} announces_per_min={announces_per_min}",
         run.path().display()
     );
 
@@ -404,6 +469,13 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     }
 
     let _peers = start_peers(&instance, node_hash, peer_count, fresh, run.path()).await;
+    let stop_announcer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let announcer = start_announcer(
+        &instance,
+        run.path().join("announcer"),
+        announces_per_min,
+        Arc::clone(&stop_announcer),
+    );
 
     // Every sample: SIGUSR1, then the census the next tick writes.
     let started = Instant::now();
@@ -481,6 +553,15 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
             .or_default() += 1;
     }
     eprintln!("PN_SOAK peer table changes {peer_reasons:?}");
+    stop_announcer.store(true, std::sync::atomic::Ordering::Relaxed);
+    let announced = announcer.await.unwrap_or(0);
+    let last_transport = log
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("PN_TRANSPORT "))
+        .unwrap_or("PN_TRANSPORT none")
+        .to_string();
+    eprintln!("PN_SOAK announced={announced} last {last_transport}");
     drop(child);
     daemon.stop().await.ok();
 
@@ -574,6 +655,47 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
         last.get("dup") / 1000.0,
         slope(window, "dup") / 1000.0,
     );
+
+    // The node's transport tables (order 1586), by their ceilings at every
+    // sample: none may lack one, none may hold more than its own. Below
+    // the ceilings they grow by design, with every destination announced.
+    let transport_breach = samples
+        .iter()
+        .find(|s| s.get("transport_unbounded") > 0.0 || s.get("transport_over") > 0.0);
+    let at_ceiling = |name: &str| {
+        last_transport
+            .split_whitespace()
+            .find_map(|f| f.strip_prefix("tables="))
+            .and_then(|tables| {
+                tables
+                    .split(',')
+                    .find_map(|t| t.strip_prefix(&format!("{name}:")).map(str::to_string))
+            })
+            .unwrap_or_else(|| "?".to_string())
+    };
+    println!(
+        "PN_GROWTH table=transport judged=bound announced={announced} first_kb={:.1} \
+         last_kb={:.1} kb_per_min={:.2} entries={} unbounded={} over={} \
+         known_identities={} path_table={} announce_cache={} known_dest_entries={}",
+        first.get("transport") / 1000.0,
+        last.get("transport") / 1000.0,
+        slope(window, "transport") / 1000.0,
+        last.get("transport_entries"),
+        last.get("transport_unbounded"),
+        last.get("transport_over"),
+        at_ceiling("known_identities"),
+        at_ceiling("path_table"),
+        at_ceiling("announce_cache"),
+        at_ceiling("known_dest_entries"),
+    );
+    if let Some(sample) = transport_breach {
+        red.push(format!(
+            "transport: {} table(s) without a ceiling, {} over theirs at minute {:.1}",
+            sample.get("transport_unbounded"),
+            sample.get("transport_over"),
+            sample.minute
+        ));
+    }
 
     // `sync_in` holds the sync batches in flight, each at most the node's
     // per-sync limit, one per peer at most: a bounded transient. It is
