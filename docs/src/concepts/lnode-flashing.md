@@ -43,7 +43,7 @@ Automatic today:
 
 - **Bundle discovery**: `--bundle`, then `$LNFLASH_BUNDLE`, then next to
   the binary, then `/usr/share/lnflash` (`locate`,
-  `lnflash/src/manifest.rs:1018`).
+  `lnflash/src/manifest.rs:969`).
 - **The self check**: `--check-bundle` verifies the manifest and every
   payload checksum (`verify_all`, `lnflash/src/main.rs:1069`).
 - **Entry** by the 1200-baud touch, then waiting for the bootloader
@@ -53,9 +53,9 @@ Automatic today:
   precondition with its remedy, and the read back of the `[FW_BUILD]`
   banner.
 - **Transports**: `uf2-msc` and `dfu-serial`, the two variants of
-  `Transport` (`lnflash/src/manifest.rs:129`). The third, the ESP32 ROM
-  loader through `espflash` or `esptool`, exists as `lnflash/src/esp.rs`,
-  but no flash run reaches it yet: nothing in `flow.rs` calls it.
+  `Transport` (`lnflash/src/manifest.rs:129`). A third, the ESP32 ROM
+  loader through `espflash` or `esptool`, was written and removed again
+  with #476 because no flash run reached it (commit 39071420 holds it).
 
 Where it asks:
 
@@ -725,9 +725,9 @@ physical double-tap, a DTR/RTS sequence on ESP32, BOOTSEL on RP2040.
 bootloader's drive, `dfu-serial` sends Nordic's legacy serial DFU over the
 bootloader's CDC port (below, "The second transport: serial DFU"). A
 third, the ESP32 ROM's serial loader driven through `espflash` or
-`esptool`, is `lnflash/src/esp.rs` with its catalogue section
-`[board.<name>.esp]` (Codeberg #473); no board's flashing half uses it
-yet.
+`esptool`, was written for the M9 (Codeberg #473) and removed again with
+#476 because no board's flashing half reached it; commit 39071420 holds
+it for the day the M9 entry lands.
 
 **Verify** — did it take? Re-enumeration plus the `[FW_BUILD]` banner
 with a matching git SHA.

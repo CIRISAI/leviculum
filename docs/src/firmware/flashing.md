@@ -491,9 +491,10 @@ Debian's `esptool` 4.7.0 lacks the ESP32-S3 stub and fails with
 `stub_flasher_32s3.json` not found, so give it `--no-stub` or use
 `espflash` or the pinned `esptool` that `scripts/install-esptool.sh`
 installs. On the M9 keep the line at 230400 baud; its CH340K loses bytes
-at 460800 and above. `lnflash` has the transport (`lnflash/src/esp.rs`)
-but no ESP32 board in its catalogue yet, so these boards are flashed by
-hand or by recipe for now.
+at 460800 and above. `lnflash` does not flash ESP32 boards. Its ROM-loader
+transport, which no board ever reached, was removed with #476 and can be
+restored from commit 39071420 when the M9 entry lands; until then these
+boards are flashed by hand or by recipe.
 
 ## A note on disconnecting consumers
 

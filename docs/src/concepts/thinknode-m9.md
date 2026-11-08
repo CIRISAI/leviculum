@@ -638,10 +638,10 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      and then RTS one after the other, and one line moving alone pulls
      EN through the CH340K. A termios reader that opens the port without
      moving the lines (the `m9-listen4.py` shape) does not reset it.
-   - **2026-10-25, the flashing half (#473).** `lnflash/src/esp.rs` writes
+   - **2026-10-25, the flashing half (#473).** `lnflash/src/esp.rs` wrote
      an ESP32 through the ROM loader with `espflash` (preferred, it carries
      its own stubs and takes the ELF) or `esptool`, with `--no-stub` when
-     the esptool package lacks the chip's stub. A catalogue entry states
+     the esptool package lacks the chip's stub. A catalogue entry stated
      the loader's facts as `[board.<name>.esp]`, `chip` and `baud`; the
      M9's rate is 230400, because its CH340K lost bytes at 460800 and
      921600. No M9 entry is in the catalogue yet: lnflash's control half
@@ -649,7 +649,10 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      a control-only entry keyed on `1a86:7522` would point every control
      session at every CH340 on the bus. The entry lands with the
      single-port host link or with the first bundle that carries an M9
-     image.
+     image. **2026-11-08 (#476):** no flash run reached the module, so it was
+     removed with the catalogue section; commit 39071420 holds both for
+     the day the M9 entry lands. Until then these boards are flashed by
+     hand or by recipe.
 5. **Acceptance at the rig:**
    - the boot proof;
    - the display. Since 2026-10-25 (980) the status page and its

@@ -598,8 +598,9 @@ fi
 #     package carries the S3 stub (step 6d's venv does; Debian's 4.7.0 does
 #     not and dies on stub_flasher_32s3.json without --no-stub). Steps 6c
 #     and 6d install both, so this only fires when one of them failed or
-#     was skipped; lnflash's esp transport searches the same places
-#     (lnflash/src/esp.rs, find_flasher).
+#     was skipped. lnflash does not flash ESP32 boards (#476 removed its
+#     unreached ROM-loader transport; commit 39071420 holds it), so these
+#     tools serve the recipes and hand flashing.
 ESP_STUB_CHECK='import esptool, os, sys
 want = {"stub_flasher_32s3.json", "esp32s3.json"}
 root = os.path.join(os.path.dirname(esptool.__file__), "targets", "stub_flasher")

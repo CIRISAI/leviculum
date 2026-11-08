@@ -23,7 +23,6 @@
 pub mod dfu;
 pub mod entry;
 pub mod envelope;
-pub mod esp;
 pub mod flow;
 pub mod home;
 pub mod ihex;
