@@ -7,11 +7,18 @@
 //!
 //! The model knows the hub the config names, how the link to it stands,
 //! the rooms the hub says we are in, and what was said in them while we
-//! were there. One input line does it all, as IRC's does: in a room a
-//! line goes to the room, `/me` makes it an action, `/part` leaves; a
-//! room name (`#lab`, or `/join #lab key`) joins. What reaches the hub is
-//! the shell's ([`UiEffect::Rooms`], `crate::rooms_link`), what comes back
-//! is [`RoomsEvent`].
+//! were there.
+//!
+//! A room is drawn as a chat (1450, walk 1 finding 20): bubbles, the
+//! writer's avatar and name over the first of a run, the comings and
+//! goings as quiet lines in the middle, the people seen in it under the
+//! room's name and their list behind it, and "Leave room" in its menu.
+//! The input is a compose field: in a room a line goes to the room; a
+//! room name (`#lab`) joins one. IRC's commands stay as shortcuts for
+//! those who know them (`/me` makes an action, `/part` leaves, `/join
+//! #lab key` joins a room with a key), and nothing on screen names them.
+//! What reaches the hub is the shell's ([`UiEffect::Rooms`],
+//! `crate::rooms_link`), what comes back is [`RoomsEvent`].
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -21,9 +28,11 @@ use leviculum_ui::input::InputBuffer;
 use leviculum_ui::toast::ToastKind;
 use serde_json::{json, Value};
 
-use super::scene::TabId;
+use super::chat;
+use super::scene::{Avatar, TabId};
 use super::strings::{Arg, StrId, Text};
 use super::{UiEffect, UiModel};
+use crate::when::WallTime;
 
 /// How many lines a room keeps while the app runs: a room is live, and
 /// what scrolled past this is gone, as it is for the hub.
@@ -113,12 +122,29 @@ pub struct Room {
     pub lines: Vec<RoomLine>,
     /// Lines that came while it was not open.
     pub unread: u32,
+    /// The others seen in it while we were there, in the order they came:
+    /// who came in or wrote, and has not left. The hub sends no list of
+    /// members, so this is what the room's header and its people say.
+    pub members: Vec<String>,
 }
 
 impl Room {
     fn push(&mut self, line: RoomLine) {
         if self.lines.len() >= LINES_KEPT {
             self.lines.remove(0);
+        }
+        if !line.ours {
+            if let Some(nick) = &line.nick {
+                match line.kind {
+                    RoomLineKind::Parted => self.members.retain(|m| m != nick),
+                    RoomLineKind::Joined | RoomLineKind::Said(_) => {
+                        if !self.members.contains(nick) {
+                            self.members.push(nick.clone());
+                        }
+                    }
+                    RoomLineKind::Hub | RoomLineKind::Error => {}
+                }
+            }
         }
         self.lines.push(line);
     }
@@ -140,6 +166,8 @@ pub struct Rooms {
     pub rooms: Vec<Room>,
     /// The open room, an index into `rooms`.
     pub selected: Option<usize>,
+    /// The open room's people are shown, behind its header.
+    pub people: bool,
     /// The input line.
     pub input: String,
 }
@@ -155,6 +183,7 @@ impl Default for Rooms {
             body_limit: BODY_LIMIT,
             rooms: Vec::new(),
             selected: None,
+            people: false,
             input: String::new(),
         }
     }
@@ -245,6 +274,10 @@ pub enum RoomsEvent {
     Typed(String),
     /// The input line is sent.
     Submit,
+    /// The open room's header: its people are shown, or hidden again.
+    People(bool),
+    /// The open room's menu: "Leave room".
+    Leave,
 }
 
 /// A tab chosen: the Rooms come to the front, any other sends them back.
@@ -340,6 +373,7 @@ pub(super) fn fold<B: InputBuffer + Default>(
                 if let Some(index) = rooms.index(&room) {
                     rooms.rooms.remove(index);
                     rooms.selected = None;
+                    rooms.people = false;
                 }
             } else {
                 let line = RoomLine {
@@ -403,12 +437,20 @@ pub(super) fn fold<B: InputBuffer + Default>(
         }
         RoomsEvent::Show(index) => {
             rooms.selected = index.filter(|i| *i < rooms.rooms.len());
+            rooms.people = false;
             if let Some(room) = rooms.selected.and_then(|i| rooms.rooms.get_mut(i)) {
                 room.unread = 0;
             }
         }
         RoomsEvent::Typed(text) => rooms.input = text,
         RoomsEvent::Submit => return submit(model),
+        RoomsEvent::People(shown) => rooms.people = shown && rooms.room().is_some(),
+        RoomsEvent::Leave => {
+            let Some(room) = rooms.room().map(|r| r.name.clone()) else {
+                return Vec::new();
+            };
+            return ask(model, RoomAsk::Part { room });
+        }
     }
     Vec::new()
 }
@@ -416,8 +458,10 @@ pub(super) fn fold<B: InputBuffer + Default>(
 /// A key while the Rooms tab is in front (the terminal; a phone and a
 /// window have their own field and say [`RoomsEvent::Typed`]): letters
 /// go to the input line, `Backspace` takes one back, `Enter` sends it,
-/// `Up` and `Down` step the rooms, `Esc` closes the open room and, with
-/// none open, leaves the tab for the chats, as `Ctrl-g` does.
+/// `Up` and `Down` step the rooms, `Esc` closes the people, then the open
+/// room and, with none open, leaves the tab for the chats, as `Ctrl-g`
+/// does. `Ctrl-p` shows the open room's people, `Ctrl-l` leaves it: the
+/// header and the menu the phone and the window tap.
 pub(super) fn key<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     key: leviculum_ui::input::KeyEvent,
@@ -427,6 +471,11 @@ pub(super) fn key<B: InputBuffer + Default>(
     let rooms = &mut model.rooms;
     match key.code {
         KeyCode::Char('g') if ctrl => return leave(model),
+        KeyCode::Char('p') if ctrl => {
+            let shown = !rooms.people;
+            return fold(model, RoomsEvent::People(shown));
+        }
+        KeyCode::Char('l') if ctrl => return fold(model, RoomsEvent::Leave),
         KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
             rooms.input.push(c);
         }
@@ -444,6 +493,7 @@ pub(super) fn key<B: InputBuffer + Default>(
             };
             return fold(model, RoomsEvent::Show(Some(next)));
         }
+        KeyCode::Esc if rooms.people => rooms.people = false,
         KeyCode::Esc if rooms.selected.is_some() => rooms.selected = None,
         KeyCode::Esc => return leave(model),
         _ => {}
@@ -502,18 +552,26 @@ fn submit<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     } else {
         None
     };
-    let Some(ask) = ask else {
+    let Some(asked) = ask else {
         let text = Text::key(StrId::RoomsHowToJoin).resolve(model.lang);
         model.toast(ToastKind::Info, text);
         return Vec::new();
     };
+    let effects = self::ask(model, asked);
+    if !effects.is_empty() {
+        model.rooms.input.clear();
+    }
+    effects
+}
+
+/// `asked` to the hub, or, before it answered, a toast that says so.
+fn ask<B>(model: &mut UiModel<B>, asked: RoomAsk) -> Vec<UiEffect> {
     if model.rooms.state != HubState::Ready {
         let text = refused(&Refusal::NotReady).resolve(model.lang);
         model.toast(ToastKind::Error, text);
         return Vec::new();
     }
-    model.rooms.input.clear();
-    Vec::from([UiEffect::Rooms(ask)])
+    Vec::from([UiEffect::Rooms(asked)])
 }
 
 /// A refusal in the reader's words.
@@ -547,18 +605,23 @@ pub fn down(why: Down) -> Text {
     })
 }
 
-/// The Rooms surface as the frontends draw it: the hub's line, the rooms,
-/// the open room's lines under the one line that says what a room is not,
-/// and the input.
+/// The Rooms surface as the frontends draw it (1450): the rooms beside
+/// the open one, drawn as a chat, and the compose field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomsNode {
-    /// How the hub stands.
-    pub hub: Text,
+    /// How the link stands while it is not up ("Connecting…", why it is
+    /// down); none while it is: a working link says nothing.
+    pub status: Option<Text>,
     pub rows: Vec<RoomRow>,
     pub open: Option<RoomView>,
+    /// What the field holds.
     pub input: String,
-    /// What the input does here.
-    pub hint: Text,
+    /// The field's own hint, the one place it is said: "Message" in a
+    /// room, "Room name, like #lab" with none open.
+    pub placeholder: Text,
+    /// What stands where the open room would, with none open: how to
+    /// join one.
+    pub empty: Option<Text>,
 }
 
 /// A room in the list.
@@ -567,18 +630,41 @@ pub struct RoomRow {
     pub name: String,
     pub unread: u32,
     pub selected: bool,
+    /// The room's round avatar, its first letter, as a chat's.
+    pub avatar: Avatar,
 }
 
-/// The open room.
+/// A verb of the open room's menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomVerb {
+    pub label: Text,
+    /// What a tap on it tells the model.
+    pub event: RoomsEvent,
+}
+
+/// The open room, as a chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomView {
     pub name: String,
-    /// "A room is live: …", the one line said when a room is opened.
+    pub avatar: Avatar,
+    /// Under the name, as a group's header says its members: "bob,
+    /// carol, you", or "Only you so far". A tap on the header shows
+    /// [`RoomView::people`].
+    pub subtitle: Text,
+    /// The people seen here, the reader last, while the header was
+    /// tapped ([`RoomsEvent::People`]); none otherwise.
+    pub people: Option<Vec<Text>>,
+    /// The line over the people: who the list holds.
+    pub people_note: Text,
+    /// The room's menu: its people, and "Leave room".
+    pub menu: Vec<RoomVerb>,
+    /// "A room is live: …", the one line at the top of every room, as a
+    /// chat's notice in the middle.
     pub live: Text,
     pub lines: Vec<RoomLineNode>,
 }
 
-/// One drawn line of a room: who, and what.
+/// One drawn line of a room: a bubble, or a quiet line in the middle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomLineNode {
     /// The nick, or the reader's own word ("you"), empty for the hub.
@@ -586,21 +672,47 @@ pub struct RoomLineNode {
     pub text: Text,
     pub kind: RoomLineKind,
     pub ours: bool,
+    /// A line someone said, drawn as a bubble (ours on the right); the
+    /// rest, comings and goings and the hub's words, as a quiet line in
+    /// the middle.
+    pub bubble: bool,
+    /// The first bubble of another's run: the writer's name over it and
+    /// the avatar beside it, as in a group's chat.
+    pub named: bool,
+    /// The writer's avatar, on the first bubble of another's run.
+    pub avatar: Option<Avatar>,
+    /// `14:05`, when the hub stamped the line.
+    pub time: Option<String>,
+}
+
+/// A nick's stand-in for a peer's hash: what picks its avatar's colour,
+/// the same for the same nick everywhere.
+fn nick_key(nick: &str) -> [u8; 16] {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in nick.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    let mut key = [0u8; 16];
+    key[..8].copy_from_slice(&hash.to_le_bytes());
+    key[8..].copy_from_slice(&hash.rotate_left(29).to_le_bytes());
+    key
+}
+
+/// The round avatar of a nick or a room's name: its first letter.
+pub fn avatar(name: &str) -> Avatar {
+    let key = nick_key(name);
+    Avatar::of(chat::initials(Some(name), &key), &key, None, None)
 }
 
 /// The Rooms surface for the frontends.
 pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
     let rooms = &model.rooms;
-    let hub = match rooms.state {
-        _ if rooms.hub.is_none() => Text::key(StrId::RoomsNoHub),
-        HubState::Off | HubState::Linking => Text::key(StrId::RoomsLinking),
-        HubState::Ready => Text::Key(
-            StrId::RoomsHub,
-            Vec::from([Arg::Str(
-                rooms.hub_name.clone().unwrap_or_else(|| "?".to_string()),
-            )]),
-        ),
-        HubState::Down(why) => down(why),
+    let status = match rooms.state {
+        _ if rooms.hub.is_none() => Some(Text::key(StrId::RoomsNoHub)),
+        HubState::Off | HubState::Linking => Some(Text::key(StrId::RoomsLinking)),
+        HubState::Ready => None,
+        HubState::Down(why) => Some(down(why)),
     };
     let rows = rooms
         .rooms
@@ -610,27 +722,80 @@ pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
             name: r.name.clone(),
             unread: r.unread,
             selected: rooms.selected == Some(i),
+            avatar: avatar(&r.name),
         })
         .collect();
-    let open = rooms.room().map(|room| RoomView {
-        name: room.name.clone(),
-        live: Text::key(StrId::RoomsLive),
-        lines: room.lines.iter().map(line_node).collect(),
-    });
-    let hint = Text::key(match rooms.room() {
-        Some(_) => StrId::RoomsHintRoom,
-        None => StrId::RoomsHowToJoin,
-    });
+    let offset = model.now.map_or(0, |now| now.offset_secs);
+    let open = rooms.room().map(|room| view(room, rooms.people, offset));
+    let (placeholder, empty) = match &open {
+        Some(_) => (Text::key(StrId::ComposeHint), None),
+        None => (
+            Text::key(StrId::RoomsJoinHint),
+            Some(Text::key(StrId::RoomsHowToJoin)),
+        ),
+    };
     RoomsNode {
-        hub,
+        status,
         rows,
         open,
         input: rooms.input.clone(),
-        hint,
+        placeholder,
+        empty,
     }
 }
 
-fn line_node(line: &RoomLine) -> RoomLineNode {
+/// The open room as a chat.
+fn view(room: &Room, people_shown: bool, offset_secs: i32) -> RoomView {
+    let subtitle = match room.members.as_slice() {
+        [] => Text::key(StrId::RoomsOnlyYou),
+        names => Text::Key(StrId::RoomsWithYou, Vec::from([Arg::Str(names.join(", "))])),
+    };
+    let people = people_shown.then(|| {
+        room.members
+            .iter()
+            .map(|m| Text::Raw(m.clone()))
+            .chain(core::iter::once(Text::key(StrId::RoomsYou)))
+            .collect()
+    });
+    let menu = Vec::from([
+        RoomVerb {
+            label: Text::key(StrId::RoomsPeople),
+            event: RoomsEvent::People(!people_shown),
+        },
+        RoomVerb {
+            label: Text::key(StrId::RoomsLeave),
+            event: RoomsEvent::Leave,
+        },
+    ]);
+    let mut lines: Vec<RoomLineNode> = Vec::with_capacity(room.lines.len());
+    let mut last_writer: Option<(bool, Option<&str>)> = None;
+    for line in &room.lines {
+        let mut node = line_node(line, offset_secs);
+        if node.bubble {
+            let writer = (line.ours, line.nick.as_deref());
+            node.named = !line.ours && last_writer != Some(writer);
+            if node.named {
+                node.avatar = line.nick.as_deref().map(avatar);
+            }
+            last_writer = Some(writer);
+        } else {
+            last_writer = None;
+        }
+        lines.push(node);
+    }
+    RoomView {
+        name: room.name.clone(),
+        avatar: avatar(&room.name),
+        subtitle,
+        people,
+        people_note: Text::key(StrId::RoomsPeopleNote),
+        menu,
+        live: Text::key(StrId::RoomsLive),
+        lines,
+    }
+}
+
+fn line_node(line: &RoomLine, offset_secs: i32) -> RoomLineNode {
     let nick = |line: &RoomLine| match (&line.nick, line.ours) {
         (_, true) => Text::key(StrId::RoomsYou),
         (Some(nick), false) => Text::Raw(nick.clone()),
@@ -661,36 +826,67 @@ fn line_node(line: &RoomLine) -> RoomLineNode {
         }
         RoomLineKind::Said(_) => (nick(line), Text::Raw(line.text.clone())),
     };
+    let bubble = matches!(line.kind, RoomLineKind::Said(_));
+    let time = (bubble && line.ts_ms > 0).then(|| {
+        WallTime {
+            unix_secs: i64::try_from(line.ts_ms / 1000).unwrap_or(i64::MAX),
+            offset_secs,
+        }
+        .hh_mm()
+    });
     RoomLineNode {
         who,
         text,
         kind: line.kind,
         ours: line.ours,
+        bubble,
+        named: false,
+        avatar: None,
+        time,
     }
+}
+
+fn avatar_json(avatar: &Avatar) -> Value {
+    json!({
+        "initials": avatar.initials,
+        "fg": alloc::format!("{:06x}", avatar.fg),
+        "bg": alloc::format!("{:06x}", avatar.bg),
+    })
 }
 
 impl RoomsNode {
     /// The surface as JSON for golden files, its texts unresolved.
     pub fn to_json(&self) -> Value {
         json!({
-            "hub": self.hub.to_json(),
+            "status": self.status.as_ref().map(Text::to_json),
             "rows": self.rows.iter().map(|r| json!({
                 "name": r.name,
                 "unread": r.unread,
                 "selected": r.selected,
+                "avatar": avatar_json(&r.avatar),
             })).collect::<Vec<_>>(),
             "open": self.open.as_ref().map(|room| json!({
                 "name": room.name,
+                "avatar": avatar_json(&room.avatar),
+                "subtitle": room.subtitle.to_json(),
+                "people": room.people.as_ref().map(|p| p.iter().map(Text::to_json).collect::<Vec<_>>()),
+                "people_note": room.people_note.to_json(),
+                "menu": room.menu.iter().map(|v| v.label.to_json()).collect::<Vec<_>>(),
                 "live": room.live.to_json(),
                 "lines": room.lines.iter().map(|l| json!({
                     "who": l.who.to_json(),
                     "text": l.text.to_json(),
                     "kind": alloc::format!("{:?}", l.kind),
                     "ours": l.ours,
+                    "bubble": l.bubble,
+                    "named": l.named,
+                    "avatar": l.avatar.as_ref().map(avatar_json),
+                    "time": l.time,
                 })).collect::<Vec<_>>(),
             })),
             "input": self.input,
-            "hint": self.hint.to_json(),
+            "placeholder": self.placeholder.to_json(),
+            "empty": self.empty.as_ref().map(Text::to_json),
         })
     }
 }
@@ -908,15 +1104,17 @@ mod tests {
         assert_eq!(open.live, Text::key(StrId::RoomsLive));
         let last = open.lines.last().expect("a line");
         assert_eq!(last.who, Text::key(StrId::RoomsYou));
-        assert_eq!(
-            node.hub.resolve(super::super::strings::Lang::De),
-            "Hub periculum"
-        );
+        // 1450: a link that is up says nothing, and the field's hint is
+        // a chat's.
+        assert_eq!(node.status, None);
+        assert_eq!(node.placeholder, Text::key(StrId::ComposeHint));
+        assert_eq!(node.empty, None);
         // The control: with no room open the one line is not said.
         rooms(&mut model, RoomsEvent::Show(None));
         let node = model.scene(LayoutClass::Wide).rooms.expect("the rooms");
         assert!(node.open.is_none());
-        assert_eq!(node.hint, Text::key(StrId::RoomsHowToJoin));
+        assert_eq!(node.empty, Some(Text::key(StrId::RoomsHowToJoin)));
+        assert_eq!(node.placeholder, Text::key(StrId::RoomsJoinHint));
         // And with the tab behind, the scene has no Rooms.
         update(&mut model, UiEvent::Tab(TabId::Chats));
         assert!(model.scene(LayoutClass::Wide).rooms.is_none());
@@ -941,5 +1139,132 @@ mod tests {
         let said: Vec<String> = lines.iter().map(|l| l.text.resolve(Lang::De)).collect();
         assert_eq!(said, ["du bist da", "bob ist da"]);
         assert_eq!(lines[0].text.resolve(Lang::En), "you came in");
+    }
+
+    /// 1450 (walk 1, finding 20): a room is drawn as a chat. Said lines
+    /// are bubbles, another's run is named once with its avatar, ours
+    /// stand unnamed, the comings and goings are quiet lines between;
+    /// the header names the people seen, and no word on screen is IRC's.
+    #[test]
+    fn a_room_is_drawn_as_a_chat_with_bubbles_avatars_and_its_people() {
+        use super::super::strings::Lang;
+        let mut model = in_lab();
+        rooms(
+            &mut model,
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: Some("bob".into()),
+            },
+        );
+        for (nick, ours, text) in [
+            ("bob", false, "morning"),
+            ("bob", false, "anyone at the field site?"),
+            ("lew", true, "on my way"),
+            ("carol", false, "me too"),
+        ] {
+            rooms(
+                &mut model,
+                RoomsEvent::Line {
+                    room: "#lab".into(),
+                    kind: LineKind::Msg,
+                    text: text.into(),
+                    nick: Some(nick.into()),
+                    ours,
+                    ts_ms: 1_793_702_757_876,
+                },
+            );
+        }
+        let open = node(&model).open.expect("open");
+        let shape: Vec<(bool, bool, bool)> = open
+            .lines
+            .iter()
+            .map(|l| (l.bubble, l.named, l.avatar.is_some()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (false, false, false), // you came in
+                (false, false, false), // bob came in
+                (true, true, true),    // bob, named
+                (true, false, false),  // bob again, the same run
+                (true, false, false),  // ours
+                (true, true, true),    // carol
+            ]
+        );
+        assert!(open.lines[2].time.is_some(), "a stamped line has its time");
+        assert_eq!(open.subtitle.resolve(Lang::En), "bob, carol, you");
+        assert!(open.people.is_none(), "behind the header until tapped");
+        // The header's tap shows them, the reader last; Esc hides them.
+        rooms(&mut model, RoomsEvent::People(true));
+        let people: Vec<String> = node(&model)
+            .open
+            .and_then(|o| o.people)
+            .expect("shown")
+            .iter()
+            .map(|t| t.resolve(Lang::En))
+            .collect();
+        assert_eq!(people, ["bob", "carol", "you"]);
+        // Who left is gone from them.
+        rooms(
+            &mut model,
+            RoomsEvent::Parted {
+                room: "#lab".into(),
+                nick: Some("bob".into()),
+            },
+        );
+        let subtitle = node(&model).open.expect("open").subtitle;
+        assert_eq!(subtitle.resolve(Lang::De), "carol, du");
+        // No word of IRC's on the screen: the rooms' words in both
+        // languages, the shortcuts and the hub named nowhere.
+        for lang in [Lang::En, Lang::De] {
+            let shown = node(&model);
+            let mut words = vec![
+                shown.placeholder.resolve(lang),
+                shown.open.as_ref().expect("open").live.resolve(lang),
+            ];
+            words.extend(shown.status.iter().map(|t| t.resolve(lang)));
+            words.extend(
+                shown
+                    .open
+                    .iter()
+                    .flat_map(|o| o.menu.iter().map(|v| v.label.resolve(lang))),
+            );
+            for word in words {
+                for irc in ["/me", "/part", "/join", "Hub", "rrc"] {
+                    assert!(!word.contains(irc), "{word:?} says {irc:?}");
+                }
+            }
+        }
+    }
+
+    /// 1450: "Leave room" in the menu parts the open room as `/part`
+    /// does, and before the hub answered it says so instead.
+    #[test]
+    fn leave_in_the_menu_parts_the_open_room() {
+        let mut model = in_lab();
+        let menu = node(&model).open.expect("open").menu;
+        let leave = menu
+            .iter()
+            .find(|v| v.label == Text::key(StrId::RoomsLeave))
+            .expect("Leave room in the menu");
+        assert_eq!(
+            rooms(&mut model, leave.event.clone()),
+            vec![UiEffect::Rooms(RoomAsk::Part {
+                room: "#lab".into()
+            })]
+        );
+        // The control: no room open, nothing to leave.
+        rooms(&mut model, RoomsEvent::Show(None));
+        assert!(rooms(&mut model, RoomsEvent::Leave).is_empty());
+        // The terminal's Ctrl-l is the same verb.
+        rooms(&mut model, RoomsEvent::Show(Some(0)));
+        use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert_eq!(
+            update(&mut model, UiEvent::Key(ctrl_l)),
+            vec![UiEffect::Rooms(RoomAsk::Part {
+                room: "#lab".into()
+            })]
+        );
     }
 }

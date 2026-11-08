@@ -192,7 +192,7 @@ stores runs instead of cells; the M9 slice measures and picks (slice 4).
 
 | Control | Where it is | lnomad |
 |---|---|---|
-| List row | `ListItem` (`leviculum-ui/src/scene.rs:273`, since 1240); Loquax's `Row` (`loquax/src/ui/scene.rs:393`) is a `ListItem` with a conversation's `ListRow` beside it; iced `list_row` (`loquax/src/gui/chat.rs:1791`) | **parametrised**: the generic part moved to `leviculum-ui` as `ListItem` in slice 0 (id, `selected`, `activate`, `menu`, `A11y`); Loquax's `Row` keeps its `ListRow` beside it. Title, subtitle and trailing words join the item in slice 1, with the first list whose words are the item's own (Loquax's are its `ListRow`'s). Places, history and name results are list items |
+| List row | `ListItem` (`leviculum-ui/src/scene.rs:273`, since 1240); Loquax's `Row` (`loquax/src/ui/scene.rs:393`) is a `ListItem` with a conversation's `ListRow` beside it; iced `list_row` (`loquax/src/gui/chat.rs:2052`) | **parametrised**: the generic part moved to `leviculum-ui` as `ListItem` in slice 0 (id, `selected`, `activate`, `menu`, `A11y`); Loquax's `Row` keeps its `ListRow` beside it. Title, subtitle and trailing words join the item in slice 1, with the first list whose words are the item's own (Loquax's are its `ListRow`'s). Places, history and name results are list items |
 | Top bar | `TopBar`, `Lead` (`leviculum-ui/src/scene.rs:187`) | **reused**, moved to `leviculum-ui` in slice 0; `Lead::Back` for history; the address is a field node below or inside it per renderer |
 | Tab bar | `Tabs` (`leviculum-ui/src/scene.rs:251`), `TabId` (`loquax/src/ui/scene.rs:78`), Chats and Map | **parametrised** where the browser is hosted: `TabId::Browse` beside Chats and Map ("Calls later" in [Loquax on Android: navigation and views](loquax-android-navigation.md) already plans a third). The standalone lnomad has no tab bar |
 | Sheet | `Sheet` (`leviculum-ui/src/scene.rs:293`) | **reused** unchanged: places, history, a link's long press |
@@ -270,7 +270,7 @@ and ships on its own.
 
 | # | Slice | Files | Tests | Accepted by | Depends on |
 |---|---|---|---|---|---|
-| 0 | **The contract's vocabulary moves into `leviculum-ui`**: `A11y`, `Role`, `Action<I>`, `TopBar`, `Lead`, `Tabs`, `Sheet`, `Chip`, a list item; `Text<K>`, `Lang`, `Arg`, `format`, the `catalogue!` macro, `android_xml`. Loquax re-exports, its `StrId` and node types stay its own. No behaviour change | `leviculum-ui/src/scene.rs`, `leviculum-ui/src/strings.rs` (new), `loquax/src/ui/scene.rs`, `loquax/src/ui/strings.rs`, `loquax/src/ui/intent.rs` | `loquax/tests/scene_golden.rs` unchanged; `the_phone_reads_the_catalogue` (`loquax/src/ui/strings.rs:656`) | the three `loquax/tests/golden/scene-*.json` and the generated `strings_scene.xml` byte-identical; `just ui-no-terminal`, `just loquax-core-no-std` green | Loquax slice one (`bb0e9f77`..`af8fa5c1`, here) |
+| 0 | **The contract's vocabulary moves into `leviculum-ui`**: `A11y`, `Role`, `Action<I>`, `TopBar`, `Lead`, `Tabs`, `Sheet`, `Chip`, a list item; `Text<K>`, `Lang`, `Arg`, `format`, the `catalogue!` macro, `android_xml`. Loquax re-exports, its `StrId` and node types stay its own. No behaviour change | `leviculum-ui/src/scene.rs`, `leviculum-ui/src/strings.rs` (new), `loquax/src/ui/scene.rs`, `loquax/src/ui/strings.rs`, `loquax/src/ui/intent.rs` | `loquax/tests/scene_golden.rs` unchanged; `the_phone_reads_the_catalogue` (`loquax/src/ui/strings.rs:661`) | the three `loquax/tests/golden/scene-*.json` and the generated `strings_scene.xml` byte-identical; `just ui-no-terminal`, `just loquax-core-no-std` green | Loquax slice one (`bb0e9f77`..`af8fa5c1`, here) |
 | 1 | **The proof: lnomad's TUI draws through a scene** (2 passes). `lnomad/src/app/scene.rs`: `Model::scene(class)` builds `TopBar`, `Page` (window of runs), the places `Sheet`, chips, toast; `lnomad::Intent`; `lnomad/src/app/strings.rs`, English and German, for the 37 toasts, the start page and the help groups. `tui::view` (`lnomad/src/tui.rs:99`) renders the scene; the cell mouse arms stay as they are, as in the Loquax study | `lnomad/src/app/{scene,strings}.rs` (new), `app/event.rs`, `app/chrome.rs`, `tui.rs` | the 241 `#[test]`s of `tui.rs` unchanged; `render_golden.rs`; new `lnomad/tests/scene_golden.rs` with `scene-page-{53,80}.json` of the README; positive control: shift a link by one cell and the golden fails | every `TestBackend` frame unchanged; the README window at 53×22 holds at most 67 runs (asserted, from 2.2); the build time of a README scene measured and written into this page | slice 0 |
 | 1b | **Keys become a table and intents**: lnomad's rows over `leviculum_ui::keymap`, vi, Emacs and arrows; `update_*_key` resolve to `lnomad::Intent`; help and footer derived | `lnomad/src/app/keys.rs` (new), `app/event.rs`, `app/chrome.rs` | a table test: each chord the old `match`es honoured resolves to the same intent; no chord resolves to two intents in one mode | the help overlay lists exactly the chords the handler honours | slice 1 |
 | 2 | **The window** (2 passes): `leviculum-ui-iced` extracted from `loquax/src/gui*.rs` (top bar, sheet, toast, list item, search field); `lnomad --gui` behind a `gui` feature draws the scene, the page as monospace `rich_text` runs | `leviculum-ui-iced/` (new), `loquax/src/gui.rs`, `loquax/src/gui/chat.rs`, `lnomad/src/gui.rs` (new), `lnomad/Cargo.toml` | `loquax/tests/golden/gui-chat-{light,dark}.png` byte-identical; new `lnomad/tests/golden/gui-page-{light,dark}.png` of the README fixture | Loquax's goldens unchanged; a click on a link run raises `Activate(Link(n))` in a headless test; frame time for the README at 1280×800 measured | slice 1; Loquax study slices 2 and 3 (iced draws the scene, the top bar and tab bar in the model) |
@@ -443,7 +443,7 @@ last, and is where a second pass starts.
 - **`leviculum-ui-iced`, extracted, not written beside.** Out of
   `loquax/src/gui/chat.rs` into the crate, generic over the program's
   message and coloured by a `Palette` each program fills from its own
-  tokens (Loquax's `palette`, `loquax/src/gui/chat.rs:73`): the drawn
+  tokens (Loquax's `palette`, `loquax/src/gui/chat.rs:76`): the drawn
   icons with the compose bar's and the recording bar's (`icon`), the
   waveform (`wave`, the fold handed in), the bare, link and icon-action
   buttons (`control`), the avatar and its dot (`avatar`), the top bar,
@@ -825,21 +825,21 @@ as the phone, off by default until Lew flips it.
   with the tab off they say how to switch it on.
 - **The terminal** draws the tab with lnomad's terminal view over the
   whole screen (`draw_screen`, `loquax/src/tui.rs:1689`), in the
-  messenger's theme and colour depth (`loquax/src/tui.rs:1819`). It asks
+  messenger's theme and colour depth (`loquax/src/tui.rs:1955`). It asks
   for no pictures (`no_images`): the map owns the terminal's picture
   protocol, and two pickers on one terminal is a later question.
 - **The window** draws it with lnomad's window view beside the rail
-  (`browse_view`, `loquax/src/gui.rs:2704`; `lnomad::gui::view`,
+  (`browse_view`, `loquax/src/gui.rs:2702`; `lnomad::gui::view`,
   `lnomad/src/gui.rs:681`). The pictures are lnomad's window code too:
   `Pictures` (`lnomad/src/gui.rs:272`), moved out of lnomad's `Window`
   so a host keeps it beside a model it hosts; the shell holds it and the
   window draws from it. What lnomad's view says is folded as lnomad's
-  window folds it (`App::browse`, `loquax/src/gui.rs:1923`, with
+  window folds it (`App::browse`, `loquax/src/gui.rs:1921`, with
   `wheel_mice` and `pointer_mouse`, `lnomad/src/gui.rs:433` and
   `lnomad/src/gui.rs:433`, and `type_address`,
   `lnomad/src/app/event.rs:428`, which lnomad's own window now calls as
   well). The window tells the browser its light or dark and the page's
-  cells (`browse_sync`, `loquax/src/gui.rs:1834`). The tab's icon
+  cells (`browse_sync`, `loquax/src/gui.rs:1832`). The tab's icon
   borrows the search glass; the shared icons have no globe yet.
 - **What the standalone has that the tab lacked (1337's list), and what
   the desktop tab has now.** Inline pictures: the window, yes; the

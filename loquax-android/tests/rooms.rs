@@ -153,6 +153,40 @@ fn the_phone_works_a_room_through_the_schema() {
     tap(&mut model, "say", "", 0);
     check("rooms-room.json", &screen(&model));
 
+    // 1450: a room is a chat. The people under its name, their list
+    // behind the header, and "Leave room" in its menu, which parts it as
+    // `/part` does.
+    let shown = screen(&model);
+    assert_eq!(shown.subtitle, "marcel, du");
+    assert!(shown.status.is_empty(), "a link that is up says nothing");
+    assert_eq!(shown.placeholder, "Nachricht");
+    let named: Vec<&str> = shown
+        .lines
+        .iter()
+        .filter(|l| l.named)
+        .map(|l| l.who.as_str())
+        .collect();
+    assert_eq!(named, ["marcel"], "another's run named once");
+    tap(&mut model, "people", "", 1);
+    let shown = screen(&model);
+    assert!(shown.people_shown);
+    assert_eq!(shown.people, ["marcel", "du"]);
+    tap(&mut model, "people", "", 0);
+    assert!(!screen(&model).people_shown);
+    let leave = shown
+        .menu
+        .iter()
+        .find(|m| m.verb == "leave")
+        .expect("Leave room in the menu");
+    assert_eq!(leave.label, "Raum verlassen");
+    let effects = tap(&mut model, &leave.verb, "", leave.index);
+    assert_eq!(
+        effects,
+        [UiEffect::Rooms(RoomAsk::Part {
+            room: "#lab".to_string()
+        })]
+    );
+
     // The list, then the room again, then the chats.
     tap(&mut model, "show", "", -1);
     assert!(screen(&model).room.is_empty());

@@ -519,10 +519,12 @@ pub enum Request {
     /// A verb of the Rooms tab (1384), Reticulum Relay Chat on the hub
     /// the config's `rooms_hub` names: `tab` (it comes to the front),
     /// `chats` (it leaves), `show` with the list's `index` of the room to
-    /// open (`-1` for the list), and `say` with the input field's `text`,
-    /// which the model reads as the terminal's input line: `#room` or
-    /// `/join #room key` joins, a line goes to the open room, `/me` acts,
-    /// `/part` leaves. A line the hub would not take stays in
+    /// open (`-1` for the list), `say` with the input field's `text`,
+    /// which the model reads as the terminal's input line: `#room` joins,
+    /// a line goes to the open room, and the IRC shortcuts stay for those
+    /// who know them (`/join #room key`, `/me`, `/part`); since 1450 the
+    /// open room's header and menu: `people` (`index` 1 shows them, 0
+    /// hides) and `leave`. A line the hub would not take stays in
     /// [`RoomsScreen::input`].
     Rooms {
         verb: String,
@@ -2174,7 +2176,9 @@ pub struct BrowseRow {
 /// What [`Query::Rooms`] answers (1384): the Rooms surface of the model
 /// (`loquax::ui::rooms::node`) in the phone's language, flat for
 /// `MsgPack.java`. Java draws it and decides nothing: which room is open,
-/// who said a line, and what the input does are the library's.
+/// who said a line, and what the input does are the library's. A room is
+/// drawn as a chat since 1450: bubbles, avatars, the people under its
+/// name, its menu.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomsScreen {
     pub v: u32,
@@ -2187,10 +2191,10 @@ pub struct RoomsScreen {
     /// The bar's title.
     #[serde(default)]
     pub title: String,
-    /// How the hub stands, in one line: connecting, its name, or why it
-    /// is down.
+    /// How the link stands while it is not up (connecting, or why it is
+    /// down); empty while it is.
     #[serde(default)]
-    pub hub: String,
+    pub status: String,
     /// The rooms we are in.
     #[serde(default)]
     pub rows: Vec<RoomsRow>,
@@ -2198,15 +2202,40 @@ pub struct RoomsScreen {
     /// said when a room is opened (what a room is not); its lines.
     #[serde(default)]
     pub room: String,
+    /// The open room's avatar.
+    #[serde(default)]
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: String,
+    #[serde(default)]
+    pub icon_bg: String,
+    /// Under its name: the people seen in it ("marcel, du").
+    #[serde(default)]
+    pub subtitle: String,
+    /// The people, shown while the header was tapped (`people` verb);
+    /// empty otherwise.
+    #[serde(default)]
+    pub people: Vec<String>,
+    #[serde(default)]
+    pub people_shown: bool,
+    /// The line over the people: who the list holds.
+    #[serde(default)]
+    pub people_note: String,
+    /// The room's menu, in order: its label and the verb Java sends.
+    #[serde(default)]
+    pub menu: Vec<RoomsVerb>,
     #[serde(default)]
     pub live: String,
     #[serde(default)]
     pub lines: Vec<RoomsLine>,
-    /// What the input field holds, and what it does here.
+    /// What the input field holds, and its hint (said only in the field).
     #[serde(default)]
     pub input: String,
     #[serde(default)]
-    pub hint: String,
+    pub placeholder: String,
+    /// With no room open, where the room would be: how to join one.
+    #[serde(default)]
+    pub empty: String,
 }
 
 /// A room of [`RoomsScreen`]'s list.
@@ -2217,6 +2246,24 @@ pub struct RoomsRow {
     pub unread: u32,
     #[serde(default)]
     pub selected: bool,
+    /// Its avatar, as a conversation's row carries one.
+    #[serde(default)]
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: String,
+    #[serde(default)]
+    pub icon_bg: String,
+}
+
+/// A verb of the open room's menu (1450).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsVerb {
+    pub label: String,
+    /// What Java sends with [`Request::Rooms`]: `people` (with `index` 1
+    /// to show them, 0 to hide) or `leave`.
+    pub verb: String,
+    #[serde(default)]
+    pub index: i64,
 }
 
 /// One line of the open room.
@@ -2232,6 +2279,22 @@ pub struct RoomsLine {
     /// Our own line, as the hub echoed it.
     #[serde(default)]
     pub ours: bool,
+    /// A bubble (a line someone said); else a quiet line in the middle.
+    #[serde(default)]
+    pub bubble: bool,
+    /// The first bubble of another's run: the name over it, the avatar
+    /// beside it.
+    #[serde(default)]
+    pub named: bool,
+    #[serde(default)]
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: String,
+    #[serde(default)]
+    pub icon_bg: String,
+    /// `14:05`, or empty.
+    #[serde(default)]
+    pub time: String,
 }
 
 /// One row of [`GroupScreen`].

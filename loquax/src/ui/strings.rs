@@ -45,27 +45,32 @@ leviculum_ui::catalogue! {
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";
     RoomsLive = "rooms_live", "A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.", "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.";
-    RoomsNoHub = "rooms_no_hub", "No hub yet. rooms_hub in the config names one.", "Noch kein Hub. rooms_hub in der Konfiguration nennt einen.";
-    RoomsLinking = "rooms_linking", "Connecting to the hub…", "Verbinde mit dem Hub…";
-    RoomsHub = "rooms_hub", "Hub %1$s", "Hub %1$s";
-    RoomsNoPath = "rooms_no_path", "The hub cannot be reached. Is it announced on this network?", "Der Hub ist nicht erreichbar. Wird er in diesem Netz angekündigt?";
-    RoomsNoAnswer = "rooms_no_answer", "The hub did not answer. Try again later.", "Der Hub hat nicht geantwortet. Versuch es später noch einmal.";
-    RoomsLost = "rooms_lost", "The connection to the hub broke. Open the Rooms again to reconnect.", "Die Verbindung zum Hub ist abgerissen. Öffne die Räume erneut, um neu zu verbinden.";
-    RoomsLeft = "rooms_left", "You left the hub.", "Du hast den Hub verlassen.";
+    RoomsNoHub = "rooms_no_hub", "No rooms set up yet. rooms_hub in the config names their server.", "Noch keine Räume eingerichtet. rooms_hub in der Konfiguration nennt ihren Server.";
+    RoomsLinking = "rooms_linking", "Connecting…", "Verbinde…";
+    RoomsNoPath = "rooms_no_path", "The rooms cannot be reached. Is their server on this network?", "Die Räume sind nicht erreichbar. Ist ihr Server in diesem Netz?";
+    RoomsNoAnswer = "rooms_no_answer", "The rooms did not answer. Try again later.", "Die Räume haben nicht geantwortet. Versuch es später noch einmal.";
+    RoomsLost = "rooms_lost", "The connection to the rooms broke. Open the Rooms again to reconnect.", "Die Verbindung zu den Räumen ist abgerissen. Öffne die Räume erneut, um neu zu verbinden.";
+    RoomsLeft = "rooms_left", "Not connected.", "Nicht verbunden.";
     RoomsOff = "rooms_off", "There are no Rooms here; rooms_hub in the config turns them on.", "Hier gibt es keine Räume; rooms_hub in der Konfiguration schaltet sie ein.";
     RoomsHowToJoin = "rooms_how_to_join", "Type a room's name, like #lab, to join it.", "Tipp den Namen eines Raums, etwa #lab, um ihm beizutreten.";
-    RoomsHintRoom = "rooms_hint_room", "Enter sends to the room. /me for an action, /part to leave.", "Enter schickt in den Raum. /me für eine Aktion, /part zum Verlassen.";
-    RoomsNotReady = "rooms_not_ready", "The hub has not answered yet. Wait a moment and try again.", "Der Hub hat noch nicht geantwortet. Warte kurz und versuch es noch einmal.";
+    RoomsNotReady = "rooms_not_ready", "Not connected yet. Wait a moment and try again.", "Noch nicht verbunden. Warte kurz und versuch es noch einmal.";
     RoomsNotIn = "rooms_not_in", "You are not in %1$s. Join it first.", "Du bist nicht in %1$s. Tritt ihm zuerst bei.";
     RoomsTooLong = "rooms_too_long", "This line is %1$d bytes long and a room takes at most %2$d. Shorten it.", "Diese Zeile ist %1$d Bytes lang, ein Raum nimmt höchstens %2$d. Kürze sie.";
     RoomsTooBig = "rooms_too_big", "This line needs %1$d bytes and the link carries %2$d. Shorten it.", "Diese Zeile braucht %1$d Bytes, die Verbindung trägt %2$d. Kürze sie.";
     RoomsBadRoom = "rooms_bad_room", "A room name needs a few letters and no spaces.", "Ein Raumname braucht ein paar Buchstaben und keine Leerzeichen.";
-    RoomsTooMany = "rooms_too_many", "You are in %1$d rooms, as many as this hub allows. Leave one first.", "Du bist in %1$d Räumen, so vielen, wie dieser Hub erlaubt. Verlass zuerst einen.";
+    RoomsTooMany = "rooms_too_many", "You are in %1$d rooms, as many as their server allows. Leave one first.", "Du bist in %1$d Räumen, so vielen, wie ihr Server erlaubt. Verlass zuerst einen.";
     RoomsYou = "rooms_you", "you", "du";
     RoomsCameIn = "rooms_came_in", "%1$s came in", "%1$s ist da";
     // Our own join (1384): "du ist da" was the nick put into the line above.
     RoomsWeCameIn = "rooms_we_came_in", "you came in", "du bist da";
     RoomsWentOut = "rooms_went_out", "%1$s left", "%1$s ist gegangen";
+    // 1450: a room drawn as a chat, its header, its people and its menu.
+    RoomsJoinHint = "rooms_join_hint", "Room name, like #lab", "Raumname, etwa #lab";
+    RoomsOnlyYou = "rooms_only_you", "Only you so far", "Bisher nur du";
+    RoomsWithYou = "rooms_with_you", "%1$s, you", "%1$s, du";
+    RoomsPeople = "rooms_people", "Who is here", "Wer hier ist";
+    RoomsPeopleNote = "rooms_people_note", "Everyone who came in or wrote while you were here.", "Alle, die hereinkamen oder schrieben, während du hier warst.";
+    RoomsLeave = "rooms_leave", "Leave room", "Raum verlassen";
     Settings = "settings", "Settings", "Einstellungen";
     MailboxConnected = "mailbox_connected", "You. Your mailbox is connected.", "Du. Dein Postfach ist verbunden.";
     MailboxNotConnected = "mailbox_not_connected", "You. Your mailbox is not connected.", "Du. Dein Postfach ist nicht verbunden.";

@@ -7,7 +7,9 @@
 //! [`schema::RoomsScreen`] Java draws, its words resolved in the phone's
 //! language; [`events`] reads a [`schema::Request::Rooms`] back into the
 //! model's events. Java adds no logic of the Rooms: its field hands the
-//! input line in whole, and the model reads it as the terminal's.
+//! input line in whole, and the model reads it as the terminal's. Since
+//! 1450 a room is drawn as a chat, its header's people and its menu's
+//! "Leave room" verbs of their own.
 
 use leviculum_rrc::LineKind;
 use loquax::ui::rooms::{self as model_rooms, RoomLineKind, RoomsEvent};
@@ -15,7 +17,7 @@ use loquax::ui::scene::TabId;
 use loquax::ui::strings::{Lang, StrId, Text};
 use loquax::ui::{UiEvent, UiModel};
 
-use crate::schema::{self, RoomsLine, RoomsRow, RoomsScreen};
+use crate::schema::{self, RoomsLine, RoomsRow, RoomsScreen, RoomsVerb};
 
 /// The Rooms tab as Java draws it, in `lang`. Without a hub it says only
 /// that there is no tab.
@@ -28,28 +30,17 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> RoomsScreen {
         };
     }
     let node = model_rooms::node(model);
-    let (room, live, lines) = match &node.open {
-        Some(open) => (
-            open.name.clone(),
-            open.live.resolve(lang),
-            open.lines
-                .iter()
-                .map(|line| RoomsLine {
-                    who: line.who.resolve(lang),
-                    text: line.text.resolve(lang),
-                    kind: kind(line.kind).to_string(),
-                    ours: line.ours,
-                })
-                .collect(),
-        ),
-        None => (String::new(), String::new(), Vec::new()),
-    };
-    RoomsScreen {
+    let hex = |c: u32| format!("{c:06x}");
+    let mut shown = RoomsScreen {
         v,
         enabled: true,
         open: rooms.showing(),
         title: Text::key(StrId::TabRooms).resolve(lang),
-        hub: node.hub.resolve(lang),
+        status: node
+            .status
+            .as_ref()
+            .map(|s| s.resolve(lang))
+            .unwrap_or_default(),
         rows: node
             .rows
             .iter()
@@ -57,14 +48,72 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> RoomsScreen {
                 name: row.name.clone(),
                 unread: row.unread,
                 selected: row.selected,
+                initials: row.avatar.initials.clone(),
+                icon_fg: hex(row.avatar.fg),
+                icon_bg: hex(row.avatar.bg),
             })
             .collect(),
-        room,
-        live,
-        lines,
-        input: node.input,
-        hint: node.hint.resolve(lang),
+        input: node.input.clone(),
+        placeholder: node.placeholder.resolve(lang),
+        empty: node
+            .empty
+            .as_ref()
+            .map(|e| e.resolve(lang))
+            .unwrap_or_default(),
+        ..RoomsScreen::default()
+    };
+    if let Some(open) = &node.open {
+        shown.room = open.name.clone();
+        shown.initials = open.avatar.initials.clone();
+        shown.icon_fg = hex(open.avatar.fg);
+        shown.icon_bg = hex(open.avatar.bg);
+        shown.subtitle = open.subtitle.resolve(lang);
+        shown.people_shown = open.people.is_some();
+        shown.people = open
+            .people
+            .iter()
+            .flatten()
+            .map(|p| p.resolve(lang))
+            .collect();
+        shown.people_note = open.people_note.resolve(lang);
+        shown.menu = open
+            .menu
+            .iter()
+            .map(|verb| {
+                let (name, index) = match verb.event {
+                    RoomsEvent::People(show) => ("people", i64::from(show)),
+                    _ => ("leave", 0),
+                };
+                RoomsVerb {
+                    label: verb.label.resolve(lang),
+                    verb: name.to_string(),
+                    index,
+                }
+            })
+            .collect();
+        shown.live = open.live.resolve(lang);
+        shown.lines = open
+            .lines
+            .iter()
+            .map(|line| RoomsLine {
+                who: line.who.resolve(lang),
+                text: line.text.resolve(lang),
+                kind: kind(line.kind).to_string(),
+                ours: line.ours,
+                bubble: line.bubble,
+                named: line.named,
+                initials: line
+                    .avatar
+                    .as_ref()
+                    .map(|a| a.initials.clone())
+                    .unwrap_or_default(),
+                icon_fg: line.avatar.as_ref().map(|a| hex(a.fg)).unwrap_or_default(),
+                icon_bg: line.avatar.as_ref().map(|a| hex(a.bg)).unwrap_or_default(),
+                time: line.time.clone().unwrap_or_default(),
+            })
+            .collect();
     }
+    shown
 }
 
 /// A line's kind in the schema's word.
@@ -92,6 +141,9 @@ pub fn events(verb: &str, text: &str, index: i64) -> Result<Vec<UiEvent>, String
             rooms(RoomsEvent::Typed(text.to_string())),
             rooms(RoomsEvent::Submit),
         ]),
+        // The open room's header and menu (1450).
+        "people" => Vec::from([rooms(RoomsEvent::People(index != 0))]),
+        "leave" => Vec::from([rooms(RoomsEvent::Leave)]),
         other => return Err(format!("no rooms verb {other:?}")),
     })
 }
@@ -129,6 +181,7 @@ mod tests {
     #[test]
     fn a_verb_the_tab_does_not_know_is_refused() {
         assert!(events("join", "#lab", 0).is_err());
+        assert!(events("part", "", 0).is_err(), "the menu's verb is leave");
         assert!(events("", "", 0).is_err());
     }
 }

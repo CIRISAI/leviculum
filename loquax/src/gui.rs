@@ -56,9 +56,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::advanced::image::{FilterMethod, Handle};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
-use iced::widget::{
-    button, column, container, row, scrollable, stack, text, text_editor, text_input, Space,
-};
+use iced::widget::{button, column, container, row, scrollable, stack, text, text_editor, Space};
 use iced::{
     keyboard, mouse, window, Color, Element, Length, Point, Rectangle, Renderer, Size,
     Subscription, Task, Theme,
@@ -2712,94 +2710,10 @@ impl App {
         lnomad::gui::view(&browsed.model, &pictures).map(Message::Browse)
     }
 
-    /// The Rooms tab (1379): the hub's line, the rooms beside the open
-    /// room, its one line on what a room is not over its lines, and the
-    /// input with what it does under it. Drawn from the scene's Rooms node.
+    /// The Rooms tab (1379), a room as a chat since 1450: drawn by
+    /// [`App::rooms_pane`] from the scene's Rooms node.
     fn rooms_view(&self) -> Element<'_, Message> {
-        use loquax::ui::rooms::{RoomLineKind, RoomsEvent};
-        let Some(node) = &self.seen.scene.rooms else {
-            return Space::new().into();
-        };
-        let t = self.tokens();
-        let lang = self.lang;
-        let ink = chat::colour(t.text);
-        let quiet = chat::colour(t.text_secondary);
-        let rows = node
-            .rows
-            .iter()
-            .enumerate()
-            .fold(column![].spacing(2), |list, (i, room)| {
-                let label = match room.unread {
-                    0 => room.name.clone(),
-                    n => format!("{}  {n}", room.name),
-                };
-                // The list's own row, its selection the chats' (1379).
-                list.push(leviculum_ui_iced::chrome::list_item(
-                    container(text(label).size(15).color(ink)).padding([6, 10]),
-                    room.selected,
-                    Message::Rooms(RoomsEvent::Show(Some(i))),
-                    chat::palette(t),
-                ))
-            });
-        let list = container(scrollable(rows))
-            .width(Length::Fixed(200.0))
-            .height(Length::Fill)
-            .padding(8);
-        let room: Element<'_, Message> = match &node.open {
-            Some(open) => {
-                let lines = open.lines.iter().fold(column![].spacing(4), |lines, line| {
-                    let who = line.who.resolve(lang);
-                    let said = line.text.resolve(lang);
-                    let words = match line.kind {
-                        RoomLineKind::Said(leviculum_rrc::LineKind::Msg) => {
-                            format!("{who}: {said}")
-                        }
-                        RoomLineKind::Said(leviculum_rrc::LineKind::Action) => {
-                            format!("* {who} {said}")
-                        }
-                        RoomLineKind::Said(leviculum_rrc::LineKind::Notice) => {
-                            format!("-{who}- {said}")
-                        }
-                        RoomLineKind::Error => format!("! {said}"),
-                        _ => format!("— {said}"),
-                    };
-                    let colour = match line.kind {
-                        RoomLineKind::Said(_) => ink,
-                        _ => quiet,
-                    };
-                    lines.push(text(words).size(15).color(colour))
-                });
-                column![
-                    text(open.name.clone()).size(18).color(ink),
-                    text(open.live.resolve(lang)).size(13).color(quiet),
-                    scrollable(lines).height(Length::Fill),
-                ]
-                .spacing(8)
-                .into()
-            }
-            None => container(text(node.hint.resolve(lang)).size(15).color(quiet))
-                .center(Length::Fill)
-                .into(),
-        };
-        let input = text_input(&node.hint.resolve(lang), &node.input)
-            .on_input(|typed| Message::Rooms(RoomsEvent::Typed(typed)))
-            .on_submit(Message::Rooms(RoomsEvent::Submit))
-            .size(15)
-            .padding(8);
-        let foot = self
-            .seen
-            .notice
-            .clone()
-            .unwrap_or_else(|| node.hint.resolve(lang));
-        column![
-            text(node.hub.resolve(lang)).size(15).color(quiet),
-            row![list, container(room).width(Length::Fill).padding(8)].height(Length::Fill),
-            input,
-            text(foot).size(13).color(quiet),
-        ]
-        .spacing(6)
-        .padding(10)
-        .into()
+        self.rooms_pane()
     }
 
     fn map_view(&self) -> Element<'_, Message> {
@@ -5727,7 +5641,7 @@ mod tests {
             RoomsEvent::Line {
                 room: "#lab".into(),
                 kind: LineKind::Msg,
-                text: "rrc line, thirty-one bytes long".into(),
+                text: "a line, twenty-five bytes".into(),
                 nick: Some("bob".into()),
                 ours: false,
                 ts_ms: 1_793_702_757_876,
@@ -5751,12 +5665,27 @@ mod tests {
         let _ = app.update(Message::Rooms(RoomsEvent::Typed("hi".into())));
         let _ = app.update(Message::Rooms(RoomsEvent::Submit));
         let _ = app.update(Message::Rooms(RoomsEvent::Show(Some(0))));
+        // 1450: the room's menu is the scene's, "Leave room" among it.
+        let menu = app
+            .seen
+            .scene
+            .rooms
+            .as_ref()
+            .and_then(|r| r.open.as_ref())
+            .map(|o| o.menu.clone())
+            .expect("the open room's menu");
+        let leave = menu
+            .iter()
+            .find(|v| v.event == RoomsEvent::Leave)
+            .expect("Leave room");
+        let _ = app.update(Message::Rooms(leave.event.clone()));
         assert_eq!(
             told(&mut rx),
             vec![
                 UiEvent::Rooms(RoomsEvent::Typed("hi".into())),
                 UiEvent::Rooms(RoomsEvent::Submit),
                 UiEvent::Rooms(RoomsEvent::Show(Some(0))),
+                UiEvent::Rooms(RoomsEvent::Leave),
             ]
         );
 

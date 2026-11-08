@@ -1705,24 +1705,26 @@ pub fn draw_screen(
     }
 }
 
-/// The Rooms tab (1379) over the whole terminal: the hub's line on top,
-/// the rooms on the left, the open room on the right under the one line
-/// that says what a room is not, the input line at the bottom and, under
-/// it, what it does or the toast.
+/// The Rooms tab (1379, as a chat since 1450) over the whole terminal:
+/// the tab's name on top with how the link stands while it is not up,
+/// the rooms on the left, the open room on the right as the chat pane
+/// draws a conversation (another's bubbles on the left behind their bar,
+/// the writer named over a run, ours on the right, the comings and goings
+/// as quiet lines in the middle), its people in the pane's title, the
+/// compose field with its hint at the bottom and, under it, the keys or
+/// the toast.
 fn draw_rooms(frame: &mut Frame, model: &Model) {
-    use loquax::ui::rooms::{self, RoomLineKind};
     use loquax::ui::strings::{StrId, Text as Said};
     let lang = model.lang;
-    let node = rooms::node(model);
+    let node = loquax::ui::rooms::node(model);
     let area = frame.area();
     if area.height < 6 || area.width < 20 {
         return;
     }
-    let title = format!(
-        "{} · {}",
-        Said::key(StrId::TabRooms).resolve(lang),
-        node.hub.resolve(lang)
-    );
+    let mut title = Said::key(StrId::TabRooms).resolve(lang);
+    if let Some(status) = &node.status {
+        title = format!("{title} · {}", status.resolve(lang));
+    }
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             title,
@@ -1743,12 +1745,16 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
         .rows
         .iter()
         .map(|row| {
-            let mark = if row.selected { "▸ " } else { "  " };
+            let mark = if row.selected { "▌" } else { " " };
             let unread = match row.unread {
                 0 => String::new(),
                 n => format!(" ({n})"),
             };
-            Line::from(format!("{mark}{}{unread}", row.name))
+            let style = match row.unread {
+                0 => Style::default(),
+                _ => Style::default().add_modifier(Modifier::BOLD),
+            };
+            Line::from(Span::styled(format!("{mark}{}{unread}", row.name), style))
         })
         .collect();
     frame.render_widget(
@@ -1759,32 +1765,26 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
         )),
         list,
     );
+    let inner_width = usize::from(room.width.saturating_sub(2));
     let (name, mut lines) = match &node.open {
         Some(open) => {
-            let mut lines = vec![Line::from(Span::styled(
-                open.live.resolve(lang),
-                Style::default().add_modifier(Modifier::ITALIC),
-            ))];
-            lines.extend(open.lines.iter().map(|line| {
-                let who = line.who.resolve(lang);
-                let text = line.text.resolve(lang);
-                Line::from(match line.kind {
-                    RoomLineKind::Said(leviculum_rrc::LineKind::Msg) => format!("{who}: {text}"),
-                    RoomLineKind::Said(leviculum_rrc::LineKind::Action) => {
-                        format!("* {who} {text}")
-                    }
-                    RoomLineKind::Said(leviculum_rrc::LineKind::Notice) => {
-                        format!("-{who}- {text}")
-                    }
-                    RoomLineKind::Joined | RoomLineKind::Parted | RoomLineKind::Hub => {
-                        format!("— {text}")
-                    }
-                    RoomLineKind::Error => format!("! {text}"),
-                })
-            }));
-            (open.name.clone(), lines)
+            let name = format!("{} · {}", open.name, open.subtitle.resolve(lang));
+            (name, room_lines(open, inner_width, lang))
         }
-        None => (String::new(), Vec::new()),
+        None => {
+            let empty = node.empty.as_ref().map(|e| e.resolve(lang));
+            let lines = empty
+                .map(|e| {
+                    centred(
+                        &e,
+                        inner_width,
+                        Style::default().add_modifier(Modifier::DIM),
+                    )
+                })
+                .into_iter()
+                .collect();
+            (String::new(), lines)
+        }
     };
     // The newest lines that fit, the room's one line kept on top.
     let inner = usize::from(room.height.saturating_sub(2));
@@ -1794,24 +1794,160 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
         lines = std::iter::once(live).chain(keep).collect();
     }
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(pane_block(&name, false, Borders::ALL)),
+        Paragraph::new(lines).block(pane_block(&name, false, Borders::ALL)),
         room,
     );
     let input = Rect::new(area.x, area.y + area.height - 4, area.width, 3);
+    let field = match node.input.is_empty() {
+        true => Line::from(vec![
+            Span::raw("▏"),
+            Span::styled(
+                node.placeholder.resolve(lang),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ]),
+        false => Line::from(format!("{}▏", node.input)),
+    };
     frame.render_widget(
-        Paragraph::new(format!("{}▏", node.input)).block(pane_block("", true, Borders::ALL)),
+        Paragraph::new(field).block(pane_block("", true, Borders::ALL)),
         input,
     );
     let foot = match model.current_toast() {
         Some(toast) => toast.text.clone(),
-        None => node.hint.resolve(lang),
+        None if node.open.is_some() => {
+            "Enter send │ Ctrl-p who is here │ Ctrl-l leave room │ Esc back".to_string()
+        }
+        None => "Enter join │ ↑↓ rooms │ Esc chats".to_string(),
     };
     frame.render_widget(
         Paragraph::new(foot),
         Rect::new(area.x, area.y + area.height - 1, area.width, 1),
     );
+}
+
+/// The open room's lines as the chat pane draws a conversation (1450):
+/// the one line on what a room is not in the middle, then each line a
+/// bubble or a quiet line; with the header tapped, its people instead.
+fn room_lines(open: &loquax::ui::rooms::RoomView, width: usize, lang: Lang) -> Vec<Line<'static>> {
+    use loquax::ui::rooms::RoomLineKind;
+    let quiet = Style::default().add_modifier(Modifier::DIM);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(people) = &open.people {
+        lines.push(Line::from(Span::styled(
+            open.people_note.resolve(lang),
+            quiet,
+        )));
+        lines.extend(
+            people
+                .iter()
+                .map(|p| Line::from(format!(" {}", p.resolve(lang)))),
+        );
+        return lines;
+    }
+    for live in wrap_cols(&open.live.resolve(lang), width.saturating_sub(4).max(8)) {
+        lines.push(centred(&live, width, quiet.add_modifier(Modifier::ITALIC)));
+    }
+    let bubble = (width * 3 / 4).max(12);
+    for line in &open.lines {
+        let text = line.text.resolve(lang);
+        if !line.bubble {
+            let mark = match line.kind {
+                RoomLineKind::Error => "! ",
+                _ => "",
+            };
+            lines.push(centred(&format!("── {mark}{text} ──"), width, quiet));
+            continue;
+        }
+        let action = matches!(
+            line.kind,
+            RoomLineKind::Said(leviculum_rrc::LineKind::Action)
+        );
+        let said = match action {
+            true => format!("{} {text}", line.who.resolve(lang)),
+            false => text,
+        };
+        let style = match action {
+            true => Style::default().add_modifier(Modifier::ITALIC),
+            false => Style::default(),
+        };
+        let time = line.time.clone().unwrap_or_default();
+        if line.named {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(" {}", line.who.resolve(lang)),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+        } else if line.ours {
+            lines.push(Line::from(""));
+        }
+        let mut wrapped = wrap_cols(&said, bubble.saturating_sub(time.len() + 3));
+        if let Some(last) = wrapped.last_mut() {
+            if !time.is_empty() {
+                last.push_str("  ");
+                last.push_str(&time);
+            }
+        }
+        for row in wrapped {
+            match line.ours {
+                true => {
+                    let pad = width.saturating_sub(leviculum_ui::text::fit_width(&row) + 1);
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(row, style),
+                    ]));
+                }
+                false => lines.push(Line::from(vec![Span::raw("▌"), Span::styled(row, style)])),
+            }
+        }
+    }
+    lines
+}
+
+/// `text` in the middle of `width` cells.
+fn centred(text: &str, width: usize, style: Style) -> Line<'static> {
+    let pad = width.saturating_sub(leviculum_ui::text::fit_width(text)) / 2;
+    Line::from(vec![
+        Span::raw(" ".repeat(pad)),
+        Span::styled(text.to_string(), style),
+    ])
+}
+
+/// `text` in rows of at most `cols` cells, broken between words, a word
+/// longer than a row cut.
+fn wrap_cols(text: &str, cols: usize) -> Vec<String> {
+    let cols = cols.max(1);
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for word in text.split(' ') {
+        let mut word = word.to_string();
+        loop {
+            let used = leviculum_ui::text::fit_width(&row);
+            let len = leviculum_ui::text::fit_width(&word);
+            let gap = usize::from(!row.is_empty());
+            if used + gap + len <= cols {
+                if gap == 1 {
+                    row.push(' ');
+                }
+                row.push_str(&word);
+                break;
+            }
+            if !row.is_empty() {
+                rows.push(std::mem::take(&mut row));
+                continue;
+            }
+            let head = leviculum_ui::text::truncate_to_cols(&word, cols);
+            let rest = word[head.len()..].to_string();
+            rows.push(head);
+            if rest.is_empty() {
+                break;
+            }
+            word = rest;
+        }
+    }
+    if !row.is_empty() || rows.is_empty() {
+        rows.push(row);
+    }
+    rows
 }
 
 /// The hosted browser as the terminal draws it: the messenger's theme and
@@ -2222,7 +2358,7 @@ mod tests {
             RoomsEvent::Line {
                 room: "#lab".into(),
                 kind: LineKind::Msg,
-                text: "rrc line, thirty-one bytes long".into(),
+                text: "a line, twenty-five bytes".into(),
                 nick: Some("bob".into()),
                 ours: false,
                 ts_ms: 1_793_702_757_876,
@@ -2252,8 +2388,22 @@ mod tests {
         }
         let room = whole_screen(&model);
         assert!(room.contains("A room is live"), "{room}");
-        assert!(room.contains("you: hello bob"), "{room}");
+        assert!(room.contains("hello bob"), "{room}");
+        // 1450 (walk 1, finding 20): a chat, no IRC on the screen, and
+        // the field's hint once.
+        for irc in ["/me", "/part", "Hub", "rrc", "* bob", "you:"] {
+            assert!(!room.contains(irc), "{irc:?} in\n{room}");
+        }
+        assert!(room.contains("#lab · bob, you"), "the people in the title");
+        assert!(room.contains("▏Message"), "the hint in the field");
+        assert_eq!(room.matches("Message").count(), 1, "said once\n{room}");
         same_text("tui-rooms-room.txt", &room);
+        // The header's people, then back.
+        let ctrl = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        update(&mut model, ctrl('p'));
+        let people = whole_screen(&model);
+        assert!(people.contains("Everyone who came in or wrote"), "{people}");
+        update(&mut model, ctrl('p'));
 
         // Typed and sent: the line goes to the room.
         for c in "hi".chars() {

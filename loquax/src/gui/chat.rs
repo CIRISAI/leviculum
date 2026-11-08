@@ -24,8 +24,8 @@
 //! its bar, as the phone stacks them.
 
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, text, text_editor, toggler, tooltip,
-    Space,
+    button, column, container, mouse_area, row, scrollable, text, text_editor, text_input, toggler,
+    tooltip, Space,
 };
 use iced::{border, mouse, Alignment, Background, Border, Color, Element, Length, Theme};
 use std::collections::HashMap;
@@ -54,6 +54,9 @@ use super::{App, Message};
 
 /// The list's width, in logical pixels.
 pub const LIST_WIDTH: f32 = 340.0;
+
+/// A room's bubble's avatar, beside the first of another's run (1450).
+const ROOM_FACE: f32 = 28.0;
 
 /// The search field's id: the top bar's search focuses it.
 pub const SEARCH_FIELD: &str = "search";
@@ -408,6 +411,264 @@ impl App {
             background: Some(Background::Color(colour(t.background))),
             ..container::Style::default()
         })
+        .into()
+    }
+
+    /// The Rooms tab (1379), a room as a chat (1450, walk 1 finding 20):
+    /// the rooms as list rows with their avatars beside the open room,
+    /// whose bar is a chat's (avatar, name, the people seen under it, a
+    /// press on it shows them, the menu with "Leave room"), its lines as
+    /// bubbles (another's run named once with the writer's avatar, ours
+    /// on the right in the accent) and the comings and goings as quiet
+    /// lines in the middle; the compose field with its hint once, and a
+    /// line under it only for a toast.
+    pub(super) fn rooms_pane(&self) -> Element<'_, Message> {
+        use loquax::ui::rooms::RoomsEvent;
+        let Some(node) = &self.seen.scene.rooms else {
+            return Space::new().into();
+        };
+        let t = self.tokens();
+        let lang = self.lang;
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let rows = node
+            .rows
+            .iter()
+            .enumerate()
+            .fold(column![].spacing(2), |list, (i, room)| {
+                let mut line = row![
+                    avatar(&room.avatar, size::BAR_AVATAR, t),
+                    text(room.name.clone())
+                        .size(size::ROW_NAME)
+                        .color(ink)
+                        .width(Length::Fill),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center);
+                if room.unread > 0 {
+                    line = line.push(chrome::badge(
+                        room.unread,
+                        size::BADGE_TEXT,
+                        size::BADGE_CORNER,
+                        palette(t),
+                    ));
+                }
+                list.push(chrome::list_item(
+                    container(line).padding([8, 12]),
+                    room.selected,
+                    Message::Rooms(RoomsEvent::Show(Some(i))),
+                    palette(t),
+                ))
+            });
+        let mut left = column![].spacing(6);
+        if let Some(status) = &node.status {
+            left = left
+                .push(container(text(status.resolve(lang)).size(14).color(quiet)).padding([8, 12]));
+        }
+        let left = container(left.push(scrollable(rows).height(Length::Fill)))
+            .width(Length::Fixed(260.0))
+            .height(Length::Fill)
+            .padding([8, 0]);
+        let room: Element<'_, Message> = match &node.open {
+            Some(open) => self.room_chat(open, t),
+            None => container(
+                text(
+                    node.empty
+                        .as_ref()
+                        .map(|e| e.resolve(lang))
+                        .unwrap_or_default(),
+                )
+                .size(17)
+                .color(quiet),
+            )
+            .center(Length::Fill)
+            .into(),
+        };
+        let field = text_input(&node.placeholder.resolve(lang), &node.input)
+            .on_input(|typed| Message::Rooms(RoomsEvent::Typed(typed)))
+            .on_submit(Message::Rooms(RoomsEvent::Submit))
+            .size(size::BODY)
+            .padding([10, 16])
+            .style(move |theme: &Theme, status| {
+                let mut style = text_input::default(theme, status);
+                style.background = Background::Color(colour(t.bar));
+                style.border = border::rounded(size::COMPOSE_CORNER);
+                style
+            });
+        let mut right = column![room, container(field).padding([8, 12])];
+        // A toast in the window's notice; nothing else under the field:
+        // its hint is said in it, once.
+        if let Some(notice) = &self.seen.notice {
+            right =
+                right.push(container(text(notice.clone()).size(13).color(quiet)).padding([0, 16]));
+        }
+        container(row![left, right.width(Length::Fill)].height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// The open room as a chat: its bar, its people or its lines.
+    fn room_chat<'a>(
+        &'a self,
+        open: &'a loquax::ui::rooms::RoomView,
+        t: Colours,
+    ) -> Element<'a, Message> {
+        use loquax::ui::rooms::{RoomLineKind, RoomsEvent};
+        let lang = self.lang;
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let people_shown = open.people.is_some();
+        // The bar: a press on the avatar and the names shows the people,
+        // as a group's header does; the menu's verbs beside.
+        let head = flat(
+            row![
+                avatar(&open.avatar, size::BAR_AVATAR, t),
+                column![
+                    text(open.name.clone()).size(size::BAR_NAME).color(ink),
+                    text(open.subtitle.resolve(lang)).size(13).color(quiet),
+                ]
+                .spacing(2),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            Message::Rooms(RoomsEvent::People(!people_shown)),
+        )
+        .width(Length::Fill);
+        let mut bar = row![head].spacing(12).align_y(Alignment::Center);
+        for verb in &open.menu {
+            bar = bar.push(link(
+                &verb.label.resolve(lang),
+                Message::Rooms(verb.event.clone()),
+                t,
+            ));
+        }
+        let bar = container(bar)
+            .height(size::BAR)
+            .padding([0, 12])
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.bar))),
+                ..container::Style::default()
+            });
+        if let Some(people) = &open.people {
+            let list = people.iter().fold(
+                column![text(open.people_note.resolve(lang)).size(14).color(quiet)].spacing(10),
+                |list, who| {
+                    let name = who.resolve(lang);
+                    list.push(
+                        row![
+                            avatar(&loquax::ui::rooms::avatar(&name), size::BAR_AVATAR, t),
+                            text(name).size(size::ROW_NAME).color(ink),
+                        ]
+                        .spacing(12)
+                        .align_y(Alignment::Center),
+                    )
+                },
+            );
+            return column![
+                bar,
+                scrollable(container(list).padding([16, 16])).height(Length::Fill)
+            ]
+            .into();
+        }
+        let width = self.chat_width() - 260.0;
+        let note = |words: String| {
+            container(text(words).size(size::DAY).color(quiet))
+                .center_x(Length::Fill)
+                .padding(iced::Padding::ZERO.top(8).bottom(4))
+        };
+        let mut list = column![note(open.live.resolve(lang))].padding([0, 12]);
+        for line in &open.lines {
+            if !line.bubble {
+                let said = line.text.resolve(lang);
+                list = list.push(note(match line.kind {
+                    RoomLineKind::Error => format!("! {said}"),
+                    _ => said,
+                }));
+                continue;
+            }
+            let ours = line.ours;
+            let (ground, ink, meta) = match ours {
+                true => (t.bubble_ours, t.bubble_ours_text, t.bubble_ours_meta),
+                false => (t.bubble_theirs, t.bubble_theirs_text, t.bubble_theirs_meta),
+            };
+            let (ground, ink, meta) = (colour(ground), colour(ink), colour(meta));
+            list = list.push(Space::new().height(match line.named || ours {
+                true => size::GAP,
+                false => size::GAP_GROUPED,
+            }));
+            if line.named {
+                list = list.push(
+                    container(
+                        text(line.who.resolve(lang))
+                            .size(13)
+                            .color(colour(t.accent)),
+                    )
+                    .padding(iced::Padding::ZERO.left(ROOM_FACE + 8.0)),
+                );
+            }
+            let action = matches!(
+                line.kind,
+                RoomLineKind::Said(leviculum_rrc::LineKind::Action)
+            );
+            let said = match action {
+                true => format!("{} {}", line.who.resolve(lang), line.text.resolve(lang)),
+                false => line.text.resolve(lang),
+            };
+            let mut words = text(said).size(size::BODY).color(ink);
+            if action {
+                words = words.font(iced::Font {
+                    style: iced::font::Style::Italic,
+                    ..iced::Font::DEFAULT
+                });
+            }
+            let mut inside = column![words].spacing(4);
+            if let Some(time) = &line.time {
+                inside = inside.push(
+                    container(text(time.clone()).size(size::META).color(meta))
+                        .align_right(Length::Shrink),
+                );
+            }
+            let shape = container(inside)
+                .padding([8, 12])
+                .max_width(width * size::BUBBLE_PART)
+                .style(move |_: &Theme| container::Style {
+                    background: Some(Background::Color(ground)),
+                    border: border::rounded(size::CORNER),
+                    ..container::Style::default()
+                });
+            // Another's bubble stands beside its writer's avatar, the
+            // first of a run; the rest of the run keeps its place.
+            let face: Element<'_, Message> = match (&line.avatar, ours) {
+                (_, true) => Space::new().into(),
+                (Some(a), false) => avatar(a, ROOM_FACE, t),
+                (None, false) => Space::new().width(ROOM_FACE).into(),
+            };
+            let side: Element<'_, Message> = match ours {
+                true => container(shape).align_right(Length::Fill).into(),
+                false => row![face, shape]
+                    .spacing(8)
+                    .align_y(Alignment::Start)
+                    .into(),
+            };
+            list = list.push(side);
+        }
+        list = list.push(Space::new().height(size::GAP));
+        column![
+            bar,
+            soft(
+                scrollable(list)
+                    .anchor_bottom()
+                    .height(Length::Fill)
+                    .width(Length::Fill)
+            ),
+        ]
         .into()
     }
 

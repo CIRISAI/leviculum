@@ -115,7 +115,7 @@ async fn the_phone_joins_a_room_and_its_line_comes_back_as_you() {
         assert!(closed.enabled && !closed.open, "the tab is there, closed");
         rooms(&s, "tab", "", 0);
         let welcomed = until(&s, 60, "the hub's welcome", |shown| {
-            shown.hub.contains("periculum")
+            shown.open && shown.status.is_empty()
         });
         assert!(welcomed.open && welcomed.room.is_empty(), "{welcomed:?}");
         rooms(&s, "say", "#lab", 0);

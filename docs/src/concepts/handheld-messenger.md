@@ -1305,7 +1305,7 @@ The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
 a branch in `lines` (`loquax-m9/src/screen.rs:224`) for the scene's
-`rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:592`), which
+`rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:709`), which
 the model already returns while the tab is in front (`rooms_scene`,
 `loquax/src/ui/scene.rs:1178`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
@@ -1314,7 +1314,7 @@ as `who text`, and one input line at the bottom on the chat's editor
 (`loquax-m9/src/field.rs:20`), nicks through `narrow` as every other
 text. In the key table it needs no verbs of its own: while the tab is in
 front the model takes the terminal's keys itself (`key`,
-`loquax/src/ui/rooms.rs:421`: characters into the line, Backspace,
+`loquax/src/ui/rooms.rs:465`: characters into the line, Backspace,
 Enter sends, Up and Down step the rooms, Esc closes the room and then
 the tab), so a `ROOMS_ROWS` table beside `LIST_ROWS` and `CHAT_ROWS` in
 `loquax-m9/src/keys.rs` maps the M9's navigation keys, Enter, back,
@@ -1327,7 +1327,7 @@ on tokio (`loquax/src/rooms_link.rs`, behind `std`), so the board drives
 `leviculum_rrc::Session` (`no_std` already) over a link of its own once
 its executor over `leviculum-core` exists, or its home relays the room;
 and a room keeps up to 500 lines of up to 350 bytes (`LINES_KEPT`,
-`loquax/src/ui/rooms.rs:30`), which the census has to count before the
+`loquax/src/ui/rooms.rs:39`), which the census has to count before the
 M9 keeps as many.
 
 ### The board's node and the client's board half (1414)
