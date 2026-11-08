@@ -288,9 +288,7 @@ fn census() {
     // census held a chat draw to 0 B before 1541 and went red at 64 B:
     // six keys of eight bytes in a list grown by push to room for eight
     // (1581). Up to twice the keys' bytes are the list's; more is a leak.
-    let seen_bytes = renderer
-        .seen()
-        .map_or(0, core::mem::size_of_val) as isize;
+    let seen_bytes = renderer.seen().map_or(0, core::mem::size_of_val) as isize;
     println!(
         "open chat first draw: held {chat_draw_held} B, {seen_bytes} B of them the keys it \
          showed, peak {chat_draw_peak} B, stack {chat_draw_stack} B"
