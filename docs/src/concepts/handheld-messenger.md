@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:840`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:842`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1110,7 +1110,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
   feature range-checked. The region's tiles are already geometry; there
   is no other decode.
 - **Pixels** is the map core's filler painting the view straight into
-  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:738`); the
+  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:732`); the
   whole screen adds the bar's and the legend's cells and the pins
   (`Renderer::show`, `loquax-m9/src/render.rs:226`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
@@ -1129,7 +1129,7 @@ in place:
 | the 2 km region, z10 to z15 | 820,244 B | flash, read in place: none in PSRAM |
 | the fixture region the image carries | 197,972 B | flash |
 | the view's tiles, read out of a card instead | 81,850 to 201,070 B | PSRAM, per view |
-| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:694`) | 217,508 B | PSRAM |
+| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:688`) | 217,508 B | PSRAM |
 | a map draw's heap peak (census, below) | 75,404 B | PSRAM |
 | the cells' own per view, besides the painter's (source and cells) | 191,436 B braille, 120,204 B quadrants | PSRAM |
 | the panel's frame | 153,600 B | SRAM or PSRAM |
@@ -1152,7 +1152,7 @@ renderer is written twice; the cell renderer keeps the bar and the
 legend.
 
 **The screen** (`lines`, `loquax-m9/src/map.rs:221`; `pins`,
-`loquax-m9/src/map.rs:784`), as 1531 left it after Lew's evening at
+`loquax-m9/src/map.rs:778`), as 1531 left it after Lew's evening at
 the board on 2026-11-07: the map is in the light table, in the M9's
 finish (square caps, no casings, no buildings); the UI around it keeps
 its dark tokens. There is no title row and no legend: the picture is
@@ -1174,7 +1174,7 @@ cells first, every row in the map's ground, then the map over them, the
 names, the pins and the words; ratatui draws only cells that changed,
 so the next map leaves the blank rows alone, and the renderer clears
 its cells when the screen leaves the map (`leave_map`,
-`loquax-m9/src/render.rs:318`), or the list would keep map pixels where
+`loquax-m9/src/render.rs:320`), or the list would keep map pixels where
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
@@ -1907,6 +1907,43 @@ F5 the bubbles, the house, the square bubble, the pin and the map, the
 letters the QWERTY block (`+`, `-`, `t`, `y` the map's), the page and the
 last `KEY` line in the title. It builds for the host's own triple, as
 `loquax gui` does.
+
+### The map's picture, the boot's census and the bench walk (1554)
+
+**The picture's key is the view and the pins.** Window 13 showed the kept
+picture (1507) drawn three times on one open of the map: at the open,
+when the key hint's row went after 3 s, when the corner credit went
+after 5 s; and Map, Back, Map after 7 s drew it again (`kept=0
+picture_ms=142`). The key carried the cells the names kept clear of the
+words, and the picture was the shorter one while the bottom row had
+words. Now the picture always takes the bottom row and its names keep
+clear of the pins only; the hint, the pin's card and the credit are
+drawn over the copy (`Renderer::show`, `loquax-m9/src/render.rs:226`;
+`Kept`, `loquax-m9/src/map.rs:913`), so a word that goes uncovers the
+picture kept under it. A name under a word stays hidden while the word
+stands. `the_words_over_the_map_never_draw_its_picture_again`
+(`loquax-m9/tests/map.rs:219`) walks the board's chrome clock: open with
+hint and credit, the hint's second page, both gone, Back, Map: one
+picture drawn, three copied back, every frame a fresh uncached draw's.
+Under the old key it counts two drawn. `Kept::copied` counts copies
+instead of draws; a draw's own copy is not counted.
+
+**The census in the reader's size.** 1532's census walked every screen
+in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
+A release boot now walks the reader's size only; the bench image walks
+both (`thinknode_m9.rs:2102`).
+
+**The walk.** `expect <field> changed` waits for a `[PAGE]` line that
+moves the field, up to 1 s after the action began
+(`CHANGED_WAIT_S`, `scripts/m9-walk.py:112`): T on the map flushes the
+hint's row first and says the zoom about 400 ms later. `key_ms` still
+measures the first flush after the key, and walk.md names its `rows=`.
+The house key opens the house page after its tap's 300 ms gap
+(`GAP_MS`, `loquax-m9/src/house.rs:43`), so its bar is that much longer
+(`HOUSE_GAP_MS`, `scripts/m9-walk.py:109`); `bench.walk` waits for
+`page=house` and leaves it with Back. An lnsd on the proxy's pty
+re-attaches by itself after a flash; a second one is refused with
+"shared-instance name already served" (`scripts/m9-walk.sh`).
 
 ### Tracks on the M9 (1385, not built)
 
