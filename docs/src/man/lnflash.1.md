@@ -13,7 +13,7 @@ lnflash -- flash, configure and watch LNode boards
 
 ## DESCRIPTION
 
-**lnflash** brings an LNode board up on the firmware bundle beside the binary: it finds attached boards, brings each into its bootloader, confirms from the bootloader what the board is, checks the SoftDevice precondition and writes. After a flash it offers radio settings and a telemetry target. It needs no network and no external programs; writing needs root because the bootloader drive is a root:disk block device.
+**lnflash** brings an LNode board up on the firmware bundle beside the binary: it finds attached boards, brings each into its bootloader, confirms from the bootloader what the board is, checks the SoftDevice precondition and writes. It asks nothing: starting it is the decision to flash every board it recognises and has an image for, and **--dry-run** shows what that would do. Serial devices it does not know (an ESP32 RNode, a ThinkNode M9) get one line each and are left alone; lnflash does not flash ESP32 boards. After a flash the radio is settled without a question: stored settings other than the shipped eu868 profile are kept, otherwise the board gets the preset the host's time zone (or locale) names, eu868 where none does. Telemetry and remote management stay off. A port another program holds (lnsd's serial medium opens every LNode's transport port) is named with its holder and left alone. **--ask** puts every one of these decisions as a question. It needs no network and no external programs; writing needs root because the bootloader drive is a root:disk block device.
 
 The configure sessions (**--set-** *something*) talk to boards that are already running and never flash: activation is configuration, not firmware. Each session ends the run, so only one of them can be given at a time.
 
@@ -25,10 +25,13 @@ The configure sessions (**--set-** *something*) talk to boards that are already 
 :   Where the bundle is. Otherwise $LNFLASH_BUNDLE, then next to the binary, then /usr/share/lnflash.
 
 **--board** *name*
-:   A board model that is present; repeatable. A board whose model is not named is skipped and nothing is written to it; one found running is decided on its USB ID before the 1200-baud touch, and is not touched ("not named, not touched"). A Board-ID several models share is written without a question only when its model is named, which is how an unattended run under **--yes** flashes boards one owns: **--board t114 --board rak4631 --yes**.
+:   A board model that is present; repeatable. A board whose model is not named is skipped and nothing is written to it; one found running is decided on its USB ID before the 1200-baud touch, and is not touched ("not named, not touched"). A Board-ID several models share is written without a question only when its model is named, or when the board was running our own image for that model (a re-flash: our USB ID and manufacturer string, settled before the touch), which is how an unattended run under **--yes** flashes boards one owns: **--board t114 --board rak4631 --yes**.
 
 **--dry-run**
 :   Report what is attached and what would happen; change nothing. A board in application mode is not rebooted into its bootloader. A board already in its bootloader is identified only under root, because reading `INFO_UF2.TXT` means mounting it; a question the identity step would ask is reported as "would ask", and an identity a real run would refuse as "would be refused". A dry run refuses nothing itself.
+
+**--ask**
+:   Ask instead of deciding: the overwrite question for every board, the radio menu (eu868, us915, au915, custom), and the telemetry and remote-management questions, each defaulting to no.
 
 **--yes**
 :   Answer yes to every confirmation but one. Writing a board at level *expected* (wiring checked, never run by us) needs the word yes typed at its question, by a person or piped in, and **--yes** deliberately never gives it: that question is asked before the 1200-baud touch, so the board is refused untouched and keeps running. Fails rather than waits when a board needs a physical double-tap.
@@ -37,10 +40,10 @@ The configure sessions (**--set-** *something*) talk to boards that are already 
 :   Verify the bundle's manifest and payload checksums, then exit.
 
 **--radio-preset** *name*, **--radio-freq** *hz*, **--radio-bw** *hz*, **--radio-sf** *n*, **--radio-cr** *n*, **--radio-txpower** *dbm*, **--no-radio**
-:   The radio settings written after a flash. A preset (eu868, us915, au915) and explicit values are two ways to state one configuration; pick one. **--no-radio** leaves the board's stored settings alone.
+:   The radio settings written after a flash, instead of the estimate. A preset (eu868, us915, au915) and explicit values are two ways to state one configuration; pick one. **--no-radio** leaves the board's stored settings alone. Without any of them the estimate rule applies: a board reporting stored settings other than the shipped eu868 profile keeps them; otherwise the preset of the host's country is sent, the country read from the time zone (`$TZ`, `/etc/timezone`, `/etc/localtime`, through `zone.tab`) and, failing that, the locale's territory (`$LC_ALL`, `$LC_MEASUREMENT`, `$LANG`): eu868 in CEPT Europe, us915 in the US, Canada and Mexico, au915 in Australia and New Zealand, the shipped eu868 elsewhere, each said with its reason.
 
 **--telemetry** *address*, **--telemetry-profile** *name*, **--telemetry-key** *hex*, **--no-telemetry**
-:   The telemetry target offered after a flash, or the answer for **--set-telemetry**.
+:   The telemetry target sent after a flash, or the answer for **--set-telemetry**. Without them a flash sends none; **--telemetry-profile** alone, or **--ask**, asks for the address.
 
 **--quiet**
 :   Print less. With **--watch**, print nothing (an **--out** file is then required).

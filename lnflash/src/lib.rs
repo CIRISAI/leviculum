@@ -34,6 +34,7 @@ pub mod name;
 pub mod pn_list;
 pub mod position;
 pub mod radio;
+pub mod region;
 pub mod softdevice;
 pub mod summarize;
 pub mod sys;

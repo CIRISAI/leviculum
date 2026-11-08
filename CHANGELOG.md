@@ -512,6 +512,18 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- `lnflash` asks nothing (#476, 1573): starting it flashes every board it
+  recognises. The overwrite question is gone; the radio is estimated
+  (stored settings other than the shipped eu868 are kept, otherwise the
+  preset of the host's country, read from the time zone and then the
+  locale: eu868, us915 or au915, eu868 where none applies); telemetry and
+  remote management are not asked and stay off. A board that ran our own
+  image settles a shared Board-ID without the name question. `--ask` puts
+  every question back. Unknown serial devices (an M9, an ESP32 RNode) get
+  one line and are left alone, a port lnsd or another program holds is
+  named with its holder instead of read half-blind, and a missing bundle
+  says where to get one. The ESP32 transport no run reached is removed.
+
 - Loss-aware path choice is the default on radio interfaces (Codeberg
   #230, 1380). With no `path_choice` in `[reticulum]`, an RNode interface
   (a multi-RNode vport and a hot-plugged one included) and the BLE

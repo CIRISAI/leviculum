@@ -67,6 +67,10 @@ pub enum TelemetryPlan {
     /// at the prompt, which sends nothing at all — a board that has a target
     /// stored keeps it unless somebody says to clear it.
     Clear,
+    /// Send nothing and ask nothing: the zero-config flash (#476), where the
+    /// answer to the question would be its default, no. A board that has a
+    /// target stored keeps it.
+    Skip,
 }
 
 impl Default for TelemetryPlan {
@@ -91,6 +95,7 @@ pub fn resolve(ui: &mut dyn Ui, plan: &TelemetryPlan) -> io::Result<Option<Telem
     let profile = match plan {
         TelemetryPlan::Clear => return Ok(Some(clear_target())),
         TelemetryPlan::Fixed(target) => return Ok(Some(*target)),
+        TelemetryPlan::Skip => return Ok(None),
         TelemetryPlan::Ask { profile } => *profile,
     };
 

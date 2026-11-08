@@ -35,76 +35,48 @@ an advanced view.
 
 ### Where the tool stands against the goal
 
-Read from `lnflash/src/`, its README and `lnflash(1)` on 2026-10-26.
-This is a reading, not the audit; the end-to-end audit with a test per
-path is #476's task 1.
+Audited 2026-11-08 against `lnflash/src/` (#476 task 1). The reading of
+2026-10-26 before it found the tool asking at five places after a
+recognised board was found, with no estimate of region, and an ESP32
+transport no run reached. Each row names the mechanism, what it was on
+2026-10-26, what it is now, and the test that holds it
+(`lnflash/src/flow.rs` unless named otherwise).
 
-Automatic today:
+| step | 2026-10-26 | 2026-11-08 | test |
+| --- | --- | --- | --- |
+| bundle found | automatic: `--bundle`, `$LNFLASH_BUNDLE`, beside the binary, `/usr/share/lnflash` | automatic, same order; none found names where one comes from, `BUNDLE_SOURCE` (`lnflash/src/manifest.rs:74`) | `no_bundle_present_says_where_to_get_one` |
+| firmware choice | automatic: the found bundle's one image per board | automatic, unchanged: the first bundle in the order above, not the newest across bundles, because a binary and the bundle beside it come from one build and speak one control envelope | (bundle tests in `manifest.rs`) |
+| device recognised | automatic: USB IDs from `lnflash/catalogue.toml`, `find_candidates` (`lnflash/src/flow.rs:918`); lnsd's serial medium reads the same table (`CATALOGUE`, `leviculum-std/src/auto_serial.rs:182`) | automatic, unchanged; by-id paths for every open | `candidates_are_found_by_usb_id_and_labelled_as_hints_only` |
+| a stranger on the bus | silent: not a candidate, never mentioned | one line, left alone: every serial device no entry claims, `strangers` (`lnflash/src/flow.rs:1136`); a USB-serial bridge's tty is now read too, `interface_tty` (`lnflash/src/usb.rs:375`), so a CH340 (the M9, an ESP32 RNode) counts | `a_stranger_is_left_alone_with_one_line`, `a_usb_serial_bridge_shows_its_tty_like_a_cdc_function_does` |
+| enter the bootloader | automatic: the 1200-baud touch; a double-tap asked of a person when none answered | unchanged, `enter_bootloader` (`lnflash/src/flow.rs:4288`). The double-tap is hands, not a question, and only a board running firmware without the touch (or none) needs it | `zero_config_flashes_a_running_lnode_without_a_question` |
+| board already in its bootloader | flashed after the overwrite question | flashed, nothing asked | `zero_config_flashes_a_board_found_in_its_bootloader_without_a_question` |
+| identity | automatic from the bootloader, `resolve_identity` (`lnflash/src/flow.rs:560`) | unchanged | `the_board_the_bootloader_names_is_the_board_that_gets_confirmed` |
+| shared Board-ID (HT-n5262) | asks for the board's name unless `--board` | settled without a question when the board was running our image for that model (our VID `1209`, our manufacturer string), `running_ours` (`lnflash/src/flow.rs:2941`); asked otherwise, `confirm_identity_after` (`lnflash/src/flow.rs:357`) | `a_shared_board_id_is_settled_by_our_running_image_and_asked_otherwise`, `only_our_running_image_on_our_id_names_the_board` |
+| level *expected* | asks for a typed yes | unchanged, `put_level_question` (`lnflash/src/flow.rs:421`); no board is at that level today | `a_running_expected_board_without_a_yes_is_refused_and_never_touched` |
+| overwrite | asked on both transports | asked only under `--ask`, `confirm_overwrite` (`lnflash/src/flow.rs:3558`) | `ask_brings_the_overwrite_question_back_and_a_no_writes_nothing` |
+| SoftDevice | automatic remedy, or a stop naming it | unchanged | the remedy tests |
+| write | automatic | unchanged | `a_t1000e_in_its_bootloader_is_flashed_over_serial_dfu` |
+| verify | automatic: `[FW_BUILD]` banner read back, `verify_boot` (`lnflash/src/flow.rs:4416`) | unchanged; another build named fails the run with exit 1 | `a_board_that_comes_back_naming_another_build_fails_the_flash` |
+| radio settings | asked, eu868 on Enter | estimated, `set_estimated_radio` (`lnflash/src/flow.rs:4075`): stored settings other than the shipped profile are kept; otherwise the host's country preset is sent, `estimate` (`lnflash/src/region.rs:170`): the time zone through `zone.tab`, then the locale's territory; eu868 in CEPT Europe, us915 in the US, Canada and Mexico, au915 in Australia and New Zealand, the shipped eu868 elsewhere, each said with its reason. `--ask` brings the menu back | `the_estimate_keeps_settings_the_board_already_stored`, `the_estimate_goes_to_a_board_on_the_shipped_profile`, `a_board_already_on_the_estimate_is_sent_nothing`, the `region` tests |
+| telemetry, remote management | asked, no on Enter | not asked, nothing sent (the old default answer); `--ask` asks | `the_flash_flow_asks_nothing_about_telemetry_or_management_and_sends_nothing` |
+| a port another program holds | silent: as root a `TIOCEXCL` port still opens, and the holder took half the answers | refused with the holder named, "stop lnsd or let it go", `held_port` (`lnflash/src/flow.rs:1411`), from the kernel's open-file table, `holders` (`lnflash/src/usb.rs:231`) | `a_port_lnsd_holds_is_refused_with_the_holder_named`, `a_holder_is_found_by_the_device_number_and_this_process_is_not_one` |
+| ESP32 boards | `lnflash/src/esp.rs` existed, no run reached it | not flashed by lnflash: the M9 and the ESP32 RNodes are strangers. The unreached module and its catalogue section were removed; commit 39071420 holds them for the M9 entry | `a_stranger_is_left_alone_with_one_line` |
+| not root | said in the first lines | unchanged | (cli tests) |
 
-- **Bundle discovery**: `--bundle`, then `$LNFLASH_BUNDLE`, then next to
-  the binary, then `/usr/share/lnflash` (`locate`,
-  `lnflash/src/manifest.rs:969`).
-- **The self check**: `--check-bundle` verifies the manifest and every
-  payload checksum (`verify_all`, `lnflash/src/main.rs:1069`).
-- **Entry** by the 1200-baud touch, then waiting for the bootloader
-  (`enter_bootloader`, `lnflash/src/flow.rs:3989`).
-- **Identity from the bootloader**, never from the running firmware
-  (`resolve_identity`, `lnflash/src/flow.rs:530`), the SoftDevice
-  precondition with its remedy, and the read back of the `[FW_BUILD]`
-  banner.
-- **Transports**: `uf2-msc` and `dfu-serial`, the two variants of
-  `Transport` (`lnflash/src/manifest.rs:129`). A third, the ESP32 ROM
-  loader through `espflash` or `esptool`, was written and removed again
-  with #476 because no flash run reached it (commit 39071420 holds it).
+**What still asks, and why a nine-in-ten user does not see it.** One
+question: the shared Board-ID, on the first flash of a Heltec board
+that is not yet running our image. Heltec publishes HT-n5262 for the
+T114, MeshSolar and Mesh Pocket, and only the first may take the T114
+image; on MeshSolar our status LED is the battery controller's shutdown
+input. A board bought with our firmware on it, and every later flash of
+a board once flashed, runs our image and is settled without a question.
+The level question exists for a board at *expected*, and no board is at
+that level today. Beside that, one step needs hands rather than an
+answer: the double-tap of a board whose firmware takes no touch.
 
-Where it asks:
-
-- A Board-ID several models publish, when `--board` does not name one:
-  type the board's name (`board_id_shared`,
-  `lnflash/src/flow.rs:365`).
-- A board at level *expected*: type yes, which `--yes` deliberately never
-  gives (`put_level_question`, `lnflash/src/flow.rs:408`).
-- "Overwrite the firmware on this board?" on both transports (`Cancelled`,
-  `lnflash/src/flow.rs:3353` and `lnflash/src/flow.rs:3532`).
-- A double-tap when no software trigger worked (`wait_for_human`,
-  `lnflash/src/flow.rs:4034`); under `--yes` this fails the board.
-- After the flash, without the matching flags: the radio settings, eu868
-  on Enter (`ask_for_radio`, `lnflash/src/flow.rs:3907`); remote status
-  queries, no on Enter (`ASK_MANAGEMENT`, `lnflash/src/mgmt.rs:111`);
-  telemetry, no on Enter (`ASK_TELEMETRY`, `lnflash/src/telemetry.rs:97`).
-
-Where it stops, nothing written:
-
-- No Board-ID (`NoBoardId`, `lnflash/src/flow.rs:539`); a Board-ID the
-  bundle does not carry (`UnknownBoard`, `lnflash/src/flow.rs:548`); the
-  wrong model for `--board` (`WrongBoard`, `lnflash/src/flow.rs:560`); a
-  shared Board-ID without the typed name (`AmbiguousBoardId`,
-  `lnflash/src/flow.rs:372`); level *expected* without the typed yes
-  (`NeedsConfirmation`, `lnflash/src/flow.rs:424`).
-- A dfu-serial bootloader on an ID no board claims (`UnknownBootloader`,
-  `lnflash/src/flow.rs:452`); a running ID shared beyond the boards
-  `--board` names (`SharedRunningId`, `lnflash/src/flow.rs:3119`); a
-  board touched into its bootloader that turns out not named
-  (`TouchedNotNamed`, `lnflash/src/flow.rs:3206`); a bootloader that
-  never appeared (`NoBootloader`, `lnflash/src/flow.rs:4053`).
-- A SoftDevice the bundle has no remedy for (`NoRemedy`,
-  `lnflash/src/flow.rs:2871`), or a remedy that did not take
-  (`RemedyDidNotTake`, `lnflash/src/flow.rs:658`).
-- Not root: said in the first lines (`is_root`,
-  `lnflash/src/main.rs:1076`), the run identifies and then cannot write.
-- An empty bus fails a real run (`lnflash/src/main.rs:1103`).
-
-No estimate yet:
-
-- **Region**: none is guessed. The offered default is always eu868
-  (`default_preset`, `lnflash/src/flow.rs:3897`).
-- **Radio settings**: a preset or the fields, prompted or given; nothing
-  is derived from the board or the place.
-- **Revision**: nothing in `lnflash/src/` reads a board revision; the
-  serial DFU init packet states `DEVICE_REVISION_ANY`
-  (`lnflash/src/dfu.rs:71`). Choice of image per revision: not checked.
-- Two boards of one kind, a failed flash and a pulled cable as zero
-  config paths: not checked here; that is the audit.
+Not checked here: board revision (the serial DFU init packet states
+`DEVICE_REVISION_ANY`, `lnflash/src/dfu.rs:71`), and the real-board run
+(an LNode, an RNode, the M9 as a stranger), which is the reviewer's.
 
 ## The three states a board can be in
 

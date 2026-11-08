@@ -97,7 +97,7 @@ announces.
 The user switches with the long press ([One button](one-button.md)). The
 mode persists in flash across reboot and power-off. The default is Mesh,
 and `lnflash` sets the default at flash time the way it sets the
-propagation node's stamp cost (`lnflash/src/main.rs:159`).
+propagation node's stamp cost (`lnflash/src/main.rs:172`).
 
 Decided 2026-10-25 (Lew): the 8 s press puts the board to sleep in
 either mode, and a press wakes it ([One button](one-button.md)). A

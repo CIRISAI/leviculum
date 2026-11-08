@@ -68,12 +68,21 @@ pub const MANIFEST_NAME: &str = "manifest.toml";
 pub const FIRMWARE_DIR: &str = "firmware";
 /// Last resort in the resolution order, for a distro-packaged install.
 pub const SYSTEM_BUNDLE: &str = "/usr/share/lnflash";
+/// Where a person without a bundle gets one, said with [`Error::NoBundle`]
+/// (#476): a zero-config tool that stops on a missing file has to name the
+/// file's source, not only the places it was not.
+pub const BUNDLE_SOURCE: &str = "A bundle comes with the lnflash package, which installs it \
+     in /usr/share/lnflash, or in lnflash-nightly-amd64.tar.gz, unpacked and run in place; both \
+     are at https://leviculum.network/releases/nightly/latest/. --bundle names one anywhere else.";
 /// Environment override, second in the resolution order.
 pub const BUNDLE_ENV: &str = "LNFLASH_BUNDLE";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("no bundle found; looked in {}", .0.join(", "))]
+    #[error(
+        "no bundle found; looked in {}. {BUNDLE_SOURCE}",
+        .0.join(", ")
+    )]
     NoBundle(Vec<String>),
     #[error("reading {path}: {source}")]
     Io {
@@ -1857,6 +1866,24 @@ convert = "hex-to-uf2"
                 err.contains(&dir.join(FIRMWARE_DIR).display().to_string()),
                 "{err}"
             );
+        }
+    }
+
+    #[test]
+    fn no_bundle_present_says_where_to_get_one() {
+        // #476: the zero-config run that finds no bundle says where one
+        // comes from, not only where it was not.
+        let base = TempDir::new().unwrap();
+        let err = locate_with(&roots_under(base.path()), None)
+            .unwrap_err()
+            .to_string();
+        for needle in [
+            "the lnflash package, which installs it in /usr/share/lnflash",
+            "lnflash-nightly-amd64.tar.gz, unpacked and run in place",
+            "https://leviculum.network/releases/nightly/latest/",
+            "--bundle names one anywhere else",
+        ] {
+            assert!(err.contains(needle), "{needle:?} missing from: {err}");
         }
     }
 

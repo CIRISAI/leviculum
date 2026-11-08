@@ -168,7 +168,12 @@ fn merge(mut chunks: Vec<Span>) -> Result<Vec<Span>, Error> {
 }
 
 fn verify_checksum(bytes: &[u8], line: usize) -> Result<(), Error> {
-    let (declared, payload) = bytes.split_last().expect("length checked by caller");
+    // The caller has already refused a record shorter than five bytes, so an
+    // empty one cannot get here; it is still answered as the short record it
+    // would be rather than trusted.
+    let Some((declared, payload)) = bytes.split_last() else {
+        return Err(Error::ShortRecord { line });
+    };
     let sum = payload.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
     let computed = (!sum).wrapping_add(1);
     if computed == *declared {

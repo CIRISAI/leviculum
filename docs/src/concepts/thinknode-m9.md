@@ -577,7 +577,7 @@ Nothing in this section is built yet, except where a dated note says otherwise.
 4. **Give the rig an ESP32 side.** Nothing on the rig handles this chip
    family as an LNode today:
    - `lnflash` knows two transports, `uf2-msc` and `dfu-serial`
-     (`Transport`, `lnflash/src/manifest.rs:129-139`). An ESP32-S3 has no
+     (`Transport`, `lnflash/src/manifest.rs:138-148`). An ESP32-S3 has no
      UF2 and no DFU and is written with `espflash`.
    - periculum's LNode profile identifies a board by its USB vendor string
      and interface numbers (`periculum/periculum/devices/lnode.toml:24-32`).
@@ -651,8 +651,8 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      single-port host link or with the first bundle that carries an M9
      image. **2026-11-08 (#476):** no flash run reached the module, so it was
      removed with the catalogue section; commit 39071420 holds both for
-     the day the M9 entry lands. Until then these boards are flashed by
-     hand or by recipe.
+     the day the M9 entry lands. Until then lnflash names an M9 on the bus
+     in one line and leaves it alone.
 5. **Acceptance at the rig:**
    - the boot proof;
    - the display. Since 2026-10-25 (980) the status page and its
