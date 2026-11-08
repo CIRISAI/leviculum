@@ -125,8 +125,7 @@ leviculum_ui::catalogue! {
     // The map on the M9 (1375): its pins in ASCII, the atlas has no ◉, and
     // the keys a board without a palette or a pointer works it with.
     // 1447 (walk 1 finding 23): each fits the M9's 31 cells; the keys come in two pages.
-    MapLegend = "map_legend", "* person  @ chosen  grey: old", "* Person  @ gewählt  grau: alt";
-    MapKeys = "map_keys", "arrows pan  +- zoom", "Pfeile schieben  +- Zoom";
+    MapKeys = "map_keys", "T in  Y out  arrows pan", "T näher  Y weiter  Pfeile schieben";
     MapKeysPin = "map_keys_pin", "space next pin  enter open", "Leer nächster Pin  Enter öffnen";
     // A row's last line while a message is typed there and not sent (1219).
     DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";

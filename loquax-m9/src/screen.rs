@@ -126,6 +126,9 @@ pub struct Look {
     /// not reach the flash, a join the record could not keep. It takes
     /// the home word's place at the bar's right end until it clears.
     pub fault: Option<loquax::ui::strings::StrId>,
+    /// What the map shows over its picture (1531): the key hint and the
+    /// corner credit, which the board's clock says ([`crate::map::Chrome`]).
+    pub map: crate::map::Overlay,
 }
 
 impl Look {
@@ -141,6 +144,10 @@ impl Look {
             row: 0,
             home: None,
             fault: None,
+            map: crate::map::Overlay {
+                hint: None,
+                credit: false,
+            },
         }
     }
 

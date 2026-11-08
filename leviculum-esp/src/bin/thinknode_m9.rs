@@ -693,6 +693,9 @@ struct Shown {
     pairing: Option<Pairing>,
     word: Option<Word>,
     fault: Option<StrId>,
+    /// The map's key hint and corner credit (1531), as the loop's
+    /// [`map::Chrome`] says them.
+    map: map::Overlay,
 }
 
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
@@ -715,6 +718,7 @@ fn redraw(
         row,
         home: shown.word,
         fault: shown.fault,
+        map: shown.map,
         ..screen::Look::of(model)
     };
     #[cfg(not(m9_bench))]
@@ -733,6 +737,22 @@ fn redraw(
     if drawn.is_err() {
         log.line("[DISP] ", alloc::string::String::from("draw=failed"));
         return;
+    }
+    // What the map's draw did (1531): its zoom, the picture's and the
+    // label pass's time, the names set and dropped.
+    if let Some(stats) = renderer.take_map_stats() {
+        let ms = |us: u64| alloc::format!("{}.{:03}", us / 1000, us % 1000);
+        log.line(
+            "[MAP] ",
+            alloc::format!(
+                "zoom={} picture_ms={} names_ms={} names={} dropped={}",
+                stats.zoom,
+                ms(stats.picture_us),
+                ms(stats.names_us),
+                stats.names.drawn,
+                stats.names.dropped()
+            ),
+        );
     }
     let at = page::of(model, row, shown.pairing.is_some(), &renderer.window());
     let moved = said.say(at);
@@ -1092,6 +1112,7 @@ fn main() -> ! {
         pairing: node.address().is_none().then(Pairing::new),
         word: node.word(),
         fault: None,
+        map: map::Overlay::default(),
     };
 
     // The seed the UI core draws client ids from (1493): entropy taken
@@ -1528,6 +1549,8 @@ fn ui_main(
             core::hint::spin_loop();
         }
     };
+    // The map's passes timed for its `[MAP]` line (1531).
+    renderer.set_clock(leviculum_esp::uptime_us);
     let renderer_held = leviculum_esp::heap_live() - before;
     log.line(
         "[CENSUS] ",
@@ -1635,6 +1658,10 @@ fn ui_main(
     // The peer of the bench's arrival on its way to the fold (1540).
     #[cfg(m9_bench)]
     let mut arriving: Option<[u8; 16]> = None;
+
+    // The map's words by the clock (1531): the key hint after it opens
+    // and after a key it does not know, the credit once a boot.
+    let mut chrome = map::Chrome::default();
 
     // From here the UI core's loop feeds its own watchdog (1534).
     let mut wdt = Watchdog::arm(wdt);
@@ -1764,6 +1791,7 @@ fn ui_main(
                             pairing: Some(Pairing::new()),
                             word: None,
                             fault: None,
+                            map: map::Overlay::default(),
                         };
                         redraw(
                             &mut renderer,
@@ -1829,6 +1857,9 @@ fn ui_main(
                     }
                     continue;
                 }
+                if !map::bound(&model, &event) {
+                    chrome.nudge(leviculum_esp::uptime_ms());
+                }
                 let effects = group::press(&mut model, &mut row, &event);
                 if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
                     frame_whole(&renderer);
@@ -1861,6 +1892,15 @@ fn ui_main(
 
         stall::stage(Core::Ui, Stage::Draw);
         dirty |= drawn.due(&model);
+        // The map's words come and go by the clock (1531): a redraw when
+        // they change, none while they stand.
+        let now = leviculum_esp::uptime_ms();
+        chrome.seen(map::shown(&model), now);
+        let overlay = chrome.overlay(now, || !model.map_pins().is_empty());
+        if overlay != shown.map {
+            shown.map = overlay;
+            dirty = true;
+        }
         if dirty {
             redraw(
                 &mut renderer,

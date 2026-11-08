@@ -72,8 +72,7 @@
     <string name="nearby_card">Nearby, not in your contacts</string>
     <string name="nearby_add">Add</string>
     <string name="nearby_enter_adds">Enter adds</string>
-    <string name="map_legend">* person  @ chosen  grey: old</string>
-    <string name="map_keys">arrows pan  +- zoom</string>
+    <string name="map_keys">T in  Y out  arrows pan</string>
     <string name="map_keys_pin">space next pin  enter open</string>
     <string name="draft_row">Draft: %1$s</string>
     <string name="row_you">you: %1$s</string>

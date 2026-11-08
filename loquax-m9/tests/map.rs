@@ -74,10 +74,7 @@ fn the_map_pins_come_from_shares_an_announce_and_the_gnss_fix() {
     let (_, placed) = map::view(&model).expect("the open map");
     assert_eq!(placed.len(), 5, "every pin is in the fitted view");
     for pin in &placed {
-        assert!(
-            PICTURE.y <= pin.row && pin.row < PICTURE.bottom(),
-            "{pin:?}"
-        );
+        assert!(pin.row < PICTURE.bottom(), "{pin:?}");
         assert!(pin.text.contains('*') || pin.text.contains('@'), "{pin:?}");
     }
     let mut without = Screen::Map.model();
@@ -85,7 +82,8 @@ fn the_map_pins_come_from_shares_an_announce_and_the_gnss_fix() {
     assert!(without.map_pins().iter().all(|p| p.peer != OWN));
 }
 
-/// The model's view is the picture's pixels: 32 x 9 cells of 10 x 20.
+/// The model's view is the picture's pixels: 32 x 11 cells of 10 x 20
+/// (1531: no title row, no legend).
 #[test]
 fn the_view_is_the_picture_in_pixels() {
     let model = Screen::Map.model();
@@ -209,7 +207,7 @@ fn an_unchanged_redraw_flushes_nothing() {
 /// 1476, the grey map of Lew's photo: a home's board opens the map where
 /// its own fix is, far from the region the image carries. The picture is
 /// not plain grey: it says "Keine Karte für diese Gegend" above the own
-/// pin and how a region gets onto the board in its last row, the bar has no
+/// pin and how a region gets onto the board in its last row, no row has a
 /// credit for data it does not show, and nothing of the map is drawn.
 /// Pinned as a golden. The control: the fixture's own view over Florence
 /// draws the region and says none of it.
@@ -233,14 +231,7 @@ fn the_map_says_so_where_no_region_lies_under_the_view() {
     assert!(!map::covers(region.region.header(), &view));
 
     let look = Look::of(&model);
-    let lines = map::lines(
-        &model,
-        &look,
-        "© OpenStreetMap contributors",
-        true,
-        COLS,
-        GRID,
-    );
+    let lines = map::lines(&look, true, COLS, GRID);
     let text: Vec<String> = lines
         .iter()
         .map(|l| l.cells.iter().map(|c| c.ch).collect())
@@ -281,19 +272,11 @@ fn the_map_says_so_where_no_region_lies_under_the_view() {
     let florence = Screen::Map.model();
     let (view, _) = map::view(&florence).expect("map");
     assert!(map::covers(region.region.header(), &view));
-    let text: Vec<String> = map::lines(
-        &florence,
-        &Look::of(&florence),
-        "© OpenStreetMap contributors",
-        false,
-        COLS,
-        GRID,
-    )
-    .iter()
-    .map(|l| l.cells.iter().map(|c| c.ch).collect())
-    .collect();
+    let text: Vec<String> = map::lines(&Look::of(&florence), false, COLS, GRID)
+        .iter()
+        .map(|l| l.cells.iter().map(|c| c.ch).collect())
+        .collect();
     assert!(text.iter().all(|l| !l.contains(&none)));
-    assert!(text[0].contains("© OSM"));
     let mut inks = std::collections::BTreeSet::new();
     let frame = drawn(&florence);
     for y in top..bottom.min(HEIGHT) {
@@ -302,4 +285,178 @@ fn the_map_says_so_where_no_region_lies_under_the_view() {
         }
     }
     assert!(inks.len() > 8, "the region's picture: {} inks", inks.len());
+}
+
+/// What `model` shows under `overlay`, drawn by a fresh renderer.
+fn drawn_with(model: &UiModel<Field>, overlay: map::Overlay) -> Frame {
+    let mut frame = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    Renderer::new(&mut frame)
+        .expect("renderer")
+        .show(
+            model,
+            &Look {
+                map: overlay,
+                ..Look::of(model)
+            },
+            &mut map,
+        )
+        .expect("draw");
+    frame
+}
+
+/// The fixture's map at `zoom`, its view and pins as the model has them.
+fn at_zoom(zoom: u8) -> UiModel<Field> {
+    let mut model = Screen::Map.model();
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = zoom;
+    }
+    model
+}
+
+/// 1531: the M9's map carries names. Over Florence at z16 the label pass
+/// sets street names, never on a pin's cells, and they are in the
+/// frame; at z13 the fixture holds no name its zoom shows (its place
+/// points lie outside the cut, its streets start at z14), and the frame
+/// is the picture alone. Both pinned as goldens. The control: the same
+/// z16 frame without the names differs.
+#[test]
+fn the_map_carries_names_at_z13_and_z16() {
+    let region = Map::new(FIXTURE).expect("region");
+    for (zoom, golden) in [(13, "m9-map-z13.png"), (16, "m9-map-z16.png")] {
+        let model = at_zoom(zoom);
+        let (view, pins) = map::view(&model).expect("map");
+        let tall = map::with_bottom(&view);
+        let taken = map::pin_cells(&pins);
+        let (names, stats) = map::names(&region.region, &tall, map::BOTTOM + 1, &taken);
+        println!("z{zoom}: {stats:?} {names:?}");
+        assert_eq!(stats.drawn, names.len());
+        assert!(names.len() <= map::NAMES_MAX);
+        match zoom {
+            13 => assert_eq!(stats.found, 0, "{names:?}"),
+            _ => assert!(names.len() >= 2, "z{zoom}: {stats:?}"),
+        }
+        for name in &names {
+            let width = name.text.chars().count() as u16;
+            assert!(name.col + width <= PICTURE.width, "{name:?}");
+            for &(col, row, w) in &taken {
+                let apart = row != name.row || col + w <= name.col || name.col + width <= col;
+                assert!(apart, "{name:?} over a pin at {col},{row}");
+            }
+        }
+        let frame = drawn_with(&model, map::Overlay::default());
+        support::check(golden, &frame);
+    }
+}
+
+/// 1531: places are set first, then the streets and rivers, then from
+/// z15 the parks: over Berlin's Mitte (the map core's second fixture,
+/// which holds the city's point) "Berlin" is the first name at every
+/// zoom, and a park comes only from z15.
+#[test]
+fn places_come_first_and_parks_from_z15() {
+    use leviculum_map::labels::LabelKind;
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::region::Region;
+    use leviculum_map::viewport::Viewport;
+
+    let bytes: &[u8] = include_bytes!("../../leviculum-map/fixtures/berlin/mitte.lmr");
+    let region = Region::from_bytes(bytes).expect("region");
+    let at = project(LatLon::from_e6(52_517_500, 13_395_000));
+    for zoom in 12..=16 {
+        let view = Viewport::new(at, zoom, 320, 240);
+        let (names, stats) = map::names(&region, &view, map::BOTTOM + 1, &[]);
+        println!("z{zoom}: {stats:?} {names:?}");
+        let first = names.first().expect("a name");
+        assert_eq!(
+            (first.kind, first.text.as_str()),
+            (LabelKind::City, "Berlin")
+        );
+        let kinds: Vec<LabelKind> = names.iter().map(|n| n.kind).collect();
+        let parks = kinds.iter().any(|k| matches!(k, LabelKind::Park));
+        assert!(!(parks && zoom < map::POI_ZOOM), "z{zoom}: {kinds:?}");
+        // Rounds in order: no place after a street, no street after a park.
+        let round = |k: &LabelKind| match k {
+            LabelKind::Park | LabelKind::Water => 2,
+            k if k.is_line() => 1,
+            _ => 0,
+        };
+        assert!(
+            kinds.windows(2).all(|w| round(&w[0]) <= round(&w[1])),
+            "{kinds:?}"
+        );
+    }
+    let view = Viewport::new(at, 15, 320, 240);
+    let (names, _) = map::names(&region, &view, map::BOTTOM + 1, &[]);
+    assert!(
+        names.iter().any(|n| n.kind == LabelKind::Park),
+        "the control: z15 sets a park"
+    );
+}
+
+/// 1531: the map's chrome. No title row and no legend: the picture
+/// covers the panel. The first open after a boot shows the key hint in
+/// the bottom row and "© OpenStreetMap" in the top right corner; a later
+/// open the hint alone; once the hint is gone the bottom row is the
+/// chosen pin's card with the credit. Each pinned as a golden, and each
+/// differs from the others.
+#[test]
+fn the_hint_the_credit_and_the_card_have_their_goldens() {
+    let model = Screen::Map.model();
+    let keys = map::Overlay {
+        hint: Some(loquax::ui::strings::StrId::MapKeys),
+        credit: false,
+    };
+    let open = map::Overlay {
+        credit: true,
+        ..keys
+    };
+    let frames = [
+        ("m9-map-open.png", drawn_with(&model, open)),
+        ("m9-map-hint.png", drawn_with(&model, keys)),
+        (
+            "m9-map-card.png",
+            drawn_with(&model, map::Overlay::default()),
+        ),
+    ];
+    for (name, frame) in &frames {
+        support::check(name, frame);
+    }
+    for i in 0..frames.len() {
+        for j in i + 1..frames.len() {
+            assert_ne!(
+                frames[i].1.pixels(),
+                frames[j].1.pixels(),
+                "{} {}",
+                frames[i].0,
+                frames[j].0
+            );
+        }
+    }
+    let lang = model.lang;
+    let card = map::bottom(
+        &model,
+        &map::Overlay::default(),
+        Some("© OpenStreetMap"),
+        lang,
+    )
+    .expect("a pin is chosen");
+    assert!(card.ends_with("© OpenStreetMap "), "{card:?}");
+    let hint = map::bottom(&model, &keys, Some("© OpenStreetMap"), lang).expect("the hint");
+    assert_eq!(hint, "T näher Y weiter Pfeile schieben");
+}
+
+/// 1531: a key the open map does not know brings the hint back; every
+/// key of the table is known. The control: off the map every key is.
+#[test]
+fn an_unknown_key_on_the_map_is_told_apart() {
+    let model = Screen::Map.model();
+    for (verb, key, _) in ROWS {
+        assert!(map::bound(&model, &event(key)), "{verb} ({key:?})");
+    }
+    for c in ['q', 'x', 'z'] {
+        assert!(!map::bound(&model, &event(M9Key::Char(c))), "{c}");
+    }
+    let list = fixture::model();
+    assert!(map::bound(&list, &event(M9Key::Char('q'))));
 }

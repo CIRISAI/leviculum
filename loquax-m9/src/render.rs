@@ -43,6 +43,22 @@ where
     map_drawn: bool,
     /// Where the last draw's screen stood (1533).
     window: screen::Window,
+    /// The board's microsecond clock, which times the map's passes for
+    /// the `[MAP]` line (1531); none on the host.
+    clock: Option<fn() -> u64>,
+    /// What the last map draw did; taken by the board's log.
+    map_stats: Option<MapStats>,
+}
+
+/// One map draw, for the board's `[MAP]` line (1531): the zoom, the
+/// picture's and the label pass's microseconds (0 without a clock), and
+/// the names the pass found and set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MapStats {
+    pub zoom: u8,
+    pub picture_us: u64,
+    pub names_us: u64,
+    pub names: map::NameStats,
 }
 
 impl<'d, D> Renderer<'d, D>
@@ -79,6 +95,8 @@ where
             font,
             map_drawn: false,
             window: screen::Window::default(),
+            clock: None,
+            map_stats: None,
         })
     }
 
@@ -102,6 +120,17 @@ where
         self.window
     }
 
+    /// Time the map's passes with `clock`, microseconds since any start.
+    pub fn set_clock(&mut self, clock: fn() -> u64) {
+        self.clock = Some(clock);
+    }
+
+    /// What the last map draw did, once: the board says it in a `[MAP]`
+    /// line.
+    pub fn take_map_stats(&mut self) -> Option<MapStats> {
+        self.map_stats.take()
+    }
+
     /// Draw what `model` shows: the map in pixels when it is open
     /// ([`map::shown`]), else the scene of it ([`screen::scene`]) in cells.
     pub fn show(
@@ -113,18 +142,47 @@ where
         let Some((view, pins)) = map::shown(model).then(|| map::view(model)).flatten() else {
             return self.draw(&screen::scene(model), look);
         };
-        let credit = map.credit();
-        // No region under the view (1476): the cells say so, no picture.
+        let attribution = map.credit();
+        // No region under the view (1476): the cells say so, no picture,
+        // and no credit, as nobody's data is shown.
         let bare = !map::covers(map.region.header(), &view);
+        let credit = (!bare).then(|| map::short_credit(&attribution));
+        let bottom = map::bottom(model, &look.map, credit, look.lang);
+        // The picture takes the bottom row when it has no words (1531).
+        let painted = match bottom {
+            Some(_) => view,
+            None => map::with_bottom(&view),
+        };
+        let corner = credit.filter(|_| look.map.credit);
         self.window = screen::Window::default();
-        self.cells(|cols, rows| map::lines(model, look, &credit, bare, cols, rows))?;
+        self.cells(|cols, rows| map::lines(look, bare, cols, rows))?;
+        let clock = self.clock;
+        let now = || clock.map_or(0, |c| c());
         let panel = self.terminal.backend_mut().display_mut();
+        let mut stats = MapStats {
+            zoom: view.zoom(),
+            ..MapStats::default()
+        };
         if !bare {
+            let t0 = now();
             map.painter
-                .picture(&map.region, &view, panel)
+                .picture(&map.region, &painted, panel)
                 .map_err(|_| DrawError)?;
+            let t1 = now();
+            // The names where no pin and no word is (1531).
+            let mut taken = map::pin_cells(&pins);
+            taken.extend(corner.map(map::credit_cells));
+            let rows = (painted.size().1 / u32::from(map::CELL_PX.1)) as u16;
+            let (names, found) = map::names(&map.region, &painted, rows, &taken);
+            map::draw_names(&names, &self.font, panel).map_err(|_| DrawError)?;
+            let t2 = now();
+            stats.picture_us = t1.saturating_sub(t0);
+            stats.names_us = t2.saturating_sub(t1);
+            stats.names = found;
         }
         map::pins(&pins, look, &self.font, panel).map_err(|_| DrawError)?;
+        map::words(bottom.as_deref(), corner, look, &self.font, panel).map_err(|_| DrawError)?;
+        self.map_stats = Some(stats);
         self.map_drawn = true;
         Ok(())
     }
