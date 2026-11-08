@@ -2898,6 +2898,47 @@ m9-walk-selftest:
 m9-walk rig walk="scripts/m9-walks/bench.walk" image="" proxy="":
     bash scripts/m9-walk.sh --rig {{rig}} --walk {{walk}} {{ if image != "" { "--image " + image } else { "" } }} {{ if proxy != "" { "--start-proxy " + proxy } else { "" } }}
 
+# 1530, #232: the M9 on the host, headless (loquax-m9's `loquax-m9-sim`,
+# feature `sim`): the bin's tests first, among them the golden parity (every
+# `tests/golden/m9-fw-*.png` reached through the sim's board, by its
+# FRAME_DUMP path and by its keys from power-on, compared pixel for pixel),
+# then the two walks under scripts/m9-sim-walks/: the fixture from the
+# pairing on, and the 1489 store pulled into a home's board and booted again.
+# Dumps, logs and text rows land in `out`, under target/; the bin's lines
+# are the board's (`KEY`, `[PAGE]`, `[STORE]`). Not in `fast`: nothing ships
+# it, and it builds the bin.
+[doc('Walk the M9 sim headless over the fixture and the 1489 store (#232)')]
+m9-sim-walk out="target/m9-sim-walk":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$(pwd)"
+    {{manifest}} m9-sim-tests -- cargo test -p loquax-m9 --features sim --bin loquax-m9-sim
+    cargo build -q -p loquax-m9 --features sim --bin loquax-m9-sim
+    sim() { cargo run -q --manifest-path "$root/Cargo.toml" -p loquax-m9 --features sim --bin loquax-m9-sim -- "$@"; }
+    for walk in fixture real; do
+        dir="$root/{{out}}/$walk"
+        rm -rf "$dir" && mkdir -p "$dir"
+        store=fixture; [ "$walk" = real ] && store=real
+        (cd "$dir" && sim --store "$store" --save flash.img --script "$root/scripts/m9-sim-walks/$walk.walk" --dump last.png --text > text.txt 2> board.log)
+        echo "m9-sim-walk: $walk ok, $(ls "$dir"/*.png | wc -l) dumps in $dir"
+    done
+    # What the walks must have shown, read off the board's own lines.
+    grep -q '^\[PAGE\] name=map ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the fixture walk never reached the map"; exit 1; }
+    grep -q '^\[PAGE\] name=compose ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the fixture walk never reached compose"; exit 1; }
+    grep -q 'restore=resumed' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the real store's second boot did not resume"; exit 1; }
+    grep -q '^\[STORE\] page_read ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL no chat page was read from the ring"; exit 1; }
+    echo "m9-sim-walk: PASS"
+
+# 1530, #232: the M9 in a window on the host: the panel at `scale` (2 or 3),
+# the host's keys as the M9's (arrows the ring, Enter its centre, Esc Back,
+# F1-F5 the bubbles, house, square bubble, pin, map, the letters the QWERTY
+# block). `store` is `fixture`, `real` or a flash image a run saved with
+# `--save`. For the host's own triple, as `loquax-gui`: winit opens X11 and
+# Wayland with dlopen, which a musl-static binary cannot.
+[doc('Run the M9 sim in a window (#232)')]
+m9-sim store="fixture" scale="2":
+    cargo run -p loquax-m9 --features sim-window --bin loquax-m9-sim --target "$(rustc -vV | sed -n 's/^host: //p')" -- --window --scale {{scale}} --store {{store}}
+
 # 1441: rewrite the baseline `window-bench` measures against, after a change
 # whose cost was measured and accepted in its commit message; the commit
 # that writes it is the next runs' BASE.
