@@ -17,6 +17,10 @@
 //! - `--bench`: the bench image (1562): "Bench" listed, `bench arrive`
 //!   and `bench forget` in a script taken. Without it the board is a
 //!   release image, which restores no "Bench" and refuses both.
+//! - `--seed-home <dir>`: fill a `loquax mailbox` state directory with
+//!   the 1489 fixture as its archive, under its own identity, print
+//!   `BENCH_HOME address=<hex> appended=<n> held=<n>` and exit (1562,
+//!   [`seed`]; `scripts/m9-bench-home.sh setup`).
 //! - `--save`: write the flash image at the end (and at each reboot), so
 //!   the next run's `--store <image>` is a power cycle.
 //! - `--keys`, `--script`: the presses ([`script`]).
@@ -39,6 +43,7 @@ mod flash;
 mod parity;
 mod real;
 mod script;
+mod seed;
 #[cfg(feature = "sim-window")]
 mod window;
 
@@ -57,6 +62,7 @@ struct Args {
     store: Option<String>,
     save: Option<PathBuf>,
     bench: bool,
+    seed_home: Option<PathBuf>,
     steps: Vec<Step>,
     reboot_after: Option<usize>,
     dump: Option<PathBuf>,
@@ -67,7 +73,7 @@ struct Args {
 }
 
 fn usage() -> &'static str {
-    "usage: loquax-m9-sim [--store fixture|real|<image>] [--save <image>] [--bench] \
+    "usage: loquax-m9-sim --seed-home <dir> | [--store fixture|real|<image>] [--save <image>] [--bench] \
      [--keys \"down enter\" | --script <file>] [--reboot-after <n>] \
      [--dump <png>] [--dump-every <n>] [--text] [--window [--scale 2|3]]"
 }
@@ -109,6 +115,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             }
             "--text" => args.text = true,
             "--bench" => args.bench = true,
+            "--seed-home" => args.seed_home = Some(PathBuf::from(value("--seed-home")?)),
             "--window" => args.window = true,
             "--scale" => {
                 let n = value("--scale")?;
@@ -195,6 +202,20 @@ fn arrivals(args: &Args) -> Arrivals {
 }
 
 fn run(args: &Args) -> Result<(), String> {
+    if let Some(dir) = &args.seed_home {
+        let seeded = seed::seed(dir)?;
+        println!(
+            "BENCH_HOME address={} appended={} held={}",
+            seeded
+                .address
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            seeded.appended,
+            seeded.held
+        );
+        return Ok(());
+    }
     let board = power_on(args.store.as_deref(), arrivals(args))?;
     if args.window {
         #[cfg(feature = "sim-window")]

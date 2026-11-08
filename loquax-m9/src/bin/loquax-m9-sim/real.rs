@@ -23,18 +23,26 @@ use loquax::home::{KIND_MARK, KIND_NAME, KIND_RECEIVED, KIND_SENT};
 mod real_store;
 
 /// The address the fixture's messages are to and from: the home's.
+#[allow(dead_code)]
 pub fn address() -> [u8; 16] {
     real_store::own()
 }
 
 /// The fixture's archive, oldest first, its sequences from 1.
+#[allow(dead_code)]
 pub fn archive() -> Result<Vec<Entry>, String> {
+    archive_for(real_store::own())
+}
+
+/// The fixture's archive for the home whose LXMF address is `own`
+/// (1562: the bench home seeds its own archive with it, under its own
+/// identity's address, so a board that joins it pulls the fixture).
+pub fn archive_for(own: [u8; 16]) -> Result<Vec<Entry>, String> {
     // The home signs nothing the board checks (`board::fold` says
     // `verified: false`); one fixed key signs every message, so the bytes
     // are the same on every run.
     let signer = Identity::from_private_key_bytes(&[0x53; 64])
         .map_err(|e| format!("the fixture's signing key: {e:?}"))?;
-    let own = real_store::own();
     let mut rows: Vec<(i64, u8, Vec<u8>)> = Vec::new();
     for (peer, name) in real_store::names() {
         rows.push((0, KIND_NAME, wire::name_entry(&peer, &name)));

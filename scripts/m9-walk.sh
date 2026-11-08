@@ -25,8 +25,15 @@
 #
 #   VERDICT <PASS|FAIL> steps=.. boots=.. key_ms n=.. median=.. max=.. ...
 #
+# A walk that opens chats runs only on a board joined to the bench home
+# (order 1562, scripts/m9-bench-home.sh): its address is read from
+# --bench-home (32 hex or a file), else from the bench home's folder,
+# ${XDG_STATE_HOME:-$HOME/.local/state}/leviculum/m9-bench-home/address, and
+# m9-walk.py refuses the walk before its first key when the board's client
+# record names another home.
+#
 # Usage:
-#   bash scripts/m9-walk.sh --rig DIR --walk FILE [--image ELF] [--out DIR] [--boots N] [--start-proxy DEV]
+#   bash scripts/m9-walk.sh --rig DIR --walk FILE [--image ELF] [--out DIR] [--boots N] [--start-proxy DEV] [--bench-home HEX|FILE]
 #   bash scripts/m9-walk.sh --selftest
 #
 # --image is the ELF to flash, the bench one being
@@ -46,6 +53,7 @@ if [ "${1:-}" = "--selftest" ]; then
 fi
 
 rig="" walk="" image="" out="" boots=2 start_dev=""
+bench_home="${XDG_STATE_HOME:-$HOME/.local/state}/leviculum/m9-bench-home/address"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --rig) rig="${2:-}"; shift 2 ;;
@@ -54,7 +62,8 @@ while [ "$#" -gt 0 ]; do
         --out) out="${2:-}"; shift 2 ;;
         --boots) boots="${2:-}"; shift 2 ;;
         --start-proxy) start_dev="${2:-}"; shift 2 ;;
-        *) echo "usage: $0 --rig DIR --walk FILE [--image ELF] [--out DIR] [--boots N] [--start-proxy DEV] | --selftest" >&2; exit 2 ;;
+        --bench-home) bench_home="${2:-}"; shift 2 ;;
+        *) echo "usage: $0 --rig DIR --walk FILE [--image ELF] [--out DIR] [--boots N] [--start-proxy DEV] [--bench-home HEX|FILE] | --selftest" >&2; exit 2 ;;
     esac
 done
 if [ ! -d "$rig" ] || [ ! -f "$walk" ]; then
@@ -153,7 +162,8 @@ if [ -n "$image" ]; then
     proxy_pid >/dev/null || { echo "$TAG FAIL the proxy did not come back"; exit 1; }
 fi
 
-python3 -I "$ROOT/scripts/m9-walk.py" --rig "$rig" --walk "$walk" --out "$out" --boots "$boots"
+python3 -I "$ROOT/scripts/m9-walk.py" --rig "$rig" --walk "$walk" --out "$out" --boots "$boots" \
+    --bench-home "$bench_home"
 rc=$?
 echo "$TAG out: $out (walk.md for the agent's eye, board.log, dumps/)"
 exit "$rc"

@@ -349,7 +349,7 @@ nrf-shellcheck:
         scripts/tmp-leftovers.sh scripts/test-tmp-leftovers.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh scripts/check-nrf-flash-budget.sh \
-        scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh scripts/check-m9-bench-off.sh \
+        scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh scripts/check-m9-bench-off.sh scripts/m9-bench-home.sh \
         scripts/nrf-flash.sh scripts/check-nrf-reproducible.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
@@ -2911,6 +2911,23 @@ m9-walk-selftest:
 [doc('Walk the M9 on the bench: flash, two boots, a walk file, a verdict')]
 m9-walk rig walk="scripts/m9-walks/bench.walk" image="" proxy="":
     bash scripts/m9-walk.sh --rig {{rig}} --walk {{walk}} {{ if image != "" { "--image " + image } else { "" } }} {{ if proxy != "" { "--start-proxy " + proxy } else { "" } }}
+
+# 1562: the bench M9's own mailbox, never Lew's: `setup` seeds a `loquax
+# mailbox` state folder with its own identity and the 1489 fixture, `run`
+# starts it beside the bench's lnsd, `join rig=<folder>` writes a fresh
+# code to the board, `send <words>` delivers a live arrival from the
+# reference LXMF client, `stop`. scripts/m9-bench-home.sh has the rest.
+[doc('The bench M9 mailbox: setup, run, code, join, send, stop')]
+m9-bench-home verb *args:
+    bash scripts/m9-bench-home.sh {{verb}} {{args}}
+
+# 1562: the bench home's setup and code offline in a scratch folder: the
+# code names the seeded home, a second setup appends nothing, another
+# home's code names another (the control). Builds loquax and the sim in
+# release; not in `fast`.
+[doc('Check the bench M9 mailbox setup offline')]
+m9-bench-home-selftest:
+    @bash scripts/m9-bench-home.sh --selftest
 
 # 1530, #232: the M9 on the host, headless (loquax-m9's `loquax-m9-sim`,
 # feature `sim`): the bin's tests first, among them the golden parity (every

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Walk the ThinkNode M9 on the bench without hands (orders 1533, 1540).
+"""Walk the ThinkNode M9 on the bench without hands (orders 1533, 1540, 1562).
 
 The board runs the bench image (`scripts/build-m9-image.sh --bench`, boot
 line `[BENCH] inject=on`). The rig folder's proxy (scripts/m9-proxy.py,
@@ -45,11 +45,19 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
                               `erase-ring` the message ring's (the open's
                               read mark), `erase` both; waits for
                               `[BENCH] owe=armed`
-    bench arrive <row>        TYPE_BENCH_ARRIVE (1540): a message comes
-                              into the chat at that row of the list
-                              (modulo the rows there are), unread, and its
-                              chat is selected; waits for
+    bench arrive              TYPE_BENCH_ARRIVE (1540, 1562): a message
+                              comes into "Bench", the bench's own
+                              conversation, never a real chat, unread,
+                              and "Bench" is selected (the next `key
+                              enter` opens it); waits for
                               `[BENCH] arrive=folded`
+    bench forget              TYPE_BENCH_FORGET (1562): every arrival out
+                              of the board's store, 1540's unflagged ones
+                              in real chats with them, the summary log
+                              erased and the store rebuilt from the ring;
+                              waits for `[BENCH] forget=reopened`
+                              (FORGET_WAIT_S), its long core-0 turn named
+                              `forget_ms=` in walk.md, not failed
     open longest [<rows>]     open each of the list's first rows (8) in
                               turn, back out, and open the one whose
                               [PAGE] top is largest: the chat with the
@@ -60,6 +68,15 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
                               the walk asks another question than the
                               latency (hang.walk: Enter on a long chat
                               took 1.7 s in window 10, 1507's to fix)
+
+A walk that opens chats (`key enter`, `hold enter`, `open longest`) is
+REFUSED before its first step unless the board's client record names the
+bench home (1562): the `[HOME] client=yes ... home=<hex>` line of the
+boots against --bench-home, the address `scripts/m9-bench-home.sh`
+wrote. An open marks the chat's messages read and the board tells its
+home, so on Lew's own home his contacts saw read ticks from the bench
+(window 13, 2026-11-08 09:06). A board with no home (`client=none`) shows
+the fixture and is walked; a walk without opens is walked on any home.
 
 The walk's verdict is held to the bars of order 1533: key to frame under
 100 ms (a KEY line's board time to the next `[DISP] flush` line's t=;
@@ -80,8 +97,13 @@ the boot says), and every expect and wait met. Output, in --out:
     VERDICT     the verdict line, also the last line of walk.md
 
 Usage:
-  m9-walk.py --rig DIR --walk FILE [--out DIR] [--boots N]
+  m9-walk.py --rig DIR --walk FILE [--out DIR] [--boots N] [--bench-home HEX|FILE]
+  m9-walk.py --rig DIR --home-code CODE [--bench-home HEX|FILE]
   m9-walk.py --selftest
+
+--home-code (1562, scripts/m9-bench-home.sh join): the code written to the
+board as TYPE_HOME_CODE; waits for `[HOME] code=taken` and the client
+line, and fails when that line names another home than --bench-home.
 """
 
 import argparse
@@ -96,8 +118,8 @@ import time
 import zlib
 
 FLAG, ESC, XON, XOFF = 0x7E, 0x7D, 0x11, 0x13
-TYPE_FRAME_DUMP, TYPE_KEY_INJECT = 0x18, 0x1A
-TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE = 0x1B, 0x1C
+TYPE_FRAME_DUMP, TYPE_HOME_CODE, TYPE_KEY_INJECT = 0x18, 0x19, 0x1A
+TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE, TYPE_BENCH_FORGET = 0x1B, 0x1C, 0x1D
 # leviculum-core/src/envelope.rs, BENCH_OWE_*.
 OWE_FLAGS = {None: 0x00, "erase-log": 0x01, "erase-ring": 0x02, "erase": 0x03}
 # The steps that do something; `expect ... changed` and `expect log` look
@@ -117,6 +139,10 @@ READY_WAIT_S = 90.0
 DUMP_WAIT_S = 20.0
 DUMP_LOOP_WAIT_S = 1.0
 BENCH_WAIT_S = 5.0
+# A forget reads the ring, rewrites its sectors, erases the summary log
+# and rebuilds the store: a whole-ring rebuild took 57 s to 100 s on the
+# bench (handheld.rs, `client`'s feed).
+FORGET_WAIT_S = 240.0
 # The [OPEN] line's fields (1540; marks, sectors, unpack and alloc 1556),
 # in its order.
 OPEN_FIELDS = ("marks", "sectors", "wait_ms", "page_read_ms", "decode_ms", "unpack_ms", "alloc_ms",
@@ -218,12 +244,38 @@ def bench_frame(args):
             raise ValueError(f"bench owe takes erase, erase-log or erase-ring, not {flag!r}")
         flags = OWE_FLAGS[flag]
         return wire(envelope(TYPE_BENCH_OWE, bytes([flags]) if flags else b""))
-    if args[:1] == ["arrive"] and len(args) == 2:
-        row = int(args[1])
-        if not 0 <= row <= 255:
-            raise ValueError("a row is 0 to 255")
-        return wire(envelope(TYPE_BENCH_ARRIVE, bytes([row])))
-    raise ValueError("bench owe [erase|erase-log|erase-ring] or bench arrive <row>")
+    if args == ["arrive"]:
+        return wire(envelope(TYPE_BENCH_ARRIVE, b""))
+    if args == ["forget"]:
+        return wire(envelope(TYPE_BENCH_FORGET, b""))
+    raise ValueError("bench owe [erase|erase-log|erase-ring], bench arrive (no row since 1562) or bench forget")
+
+
+def opens_chats(steps):
+    """Whether parsed `steps` open a chat (1562): Enter or `open`."""
+    for _, verb, args in steps:
+        if verb == "open":
+            return True
+        if verb in ("key", "hold") and key_code(args[0]) == NAMES["enter"]:
+            return True
+    return False
+
+
+def read_home(value):
+    """--bench-home: 32 hex characters, or a file whose first word they
+    are; None for none given or a file that is not there."""
+    if not value:
+        return None
+    if re.fullmatch(r"[0-9a-fA-F]{32}", value):
+        return value.lower()
+    try:
+        with open(value) as f:
+            word = (f.read().split() or [""])[0]
+    except OSError:
+        return None
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", word):
+        raise ValueError(f"--bench-home {value}: no 32-hex address in it")
+    return word.lower()
 
 
 def fields(line):
@@ -354,8 +406,17 @@ class Rig:
 
 
 class Walk:
-    def __init__(self, rig, out, boots):
+    def __init__(self, rig, out, boots, bench_home=None):
         self.rig = rig
+        self.bench_home = bench_home
+        # The home the board's client record names, from its boot's
+        # `[HOME] client=` line: "none" for a board without one, None
+        # before any line said.
+        self.home = None
+        # A forget's own core-0 turn (1562): exempt from the turn bar
+        # while `forgetting`, its turn_ms kept for walk.md.
+        self.forgetting = False
+        self.forget_turn = None
         self.out = out
         self.boots_asked = boots
         os.makedirs(os.path.join(out, "dumps"), exist_ok=True)
@@ -412,6 +473,9 @@ class Walk:
                 # the walk's bars stay the key's flush and core 0's turn.
                 return
             ms = int(f.get("turn_ms", 0))
+            if self.forgetting:
+                self.forget_turn = max(self.forget_turn or 0, ms)
+                return
             if self.dumping and self.dump_turn is None and f.get("stage") == "take":
                 # The dump's turn: core 0 wrote its lines (4.4 to 5 s in
                 # window 11a), a cost of the bench's dump, not of the UI.
@@ -428,6 +492,13 @@ class Walk:
                 self.opens.append({k: float(f[k]) for k in OPEN_FIELDS})
             except (KeyError, ValueError):
                 self.fail(f"an [OPEN] line that does not read: {line}")
+        elif line.startswith("[HOME] client="):
+            f = fields(line)
+            if f.get("client") == "yes":
+                # An image before 1562 says no home: unknown, never the bench's.
+                self.home = f.get("home", "unknown").lower()
+            elif f.get("client") == "none":
+                self.home = "none"
         elif line.startswith("[UART] "):
             self.rx_lost = int(fields(line).get("rx_lost", 0))
         elif line.startswith("[STORE] ") and "restore_ms=" in line:
@@ -554,18 +625,32 @@ class Walk:
         """A bench frame (1540) and the board's line that says it took."""
         start = self.mark()
         self.rig.send(bench_frame(args))
+        wait = BENCH_WAIT_S
         if args[0] == "owe":
-            done, refused = "[BENCH] owe=armed", "[BENCH] owe=refused"
+            done, refused = "[BENCH] owe=armed", ("[BENCH] owe=refused",)
+        elif args[0] == "arrive":
+            done, refused = "[BENCH] arrive=folded", ("[BENCH] arrive=refused",)
         else:
-            done, refused = "[BENCH] arrive=folded", "[BENCH] arrive=refused"
-        line, _ = self.until(lambda l: l.startswith(done) or l.startswith(refused), BENCH_WAIT_S, start)
+            done, refused = "[BENCH] forget=reopened", ("[BENCH] forget=refused", "[BENCH] forget=failed")
+            wait = FORGET_WAIT_S
+            self.forgetting, self.forget_turn = True, None
+        line, _ = self.until(lambda l: l.startswith(done) or l.startswith(refused), wait, start)
         step = " ".join(["bench"] + args)
+        if self.forgetting:
+            # The forget's turn line comes after its last line.
+            self.pump(1.0)
+            self.forgetting = False
         if not line:
-            self.fail(f"{step}: no {done} line within {BENCH_WAIT_S:.0f} s")
+            self.fail(f"{step}: no {done} line within {wait:.0f} s")
             return f"no {done} line"
         if line.startswith(refused):
             self.fail(f"{step}: {line}")
             return line
+        if args[0] == "forget":
+            said = [l for l in self.step_lines[start:] if l.startswith("[BENCH] forget=done")]
+            f = fields(said[-1]) if said else {}
+            return "forget " + " ".join(f"{k}={f[k]}" for k in ("flagged", "unflagged", "marks", "entries")
+                                        if k in f) + f" forget_ms={self.forget_turn}"
         f = fields(line)
         return f"{done.split()[1]} " + " ".join(f"{k}={f[k]}" for k in ("flags", "peer", "unread") if k in f)
 
@@ -658,12 +743,31 @@ class Walk:
             ok = (got == want) == (op == "=")
         return ok, f"{field}={got}"
 
+    def refusal(self, steps):
+        """Why the walk must not run on this board (1562), or None."""
+        if not opens_chats(steps) or self.home == "none":
+            return None
+        if self.bench_home is None:
+            return (f"REFUSED the walk opens chats and no bench home is known (--bench-home, "
+                    f"scripts/m9-bench-home.sh setup); the board's client record names home {self.home}")
+        if self.home != self.bench_home:
+            return (f"REFUSED the board's client record names home {self.home}, not the bench home "
+                    f"{self.bench_home}: a walk that opens chats marks their messages read at that home "
+                    f"(scripts/m9-bench-home.sh join pairs the board with the bench home)")
+        return None
+
     def run(self, steps):
+        parsed = parse(steps)
         self.notes.append(self.boot("before the walk"))
         for n in range(1, self.boots_asked):
             self.notes.append(self.boot(f"boot {n + 1} of {self.boots_asked}"))
         self.row("boot", "; ".join(self.notes))
-        for line, verb, args in parse(steps):
+        refused = self.refusal(parsed)
+        if refused:
+            print(refused)
+            self.fail(refused)
+            return self.verdict()
+        for line, verb, args in parsed:
             extra = ""
             if verb in ACTIONS:
                 self.pump(0.0)
@@ -775,8 +879,12 @@ class FakeBoard(threading.Thread):
     key opens the house page after its tap's 300 ms gap."""
 
     def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
-                 release=False, slow_turn=False, tops=(0, 5, 2), torn=False, stuck_zoom=False):
+                 release=False, slow_turn=False, tops=(0, 5, 2), torn=False, stuck_zoom=False,
+                 home=None):
         super().__init__(daemon=True)
+        # 1562: the home its client record names; None says client=none.
+        self.home = SELFTEST_HOME if home is None else home
+        self.arrived = 0
         self.rig, self.slow_ms, self.grow_rx = rig, slow_ms, grow_rx
         self.refuse_owe, self.hang_on = refuse_owe, hang_on
         self.release, self.slow_turn, self.tops = release, slow_turn, tops
@@ -815,6 +923,11 @@ class FakeBoard(threading.Thread):
                 restore = "whole" if self.boots == 1 else "resumed"
                 self.say("[PREV_RUN] reason=power record=none t=1",
                          f"[STORE] sectors=896 used=3 entries=40 restore={restore} restore_ms=640 t=900")
+                if self.home == "none":
+                    self.say("[HOME] client=none page=1 t=905")
+                else:
+                    self.say("[HOME] client=yes admitted=yes cursor=40 page=1 max_answer=1 "
+                             + (f"home={self.home}" if self.home else "") + " t=906")
                 if not self.release:
                     self.say("[BENCH] inject=on t=2",
                              "[WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow t=950")
@@ -895,9 +1008,23 @@ class FakeBoard(threading.Thread):
             flags = payload[0] if payload else 0
             self.say(f"[BENCH] owe={'refused' if self.refuse_owe else 'armed'} flags={flags:#04x}")
         elif kind == TYPE_BENCH_ARRIVE:
-            self.say(f"[BENCH] arrive=sent row={payload[0] % 3} of=3 peer=0a0b0c0d",
+            if payload:
+                self.say("[BENCH] arrive=refused reason=malformed")
+                return
+            self.arrived += 1
+            self.say(f"[BENCH] arrive=sent peer=6c6f7175 named={'yes' if self.arrived > 1 else 'no'}",
                      "[STORE] kept=1 writes=1 erased=0 cursor=40 used=3 entries=41",
-                     "[BENCH] arrive=folded peer=0a0b0c0d unread=1")
+                     f"[BENCH] arrive=folded peer=6c6f7175 unread={self.arrived}")
+        elif kind == TYPE_HOME_CODE:
+            self.say("[HOME] code=taken saved=yes",
+                     f"[HOME] client=yes admitted=no cursor=0 page=1 max_answer=1 home={self.home}")
+        elif kind == TYPE_BENCH_FORGET:
+            self.say(f"[BENCH] forget=done flagged={self.arrived + 1} unflagged=2 marks=1 entries={self.arrived + 4} "
+                     "frames=6 sectors=2 summary_erased=112 ms=6200",
+                     "[STORE] sectors=896 used=3 entries=40 restore=rebuilt restore_ms=2900 t=9000",
+                     "[BENCH] forget=reopened",
+                     "[LOOP] turn_ms=9100 stage=take host=0 node=0 take=9100 draw=0 keys=0 entries=40")
+            self.arrived = 0
         elif kind == TYPE_FRAME_DUMP:
             w, h = 4, 4
             rows = [[0xF800, 0x07E0, 0x001F, 0xFFFF], [0, 0, 0x1234, 0x1234],
@@ -962,13 +1089,13 @@ wait page=chats
 # The bench steps' selftest walk (1540): hang.walk's block, twice.
 SELFTEST_HANG_WALK = """
 allow key_ms 2000
-bench arrive 0
+bench arrive
 bench owe erase
 key enter
 wait page=chat
 key back
 wait page=chats
-bench arrive 4
+bench arrive
 bench owe
 key enter
 wait page=chat
@@ -977,19 +1104,31 @@ measure
 """
 
 
+# 1562: the clean-up, a walk without opens.
+SELFTEST_FORGET_WALK = """
+bench arrive
+bench forget
+wait page=chats
+"""
+
+SELFTEST_HOME = "0123456789abcdef0123456789abcdef"
+SELFTEST_OTHER = "fedcba9876543210fedcba9876543210"
+
+
 def selftest():
     rc = 0
     with tempfile.TemporaryDirectory(dir=os.environ.get("M9_WALK_TMP")) as base:
-        def walk(name, steps=SELFTEST_WALK, **board):
+        def walk(name, steps=SELFTEST_WALK, bench_home=SELFTEST_HOME, **board):
             rig = os.path.join(base, name)
             os.makedirs(rig)
             open(os.path.join(rig, "raw.bin"), "wb").close()
             fake = FakeBoard(rig, **board)
             fake.start()
             out = os.path.join(rig, "out")
-            w = Walk(Rig(rig), out, boots=2)
+            w = Walk(Rig(rig), out, boots=2, bench_home=bench_home)
             got = w.run(steps.splitlines())
             fake.stop = True
+            w.fake = fake
             return got, w, out
         got, w, out = walk("good")
         if got != 0:
@@ -1028,6 +1167,55 @@ def selftest():
         if got == 0 or not any("reason=wdt0" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a hang on an open passed the [PREV_RUN] bar", w.fails)
             rc = 1
+        # 1562: a walk with opens on a board joined to another home is
+        # refused before its first key (the positive control: no KEY,
+        # no open), so is one with no bench home known and one whose
+        # board says no home address (an image before 1562); a walk
+        # without opens runs on any home, and a board without a home
+        # (the fixture) is walked with opens.
+        for name, kw, why in (("foreign", {"home": SELFTEST_OTHER}, "not the bench home"),
+                              ("nobench", {"bench_home": None}, "no bench home is known"),
+                              ("oldimage", {"home": ""}, "names home unknown")):
+            got, w, _ = walk(name, steps=SELFTEST_HANG_WALK, **kw)
+            if got == 0 or not any(f.startswith("REFUSED") and why in f for f in w.fails):
+                print(f"[m9-walk] selftest FAIL: {name}: a walk with opens was not refused ({why})", w.fails)
+                rc = 1
+            if w.fake.opens or w.keys:
+                print(f"[m9-walk] selftest FAIL: {name}: the refused walk pressed keys", w.fake.opens, w.keys)
+                rc = 1
+        got, w, _ = walk("foreignmap", steps=SELFTEST_MAP_WALK, home=SELFTEST_OTHER)
+        if got != 0:
+            print("[m9-walk] selftest FAIL: a walk without opens was refused on another home", w.fails)
+            rc = 1
+        got, w, _ = walk("nohome", steps=SELFTEST_OPEN_WALK, home="none", bench_home=None)
+        if got != 0:
+            print("[m9-walk] selftest FAIL: a board without a home was refused", w.fails)
+            rc = 1
+        # 1562: the forget waits for the reopen and names its long turn
+        # instead of failing the 250 ms bar; it is no open, so it runs on
+        # any home (the clean-up of Lew's board).
+        got, w, out = walk("forget", steps=SELFTEST_FORGET_WALK, home=SELFTEST_OTHER)
+        if got != 0:
+            print("[m9-walk] selftest FAIL: the forget walk failed", w.fails)
+            rc = 1
+        with open(os.path.join(out, "walk.md")) as f:
+            md = f.read()
+            if "forget flagged=2 unflagged=2 marks=1 entries=5 forget_ms=9100" not in md:
+                print("[m9-walk] selftest FAIL: walk.md does not say the forget and its turn")
+                rc = 1
+        # 1562: the bench home's join: the code taken and the record
+        # naming the bench home passes; a record naming another fails.
+        for name, home, want in (("join", SELFTEST_HOME, 0), ("joinother", SELFTEST_OTHER, 1)):
+            rig = os.path.join(base, name)
+            os.makedirs(rig)
+            open(os.path.join(rig, "raw.bin"), "wb").close()
+            fake = FakeBoard(rig, home=home)
+            fake.start()
+            got = home_code(Rig(rig), "lqxh1selftest", SELFTEST_HOME, timeout=5.0)
+            fake.stop = True
+            if got != want:
+                print(f"[m9-walk] selftest FAIL: {name}: --home-code said {got}, not {want}")
+                rc = 1
         # 1542 (a): a board without the bench's and the watchdog's lines
         # (a release image) fails by name on every boot.
         got, w, _ = walk("release", release=True)
@@ -1081,7 +1269,7 @@ def selftest():
         if got == 0 or not any("expect zoom changed" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a zoom that never moved passed", w.fails)
             rc = 1
-    for name in ("bench.walk", "hang.walk"):
+    for name in ("bench.walk", "hang.walk", "forget.walk"):
         shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "m9-walks", name)
         try:
             with open(shipped) as f:
@@ -1089,7 +1277,7 @@ def selftest():
         except (OSError, ValueError) as e:
             print(f"[m9-walk] selftest FAIL: the shipped {name} does not read: {e}")
             rc = 1
-    for bad in (["bench owe now"], ["bench arrive 256"], ["bench nap"], ["allow key_ms -1"],
+    for bad in (["bench owe now"], ["bench arrive 3"], ["bench forget all"], ["bench nap"], ["allow key_ms -1"],
                 ["open shortest"], ["open longest 0"]):
         try:
             parse(bad)
@@ -1100,8 +1288,11 @@ def selftest():
     if bench_frame(["owe", "erase-log"]).hex() != "7ea4a51b0001017e":
         print("[m9-walk] selftest FAIL: the owe frame is not the envelope's", bench_frame(["owe", "erase-log"]).hex())
         rc = 1
-    if bench_frame(["arrive", "3"]).hex() != "7ea4a51c0001037e":
+    if bench_frame(["arrive"]).hex() != "7ea4a51c00007e":
         print("[m9-walk] selftest FAIL: the arrive frame is not the envelope's")
+        rc = 1
+    if bench_frame(["forget"]).hex() != "7ea4a51d00007e":
+        print("[m9-walk] selftest FAIL: the forget frame is not the envelope's")
         rc = 1
     try:
         parse(["key nosuchkey"])
@@ -1121,8 +1312,40 @@ def selftest():
               "a release boot fails by name, the dump's turn is named and another slow turn fails, "
               "open longest picks the longest chat and fails on a list of one-screen chats, "
               "a torn dump is named TORN with its lost lines and still drawn, "
-              "a zoom said behind the hint row's flush is waited for and one that never moves fails")
+              "a zoom said behind the hint row's flush is waited for and one that never moves fails; "
+              "a walk with opens is refused on another home, with no bench home and on an image that "
+              "says none, before its first key, and runs without opens or without a home; "
+              "bench forget waits for the reopen and names its turn; "
+              "a code the board takes for the bench home joins, one for another home fails")
     return rc
+
+
+def home_code(rig, code, bench_home, timeout=20.0):
+    """Write `code` to the board (TYPE_HOME_CODE) and wait for it to take
+    it and say the home its new record names (1562)."""
+    rig.read_lines()
+    rig.send(wire(envelope(TYPE_HOME_CODE, code.encode())))
+    deadline = time.monotonic() + timeout
+    taken = None
+    while time.monotonic() < deadline:
+        for line in rig.read_lines():
+            if line.startswith("[HOME] code="):
+                print(line)
+                if not line.startswith("[HOME] code=taken"):
+                    print(f"[m9-walk] FAIL the board did not take the code: {line}")
+                    return 1
+                taken = line
+            elif taken and line.startswith("[HOME] client=yes"):
+                print(line)
+                home = fields(line).get("home", "unknown").lower()
+                if bench_home and home != bench_home:
+                    print(f"[m9-walk] FAIL the board's record names home {home}, not the bench home {bench_home}")
+                    return 1
+                print(f"[m9-walk] JOINING home={home}: the admission follows over the node (the mailbox's log)")
+                return 0
+        time.sleep(0.05)
+    print(f"[m9-walk] FAIL no [HOME] code=taken and client line within {timeout:.0f} s")
+    return 1
 
 
 def main():
@@ -1131,8 +1354,10 @@ def main():
     ap.add_argument("--walk")
     ap.add_argument("--out")
     ap.add_argument("--boots", type=int, default=2)
+    ap.add_argument("--bench-home", help="the bench home's LXMF address, 32 hex, or a file that holds it")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--check", metavar="WALK", help="only read the walk file")
+    ap.add_argument("--home-code", metavar="CODE", help="write an admission code to the board")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
@@ -1145,12 +1370,21 @@ def main():
             return 2
         print(f"[m9-walk] {a.check}: {n} steps read")
         return 0
+    try:
+        bench_home = read_home(a.bench_home)
+    except ValueError as e:
+        print(f"[m9-walk] {e}")
+        return 2
+    if a.home_code:
+        if not a.rig:
+            ap.error("--home-code needs --rig")
+        return home_code(Rig(a.rig), a.home_code, bench_home)
     if not a.rig or not a.walk:
         ap.error("--rig and --walk, or --selftest")
     out = a.out or os.path.join(a.rig, "walk-" + time.strftime("%Y%m%d-%H%M%S"))
     with open(a.walk) as f:
         steps = f.read().splitlines()
-    return Walk(Rig(a.rig), out, a.boots).run(steps)
+    return Walk(Rig(a.rig), out, a.boots, bench_home=bench_home).run(steps)
 
 
 if __name__ == "__main__":

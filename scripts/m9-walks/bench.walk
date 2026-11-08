@@ -5,10 +5,12 @@
 # (walk.md lists them in order); the expects are what a script can hold
 # without one.
 #
-# The board is a device of a home with its chats restored, one of the
-# list's first eight rows a chat longer than one screen (the bench M9's own
-# home, Lew's). Two boots before this file starts: the second is a resumed
-# restore under 2 s.
+# The board is a device of the bench home (1562, scripts/m9-bench-home.sh:
+# the 1489 fixture, its long chat Anna's 1200 messages), never Lew's: the
+# walk opens chats, and m9-walk.py refuses it before the first key on a
+# board whose client record names another home. One of the list's first
+# eight rows is a chat longer than one screen. Two boots before this file
+# starts: the second is a resumed restore under 2 s.
 
 # The list.
 wait page=chats
