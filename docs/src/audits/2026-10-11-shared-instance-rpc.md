@@ -524,7 +524,7 @@ comments and quote stripping to ConfigObj's own rules
 (`strip_value`, `leviculum-std/src/ini_config.rs:1190`); the config
 directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 `~/.reticulum` (`resolve_config_dir`,
-`leviculum-std/src/config.rs:1619`, against
+`leviculum-std/src/config.rs:1631`, against
 `reference/Reticulum/RNS/Reticulum.py:229-236`); `ifac_size` in bits
 with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:975-985`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
@@ -562,7 +562,7 @@ daemon:
 1. **`share_instance`** — Python defaults true
    (`reference/Reticulum/RNS/Reticulum.py:287`); ours defaults false
    (`leviculum-std/src/config.rs:94-99`, resolved unchanged by the
-   builder, `leviculum-std/src/driver/builder.rs:928-930`). A config
+   builder, `leviculum-std/src/driver/builder.rs:945-947`). A config
    that never names the key gives rnsd a shared instance and lnsd
    none: every Python tool answers "No shared RNS instance available"
    against lnsd. This is the central drop-in switch defaulting to the
@@ -576,7 +576,7 @@ daemon:
    when `enabled` or `interface_enabled` is explicitly true and skips
    the section otherwise
    (`reference/Reticulum/RNS/Reticulum.py:950` and `:1056`); ours
-   defaults the field true (`leviculum-std/src/config.rs:770-771`), so
+   defaults the field true (`leviculum-std/src/config.rs:782-783`), so
    a section with no `enabled` key is live under lnsd and dead under
    rnsd.
 
@@ -734,7 +734,7 @@ Deliberate, documented deviations, re-confirmed as stated: our
 being locally observable only (`leviculum-std/src/config.rs:255-270`);
 ingress control defaults off for dial-out point-to-point types where
 Python is flat-true (`ingress_control_default_for_type`,
-`leviculum-std/src/config.rs:1419`); the discoverable-mode promotion
+`leviculum-std/src/config.rs:1431`); the discoverable-mode promotion
 fills only an UNSET mode where Python overrides an explicit one
 (`promote_discoverable_modes`, `leviculum-std/src/ini_config.rs:395`).
 Also ignored without a current consumer: `link_mtu_discovery` (no

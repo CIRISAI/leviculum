@@ -118,7 +118,7 @@ grounds: an application pinned it, it was used within
 `UNUSED_DESTINATION_LINGER` — 6 minutes
 (`reference/Reticulum/RNS/Identity.py:349-352`, the two timeouts at
 `Transport.py:91-92`). We implement the first two and not the third
-(`leviculum-core/src/memory_storage.rs:1378`): our announce cache stores
+(`leviculum-core/src/memory_storage.rs:1442`): our announce cache stores
 the raw announce, not the moment we heard it, so there is no age to
 compare against. The third arm only ever protects a destination nothing
 has asked about, so dropping it a few minutes early costs a path request
@@ -136,7 +136,7 @@ Leviculum defaults it **off** on dial-out point-to-point links —
 `TCPClientInterface`, `BackboneClientInterface`, `UDPInterface`, and an
 `I2PInterface` without `connectable` — and leaves it **on** everywhere
 else, including every listener
-(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:1419`).
+(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:1431`).
 
 Against the rule: the flag decides only whether *we* hold incoming
 announces, so no wire byte and no behaviour a peer observes changes

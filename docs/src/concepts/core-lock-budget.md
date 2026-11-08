@@ -369,7 +369,7 @@ The rule that follows is the CPU rule's sibling:
 > worse bug than the missing diagnostic.**
 
 The event log now inverts the trade (`FileSink`,
-`leviculum-std/src/event_log.rs:1847`): the emitting thread does a
+`leviculum-std/src/event_log.rs:1865`): the emitting thread does a
 bounded enqueue and returns, one writer thread owns the file, and an
 overrun drops lines and says so with `EVENT_LOG_DROPPED` rather than
 blocking the mesh. `LEVICULUM_EVENT_LOG_SYNC=1` restores the old
@@ -386,7 +386,7 @@ informatively:
 | --- | --- | --- |
 | `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:7085`) | announce handling itself took ≥ 100 ms |
 | `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4612`) | an outside thread waited ≥ 250 ms for the core lock |
-| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1964`) | one batch write to the log file took ≥ 50 ms |
+| `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1982`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by
 something other than announce handling; `EVENT_LOG_WRITE_SLOW`
@@ -427,10 +427,10 @@ The flush now keeps to the shape in all three phases:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `Storage::take_flush_snapshot` | brief: shares the table, copies the packet hashes | `leviculum-std/src/storage.rs:732` |
-| `Storage::collect_flush_slice` | brief, once per 1024 identities, 1 ms apart | `leviculum-std/src/storage.rs:778` |
-| `FlushSnapshot::write` | **none**: the fold, the announce parses, the copy, the file IO | `leviculum-std/src/storage.rs:601` |
-| `Storage::finish_flush` | brief: swaps the folded table in; `settle_flush` frees the old one on the blocking pool | `leviculum-std/src/storage.rs:815` |
+| `Storage::take_flush_snapshot` | brief: shares the table, copies the packet hashes | `leviculum-std/src/storage.rs:787` |
+| `Storage::collect_flush_slice` | brief, once per 1024 identities, 1 ms apart | `leviculum-std/src/storage.rs:833` |
+| `FlushSnapshot::write` | **none**: the fold, the announce parses, the copy, the file IO | `leviculum-std/src/storage.rs:656` |
+| `Storage::finish_flush` | brief: swaps the folded table in; `settle_flush` frees the old one on the blocking pool | `leviculum-std/src/storage.rs:870` |
 
 The capture is sliced rather than made a single cheap copy because a
 cheap copy of 50 000 identities and their announces does not exist; the
