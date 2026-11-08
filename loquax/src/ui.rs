@@ -3176,6 +3176,28 @@ impl<'a, B: InputBuffer + Default> Batch<'a, B> {
         self.effects.extend(effects);
     }
 
+    /// Take out the conversations the fold left with nothing to list
+    /// (1521c): no message and no row kept for one ([`UiModel::row`]), an
+    /// invitation's group no message reached or a chat whose every message
+    /// a mark deleted. A device that lists its conversations from kept rows
+    /// at the next boot has no row for them, so the boot that folded them
+    /// must not list them either. Noted with the batch; the conversations
+    /// taken out.
+    pub fn drop_rowless(&mut self) -> Vec<[u8; 16]> {
+        let rowless: Vec<[u8; 16]> = self
+            .model
+            .conversations
+            .iter()
+            .map(|c| c.peer)
+            .filter(|peer| self.model.row(peer).is_none())
+            .collect();
+        for peer in &rowless {
+            self.folded = true;
+            let _ = self.model.remove_conversation(*peer);
+        }
+        rowless
+    }
+
     /// Note what the batch changed, once, and hand back what its events
     /// asked for.
     pub fn finish(mut self) -> Vec<UiEffect> {

@@ -423,6 +423,9 @@ fn rebuild<S: Sectors>(
         },
     );
     let t0 = clock();
+    // What the summary log cannot carry is not listed (1521c): the boot
+    // that resumes from it lists the rows alone, and the two must agree.
+    let _ = batch.drop_rowless();
     batch.finish();
     let finish = clock().saturating_sub(t0);
     shown.selected = top(&shown);

@@ -29,7 +29,7 @@ use leviculum_ui::delivery::DeliveryState;
 use leviculum_ui::input::InputBuffer;
 use leviculum_ui::toast::{Toast, ToastKind};
 
-use super::{Message, NewRule, UiEffect, UiModel};
+use super::{Conversation, Message, NewRule, UiEffect, UiModel};
 use crate::home::wire::MarkFlag;
 use crate::telemetry::Fix;
 use crate::when::WallTime;
@@ -961,16 +961,32 @@ impl<B> UiModel<B> {
     /// client of a home node from every device of the home when
     /// `everywhere`.
     pub(super) fn delete_conversation(&mut self, peer: [u8; 16], everywhere: bool) {
-        let Some(c) = self.conversations.iter().position(|c| c.peer == peer) else {
+        let label = self.names.label(&peer);
+        let Some(removed) = self.remove_conversation(peer) else {
             return;
         };
-        let label = self.names.label(&peer);
-        let removed = self.conversations.remove(c);
         let everywhere = everywhere && self.home_client;
         if everywhere {
             let ids = removed.messages.iter().filter_map(|m| m.id).collect();
             self.mark_out(MarkFlag::Deleted, ids);
         }
+        self.forgotten.push(StoreWrite::ForgetConversation { peer });
+        let place = match everywhere {
+            true => "every device of this home",
+            false => "this device",
+        };
+        self.toast(
+            ToastKind::Info,
+            format!("conversation with {label} deleted from {place}"),
+        );
+    }
+
+    /// Take conversation `peer` out of the model, every index into the
+    /// conversations moved past it: what a delete does on the screen,
+    /// without its store write, its mark or its toast.
+    pub(super) fn remove_conversation(&mut self, peer: [u8; 16]) -> Option<Conversation> {
+        let c = self.conversations.iter().position(|c| c.peer == peer)?;
+        let removed = self.conversations.remove(c);
         for (sc, _) in self.sending.iter_mut() {
             if *sc > c && *sc != super::receipts::RECEIPT_SEND && *sc != super::groups::STATE_SEND {
                 *sc -= 1;
@@ -988,7 +1004,6 @@ impl<B> UiModel<B> {
         self.positions.remove(&peer);
         self.tracks.remove(&peer);
         self.fixes_received.retain(|fix| fix.peer != peer);
-        self.forgotten.push(StoreWrite::ForgetConversation { peer });
         if self.selected == c {
             let open = self.order().first().copied().unwrap_or(0);
             self.selected = open;
@@ -1005,14 +1020,7 @@ impl<B> UiModel<B> {
             search.selected = 0;
             search.stored.clear();
         }
-        let place = match everywhere {
-            true => "every device of this home",
-            false => "this device",
-        };
-        self.toast(
-            ToastKind::Info,
-            format!("conversation with {label} deleted from {place}"),
-        );
+        Some(removed)
     }
 
     /// The palette's `pin`: the open conversation goes above the rule, or

@@ -574,3 +574,146 @@ fn newest_id(flash: &MemFlash, archive: &Archive, peer: [u8; 16]) -> [u8; 32] {
         .and_then(|m| m.id)
         .expect("a received message")
 }
+
+/// The fixture's archive and two conversations the fold makes that hold
+/// no message (1521c): a group a friend invited the reader to, which no
+/// message reached, and a chat whose only message a mark deleted. What
+/// they add to the archive, and the two conversations' peers.
+fn with_rowless(archive: &Archive) -> (Vec<Entry>, [[u8; 16]; 2]) {
+    use leviculum_lxmf::lev::{Invite, Lev};
+    use loquax::home::wire::{mark_request, Mark, MarkFlag};
+    use loquax::home::KIND_MARK;
+    let mut entries = archive.entries();
+    let mut seq = MESSAGES;
+    let mut at = |entries: &mut Vec<Entry>, kind: u8, packed: Vec<u8>| {
+        seq += 1;
+        entries.push(Entry {
+            seq,
+            kind,
+            at: 1_762_000_000 + seq as i64,
+            packed,
+        });
+    };
+    let inviter = &archive.friends[3];
+    let group = Identity::generate(&mut OsRng);
+    let group_address = lxmf_address(&group.public_key_bytes()).expect("address");
+    let mut fields = Vec::new();
+    Lev {
+        invite: Some(Invite {
+            group: group_address,
+            public_key: group.public_key_bytes(),
+            name: "Chor".into(),
+            admin_name: "Jürgen".into(),
+            epoch: 1,
+        }),
+        ..Lev::default()
+    }
+    .put_into(&mut fields);
+    let invitation = Message::create(
+        archive.address,
+        lxmf_address(&inviter.public_key_bytes()).expect("address"),
+        inviter,
+        1_762_000_000.0 + MESSAGES as f64 + 1.0,
+        Vec::new(),
+        b"Jurgen invited you to Chor".to_vec(),
+        fields,
+        DeliveryMethod::Direct,
+    )
+    .expect("create");
+    at(&mut entries, KIND_RECEIVED, invitation.pack());
+    let stranger = Identity::generate(&mut OsRng);
+    let stranger_address = lxmf_address(&stranger.public_key_bytes()).expect("address");
+    let gone = Message::create(
+        archive.address,
+        stranger_address,
+        &stranger,
+        1_762_000_000.0 + MESSAGES as f64 + 2.0,
+        Vec::new(),
+        b"deleted on another device".to_vec(),
+        Vec::new(),
+        DeliveryMethod::Direct,
+    )
+    .expect("create");
+    let id = gone.message_id;
+    at(&mut entries, KIND_RECEIVED, gone.pack());
+    at(
+        &mut entries,
+        KIND_MARK,
+        mark_request(&Mark {
+            flag: MarkFlag::Deleted,
+            ids: vec![id],
+        }),
+    );
+    (entries, [group_address, stranger_address])
+}
+
+/// 1521c, the M9's bench: the boot that folded the ring said
+/// `conversations=16`, every boot that resumed from the summary log after
+/// it `conversations=15`. The fold made a conversation that holds no
+/// message, for which `UiModel::row` has no row, so the summary log never
+/// carried it. The two boots of one store list the same conversations:
+/// the fold leaves out what the summaries cannot carry. The positive
+/// control is the same entries folded page by page into a fresh model,
+/// as the pull folds them: it holds the two rowless conversations.
+#[test]
+fn a_rebuilt_and_a_resumed_boot_count_the_same_conversations() {
+    let archive = Archive::new();
+    let (entries, rowless) = with_rowless(&archive);
+    let mut flash = MemFlash::new(2048);
+    let home::Boot {
+        shelf: mut store, ..
+    } = home::restore(&mut flash, archive.address).expect("boot");
+    for page in entries.chunks(72) {
+        home::keep(&mut store, &mut flash, page, &archive.address).expect("keep");
+    }
+
+    let mut control = home::model(archive.address);
+    for page in entries.chunks(72) {
+        home::take(&mut control, page, &archive.address);
+    }
+    for peer in rowless {
+        let held = control.conversations.iter().find(|c| c.peer == peer);
+        assert!(
+            held.is_some_and(|c| c.messages.is_empty()) && control.row(&peer).is_none(),
+            "the fold holds {peer:02x?} without a message or a row"
+        );
+    }
+    assert_eq!(control.conversations.len(), CONVERSATIONS + 2);
+
+    let rebuilt = home::restore(&mut flash, archive.address).expect("rebuild");
+    assert!(
+        matches!(rebuilt.how, home::How::Rebuilt { .. }),
+        "{:?}",
+        rebuilt.how
+    );
+    let resumed = home::restore(&mut flash, archive.address).expect("resume");
+    assert!(
+        matches!(resumed.how, home::How::Resumed { .. }),
+        "{:?}",
+        resumed.how
+    );
+    println!(
+        "COUNT rebuilt={} resumed={} control={}",
+        rebuilt.model.conversations.len(),
+        resumed.model.conversations.len(),
+        control.conversations.len()
+    );
+    assert_eq!(
+        rebuilt.model.conversations.len(),
+        resumed.model.conversations.len(),
+        "the boot that folds the ring and the one that resumes count alike"
+    );
+    assert_eq!(rebuilt.model.conversations.len(), CONVERSATIONS);
+    let peers = |boot: &home::Boot| {
+        let mut peers: Vec<[u8; 16]> = boot.model.conversations.iter().map(|c| c.peer).collect();
+        peers.sort();
+        peers
+    };
+    assert_eq!(peers(&rebuilt), peers(&resumed));
+    assert_eq!(
+        text(&rebuilt.model),
+        text(&resumed.model),
+        "and list the same rows"
+    );
+}
+
