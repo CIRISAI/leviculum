@@ -167,7 +167,7 @@ the keys of #388 pass 3 already ate; plus ~26 B per persisted record
 pass. CPU and airtime: none (rotation only unpeers).
 Test: the shared-crate rule is pinned
 (`a_restored_full_table_rotates_out_its_two_lowest_acceptance_peers_on_the_tick`,
-`lnpnd/src/peering.rs:2126`); a board engine test would assert the
+`lnpnd/src/peering.rs:2133`); a board engine test would assert the
 counters survive `PeerRecord` round-trips through the record log.
 
 **D4 — no static peers on the board.** lnpnd and the reference take
@@ -210,7 +210,7 @@ empty), red before the fix (no record, no list), and the reclaim rule by
 **D5 — the peer-back recall is RAM-only and does not survive a
 reset.** Both stacks peer back a node whose sync lands by recalling
 its last announce (`peer_from_recalled_announce`,
-`leviculum-nrf/src/pn.rs:2275` and `lnpnd/src/peering.rs:1313`,
+`leviculum-nrf/src/pn.rs:2275` and `lnpnd/src/peering.rs:1320`,
 against `reference/LXMF/LXMF/LXMRouter.py:2355-2375`). The
 reference recalls from `Identity.known_destinations`, which is
 persisted; the board recalls from `EmbeddedStorage`'s 16-entry RAM
@@ -252,7 +252,7 @@ more tests beside them.
 
 **D6 — lnpnd judges an inbound sync by its link's hops when no path
 is known; the board does not.** lnpnd's deliberate deviation 556
-(8756a5df, documented at `lnpnd/src/peering.rs:1294-1312`): the
+(8756a5df, documented at `lnpnd/src/peering.rs:1301-1319`): the
 reference reads only the path table, which answers `PATHFINDER_M`
 for an unknown path, so after a restart a recallable neighbour is
 "too deep" until its next announce; the link the sync arrived over
@@ -324,32 +324,32 @@ already `KeyMining`, and `mining_peer` already says the miner is busy.
 Pinned by `a_busy_miner_holds_only_the_peers_that_need_it`
 (`leviculum-lxmf/src/peering_tests.rs`), red against the early return.
 lnpnd's tick carries the same early return
-(`lnpnd/src/peering.rs:1416`, `self.mining.is_some()`), so the
+(`lnpnd/src/peering.rs:1423`, `self.mining.is_some()`), so the
 sentence above about lnpnd does not hold; not changed here.
 
 ## 2. The store, pricing, and what the board announces
 
 Where the code is shared, verified: one accept path for uploads and
 synced messages (`handle_upload`,
-`leviculum-lxmf/src/propagation_node.rs:1269`, and `accept_stamped`,
-`leviculum-lxmf/src/propagation_node.rs:1295`, against
+`leviculum-lxmf/src/propagation_node.rs:1317`, and `accept_stamped`,
+`leviculum-lxmf/src/propagation_node.rs:1343`, against
 `reference/LXMF/LXMF/LXMRouter.py:2234-2255` and `:2430-2436`);
 dedup by store membership plus the processed-id cache
 (`reference/LXMF/LXMF/LXMRouter.py:2496`); displacement by
 `age × size` weight (`make_room`,
-`leviculum-lxmf/src/propagation_node.rs:1920`, against `get_weight`,
+`leviculum-lxmf/src/propagation_node.rs:1968`, against `get_weight`,
 `reference/LXMF/LXMF/LXMRouter.py:1056-1067`); 30-day expiry
 (`MESSAGE_EXPIRY_SECS`,
 `leviculum-lxmf/src/propagation_node.rs:65`), epoch-guarded on the
 board so the first clock seed does not mass-expire a birth-stamped
-store (`tick`, `leviculum-lxmf/src/propagation_node.rs:1835`); the
+store (`tick`, `leviculum-lxmf/src/propagation_node.rs:1883`); the
 seven-field announce built by one encoder for both stacks
-(`announce_app_data`, `leviculum-lxmf/src/propagation_node.rs:1142`,
+(`announce_app_data`, `leviculum-lxmf/src/propagation_node.rs:1190`,
 against `reference/LXMF/LXMF/LXMRouter.py:324-336`); and the `/get`
 serve with purge-only-on-haves (`handle_get`,
-`leviculum-lxmf/src/propagation_node.rs:1804`), bounded by the
+`leviculum-lxmf/src/propagation_node.rs:1852`), bounded by the
 client's limit, the board's serve limit and the live heap cap in
-composition (`leviculum-lxmf/src/propagation_node.rs:1573-1584`) —
+composition (`leviculum-lxmf/src/propagation_node.rs:1621-1632`) —
 the serve side is audited to death in #388/#384 and its numbers live
 at `SERVE_RESERVE_BYTES`
 (`leviculum-nrf/heap-budget/src/lib.rs:200`) and `live_serve_cap`
@@ -359,7 +359,7 @@ What the board accepts, by path: a raw link packet (bounded by the
 link MDU, 431 B on LoRa), or a resource the advertisement gate
 admits at up to the announced sync limit
 (`accepts_resource_of`,
-`leviculum-lxmf/src/propagation_node.rs:1173`, wired through
+`leviculum-lxmf/src/propagation_node.rs:1221`, wired through
 `board_resource_refusal` at `leviculum-nrf/src/pn.rs:1318`). Storage is slice-at-a-time: the
 record goes to the flash log through the work queue, one item per
 settle pass, the stamp workblock expanded 20 rounds per pass
@@ -396,7 +396,7 @@ skips the workblock at cost 0 while no peer demands a value
 (`always_compute_stamp_value: false` in `Engine::new` as audited, now
 `true` in `board_role_config`,
 `leviculum-nrf/pn-store/src/lib.rs:411`; the gate at
-`leviculum-lxmf/src/propagation_node.rs:1326-1337`), storing stamp
+`leviculum-lxmf/src/propagation_node.rs:1374-1385`), storing stamp
 value 0 as the record's tag. A stock peer announces cost 16 with
 flexibility 3 (`PROPAGATION_COST`,
 `reference/LXMF/LXMF/LXMRouter.py:54`), so it takes only value ≥ 13;

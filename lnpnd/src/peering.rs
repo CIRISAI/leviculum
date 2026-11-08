@@ -1209,10 +1209,17 @@ impl PeeringRuntime {
                     job.invalid += 1;
                 }
                 UploadOutcome::StoreFailed(error) => {
-                    // Eviction already ran inside accept, and the resource
-                    // is already concluded, so the peer has moved its
-                    // cursor past this message: it is lost here. What can
-                    // be saved is the next batch, so the node declines
+                    // Not a space failure any more (LV-1001): the limits we
+                    // announce and enforce at the resource advertisement
+                    // are held to what the store can hold
+                    // (`PropagationNode::new`, `store_fit_kb`), so a peer
+                    // never offers a message the empty store could not
+                    // keep, and eviction makes room for any that fits. What
+                    // still lands here is the store's own failure, an I/O
+                    // error on append or on an eviction's purge. The
+                    // resource is concluded and the peer has moved its
+                    // cursor past this message, so it is lost here. What
+                    // can be saved is the next batch, so the node declines
                     // until its maintenance sweep has run
                     // (`Self::store_full`), and the round says what it
                     // dropped (`PN_STORE_FULL` below).
@@ -2499,6 +2506,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// LV-1001 (order 1520): a node whose store cannot hold a message never
+    /// lets a peer believe it took it. lnpnd with a 1 000-byte store
+    /// (`--store-limit-kb 1`, the cell `lnpnd_store_full_during_a_sync`)
+    /// and lnpnd's default limits: a sending peer plans its offer from the
+    /// limits our announce carries, and a 1 500-byte message, which no
+    /// eviction could ever make room for, is not in it; a peer still holding
+    /// an older, larger limit of ours is refused at the resource
+    /// advertisement, before its cursor moves. Before the fix the announce
+    /// said 256 KB, the plan carried the message, the resource was taken,
+    /// and the accept failed after the peer had moved on (`StoreFailed`).
+    /// Positive control: a 400-byte message is offered and stored.
+    #[test]
+    fn a_message_the_store_cannot_hold_is_never_taken_from_a_peer() {
+        use leviculum_lxmf::{
+            PropagationNodeAnnounce, PropagationNodeConfig, PropagationUpload, UploadOutcome,
+        };
+
+        let now = unix_secs();
+        let lnpnd_defaults = PropagationNodeConfig {
+            stamp_cost: 0,
+            transfer_limit_kb: 256,
+            sync_limit_kb: 10_240,
+            ..PropagationNodeConfig::default()
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut receiver = PropagationNode::new(
+            FilePropagationStore::open(dir.path(), 1_000).expect("store"),
+            lnpnd_defaults.clone(),
+        );
+        let announce = PropagationNodeAnnounce::decode(&receiver.announce_app_data(now))
+            .expect("our own announce");
+
+        // The sending peer's store: one message too big for the receiver's
+        // whole store, one that fits.
+        let mut sender =
+            PropagationNode::new(MemoryPropagationStore::new(1_000_000), lnpnd_defaults);
+        let mut upload = |len: usize, seed: u8| {
+            let mut lxmf_data = vec![7u8; 16];
+            lxmf_data.resize(len, seed);
+            let envelope = PropagationUpload::single(1.0, lxmf_data, [0xee; 32]).encode();
+            match sender.handle_upload(&envelope, now, |_, _| Some(0)) {
+                UploadOutcome::Accepted { transient_id, .. } => (transient_id, envelope.len()),
+                other => panic!("{other:?}"),
+            }
+        };
+        let (big, big_envelope) = upload(1_500, 1);
+        let (small, _) = upload(400, 2);
+
+        // The peer plans from what we announced.
+        let mut runtime = peer_with(0, 0, announce.transfer_limit_kb);
+        runtime
+            .table
+            .get_mut(&[1; 16])
+            .expect("the peer")
+            .sync_limit_kb = announce.sync_limit_kb;
+        let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+        let plan = plan_offer(
+            peer,
+            sender.store(),
+            sender.transfer_limit_bytes(),
+            offer_budget_for_mdu(8192),
+        )
+        .expect("store")
+        .expect("an offer");
+        assert_eq!(plan.ids, vec![small], "the oversize message is not offered");
+        assert_eq!(plan.skipped_oversize, 1, "it stays with the sender");
+
+        // A peer with a stale, larger limit is refused before transfer.
+        assert!(
+            !receiver.accepts_resource_of(big_envelope as u64),
+            "a {big_envelope}-byte sync of it is refused at the advertisement"
+        );
+
+        // Positive control: the message that fits is stored.
+        let body = sender
+            .store()
+            .read_body(&small)
+            .expect("read")
+            .expect("body");
+        assert!(receiver.accepts_resource_of(body.len() as u64 + 32));
+        match receiver.accept_stamped(&body, now, |_, _| Some(0)) {
+            UploadOutcome::Accepted {
+                duplicate: false, ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        let _ = big;
     }
 
     /// Order 1295 (reversing 1294's refusal): a client upload above our

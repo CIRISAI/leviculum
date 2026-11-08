@@ -55,6 +55,8 @@ Like lxmd, the daemon also keeps a mailbox of its own: an LXMF delivery destinat
 
 Daemon settings can also be given as flags (`--stamp-cost`, `--peering-cost`, `--max-peers`, `--static-peers`, `--autopeer`, `--autopeer-maxdepth`, `--remote-peering-cost-max`, `--max-inbound-syncs`, `--from-static-only`, `--transfer-limit-kb`, `--sync-limit-kb`, `--store-limit-kb`, `--announce-interval-secs`, `--name`); a flag overrides the config file's value for the same setting.
 
+The per-message transfer limit and the per-sync limit the node announces are held to what its message store can hold: a store limit below either lowers it, so a peer never sends a message the store could not keep (a stock lxmd announces the configured values and culls later).
+
 ## REMOTE MANAGEMENT
 
 The query verbs run as a client against a node's control destination, identifying with an identity the node has allowed. A node always allows its own identity, so the local verbs work on a fresh installation with nothing configured; `control_allowed` in the config adds other people's identity hashes. Without **--remote** they query the local daemon using the config directory's identity; with **--remote** *hash* (a propagation destination hash) they query that node, with **--identity** *path* naming the identity file to identify with. The counterpart tool's verbs are interchangeable with these.

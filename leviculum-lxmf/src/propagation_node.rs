@@ -1035,7 +1035,15 @@ impl<S: PropagationStore> PropagationNode<S> {
             + self.eviction_candidates.capacity() * core::mem::size_of::<Eviction>()
     }
 
-    pub fn new(mut store: S, config: PropagationNodeConfig) -> Self {
+    /// Build the role over `store`. The announced limits are held to what
+    /// the store can ever keep (`store_fit_kb`, LV-1001): a configured limit
+    /// above it is clamped, so the per-message transfer limit and the
+    /// per-sync limit we announce, enforce at the resource advertisement
+    /// and offer by never promise more than the store holds.
+    pub fn new(mut store: S, mut config: PropagationNodeConfig) -> Self {
+        let fit_kb = Self::store_fit_kb(&store);
+        config.transfer_limit_kb = config.transfer_limit_kb.min(fit_kb);
+        config.sync_limit_kb = config.sync_limit_kb.min(fit_kb);
         store.count_sizes_up_to(Self::largest_offered_size_under(&config));
         Self {
             store,
@@ -1048,6 +1056,46 @@ impl<S: PropagationStore> PropagationNode<S> {
             compute_stamp_value: false,
             calendar_jump_floor: 0,
         }
+    }
+
+    /// The largest limit, in the reference's kilobytes of 1000 bytes, whose
+    /// whole size the empty store could hold
+    /// ([`PropagationStore::space_required`] at most
+    /// [`PropagationStore::capacity`]).
+    ///
+    /// # Why the announce is held to the store (LV-1001)
+    ///
+    /// A peer's sync resource concludes before we store a byte of it, and
+    /// the peer marks every message in it handled as it concludes
+    /// (`resource_concluded`, `reference/LXMF/LXMF/LXMPeer.py:492-502`).
+    /// A message the store cannot hold even empty fails its append after
+    /// that point and is lost on both sides. Nothing in the `/offer`
+    /// exchange can save it: the offer carries ids and no sizes, and an id
+    /// left out of our answer is one the sender marks handled too, "it has
+    /// already received it from another peer" (`offer_response`,
+    /// `LXMPeer.py:442-448`). The limits we announce are what a peer sizes
+    /// its offer by: a message above the per-message limit it skips and
+    /// keeps (`LXMPeer.py:370-373`), and a sync above the per-sync limit we
+    /// refuse at the advertisement, where its cursor has not moved
+    /// ([`Self::accepts_resource_of`]; the reference's own check,
+    /// `LXMRouter.py:2220-2224`). Holding both to the store's capacity
+    /// closes the space path.
+    ///
+    /// The reference does not clamp: it stores whatever a sync brings and
+    /// enforces its limit later in its clean pass (`LXMRouter.py:1183-1210`).
+    /// The clamp changes only the numbers in fields 3 and 4 of the announce;
+    /// a stock node reads them as it reads any other node's limits.
+    fn store_fit_kb(store: &S) -> u64 {
+        let capacity = store.capacity();
+        let mut kb = capacity / 1000;
+        while kb > 0 {
+            let bytes = usize::try_from(kb.saturating_mul(1000)).unwrap_or(usize::MAX);
+            if store.space_required(bytes) <= capacity {
+                break;
+            }
+            kb -= 1;
+        }
+        kb
     }
 
     /// The node's calendar just jumped from its birth anchor to real time;

@@ -305,9 +305,11 @@ fn the_get_exchange_matches_the_reference_handler_byte_for_byte() {
 fn our_announce_matches_the_reference_announce_byte_for_byte() {
     // VEC-ANN-PROPAGATION pins the seven-field app_data for the reference's
     // defaults (256/10240/[16,3,18]/"Node") at the fixed timebase. Our
-    // encoder configured identically must produce identical bytes.
+    // encoder configured identically must produce identical bytes. The
+    // store holds the announced sync limit, so the limits are announced as
+    // configured and not clamped to the store (LV-1001).
     let node = PropagationNode::new(
-        MemoryPropagationStore::new(1024),
+        MemoryPropagationStore::new(256 * 40 * 1000),
         PropagationNodeConfig {
             transfer_limit_kb: 256,
             sync_limit_kb: 256 * 40,
