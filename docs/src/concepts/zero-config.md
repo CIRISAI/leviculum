@@ -7,7 +7,7 @@ This page records the design as decided, the facts it rests on, the
 measurements the cells took before any of it was built, and the order it
 is built in.
 
-Steps 1, 2 and 3 are built (below), and lnsd writes its first-start file
+Steps 1 to 4 are built (below), and lnsd writes its first-start file
 (open question 1, decided); nothing after them is. Citations into this tree are against
 master at the commit that adds the page; citations into the Python
 reference are against the pinned `reference/Reticulum` (1.3.5). The
@@ -379,7 +379,57 @@ on the same storage path and the same shared-instance port as a
 standalone lnsd, so identity and known destinations are shared and a
 second instance never opens a second port in silence. The function
 "find the instance or start one" lives in `leviculum-std`, with one
-caller per tool.
+caller per tool. Decided by Lew on 2026-10-23 (#471); built as step 4.
+
+## Step 4, as built
+
+The function is `find_or_start` (`leviculum-std/src/instance.rs`), and
+`for_tool` beside it is what a tool calls with its flags:
+
+- **The find**, the way the stock tools look: the data channel
+  `rns/<instance>` on the abstract AF_UNIX socket, then TCP loopback at
+  the configured `shared_instance_port`, else 37428. The TCP fallback is
+  asked only for the instance `default` or a configured port, where it can
+  be the same instance; a config that says `shared_instance_type = tcp` is
+  asked on TCP only. Each channel is asked until `FIND_BOUND` (150 ms) has
+  passed: a loopback connect is refused at once, so the bound covers only
+  a daemon caught binding.
+- **The start**, when nothing answers: `lnsd -c <config_dir>`, the lnsd
+  from `LEVICULUM_LNSD`, else beside the tool, else on `PATH`, through
+  `spawn_supervised`, its stdout and stderr appended to `lnsd.log` in the
+  config directory. The tool waits until the channel accepts, at most
+  `START_BOUND` (20 s). On an empty directory lnsd writes its first-start
+  file, so the tool reads its configuration again afterwards. A config with
+  `share_instance = No` starts nothing (a daemon without a shared instance
+  serves no tool).
+- **The line**, catalogued as `INSTANCE`: `INSTANCE found=yes via=unix|tcp
+  pid=none` or `INSTANCE started=yes via=unix|tcp pid=<pid>`. The command
+  line tools print it on stderr after a start, and after a find too under
+  `-v`; Loquax writes it to its log only, its screen being its stderr.
+- **Two tools at once.** The find and the start run under an exclusive
+  `flock` on `.lnsd-start.lock` in the config directory: the first starts
+  the daemon, the second finds it once it holds the lock. Two directories
+  naming one instance both start an lnsd; the second cannot bind the name
+  and exits, and its tool reports `found`. Held by
+  `two_callers_at_once_start_one_daemon`
+  (`leviculum-cli/tests/find_or_start.rs`), against the real lnsd.
+- **The daemon goes with the tool**: dropping the returned instance stops
+  it (`SIGTERM`, then `SIGKILL` after 3 s), and a tool that dies otherwise
+  leaves it to the kernel.
+- **The callers.** `lnstatus`, `lncp`, `lnprobe` and `lnpath` before they
+  attach or ask over the RPC; `lnomad` before its session, terminal and
+  window alike; Loquax's terminal and window in `shell::start`, beside the
+  shared instance they attached to before. Each has `--no-start`, which
+  keeps the old failure for scripts. `lnstest` has no caller: `selftest`
+  and `connect` dial TCP addresses, and `diag` reads a daemon that runs,
+  which a started one would not answer for. Loquax's command line
+  subcommands (`send`, `fetch`, the mailbox) keep their own decision, the
+  mailbox's being 1354's.
+
+The cells `zero_config_tool_starts_the_daemon` and
+`zero_config_tool_finds_the_daemon` hold it, in netns and docker. Against
+master before step 4 both were red (`instance=none ... tool_exit=1`: "No
+shared RNS instance available to get status from").
 
 ## The steps, and the cells that hold each
 
@@ -394,7 +444,7 @@ line today and gaining its `expect` when its step lands. Their lines on
 | 2 (built) | the `[auto]` section, the per-medium rule, the host marker and `LEVICULUM_NO_AUTO`, the `AUTO_LAYER` line | `config_present_means_only_config`; `periculum auto-layer` | `configured=1 running=1 extra=none serial_bytes=0` (asserted); `absent=115` |
 | 3 (built) | the server list, choice persisted and logged, pinnable, fail-over, autoconnect ceiling | `zero_config_server_list` | before: `shared_instance=no connected=none discovered=0 failover=n/a`; since 1510: `config=default chosen=absent.invalid:4242,entry:4242 why=pinned failover=absent.invalid:4242tobackbone:4242 up=2`, after a restart `config=file ... why=persisted` (asserted) |
 | (built) | lnsd writes its first-start file (open question 1) | `zero_config_first_start_file` | `file=yes equals_writeconfig=yes rnstatus_wrote=none config_unchanged=yes control_wrote=yes` (asserted) |
-| 4 | "find the instance or start one" in `leviculum-std`, then lnomad and the other tools | none yet | |
+| 4 (built) | "find the instance or start one" in `leviculum-std`, then lnomad and the other tools | `zero_config_tool_starts_the_daemon`; `zero_config_tool_finds_the_daemon` | before: `instance=none daemon_parent=none ... tool_exit=1`; `instance=none`; since step 4: `before=none instance=started via=unix daemon_parent=tool daemon_after_tool=gone socket_after_tool=closed config_written=yes daemon_log=yes`; `instance=found via=unix lnsd_on_dir=1 tool_children=0 subject_after_tool=alive` (asserted) |
 | 5 | serial: LNodes by string, RNodes by silence plus `CMD_DETECT`, `TIOCEXCL`, bootloader ids, hotplug | `serial_probe_writes_nothing_to_strangers` | `strangers=0 quiet=0 talker=0 rnode=0 rnode_probe=absent` (`strangers=0` asserted) |
 | 6 | BLE on when an adapter is present, the lab guard measured | `ble_room_auto_start` | `arm=no_config shared_instance=no interfaces=0 ble=absent`; `arm=auto_bluetooth_no ... ble=absent` (asserted) |
 | (built) | the Debian package ships no stock configuration | `just verify-deb` | `ships no /etc/reticulum/config` |
