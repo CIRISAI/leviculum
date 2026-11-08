@@ -1815,7 +1815,7 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
     let foot = match model.current_toast() {
         Some(toast) => toast.text.clone(),
         None if node.open.is_some() => {
-            "Enter send │ Ctrl-p who is here │ Ctrl-l leave room │ Esc back".to_string()
+            "Enter send │ Alt-p who is here │ Alt-l leave room │ Esc back".to_string()
         }
         None => "Enter join │ ↑↓ rooms │ Esc chats".to_string(),
     };
@@ -2399,11 +2399,11 @@ mod tests {
         assert_eq!(room.matches("Message").count(), 1, "said once\n{room}");
         same_text("tui-rooms-room.txt", &room);
         // The header's people, then back.
-        let ctrl = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
-        update(&mut model, ctrl('p'));
+        let alt = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+        update(&mut model, alt('p'));
         let people = whole_screen(&model);
         assert!(people.contains("Everyone who came in or wrote"), "{people}");
-        update(&mut model, ctrl('p'));
+        update(&mut model, alt('p'));
 
         // Typed and sent: the line goes to the room.
         for c in "hi".chars() {

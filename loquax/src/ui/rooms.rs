@@ -460,23 +460,25 @@ pub(super) fn fold<B: InputBuffer + Default>(
 /// go to the input line, `Backspace` takes one back, `Enter` sends it,
 /// `Up` and `Down` step the rooms, `Esc` closes the people, then the open
 /// room and, with none open, leaves the tab for the chats, as `Ctrl-g`
-/// does. `Ctrl-p` shows the open room's people, `Ctrl-l` leaves it: the
-/// header and the menu the phone and the window tap.
+/// does. `Alt-p` shows the open room's people, `Alt-l` leaves it: the
+/// header and the menu the phone and the window tap (no `Ctrl` chord:
+/// `Ctrl-l` redraws everywhere, `Ctrl-p` and `Ctrl-w` edit a line).
 pub(super) fn key<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     key: leviculum_ui::input::KeyEvent,
 ) -> Vec<UiEffect> {
     use leviculum_ui::input::{KeyCode, KeyModifiers};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     let rooms = &mut model.rooms;
     match key.code {
         KeyCode::Char('g') if ctrl => return leave(model),
-        KeyCode::Char('p') if ctrl => {
+        KeyCode::Char('p') if alt => {
             let shown = !rooms.people;
             return fold(model, RoomsEvent::People(shown));
         }
-        KeyCode::Char('l') if ctrl => return fold(model, RoomsEvent::Leave),
-        KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+        KeyCode::Char('l') if alt => return fold(model, RoomsEvent::Leave),
+        KeyCode::Char(c) if !ctrl && !alt => {
             rooms.input.push(c);
         }
         KeyCode::Backspace => {
@@ -1256,12 +1258,15 @@ mod tests {
         // The control: no room open, nothing to leave.
         rooms(&mut model, RoomsEvent::Show(None));
         assert!(rooms(&mut model, RoomsEvent::Leave).is_empty());
-        // The terminal's Ctrl-l is the same verb.
+        // The terminal's Alt-l is the same verb; Ctrl-l is not (it
+        // redraws everywhere).
         rooms(&mut model, RoomsEvent::Show(Some(0)));
         use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
         let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert!(update(&mut model, UiEvent::Key(ctrl_l)).is_empty());
+        let alt_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT);
         assert_eq!(
-            update(&mut model, UiEvent::Key(ctrl_l)),
+            update(&mut model, UiEvent::Key(alt_l)),
             vec![UiEffect::Rooms(RoomAsk::Part {
                 room: "#lab".into()
             })]

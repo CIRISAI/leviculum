@@ -21,4 +21,4 @@ Rooms
 ┌● ────────────────────────────────────────────────────────────────────────────┐
 │▏Message                                                                      │
 └──────────────────────────────────────────────────────────────────────────────┘
-Enter send │ Ctrl-p who is here │ Ctrl-l leave room │ Esc back
+Enter send │ Alt-p who is here │ Alt-l leave room │ Esc back
