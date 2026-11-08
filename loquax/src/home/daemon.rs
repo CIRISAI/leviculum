@@ -145,8 +145,18 @@ fn handover(
     })
 }
 
-/// How often the engine's events are read.
+/// How often the engine's events are read while there is work.
 const PUMP: Duration = Duration::from_millis(20);
+/// How often they are read once [`QUIET_PUMPS`] reads in a row found
+/// nothing (order 1585): the 20 ms read was 70 % of an idle mailbox's CPU
+/// (1.0 % of a core against 0.3 % at 250 ms, measured by
+/// `tests/mailbox_census.rs`), and on the field host the mailbox burned
+/// 23 % of a core with nothing to do. A device's request is not read by the
+/// pump and is answered at once; what waits up to this long is an engine
+/// event after a quiet spell, an arrival from the mesh among them.
+const PUMP_QUIET: Duration = Duration::from_millis(250);
+/// Reads in a row that found nothing before the pump slows: one second.
+const QUIET_PUMPS: u32 = 50;
 /// How often the outbox looks for a due retry or a passed horizon. Both are
 /// counted in seconds.
 const OUTBOX_TICK: Duration = Duration::from_secs(1);
@@ -518,7 +528,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut engine_ready = false;
     let origin = tokio::time::Instant::now();
     let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let mut pump = tokio::time::interval(PUMP);
+    let mut next_pump = tokio::time::Instant::now();
+    let mut quiet_pumps: u32 = 0;
     let mut outbox_tick = tokio::time::interval(OUTBOX_TICK);
     let mut outside = tokio::time::interval(OUTSIDE_LOOK);
     // The first announce goes out with the engine's registration; the next
@@ -573,6 +584,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let outcome = loop {
         tokio::select! {
             Some(request) = requests.recv() => {
+                // A device is talking: its answers' events are read at once.
+                quiet_pumps = 0;
+                next_pump = tokio::time::Instant::now() + PUMP;
                 let (link, remote) = (request.link_id, request.remote);
                 serving.handover =
                     handover(&home, [&ratchet_file, &known_file], &own_name, &request.path);
@@ -702,11 +716,20 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     let _ = hosted.engine.submit(Command::Announce);
                 }
             }
-            _ = pump.tick() => {
+            _ = tokio::time::sleep_until(next_pump) => {
                 let events = match fanout.pump(&mut attached.outbox) {
                     Ok(events) => events,
                     Err(gone) => break Err(gone.to_string()),
                 };
+                // Busy while anything came or is in flight; quiet after a
+                // second of nothing (1585).
+                let busy = !events.is_empty()
+                    || fetch.is_some()
+                    || !pn_asks.is_empty()
+                    || census_owed.is_some();
+                quiet_pumps = if busy { 0 } else { quiet_pumps.saturating_add(1) };
+                next_pump = tokio::time::Instant::now()
+                    + if quiet_pumps >= QUIET_PUMPS { PUMP_QUIET } else { PUMP };
                 let mut unstarted = None;
                 for event in events {
                     match event {
