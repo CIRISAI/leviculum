@@ -80,16 +80,135 @@ fn unix_secs() -> u64 {
 /// `own_transfer_limit_bytes` is ours: a message above it is local only and
 /// never offered ([`PropagationNode::is_local_only`]); `u64::MAX` offers by
 /// the peer's limit alone.
+#[cfg(test)]
 fn plan_offer<S: PropagationStore + ?Sized>(
     peer: &Peer,
     store: &S,
     own_transfer_limit_bytes: u64,
     offer_budget: usize,
 ) -> Result<Option<OfferPlan>, StorageError> {
+    plan_offer_excluding(peer, store, own_transfer_limit_bytes, offer_budget, &|_| {
+        false
+    })
+}
+
+/// [`plan_offer`], stepping past every entry `held_by_peer` names for good
+/// ([`OfferBuilder::skip_held_by_peer`]).
+fn plan_offer_excluding<S: PropagationStore + ?Sized>(
+    peer: &Peer,
+    store: &S,
+    own_transfer_limit_bytes: u64,
+    offer_budget: usize,
+    held_by_peer: &dyn Fn(&TransientId) -> bool,
+) -> Result<Option<OfferPlan>, StorageError> {
     let mut builder =
         OfferBuilder::new(peer, offer_budget).with_own_transfer_limit(own_transfer_limit_bytes);
-    store.for_each_above(peer.cursor, &mut |meta| builder.push(meta))?;
+    store.for_each_above(peer.cursor, &mut |meta| {
+        if held_by_peer(&meta.transient_id) {
+            builder.skip_held_by_peer(meta)
+        } else {
+            builder.push(meta)
+        }
+    })?;
     Ok(builder.finish())
+}
+
+/// The offer this node makes `peer`, the probe and the real one alike: by
+/// our own transfer limit, and without what came to us from `peer` itself
+/// ([`Origins::came_from`], LV-1003).
+fn plan_offer_toward<S: PropagationStore>(
+    peer: &Peer,
+    node: &PropagationNode<S>,
+    origins: &Origins,
+    offer_budget: usize,
+) -> Result<Option<OfferPlan>, StorageError> {
+    plan_offer_excluding(
+        peer,
+        node.store(),
+        node.transfer_limit_bytes(),
+        offer_budget,
+        &|id| origins.came_from(id, &peer.destination_hash),
+    )
+}
+
+/// Bytes of a transient id [`Origins`] keys by: the processed-id cache's
+/// prefix, exact for the reason `leviculum_lxmf::processed_ids` gives (a
+/// fresh id matches a held one with probability `n / 2^128`).
+const ORIGIN_KEY_LEN: usize = 16;
+
+/// Which peer's sync each stored message came from, so the offer toward
+/// that peer steps past it (LV-1003).
+///
+/// The reference keeps the same fact per message as `from_peer` and
+/// excludes it in `flush_peer_distribution_queue`
+/// (`reference/LXMF/LXMF/LXMRouter.py:2484`). Our one cursor per peer
+/// cannot say "this came from you", so without this the next offer to the
+/// sender listed every message it had just sent us, and a sender that had
+/// delivered and purged one since wanted it back: 1524's cell
+/// `lnpnd_delivered_not_wanted_back` measured the bodies crossing again.
+/// The wire is unchanged; a peer simply is not offered what it sent.
+///
+/// It lives here, not in the role: the board links the role, keeps no
+/// per-message state outside its record log, and a map there cost the
+/// rak4631 3.5 KiB of flash for code it never runs. Cost on a host: one
+/// entry per stored message that arrived by sync, a 16-byte id prefix, the
+/// 16-byte peer hash and the 8-byte receive time, 40 bytes plus the hash
+/// table's control byte and load factor, about 47 bytes a message. An
+/// entry goes when its message leaves the store ([`Self::forget`], from the
+/// role's departures and a failed deferred write) and, as a backstop for a
+/// removal neither reports, past the message expiry once the map outgrows
+/// the store ([`Self::prune_if_above`]). RAM only: after a
+/// restart a message is offered back once more, and the peer declines what
+/// it holds or has let go.
+#[derive(Default)]
+pub(crate) struct Origins {
+    by_id: HashMap<[u8; ORIGIN_KEY_LEN], ([u8; 16], u64)>,
+}
+
+impl Origins {
+    fn key(transient_id: &TransientId) -> [u8; ORIGIN_KEY_LEN] {
+        let mut key = [0u8; ORIGIN_KEY_LEN];
+        key.copy_from_slice(&transient_id[..ORIGIN_KEY_LEN]);
+        key
+    }
+
+    fn note(&mut self, transient_id: &TransientId, peer: &[u8; 16], now_secs: u64) {
+        self.by_id
+            .insert(Self::key(transient_id), (*peer, now_secs));
+    }
+
+    /// Whether `transient_id` was stored here from `peer`'s sync.
+    pub(crate) fn came_from(&self, transient_id: &TransientId, peer: &[u8; 16]) -> bool {
+        self.by_id
+            .get(&Self::key(transient_id))
+            .is_some_and(|(origin, _)| origin == peer)
+    }
+
+    /// The message left the store.
+    pub(crate) fn forget(&mut self, transient_id: &TransientId) {
+        self.by_id.remove(&Self::key(transient_id));
+    }
+
+    /// Drop entries older than `expiry_secs`, no message outlives that, but
+    /// only while the map holds more than `stored` entries: every removal
+    /// from the store reports a departure that [`Self::forget`]s its
+    /// origin, so only a removal that did not makes the map outgrow the
+    /// store, and the walk is paid only then, not on every sweep under the
+    /// core lock.
+    pub(crate) fn prune_if_above(&mut self, stored: usize, now_secs: u64, expiry_secs: u64) {
+        if self.by_id.len() <= stored {
+            return;
+        }
+        self.by_id
+            .retain(|_, (_, at)| now_secs.saturating_sub(*at) <= expiry_secs);
+    }
+
+    fn heap_bytes(&self) -> usize {
+        crate::census::hash_table_bytes(
+            self.by_id.capacity(),
+            std::mem::size_of::<[u8; ORIGIN_KEY_LEN]>() + std::mem::size_of::<([u8; 16], u64)>(),
+        )
+    }
 }
 
 /// One outbound sync round in flight.
@@ -198,6 +317,8 @@ pub(crate) enum InboundSyncStart {
 pub(crate) struct PeeringRuntime {
     table: PeerTable,
     gate: InboundGate,
+    /// Which peer each synced message came from ([`Origins`], LV-1003).
+    origins: Origins,
     peer_store: Box<dyn PeerStore + Send>,
     our_identity: Identity,
     our_identity_hash: [u8; 16],
@@ -269,6 +390,8 @@ pub(crate) struct PeeringHeap {
     pub links: usize,
     /// The static peers whose path is still to be asked for.
     pub config: usize,
+    /// The synced messages' origins ([`Origins`]).
+    pub origins: usize,
 }
 
 impl PeeringRuntime {
@@ -303,6 +426,7 @@ impl PeeringRuntime {
             sync_out,
             links,
             config: self.static_paths_pending.capacity() * size_of::<[u8; 16]>(),
+            origins: self.origins.heap_bytes(),
         }
     }
 
@@ -343,6 +467,7 @@ impl PeeringRuntime {
             peer_store,
             our_identity,
             our_identity_hash,
+            origins: Origins::default(),
             validated_links: HashMap::new(),
             inbound_transfers: HashSet::new(),
             inbound_link_facts: HashMap::new(),
@@ -412,6 +537,12 @@ impl PeeringRuntime {
         let cursor = self.table.get(destination_hash)?.cursor;
         let counts = node.unhandled_above(&[cursor]).ok()?;
         counts.first().map(|count| *count as usize)
+    }
+
+    /// The synced messages' origins, for the engine to drop the ones whose
+    /// message left the store.
+    pub(crate) fn origins_mut(&mut self) -> &mut Origins {
+        &mut self.origins
     }
 
     /// Reset one peer's cursor to 0: the bounded-full-re-offer path (§5's
@@ -878,9 +1009,9 @@ impl PeeringRuntime {
         }
         self.validated_links.insert(*link_id, remote_hash);
 
-        let response = answer_offer(&offer.transient_ids, |id| {
-            node.store().contains(id).unwrap_or(false)
-        });
+        // Not only what the store holds: what this node processed and let
+        // go is not wanted back either (LV-1003, `PropagationNode::knows`).
+        let response = answer_offer(&offer.transient_ids, |id| node.knows(id, now));
         let wanted = match &response {
             OfferResponse::WantNone => 0,
             OfferResponse::WantAll => offer.transient_ids.len(),
@@ -1195,6 +1326,7 @@ impl PeeringRuntime {
                     if duplicate {
                         job.duplicates += 1;
                     } else {
+                        self.origins.note(&transient_id, &remote_hash, now);
                         job.accepted += 1;
                         job.bytes += size as u64;
                         local.push((transient_id, destination_hash));
@@ -1571,12 +1703,7 @@ impl PeeringRuntime {
         // against the link that will carry it. An empty id list still
         // carries the full skip scan, so dead entries step past here as
         // before.
-        let Ok(probe) = plan_offer(
-            peer,
-            node.store(),
-            node.transfer_limit_bytes(),
-            OFFER_PROBE_BUDGET,
-        ) else {
+        let Ok(probe) = plan_offer_toward(peer, node, &self.origins, OFFER_PROBE_BUDGET) else {
             // A store that cannot be walked now will most likely fail on
             // the next pass too: the peer is booked like an unreachable
             // one, so it climbs the backoff ladder instead of staying due.
@@ -1718,12 +1845,8 @@ impl PeeringRuntime {
             return;
         };
         let cursor = peer.cursor;
-        let Ok(planned) = plan_offer(
-            peer,
-            node.store(),
-            node.transfer_limit_bytes(),
-            offer_budget_for_mdu(mdu),
-        ) else {
+        let Ok(planned) = plan_offer_toward(peer, node, &self.origins, offer_budget_for_mdu(mdu))
+        else {
             if let RoundStep::End(end) =
                 round_step(self.round_view().as_ref(), RoundEvent::StoreFailed)
             {
@@ -2860,6 +2983,136 @@ mod tests {
              rotation_us_max={rotation_max} count_index_bytes={}",
             node.store().len(),
             node.store().count_index_bytes(),
+        );
+    }
+
+    /// LV-1003, finding 2: a message that reached this node by a peer's
+    /// sync is not offered back to that peer. Before, the one cursor per
+    /// peer listed it in the very next offer to its sender, which wanted it
+    /// back as soon as it had delivered and purged it (1524's cell
+    /// `lnpnd_delivered_not_wanted_back`). The offer still steps the cursor
+    /// past it. Positive control: another peer is offered all of it.
+    #[test]
+    fn a_message_synced_from_a_peer_is_not_offered_back_to_it() {
+        use leviculum_lxmf::constants::{LXMF_OVERHEAD, STAMP_SIZE};
+        use leviculum_lxmf::PropagationNodeConfig;
+
+        let stamped = |seed: u8| {
+            let mut message = vec![seed; LXMF_OVERHEAD + 40];
+            message.extend_from_slice(&[seed.wrapping_add(1); STAMP_SIZE]);
+            message
+        };
+        let id_of = |message: &[u8]| {
+            leviculum_core::crypto::full_hash(&message[..message.len() - STAMP_SIZE])
+        };
+        let now = unix_secs();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir.path()).expect("storage under a fresh temp dir"),
+        );
+        let mut runtime = peer_with(0, 0, 256);
+        let mut node = PropagationNode::new(
+            MemoryPropagationStore::new(64_000),
+            PropagationNodeConfig {
+                stamp_cost: 0,
+                always_compute_stamp_value: false,
+                ..PropagationNodeConfig::default()
+            },
+        );
+
+        // A client upload first, then the peer's two.
+        let upload = stamped(0x10);
+        match node.accept_stamped(&upload, now, |_, _| Some(0)) {
+            UploadOutcome::Accepted {
+                duplicate: false, ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        let synced = vec![stamped(0x20), stamped(0x30)];
+        let mut job = InboundSync {
+            link_id: LinkId::new([0x42; 16]),
+            remote_hash: [1; 16],
+            now,
+            messages: synced.clone(),
+            next: 0,
+            accepted: 0,
+            duplicates: 0,
+            bytes: 0,
+            invalid: 0,
+            store_failed: 0,
+        };
+        let mut out = TickOutput::empty();
+        let stored = runtime.advance_sync_resource(
+            &mut core,
+            &mut node,
+            &mut job,
+            usize::MAX,
+            &mut |_, _| Some(0),
+            &mut out,
+        );
+        assert_eq!(
+            stored.len(),
+            2,
+            "the peer's two must be stored, or the test proves nothing"
+        );
+
+        let budget = offer_budget_for_mdu(8192);
+        let newest = node.store().newest_sequence().expect("newest");
+        let peer = runtime.peer_for_tests(&[1; 16]).expect("the peer");
+        let plan = plan_offer_toward(peer, &node, &runtime.origins, budget)
+            .expect("store")
+            .expect("an offer");
+        assert_eq!(
+            plan.ids,
+            vec![id_of(&upload)],
+            "only the client's message is offered to the peer the others came from"
+        );
+        assert_eq!(
+            plan.cursor_target, newest,
+            "the cursor steps past what the peer sent us"
+        );
+
+        let other = record([2; 16], 9, now).into_peer();
+        let plan = plan_offer_toward(&other, &node, &runtime.origins, budget)
+            .expect("store")
+            .expect("an offer");
+        assert_eq!(
+            plan.ids,
+            vec![id_of(&upload), id_of(&synced[0]), id_of(&synced[1])],
+            "positive control: another peer is offered all three"
+        );
+    }
+
+    /// LV-1003: an origin goes with its message, from that peer only, and
+    /// the age backstop walks the map only once it outgrew the store.
+    #[test]
+    fn an_origin_is_kept_per_peer_and_dropped_with_its_message() {
+        let peer = [0x17; 16];
+        let mut origins = Origins::default();
+        origins.note(&[1; 32], &peer, 0);
+        origins.note(&[2; 32], &peer, 20 * 86_400);
+        assert!(origins.came_from(&[1; 32], &peer));
+        assert!(
+            !origins.came_from(&[1; 32], &[0x18; 16]),
+            "from that peer only"
+        );
+        assert!(!origins.came_from(&[3; 32], &peer), "never noted");
+
+        origins.forget(&[2; 32]);
+        assert!(!origins.came_from(&[2; 32], &peer), "left the store");
+
+        let expiry = 30 * 86_400;
+        origins.prune_if_above(1, 31 * 86_400, expiry);
+        assert!(
+            origins.came_from(&[1; 32], &peer),
+            "no walk while the map is no larger than the store"
+        );
+        origins.prune_if_above(0, 31 * 86_400, expiry);
+        assert!(
+            !origins.came_from(&[1; 32], &peer),
+            "past the expiry, once it outgrew the store"
         );
     }
 }

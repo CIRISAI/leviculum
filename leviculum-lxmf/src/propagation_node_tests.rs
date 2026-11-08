@@ -300,6 +300,29 @@ fn expiry_purges_only_what_is_older_than_thirty_days() {
     assert!(node.store().contains(&fresh).unwrap());
 }
 
+/// LV-1003: `knows` is the one reading behind both the ingest's duplicate
+/// test and the `/offer` answer. A message held is known, and so is one
+/// collected and purged; one never seen is not.
+#[test]
+fn a_collected_message_stays_known_after_it_left_the_store() {
+    let mut node = node(64 * 1024);
+    let held = accepted_id(&node.handle_upload(&envelope(7, 1), 100, stamp_of_value_zero));
+    let collected = accepted_id(&node.handle_upload(&envelope(7, 2), 100, stamp_of_value_zero));
+    assert!(node.store_mut().purge(&collected).unwrap());
+    node.note_confirmed_deletion(&collected, 200);
+
+    assert!(node.knows(&held, 300), "held in the store");
+    assert!(!node.store().contains(&collected).unwrap());
+    assert!(node.knows(&collected, 300), "collected and purged");
+    assert!(!node.knows(&[0x99; 32], 300), "never seen");
+
+    // The ingest agrees: offered again, it is a duplicate.
+    match node.handle_upload(&envelope(7, 2), 300, stamp_of_value_zero) {
+        UploadOutcome::Accepted { duplicate, .. } => assert!(duplicate),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn a_full_store_displaces_by_age_times_size() {
     // Room for roughly two field-sized messages.

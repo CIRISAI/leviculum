@@ -1023,12 +1023,27 @@ Three cursor semantics the build pinned down, tested in
   conformance cells drive this path explicitly (`lxmf_pn_reoffer`).
 
 What a Python peer observes: offers that may include ids it already
-holds — including messages it itself sent us, since a cursor cannot
-encode the reference's `from_peer` exclusion
-(`flush_peer_distribution_queue`, `LXMRouter.py:2484`). That is
-wire-legal and self-limiting: `offer_request` answers out of its own
-store membership (`:2317-2318`) and declines them, and the cost is
-offer-list bytes, not message bodies. The round-robin page reclaim
+holds. A cursor alone cannot encode the reference's `from_peer`
+exclusion (`flush_peer_distribution_queue`, `LXMRouter.py:2484`), and
+offering a message back to the peer it came from cost more than
+offer-list bytes: `offer_request` answers out of its own store
+membership (`:2317-2318`), so a peer that had delivered and purged the
+message wanted it back and the bodies crossed again, to be dropped at
+ingest as duplicates (LV-1003, measured by the periculum cell
+`lnpnd_delivered_not_wanted_back` on both stacks). Two changes on the
+host close it. lnpnd records, for every message a peer's sync stores,
+which peer it came from (`Origins` in `lnpnd/src/peering.rs`, about 47
+bytes a stored message in RAM, dropped when the message leaves) and
+steps the offer toward that peer past it for good, as a permanent skip
+(`OfferBuilder::skip_held_by_peer`). The record lives in lnpnd, not in
+the role: in the role it cost the rak4631 3.5 KiB of flash for code the
+board never runs. And lnpnd's own `/offer` answer
+asks `PropagationNode::knows`: the store, the processed-id cache and
+the store's departures, so a message it delivered and let go is not
+wanted back from anyone. The second is a deviation from the reference's
+store-only answer with no wire effect; an unwanted id is one the peer
+keeps. The board records no origin and still offers back; its peer
+declines what it knows. The round-robin page reclaim
 also means a cursor's page can be erased and reused while the cursor
 still names the old sequence; page sequences are monotone, so a
 cursor pointing into a reclaimed page simply reads as "older than

@@ -1392,16 +1392,7 @@ impl<S: PropagationStore> PropagationNode<S> {
         body.extend_from_slice(stamp);
         let size = body.len() as u32;
 
-        // A store that remembers its own departures answers for them past a
-        // restart; an expired message is not one (`track_departures`).
-        let received_since = now_secs.saturating_sub(self.config.message_expiry_secs);
-        let duplicate = self.processed.contains(&transient_id)
-            || self.store.contains(&transient_id).unwrap_or(false)
-            || self
-                .store
-                .departed(&transient_id, received_since)
-                .unwrap_or(false);
-        if duplicate {
+        if self.knows(&transient_id, now_secs) {
             return UploadOutcome::Accepted {
                 transient_id,
                 destination_hash,
@@ -1445,6 +1436,36 @@ impl<S: PropagationStore> PropagationNode<S> {
             duplicate: false,
             evicted,
         }
+    }
+
+    /// Whether this node holds `transient_id` or held it and let it go: in
+    /// the store, in the processed-id cache, or among the store's own
+    /// departures inside `message_expiry`. One reading for both places that
+    /// ask: an ingest calls such a message a duplicate, and an `/offer`
+    /// answers it unwanted (LV-1003), so a message we delivered and purged
+    /// does not cross the wire again only to be dropped as a duplicate.
+    ///
+    /// **Deviation:** the reference's `offer_request` asks its store alone
+    /// (`propagation_entries`, `reference/LXMF/LXMF/LXMRouter.py:2318`) and
+    /// wants a drained message back, then drops the bodies at ingest
+    /// (`:2496`). Wire and semantics hold: an unwanted id is one the offering
+    /// peer keeps, exactly as for one we still store.
+    ///
+    /// Cost per id: one processed-cache lookup in RAM (a binary search per
+    /// week bucket, [`crate::processed_ids`]), one store-index lookup, and
+    /// on a store that remembers departures one more lookup
+    /// ([`PropagationStore::departed`]; a host's default answers `false`
+    /// without reading anything).
+    pub fn knows(&self, transient_id: &TransientId, now_secs: u64) -> bool {
+        // A store that remembers its own departures answers for them past a
+        // restart; an expired message is not one (`track_departures`).
+        let received_since = now_secs.saturating_sub(self.config.message_expiry_secs);
+        self.processed.contains(transient_id)
+            || self.store.contains(transient_id).unwrap_or(false)
+            || self
+                .store
+                .departed(transient_id, received_since)
+                .unwrap_or(false)
     }
 
     /// Un-remember one transient ID from the duplicate cache.

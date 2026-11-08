@@ -696,7 +696,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             store_writer: store.writer_bytes,
             sync_out: peering.sync_out,
             sync_in: pending + self.validation.bytes_in_flight(),
-            dup: ready.node.heap_bytes(),
+            dup: ready.node.heap_bytes() + peering.origins,
             links,
             mailbox: ready.mailbox.as_ref().map_or(0, MailboxRuntime::heap_bytes),
             config,
@@ -740,6 +740,8 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         }
         self.departures_dirty = true;
         for (transient_id, reason) in fresh {
+            // Its origin goes with it (LV-1003).
+            ready.peering.origins_mut().forget(&transient_id);
             tracing::debug!(
                 event = "PN_DEPART",
                 id = full_hex(&transient_id),
@@ -1841,6 +1843,7 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
         let settled = ready.node.store_mut().settle_writes();
         for transient_id in &settled.failed {
             ready.node.forget_processed(transient_id);
+            ready.peering.origins_mut().forget(transient_id);
             log_reject("store_failed", "writer");
             self.emit(EngineEvent::Rejected {
                 detail: format!("store write failed for {}", short_hex(transient_id)),
@@ -2294,6 +2297,17 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
             let evicted = ready.node.tick_at_most(unix_secs(), MAX_EXPIRED_PER_TICK);
             self.expiry_backlog = evicted.len() >= MAX_EXPIRED_PER_TICK;
             log_evictions(&evicted, &self.events);
+        }
+        if sweep_due {
+            // Every removal reports a departure, which drops its origin;
+            // more origins than messages means one did not, and only then
+            // is the map walked (LV-1003, `Origins::prune`).
+            let stored = ready.node.store().count().unwrap_or(0);
+            let expiry = ready.node.config().message_expiry_secs;
+            ready
+                .peering
+                .origins_mut()
+                .prune_if_above(stored, unix_secs(), expiry);
         }
         if sweep_due {
             // The store's own line: how full it is against its limit, and
@@ -4423,6 +4437,129 @@ mod tests {
             offer(&mut engine, &mut server, &mut client),
             OfferResponse::Error(PeerError::Throttled),
             "with no batch in progress the gate must not postpone"
+        );
+    }
+
+    /// LV-1003, finding 1: a message this node received, delivered and
+    /// purged is not wanted back when a peer offers it. Before, `/offer`
+    /// asked the store alone, wanted it, and the bodies crossed the wire to
+    /// be dropped at ingest as duplicates (1524's cell
+    /// `lnpnd_delivered_not_wanted_back`: `offered=5 wanted=5`, then five
+    /// `dup=true via="sync"`). The message arrives by a peer's sync, so the
+    /// engine's origin record is checked on the way. Positive control: a
+    /// fresh id in the same offer is wanted.
+    #[test]
+    fn a_message_delivered_and_purged_here_is_not_wanted_back() {
+        use leviculum_lxmf::{OfferResponse, PeerOffer, PeerSyncEnvelope};
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: cost_free(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            // At cost 0 any peering key passes, so the offer reaches the
+            // membership answer.
+            peering: PeeringConfig {
+                peering_cost: 0,
+                ..PeeringConfig::default()
+            },
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        // A peer's sync stores one message here.
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let from_peer = [0x17; 16];
+        let batch_link = LinkId::new([0x42; 16]);
+        ready.peering.validate_link_for_tests(batch_link, from_peer);
+        let message = synced_message(0x31);
+        let transient_id =
+            leviculum_core::crypto::full_hash(&message[..message.len() - STAMP_SIZE]);
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: vec![message],
+        }
+        .encode();
+        engine.on_inbound_resource_completed(&mut ready, &server, &batch_link, &envelope);
+        let mut out = TickOutput::empty();
+        absorb(&mut engine, &mut ready, &mut server, &mut out);
+        assert!(
+            ready.node.store().contains(&transient_id).expect("store"),
+            "the message must be stored, or the test proves nothing"
+        );
+        assert!(
+            ready
+                .peering
+                .origins_mut()
+                .came_from(&transient_id, &from_peer),
+            "the engine records which peer a synced message came from"
+        );
+
+        // Delivered and purged, as the engine's local delivery does.
+        assert!(ready.node.store_mut().purge(&transient_id).expect("purge"));
+        ready
+            .node
+            .note_delivered_locally(&transient_id, unix_secs());
+        engine.log_departures(&mut ready);
+        assert!(
+            !ready
+                .peering
+                .origins_mut()
+                .came_from(&transient_id, &from_peer),
+            "the origin goes with the message"
+        );
+        engine.state = State::Ready(ready);
+
+        // A peer offers it back, beside one this node never saw.
+        let sender = leviculum_std::generate_identity();
+        let link_id = identified_link(
+            &mut engine,
+            &mut server,
+            &mut client,
+            destination_hash,
+            &signing_key,
+            &sender,
+        );
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        let fresh = [0x99; 32];
+        let offer = PeerOffer {
+            peering_key: [0; 32],
+            transient_ids: vec![transient_id, fresh],
+        }
+        .encode();
+        let response =
+            ready
+                .peering
+                .answer_offer_request(&mut server, &ready.node, &link_id, &offer, false);
+        engine.state = State::Ready(ready);
+        assert_eq!(
+            OfferResponse::decode(&response).ok(),
+            Some(OfferResponse::Wanted(vec![fresh])),
+            "the delivered message is not wanted back, the fresh one is"
         );
     }
 

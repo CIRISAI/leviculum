@@ -36,8 +36,9 @@
 //! index's bytes a message. `dup` is judged against the growth it has by design: every
 //! accepted id is remembered for the reference's 180-day window
 //! (`leviculum-lxmf/src/processed_ids.rs`), [`DUP_BYTES_PER_ACCEPT`] bytes an
-//! id at most, and every evicted one for the message expiry,
-//! [`DUP_BYTES_PER_EVICTION`]. `rss_kb` is printed beside the tables, not judged: the
+//! id at most, every synced one's origin while the message is held,
+//! [`DUP_BYTES_PER_SYNCED_ORIGIN`], and every evicted one for the message
+//! expiry, [`DUP_BYTES_PER_EVICTION`]. `rss_kb` is printed beside the tables, not judged: the
 //! allocator keeps what it once had, and what to fix is the table.
 //!
 //! Run it with `just pn-growth-soak` (release, 20 minutes, 300 000
@@ -84,6 +85,16 @@ const PEER_STORE_BYTES: u64 = 8_000_000;
 /// `leviculum-lxmf/src/propagation_node.rs`): a 32-byte id and its time
 /// and reason in a B-tree, about 78 bytes by the census's model.
 const DUP_BYTES_PER_EVICTION: f64 = 80.0;
+
+/// The origin the peering runtime keeps for every message a peer's sync
+/// stored, so the offer toward that peer leaves it out (`Origins`,
+/// `lnpnd/src/peering.rs`, LV-1003): a 16-byte id prefix, the peer and the
+/// receive time in a hash table, about 47 bytes by the census's model,
+/// counted in `dup`. Every accept in this soak arrives by a peer's sync. It
+/// goes when its message is evicted, so it is bounded by the store's count,
+/// but the prefilled messages the node evicts first carry none: until they
+/// are gone the column grows by this much an accept.
+const DUP_BYTES_PER_SYNCED_ORIGIN: f64 = 48.0;
 
 /// The line lnpnd prints once its propagation destination is up.
 const READY: &str = "lnpnd: propagation node ready";
@@ -511,7 +522,7 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     let index_per_message = last.get("store_index") / last.get("stored").max(1.0);
     let index_allowance = stored_per_min * index_per_message / 1000.0;
     let evictions_per_min = evicted as f64 / span;
-    let dup_allowance = (accepts_per_min * DUP_BYTES_PER_ACCEPT
+    let dup_allowance = (accepts_per_min * (DUP_BYTES_PER_ACCEPT + DUP_BYTES_PER_SYNCED_ORIGIN)
         + evictions_per_min * DUP_BYTES_PER_EVICTION)
         / 1000.0;
     let mut red = Vec::new();

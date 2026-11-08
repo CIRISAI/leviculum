@@ -17,7 +17,7 @@
 //! | `store_writer` | appends and purges the store's writer has not confirmed |
 //! | `sync_out` | the outbound round's offer plan |
 //! | `sync_in` | payloads queued for the stamp worker and for the store |
-//! | `dup` | the role's duplicate list: processed ids, departed ids |
+//! | `dup` | the role's duplicate list: processed ids, departed ids; the synced messages' origins |
 //! | `links` | per-link state: proofs owed, open links, validated links |
 //! | `mailbox` | the own mailbox's router tables |
 //! | `config` | lists read from the config: allow lists, ignored, static peers |
@@ -94,6 +94,7 @@ pub const FIELD_COLUMNS: &[(&str, &str, &str)] = &[
     ("Ready", "delivery_limit_kb", "-"),
     ("PeeringRuntime", "table", "peers"),
     ("PeeringRuntime", "gate", "peers"),
+    ("PeeringRuntime", "origins", "dup"),
     ("PeeringRuntime", "peer_store", "-"),
     ("PeeringRuntime", "our_identity", "-"),
     ("PeeringRuntime", "our_identity_hash", "-"),
