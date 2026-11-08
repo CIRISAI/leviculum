@@ -253,6 +253,7 @@ skip  loquax-android   glyph                      # Glyph.java against the core'
 skip  loquax-android   home_reach                 # phone and mailbox through in-process relays over loopback TCP sockets (1196); subject is the code
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   m9_scene_census            # counts the M9 screens' scene heap with a global allocator (1343); subject is the code
+skip  loquax-android   m9_fold_census             # a pulled page's fold split into unpack, step, note and route by time and allocator calls and bytes, and folded in chunks (1575); subject is the code
 skip  loquax-android   operation_counts           # a phone session over the real fixture, a key in compose counted against its bar (1489); subject is the code, starts a node
 skip  loquax-android   m9_fixture_census          # counts the M9 image's fixture screens (the group's since 1366) and the client session's pull against the census budgets with a global allocator (1361, 1363); subject is the code
 skip  loquax-android   m9_client                  # the M9's no_std client against in-process mailboxes and a transport over loopback TCP, through a counting proxy (1363), and the group verbs from the board's keys (1366); subject is the code
@@ -279,6 +280,7 @@ skip  loquax-m9        restore_counts             # the M9 restore, a pulled pag
 skip  loquax-m9        page                       # the M9 [PAGE] line walked over the fixture with the board's keys and one renderer: page, cursor, top, zoom (1533); subject is the code
 skip  loquax-m9        read                       # the M9 reads by its viewport: the board's draw says the bubbles whose last line showed, the dwell sees them, the seen mark is routed and kept over a reboot, each with its control (1541); subject is the code
 skip  loquax-m9        bench                      # the bench never touches a real chat: arrivals into "Bench" only, a release restore lists none, no mark to the home, bench forget takes 1540's and the flagged out (1562); subject is the code
+skip  loquax-m9        drain                      # the UI core's drain played over a test clock: a budget per turn, a key yields the fold, pages counted once and rows once a page, the unbudgeted loop as control (1575); subject is the code
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer

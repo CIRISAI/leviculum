@@ -57,18 +57,228 @@ pub fn take(
     entries: &[Entry],
     address: &[u8; 16],
 ) -> (usize, Vec<UiEffect>) {
+    let (_, taken, effects) = fold_until(
+        model,
+        entries,
+        address,
+        &|| 0,
+        &mut |_| false,
+        &mut TakeSpent::default(),
+    );
+    (taken, effects)
+}
+
+/// Where a fold of pulled entries went, in the units of the clock it was
+/// handed (1575, the bench's `[FOLD]` line): each entry unpacked into the
+/// model's event (`board::fold`, the LXMF unpack and its message id), the
+/// model's step for it, and the batch's note at its end (the list ordered,
+/// the window built), summed over every chunk folded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TakeSpent {
+    pub unpack: u64,
+    pub step: u64,
+    pub finish: u64,
+}
+
+/// [`take`], timed by `clock`.
+pub fn take_timed(
+    model: &mut UiModel<Field>,
+    entries: &[Entry],
+    address: &[u8; 16],
+    clock: &dyn Fn() -> u64,
+) -> (usize, Vec<UiEffect>, TakeSpent) {
+    let mut spent = TakeSpent::default();
+    let (_, taken, effects) =
+        fold_until(model, entries, address, clock, &mut |_| false, &mut spent);
+    (taken, effects, spent)
+}
+
+/// Fold `entries` from the first as one batch until `stop` says so after
+/// an entry (it is asked with the entries looked at so far; at least one
+/// is folded whatever it says): how many entries were looked at, how many
+/// of them the model took, and what the batch asked back.
+fn fold_until(
+    model: &mut UiModel<Field>,
+    entries: &[Entry],
+    address: &[u8; 16],
+    clock: &dyn Fn() -> u64,
+    stop: &mut dyn FnMut(usize) -> bool,
+    spent: &mut TakeSpent,
+) -> (usize, usize, Vec<UiEffect>) {
     behind_the_list(model, |model| {
-        let mut taken = 0;
+        let (mut looked, mut taken) = (0, 0);
         let mut batch = Batch::new(model);
-        for event in entries
-            .iter()
-            .filter_map(|entry| board::fold(entry, address))
-        {
-            batch.fold(UiEvent::Engine(event));
-            taken += 1;
+        for entry in entries {
+            let t0 = clock();
+            let event = board::fold(entry, address);
+            let t1 = clock();
+            spent.unpack += t1.saturating_sub(t0);
+            looked += 1;
+            if let Some(event) = event {
+                batch.fold(UiEvent::Engine(event));
+                taken += 1;
+                spent.step += clock().saturating_sub(t1);
+            }
+            if stop(looked) {
+                break;
+            }
         }
-        (taken, batch.finish())
+        let t2 = clock();
+        let effects = batch.finish();
+        spent.finish += clock().saturating_sub(t2);
+        (looked, taken, effects)
     })
+}
+
+/// How long one turn of the UI core folds a pulled page before it looks
+/// at the keys again (1575), in microseconds from the turn's start: a
+/// time, not a count of entries, because an entry's cost on the board is
+/// no constant (window 16b: 234 entries in 836 ms, 55 in 536 to 620 ms,
+/// the allocator and the flash's parks inside them), and the bar it
+/// serves is a time. A key pressed into a turn waits for the rest of it,
+/// then for the next turn's drain, its keys, its draw and its flush: the
+/// bar is 100 ms from the press to the flush (order 1533). The next
+/// turn's fold stops after one entry when a press is waiting
+/// ([`Folding::fold`]'s `key_waiting`), so the budget bounds the turn
+/// the key fell into: 25 ms of entries, then the one that crossed it and
+/// the batch's note and route ([`DRAIN_BAR_MS`]). Shorter splits a page
+/// into more batches, each of which notes and routes the list again
+/// (host, `m9_fold_census`: about 380 allocator calls a batch however
+/// few its entries); longer eats the draw's share of the 100 ms.
+pub const FOLD_BUDGET_US: u64 = 25_000;
+
+/// The longest drain stage of a UI turn the bench walk accepts (1575,
+/// `scripts/m9-walk.py`'s bar for a `[LOOP] core=ui` line's `drain=`):
+/// [`FOLD_BUDGET_US`], the entry that crossed it (11 ms the slowest per
+/// entry window 16b showed, 600 ms for 55) and the batch's note and route
+/// after it, with room for one flash park of core 0 (52 ms the longest in
+/// window 16b) inside.
+pub const DRAIN_BAR_MS: u64 = 100;
+
+/// A pulled page part-folded (1575): its entries, how many of them were
+/// folded already, the home's address they fold under.
+struct Partial {
+    entries: Vec<Entry>,
+    at: usize,
+    address: [u8; 16],
+}
+
+/// The pulled pages the UI core folds a budget at a time (1575): one
+/// drain turn of the board folded a whole page of 234 entries, 836 ms in
+/// window 16b, before it looked at the keys again; a key pressed in it
+/// waited for all of it. A page goes in whole ([`Folding::begin`]) and
+/// comes out folded over as many turns as its entries take
+/// ([`Folding::fold`]); the page counts as folded once, when its last
+/// entry is, so the summary's pages owed (`Shelf::pages_owed`) move as
+/// they did.
+#[derive(Default)]
+pub struct Folding {
+    partial: Option<Partial>,
+    spent: TakeSpent,
+    folded: usize,
+    /// The rows and deletions the turns of a part-folded page said,
+    /// held for the turn that folds its last entry ([`Folding::rows_due`]).
+    rows: Vec<Row>,
+    gone: Vec<[u8; 16]>,
+}
+
+/// What one [`Folding::fold`] did.
+pub struct Chunk {
+    /// Entries looked at in this chunk.
+    pub looked: usize,
+    /// What the chunk's batch asked back, for `route`.
+    pub effects: Vec<UiEffect>,
+    /// The page whose last entry this chunk folded, whole, for the
+    /// caller's own look at it (the bench's arrival): one page folded.
+    pub done: Option<Vec<Entry>>,
+}
+
+impl Folding {
+    /// A page still being folded: the next turn folds on before it takes
+    /// any other message.
+    pub fn busy(&self) -> bool {
+        self.partial.is_some()
+    }
+
+    /// Take a pulled page to fold. A page still part-folded goes on
+    /// first: the caller begins a page only when [`Folding::busy`] is
+    /// false, so the pages fold in the order they came.
+    pub fn begin(&mut self, entries: Vec<Entry>, address: [u8; 16]) {
+        debug_assert!(self.partial.is_none(), "a page begun over another");
+        self.partial = Some(Partial {
+            entries,
+            at: 0,
+            address,
+        });
+    }
+
+    /// Fold the page on until `key_waiting` says a press is queued or
+    /// `clock` reaches `deadline`, both asked after each entry, the press
+    /// first (at least one entry is folded, so a page always moves). The
+    /// entries folded go into the model as one batch.
+    pub fn fold(
+        &mut self,
+        model: &mut UiModel<Field>,
+        clock: &dyn Fn() -> u64,
+        deadline: u64,
+        key_waiting: &mut dyn FnMut() -> bool,
+    ) -> Chunk {
+        let Some(partial) = self.partial.as_mut() else {
+            return Chunk {
+                looked: 0,
+                effects: Vec::new(),
+                done: None,
+            };
+        };
+        let (looked, _, effects) = fold_until(
+            model,
+            &partial.entries[partial.at..],
+            &partial.address,
+            clock,
+            &mut |_| key_waiting() || clock() >= deadline,
+            &mut self.spent,
+        );
+        partial.at += looked;
+        self.folded += looked;
+        let done = match partial.at >= partial.entries.len() {
+            true => self.partial.take().map(|p| p.entries),
+            false => None,
+        };
+        Chunk {
+            looked,
+            effects,
+            done,
+        }
+    }
+
+    /// The rows and deleted conversations a turn would hand the summary
+    /// log, merged into what earlier turns held (a newer row of a
+    /// conversation replaces the held one): held while a page is
+    /// part-folded, so the summary log is written once a page as before
+    /// (a write per turn would be a flash write, and a park of this core,
+    /// per chunk). Whether they go now; then `rows` and `gone` hold all of
+    /// them.
+    pub fn rows_due(&mut self, rows: &mut Vec<Row>, gone: &mut Vec<[u8; 16]>) -> bool {
+        self.rows
+            .retain(|held| !rows.iter().any(|row| row.peer == held.peer));
+        self.rows.append(rows);
+        self.gone.append(gone);
+        if self.busy() {
+            return false;
+        }
+        *rows = core::mem::take(&mut self.rows);
+        *gone = core::mem::take(&mut self.gone);
+        true
+    }
+
+    /// Where the folds' time went since the last call, and how many
+    /// entries they looked at (the bench's `[FOLD]` line).
+    pub fn take_spent(&mut self) -> (TakeSpent, usize) {
+        (
+            core::mem::take(&mut self.spent),
+            core::mem::take(&mut self.folded),
+        )
+    }
 }
 
 /// Run `fold` with the list's cursor hidden from it while the keys are

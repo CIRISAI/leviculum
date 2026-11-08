@@ -191,6 +191,12 @@ impl Presses {
         Some(press)
     }
 
+    /// A press waits to be taken (1575): what the UI core's fold asks
+    /// after each entry, to yield to the keys at once.
+    pub fn waiting(&self) -> bool {
+        self.len > 0
+    }
+
     /// Answers dropped because the queue was full.
     pub fn lost(&self) -> u32 {
         self.lost
