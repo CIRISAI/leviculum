@@ -421,10 +421,10 @@ The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
 `thumbv7em-none-eabihf` and the M9's `xtensa-esp32s3-none-elf` by `just
 m9-render-no-std` (in `guards`, with an injected `std::fs` call as its
 positive control). It words the chats list scene in cells
-(`lines`, `loquax-m9/src/screen.rs:199`) and draws them through
+(`lines`, `loquax-m9/src/screen.rs:206`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
-mousefood (`draw`, `loquax-m9/src/render.rs:86`). Mousefood's own
+mousefood (`draw`, `loquax-m9/src/render.rs:104`). Mousefood's own
 `framebuffer` is off: the cells go straight into the caller's frame, and
 the crate's `framebuffer` feature turns it back on for the board's DMA
 measurement. What the slice settled on the host:
@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:489`).
+  (`narrow`, `loquax-m9/src/screen.rs:496`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:433`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:440`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -510,8 +510,8 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   the cursor nine bubbles, opens the line and types an emoji with one
   renderer, and must equal a fresh draw.
 - **What the M9 shows of a model** (`scene`,
-  `loquax-m9/src/screen.rs:172`, and `Look::of`,
-  `loquax-m9/src/screen.rs:149`). The Compact scene, which is the open chat
+  `loquax-m9/src/screen.rs:179`, and `Look::of`,
+  `loquax-m9/src/screen.rs:156`). The Compact scene, which is the open chat
   alone, with the cursor of the pane the keys are in; and the list while
   the keys are on the list. The model's back from the chat moves the keys
   to the list and keeps the chat open, as the terminal's panes do, so a
@@ -1097,9 +1097,9 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
   feature range-checked. The region's tiles are already geometry; there
   is no other decode.
 - **Pixels** is the map core's filler painting the view straight into
-  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:332`); the
+  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:735`); the
   whole screen adds the bar's and the legend's cells and the pins
-  (`Renderer::show`, `loquax-m9/src/render.rs:107`).
+  (`Renderer::show`, `loquax-m9/src/render.rs:136`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
   drawn at four by eight source pixels a cell, encoded into glyphs and
   drawn by ratatui through mousefood. The atlas has two of the
@@ -1116,7 +1116,7 @@ in place:
 | the 2 km region, z10 to z15 | 820,244 B | flash, read in place: none in PSRAM |
 | the fixture region the image carries | 197,972 B | flash |
 | the view's tiles, read out of a card instead | 81,850 to 201,070 B | PSRAM, per view |
-| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:289`) | 217,508 B | PSRAM |
+| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:691`) | 217,508 B | PSRAM |
 | a map draw's heap peak (census, below) | 75,404 B | PSRAM |
 | the cells' own per view, besides the painter's (source and cells) | 191,436 B braille, 120,204 B quadrants | PSRAM |
 | the panel's frame | 153,600 B | SRAM or PSRAM |
@@ -1138,23 +1138,34 @@ same code the phone, the window and the terminal draw through, so no
 renderer is written twice; the cell renderer keeps the bar and the
 legend.
 
-**The screen** (`lines`, `loquax-m9/src/map.rs:178`; `pins`,
-`loquax-m9/src/map.rs:382`): the bar says "Map", the zoom, and the
-data's credit at its right end, which the ODbL asks for on the view;
-the picture under it the whole width, its two pixels past the last
-cell in the map's background; the legend `* person  @ chosen  grey: old
-or nearby` and the keys under it, both in the catalogue
-(`StrId::MapLegend`, `StrId::MapKeys`). The map is in the dark table
-under the dark UI, in the M9's finish (square caps, no casings, no
-buildings). A draw is the cells first with the picture's rows blank,
-then the map over them, then the pins; ratatui draws only cells that
-changed, so the next map leaves the blank rows alone, and the renderer
-clears its cells when the screen leaves the map
-(`leave_map`, `loquax-m9/src/render.rs:145`), or the list would keep
-map pixels where its cells are blank.
+**The screen** (`lines`, `loquax-m9/src/map.rs:221`; `pins`,
+`loquax-m9/src/map.rs:781`), as 1531 left it after Lew's evening at
+the board on 2026-11-07: the map is in the light table, in the M9's
+finish (square caps, no casings, no buildings); the UI around it keeps
+its dark tokens. There is no title row and no legend: the picture is
+the whole panel, rows 0 to 10 for the model's fit and pins (320 x 220),
+and row 11 is the picture too whenever it has no words. Its words
+(`Chrome`, `loquax-m9/src/map.rs:277`; `bottom`,
+`loquax-m9/src/map.rs:390`): the key hint, "T näher  Y weiter
+Pfeile schieben", for three seconds after the map opens and after a key
+it does not know, the pins' page for three more when there is a pin;
+then the chosen pin's card, its age and the data's credit, "©
+OpenStreetMap", at the right end; and the credit for two seconds in the
+picture's top right corner the first time the map opens after a boot.
+The names (`names`, `loquax-m9/src/map.rs:515`) are set after the
+picture and before the pins, by the map core's placement rule in three
+rounds: places, then streets and rivers centred on a straight stretch
+of their line (horizontal, the atlas cannot turn text), then from z15
+parks and waters; one per 11 x 3 cells, at most eight. A draw is the
+cells first, every row in the map's ground, then the map over them, the
+names, the pins and the words; ratatui draws only cells that changed,
+so the next map leaves the blank rows alone, and the renderer clears
+its cells when the screen leaves the map (`leave_map`,
+`loquax-m9/src/render.rs:203`), or the list would keep map pixels where
+its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:5827`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:5834`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1167,9 +1178,10 @@ the model (`map_picture`, `loquax/src/ui.rs:1211`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
-**The keys** (`ROWS`, `loquax-m9/src/map.rs:113`) are the terminal's map
+**The keys** (`ROWS`, `loquax-m9/src/map.rs:133`) are the terminal's map
 keys where the M9 has the key; Space and Backspace stand in for Tab and
-Shift-Tab, which it has not (`key`, `loquax-m9/src/map.rs:131`). A test
+Shift-Tab, which it has not, and T, I, Y, O for `+` and `-`, which sit on
+the controller's Sym layer (`key`, `loquax-m9/src/map.rs:156`). A test
 takes every row through the shared resolver
 (`every_map_key_runs_the_terminals_map_command`).
 
@@ -1178,7 +1190,7 @@ takes every row through the shared resolver
 | the map of every pin | `M` (on the list) | the palette's `map` |
 | this chat's peer on the map | `m` (on the list) | `PeerOnMap` |
 | pan | the arrows | `Pan` by an eighth |
-| zoom in / out | `+` / `-` | `ZoomIn` / `ZoomOut` |
+| zoom in / out | `T` / `Y` (the keys under the ring, 1531), `I` / `O`, `+` / `-` | `ZoomIn` / `ZoomOut` |
 | next / previous pin | Space / Backspace | `Step` |
 | every pin again | `0` | `Fit` |
 | open the pin's chat | Enter | `Open` |
@@ -1186,7 +1198,7 @@ takes every row through the shared resolver
 
 **The fixture** (`map`, `loquax-m9/src/fixture.rs:326`) gives the
 board's model the map core's Florence region (`FIXTURE`,
-`loquax-m9/src/map.rs:67`, read in place from the image), the picture,
+`loquax-m9/src/map.rs:83`, read in place from the image), the picture,
 and five positions: the board's GNSS fix by the cathedral, Jürgen's and
 Mum's shares, Zoë's three hours old, and Rifugio, a node nearby that
 announced itself. The existing screens' goldens did not move. Two
@@ -1279,7 +1291,7 @@ All targets:
 The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
-a branch in `lines` (`loquax-m9/src/screen.rs:199`) for the scene's
+a branch in `lines` (`loquax-m9/src/screen.rs:206`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:592`), which
 the model already returns while the tab is in front (`rooms_scene`,
 `loquax/src/ui/scene.rs:1172`), and its tab in the tab bar the screen
