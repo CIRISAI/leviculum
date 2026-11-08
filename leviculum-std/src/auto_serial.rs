@@ -12,7 +12,7 @@
 //! |---|---|---|---|
 //! | a `bootloader_usb` id of `lnflash/catalogue.toml` | or `bootloader` in the name | a board in its bootloader | nothing, not opened |
 //! | a `1209:*` `candidate_usb` id of the catalogue | and `usb-leviculum_...` | an LNode (our firmware sets the strings) | `if02`: a `SerialInterface`; `if00` (debug log): nothing |
-//! | [`RNODE_USB`] | or one of its name fragments | an RNode candidate | listens [`SILENCE`]; silent: one `CMD_DETECT`; `DETECT_RESP`: an `RNodeInterface` |
+//! | [`RNODE_USB`] | or one of its name fragments | an RNode candidate | listens [`SILENCE`]; silent, or speaking only RNode status frames ([`rnode_status_command`]): one `CMD_DETECT`; `DETECT_RESP`: an `RNodeInterface` |
 //! | anything else | | a stranger | nothing, not opened |
 //!
 //! A port another process holds (an fd on it in `/proc`, or `EBUSY` under
@@ -20,13 +20,23 @@
 //! no open at all; a candidate is opened under `TIOCEXCL` for its silence
 //! and its probe, and closed before the interface opens it.
 //!
+//! An RNode whose radio is on is not silent: its firmware sends status
+//! frames on its own (`CMD_STAT_CHTM` about every 1.15 s, battery and
+//! temperature every 5 s; measured on the rig, 1567). Well-formed KISS frames
+//! whose command bytes are all of the firmware's status family name the
+//! sender a KISS speaker, and it is asked at once. Anything else heard is
+//! `talking`, and after [`TALKING_LISTENS`] listens the entry is a stranger.
+//!
 //! Each board gets an `[[Auto Serial n]]` section with the shipped LoRa
 //! defaults ([`LORA_FREQUENCY`], [`LORA_BANDWIDTH`], [`LORA_SPREADING_FACTOR`],
-//! [`LORA_CODING_RATE`]), origin `default`, its port the by-id link, so a board
-//! that leaves and comes back is found again by the interface's own reconnect
-//! loop. A board that appears later is found by the next scan, every
-//! [`RESCAN`]. Every verdict is one `AUTO_SERIAL` line, once per entry and
-//! again only when it changes.
+//! [`LORA_CODING_RATE`]), origin `default`, its port the by-id link. A by-id
+//! name keeps its section while lnsd lives: a board that leaves and comes
+//! back, however long it is gone, is picked up by its interface's own
+//! reconnect loop, and the scan never renders it a second section (1567).
+//! Only entries that never got a section are forgotten when their link goes,
+//! and asked again when it returns. A board that appears later is found by the
+//! next scan, every [`RESCAN`]. Every verdict is one `AUTO_SERIAL` line, once
+//! per entry and again only when it changes.
 //!
 //! The decision sits in front of the core: this module edits the interface
 //! list a configuration hands the builder, or hands a section to the running
@@ -47,15 +57,28 @@ pub const ENV_SERIAL_DIR: &str = "LEVICULUM_AUTO_SERIAL_DIR";
 /// Where udev links every USB serial port under the strings of its device.
 pub const DEFAULT_SERIAL_DIR: &str = "/dev/serial/by-id";
 
-/// How long an RNode candidate must stay silent before it is asked. An RNode
-/// firmware says nothing until it is asked; a GPS speaks NMEA every second,
-/// a printer its status.
+/// How long an RNode candidate is listened to before it is asked. An RNode
+/// firmware with its radio off says little (a battery frame every 5 s); one
+/// with its radio on sends status frames every 1.15 s, which
+/// [`listen_verdict`] recognises; a GPS speaks NMEA every second, a printer
+/// its status.
 pub const SILENCE: Duration = Duration::from_secs(1);
 
 /// How long a probed candidate has to answer `DETECT_RESP`. The
 /// RNodeInterface's own detect waits 200 ms (`interfaces::rnode`); a
 /// first-time probe gets more, it may meet a board just through its boot.
 pub const PROBE_ANSWER: Duration = Duration::from_millis(500);
+
+/// How long the listen is stretched when its window ends inside a frame, so
+/// a status frame cut by the window's end is read whole. The longest status
+/// frame is 30 bytes escaped, under 3 ms at [`RNODE_SPEED`].
+pub const KISS_TAIL: Duration = Duration::from_millis(50);
+
+/// The longest edge fragment a listen tolerates: bytes before its first
+/// `FEND` (a frame the window opened inside) or after its last. The longest
+/// status frame, `CMD_STAT_PHYPRM` with 12 payload bytes, is 13 bytes, 26
+/// with every byte escaped.
+pub const MAX_FRAGMENT: usize = 32;
 
 /// The rescan period: a board plugged in after the start is found this long
 /// after its link appears at most, plus its silence.
@@ -363,6 +386,10 @@ pub struct Verdict {
     pub reason: Reason,
     /// The section lnsd attached, when it did.
     pub section: Option<String>,
+    /// Who holds the port, `pid:comm`, when the reason is `held`;
+    /// `unknown` when the open was refused under `TIOCEXCL` by a process
+    /// whose fds this one may not read.
+    pub holder: Option<String>,
 }
 
 /// What a probe of a candidate found.
@@ -374,6 +401,89 @@ pub enum Probe {
     Held,
     NoAccess,
     OpenFailed,
+}
+
+/// Whether `command` is one of the RNode firmware's status reports, the
+/// frames it sends on its own while its radio is on: `CMD_STAT_RX` (0x21)
+/// through `CMD_STAT_TEMP` (0x29), `reference/RNode_Firmware/Framing.h:41-49`,
+/// our `leviculum_core::rnode::CMD_STAT_*`. `CMD_DATA` (0x00), a packet the
+/// radio received, is not among them: a generic KISS modem sends it too.
+pub fn rnode_status_command(command: u8) -> bool {
+    use leviculum_core::rnode::{CMD_STAT_RX, CMD_STAT_TEMP};
+    (CMD_STAT_RX..=CMD_STAT_TEMP).contains(&command)
+}
+
+/// What a candidate said while it was listened to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Listen {
+    /// Nothing.
+    Silent,
+    /// Only RNode status frames, at least one of them whole: an RNode with
+    /// its radio on. Asked at once.
+    RnodeStatus,
+    /// Bytes, none of them proof either way yet (a fragment).
+    Undecided,
+    /// Something that is not an RNode's status: a boot log, NMEA, a frame of
+    /// another command.
+    Foreign,
+}
+
+/// Judge the bytes heard from a candidate. Split at `FEND`: every complete
+/// frame between two `FEND`s must start with a status command
+/// ([`rnode_status_command`]) and escape correctly; the fragment before the
+/// first `FEND` and the one after the last may be cut frames, no longer than
+/// [`MAX_FRAGMENT`], the trailing one starting with a status command.
+pub fn listen_verdict(bytes: &[u8]) -> Listen {
+    use leviculum_core::framing::kiss::{FEND, FESC, TFEND, TFESC};
+    if bytes.is_empty() {
+        return Listen::Silent;
+    }
+    let escapes_ok = |seg: &[u8]| {
+        let mut it = seg.iter();
+        while let Some(&b) = it.next() {
+            if b == FESC && !matches!(it.next(), Some(&TFEND) | Some(&TFESC)) {
+                return false;
+            }
+        }
+        true
+    };
+    let segments: Vec<&[u8]> = bytes.split(|&b| b == FEND).collect();
+    if segments.len() == 1 {
+        // No FEND at all: a fragment so far, or text.
+        return if bytes.len() > MAX_FRAGMENT || !escapes_ok(bytes) {
+            Listen::Foreign
+        } else {
+            Listen::Undecided
+        };
+    }
+    let (lead, rest) = match segments.split_first() {
+        Some(split) => split,
+        None => return Listen::Undecided,
+    };
+    let (trail, whole) = match rest.split_last() {
+        Some(split) => split,
+        None => return Listen::Undecided,
+    };
+    // The leading fragment's tail end may have been cut mid-escape at the
+    // window's opening; only its length is judged.
+    if lead.len() > MAX_FRAGMENT {
+        return Listen::Foreign;
+    }
+    if !trail.is_empty() && (trail.len() > MAX_FRAGMENT || !rnode_status_command(trail[0])) {
+        return Listen::Foreign;
+    }
+    let mut frames = 0;
+    for frame in whole.iter().filter(|f| !f.is_empty()) {
+        if !rnode_status_command(frame[0]) || !escapes_ok(frame) {
+            return Listen::Foreign;
+        }
+        frames += 1;
+    }
+    if frames > 0 {
+        Listen::RnodeStatus
+    } else {
+        Listen::Undecided
+    }
 }
 
 /// Whether `bytes` carry a `DETECT_RESP` frame.
@@ -437,7 +547,7 @@ pub trait Host {
     fn entries(&self, dir: &Path) -> Vec<String>;
     /// The USB ids behind a link, when it leads to a USB device.
     fn usb_ids(&self, link: &Path) -> Option<UsbId>;
-    /// Another process holding the port, as `pid comm`.
+    /// Another process holding the port, as `pid:comm`.
     fn holder(&self, link: &Path) -> Option<String>;
     /// The device a link leads to, for comparing with configured ports.
     fn device(&self, path: &Path) -> Option<PathBuf>;
@@ -500,12 +610,22 @@ impl<H: Host + Sync> AutoSerial<H> {
     /// One pass over the directory: every entry not yet settled is sorted,
     /// candidates are listened to and probed (in parallel, so a start with
     /// several waits one silence), and every board found is returned as a
-    /// section to attach. An entry whose link is gone is forgotten, so a
-    /// device that comes back is asked again.
+    /// section to attach.
+    ///
+    /// The section table answers first: a by-id name that got a section
+    /// keeps it, and its verdict, while lnsd lives, present or not. Its
+    /// interface owns the port and the board's return (its reconnect loop
+    /// reopens the same by-id link), so the scan neither asks the port again
+    /// nor renders it a second section. Before 1567 an absence across one
+    /// rescan forgot the entry, the return was judged new, and a second
+    /// section fought the first for the port for ever (rig, T114 run3).
+    /// An entry that never got a section is forgotten when its link is gone,
+    /// so a device that comes back is asked again.
     pub fn scan(&mut self) -> Vec<InterfaceConfig> {
         let mut names = self.host.entries(&self.dir);
         names.sort();
-        self.seen.retain(|n, _| names.contains(n));
+        self.seen
+            .retain(|n, s| s.verdict.section.is_some() || names.contains(n));
         let pending: Vec<String> = names
             .into_iter()
             .filter(|n| match self.seen.get(n) {
@@ -520,47 +640,47 @@ impl<H: Host + Sync> AutoSerial<H> {
         let dir = &self.dir;
         let configured = &self.configured;
         let attach = self.attach;
-        let judged: Vec<(String, Class, Option<Probe>, Option<Reason>)> =
-            std::thread::scope(|scope| {
-                let handles: Vec<_> = pending
-                    .iter()
-                    .map(|name| {
-                        scope.spawn(move || {
-                            let link = dir.join(name);
-                            let class = classify(name, host.usb_ids(&link), catalogue);
-                            let wants_port =
-                                matches!(class, Class::Lnode { .. } | Class::RnodeCandidate { .. });
-                            if !wants_port {
-                                return (name.clone(), class, None, None);
-                            }
-                            if host.device(&link).is_some_and(|d| configured.contains(&d)) {
-                                return (name.clone(), class, None, Some(Reason::Configured));
-                            }
-                            if !attach {
-                                return (name.clone(), class, None, Some(Reason::NotBuilt));
-                            }
-                            if let Some(holder) = host.holder(&link) {
-                                tracing::info!(
-                                    "{} is held by {}; not touched, asked again in {} s",
-                                    link.display(),
-                                    holder,
-                                    RESCAN.as_secs()
-                                );
-                                return (name.clone(), class, None, Some(Reason::Held));
-                            }
-                            let probe = match class {
-                                Class::RnodeCandidate { .. } => Some(host.probe(&link)),
-                                _ => None,
-                            };
-                            (name.clone(), class, probe, None)
-                        })
+        type Judged = (String, Class, Option<Probe>, Option<Reason>, Option<String>);
+        let judged: Vec<Judged> = std::thread::scope(|scope| {
+            let handles: Vec<_> = pending
+                .iter()
+                .map(|name| {
+                    scope.spawn(move || {
+                        let link = dir.join(name);
+                        let class = classify(name, host.usb_ids(&link), catalogue);
+                        let wants_port =
+                            matches!(class, Class::Lnode { .. } | Class::RnodeCandidate { .. });
+                        if !wants_port {
+                            return (name.clone(), class, None, None, None);
+                        }
+                        if host.device(&link).is_some_and(|d| configured.contains(&d)) {
+                            return (name.clone(), class, None, Some(Reason::Configured), None);
+                        }
+                        if !attach {
+                            return (name.clone(), class, None, Some(Reason::NotBuilt), None);
+                        }
+                        if let Some(holder) = host.holder(&link) {
+                            tracing::info!(
+                                "{} is held by {}; not touched, asked again in {} s",
+                                link.display(),
+                                holder,
+                                RESCAN.as_secs()
+                            );
+                            return (name.clone(), class, None, Some(Reason::Held), Some(holder));
+                        }
+                        let probe = match class {
+                            Class::RnodeCandidate { .. } => Some(host.probe(&link)),
+                            _ => None,
+                        };
+                        (name.clone(), class, probe, None, None)
                     })
-                    .collect();
-                handles.into_iter().filter_map(|h| h.join().ok()).collect()
-            });
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
 
         let mut found = Vec::new();
-        for (name, class, probe, early) in judged {
+        for (name, class, probe, early, holder) in judged {
             let link = self.dir.join(&name);
             let (kind, board) = match &class {
                 Class::Bootloader => (Kind::Bootloader, None),
@@ -607,14 +727,35 @@ impl<H: Host + Sync> AutoSerial<H> {
                 }
                 _ => None,
             };
+            let holder = match reason {
+                Reason::Held => Some(holder.unwrap_or_else(|| "unknown".to_string())),
+                _ => None,
+            };
             let verdict = Verdict {
                 kind,
                 board,
                 reason,
                 section,
+                holder,
             };
             let talking = self.seen.get(&name).map_or(0, |s| s.talking)
                 + u32::from(reason == Reason::Talking);
+            if reason == Reason::Talking {
+                // One line per listen: the verdict line below is said once,
+                // and a reader (a cell, a person at the bench) has to see
+                // that the talker was asked again and how often (1567).
+                tracing::info!(
+                    "{} talked during its silence (listen {} of {}); {}",
+                    name,
+                    talking,
+                    TALKING_LISTENS,
+                    if talking < TALKING_LISTENS {
+                        "listened to again on the next scan"
+                    } else {
+                        "a stranger from now on"
+                    }
+                );
+            }
             let changed = self.seen.get(&name).map(|s| &s.verdict) != Some(&verdict);
             if changed {
                 log_verdict(&name, &verdict);
@@ -641,6 +782,7 @@ fn log_verdict(name: &str, v: &Verdict) {
         reason = v.reason.as_str(),
         attached = %crate::auto_layer::yes_no(v.section.is_some()),
         section = %Scalar(&section),
+        holder = %Scalar(v.holder.as_deref().unwrap_or("none")),
     );
 }
 
@@ -752,10 +894,13 @@ mod linux {
     use std::path::Path;
     use std::time::Instant;
 
-    use super::{detect_request, has_detect_response, Probe, PROBE_ANSWER, RNODE_SPEED, SILENCE};
+    use super::{
+        detect_request, has_detect_response, listen_verdict, Listen, Probe, KISS_TAIL,
+        PROBE_ANSWER, RNODE_SPEED, SILENCE,
+    };
 
     /// Another process with an fd on the device `link` leads to, as
-    /// `pid comm`. Processes whose fds this one may not read are not seen;
+    /// `pid:comm`. Processes whose fds this one may not read are not seen;
     /// `TIOCEXCL` at the open covers those that hold the port exclusively.
     pub(super) fn holder(link: &Path) -> Option<String> {
         let meta = std::fs::metadata(link).ok()?;
@@ -780,7 +925,7 @@ mod linux {
                 if m.file_type().is_char_device() && m.rdev() == rdev {
                     let comm =
                         std::fs::read_to_string(proc_entry.path().join("comm")).unwrap_or_default();
-                    return Some(format!("{} {}", pid, comm.trim()));
+                    return Some(format!("{}:{}", pid, comm.trim()));
                 }
             }
         }
@@ -851,12 +996,18 @@ mod linux {
         Ok(port)
     }
 
-    /// Read what arrives within `window`, at most `cap` bytes.
-    fn read_for(port: &Port, window: std::time::Duration, cap: usize) -> Vec<u8> {
-        let mut got = Vec::new();
+    /// Read what arrives within `window`, at most `cap` bytes, and stop
+    /// early once `enough` says so.
+    fn read_until(
+        port: &Port,
+        got: &mut Vec<u8>,
+        window: std::time::Duration,
+        cap: usize,
+        enough: impl Fn(&[u8]) -> bool,
+    ) {
         let deadline = Instant::now() + window;
         let mut buf = [0u8; 256];
-        while got.len() < cap {
+        while got.len() < cap && !enough(got) {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
@@ -885,7 +1036,29 @@ mod linux {
                 break;
             }
         }
-        got
+    }
+
+    /// The most a listen keeps: a talker's text is judged on its first
+    /// bytes, and an RNode's status on its first whole frame.
+    const LISTEN_CAP: usize = 4096;
+
+    /// The command bytes of the whole frames in `heard`, `0x25,0x27`.
+    fn status_commands(heard: &[u8]) -> String {
+        use leviculum_core::framing::kiss::FEND;
+        let mut seen: Vec<u8> = Vec::new();
+        let segments: Vec<&[u8]> = heard.split(|&b| b == FEND).collect();
+        let inner = segments.len().saturating_sub(1);
+        for frame in segments.iter().take(inner).skip(1) {
+            if let Some(&c) = frame.first() {
+                if !seen.contains(&c) {
+                    seen.push(c);
+                }
+            }
+        }
+        seen.iter()
+            .map(|c| format!("0x{c:02x}"))
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     pub(super) fn probe(link: &Path) -> Probe {
@@ -893,8 +1066,25 @@ mod linux {
             Ok(port) => port,
             Err(p) => return p,
         };
-        if !read_for(&port, SILENCE, 1).is_empty() {
-            return Probe::Talking;
+        // Listen until the window ends or the bytes decide: one whole status
+        // frame names an RNode (asked at once), anything foreign a talker.
+        let mut heard = Vec::new();
+        let decided = |b: &[u8]| matches!(listen_verdict(b), Listen::RnodeStatus | Listen::Foreign);
+        read_until(&port, &mut heard, SILENCE, LISTEN_CAP, decided);
+        if listen_verdict(&heard) == Listen::Undecided {
+            // The window ended inside a frame: read the rest of it.
+            read_until(&port, &mut heard, KISS_TAIL, LISTEN_CAP, decided);
+        }
+        match listen_verdict(&heard) {
+            Listen::Silent => {}
+            Listen::RnodeStatus => {
+                tracing::info!(
+                    "{} sent RNode status frames during its silence ({}); asked at once",
+                    link.display(),
+                    status_commands(&heard)
+                );
+            }
+            Listen::Undecided | Listen::Foreign => return Probe::Talking,
         }
         let request = detect_request();
         // SAFETY: `request` is valid for its length.
@@ -902,7 +1092,14 @@ mod linux {
         if n != request.len() as isize {
             return Probe::OpenFailed;
         }
-        let answer = read_for(&port, PROBE_ANSWER, 4096);
+        let mut answer = Vec::new();
+        read_until(
+            &port,
+            &mut answer,
+            PROBE_ANSWER,
+            LISTEN_CAP,
+            has_detect_response,
+        );
         if has_detect_response(&answer) {
             Probe::Rnode
         } else {
@@ -1083,7 +1280,7 @@ mod tests {
             self.held
                 .iter()
                 .any(|h| h == name)
-                .then(|| "42 minicom".into())
+                .then(|| "42:minicom".into())
         }
         fn device(&self, path: &Path) -> Option<PathBuf> {
             Some(path.to_path_buf())
@@ -1240,6 +1437,115 @@ mod tests {
         assert_eq!(s.verdict(LNODE).unwrap().reason, Reason::NotBuilt);
     }
 
+    /// The bytes the rig's RNodes sent unasked (1567, `chatter-a.txt`,
+    /// `radiooff-tbeam22.txt`): every one is an RNode's status, and what
+    /// is not stays foreign.
+    #[test]
+    fn rnode_status_frames_are_recognised_and_nothing_else() {
+        let hex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        // T-Beam CHTM, radio on.
+        assert_eq!(
+            listen_verdict(&hex("c025000000000000000d3d3effc0")),
+            Listen::RnodeStatus
+        );
+        // CP2102: battery and temperature back to back.
+        assert_eq!(
+            listen_verdict(&hex("c027014bc0c029b2c0")),
+            Listen::RnodeStatus
+        );
+        // Radio off: the 5 s battery frame alone.
+        assert_eq!(listen_verdict(&hex("c0270000c0")), Listen::RnodeStatus);
+        // A window that opened inside a frame and closed inside the next.
+        assert_eq!(
+            listen_verdict(&hex("3d3effc0c0270000c0c02500")),
+            Listen::RnodeStatus
+        );
+        // An escaped byte inside a status frame.
+        assert_eq!(listen_verdict(&hex("c02501dbdc02c0")), Listen::RnodeStatus);
+        // A cut frame alone decides nothing yet.
+        assert_eq!(listen_verdict(&hex("c025000000")), Listen::Undecided);
+        assert_eq!(listen_verdict(&[]), Listen::Silent);
+        // A boot ROM's text, NMEA, and frames of other commands are foreign.
+        assert_eq!(
+            listen_verdict(b"ESP-ROM:esp32s3-20210327\r\nBuild:Mar 27 2021\r\n"),
+            Listen::Foreign
+        );
+        assert_eq!(
+            listen_verdict(
+                b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n"
+            ),
+            Listen::Foreign
+        );
+        // A short text without a FEND decides nothing within the window; the
+        // probe counts what is still undecided at its end as talking.
+        assert_eq!(listen_verdict(b"$GPTXT,01*77\r\n"), Listen::Undecided);
+        // A received packet (CMD_DATA) and a detect answer are no status.
+        assert_eq!(listen_verdict(&hex("c00001020304c0")), Listen::Foreign);
+        assert_eq!(listen_verdict(&hex("c00846c0")), Listen::Foreign);
+        // A bad escape inside a status frame is no KISS.
+        assert_eq!(listen_verdict(&hex("c025db00c0")), Listen::Foreign);
+        // Status first, then text: foreign.
+        assert_eq!(
+            listen_verdict(&[&hex("c0270000c0")[..], b"rst:0x1 (POWERON_RESET)"].concat()),
+            Listen::Foreign
+        );
+        // The family's two ends, and its neighbours outside it.
+        assert!(rnode_status_command(0x21) && rnode_status_command(0x29));
+        assert!(!rnode_status_command(0x20) && !rnode_status_command(0x2a));
+    }
+
+    /// The rig's run3 (1567): a board with a section, gone across two
+    /// rescans and back, keeps its one section and is not asked again; its
+    /// interface reopens the link.
+    #[test]
+    fn a_board_with_a_section_keeps_it_across_an_absence() {
+        let host = FakeHost {
+            entries: Mutex::new(vec![LNODE.to_string(), RNODE.to_string()]),
+            probes: HashMap::from([(RNODE.to_string(), Probe::Rnode)]),
+            ..Default::default()
+        };
+        let mut s = scanner(host, &Config::default());
+        assert_eq!(s.scan().len(), 2);
+        let lnode_section = s.verdict(LNODE).unwrap().section.clone();
+        let rnode_section = s.verdict(RNODE).unwrap().section.clone();
+        s.host.entries.lock().unwrap().clear();
+        assert!(s.scan().is_empty());
+        assert!(s.scan().is_empty());
+        assert_eq!(s.verdict(LNODE).unwrap().section, lnode_section);
+        s.host
+            .entries
+            .lock()
+            .unwrap()
+            .extend([LNODE.to_string(), RNODE.to_string()]);
+        assert!(s.scan().is_empty(), "no second section");
+        assert_eq!(s.verdict(LNODE).unwrap().section, lnode_section);
+        assert_eq!(s.verdict(RNODE).unwrap().section, rnode_section);
+        assert_eq!(s.host.probed.lock().unwrap().len(), 1, "probed once");
+    }
+
+    #[test]
+    fn a_held_verdict_names_its_holder() {
+        let host = FakeHost {
+            entries: Mutex::new(vec![LNODE.to_string()]),
+            held: vec![LNODE.to_string()],
+            ..Default::default()
+        };
+        let mut s = scanner(host, &Config::default());
+        s.scan();
+        assert_eq!(
+            s.verdict(LNODE).unwrap().holder.as_deref(),
+            Some("42:minicom")
+        );
+        s.host.held.clear();
+        s.scan();
+        assert_eq!(s.verdict(LNODE).unwrap().holder, None);
+    }
+
     /// The probe on a real pty: a silent device that answers is an RNode, a
     /// talker is refused before anything is written to it.
     #[cfg(target_os = "linux")]
@@ -1328,5 +1634,49 @@ mod tests {
             talker.join().unwrap().is_empty(),
             "nothing written to a talker"
         );
+
+        // An RNode with its radio on (1567): CHTM frames from the first
+        // moment, every 300 ms here; it is asked at once and answers.
+        let (mut master, path) = pty();
+        let chtm = [
+            0xc0, 0x25, 0, 0, 0, 0, 0, 0, 0, 0x0d, 0x3d, 0x3e, 0xff, 0xc0,
+        ];
+        let chatter = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 64];
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut next = std::time::Instant::now();
+            while std::time::Instant::now() < deadline {
+                if std::time::Instant::now() >= next {
+                    let _ = master.write_all(&chtm);
+                    next += Duration::from_millis(300);
+                }
+                let mut pfd = libc::pollfd {
+                    fd: std::os::fd::AsRawFd::as_raw_fd(&master),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: a poll on the master's own fd.
+                if unsafe { libc::poll(&mut pfd, 1, 20) } > 0 && pfd.revents & libc::POLLIN != 0 {
+                    if let Ok(n) = master.read(&mut buf) {
+                        got.extend_from_slice(&buf[..n]);
+                        if got.ends_with(&detect_request()) {
+                            master.write_all(&[0xc0, 0x08, 0x46, 0xc0]).unwrap();
+                            return (got, master);
+                        }
+                    }
+                }
+            }
+            (got, master)
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(linux::probe(&path), Probe::Rnode);
+        assert!(
+            started.elapsed() < SILENCE,
+            "asked at once, not after the silence: {:?}",
+            started.elapsed()
+        );
+        let (got, _master) = chatter.join().unwrap();
+        assert_eq!(got, detect_request());
     }
 }

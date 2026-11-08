@@ -59,6 +59,10 @@ struct RNodeDetectResult {
     firmware_version: Option<(u8, u8)>,
     platform: Option<u8>,
     mcu: Option<u8>,
+    /// The transmit power the board confirmed after configuration, where it
+    /// differs from the request: a derived board-maximum request comes back
+    /// at the board's own ceiling (1567, the T-Beams' 17 dBm).
+    tx_power_confirmed: Option<u8>,
 }
 
 /// Errors from RNode serial operations
@@ -140,6 +144,10 @@ pub(crate) struct RNodeInterfaceConfig {
     /// The node's 16-byte identity hash, which with the interface name gives
     /// this interface its [`FrameClass`].
     pub identity_hash: [u8; 16],
+    /// The node's goodbye count (1567): held by the interface task until it
+    /// ends, so a stopping node waits for this radio's goodbye. `None` in
+    /// tests that run no node.
+    pub goodbye: Option<super::goodbye::GoodbyeToken>,
 }
 
 impl RNodeInterfaceConfig {
@@ -1867,7 +1875,8 @@ where
     tokio::time::sleep(CONFIG_PROCESS_WAIT).await;
 
     // Read and validate confirmation frames
-    validate_radio_config(port, radio, name).await?;
+    let mut detect_result = detect_result;
+    detect_result.tx_power_confirmed = validate_radio_config(port, radio, name).await?;
 
     // Final settle
     tokio::time::sleep(FINAL_SETTLE).await;
@@ -1932,6 +1941,7 @@ where
         firmware_version: None,
         platform: None,
         mcu: None,
+        tx_power_confirmed: None,
     };
 
     read_frames_until_deadline(port, DETECT_TIMEOUT, |command, payload| match command {
@@ -1998,7 +2008,7 @@ async fn validate_radio_config<S>(
     port: &mut S,
     radio: &RadioParams,
     name: &str,
-) -> Result<(), RNodeError>
+) -> Result<Option<u8>, RNodeError>
 where
     S: AsyncRead + Unpin,
 {
@@ -2115,7 +2125,7 @@ where
         ));
     }
 
-    Ok(())
+    Ok(confirmed_txp)
 }
 
 // ---------------------------------------------------------------------------
@@ -3462,13 +3472,36 @@ async fn rnode_reconnect_task<S, C, Fut>(
         // Between here and a configured radio the carrier is down (L-0020).
         counters.set_online(false);
         // Open the channel, then configure it. Combined so either step's error
-        // routes through the same reconnect-retry path.
+        // routes through the same reconnect-retry path. A node that stops
+        // during the configuration (2.5 s of it is waiting on the board) is
+        // not kept waiting, and the board is not left with the radio the
+        // configuration just switched on: it gets its goodbye here (1567).
         let opened = async {
             let mut port = connect().await?;
-            let detect = configure_stream(&mut port, radio, &ctx.name).await?;
-            Ok::<_, RNodeError>((port, detect))
+            let configured = tokio::select! {
+                r = configure_stream(&mut port, radio, &ctx.name) => Some(r),
+                _ = incoming_tx.closed() => None,
+            };
+            match configured {
+                Some(r) => Ok::<_, RNodeError>(Some((port, r?))),
+                None => {
+                    send_goodbye(&mut port, &ctx.name).await;
+                    Ok(None)
+                }
+            }
         }
         .await;
+        let opened = match opened {
+            Ok(Some(pair)) => Ok(pair),
+            Ok(None) => {
+                tracing::debug!(
+                    "{}: event loop shut down during configuration, stopping",
+                    ctx.name
+                );
+                return;
+            }
+            Err(e) => Err(e),
+        };
 
         match opened {
             Ok((port, detect)) => {
@@ -3482,8 +3515,18 @@ async fn rnode_reconnect_task<S, C, Fut>(
                 ready.signal_ready();
 
                 if let Some((major, minor)) = detect.firmware_version {
+                    // The power the board runs at, which is what it confirmed:
+                    // a board-maximum request below the default comes back at
+                    // the board's ceiling, and the line said the request
+                    // until 1567 (T-Beams: "using 17 dBm" beside "txp=22").
+                    let txp = match detect.tx_power_confirmed {
+                        Some(c) if c != radio.tx_power => {
+                            format!("{c} dBm, {} dBm requested", radio.tx_power)
+                        }
+                        _ => format!("{} dBm", radio.tx_power),
+                    };
                     tracing::info!(
-                        "{}: configured (FW {}.{}, freq={} Hz, bw={} Hz, sf={}, cr={}, txp={} dBm)",
+                        "{}: configured (FW {}.{}, freq={} Hz, bw={} Hz, sf={}, cr={}, txp={})",
                         ctx.name,
                         major,
                         minor,
@@ -3491,7 +3534,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                         radio.bandwidth,
                         radio.sf,
                         radio.cr,
-                        radio.tx_power
+                        txp
                     );
                 }
 
@@ -3531,12 +3574,20 @@ async fn rnode_reconnect_task<S, C, Fut>(
         }
 
         // Check if event loop shut down
-        if incoming_tx.is_closed() {
+        if incoming_tx.is_closed() || outgoing_rx.is_closed() {
             tracing::debug!("{}: event loop shut down, stopping reconnect", ctx.name);
             return;
         }
 
-        tokio::time::sleep(RECONNECT_INTERVAL).await;
+        // A node stopping during the wait is not kept waiting for it: the
+        // task ends at once and drops its goodbye token (1567).
+        tokio::select! {
+            _ = tokio::time::sleep(RECONNECT_INTERVAL) => {}
+            _ = incoming_tx.closed() => {
+                tracing::debug!("{}: event loop shut down, stopping reconnect", ctx.name);
+                return;
+            }
+        }
     }
 }
 
@@ -3601,6 +3652,8 @@ pub(crate) struct RNodeChannelInterfaceConfig {
     pub subslot_arm: SubslotArm,
     /// See [`RNodeInterfaceConfig::identity_hash`].
     pub identity_hash: [u8; 16],
+    /// See [`RNodeInterfaceConfig::goodbye`].
+    pub goodbye: Option<super::goodbye::GoodbyeToken>,
 }
 
 impl RNodeChannelInterfaceConfig {
@@ -3696,6 +3749,7 @@ fn spawn_rnode_with_connector<S, C, Fut>(
     buffer_size: usize,
     connect: C,
     shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+    goodbye: Option<super::goodbye::GoodbyeToken>,
 ) -> InterfaceHandle
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -3767,6 +3821,9 @@ where
     let frame_turnaround_ms = max_tx_hold(ctx.radio.bandwidth, ctx.radio.sf, ctx.radio.cr).held_ms;
 
     tokio::spawn(async move {
+        // Held for the task's whole life and dropped when it ends, after the
+        // goodbye the io task writes when the event loop goes (1567).
+        let _goodbye = goodbye;
         let run = rnode_reconnect_task(
             ctx,
             connect,
@@ -3884,6 +3941,7 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
             async move { open_serial_port(&path).await }
         },
         None,
+        config.goodbye,
     )
 }
 
@@ -3928,6 +3986,7 @@ pub(crate) fn spawn_rnode_channel_interface(
             }
         },
         shutdown,
+        config.goodbye,
     )
 }
 
@@ -4033,6 +4092,7 @@ where
         firmware_version: None,
         platform: None,
         mcu: None,
+        tx_power_confirmed: None,
     };
     let mut chip_types: Vec<u8> = Vec::new();
 
@@ -4975,6 +5035,7 @@ mod tests {
                 jitter_arm: JitterArm::AsIs,
                 subslot_arm: SubslotArm::Off,
                 identity_hash: [0u8; 16],
+                goodbye: None,
             },
             None,
         );
@@ -5044,6 +5105,7 @@ mod tests {
                 jitter_arm: JitterArm::AsIs,
                 subslot_arm: SubslotArm::Off,
                 identity_hash: [0u8; 16],
+                goodbye: None,
             };
         let halves_of = |port: tokio::io::DuplexStream| {
             let (read_half, write_half) = tokio::io::split(port);
@@ -5091,10 +5153,36 @@ mod tests {
     /// when the channel closes (`closed`) — i.e. when the interface task is torn
     /// down. Used by the runtime attach/detach test.
     async fn rnode_firmware_stub_signals(
-        mut peer: tokio::io::DuplexStream,
+        peer: tokio::io::DuplexStream,
         configured: tokio::sync::mpsc::Sender<()>,
         closed: tokio::sync::mpsc::Sender<()>,
     ) {
+        rnode_firmware_stub_recording(peer, configured, closed, None, Duration::ZERO).await
+    }
+
+    /// [`rnode_firmware_stub_signals`], keeping every byte the interface
+    /// wrote in `record` when one is given, and, once the radio is on,
+    /// taking `read_delay` before each read: a board that drains its line
+    /// slowly, as a real tty's close does (1567).
+    async fn rnode_firmware_stub_recording(
+        peer: tokio::io::DuplexStream,
+        configured: tokio::sync::mpsc::Sender<()>,
+        closed: tokio::sync::mpsc::Sender<()>,
+        record: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
+        read_delay: Duration,
+    ) {
+        // Replies go out on their own task, so the reader never stops reading
+        // to write: on a small duplex a stub that did would deadlock against
+        // an interface still writing its own frames.
+        let (mut rd, mut wr) = tokio::io::split(peer);
+        let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            while let Some(reply) = reply_rx.recv().await {
+                if wr.write_all(&reply).await.is_err() {
+                    return;
+                }
+            }
+        });
         let mut deframer = KissDeframer::with_max_payload(rnode::HW_MTU);
         let mut buf = [0u8; 512];
         let push = |reply: &mut Vec<u8>, cmd: u8, payload: &[u8]| {
@@ -5102,14 +5190,22 @@ mod tests {
             kiss::frame(cmd, payload, &mut one);
             reply.extend_from_slice(&one);
         };
+        // Slow only once the radio is on: detect and configure run at speed.
+        let mut delay = Duration::ZERO;
         loop {
-            let n = match peer.read(&mut buf).await {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let n = match rd.read(&mut buf).await {
                 Ok(0) | Err(_) => {
                     let _ = closed.try_send(());
                     return;
                 }
                 Ok(n) => n,
             };
+            if let Some(record) = &record {
+                record.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
             let mut reply: Vec<u8> = Vec::new();
             for f in deframer.process(&buf[..n]) {
                 if let KissDeframeResult::Frame { command, payload } = f {
@@ -5132,16 +5228,138 @@ mod tests {
                         rnode::CMD_RADIO_STATE => {
                             push(&mut reply, command, &payload);
                             let _ = configured.try_send(());
+                            if payload.first() == Some(&rnode::RADIO_STATE_ON) {
+                                delay = read_delay;
+                            }
                         }
                         _ => {}
                     }
                 }
             }
-            if !reply.is_empty() && peer.write_all(&reply).await.is_err() {
+            if !reply.is_empty() && reply_tx.send(reply).is_err() {
                 let _ = closed.try_send(());
                 return;
             }
         }
+    }
+
+    /// 1567: a stopping node lets every RNode's goodbye (radio off, leave)
+    /// reach its board before the runtime goes. On the rig a SIGTERM reached
+    /// two RNodes of four; the other two kept their radios on. The radios
+    /// here take their bytes slowly, as a tty's close does. Without the
+    /// stop's wait both arms read (0, 4), three runs of three.
+    #[tokio::test]
+    async fn stop_after_configuration_says_goodbye_to_every_rnode() {
+        assert_eq!(goodbyes_on_stop(true).await, (4, 4));
+    }
+
+    /// The same stop while the radios are still being configured (the radio
+    /// was just switched on): the configuration is cut short and each board
+    /// still gets its goodbye.
+    #[tokio::test]
+    async fn stop_during_configuration_says_goodbye_to_every_rnode() {
+        assert_eq!(goodbyes_on_stop(false).await, (4, 4));
+    }
+
+    /// Four RNodes on one node, stopped; `(reached, radios)`: how many
+    /// received the goodbye. `online` stops only once all four are online.
+    async fn goodbyes_on_stop(online: bool) -> (usize, usize) {
+        use crate::driver::ReticulumNodeBuilder;
+
+        struct MockFactory(std::sync::Mutex<Option<RNodeChannelHalves>>);
+        impl RNodeChannelFactory for MockFactory {
+            fn open(&self) -> RNodeChannelOpenFuture {
+                let taken = self.0.lock().unwrap().take();
+                Box::pin(async move { taken.ok_or_else(|| "channel already opened".into()) })
+            }
+        }
+
+        let td = tempfile::tempdir().expect("tempdir");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(true)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync");
+        node.start().await.expect("start");
+
+        const RADIOS: usize = 4;
+        let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::channel::<()>(RADIOS);
+        let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(RADIOS);
+        let mut records = Vec::new();
+        let mut handles = Vec::new();
+        for _ in 0..RADIOS {
+            let (port, peer) = tokio::io::duplex(4);
+            let (read_half, write_half) = tokio::io::split(port);
+            let halves = std::sync::Mutex::new(Some((
+                Box::new(read_half) as Box<dyn AsyncRead + Send + Unpin>,
+                Box::new(write_half) as Box<dyn AsyncWrite + Send + Unpin>,
+            )));
+            let record = Arc::new(std::sync::Mutex::new(Vec::new()));
+            tokio::spawn(rnode_firmware_stub_recording(
+                peer,
+                cfg_tx.clone(),
+                closed_tx.clone(),
+                Some(Arc::clone(&record)),
+                // A line that takes its bytes 4 at a time, 200 ms apart: the
+                // goodbye needs two drains, which a runtime torn down at once
+                // never gives it, and the stop's bound (2 s) does.
+                Duration::from_millis(200),
+            ));
+            records.push(record);
+            handles.push(
+                node.spawn_rnode_channel_interface(RNodeChannelConfig {
+                    factory: Arc::new(MockFactory(halves)),
+                    frequency: 868_000_000,
+                    bandwidth: 125_000,
+                    tx_power: 17,
+                    sf: 7,
+                    cr: 5,
+                    st_alock: None,
+                    lt_alock: None,
+                    flow_control: false,
+                    buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
+                })
+                .expect("attach"),
+            );
+        }
+        for _ in 0..RADIOS {
+            tokio::time::timeout(Duration::from_secs(8), cfg_rx.recv())
+                .await
+                .expect("every radio configured within 8 s")
+                .expect("cfg channel open");
+        }
+        if online {
+            let all_online = async {
+                while node.interface_stats().iter().filter(|s| s.online).count() < RADIOS {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(8), all_online)
+                .await
+                .expect("every radio online within 8 s");
+        }
+
+        node.stop().await.expect("stop");
+        // Each stub reads what was written before its channel closed.
+        for _ in 0..RADIOS {
+            tokio::time::timeout(Duration::from_secs(8), closed_rx.recv())
+                .await
+                .expect("every channel closes after the stop")
+                .expect("closed channel open");
+        }
+        let mut goodbye = rnode::build_set_radio_state(rnode::RADIO_STATE_OFF);
+        goodbye.extend_from_slice(&rnode::build_leave());
+        let reached = records
+            .iter()
+            .filter(|r| {
+                r.lock()
+                    .unwrap()
+                    .windows(goodbye.len())
+                    .any(|w| w == goodbye.as_slice())
+            })
+            .count();
+        drop(handles);
+        (reached, RADIOS)
     }
 
     // #19 follow-up: attach a channel-backed RNode interface to a RUNNING node
@@ -5508,6 +5726,7 @@ mod tests {
             jitter_arm: JitterArm::AsIs,
             subslot_arm: SubslotArm::Off,
             identity_hash: [0u8; 16],
+            goodbye: None,
         };
 
         let mut handle = spawn_rnode_interface(config);

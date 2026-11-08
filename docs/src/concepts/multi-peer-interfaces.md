@@ -31,7 +31,7 @@ child is built from the already-connected stream
 `leviculum-std/src/interfaces/tcp.rs:692`), inherits IFAC, mode and
 ingress control from the listener, and is handed to the event loop,
 which registers it in the routing map like any other interface
-(`registry`, `leviculum-std/src/driver/mod.rs:5336`).
+(`registry`, `leviculum-std/src/driver/mod.rs:5373`).
 
 The listener itself is deliberately **not** in that map. It carries no
 packets, so it would be a send target that cannot send; it is recorded
@@ -44,10 +44,10 @@ routing map and the reporting inventory is the point of that module
 
 Teardown runs through the ordinary disconnect path: the event loop
 notices the channel closed, calls `handle_interface_down`
-(`leviculum-std/src/driver/mod.rs:4938-4939`) to cull the routing entries,
+(`leviculum-std/src/driver/mod.rs:4975-4976`) to cull the routing entries,
 and the child's byte counters are folded into its parent's departed
 totals so the listener's reported traffic does not shrink when a client
-leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4405`).
+leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4442`).
 
 ### AutoInterface, I2P, shared instance: the same shape
 
@@ -333,7 +333,7 @@ parent to lean on. Measured against the tree, not assumed:
 | Machinery | Per | Where it belongs |
 |---|---|---|
 | Airtime credit bucket (`AirtimeCredit`, `leviculum-std/src/interfaces/airtime.rs:23`) | **medium** — one radio, one duty cycle | parent |
-| Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:361`) | **medium** — contention is on the air | parent |
+| Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:369`) | **medium** — contention is on the air | parent |
 | Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:3263`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:3551`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
 | Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:3577`) | **medium** | parent |
 | Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:1547`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1758`) | **medium** — one adapter | parent |

@@ -75,6 +75,10 @@ pub(super) struct InterfaceBuildCtx<'a> {
     /// firmware uses (`leviculum_ble_tx::device_name`).
     #[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
     pub identity_hash: [u8; 16],
+    /// The node's goodbye count: a radio interface holds a token of it until
+    /// its task ends, so the node's stop waits for the goodbye (1567).
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
+    pub goodbyes: crate::interfaces::RadioGoodbyes,
 }
 
 /// Outcome of building one configured interface section.
@@ -352,6 +356,7 @@ mod tests {
                 transport_enabled: false,
                 default_announce_rate: Default::default(),
                 identity_hash: [0u8; 16],
+                goodbyes: crate::interfaces::RadioGoodbyes::new(),
             }
         }
     }

@@ -271,12 +271,15 @@ media it may start is the `[auto]` section, four yes/no keys, read by
   `LEVICULUM_AUTO_SERIAL_DIR`) at start and every 5 s after. An LNode,
   named by our firmware's USB strings, becomes a `SerialInterface` without
   a byte written to it first; an RNode candidate on a CP210x, CH9102 or
-  Espressif USB bridge is listened to for one second, and only a silent
-  one is sent one detect request; one that answers becomes an
-  `RNodeInterface`. Both run the shipped LoRa settings (869463000 Hz,
-  125 kHz, SF8, CR5) as `[[Auto Serial <n>]]`. Bootloaders, ports another
-  process holds and every other device are left alone, and every entry
-  gets one `AUTO_SERIAL` line saying why.
+  Espressif USB bridge is listened to for one second, and only one that
+  stayed silent or sent nothing but RNode status frames is sent one detect
+  request; one that answers becomes an `RNodeInterface`. Both run the
+  shipped LoRa settings (869463000 Hz, 125 kHz, SF8, CR5) as
+  `[[Auto Serial <n>]]`, and keep that section while lnsd runs: a board
+  unplugged and plugged in again is reopened by its interface. Bootloaders,
+  ports another process holds and every other device are left alone, and
+  every entry gets one `AUTO_SERIAL` line saying why. On stop every RNode
+  is told to switch its radio off before lnsd exits.
 - **`bluetooth = yes`** asks BlueZ for an adapter at start: the default
   adapter (`hci0`, else the lowest name), or the one
   `LEVICULUM_AUTO_BLUETOOTH_ADAPTER` names. A powered adapter, or one lnsd

@@ -62,7 +62,7 @@ transport off, a shared instance named `default`, log level 4,
 - Every interface section carries an origin, `configured` or `default`
   (`InterfaceOrigin`, `leviculum-std/src/config.rs:681`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
-  builds any (`leviculum-std/src/driver/mod.rs:2338`), and once
+  builds any (`leviculum-std/src/driver/mod.rs:2348`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:215`).
 - `interface_stats` serves the origin as the `origin` key
   (`leviculum-std/src/rpc/handlers.rs:674`), and `lnstatus` prints it,
@@ -339,13 +339,14 @@ only when both hold:
 
 1. its by-id name is an RNode-typical candidate string (Heltec, LilyGO,
    RAK, Espressif JTAG/serial), and
-2. it stayed silent for one second of listening. A GPS speaking NMEA or
-   a printer reporting its status is out, whatever its name.
+2. it stayed silent for one second of listening, or said nothing but
+   RNode status frames. A GPS speaking NMEA or a printer reporting its
+   status is out, whatever its name.
 
 Then, and only then, one `CMD_DETECT` with `DETECT_REQ`; a device that
 answers `DETECT_RESP` is an RNode. lnsd already speaks this handshake
-(`detect_on_port`, `leviculum-std/src/interfaces/rnode.rs:1923`; the same
-frame is its serial heartbeat, `leviculum-std/src/interfaces/rnode.rs:3076-3078`).
+(`detect_on_port`, `leviculum-std/src/interfaces/rnode.rs:1932`; the same
+frame is its serial heartbeat, `leviculum-std/src/interfaces/rnode.rs:3086-3088`).
 A refused device is remembered and not asked again; hotplug is a rescan
 of the by-id directory every 5 s (built so, see step 5 below). The directory is
 `LEVICULUM_AUTO_SERIAL_DIR`, default `/dev/serial/by-id`, so a cell can
@@ -401,14 +402,32 @@ the server list, before the node is built.
   shows as `EBUSY`, the same skip; `TIOCNXCL` before the close leaves the
   port to the interface. `EACCES` is a warning naming the dialout group.
 - **The probe.** A candidate is put raw at 115200 Bd, its input flushed,
-  and listened to for one second (`SILENCE`). One byte is "talking": the
-  candidate is refused, and listened to again on the next two scans
-  (`TALKING_LISTENS`, a board through its boot prints once, a GPS never
-  stops) before it stays refused. A silent one is sent `c0 08 73 c0`, the
+  and listened to for one second (`SILENCE`). An RNode is not always
+  silent: its radio on, the firmware sends `CMD_STAT_CHTM`
+  (`c0 25 .. c0`) about every 1.15 s, and battery and temperature
+  (`c0 27 .. c0`, `c0 29 .. c0`) every 5 s even with the radio off, all
+  measured on the rig (1567). Before 1567 one such byte made the board
+  "talking", and a board left with its radio on by the previous instance
+  was refused for good. So the listen is judged by what it heard
+  (`listen_verdict`): well-formed KISS frames whose command bytes are all
+  of the firmware's status family, `CMD_STAT_RX` 0x21 through
+  `CMD_STAT_TEMP` 0x29 (`reference/RNode_Firmware/Framing.h:41-49`,
+  `leviculum_core::rnode::CMD_STAT_*`), name the candidate a KISS speaker,
+  and it is asked at once, on the first whole frame. A frame cut at either
+  edge of the window is tolerated up to 32 bytes; a window that ends
+  inside one is stretched by 50 ms (`KISS_TAIL`) to read it whole.
+  `CMD_DATA` (0x00), a received packet, is not of the family: a generic
+  KISS modem sends it too. Anything else is "talking": a boot ROM's text,
+  NMEA, a frame of another command. The talker is refused, and listened
+  to again on the next two scans (`TALKING_LISTENS`, a board through its
+  boot prints once, a GPS never stops) before it stays refused. A silent
+  candidate, or one that spoke only status, is sent `c0 08 73 c0`, the
   four bytes of `CMD_DETECT` with `DETECT_REQ` and nothing else, and has
   500 ms to answer `DETECT_RESP`; one that does not is not asked again.
-  Several candidates are listened to in parallel, so a start waits one
-  silence, not one per board.
+  Only a candidate, a port whose ids or name are in the table above, is
+  ever listened to, so a stranger still receives nothing. Several
+  candidates are listened to in parallel, so a start waits one silence,
+  not one per board.
 - **The sections.** A board becomes `[[Auto Serial <n>]]`, origin
   `default`, its port the by-id link: an LNode a `SerialInterface` with
   `interface_mode = gateway`, an RNode an `RNodeInterface`, both on
@@ -419,16 +438,39 @@ the server list, before the node is built.
 - **Hotplug.** A board present at start is a section before the node is
   built, so its `IFACE_CONFIG` line says `origin=default`. After the start
   the directory is read again every 5 s (`RESCAN`), and a new board is
-  handed to the running node (`Reticulum::spawn_interface`). A board that
-  leaves and comes back under the same link is found by its interface's
-  own reconnect loop; an entry whose link disappeared is forgotten, so a
-  device plugged in again is asked again. A rescan, not inotify: it needs
-  nothing beyond the directory, which a cell can be handed.
+  handed to the running node (`Reticulum::spawn_interface`). One board is
+  one section: a by-id name that got a section keeps it, present or not,
+  while lnsd lives, and its interface's own reconnect loop owns the
+  board's return, however many rescans it was gone. The section table
+  answers before the port is looked at, so the scan neither probes the
+  name again nor renders it a second section (and our own open port is
+  never mistaken for a stranger's, which the holder search could not tell:
+  it skips lnsd's own pid). Before 1567 an absence across one rescan
+  forgot the entry and the return became a second section that fought
+  the first for the port for ever (rig, a T114 deauthorised 8 s:
+  `serial_7` down with `Device or resource busy` every 5 s, `serial_18`
+  up). Only an entry that never got a section, a stranger, a refused or
+  held candidate, is forgotten when its link disappears, and asked again
+  when it is plugged in again. A rescan, not inotify: it needs nothing
+  beyond the directory, which a cell can be handed.
 - **The line**, catalogued, once per entry and again when its verdict
   changes: `AUTO_SERIAL board=<Board|none> port=<by-id name>
   kind=lnode|rnode|bootloader|other reason=name|detect|debug_port|bootloader|not_candidate|held|talking|no_answer|configured|no_access|open_failed|not_built
-  attached=yes|no section=<name|none>`. A candidate that did not answer is
-  `kind=other`.
+  attached=yes|no section=<name|none> holder=<pid:comm|unknown|none>`. A
+  candidate that did not answer is `kind=other`. `holder` names the
+  process that holds a `held` port, `unknown` when only `TIOCEXCL` said
+  so (1567); `none` on every other line.
+- **The goodbye.** A stopping lnsd writes every RNode its goodbye, radio
+  off and leave (`c0 06 00 c0 c0 0a ff c0`), and waits for each write
+  before the process ends, at most 2 s (`GOODBYE_BOUND`,
+  `leviculum-std/src/interfaces/goodbye.rs`). Before 1567 the runtime went
+  right after the event loop: on the rig a SIGTERM reached two RNodes of
+  four, and the other two kept their radios on and talked into the next
+  start's probe. A stop during an RNode's configuration cuts it short and
+  says the goodbye too, since the configuration had just switched the
+  radio on. The `configured` line names the power the board confirmed,
+  `txp=17 dBm, 22 dBm requested` on a T-Beam whose maximum is below the
+  request.
 - **The switch.** `AutoMedia::SHIPPED.serial` is `yes`, and the
   first-start file says so; `[auto] serial = no` turns it off with any
   other content of the file, and a file without `[auto]` asks for

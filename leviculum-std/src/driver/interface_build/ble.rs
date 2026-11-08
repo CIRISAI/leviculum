@@ -185,6 +185,7 @@ mod tests {
                 transport_enabled: false,
                 default_announce_rate: Default::default(),
                 identity_hash: [0x5A; 16],
+                goodbyes: crate::interfaces::RadioGoodbyes::new(),
             }
         }
     }

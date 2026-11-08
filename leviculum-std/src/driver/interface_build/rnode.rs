@@ -124,6 +124,7 @@ pub(super) fn build(
             // hash puts this end in one of the two residue classes of that
             // count (`interfaces::rnode::FrameClass`).
             identity_hash: ctx.identity_hash,
+            goodbye: Some(ctx.goodbyes.token()),
         },
     );
 
