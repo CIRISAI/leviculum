@@ -2454,9 +2454,15 @@ fn ui_main(
                          effects: Vec<loquax::ui::UiEffect>,
                          mut ids: &mut dyn FnMut() -> [u8; 16],
                          log: &mut UiLog,
-                         wants: &mut Wants|
+                         wants: &mut Wants,
+                         held: bool|
          -> bool {
-            let routed = home::route(model, effects, &mut ids);
+            // A pulled page's chunk that is not its last leaves its rows
+            // owed to the route after the last (1591, `home::route_held`).
+            let routed = match held {
+                true => home::route_held(model, effects, &mut ids),
+                false => home::route(model, effects, &mut ids),
+            };
             for line in routed.notices {
                 log.line("[UI] ", alloc::format!("notice=\"{line}\""));
             }
@@ -2480,13 +2486,13 @@ fn ui_main(
 
         // What the last size set asked (1546).
         let owed = core::mem::take(&mut asked);
-        if !owed.is_empty() && route_out(&mut model, owed, &mut ids, &mut log, &mut wants) {
+        if !owed.is_empty() && route_out(&mut model, owed, &mut ids, &mut log, &mut wants, false) {
             dirty = true;
         }
         // The model's clocks once a second (1541): a bubble on screen for
         // the dwell is seen, and its mark goes to the home.
         let (ticked, first_day) = reader.tick(&mut model, leviculum_esp::uptime_ms());
-        if route_out(&mut model, ticked, &mut ids, &mut log, &mut wants) || first_day {
+        if route_out(&mut model, ticked, &mut ids, &mut log, &mut wants, false) || first_day {
             dirty = true;
         }
 
@@ -2512,7 +2518,14 @@ fn ui_main(
                 turn_entries += chunk.looked as u32;
                 #[cfg(m9_bench)]
                 let t_route = leviculum_esp::uptime_us();
-                if route_out(&mut model, chunk.effects, &mut ids, &mut log, &mut wants) {
+                if route_out(
+                    &mut model,
+                    chunk.effects,
+                    &mut ids,
+                    &mut log,
+                    &mut wants,
+                    chunk.done.is_none(),
+                ) {
                     dirty = true;
                 }
                 #[cfg(m9_bench)]
@@ -2570,7 +2583,7 @@ fn ui_main(
                 }
                 ToUi::Answer(answer) => {
                     let effects = home::answered(&mut model, answer);
-                    if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
+                    if route_out(&mut model, effects, &mut ids, &mut log, &mut wants, false) {
                         dirty = true;
                     }
                 }
@@ -2585,7 +2598,7 @@ fn ui_main(
                     let effects = home::page_in(&mut model, peer, &entries, earlier, &address);
                     #[cfg(m9_bench)]
                     let effects = open.page_in(&mut model, peer, &entries, earlier, &address);
-                    route_out(&mut model, effects, &mut ids, &mut log, &mut wants);
+                    route_out(&mut model, effects, &mut ids, &mut log, &mut wants, false);
                     // The page is on the chat now, whatever it asked.
                     dirty = true;
                 }
@@ -2732,7 +2745,7 @@ fn ui_main(
                 if listed && group::Place::of(&model) == group::Place::Chat {
                     opened = model.conversations.get(model.selected).map(|c| c.peer);
                 }
-                if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
+                if route_out(&mut model, effects, &mut ids, &mut log, &mut wants, false) {
                     frame_whole(&renderer);
                     dirty = true;
                 }

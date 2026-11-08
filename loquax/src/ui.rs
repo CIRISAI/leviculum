@@ -604,6 +604,13 @@ struct LaidCache {
     laid: alloc::sync::Arc<layout::Laid>,
 }
 
+/// The stamps of the windows the last note left ([`UiModel::scene_owed`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SceneOwed {
+    list: Option<u64>,
+    chat: Option<(usize, u64)>,
+}
+
 /// The open chat's window as the last fold built it (1490).
 #[derive(Clone, Debug)]
 struct BuiltChat {
@@ -1172,13 +1179,18 @@ pub struct UiModel<B> {
     /// Conversations whose own state (pin, unread) a fold changed.
     changed_peers: BTreeSet<[u8; 16]>,
     /// What earlier folds changed and the store has not drained
-    /// ([`UiModel::take_writes`] reads both halves).
-    owed_changed: BTreeSet<([u8; 16], u64)>,
+    /// ([`UiModel::take_writes`] reads both halves): each note's set as
+    /// it was, merged only by the drain (1591: a merge per note was an
+    /// allocation per few entries of a pulled page folded in chunks).
+    owed_changed: Vec<BTreeSet<([u8; 16], u64)>>,
     owed_peers: BTreeSet<[u8; 16]>,
     owed_groups: BTreeSet<[u8; 16]>,
     /// Conversations whose listing the store must relearn (1490): every
     /// revision bump queues its peer here, take_writes derives the row.
     listing_owed: BTreeSet<[u8; 16]>,
+    /// The note's list of the conversations it bumped, kept between
+    /// notes so a note allocates nothing for it (1591).
+    bumped: Vec<usize>,
     /// The conversation whose first page was asked of the store and has
     /// not come (1490): asked once per selection, cleared when it lands.
     page_asked: Option<[u8; 16]>,
@@ -1351,9 +1363,11 @@ pub struct UiModel<B> {
     /// ([`UiEvent::Viewing`] sets it; a window that scrolls itself asks
     /// for everything with [`Viewing::ALL`]).
     pub viewing: Viewing,
-    /// The list's window as the last fold built it ([`scene::Scene`]'s
-    /// list): checked against its stamp before every reuse.
-    built_list: Option<BuiltList>,
+    /// The list's window as the first scene read after the last fold
+    /// built it ([`scene::Scene`]'s list): checked against its stamp
+    /// before every reuse. Interior-mutable since 1591: the read builds
+    /// it, not the note ([`UiModel::scene_owed`]).
+    built_list: core::cell::RefCell<Option<BuiltList>>,
     /// Where a list apart (the M9's compact list) last stood (1546): the
     /// selected conversation's peer and its line in the rows on screen.
     /// The cursor is the reader's: rows that move in the order move
@@ -1361,10 +1375,21 @@ pub struct UiModel<B> {
     /// ([`UiModel::list_top`]). Interior-mutable: the scene's read keeps
     /// it.
     list_line: core::cell::Cell<Option<([u8; 16], usize)>>,
-    /// The open chat as the last fold built it: the window of bubbles
-    /// around the newest, or around the cursor while the keys are in the
-    /// chat.
-    built_chat: Option<BuiltChat>,
+    /// The open chat as the first scene read after the last fold built
+    /// it: the window of bubbles around the newest, or around the cursor
+    /// while the keys are in the chat. Interior-mutable as `built_list`.
+    built_chat: core::cell::RefCell<Option<BuiltChat>>,
+    /// The stamps the last note's windows have (1591): the list's, and
+    /// the open chat's with its conversation when one is shown. The
+    /// scene's read builds a window and keeps it only while its stamp is
+    /// the noted one, so what it keeps is what the note would have built;
+    /// a model changed outside [`update`] since reads cold, as before.
+    /// Before 1591 every note built both windows, and a pulled page
+    /// folded a budget at a time (1575) paid the rows once per batch,
+    /// dozens of times per page, for frames nobody drew (window 18:
+    /// `finish` 9.2 of 16.3 ms per entry); now they are paid once per
+    /// frame read, and not at all for a batch no frame follows.
+    scene_owed: SceneOwed,
     /// The open conversation laid out as the terminal had it last
     /// (1490), keyed by [`UiModel::laid_key`]: a key that only moved the
     /// cursor restyles two blocks in place instead of laying thousands
@@ -1457,10 +1482,11 @@ impl<B: InputBuffer + Default> UiModel<B> {
             show_archived: false,
             changed: BTreeSet::new(),
             changed_peers: BTreeSet::new(),
-            owed_changed: BTreeSet::new(),
+            owed_changed: Vec::new(),
             owed_peers: BTreeSet::new(),
             owed_groups: BTreeSet::new(),
             listing_owed: BTreeSet::new(),
+            bumped: Vec::new(),
             page_asked: None,
             read_pending: Vec::new(),
             forgotten: Vec::new(),
@@ -1519,9 +1545,10 @@ impl<B: InputBuffer + Default> UiModel<B> {
             order_cache: None,
             folding: false,
             viewing: Viewing::default(),
-            built_list: None,
+            built_list: core::cell::RefCell::new(None),
             list_line: core::cell::Cell::new(None),
-            built_chat: None,
+            built_chat: core::cell::RefCell::new(None),
+            scene_owed: SceneOwed::default(),
             laid_cache: core::cell::RefCell::new(None),
             view_cache: core::cell::RefCell::new(None),
         };
@@ -1871,30 +1898,47 @@ impl<B> UiModel<B> {
     /// note moves them into the owed shadows the store drains, so the
     /// poke costs the fold's changes, never what accumulated.
     fn note_changes(&mut self) -> bool {
-        let mut poked: BTreeSet<[u8; 16]> = BTreeSet::new();
+        // The fold's own sets are asked in place (1591): a set of the
+        // poked peers built per note was the note's own allocations, paid
+        // once per batch however small the batch.
         let changed = core::mem::take(&mut self.changed);
-        poked.extend(changed.iter().map(|(peer, _)| *peer));
-        self.owed_changed.extend(changed);
         let peers = core::mem::take(&mut self.changed_peers);
-        poked.extend(peers.iter().copied());
-        self.owed_peers.extend(peers);
         let groups = core::mem::take(&mut self.groups_changed);
-        poked.extend(groups.iter().copied());
-        self.owed_groups.extend(groups);
-        let mut bumped: Vec<usize> = Vec::new();
+        let poked = |peer: &[u8; 16]| {
+            peers.contains(peer)
+                || groups.contains(peer)
+                || changed
+                    .range((*peer, 0)..=(*peer, u64::MAX))
+                    .next()
+                    .is_some()
+        };
+        let mut bumped = core::mem::take(&mut self.bumped);
+        bumped.clear();
         for (index, conversation) in self.conversations.iter_mut().enumerate() {
             let refreshed = conversation
                 .summary
                 .refresh(conversation.peer, &conversation.messages);
             let stamp = conversation.row_fingerprint();
-            if refreshed || stamp != conversation.stamp.get() || poked.contains(&conversation.peer)
-            {
+            if refreshed || stamp != conversation.stamp.get() || poked(&conversation.peer) {
                 conversation.stamp = Rev::at(stamp);
                 conversation.revision = Rev::at(conversation.revision.get().wrapping_add(1));
                 self.listing_owed.insert(conversation.peer);
                 bumped.push(index);
             }
         }
+        // Into the owed shadows the store drains: moved whole when they
+        // are drained already, no node copied.
+        fn owe<T: Ord>(owed: &mut BTreeSet<T>, more: BTreeSet<T>) {
+            match owed.is_empty() {
+                true => *owed = more,
+                false => owed.extend(more),
+            }
+        }
+        if !changed.is_empty() {
+            self.owed_changed.push(changed);
+        }
+        owe(&mut self.owed_peers, peers);
+        owe(&mut self.owed_groups, groups);
         let look = self.look_fingerprint();
         let looked = look != self.look_stamp;
         if looked {
@@ -1904,8 +1948,12 @@ impl<B> UiModel<B> {
         // The fold is noted: the caches may stand on it again.
         self.folding = false;
         self.refresh_order(&bumped);
-        self.refresh_scene();
+        // The list's and the chat's windows are built by the next scene
+        // read ([`UiModel::built_list`]), not here (1591): only their
+        // stamps are taken now.
+        self.scene_owed = self.noted_stamps();
         let rows = looked || !bumped.is_empty() || self.lists_len != self.conversations.len();
+        self.bumped = bumped;
         if rows {
             self.lists_len = self.conversations.len();
             self.lists_rev = self.lists_rev.wrapping_add(1);
@@ -1965,8 +2013,9 @@ impl<B> UiModel<B> {
     /// before `run` gave the window its chooser).
     pub fn changed_outside(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        self.built_list = None;
-        self.built_chat = None;
+        *self.built_list.get_mut() = None;
+        *self.built_chat.get_mut() = None;
+        self.scene_owed = SceneOwed::default();
         *self.view_cache.borrow_mut() = None;
     }
 
@@ -2399,17 +2448,40 @@ impl<B> UiModel<B> {
         hash.done()
     }
 
-    /// Build what the fold changed of the scene (1490): the list's
-    /// window and the open chat's, each only when its stamp moved, each
-    /// counted into the event that made it. [`UiModel::scene`] assembles
-    /// from these and builds nothing itself while they are current.
-    fn refresh_scene(&mut self) {
+    /// The stamps of the windows the fold left (1591, [`SceneOwed`]),
+    /// from the order the note just refreshed.
+    fn noted_stamps(&self) -> SceneOwed {
+        let list = self.order_cache.as_ref().map(|cache| {
+            let (first, len, top) = self.list_window(&cache.order);
+            self.list_stamp(&cache.order, first, len, top)
+        });
+        let shown = !self.viewing.apart || self.focus != Pane::Conversations;
+        let chat = (shown && self.conversations.get(self.selected).is_some()).then(|| {
+            let (from, to) = self.chat_window(self.selected);
+            (self.selected, self.chat_stamp(self.selected, from, to))
+        });
+        SceneOwed { list, chat }
+    }
+
+    /// The list's window as the fold left it (1490, 1591): the rows in
+    /// view and their margin, built once a fold was noted and kept while
+    /// its stamp is current; `None` while a fold runs or after the model
+    /// changed outside [`update`] (the scene builds whole then). Built by
+    /// the first read after a note, counted into the event that read it.
+    pub(crate) fn built_list(&self) -> Option<scene::List> {
+        if self.folding {
+            return None;
+        }
         let order = self.order();
         let (first, len, top) = self.list_window(&order);
         let stamp = self.list_stamp(&order, first, len, top);
-        if self.built_list.as_ref().map(|b| b.stamp) != Some(stamp) {
+        let current = self.built_list.borrow().as_ref().map(|b| b.stamp) == Some(stamp);
+        if !current {
+            if self.scene_owed.list != Some(stamp) {
+                return None;
+            }
             let rows = scene::rows(self, order[first..first + len].to_vec());
-            self.built_list = Some(BuiltList {
+            *self.built_list.borrow_mut() = Some(BuiltList {
                 stamp,
                 first,
                 total: order.len(),
@@ -2417,18 +2489,40 @@ impl<B> UiModel<B> {
                 rows,
             });
         }
-        let shown = !self.viewing.apart || self.focus != Pane::Conversations;
-        match shown && self.conversations.get(self.selected).is_some() {
-            true => {
-                let (from, to) = self.chat_window(self.selected);
-                let stamp = self.chat_stamp(self.selected, from, to);
-                if self.built_chat.as_ref().map(|b| b.stamp) != Some(stamp) {
-                    let chat = scene::chat_in(self, self.selected, from, to);
-                    self.built_chat = Some(BuiltChat { stamp, chat });
-                }
-            }
-            false => self.built_chat = None,
+        let built = self.built_list.borrow();
+        let built = built.as_ref()?;
+        Some(scene::List {
+            id: scene::NodeId::List,
+            rows: built.rows.clone(),
+            first: built.first,
+            total: built.total,
+            top: built.top,
+            empty: strings::Text::key(strings::StrId::NoConversations),
+            a11y: scene::A11y::of(
+                scene::NodeId::List,
+                scene::Role::List,
+                strings::Text::key(strings::StrId::TabChats),
+            ),
+        })
+    }
+
+    /// Conversation `c`'s chat window as the fold left it (1490, 1591),
+    /// as [`UiModel::built_list`] keeps the list's.
+    pub(crate) fn built_chat(&self, c: usize) -> Option<scene::Chat> {
+        if self.folding {
+            return None;
         }
+        let (from, to) = self.chat_window(c);
+        let stamp = self.chat_stamp(c, from, to);
+        let current = self.built_chat.borrow().as_ref().map(|b| b.stamp) == Some(stamp);
+        if !current {
+            if self.scene_owed.chat != Some((c, stamp)) {
+                return None;
+            }
+            let chat = scene::chat_in(self, c, from, to);
+            *self.built_chat.borrow_mut() = Some(BuiltChat { stamp, chat });
+        }
+        self.built_chat.borrow().as_ref().map(|b| b.chat.clone())
     }
 
     /// The conversations the list shows, in no order: [`UiModel::order`]

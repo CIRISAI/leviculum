@@ -358,7 +358,13 @@ impl<B> UiModel<B> {
         // fold later.
         let mut touched: alloc::collections::BTreeSet<[u8; 16]> =
             core::mem::take(&mut self.listing_owed);
-        let mut changed = core::mem::take(&mut self.owed_changed);
+        let mut changed = alloc::collections::BTreeSet::new();
+        for owed in core::mem::take(&mut self.owed_changed) {
+            match changed.is_empty() {
+                true => changed = owed,
+                false => changed.extend(owed),
+            }
+        }
         changed.extend(core::mem::take(&mut self.changed));
         for (peer, key) in changed {
             let found = self
@@ -450,9 +456,14 @@ impl<B> UiModel<B> {
     /// boot).
     pub fn take_touched(&mut self) -> Touched {
         let mut peers = core::mem::take(&mut self.listing_owed);
-        let mut changed = core::mem::take(&mut self.owed_changed);
-        changed.append(&mut self.changed);
-        peers.extend(changed.into_iter().map(|(peer, _)| peer));
+        for owed in core::mem::take(&mut self.owed_changed) {
+            peers.extend(owed.into_iter().map(|(peer, _)| peer));
+        }
+        peers.extend(
+            core::mem::take(&mut self.changed)
+                .into_iter()
+                .map(|(peer, _)| peer),
+        );
         peers.append(&mut self.owed_peers);
         peers.append(&mut self.changed_peers);
         self.fixes_received.clear();
@@ -953,7 +964,9 @@ impl<B> UiModel<B> {
             self.press = None;
         }
         self.changed.remove(&(peer, key));
-        self.owed_changed.remove(&(peer, key));
+        for owed in &mut self.owed_changed {
+            owed.remove(&(peer, key));
+        }
         Some(id)
     }
 
@@ -999,7 +1012,9 @@ impl<B> UiModel<B> {
             other => other,
         };
         self.changed.retain(|(p, _)| *p != peer);
-        self.owed_changed.retain(|(p, _)| *p != peer);
+        for owed in &mut self.owed_changed {
+            owed.retain(|(p, _)| *p != peer);
+        }
         self.changed_peers.remove(&peer);
         self.owed_peers.remove(&peer);
         self.positions.remove(&peer);

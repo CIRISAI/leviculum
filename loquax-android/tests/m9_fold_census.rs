@@ -10,7 +10,10 @@
 //! by bytes allocated: the board's allocator is the share the host's is
 //! not (alloc_ms1 80 to 429 ms per 5 s in window 16b). Then the same
 //! page folded a budget at a time (`home::Folding`), to show what a
-//! split costs: each chunk is a batch of its own, noted and routed once.
+//! split costs: each chunk is a batch of its own, noted and routed once,
+//! and since 1591 that costs a few allocator calls a chunk more than the
+//! whole page's note and route (the note builds no scene; the frame's
+//! read does), not the list's window again per chunk.
 //!
 //! One test in its own binary: the allocator counts the whole process.
 //! It lives here because a counting allocator is `unsafe` code, which
@@ -173,8 +176,14 @@ fn chunked(
             n += 1;
             n >= chunk
         });
+        // As the board routes a chunk (1591): its rows only after the
+        // page's last.
         let t0 = clock();
-        std::hint::black_box(home::route(model, out.effects, &mut || [7; 16]));
+        let routed = match out.done.is_some() {
+            true => home::route(model, out.effects, &mut || [7; 16]),
+            false => home::route_held(model, out.effects, &mut || [7; 16]),
+        };
+        std::hint::black_box(routed);
         route += clock() - t0;
         chunks += 1;
     }
@@ -185,7 +194,7 @@ fn chunked(
 #[test]
 fn a_pulled_pages_fold_split_by_phase() {
     let archive = Archive::new();
-    let all = archive.entries(1, 4000 + 6 * 234 + 1);
+    let all = archive.entries(1, 4000 + 8 * 234 + 1);
     let mut model = home::model(archive.address);
     for page in all[..3766].chunks(234) {
         home::take(&mut model, page, &archive.address);
@@ -246,14 +255,30 @@ fn a_pulled_pages_fold_split_by_phase() {
     let (chunks, finish, route) = chunked(&mut model, page, archive.address, 20, &calls);
     println!("FOLD chunked entries=234 chunk=20 chunks={chunks} alloc_calls finish={finish} route={route}");
     assert_eq!(chunks, 12, "234 entries in chunks of 20");
-    // The split's price, by the allocator's calls: every chunk notes
-    // and routes the list again, so twelve chunks cost several times the
-    // whole page's note and route (measured 2026-11-08: 5067 against
-    // 520). Why the budget is a time a turn, not a few entries.
+    // The split's price, by the allocator's calls (1591): the note
+    // builds no scene since 1591 (the frame's read does), keeps its
+    // bumped list between notes and its poked peers in the fold's own
+    // sets, and a chunk that is not the page's last routes no rows
+    // (`home::route_held`). What is left per chunk is a few calls: the
+    // chunk's change set handed to the owed list and freed at the drain.
+    // Measured 2026-11-09: 112 calls in twelve chunks against 70 whole,
+    // 1.6x; before 1591, 5067 against 520 (9.7x), what window 18's
+    // board paid as `finish` 9.2 of 16.3 ms per entry.
     assert!(
-        finish + route > 4 * fixed(calls_234),
-        "chunks of 20: finish+route {} against {} whole",
+        finish + route <= 2 * fixed(calls_234),
+        "chunks of 20: finish+route {} against {} whole, over 2x",
         finish + route,
         fixed(calls_234)
+    );
+
+    // And by time, against a whole page's (1591): the note's walk over
+    // the conversations is per chunk, the rest per entry.
+    let page = next();
+    let whole = phases(&mut model, &page, &archive.address, &micros);
+    let page = next();
+    let (_, finish_us, route_us) = chunked(&mut model, page, archive.address, 20, &micros);
+    println!(
+        "FOLD chunked entries=234 chunk=20 us finish={finish_us} route={route_us} whole finish={} route={}",
+        whole[2], whole[3]
     );
 }

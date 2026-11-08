@@ -1096,42 +1096,17 @@ impl<B> UiModel<B> {
         .in_class(class)
     }
 
-    /// The list the fold built for the viewport (1490), reused while its
-    /// stamp is current; a model changed outside `update` builds whole,
-    /// as before.
+    /// The list the fold left for the viewport (1490), built by the
+    /// first read after the fold and reused while its stamp is current
+    /// (1591); a model changed outside `update` builds whole, as before.
     fn assembled_list(&self) -> List {
-        if !self.folding {
-            if let Some(built) = &self.built_list {
-                let order = self.order();
-                let (first, len, top) = self.list_window(&order);
-                if built.stamp == self.list_stamp(&order, first, len, top) {
-                    return List {
-                        id: NodeId::List,
-                        rows: built.rows.clone(),
-                        first: built.first,
-                        total: built.total,
-                        top: built.top,
-                        empty: Text::key(StrId::NoConversations),
-                        a11y: A11y::of(NodeId::List, Role::List, Text::key(StrId::TabChats)),
-                    };
-                }
-            }
-        }
-        list(self)
+        self.built_list().unwrap_or_else(|| list(self))
     }
 
-    /// The open chat the fold built for the viewport (1490), reused
-    /// while its stamp is current; built whole otherwise.
+    /// The open chat the fold left for the viewport, as the list's;
+    /// built whole otherwise.
     fn assembled_chat(&self, c: usize) -> Chat {
-        if !self.folding {
-            if let Some(built) = &self.built_chat {
-                let (from, to) = self.chat_window(c);
-                if built.stamp == self.chat_stamp(c, from, to) {
-                    return built.chat.clone();
-                }
-            }
-        }
-        chat(self, c)
+        self.built_chat(c).unwrap_or_else(|| chat(self, c))
     }
 
     /// `scene` with its nodes counted as built (1489), before a class

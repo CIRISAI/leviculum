@@ -1167,6 +1167,31 @@ pub fn route(
     effects: Vec<UiEffect>,
     ids: &mut impl FnMut() -> [u8; 16],
 ) -> Routed {
+    route_rows(model, effects, ids, true)
+}
+
+/// [`route`] for a chunk of a pulled page that is not its last
+/// ([`Folding::fold`], 1591): the rows the chunk changed stay owed in the
+/// model ([`UiModel::take_touched`]) for the route after the page's last
+/// chunk, which builds each once. The summary log is written once a
+/// page anyway ([`Folding::rows_due`]); before 1591 every chunk built
+/// the rows of the conversations it touched, and the next chunk's
+/// replaced them (`m9_fold_census`: 431 allocator calls in twelve chunks
+/// of one page against 65 for the page whole).
+pub fn route_held(
+    model: &mut UiModel<Field>,
+    effects: Vec<UiEffect>,
+    ids: &mut impl FnMut() -> [u8; 16],
+) -> Routed {
+    route_rows(model, effects, ids, false)
+}
+
+fn route_rows(
+    model: &mut UiModel<Field>,
+    effects: Vec<UiEffect>,
+    ids: &mut impl FnMut() -> [u8; 16],
+    rows: bool,
+) -> Routed {
     let mut out = Routed::default();
     // The home never had the bench's arrivals (1562): their marks are
     // kept on the board and never asked of it.
@@ -1190,13 +1215,15 @@ pub fn route(
     // changed, each as its row, for the summary log; the messages
     // themselves are in the ring already, entry by entry, so none is
     // copied to say which rows changed (1521b, `take_touched`).
-    let touched = model.take_touched();
-    out.gone = touched.gone;
-    out.rows = touched
-        .peers
-        .iter()
-        .filter_map(|peer| model.row(peer))
-        .collect();
+    if rows {
+        let touched = model.take_touched();
+        out.gone = touched.gone;
+        out.rows = touched
+            .peers
+            .iter()
+            .filter_map(|peer| model.row(peer))
+            .collect();
+    }
     if !model.take_petnames().is_empty() {
         out.unrouted.push("petnames");
     }

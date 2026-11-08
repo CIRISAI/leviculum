@@ -706,7 +706,14 @@ impl Board {
     }
 
     /// `route_out`: what a fold left, routed, its asks into `wants`.
-    fn route_out(&mut self, effects: Vec<loquax::ui::UiEffect>, wants: &mut Wants) -> bool {
+    /// `held`: a pulled page's chunk that is not its last, whose rows
+    /// stay owed to the route after the last (1591, `home::route_held`).
+    fn route_out(
+        &mut self,
+        effects: Vec<loquax::ui::UiEffect>,
+        wants: &mut Wants,
+        held: bool,
+    ) -> bool {
         // The ids as the board draws them: its boot's seed hashed with a
         // counter, one per verb the route asks.
         let seed = self.seed;
@@ -715,7 +722,10 @@ impl Board {
             counter += 1;
             id_of(&seed, counter)
         };
-        let routed = home::route(&mut self.model, effects, &mut take);
+        let routed = match held {
+            true => home::route_held(&mut self.model, effects, &mut take),
+            false => home::route(&mut self.model, effects, &mut take),
+        };
         self.counter = counter;
         for line in routed.notices {
             self.log.line("[UI] ", &format!("notice=\"{line}\""));
@@ -749,12 +759,12 @@ impl Board {
         let asked = std::mem::take(&mut self.asked);
         if !asked.is_empty() {
             busy = true;
-            dirty |= self.route_out(asked, &mut wants);
+            dirty |= self.route_out(asked, &mut wants, false);
         }
         // The model's clocks once a second (1541), as the board's loop
         // tells them. A turn that only told the time is not busy.
         let (ticked, first_day) = self.reader.tick(&mut self.model, uptime_ms());
-        dirty |= self.route_out(ticked, &mut wants) || first_day;
+        dirty |= self.route_out(ticked, &mut wants, false) || first_day;
         // The drain as `ui_main`'s (1575): what the I/O side handed over,
         // in order; a pulled page folded until the budget is spent or a
         // press waits, its rest the next turn's, and the turn that folds
@@ -776,7 +786,7 @@ impl Board {
                         Self::release_presses(scheduled, presses, kb);
                         budgeted && presses.waiting()
                     });
-                if self.route_out(chunk.effects, &mut wants) {
+                if self.route_out(chunk.effects, &mut wants, chunk.done.is_none()) {
                     dirty = true;
                 }
                 if chunk.done.is_some() {
@@ -808,7 +818,7 @@ impl Board {
                 } => {
                     self.reader.saw(&entries, uptime_ms());
                     let effects = home::page_in(&mut self.model, peer, &entries, earlier, &address);
-                    self.route_out(effects, &mut wants);
+                    self.route_out(effects, &mut wants, false);
                     dirty = true;
                 }
                 ToUi::Fault(fault) => {
@@ -878,7 +888,7 @@ impl Board {
                     self.chrome.nudge(uptime_ms());
                 }
                 let effects = group::press(&mut self.model, &mut self.row, &event);
-                if self.route_out(effects, &mut wants) {
+                if self.route_out(effects, &mut wants, false) {
                     self.renderer.panel().forget_flushed();
                     dirty = true;
                 }
