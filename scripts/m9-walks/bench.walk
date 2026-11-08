@@ -5,9 +5,10 @@
 # (walk.md lists them in order); the expects are what a script can hold
 # without one.
 #
-# The board is a device of a home with its chats restored, the list's top
-# entry the long chat (the bench M9's own home, Lew's). Two boots before
-# this file starts: the second is a resumed restore under 2 s.
+# The board is a device of a home with its chats restored, one of the
+# list's first eight rows a chat longer than one screen (the bench M9's own
+# home, Lew's). Two boots before this file starts: the second is a resumed
+# restore under 2 s.
 
 # The list.
 wait page=chats
@@ -15,9 +16,12 @@ expect cursor=0
 dump 01-list
 idle 10
 
-# Open the long chat: the newest message under the cursor.
-key enter
+# Open the long chat: each of the first eight rows opened and left, then
+# the one with the most lines above its screen (1542: window 11a opened
+# row 0, four bubbles, and the held scrolls below tested nothing).
+open longest 8
 wait page=chat
+expect top>0
 dump 02-chat
 
 # Scroll three pages back, a held ring up each (an answer every 200 ms).

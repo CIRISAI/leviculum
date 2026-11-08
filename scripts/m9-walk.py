@@ -46,6 +46,12 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
                               (modulo the rows there are), unread, and its
                               chat is selected; waits for
                               `[BENCH] arrive=folded`
+    open longest [<rows>]     open each of the list's first rows (8) in
+                              turn, back out, and open the one whose
+                              [PAGE] top is largest: the chat with the
+                              most lines above its screen, whatever the
+                              list's order (1542); fails when none has
+                              more than one screen (every top 0)
     allow key_ms <ms>         the key bar for the rest of the walk, when
                               the walk asks another question than the
                               latency (hang.walk: Enter on a long chat
@@ -54,9 +60,11 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
 The walk's verdict is held to the bars of order 1533: key to frame under
 100 ms (a KEY line's board time to the next `[DISP] flush` line's t=),
 a resumed restore under 2 s on every boot after the first, no `[LOOP]`
-turn over 250 ms, no `[PREV_RUN]` line that carries a record (a watchdog
+turn over 250 ms (a dump step's own turn, core 0 writing the dump's lines,
+is exempt and named `dump_ms=` in walk.md instead), no `[PREV_RUN]` line that carries a record (a watchdog
 or a panic; a power-on reset says `record=none`), rx_lost not growing in
-an idle step, and every expect and wait met. Output, in --out:
+an idle step, a `[BENCH] inject=on` line on every boot (whatever else
+the boot says), and every expect and wait met. Output, in --out:
 
     board.log   every board line the walk saw, host time first
     walk.md     one line per step: page, cursor, top, latency, dump path,
@@ -87,13 +95,14 @@ TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE = 0x1B, 0x1C
 OWE_FLAGS = {None: 0x00, "erase-log": 0x01, "erase-ring": 0x02, "erase": 0x03}
 # The steps that do something; `expect ... changed` and `expect log` look
 # back to the last of them.
-ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep", "bench")
+ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep", "bench", "open")
 KEY_MS_BAR = 100
 RESTORE_MS_BAR = 2000
 LOOP_MS_BAR = 250
 KEY_WAIT_S = 2.0
 READY_WAIT_S = 90.0
 DUMP_WAIT_S = 20.0
+DUMP_LOOP_WAIT_S = 1.0
 BENCH_WAIT_S = 5.0
 # The [OPEN] line's fields (1540), in its order.
 OPEN_FIELDS = ("wait_ms", "page_read_ms", "decode_ms", "fold_ms", "scene_ms", "draw_ms", "flush_ms")
@@ -107,7 +116,8 @@ NAMES = {
 }
 
 
-VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure", "bench", "allow")
+VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure", "bench", "allow", "open")
+OPEN_ROWS = 8
 
 
 def parse(steps):
@@ -136,6 +146,9 @@ def parse(steps):
             if verb == "allow":
                 if args[0] != "key_ms" or int(args[1]) <= 0:
                     raise ValueError("allow key_ms <ms>")
+            if verb == "open":
+                if args[:1] != ["longest"] or len(args) > 2 or (len(args) == 2 and not 0 < int(args[1]) <= 64):
+                    raise ValueError("open longest [<rows>], rows 1 to 64")
         except (IndexError, ValueError) as e:
             raise ValueError(f"line {number}: `{line}`: {e}") from None
         out.append((line, verb, args))
@@ -318,6 +331,10 @@ class Walk:
         self.loop_max = 0
         self.key_bar = KEY_MS_BAR
         self.opens = []
+        # A dump step's own [LOOP] turn (1542): exempt from the bar while
+        # `dumping`, its turn_ms kept here for walk.md.
+        self.dumping = False
+        self.dump_turn = None
 
     # ----- the line -----
 
@@ -341,7 +358,13 @@ class Walk:
         if line.startswith("[PAGE] "):
             self.page = {k: v for k, v in fields(line).items() if k != "t"}
         elif line.startswith("[LOOP] "):
-            ms = int(fields(line).get("turn_ms", 0))
+            f = fields(line)
+            ms = int(f.get("turn_ms", 0))
+            if self.dumping and self.dump_turn is None and f.get("stage") == "take":
+                # The dump's turn: core 0 wrote its lines (4.4 to 5 s in
+                # window 11a), a cost of the bench's dump, not of the UI.
+                self.dump_turn = ms
+                return
             self.loop_max = max(self.loop_max, ms)
             if ms > LOOP_MS_BAR:
                 self.fail(f"[LOOP] turn_ms={ms} over {LOOP_MS_BAR}: {line}")
@@ -399,14 +422,15 @@ class Walk:
         self.rig.reset()
         self.page = {}
         self.boots += 1
-        up, at = self.until(lambda l: l.startswith("[WATCHDOG] "), READY_WAIT_S, start)
-        page = None
-        if up:
-            page, _ = self.until(lambda l: l.startswith("[PAGE] "), READY_WAIT_S, start)
+        # The UI up: a [PAGE] line, with or without the [WATCHDOG] line
+        # before it (an image older than 1534 says none).
+        page, _ = self.until(lambda l: l.startswith("[PAGE] "), READY_WAIT_S, start)
         if not page:
             self.fail(f"boot {self.boots} ({why}): no UI within {READY_WAIT_S:.0f} s")
-        bench = any(l.startswith("[BENCH] inject=on") for l in self.step_lines[start:at])
-        if up and not bench:
+        # On every boot, whatever else it said (1542): the bench image
+        # says it before its loop arms, so it is read by now.
+        bench = any(l.startswith("[BENCH] inject=on") for l in self.step_lines[start:])
+        if not bench:
             self.fail(f"boot {self.boots}: no [BENCH] inject=on line, not the bench image")
         restore = [r for r in self.restores if r[0] == self.boots]
         said = "restore=none"
@@ -439,6 +463,19 @@ class Walk:
         return f"key_ms={ms}"
 
     def dump(self, name):
+        self.dumping, self.dump_turn = True, None
+        try:
+            said = self.dump_lines(name)
+            # The dump's [LOOP] line ends the turn that wrote it.
+            if self.dump_turn is None:
+                self.until(lambda l: self.dump_turn is not None, DUMP_LOOP_WAIT_S, len(self.step_lines))
+        finally:
+            self.dumping = False
+        if self.dump_turn is not None:
+            said += f" dump_ms={self.dump_turn}"
+        return said
+
+    def dump_lines(self, name):
         start = self.mark()
         self.rig.send(dump_frame())
         end, _ = self.until(lambda l: l.startswith("PBE "), DUMP_WAIT_S, start)
@@ -473,6 +510,67 @@ class Walk:
             return line
         f = fields(line)
         return f"{done.split()[1]} " + " ".join(f"{k}={f[k]}" for k in ("flags", "peer", "unread") if k in f)
+
+    def wait_page(self, name, ms):
+        """Until the last [PAGE] line names `name`, for up to `ms`."""
+        self.pump(0.0)
+        if self.page.get("name") == name:
+            return True
+        got, _ = self.until(lambda l: l.startswith("[PAGE] ") and fields(l).get("name") == name,
+                            ms / 1000, len(self.step_lines))
+        return got is not None or self.page.get("name") == name
+
+    def cursor_to(self, row):
+        """The list's cursor to `row` by ring presses; False at the
+        list's end (a press that moved nothing) or off the list."""
+        for _ in range(2 * OPEN_ROWS * 8):
+            if self.page.get("name") != "chats":
+                return False
+            cursor = int(self.page.get("cursor", -1))
+            if cursor == row:
+                return True
+            self.key(NAMES["ring_down"] if cursor < row else NAMES["ring_up"])
+            if int(self.page.get("cursor", -1)) == cursor:
+                return False
+        return False
+
+    def open_longest(self, rows):
+        """Open the list's first `rows` chats in turn and the one whose
+        [PAGE] top is largest last: the held scrolls after it test
+        scrolling, not the list's order (1542)."""
+        if not self.wait_page("chats", 5000):
+            self.fail(f"open longest: not on the list ({self.page.get('name')})")
+            return "not on the list"
+        tops = {}
+        for row in range(rows):
+            if not self.cursor_to(row):
+                break
+            self.key(NAMES["enter"])
+            if not self.wait_page("chat", 5000):
+                self.fail(f"open longest: row {row} did not open")
+                return f"row {row} did not open"
+            self.pump(0.3)
+            tops[row] = int(self.page.get("top", 0))
+            self.key(NAMES["back"])
+            if not self.wait_page("chats", 5000):
+                self.fail(f"open longest: no way back to the list from row {row}")
+                return f"no way back from row {row}"
+        if not tops:
+            self.fail("open longest: the list has no row to open")
+            return "no rows"
+        pick = max(tops, key=lambda r: (tops[r], -r))
+        said = "tops " + " ".join(f"{r}:{t}" for r, t in sorted(tops.items()))
+        if tops[pick] == 0:
+            self.fail(f"open longest: no chat of {len(tops)} has more than one screen ({said})")
+            return said
+        if not self.cursor_to(pick):
+            self.fail(f"open longest: the cursor did not reach row {pick} again")
+            return said
+        self.page_before = dict(self.page)
+        self.key(NAMES["enter"])
+        if not self.wait_page("chat", 5000):
+            self.fail(f"open longest: row {pick} did not open the second time")
+        return f"opened row {pick} top={self.page.get('top')}; {said}"
 
     def expect(self, words):
         if words[0] == "log":
@@ -548,6 +646,8 @@ class Walk:
             elif verb == "allow":
                 self.key_bar = int(args[1])
                 extra = f"key bar {self.key_bar} ms from here"
+            elif verb == "open":
+                extra = self.open_longest(int(args[1]) if len(args) == 2 else OPEN_ROWS)
             else:
                 raise ValueError(f"no step {verb!r}")
             self.row(line, extra)
@@ -599,12 +699,19 @@ class FakeBoard(threading.Thread):
     raw.bin as the M9 would. `slow_ms` delays every flush, `refuse_owe`
     refuses the bench's owe as a board without a store does, `hang_on`
     is the open after which the board hangs and its watchdog restarts it
-    (1540: what hang.walk exists to catch)."""
+    (1540: what hang.walk exists to catch). 1542: `release` boots without
+    the bench's and the watchdog's lines, `slow_turn` says a 400 ms
+    [LOOP] turn after every key, `tops` is each chat's top when opened
+    (the list has as many rows), and every dump ends with its 4400 ms
+    [LOOP] turn as the board's does."""
 
-    def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None):
+    def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
+                 release=False, slow_turn=False, tops=(0, 5, 2)):
         super().__init__(daemon=True)
         self.rig, self.slow_ms, self.grow_rx = rig, slow_ms, grow_rx
         self.refuse_owe, self.hang_on = refuse_owe, hang_on
+        self.release, self.slow_turn, self.tops = release, slow_turn, tops
+        self.row = 0
         self.page = "chats"
         self.opens = 0
         self.t0 = time.monotonic()
@@ -622,7 +729,8 @@ class FakeBoard(threading.Thread):
                 f.write(line.encode() + b"\r\n")
 
     def page_line(self):
-        self.say(f"[PAGE] name={self.page} cursor={self.cursor} top={max(0, self.cursor - 4)} t={self.ms()}")
+        top = self.tops[self.row] if self.page == "chat" else max(0, self.cursor - 4)
+        self.say(f"[PAGE] name={self.page} cursor={self.cursor} top={top} t={self.ms()}")
 
     def run(self):
         tx, rst = os.path.join(self.rig, "tx.hex"), os.path.join(self.rig, "reset")
@@ -632,9 +740,12 @@ class FakeBoard(threading.Thread):
                 self.boots += 1
                 self.cursor = 0
                 self.page = "chats"
-                self.say("[PREV_RUN] reason=power record=none t=1", "[BENCH] inject=on t=2",
-                         f"[STORE] sectors=896 used=3 entries=40 restore={'whole' if self.boots == 1 else 'resumed'} restore_ms=640 t=900",
-                         "[WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow t=950")
+                restore = "whole" if self.boots == 1 else "resumed"
+                self.say("[PREV_RUN] reason=power record=none t=1",
+                         f"[STORE] sectors=896 used=3 entries=40 restore={restore} restore_ms=640 t=900")
+                if not self.release:
+                    self.say("[BENCH] inject=on t=2",
+                             "[WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow t=950")
                 self.page_line()
             if os.path.exists(tx) and os.path.getsize(tx) > 0:
                 with open(tx, "r+") as f:
@@ -663,16 +774,21 @@ class FakeBoard(threading.Thread):
             at = self.ms()
             code = payload[0]
             self.say(f"KBRAW {at} {code:02x}", f"KEY {at} code={code:#04x} name=x")
-            if code == 0xB6:
-                self.cursor += 1
+            if code == 0xB6 and self.page == "chats":
+                self.cursor = min(self.cursor + 1, len(self.tops) - 1)
+            elif code == 0xB5 and self.page == "chats":
+                self.cursor = max(self.cursor - 1, 0)
             if code == 0x0D and self.page == "chats":
                 self.page = "chat"
+                self.row = self.cursor
                 self.opens += 1
             elif code == 0x86:
                 self.page = "chats"
             time.sleep(self.slow_ms / 1000)
             self.say(f"[DISP] flush rows=0..239 ms=4.000 t={self.ms() + 20}")
             self.page_line()
+            if self.slow_turn:
+                self.say("[LOOP] turn_ms=400 stage=draw host=0 node=0 take=0 draw=400 keys=0 entries=40")
             if code == 0x0D and self.page == "chat":
                 if self.opens == self.hang_on:
                     # Silent, then the watchdog's reset and its record.
@@ -700,7 +816,8 @@ class FakeBoard(threading.Thread):
             for v in px:
                 for b in (v & 0xFF, v >> 8):
                     h32 = ((h32 ^ b) * 0x01000193) & 0xFFFFFFFF
-            self.say(f"PBM {w} {h}", "PBR 0 0 f800 07e0 001f ffff", "PBR 1 0 0000*2 1234*2", f"PBE {h32:08x}")
+            self.say(f"PBM {w} {h}", "PBR 0 0 f800 07e0 001f ffff", "PBR 1 0 0000*2 1234*2", f"PBE {h32:08x}",
+                     "[LOOP] turn_ms=4400 stage=take host=0 node=0 take=4400 draw=0 keys=0 entries=40")
 
 
 SELFTEST_WALK = """
@@ -715,6 +832,16 @@ reboot
 expect cursor=0
 idle 0.4
 measure
+"""
+
+# 1542: the longest chat opened whatever its row, then a dump of it.
+SELFTEST_OPEN_WALK = """
+open longest
+expect page=chat
+expect top=5
+dump chat
+key back
+wait page=chats
 """
 
 # The bench steps' selftest walk (1540): hang.walk's block, twice.
@@ -786,6 +913,32 @@ def selftest():
         if got == 0 or not any("reason=wdt0" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a hang on an open passed the [PREV_RUN] bar", w.fails)
             rc = 1
+        # 1542 (a): a board without the bench's and the watchdog's lines
+        # (a release image) fails by name on every boot.
+        got, w, _ = walk("release", release=True)
+        if got == 0 or sum("no [BENCH] inject=on line" in f for f in w.fails) != 3:
+            print("[m9-walk] selftest FAIL: a release boot passed or was not named on every boot", w.fails)
+            rc = 1
+        # 1542 (b): the dump's own 4400 ms turn is named, not failed (the
+        # good walk above passed with it); any other slow turn fails.
+        with open(os.path.join(base, "good", "out", "walk.md")) as f:
+            if "dump_ms=4400" not in f.read():
+                print("[m9-walk] selftest FAIL: walk.md does not name the dump's turn")
+                rc = 1
+        got, w, _ = walk("slowturn", slow_turn=True)
+        if got == 0 or not any("[LOOP] turn_ms=400 over" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a 400 ms turn outside a dump passed the 250 ms bar")
+            rc = 1
+        # 1542 (c): the longest chat is opened whatever its row; a list
+        # of one-screen chats fails by name.
+        got, w, out = walk("longest", steps=SELFTEST_OPEN_WALK)
+        if got != 0 or len(w.opens) != 4:
+            print("[m9-walk] selftest FAIL: open longest did not open row 1 after the three", w.fails, len(w.opens))
+            rc = 1
+        got, w, _ = walk("short", steps=SELFTEST_OPEN_WALK, tops=(0, 0, 0))
+        if got == 0 or not any("more than one screen" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a list of one-screen chats passed open longest", w.fails)
+            rc = 1
     for name in ("bench.walk", "hang.walk"):
         shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "m9-walks", name)
         try:
@@ -794,7 +947,8 @@ def selftest():
         except (OSError, ValueError) as e:
             print(f"[m9-walk] selftest FAIL: the shipped {name} does not read: {e}")
             rc = 1
-    for bad in (["bench owe now"], ["bench arrive 256"], ["bench nap"], ["allow key_ms -1"]):
+    for bad in (["bench owe now"], ["bench arrive 256"], ["bench nap"], ["allow key_ms -1"],
+                ["open shortest"], ["open longest 0"]):
         try:
             parse(bad)
             print(f"[m9-walk] selftest FAIL: `{bad[0]}` was read")
@@ -821,7 +975,9 @@ def selftest():
         rc = 1
     if rc == 0:
         print("[m9-walk] selftest ok: a good walk passes and writes its dump, a slow frame and a growing rx_lost fail; "
-              "the bench steps pass and count opens, a refused owe and a hang on an open fail")
+              "the bench steps pass and count opens, a refused owe and a hang on an open fail; "
+              "a release boot fails by name, the dump's turn is named and another slow turn fails, "
+              "open longest picks the longest chat and fails on a list of one-screen chats")
     return rc
 
 
