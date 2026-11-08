@@ -7,7 +7,9 @@
 //!    fails crisply after the router's stock attempts.
 //! 2. On direct failure, the same packed message goes to the propagation
 //!    node, and direct delivery is tried again on every announce of the
-//!    recipient and every [`Policy::retry_secs`], for [`Policy::horizon_secs`].
+//!    recipient and every [`Policy::retry_secs`], doubled for each direct
+//!    leg in a row that went unproven up to [`MAX_RETRY_DOUBLINGS`] times,
+//!    for [`Policy::horizon_secs`].
 //! 3. DELIVERED when a direct proof arrives, even after the propagation node
 //!    took a copy: the recipient keeps one message per hash
 //!    (`reference/LXMF/LXMF/LXMRouter.py:1906-1908`), so the copy it later
@@ -33,8 +35,22 @@ use alloc::vec::Vec;
 /// besides on every announce of the recipient: an hour. The announce is the
 /// retry that matters, since it says the recipient is there; the cadence
 /// covers an announce the home node did not hear, at a cost of one link
-/// attempt an hour, 168 over the seven days.
+/// attempt an hour at first; the gap doubles for a recipient that keeps
+/// not answering ([`MAX_RETRY_DOUBLINGS`]).
 pub const DEFAULT_RETRY_SECS: u64 = 3600;
+/// How often the slow cadence doubles for a recipient that keeps not
+/// answering: three times, so the gap grows 1 h, 2 h, 4 h and stays at
+/// 8 h (order 1585).
+///
+/// The hourly cadence tried every waiting message direct 24 times a day
+/// whoever answered: on miauhaus 22 messages for peers that were away made
+/// 521 `direct unanswered` lines a day, each a link attempt, a path request
+/// and a log line. With the doubling a message waiting the whole seven
+/// days goes direct about 24 times instead of 168. The recipient's own
+/// announce still tries it at once, so a recipient that comes back is
+/// reached as soon as before.
+pub const MAX_RETRY_DOUBLINGS: u32 = 3;
+
 /// How many days a message is retried direct: seven, as Lew decided on
 /// 2026-10-29.
 pub const DEFAULT_DAYS: u64 = 7;
@@ -243,6 +259,9 @@ struct Item {
     /// the key, offers the node the copy.
     key_wanted: bool,
     next_direct_at: i64,
+    /// Direct legs in a row that ended without a proof: each doubles the
+    /// slow cadence, up to [`MAX_RETRY_DOUBLINGS`].
+    misses: u32,
 }
 
 impl Item {
@@ -301,12 +320,23 @@ impl Outgoing {
             propagation_owed: false,
             key_wanted: false,
             next_direct_at: i64::MIN,
+            misses: 0,
         });
     }
 
     /// The packed message, while it is retried.
     pub fn packed(&self, id: &[u8; 32]) -> Option<&[u8]> {
         self.item(id).map(|item| item.packed.as_slice())
+    }
+
+    /// Direct legs of `id` in a row that went unproven.
+    pub fn misses(&self, id: &[u8; 32]) -> u32 {
+        self.item(id).map_or(0, |item| item.misses)
+    }
+
+    /// The recipient of `id`, while it is retried.
+    pub fn destination(&self, id: &[u8; 32]) -> Option<[u8; 16]> {
+        self.item(id).map(|item| item.destination)
     }
 
     /// Whether a propagation node took a copy of `id`.
@@ -386,6 +416,7 @@ impl Outgoing {
             {
                 item.in_flight = None;
                 item.propagation_owed |= !item.propagated;
+                item.misses = item.misses.saturating_add(1);
                 acts.push(Act::Unanswered {
                     id: item.id,
                     offer: !item.propagated,
@@ -399,6 +430,9 @@ impl Outgoing {
                 }
                 item.in_flight = None;
                 item.propagation_owed |= leg == Leg::Direct && !item.propagated;
+                if leg == Leg::Direct {
+                    item.misses = item.misses.saturating_add(1);
+                }
                 acts.push(Act::GiveUp { id: item.id, leg });
                 acts.push(Act::Record {
                     id: item.id,
@@ -422,7 +456,7 @@ impl Outgoing {
                 item.propagation_owed = false;
                 acts.push(item.start(Leg::Propagated, now));
             } else if now >= item.next_direct_at {
-                item.next_direct_at = now.saturating_add(retry);
+                item.next_direct_at = now.saturating_add(backoff(retry, item.misses));
                 acts.push(item.start(Leg::Direct, now));
             }
             true
@@ -468,7 +502,7 @@ impl Outgoing {
             {
                 continue;
             }
-            item.next_direct_at = now.saturating_add(retry);
+            item.next_direct_at = now.saturating_add(backoff(retry, item.misses));
             acts.push(item.start(Leg::Direct, now));
         }
         acts
@@ -494,8 +528,14 @@ impl Outgoing {
             }
             // A direct leg without a proof failed, whatever the router
             // called its last state: only a proof says the peer has it.
-            (Leg::Direct, _) if !item.propagated => alloc::vec![item.start(Leg::Propagated, now)],
-            (Leg::Direct, _) => Vec::new(),
+            (Leg::Direct, _) if !item.propagated => {
+                item.misses = item.misses.saturating_add(1);
+                alloc::vec![item.start(Leg::Propagated, now)]
+            }
+            (Leg::Direct, _) => {
+                item.misses = item.misses.saturating_add(1);
+                Vec::new()
+            }
             (Leg::Propagated, Outcome::Sent | Outcome::Delivered) => {
                 item.propagated = true;
                 alloc::vec![Act::Record {
@@ -511,6 +551,69 @@ impl Outgoing {
                 Vec::new()
             }
         }
+    }
+}
+
+/// The slow cadence after `misses` direct legs in a row without a proof:
+/// `retry` doubled once a miss, at most [`MAX_RETRY_DOUBLINGS`] times.
+pub fn backoff(retry: i64, misses: u32) -> i64 {
+    retry.saturating_mul(1 << misses.min(MAX_RETRY_DOUBLINGS))
+}
+
+/// How often a peer's outbox line may be said: once an hour (order 1585).
+pub const PEER_LINE_EVERY_SECS: i64 = 3600;
+
+/// Peers whose line was said lately, at most this many: an older one
+/// makes room, and the worst it costs is one line too many.
+pub const PEER_LINES_CAP: usize = 1024;
+
+/// The outbox's lines about a recipient that does not answer, said once a
+/// peer an hour and not once an attempt (order 1585): the field mailbox
+/// said `direct unanswered` 521 times a day for a few peers that were away.
+/// The line that is said counts the ones held back since.
+#[derive(Default)]
+pub struct PeerLines {
+    said: alloc::collections::BTreeMap<[u8; 16], (i64, u32)>,
+}
+
+impl PeerLines {
+    /// May a line about `peer` be said at `now`? `Some(held)` with the
+    /// lines held back since the last one, `None` while it is quiet.
+    pub fn admit(&mut self, peer: [u8; 16], now: i64) -> Option<u32> {
+        if let Some((at, held)) = self.said.get_mut(&peer) {
+            if now.saturating_sub(*at) < PEER_LINE_EVERY_SECS {
+                *held = held.saturating_add(1);
+                return None;
+            }
+            let before = *held;
+            *at = now;
+            *held = 0;
+            return Some(before);
+        }
+        if self.said.len() >= PEER_LINES_CAP {
+            self.said
+                .retain(|_, (at, _)| now.saturating_sub(*at) < PEER_LINE_EVERY_SECS);
+            if self.said.len() >= PEER_LINES_CAP {
+                if let Some(oldest) = self
+                    .said
+                    .iter()
+                    .min_by_key(|(_, (at, _))| *at)
+                    .map(|(peer, _)| *peer)
+                {
+                    self.said.remove(&oldest);
+                }
+            }
+        }
+        self.said.insert(peer, (now, 0));
+        Some(0)
+    }
+
+    /// Peers held and their estimated heap bytes, for the census.
+    pub fn census(&self) -> (usize, usize) {
+        (
+            self.said.len(),
+            leviculum_core::heap_census::btree_map_bytes(&self.said),
+        )
     }
 }
 
@@ -538,6 +641,65 @@ mod tests {
 
     fn unanswered(offer: bool) -> Act {
         Act::Unanswered { id: ID, offer }
+    }
+
+    /// Order 1585: a recipient that never answers is tried direct at a
+    /// doubling gap, 1 h, 2 h, 4 h, then every 8 h; its announce still
+    /// tries at once.
+    #[test]
+    fn the_slow_cadence_doubles_for_a_recipient_that_never_answers() {
+        let mut outgoing = outbox();
+        let mut starts = Vec::new();
+        let mut now = 1000;
+        while now < 1000 + 2 * DAY {
+            for act in outgoing.tick(now) {
+                match act {
+                    Act::Send {
+                        leg: Leg::Direct, ..
+                    } => starts.push(now),
+                    // The propagated copy goes and is taken.
+                    Act::Send {
+                        leg: Leg::Propagated,
+                        ..
+                    } => {
+                        outgoing.left(&ID, Outcome::Sent, now);
+                    }
+                    _ => {}
+                }
+            }
+            now += 1;
+        }
+        let gaps: Vec<i64> = starts.windows(2).map(|w| w[1] - w[0]).collect();
+        assert_eq!(&gaps[..4], [3600, 7200, 14400, 28800], "{gaps:?}");
+        assert!(gaps[4..].iter().all(|gap| *gap == 28800), "{gaps:?}");
+        // Nine in two days (0, 1, 3, 7, 15, 23, 31, 39, 47 h); about 24
+        // over the seven days, where the hour made 168.
+        assert_eq!(starts.len(), 9, "{starts:?}");
+        // The recipient's announce tries at once, whatever the gap.
+        assert_eq!(
+            outgoing.announced(PEER, Heard::Announce, now),
+            [send(Leg::Direct)]
+        );
+    }
+
+    #[test]
+    fn a_peers_line_is_said_once_an_hour_with_the_count_held_back() {
+        let mut lines = PeerLines::default();
+        assert_eq!(lines.admit(PEER, 0), Some(0));
+        for t in 1..10 {
+            assert_eq!(lines.admit(PEER, t * 60), None);
+        }
+        // Another peer is its own.
+        assert_eq!(lines.admit([3; 16], 100), Some(0));
+        assert_eq!(lines.admit(PEER, 3600), Some(9));
+        assert_eq!(lines.admit(PEER, 3601), None);
+        // Held to its cap.
+        for n in 0..PEER_LINES_CAP as u32 + 5 {
+            let mut peer = [0; 16];
+            peer[..4].copy_from_slice(&n.to_be_bytes());
+            lines.admit(peer, 4000);
+        }
+        assert!(lines.census().0 <= PEER_LINES_CAP);
     }
 
     #[test]
@@ -577,9 +739,10 @@ mod tests {
         );
         // A second failure does not propagate again: the node has a copy.
         assert!(outgoing.left(&ID, Outcome::Failed, 0).is_empty());
-        // The cadence counts from the last direct attempt.
-        assert!(outgoing.tick(1200 + 3599).is_empty());
-        assert_eq!(outgoing.tick(1200 + 3600), [send(Leg::Direct)]);
+        // The cadence counts from the last direct attempt, doubled for the
+        // one miss before it (1585).
+        assert!(outgoing.tick(1200 + 7199).is_empty());
+        assert_eq!(outgoing.tick(1200 + 7200), [send(Leg::Direct)]);
         assert_eq!(
             outgoing.left(&ID, Outcome::Delivered, 0),
             [record(Change::Delivered)]
@@ -895,9 +1058,10 @@ mod tests {
         assert!(outgoing
             .announced(PEER, Heard::PathResponse, 1300)
             .is_empty());
-        // And the hour, counted from the announce's leg.
-        assert!(outgoing.tick(1200 + 3599).is_empty());
-        assert_eq!(outgoing.tick(1200 + 3600), [send(Leg::Direct)]);
+        // And the cadence, counted from the announce's leg, doubled for
+        // the one miss before it (1585).
+        assert!(outgoing.tick(1200 + 7199).is_empty());
+        assert_eq!(outgoing.tick(1200 + 7200), [send(Leg::Direct)]);
     }
 
     /// 1406, the field mailbox: a message the node took long ago, its

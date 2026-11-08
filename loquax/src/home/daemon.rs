@@ -471,6 +471,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         newest: 0,
         nodes: std::collections::HashMap::new(),
         proven: Vec::new(),
+        lines: Default::default(),
     };
     let mut groups = Vec::new();
     for hosted in group::hosted(&home, &store)? {
@@ -1914,6 +1915,8 @@ struct Sender {
     /// The originals a copy's first proof was booked for, by group, whose
     /// writer's status the group's pump sends when due (1307 pass four).
     proven: Vec<([u8; 16], [u8; 32])>,
+    /// The `direct unanswered` lines, once a peer an hour (order 1585).
+    lines: super::outgoing::PeerLines,
 }
 
 impl Sender {
@@ -1925,7 +1928,8 @@ impl Sender {
             self.told.len(),
             hash_table_bytes(self.told.capacity(), 32)
                 + hash_table_bytes(self.nodes.capacity(), 48)
-                + self.proven.capacity() * 48,
+                + self.proven.capacity() * 48
+                + self.lines.census().1,
         )
     }
 
@@ -1949,17 +1953,24 @@ impl Sender {
                 Leg::Propagated => self.nodes.remove(id),
                 Leg::Direct => None,
             };
-            tracing::info!(
-                "{}",
-                left_line(
-                    leg,
-                    outcome,
-                    outgoing.unanswered(id).then_some(!outgoing.propagated(id)),
-                    id,
-                    node,
-                    reason
-                )
-            );
+            let unanswered = outgoing.unanswered(id).then_some(!outgoing.propagated(id));
+            // A recipient that does not answer is said at a message's first
+            // miss, and its retries once a peer an hour, not once an
+            // attempt (1585); every other end is said as it comes.
+            let held = match (leg, outcome, unanswered) {
+                (Leg::Direct, Outcome::Failed, Some(_)) if outgoing.misses(id) > 0 => {
+                    let peer = outgoing.destination(id).unwrap_or([0; 16]);
+                    self.lines.admit(peer, unix_now())
+                }
+                _ => Some(0),
+            };
+            if let Some(held) = held {
+                tracing::info!(
+                    "{}{}",
+                    left_line(leg, outcome, unanswered, id, node, reason),
+                    held_back(held)
+                );
+            }
         }
         let acts = outgoing.left(id, outcome, unix_now());
         self.carry_out(engine, store, outgoing, acts, selected_pn, held_pn);
@@ -1984,7 +1995,16 @@ impl Sender {
             match act {
                 Act::Record { id, change } => self.record(store, &id, change),
                 Act::Unanswered { id, offer } => {
-                    tracing::info!("{}", unanswered_line(&id, offer));
+                    // A message's first miss is said; its retries once a
+                    // peer an hour (1585).
+                    let peer = outgoing.destination(&id).unwrap_or([0; 16]);
+                    let held = match outgoing.misses(&id) {
+                        0 | 1 => Some(0),
+                        _ => self.lines.admit(peer, unix_now()),
+                    };
+                    if let Some(held) = held {
+                        tracing::info!("{}{}", unanswered_line(&id, offer), held_back(held));
+                    }
                     // As a stall's call-off: the router's end comes back as
                     // a Left the outbox ignores.
                     let _ = engine.submit(Command::Cancel { message_id: id });
@@ -2148,6 +2168,15 @@ fn unanswered_line(id: &[u8; 32], offer: bool) -> String {
         super::outgoing::ANSWER_SECS,
         unanswered_next(offer)
     )
+}
+
+/// The tail of a peer's line that was held back (1585): how many like it
+/// went unsaid since the last one.
+fn held_back(held: u32) -> String {
+    match held {
+        0 => String::new(),
+        n => format!(" ({n} more for this peer in the last hour not logged)"),
+    }
 }
 
 /// What follows an unanswered direct leg, as its lines say it.
@@ -2821,6 +2850,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         pump_group(&mut store, &mut sender, &mut engine, None);
         let commands = engine.engine.commands.take();
@@ -2940,6 +2970,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -3067,6 +3098,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -3187,6 +3219,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -3303,6 +3336,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         let sends = |commands: Vec<Command>| -> Vec<Vec<u8>> {
             let mut out: Vec<Vec<u8>> = commands
@@ -3488,6 +3522,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         let unpack = |packed: &[u8]| {
             leviculum_lxmf::Message::unpack(
@@ -3650,6 +3685,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         let mut engine = GroupEngine {
             hosted: hosted.clone(),
