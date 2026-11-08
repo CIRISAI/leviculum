@@ -172,6 +172,12 @@ pub mod alloc_clock {
     pub fn cycles() -> u32 {
         SPENT[core()].load(Ordering::Relaxed)
     }
+
+    /// The cycles `core` (0 or 1) spent in the allocator so far: for
+    /// the `[IDLE]` window's deltas (1569), read from either core.
+    pub fn cycles_of(core: usize) -> u32 {
+        SPENT[core.min(1)].load(Ordering::Relaxed)
+    }
 }
 
 /// The largest block the allocator hands out now, found by halving

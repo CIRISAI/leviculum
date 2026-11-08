@@ -111,7 +111,7 @@
 //!                           the line took (1507), tx_drop_kind the same
 //!                           by what they were (1553); dump stays 0, a
 //!                           dump's line is never dropped for another
-//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> t=<ms>
+//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> park_ms=<n> park_max_ms=<n> park_ops=<n> t=<ms>  (1569; the bench image adds alloc_ms0=<n> alloc_ms1=<n>, each core's time inside the allocator)
 //!                           every five seconds (1507, `leviculum_esp::idle`):
 //!                           the share of the window each core waited for
 //!                           its next interrupt (WAITI) instead of spinning;
@@ -163,6 +163,7 @@
 //! [KB] answer=mixed t=<ms>  after one whose bytes disagree
 //! [KB] queue_lost=<n> read_failed=<n>   when either count moved (1463)
 //! [LOOP] turn_ms=<n> stage=<host|node|take|draw|keys> host=.. node=.. take=.. draw=.. keys=.. entries=<n>
+//! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n>  (1569, the UI core's slow turn: msgs the queue held, entries folded)
 //!                           a turn of the loop longer than 100 ms (1463)
 //! ```
 //!
@@ -1638,6 +1639,15 @@ fn main() -> ! {
     // Where the `[IDLE]` line's window began (1507).
     let mut idle_since = uptime_ms();
     let _ = leviculum_esp::idle::waited_us();
+    // The flash ops' park account as of the last window (1569).
+    let mut park_since = leviculum_esp::flash::park::so_far();
+    // Each core's allocator cycles as of the last window (1569): the
+    // starve's instrument, in the bench image whose clock it is.
+    #[cfg(m9_bench)]
+    let mut alloc_since = [
+        leviculum_esp::alloc_clock::cycles_of(0),
+        leviculum_esp::alloc_clock::cycles_of(1),
+    ];
     // The bench's keys (1533), only in an image built for it.
     #[cfg(m9_bench)]
     let mut inject = loquax_m9::kbraw::Inject::new();
@@ -1680,13 +1690,57 @@ fn main() -> ! {
             let [io, ui] = leviculum_esp::idle::waited_us();
             let window_us = (now.saturating_sub(idle_since) * 1000).max(1);
             idle_since = now;
+            // The flash ops' cost to the UI core this window (1569):
+            // parked time, ops, and the longest single park.
+            let park_now = leviculum_esp::flash::park::so_far();
+            let park_us = park_now.0.wrapping_sub(park_since.0);
+            let park_ops = park_now.1.wrapping_sub(park_since.1);
+            park_since = park_now;
+            let park_max = leviculum_esp::flash::park::take_max_us();
+            // Each core's time inside the allocator this window (1569),
+            // the starve's instrument: cycles at 240 MHz, as
+            // milliseconds of the window.
+            #[cfg(m9_bench)]
+            let alloc_ms = {
+                let now = [
+                    leviculum_esp::alloc_clock::cycles_of(0),
+                    leviculum_esp::alloc_clock::cycles_of(1),
+                ];
+                let ms = [
+                    now[0].wrapping_sub(alloc_since[0]) / 240_000,
+                    now[1].wrapping_sub(alloc_since[1]) / 240_000,
+                ];
+                alloc_since = now;
+                ms
+            };
+            #[cfg(m9_bench)]
             log.line(
                 "[IDLE] ",
                 format_args!(
-                    "io_pct={} ui_pct={} window_ms={}",
+                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops} alloc_ms0={} alloc_ms1={}",
                     u64::from(io) * 100 / window_us,
                     u64::from(ui) * 100 / window_us,
-                    window_us / 1000
+                    window_us / 1000,
+                    park_us / 1000,
+                    park_us % 1000,
+                    park_max / 1000,
+                    park_max % 1000,
+                    alloc_ms[0],
+                    alloc_ms[1]
+                ),
+            );
+            #[cfg(not(m9_bench))]
+            log.line(
+                "[IDLE] ",
+                format_args!(
+                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops}",
+                    u64::from(io) * 100 / window_us,
+                    u64::from(ui) * 100 / window_us,
+                    window_us / 1000,
+                    park_us / 1000,
+                    park_us % 1000,
+                    park_max / 1000,
+                    park_max % 1000
                 ),
             );
         }
@@ -2275,10 +2329,20 @@ fn ui_main(
 
     // From here the UI core's loop feeds its own watchdog (1534).
     let wdt = Watchdog::arm(wdt);
+    // This core's own `[LOOP] core=ui` line (1569): what a slow turn
+    // spent in the drain against the keys, the sends and the draw, and
+    // how much the I/O core's queue held — the window 16a watchdog
+    // fired with this core in `drain` and nothing said what drain did.
+    let mut ui_turns: u32 = 0;
     loop {
         wdt.feed();
         stall::turned(Core::Ui);
+        ui_turns = ui_turns.wrapping_add(1);
+        let t_turn = leviculum_esp::uptime_us();
         stall::stage(Core::Ui, Stage::Drain);
+        // The queue's depth this turn: messages taken, entries in them.
+        let mut turn_msgs: u32 = 0;
+        let mut turn_entries: u32 = 0;
         let mut dirty = false;
         let mut wants = Wants::default();
         let route_out = |model: &mut UiModel<Field>,
@@ -2323,6 +2387,12 @@ fn ui_main(
 
         // What the I/O core brought.
         for message in ui_drain() {
+            turn_msgs += 1;
+            match &message {
+                ToUi::Entries(entries, _) => turn_entries += entries.len() as u32,
+                ToUi::Page { entries, .. } => turn_entries += entries.len() as u32,
+                _ => {}
+            }
             match message {
                 ToUi::Model(taken) => {
                     model = taken;
@@ -2461,6 +2531,7 @@ fn ui_main(
         // The keys the timer read, oldest first (1463): every press,
         // however long the turn that held it was; all of them before the
         // one draw.
+        let t_keys = leviculum_esp::uptime_us();
         stall::stage(Core::Ui, Stage::Keys);
         let (presses, _, _) = kb_drain();
         for press in presses {
@@ -2520,6 +2591,7 @@ fn ui_main(
             }
         }
 
+        let t_send = leviculum_esp::uptime_us();
         stall::stage(Core::Ui, Stage::Send);
         if !wants.verbs.is_empty() || !wants.marks.is_empty() {
             log.send(FromUi::Asks {
@@ -2542,6 +2614,7 @@ fn ui_main(
             log.send(FromUi::Load(peer));
         }
 
+        let t_draw = leviculum_esp::uptime_us();
         stall::stage(Core::Ui, Stage::Draw);
         // A house tap's gap, the switch's word (1532).
         let did = shown.overview.tick(leviculum_esp::uptime_ms() as u32);
@@ -2606,6 +2679,33 @@ fn ui_main(
         }
         #[cfg(not(m9_bench))]
         let _ = landed;
+        // A slow turn of this core says where it went (1569), as core
+        // 0's `[LOOP]` line does: the drain's microseconds and the
+        // queue's depth are the window 16a starve's instrument.
+        let t_end = leviculum_esp::uptime_us();
+        if t_end.saturating_sub(t_turn) > SLOW_TURN_MS * 1000 {
+            let spent = [
+                ("drain", t_keys.saturating_sub(t_turn)),
+                ("keys", t_send.saturating_sub(t_keys)),
+                ("send", t_draw.saturating_sub(t_send)),
+                ("draw", t_end.saturating_sub(t_draw)),
+            ];
+            let slowest = spent
+                .iter()
+                .max_by_key(|(_, us)| *us)
+                .map_or("none", |(name, _)| name);
+            log.line(
+                "[LOOP] ",
+                alloc::format!(
+                    "core=ui turn_ms={} stage={slowest} drain={} keys={} send={} draw={} msgs={turn_msgs} folded={turn_entries} turn={ui_turns}",
+                    t_end.saturating_sub(t_turn) / 1000,
+                    spent[0].1 / 1000,
+                    spent[1].1 / 1000,
+                    spent[2].1 / 1000,
+                    spent[3].1 / 1000
+                ),
+            );
+        }
         // Nothing to do until the next frame or a key (1507): no flush on
         // its way, no fold's effects owed, no draw that may go now. The
         // TE edge or the tick wakes the core; a key waits at most until

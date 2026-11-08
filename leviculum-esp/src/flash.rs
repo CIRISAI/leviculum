@@ -50,7 +50,48 @@ use crate::stall::{self, Core, Lock};
 /// and holds the next one off ([`crate::mspi`]): the bus that DMA reads is
 /// the one the op takes.
 fn parked<R>(f: impl FnOnce() -> R) -> R {
-    crate::mspi::flash(|| stall::locked(Core::Io, Lock::Flash, || critical_section::with(|_| f())))
+    crate::mspi::flash(|| {
+        stall::locked(Core::Io, Lock::Flash, || {
+            let t0 = crate::uptime_us();
+            let r = critical_section::with(|_| f());
+            park::note(crate::uptime_us().saturating_sub(t0));
+            r
+        })
+    })
+}
+
+/// What the flash ops cost the UI core (1569): each op holds the
+/// cross-core critical section and parks the other core (AutoPark), so
+/// the time inside [`parked`]'s section is the longest the UI core can
+/// have been held per op. Cumulative counters; a reader takes deltas
+/// (`[IDLE]` prints them per window), and the longest single park is
+/// taken, not read, so each window says its own.
+pub mod park {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static TOTAL_US: AtomicU32 = AtomicU32::new(0);
+    static OPS: AtomicU32 = AtomicU32::new(0);
+    static MAX_US: AtomicU32 = AtomicU32::new(0);
+
+    pub(super) fn note(us: u64) {
+        let us = u32::try_from(us).unwrap_or(u32::MAX);
+        TOTAL_US.fetch_add(us, Ordering::Relaxed);
+        OPS.fetch_add(1, Ordering::Relaxed);
+        MAX_US.fetch_max(us, Ordering::Relaxed);
+    }
+
+    /// Microseconds inside flash ops and the ops, since boot, wrapping.
+    pub fn so_far() -> (u32, u32) {
+        (
+            TOTAL_US.load(Ordering::Relaxed),
+            OPS.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The longest single op since the last call.
+    pub fn take_max_us() -> u32 {
+        MAX_US.swap(0, Ordering::Relaxed)
+    }
 }
 
 /// The partition the node's identity lives in.
