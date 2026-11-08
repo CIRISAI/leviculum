@@ -253,20 +253,30 @@ media it may start is the `[auto]` section, four yes/no keys, read by
 ```ini
 [auto]
   lan = yes          # an AutoInterface when the file names none
-  servers = no       # the shipped server list (not built yet)
+  servers = yes      # the shipped server list
   bluetooth = no     # BLE when an adapter is present (not built yet)
-  serial = no        # LNodes and RNodes on USB (not built yet)
+  serial = yes       # LNodes by their USB strings, RNodes after a probe
 ```
 
 - **A file without `[auto]` starts nothing automatic.** Every key is
   `no`, so a file means exactly what it says.
-- **No file at all** runs the shipped defaults: `lan = yes`, the others
-  `no` until their steps land. `lnsd --writeconfig` writes those
+- **No file at all** runs the shipped defaults: `lan`, `servers` and
+  `serial` `yes`, `bluetooth` `no` until its step lands. `lnsd --writeconfig` writes those
   defaults as an `[auto]` section after rnsd's first-start file.
 - **`lan = yes`** adds the AutoInterface of rnsd's first-start file,
   `[[Default Interface]]` in the default group, when the configuration
   names no AutoInterface section (enabled or not). A file that names one
   keeps exactly its own.
+- **`serial = yes`** reads `/dev/serial/by-id` (or
+  `LEVICULUM_AUTO_SERIAL_DIR`) at start and every 5 s after. An LNode,
+  named by our firmware's USB strings, becomes a `SerialInterface` without
+  a byte written to it first; an RNode candidate on a CP210x, CH9102 or
+  Espressif USB bridge is listened to for one second, and only a silent
+  one is sent one detect request; one that answers becomes an
+  `RNodeInterface`. Both run the shipped LoRa settings (869463000 Hz,
+  125 kHz, SF8, CR5) as `[[Auto Serial <n>]]`. Bootloaders, ports another
+  process holds and every other device are left alone, and every entry
+  gets one `AUTO_SERIAL` line saying why.
 - A value that is not a boolean refuses the file, as in `[reticulum]`; an
   unknown key is warned about and ignored.
 

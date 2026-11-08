@@ -339,8 +339,8 @@ Then, and only then, one `CMD_DETECT` with `DETECT_REQ`; a device that
 answers `DETECT_RESP` is an RNode. lnsd already speaks this handshake
 (`detect_on_port`, `leviculum-std/src/interfaces/rnode.rs:1923`; the same
 frame is its serial heartbeat, `leviculum-std/src/interfaces/rnode.rs:3076-3078`).
-A refused device is remembered and not asked again; hotplug is read from
-inotify on the by-id directory. The directory is
+A refused device is remembered and not asked again; hotplug is a rescan
+of the by-id directory every 5 s (built so, see step 5 below). The directory is
 `LEVICULUM_AUTO_SERIAL_DIR`, default `/dev/serial/by-id`, so a cell can
 hand lnsd ptys.
 
@@ -362,6 +362,88 @@ to its home ends in `NoPath` (1439, measured on the bench).
 All found boards are attached. Two RNodes on one frequency in one room
 hear the same frames and contend on transmit; that is documented, not
 refused.
+
+## Step 5, as built
+
+The medium is `leviculum-std/src/auto_serial.rs`; lnsd calls it after
+the server list, before the node is built.
+
+- **The ids.** Each by-id entry is sorted by its USB ids, read from sysfs
+  (the tty's device, up to the USB device's `idVendor` and `idProduct`).
+  A link that leads to no USB device, a cell's pty, is sorted by the
+  strings udev built its name from instead:
+
+  | ids | or, without ids, the name | is | lnsd |
+  |---|---|---|---|
+  | a `bootloader_usb` id of `lnflash/catalogue.toml` (`239a:0071`, `239a:0029`, `2886:0057`) | contains `bootloader` | a board in its bootloader | leaves it, unopened |
+  | a `candidate_usb` id of the catalogue under `1209` (`1209:0001` to `1209:0004`), with the name `usb-leviculum_[leviculum_]<Board>_<Serial>-ifNN` | the name alone | an LNode | `if02`: attaches it, no byte written first; `if00`, the debug log: leaves it |
+  | `10c4:ea60` (CP210x, Heltec V3) | `Silicon_Labs_CP210` | an RNode candidate | listens, then probes |
+  | `1a86:55d4` (CH9102, the T-Beams) | `1a86_USB_Single_Serial` | an RNode candidate | listens, then probes |
+  | `303a:1001` (ESP32-S3 USB, Heltec V4) | `Espressif_USB_JTAG_serial_debug_unit` | an RNode candidate | listens, then probes |
+  | anything else, `1a86:7522` (the M9's CH340K) and stock firmware's `239a:8029` among them | | a stranger | leaves it, unopened |
+
+  The catalogue is read from lnflash's file, compiled in, so a new board
+  is one entry for both tools. Our strings on an id that is not ours are
+  no LNode. The name fragments are the rig's by-id names as measured
+  2026-11-08; "Heltec", "LilyGO" and "RAK" in the plan above appear in no
+  by-id name the rig's RNodes carry, so they are not in the table.
+- **Held ports.** Before anything is opened, `/proc/*/fd` is searched for
+  another process with the same device open; one is a skip with a line
+  naming it, and the entry is asked again on the next scan. A candidate is
+  opened under `TIOCEXCL`, so a holder this process cannot see in `/proc`
+  shows as `EBUSY`, the same skip; `TIOCNXCL` before the close leaves the
+  port to the interface. `EACCES` is a warning naming the dialout group.
+- **The probe.** A candidate is put raw at 115200 Bd, its input flushed,
+  and listened to for one second (`SILENCE`). One byte is "talking": the
+  candidate is refused, and listened to again on the next two scans
+  (`TALKING_LISTENS`, a board through its boot prints once, a GPS never
+  stops) before it stays refused. A silent one is sent `c0 08 73 c0`, the
+  four bytes of `CMD_DETECT` with `DETECT_REQ` and nothing else, and has
+  500 ms to answer `DETECT_RESP`; one that does not is not asked again.
+  Several candidates are listened to in parallel, so a start waits one
+  silence, not one per board.
+- **The sections.** A board becomes `[[Auto Serial <n>]]`, origin
+  `default`, its port the by-id link: an LNode a `SerialInterface` with
+  `interface_mode = gateway`, an RNode an `RNodeInterface`, both on
+  869463000 Hz, 125 kHz, SF8, CR5, the transmit power the builder's
+  default (the board's maximum under the lawful limit). A port a section
+  of the file names is left to that section (`reason=configured`), and a
+  section name the file uses is skipped.
+- **Hotplug.** A board present at start is a section before the node is
+  built, so its `IFACE_CONFIG` line says `origin=default`. After the start
+  the directory is read again every 5 s (`RESCAN`), and a new board is
+  handed to the running node (`Reticulum::spawn_interface`). A board that
+  leaves and comes back under the same link is found by its interface's
+  own reconnect loop; an entry whose link disappeared is forgotten, so a
+  device plugged in again is asked again. A rescan, not inotify: it needs
+  nothing beyond the directory, which a cell can be handed.
+- **The line**, catalogued, once per entry and again when its verdict
+  changes: `AUTO_SERIAL board=<Board|none> port=<by-id name>
+  kind=lnode|rnode|bootloader|other reason=name|detect|debug_port|bootloader|not_candidate|held|talking|no_answer|configured|no_access|open_failed|not_built
+  attached=yes|no section=<name|none>`. A candidate that did not answer is
+  `kind=other`.
+- **The switch.** `AutoMedia::SHIPPED.serial` is `yes`, and the
+  first-start file says so; `[auto] serial = no` turns it off with any
+  other content of the file, and a file without `[auto]` asks for
+  nothing, as for every medium. A build without the `serial` feature
+  names the boards and attaches none (`reason=not_built`), and off Linux
+  the medium says once that it does not scan.
+
+The cells, in netns on 2026-11-08 (docker owed: the land gate held the
+docker lock):
+
+- `serial_probe_writes_nothing_to_strangers`: `strangers=0 quiet=0
+  talker=0 rnode_probe=seen lnode_attached=0 rnode_attached=1 rnode=30`
+  (asserted up to `rnode=`, which counts the interface's own opening after
+  the attach); the control arm `... rnode_attached=0 rnode=13`.
+- `zero_config_serial_lnode`: `attached=1 verdict=lnode:name
+  interface=yes up=yes phy=869463000/125000/8/5 debug_bytes=0` (asserted).
+- `zero_config_serial_held`: `written=0 attached=0 held=2` (asserted).
+
+The cells' fixtures close their pty slaves once the link is made, so the
+only holder of a device is the one a cell means; a subject whose cell
+names no directory reads an empty one, so a netns cell on the rig host
+never reaches its boards.
 
 ## BLE
 
@@ -445,7 +527,7 @@ line today and gaining its `expect` when its step lands. Their lines on
 | 3 (built) | the server list, choice persisted and logged, pinnable, fail-over, autoconnect ceiling | `zero_config_server_list` | before: `shared_instance=no connected=none discovered=0 failover=n/a`; since 1510: `config=default chosen=absent.invalid:4242,entry:4242 why=pinned failover=absent.invalid:4242tobackbone:4242 up=2`, after a restart `config=file ... why=persisted` (asserted) |
 | (built) | lnsd writes its first-start file (open question 1) | `zero_config_first_start_file` | `file=yes equals_writeconfig=yes rnstatus_wrote=none config_unchanged=yes control_wrote=yes` (asserted) |
 | 4 (built) | "find the instance or start one" in `leviculum-std`, then lnomad and the other tools | `zero_config_tool_starts_the_daemon`; `zero_config_tool_finds_the_daemon` | before: `instance=none daemon_parent=none ... tool_exit=1`; `instance=none`; since step 4: `before=none instance=started via=unix daemon_parent=tool daemon_after_tool=gone socket_after_tool=closed config_written=yes daemon_log=yes`; `instance=found via=unix lnsd_on_dir=1 tool_children=0 subject_after_tool=alive` (asserted) |
-| 5 | serial: LNodes by string, RNodes by silence plus `CMD_DETECT`, `TIOCEXCL`, bootloader ids, hotplug | `serial_probe_writes_nothing_to_strangers` | `strangers=0 quiet=0 talker=0 rnode=0 rnode_probe=absent` (`strangers=0` asserted) |
+| 5 (built) | serial: LNodes by string, RNodes by silence plus `CMD_DETECT`, `TIOCEXCL`, bootloader ids, hotplug | `serial_probe_writes_nothing_to_strangers`; `zero_config_serial_lnode`; `zero_config_serial_held` | before: `strangers=0 quiet=0 talker=0 rnode=0 rnode_probe=absent`; since 1555: `strangers=0 quiet=0 talker=0 rnode_probe=seen lnode_attached=0 rnode_attached=1`; `attached=1 verdict=lnode:name interface=yes up=yes phy=869463000/125000/8/5 debug_bytes=0`; `written=0 attached=0 held=2` (asserted) |
 | 6 | BLE on when an adapter is present, the lab guard measured | `ble_room_auto_start` | `arm=no_config shared_instance=no interfaces=0 ble=absent`; `arm=auto_bluetooth_no ... ble=absent` (asserted) |
 | (built) | the Debian package ships no stock configuration | `just verify-deb` | `ships no /etc/reticulum/config` |
 | | the first server entry's monitoring, privacy statement and consent | none, an operating duty | |
@@ -503,6 +585,10 @@ daemon a controller without a configured BLE interface.
 - 2026-10-23, Lew: BLE on by default in the shipped builds; the lab is
   protected by configuration and a host marker, not by a test build.
 - 2026-10-23, Lew: further server operators only with their consent.
+- 2026-10-23, Lew: serial boards are part of zero-config; the lab guard
+  (a configuration present means only the configuration) stays. Built as
+  step 5 (1555): `[auto] serial = yes` is a shipped default; RNode
+  candidates by the rig's measured bridge ids, hotplug by a 5 s rescan.
 - 2026-11-07, the reviewer (open question 1): lnsd writes its own
   configuration on first start, the way rnsd does (`Reticulum.py:336`),
   the exact bytes `lnsd --writeconfig` prints, `[auto]` fully populated at
