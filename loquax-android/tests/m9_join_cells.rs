@@ -560,13 +560,19 @@ fn pull_after_short(board: &mut Board, code: &HomeCode) -> (Ran, Option<(LinkCla
     assert_eq!(joined, Some(Ok(Outcome::Joined)));
     record.admission = Admission::Admitted;
     record.cursor = 1;
+    // Timed on the board's own clock, from the instant the ask's deadline
+    // is anchored to: the ask times out at `now_ms >= asked_at + 120_000`
+    // (`loquax/src/home/ask.rs`), so a timed-out pull reads at least
+    // 120 000 here. A wall-clock start taken after the ask was built read
+    // 119 999 ms when the board's millisecond floor and the gap between
+    // the two clocks fell together (order 1520's workspace run).
+    let asked_at = board.now();
     let ask = record
-        .pull(m9.page_bytes, board.now(), 120_000)
+        .pull(m9.page_bytes, asked_at, 120_000)
         .expect("admitted")
         .expect("ask");
-    let start = Instant::now();
     let (ran, fit) = board.run_fitted(&device, ask, m9, Duration::from_secs(125));
-    (ran, fit, start.elapsed().as_millis())
+    (ran, fit, u128::from(board.now().saturating_sub(asked_at)))
 }
 
 /// 1459, happy: the entry after the board's cursor is longer than a link
