@@ -70,6 +70,9 @@ where
     clock: Option<fn() -> u64>,
     /// What the last map draw did; taken by the board's log.
     map_stats: Option<MapStats>,
+    /// The names the picture last drawn carries, said again when it is
+    /// copied back (1507).
+    names_kept: map::NameStats,
 }
 
 /// One size's two buffers: the last frame's cells and the next one's.
@@ -98,6 +101,8 @@ pub struct MapStats {
     pub picture_us: u64,
     pub names_us: u64,
     pub names: map::NameStats,
+    /// The picture was copied back from [`Map::kept`] (1507), not drawn.
+    pub kept: bool,
 }
 
 impl<'d, D> Renderer<'d, D>
@@ -120,6 +125,7 @@ where
             window: screen::Window::default(),
             clock: None,
             map_stats: None,
+            names_kept: map::NameStats::default(),
         };
         renderer.set_grid(Size::DEFAULT)?;
         Ok(renderer)
@@ -234,25 +240,45 @@ where
             zoom: view.zoom(),
             ..MapStats::default()
         };
-        if !bare {
-            let t0 = now();
-            map.painter
-                .picture(&map.region, &painted, panel)
-                .map_err(|_| DrawError)?;
-            let t1 = now();
-            // The names where no pin and no word is (1531).
-            let mut taken = map::pin_cells(&pins);
-            taken.extend(corner.map(map::credit_cells));
-            let rows = (painted.size().1 / u32::from(map::CELL_PX.1)) as u16;
-            let (names, found) = map::names(&map.region, &painted, rows, &taken);
-            map::draw_names(&names, &font, panel).map_err(|_| DrawError)?;
-            let t2 = now();
-            stats.picture_us = t1.saturating_sub(t0);
-            stats.names_us = t2.saturating_sub(t1);
-            stats.names = found;
+        // The names where no pin and no word is (1531).
+        let mut taken = map::pin_cells(&pins);
+        taken.extend(corner.map(map::credit_cells));
+        match (&mut map.kept, bare) {
+            (_, true) => {}
+            // The kept picture (1507): drawn when the view or the cells
+            // its names keep clear of moved, copied back every time.
+            (Some(kept), false) => {
+                if kept.holds(&painted, &taken) {
+                    stats.kept = true;
+                    stats.names = self.names_kept;
+                } else {
+                    let (found, picture_us, names_us) = kept
+                        .draw(&mut map.painter, &map.region, &painted, &taken, &font, &now)
+                        .map_err(|_| DrawError)?;
+                    stats.picture_us = picture_us;
+                    stats.names_us = names_us;
+                    stats.names = found;
+                }
+                kept.copy_to(panel).map_err(|_| DrawError)?;
+            }
+            (None, false) => {
+                let t0 = now();
+                map.painter
+                    .picture(&map.region, &painted, panel)
+                    .map_err(|_| DrawError)?;
+                let t1 = now();
+                let rows = (painted.size().1 / u32::from(map::CELL_PX.1)) as u16;
+                let (names, found) = map::names(&map.region, &painted, rows, &taken);
+                map::draw_names(&names, &font, panel).map_err(|_| DrawError)?;
+                let t2 = now();
+                stats.picture_us = t1.saturating_sub(t0);
+                stats.names_us = t2.saturating_sub(t1);
+                stats.names = found;
+            }
         }
         map::pins(&pins, look, &font, panel).map_err(|_| DrawError)?;
         map::words(bottom.as_deref(), corner, look, &font, panel).map_err(|_| DrawError)?;
+        self.names_kept = stats.names;
         self.map_stats = Some(stats);
         self.map_drawn = true;
         Ok(())

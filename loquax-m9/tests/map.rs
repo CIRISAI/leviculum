@@ -164,6 +164,48 @@ fn a_map_redraw_is_the_frame_a_fresh_draw_gives() {
     assert!(!map::shown(&model), "the walk ends off the map");
 }
 
+/// The kept picture (1507): the same walk as above with the board's
+/// cache on draws every frame a fresh, uncached draw gives, and a switch
+/// from the map to the list and back to the same view draws the picture
+/// once and copies it back. The control: a zoom draws it again.
+#[test]
+fn a_kept_map_picture_is_copied_back_after_a_page_switch() {
+    let mut model = fixture::model();
+    let mut panel = Frame::new();
+    let mut shown = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    assert_eq!(map.keep_pictures(), 153_600);
+    let mut renderer = Renderer::new(&mut panel).expect("renderer");
+    let mut row = 0;
+    let mut press = |key, model: &mut UiModel<Field>, renderer: &mut Renderer<'_, Frame>| {
+        group::press(model, &mut row, &event(key));
+        renderer
+            .show(model, &Look::of(model), &mut map)
+            .expect("draw");
+        support::flush_runs(renderer.panel(), &mut shown);
+        assert_eq!(shown.pixels(), drawn(model).pixels(), "after {key:?}");
+        let kept = map.kept.as_ref().expect("kept");
+        (kept.drawn, kept.copied, renderer.take_map_stats())
+    };
+    let (drawn_once, _, stats) = press(M9Key::Char('M'), &mut model, &mut renderer);
+    assert_eq!(drawn_once, 1, "the map opened: drawn");
+    assert!(!stats.expect("a map draw").kept);
+    // Out to the list and into the map again: no picture drawn.
+    press(M9Key::Back, &mut model, &mut renderer);
+    assert!(!map::shown(&model));
+    let (again, copied, stats) = press(M9Key::Char('M'), &mut model, &mut renderer);
+    assert!(map::shown(&model));
+    assert_eq!(again, 1, "back on the map: copied, not drawn");
+    assert_eq!(copied, 2);
+    let stats = stats.expect("a map draw");
+    assert!(stats.kept);
+    assert_eq!(stats.picture_us, 0);
+    // The control: a zoom is a new view.
+    let (zoomed, _, stats) = press(M9Key::Char('+'), &mut model, &mut renderer);
+    assert_eq!(zoomed, 2, "the zoom draws it");
+    assert!(!stats.expect("a map draw").kept);
+}
+
 /// A redraw that changes nothing flushes nothing (1455): the board
 /// redraws on every pulled entry, ended send and word of its home, and
 /// the map's picture and the cells are drawn whole each time; the panel

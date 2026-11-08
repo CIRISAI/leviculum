@@ -55,6 +55,12 @@
 //! [CENSUS] screen=<groups|invite|members|admin|ask|pick|name> ...  (1366)
 //! [CENSUS] map held=<n> budget=230000 verdict=ok t=<ms>         (1375)
 //! [CENSUS] screen=<map|pan> ... verdict=ok t=<ms>               (1375)
+//! [CENSUS] map_kept held=153600 t=<ms>   the map's picture kept between
+//!                           draws from here on (1507), after the census
+//! [MAP] zoom=<z> picture_ms=.. names_ms=.. names=<n> dropped=<n> kept=<0|1>
+//!                           every map draw (1531); kept=1 copied the kept
+//!                           picture back, a page switch or a key that moved
+//!                           no view and no pin (1507), and its ms are 0
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=...
 //! [STORE] sectors=896 used=<n> entries=<n> cursor=<seq> torn=<n> foreign=<n> asks=<n> restore=<resumed|rebuilt|whole> restore_ms=<ms>  (1476, 1521)
@@ -1047,12 +1053,13 @@ fn redraw(
         log.line(
             "[MAP] ",
             alloc::format!(
-                "zoom={} picture_ms={} names_ms={} names={} dropped={}",
+                "zoom={} picture_ms={} names_ms={} names={} dropped={} kept={}",
                 stats.zoom,
                 ms(stats.picture_us),
                 ms(stats.names_us),
                 stats.names.drawn,
-                stats.names.dropped()
+                stats.names.dropped(),
+                u8::from(stats.kept)
             ),
         );
     }
@@ -1987,6 +1994,10 @@ fn ui_main(
             }
         }
     }
+    // The map's picture kept between draws from here on (1507): after the
+    // census, whose screens are measured as drawn without it.
+    let kept = map.keep_pictures();
+    log.line("[CENSUS] ", alloc::format!("map_kept held={kept}"));
     // Core 0 may run again (1521b).
     CENSUS_RUNNING.store(false, Ordering::Release);
 

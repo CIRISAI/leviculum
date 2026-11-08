@@ -873,6 +873,9 @@ fn ui_ink(c: Rgb565) -> UiInk {
 pub struct Map<'r> {
     pub region: Region<&'r [u8]>,
     pub painter: Painter,
+    /// The picture and its names as last drawn, once the board keeps
+    /// them ([`Map::keep_pictures`], 1507); `None` draws every time.
+    pub kept: Option<Kept>,
 }
 
 impl<'r> Map<'r> {
@@ -881,12 +884,153 @@ impl<'r> Map<'r> {
         Ok(Self {
             region: Region::from_bytes(bytes).map_err(MapError::Region)?,
             painter: Painter::new(),
+            kept: None,
         })
+    }
+
+    /// Keep the picture between draws from here on (1507): a page switch
+    /// back to the map, a key that moves no pin and a word that comes or
+    /// goes copy it back instead of drawing it. Its bytes, a panel's
+    /// worth, on the heap.
+    pub fn keep_pictures(&mut self) -> usize {
+        let kept = Kept::new();
+        let bytes = kept.bytes();
+        self.kept = Some(kept);
+        bytes
     }
 
     /// The credit the region carries, which the top bar shows.
     pub fn credit(&self) -> String {
         String::from(self.region.attribution())
+    }
+}
+
+/// The cells a picture's names keep clear of: column, row, width.
+pub type Clear = Vec<(u16, u16, u16)>;
+
+/// The map's picture with its names, as last drawn (1507, move 8 of the
+/// 2026-11-07 structure review's M9 list): a panel's worth of RGB565 and
+/// what it shows, the view and the cells the names kept clear of (the
+/// pins', the corner credit's). Drawn again only when either moved: a
+/// pan, a zoom, a pin that came or went.
+pub struct Kept {
+    pixels: Vec<u16>,
+    /// The view and the clear cells of what `pixels` holds.
+    holds: Option<(Viewport, Clear)>,
+    /// The picture's size.
+    size: (u32, u32),
+    /// Pictures drawn and pictures copied back, since it was made.
+    pub drawn: u32,
+    pub copied: u32,
+}
+
+impl Default for Kept {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Kept {
+    /// Room for a picture as large as the panel, holding none.
+    pub fn new() -> Self {
+        Self {
+            pixels: vec![0; (crate::frame::WIDTH * crate::frame::HEIGHT) as usize],
+            holds: None,
+            size: (0, 0),
+            drawn: 0,
+            copied: 0,
+        }
+    }
+
+    /// The bytes it holds.
+    pub fn bytes(&self) -> usize {
+        self.pixels.len() * 2
+    }
+
+    /// Whether it holds `view` drawn clear of `taken`.
+    pub fn holds(&self, view: &Viewport, taken: &[(u16, u16, u16)]) -> bool {
+        self.holds
+            .as_ref()
+            .is_some_and(|(v, t)| v == view && t.as_slice() == taken)
+    }
+
+    /// Draw `view` of `map`'s region and its names into the kept pixels,
+    /// clear of `taken`, with `font`: what [`Renderer::show`] draws on the
+    /// panel without a cache. The label pass's count.
+    ///
+    /// [`Renderer::show`]: crate::render::Renderer::show
+    pub fn draw(
+        &mut self,
+        painter: &mut Painter,
+        region: &Region<&[u8]>,
+        view: &Viewport,
+        taken: &[(u16, u16, u16)],
+        font: &MonoFont<'_>,
+        clock: &dyn Fn() -> u64,
+    ) -> Result<(NameStats, u64, u64), MapError> {
+        self.holds = None;
+        self.size = view.size();
+        let t0 = clock();
+        painter.picture(region, view, self)?;
+        let t1 = clock();
+        let rows = (view.size().1 / u32::from(CELL_PX.1)) as u16;
+        let (names, found) = names(region, view, rows, taken);
+        draw_names(&names, font, self)?;
+        let t2 = clock();
+        self.holds = Some((*view, taken.to_vec()));
+        self.drawn = self.drawn.saturating_add(1);
+        Ok((found, t1.saturating_sub(t0), t2.saturating_sub(t1)))
+    }
+
+    /// Copy the kept picture onto `panel`, where it was drawn.
+    pub fn copy_to<D>(&mut self, panel: &mut D) -> Result<(), MapError>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let (w, h) = self.size;
+        let top = i32::from(PICTURE.y * CELL_PX.1);
+        let area = Rectangle::new(Point::new(0, top), Size::new(w, h));
+        let width = crate::frame::WIDTH as usize;
+        let colours = (0..h as usize).flat_map(|y| {
+            self.pixels[y * width..y * width + w as usize]
+                .iter()
+                .map(|&raw| Rgb565::from(embedded_graphics::pixelcolor::raw::RawU16::new(raw)))
+        });
+        panel
+            .fill_contiguous(&area, colours)
+            .map_err(|_| MapError::Draw)?;
+        self.copied = self.copied.saturating_add(1);
+        Ok(())
+    }
+}
+
+impl OriginDimensions for Kept {
+    fn size(&self) -> Size {
+        Size::new(crate::frame::WIDTH, crate::frame::HEIGHT)
+    }
+}
+
+/// The kept pixels as the panel's: the picture's rows from [`PICTURE`]'s
+/// top, so the painter and the names draw here as they draw there.
+impl DrawTarget for Kept {
+    type Color = Rgb565;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        let top = i32::from(PICTURE.y * CELL_PX.1);
+        let width = crate::frame::WIDTH as i32;
+        let height = crate::frame::HEIGHT as i32;
+        for Pixel(at, colour) in pixels {
+            let y = at.y - top;
+            if (0..width).contains(&at.x) && (0..height).contains(&y) {
+                self.pixels[(y * width + at.x) as usize] =
+                    embedded_graphics::pixelcolor::raw::RawU16::from(colour).into_inner();
+            }
+        }
+        Ok(())
     }
 }
 
