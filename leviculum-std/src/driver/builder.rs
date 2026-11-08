@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use leviculum_core::identity::Identity;
+use leviculum_core::memory_storage::TableCaps;
 use leviculum_core::node::NodeCoreBuilder;
 use leviculum_core::resource::WindowPolicy;
 use leviculum_core::ProofStrategy;
@@ -989,12 +990,17 @@ impl ReticulumNodeBuilder {
         // packet_hashlist) into its inner MemoryStorage automatically, and
         // gives every runtime table and the duplicate filter the ceiling the
         // config asked for (Codeberg #421, #464).
-        let table_caps = config.reticulum.table_caps();
-        let storage = Storage::new_with_limits(
-            &storage_path,
-            table_caps,
+        //
+        // A local client of a shared instance keeps the client profile at
+        // most (order 1585): it forwards nothing, and the instance beside
+        // it holds the network's tables and answers its path requests. The
+        // config it read is the instance's own, sized for the instance.
+        let (table_caps, packet_hash_cap) = client_table_caps(
+            self.connect_instance_name.is_some(),
+            config.reticulum.table_caps(),
             config.reticulum.packet_hash_cap(),
-        )?;
+        );
+        let storage = Storage::new_with_limits(&storage_path, table_caps, packet_hash_cap)?;
         let clock = SystemClock::new();
         // Align the LoRa airtime bucket's anchor with Transport's
         // SystemClock so `try_send_prioritized`'s `last_update_ms` and
@@ -1276,6 +1282,24 @@ fn resolve_network_identity_path(
 /// resolved as the client tools resolve it
 /// ([`crate::daemon_rpc::resolve_authkey`]), or `None` when the directory
 /// holds neither an `rpc_key` nor a readable `transport_identity`.
+/// The table ceilings and the duplicate filter's for a node: the config's,
+/// and for a local client of a shared instance at most
+/// [`TableCaps::local_client`] (order 1585).
+fn client_table_caps(
+    local_client: bool,
+    configured: TableCaps,
+    packet_hash_cap: usize,
+) -> (TableCaps, usize) {
+    if !local_client {
+        return (configured, packet_hash_cap);
+    }
+    let client = TableCaps::local_client();
+    (
+        configured.at_most(client),
+        packet_hash_cap.min(client.packet_hash_cap),
+    )
+}
+
 fn shared_instance_rpc_key(config_dir: &std::path::Path) -> Option<Vec<u8>> {
     let config_file = config_dir.join("config");
     let config = config_file
@@ -1335,6 +1359,22 @@ fn hex_full(hash: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Order 1585: a local client keeps the client profile at most, a
+    /// node of its own keeps what its config says.
+    #[test]
+    fn a_local_client_is_held_to_the_client_profile() {
+        let desktop = TableCaps::desktop();
+        assert_eq!(
+            client_table_caps(false, desktop, 100_000),
+            (desktop, 100_000)
+        );
+        let (caps, hashes) = client_table_caps(true, desktop, 100_000);
+        assert_eq!(caps, TableCaps::local_client());
+        assert_eq!(hashes, TableCaps::local_client().packet_hash_cap);
+        // A config asking for less keeps its own ceiling.
+        assert_eq!(client_table_caps(true, desktop, 5).1, 5);
+    }
 
     #[test]
     fn test_builder_default() {

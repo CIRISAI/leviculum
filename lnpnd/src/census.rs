@@ -238,21 +238,8 @@ impl PnCensus {
     }
 }
 
-/// `VmRSS` of this process in kB, 0 where `/proc/self/status` cannot say.
-pub fn rss_kb() -> u64 {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status.lines().find_map(|line| {
-                line.strip_prefix("VmRSS:")?
-                    .split_whitespace()
-                    .next()?
-                    .parse()
-                    .ok()
-            })
-        })
-        .unwrap_or(0)
-}
+/// `VmRSS` of this process in kB, shared with every daemon's census.
+pub use leviculum_std::census::rss_kb;
 
 /// Engine events sent and taken, for the `eventbuf` column.
 #[derive(Debug, Default)]
@@ -325,17 +312,8 @@ impl CensusHandle {
     }
 }
 
-/// Heap bytes of a `HashMap` or `HashSet` spine: the table's buckets and
-/// their control bytes, at its capacity.
-pub(crate) fn hash_table_bytes(capacity: usize, entry_size: usize) -> usize {
-    if capacity == 0 {
-        return 0;
-    }
-    // hashbrown allocates a power of two of buckets at 7/8 load, one
-    // control byte a bucket.
-    let buckets = (capacity * 8 / 7).next_power_of_two();
-    buckets * (entry_size + 1)
-}
+/// Heap bytes of a hash table's spine, shared with every daemon's census.
+pub(crate) use leviculum_std::census::hash_table_bytes;
 
 #[cfg(test)]
 mod tests {
