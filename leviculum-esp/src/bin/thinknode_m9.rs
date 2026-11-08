@@ -2112,6 +2112,16 @@ fn ui_main(
     let sizes = Size::ALL;
     for size in sizes {
         for walked in fixture::SCREENS {
+            // The map's two screens are the bench image's only (1556): a
+            // release boot's census drew the fixture's map and its pan
+            // before the list (window 15's boot `[MAP] zoom=15
+            // picture_ms=241 names_ms=27`, the pan's), pictures no
+            // reader's map keeps (the key is the view and the pins,
+            // 0ca53c80), and the first open of the map drew again.
+            #[cfg(not(m9_bench))]
+            if matches!(walked, Screen::Map | Screen::Pan) {
+                continue;
+            }
             let budget = walked.budget();
             let (mut walk_model, walk_row) = walked.walk();
             // The walk's model is the fixture's, no home's: nothing it
@@ -2134,6 +2144,10 @@ fn ui_main(
             }
         }
     }
+    // The census's map draw is the census's (its line carries it): its
+    // stats are no `[MAP]` line of the boot's first draw (1556; window 15
+    // read one as a map rendered before the list).
+    let _ = renderer.take_map_stats();
     // The map's picture kept between draws from here on (1507): after the
     // census, whose screens are measured as drawn without it.
     let kept = map.keep_pictures();
