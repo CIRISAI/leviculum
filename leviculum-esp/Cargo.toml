@@ -67,7 +67,13 @@ embedded-hal-async = "1"
 # `leviculum-core` is `no_std + alloc`, so linking it into a binary
 # requires a `#[global_allocator]` whether or not anything allocates yet.
 # esp-hal registers the `critical_section::Impl` the heap needs.
-embedded-alloc = { version = "0.7", default-features = false, features = ["llff"] }
+# `tlsf` (rlsf), not `llff` (1569): llff is one free list, walked on
+# every alloc and every free under the one cross-core critical section,
+# and the walk grows with the heap's churn — the M9's full pull starved
+# its UI core in exactly that walk (leviculum-heap-lab/tests/pull.rs
+# measures the same fold under both: llff grows 14x from 400 to 4000
+# entries, tlsf stays flat). Tlsf allocates and frees in constant time.
+embedded-alloc = { version = "0.7", default-features = false, features = ["tlsf"] }
 
 # The ThinkNode M9's Loquax image (order 1361): the renderer, the fixture
 # model, the keyboard decoder, the frame dump and the census, all `no_std`

@@ -52,7 +52,13 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use critical_section::Mutex;
 
-use embedded_alloc::LlffHeap as Heap;
+// Tlsf, not Llff (1569): the llff free list is walked on every alloc
+// AND every free, inside the cross-core critical section, and the walk
+// grows with the churn — the M9's pull drove core 0's host stage from
+// 170 ms to 2.5 s a turn and the UI core's drain past its 5 s watchdog
+// that way (window 16a; `leviculum-heap-lab/tests/pull.rs` shows the
+// same workload flat under tlsf and growing 14x under llff).
+use embedded_alloc::TlsfHeap as Heap;
 use esp_hal::{
     clock::CpuClock,
     peripherals::{Peripherals, USB_DEVICE},
@@ -98,8 +104,8 @@ pub const FW_BUILD_STAMP: &str = concat!(
 
 /// The allocator, counted: what is live now and the most that was since
 /// [`heap_reset_peak`]. The count is what a board's census reads
-/// (`heap-budget`-style, order 1361); two atomics per call, against a
-/// linked-list search that costs far more.
+/// (`heap-budget`-style, order 1361); two atomics per call, beside the
+/// allocator's own constant-time step (tlsf since 1569).
 struct CountedHeap {
     heap: Heap,
     live: AtomicUsize,
