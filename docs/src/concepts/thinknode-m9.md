@@ -492,6 +492,26 @@ another firmware's header.
   column/row address window gives for free. The bus is shared with the
   LR1110 and the SD card, so a long flush and a radio interrupt contend;
   what that costs is measured on the board, not assumed.
+- **Type.** Two sizes since 1532 (`loquax-m9/src/font.rs`), both from
+  the `no_std` atlases of `embedded-graphics-unicodefonts` and measured on
+  the host at the panel's 0.1524 mm a pixel. The default is the 9 x 15:
+  an x of 7 px (1.07 mm), a capital of 10 px (1.52 mm), 35 x 16 cells,
+  five blank pixels at the right. The large size is the 10 x 20 of 1428:
+  an x of 8 px (1.22 mm), a capital of 13 px (1.98 mm), 32 x 12 cells.
+  The 6 x 10 lacks the delivery ladder's tick and clock, the 7 x 13,
+  7 x 14 and 8 x 13 lack the tick, and the 6 x 12 sets the same 5 px x
+  that was too small at arm's length (Lew, 2026-11-04). The list, the
+  chat, the group screens, the pairing and the overview follow the
+  reader's size, the top bar with them, as one cell row of the same
+  grid; the map's cells, its hint line, pins and names stay on the
+  large grid, which its picture is laid on (1531). The reader switches
+  on the overview behind the house key ("Schrift: klein | groß") or by
+  holding the house key a second (house presses at most 300 ms apart,
+  which only a controller that repeats a held key sends; that is not
+  measured yet). The client record's byte 6 keeps the choice across a
+  power cycle; a board without a home has no record and starts small.
+  There is no tab bar on the M9 (the scene's `Viewing::tabs` is off):
+  the map and the house have keys of their own.
 - **Input.** The 37-key QWERTY behind the I2C controller at 0x6D (V1.1,
   "Two hardware revisions") is the whole input: no touch, no encoder.
   The INT line does not fire per key, so the firmware polls while the
