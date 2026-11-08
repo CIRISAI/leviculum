@@ -66,6 +66,10 @@ pub struct Storage {
     // Spelled out rather than `KnownDestTable`: the census test finds
     // collections by their type name.
     known_dest_entries: Arc<BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>>,
+    // How many of them memory keeps (order 1585): the identity ceiling, the
+    // newest by announce time. The file keeps them all; a flush merges
+    // those memory let go of back into it from disk.
+    known_dest_cap: usize,
     // Packet hash state (two-generation rotation)
     packet_cache: HashSet<[u8; 32]>,
     packet_cache_prev: HashSet<[u8; 32]>,
@@ -153,8 +157,17 @@ impl Storage {
             }
         };
 
-        // Feed identities into runtime storage
-        for (hash, entry) in &known_dest_entries {
+        // Memory keeps the newest `identity_cap` (order 1585): a node that
+        // learned 80 000 destinations held every one of them here for its
+        // whole run, beside the identity table's own 50 000.
+        let known_dest_cap = caps.identity_cap;
+        let known_dest_entries = newest_known_destinations(known_dest_entries, known_dest_cap);
+
+        // Feed identities into runtime storage, oldest first, so the
+        // identity table's own ceiling lets go of the oldest.
+        let mut by_age: Vec<_> = known_dest_entries.iter().collect();
+        by_age.sort_by(|a, b| a.1.timestamp.total_cmp(&b.1.timestamp));
+        for (hash, entry) in by_age {
             if let Ok(identity) = Identity::from_public_key_bytes(&entry.public_key) {
                 CoreStorage::set_identity(&mut inner, *hash, identity);
             }
@@ -199,6 +212,7 @@ impl Storage {
             inner,
             ratchet_store,
             known_dest_entries: Arc::new(known_dest_entries),
+            known_dest_cap,
             packet_cache,
             packet_cache_prev: HashSet::new(),
             packet_hash_cap,
@@ -508,6 +522,40 @@ pub(crate) type FlushIoHook = std::sync::Arc<dyn Fn() + Send + Sync>;
 /// The known-destinations table: what `known_destinations` on disk holds
 /// for this node, minus the entries only another process wrote there.
 type KnownDestTable = BTreeMap<[u8; TRUNCATED_HASHBYTES], KnownDestEntry>;
+
+/// The `cap` entries of `table` with the newest announce time (order 1585).
+///
+/// The fold adds every identity the node remembered since the last flush
+/// and dropped none, so without this the table grew with uptime while the
+/// identity table beside it stayed at its ceiling. What goes here stays in
+/// the file: the next flush merges it back from disk.
+fn newest_known_destinations(table: KnownDestTable, cap: usize) -> KnownDestTable {
+    if table.len() <= cap {
+        return table;
+    }
+    if cap == 0 {
+        return KnownDestTable::new();
+    }
+    let mut stamps: Vec<f64> = table.values().map(|entry| entry.timestamp).collect();
+    let cut = stamps.len() - cap;
+    stamps.select_nth_unstable_by(cut, f64::total_cmp);
+    let floor = stamps[cut];
+    // Entries at the floor's own time are kept until the cap is met.
+    let mut room = cap - table.values().filter(|e| e.timestamp > floor).count();
+    table
+        .into_iter()
+        .filter(|(_, entry)| {
+            if entry.timestamp > floor {
+                return true;
+            }
+            if entry.timestamp == floor && room > 0 {
+                room -= 1;
+                return true;
+            }
+            false
+        })
+        .collect()
+}
 
 /// Runtime identities read per core-lock hold when a flush collects them
 /// (leviculum#563).
@@ -822,6 +870,7 @@ impl Storage {
         outcome.known_dest_entries.map(|(generation, folded)| {
             self.remembered_at
                 .retain(|_, (_, stamped)| *stamped > generation);
+            let folded = newest_known_destinations(folded, self.known_dest_cap);
             std::mem::replace(&mut self.known_dest_entries, Arc::new(folded))
         })
     }
@@ -1805,6 +1854,78 @@ mod tests {
             Some(app_data.as_slice()),
             "a restarted node must recall what the destination announced"
         );
+    }
+
+    /// Order 1585: memory keeps the newest `identity_cap` known
+    /// destinations, at load and after every flush, and the file keeps
+    /// every one of them.
+    #[test]
+    fn memory_keeps_the_newest_known_destinations_and_the_file_all() {
+        use leviculum_core::traits::Storage as CoreStorage;
+
+        let path = tempfile::tempdir().unwrap();
+        let caps = TableCaps {
+            identity_cap: 3,
+            ..TableCaps::desktop()
+        };
+        let entry = |at: f64| KnownDestEntry {
+            timestamp: at,
+            packet_hash: vec![0; PACKET_HASH_LEN],
+            public_key: Identity::generate(&mut rand_core::OsRng).public_key_bytes(),
+            app_data: None,
+            use_state: KnownDestUseState::default(),
+        };
+        {
+            let mut storage = Storage::new_with_caps(&path, TableCaps::desktop()).unwrap();
+            for n in 0..5u8 {
+                Arc::make_mut(&mut storage.known_dest_entries)
+                    .insert([n; TRUNCATED_HASHBYTES], entry(1000.0 + f64::from(n)));
+            }
+            storage.identities_dirty = true;
+            CoreStorage::flush(&mut storage);
+        }
+        let mut storage = Storage::new_with_caps(&path, caps).unwrap();
+        let kept: Vec<u8> = storage.known_dest_entries.keys().map(|k| k[0]).collect();
+        assert_eq!(kept, [2, 3, 4], "the three newest stay in memory");
+        // Three fresh identities in a run, then a flush: still three.
+        for n in 10..13u8 {
+            CoreStorage::set_identity(
+                &mut storage,
+                [n; TRUNCATED_HASHBYTES],
+                Identity::generate(&mut rand_core::OsRng),
+            );
+        }
+        CoreStorage::flush(&mut storage);
+        assert_eq!(storage.known_dest_entries.len(), 3);
+        let kept: Vec<u8> = storage.known_dest_entries.keys().map(|k| k[0]).collect();
+        assert_eq!(kept, [10, 11, 12], "the fresh ones replace the old");
+        // The control: the file lost none.
+        let on_disk = FileKnownDestinationsStore::new(path.path())
+            .load_all()
+            .unwrap();
+        assert_eq!(on_disk.len(), 8, "the file keeps every destination");
+    }
+
+    #[test]
+    fn newest_known_destinations_keeps_ties_up_to_the_cap() {
+        let entry = |at: f64| KnownDestEntry {
+            timestamp: at,
+            packet_hash: vec![0; PACKET_HASH_LEN],
+            public_key: [0; 64],
+            app_data: None,
+            use_state: KnownDestUseState::default(),
+        };
+        let table: KnownDestTable = (0..6u8)
+            .map(|n| {
+                (
+                    [n; TRUNCATED_HASHBYTES],
+                    entry(if n < 4 { 5.0 } else { 9.0 }),
+                )
+            })
+            .collect();
+        assert_eq!(newest_known_destinations(table.clone(), 3).len(), 3);
+        assert_eq!(newest_known_destinations(table.clone(), 6).len(), 6);
+        assert_eq!(newest_known_destinations(table, 0).len(), 0);
     }
 
     #[test]

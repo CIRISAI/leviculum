@@ -18,6 +18,9 @@ pub mod auto_layer;
 pub mod auto_serial;
 pub mod auto_servers;
 pub(crate) mod autoconnect;
+/// What every daemon's own census shares: RSS, hash-table spines, one
+/// dump for a process holding several nodes (order 1585).
+pub mod census;
 pub(crate) mod clock;
 pub mod config;
 pub(crate) mod counter64;
