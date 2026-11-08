@@ -12,7 +12,7 @@ description = "Standard library extensions for reticulum - networking, file I/O,
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [features]
-default = ["compression", "ble", "serial"]
+default = ["compression", "ble", "serial", "i2p"]
 # Enable compression support (uses no_std compatible compression from leviculum-core)
 compression = ["leviculum-core/compression"]
 # The Columba BLE interface (`interfaces::ble`, `BLEInterface`): bluer and
@@ -25,6 +25,11 @@ ble = ["dep:bluer", "dep:dbus"]
 # `PipeInterface`, and tokio-serial under them. Off, each of those sections is
 # a config error naming this feature (#463).
 serial = ["dep:tokio-serial", "dep:leviculum-serial-mux"]
+# `I2PInterface` (`interfaces::i2p`), SAM v3 spoken directly over tokio. It
+# gates no dependency, only the interface's code, so a minimal build can leave
+# it out (1576); off, an `I2PInterface` section is a config error naming this
+# feature, as for the two families above.
+i2p = []
 # Off by default. The census gap line subtracts the counting shim's measured
 # live bytes (`heap_accounting::live_bytes`) instead of the modelled total.
 # Only meaningful in a binary that installs `CountingAllocator` as its global

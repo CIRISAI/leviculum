@@ -27,6 +27,7 @@ pub use firmware_request::{
 };
 pub(crate) mod goodbye;
 pub mod hdlc;
+#[cfg(feature = "i2p")]
 pub(crate) mod i2p;
 pub(crate) use goodbye::{RadioGoodbyes, GOODBYE_BOUND};
 pub(crate) mod inventory;

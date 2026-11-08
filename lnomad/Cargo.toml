@@ -63,7 +63,7 @@ changelog = "../target/deb-changelog/lnomad"
 [features]
 # leviculum-std's interface families, forwarded and on by default (#463);
 # see lnpnd's manifest for why they are forwarded and not inherited.
-default = ["std", "ble", "serial", "tui"]
+default = ["std", "ble", "serial", "i2p", "tui"]
 # The platform layer (slice 4a of docs/src/concepts/lnomad-everywhere.md):
 # fetching over a shared instance (`fetch`, `browser`, `transfer`), the files
 # (`download`, `identify`, `identity`, the store halves of `bookmarks` and
@@ -88,6 +88,7 @@ std = [
 ]
 ble = ["std", "leviculum-std/ble"]
 serial = ["std", "leviculum-std/serial"]
+i2p = ["std", "leviculum-std/i2p"]
 # The terminal frontend: the `tui` module, the terminal half of `image`, and
 # the binary. Off, the crate is the browser core and its pure helpers with no
 # terminal crate in the graph, which is what `just lnomad-core-no-tui` builds

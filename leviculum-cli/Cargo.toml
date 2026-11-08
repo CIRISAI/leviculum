@@ -66,16 +66,17 @@ path = "src/bin/auto_crossmachine_test.rs"
 # package-only, so the integration tests and mvrs run the allocator the field
 # runs. `--no-default-features` builds lnsd on the libc allocator;
 # scripts/build-deb.sh does so under LEVICULUM_ALLOC=system.
-default = ["alloc-mimalloc", "compression", "ble", "serial"]
+default = ["alloc-mimalloc", "compression", "ble", "serial", "i2p"]
 # leviculum-std's optional parts, forwarded (#463). `compression` is the bz2
 # codec a Python peer's compressed resources need. `ble` is the Columba
 # `BLEInterface`, `serial` the byte-stream family (`SerialInterface`,
-# `RNodeInterface`, `RNodeMultiInterface`, `KISSInterface`, `PipeInterface`);
-# without one, a section of that kind refuses to start lnsd and names the
+# `RNodeInterface`, `RNodeMultiInterface`, `KISSInterface`, `PipeInterface`),
+# `i2p` the `I2PInterface`; without one, a section of that kind refuses to start lnsd and names the
 # feature. `just lnsd-minimal` builds and tests the set without the defaults.
 compression = ["leviculum-std/compression"]
 ble = ["leviculum-std/ble"]
 serial = ["leviculum-std/serial"]
+i2p = ["leviculum-std/i2p"]
 # Forwarded so the census gap line in leviculum-std subtracts the measured
 # live bytes; the global allocator itself is installed in src/lnsd.rs.
 heap-accounting = ["leviculum-std/heap-accounting"]

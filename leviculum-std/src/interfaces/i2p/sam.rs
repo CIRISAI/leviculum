@@ -10,7 +10,7 @@
 //! The handshake sequence we speak, per role:
 //!
 //! * client (initiator, one per `peers` entry):
-//!   `HELLO VERSION` -> `SESSION CREATE STYLE=STREAM ID=<nick> DESTINATION=TRANSIENT`
+//!   `HELLO VERSION` -> `SESSION CREATE STYLE=STREAM ID=<nick> DESTINATION=TRANSIENT SIGNATURE_TYPE=7`
 //!   on a control socket kept open for the session lifetime, then
 //!   `NAMING LOOKUP NAME=<b32>.b32.i2p` to resolve the peer to a full
 //!   destination, then `STREAM CONNECT ID=<nick> DESTINATION=<dest> SILENT=false`
@@ -45,6 +45,14 @@ pub(crate) const SAM_MAX_VERSION: &str = "3.1";
 
 /// Sentinel destination that asks SAM to generate a fresh transient key.
 pub(crate) const TRANSIENT_DESTINATION: &str = "TRANSIENT";
+
+/// Signature type of every destination we ask SAM to generate: 7, Ed25519
+/// (EdDSA-SHA512-Ed25519), the type the reference asks for
+/// (`default_sig_type`, `reference/Reticulum/RNS/vendor/i2plib/sam.py:96`).
+/// Without it i2pd 2.56 generates a legacy DSA-SHA1 destination (measured by
+/// 1568). It goes on a TRANSIENT `SESSION CREATE` only: a stored key keeps
+/// whatever type it was made with, so no running node changes its address.
+pub(crate) const SIGNATURE_TYPE_ED25519: u16 = 7;
 
 /// Upper bound on a single SAM reply line. SAM replies are short; a
 /// `SESSION STATUS` carrying a freshly generated private key is the longest
@@ -267,6 +275,17 @@ impl Destination {
         i2p_b64encode(&self.data)
     }
 
+    /// The destination's signature type: the key certificate's signing type
+    /// when the certificate is a key certificate (type 5), else 0, DSA-SHA1,
+    /// which is what a NULL certificate means in I2P's common structures.
+    pub(crate) fn sig_type(&self) -> u16 {
+        const KEY_CERT: u8 = 5;
+        match (self.data.get(384), self.data.get(387..389)) {
+            (Some(&KEY_CERT), Some(&[hi, lo])) => u16::from_be_bytes([hi, lo]),
+            _ => 0,
+        }
+    }
+
     /// The 52-character `.b32.i2p` label (without the `.b32.i2p` suffix),
     /// `base32(sha256(dest))` lowercased.
     pub(crate) fn base32(&self) -> String {
@@ -351,7 +370,16 @@ pub(crate) fn session_create(
 ) -> String {
     // Trailing space before options matches i2plib `sam.session_create`; an
     // empty options string leaves a harmless trailing space the bridge ignores.
-    format!("SESSION CREATE STYLE={style} ID={session_id} DESTINATION={destination} {options}\n")
+    // A key SAM is to generate is asked for as Ed25519, as the reference's
+    // `DEST GENERATE SIGNATURE_TYPE=7` does; a given key carries its own type.
+    let sig = if destination == TRANSIENT_DESTINATION {
+        format!(" SIGNATURE_TYPE={SIGNATURE_TYPE_ED25519}")
+    } else {
+        String::new()
+    };
+    format!(
+        "SESSION CREATE STYLE={style} ID={session_id} DESTINATION={destination}{sig} {options}\n"
+    )
 }
 
 pub(crate) fn stream_connect(session_id: &str, destination: &str, silent: bool) -> String {
@@ -532,7 +560,13 @@ mod tests {
         assert_eq!(hello(), "HELLO VERSION MIN=3.1 MAX=3.1\n");
         assert_eq!(
             session_create("STREAM", "nick", "TRANSIENT", ""),
-            "SESSION CREATE STYLE=STREAM ID=nick DESTINATION=TRANSIENT \n"
+            "SESSION CREATE STYLE=STREAM ID=nick DESTINATION=TRANSIENT SIGNATURE_TYPE=7 \n"
+        );
+        // A stored key is passed as it is, with no type: asking for another
+        // one would not change it, and its address must not change.
+        assert_eq!(
+            session_create("STREAM", "nick", "KEY", ""),
+            "SESSION CREATE STYLE=STREAM ID=nick DESTINATION=KEY \n"
         );
         assert_eq!(
             stream_connect("nick", "DEST", false),
@@ -628,6 +662,18 @@ mod tests {
         let pubdest = Destination::from_public_base64(GOLDEN_PUB).unwrap();
         assert_eq!(dest.data, pubdest.data);
         assert_eq!(dest.base32(), GOLDEN_B32);
+    }
+
+    /// The golden key is the reference's Ed25519 type; a destination with a
+    /// NULL certificate (the 387-byte DSA-SHA1 shape i2pd made for lnsd before
+    /// 1576) reads as type 0.
+    #[test]
+    fn sig_type_reads_the_key_certificate() {
+        let dest = Destination::from_public_base64(GOLDEN_PUB).unwrap();
+        assert_eq!(dest.sig_type(), SIGNATURE_TYPE_ED25519);
+        let mut dsa = dest.data[..384].to_vec();
+        dsa.extend_from_slice(&[0, 0, 0]);
+        assert_eq!(Destination { data: dsa }.sig_type(), 0);
     }
 
     #[test]

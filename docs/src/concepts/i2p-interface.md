@@ -165,26 +165,35 @@ HDLC, same `HW_MTU` (`I2P_HW_MTU`,
 same `I2P_SAM_ADDRESS` variable
 (`leviculum-std/src/driver/interface_build/i2p.rs:24`), and on top a
 120 s bound on every SAM command the reference does not have
-(`SAM_COMMAND_TIMEOUT`, `leviculum-std/src/interfaces/i2p/sam.rs:65`).
+(`SAM_COMMAND_TIMEOUT`, `leviculum-std/src/interfaces/i2p/sam.rs:73`).
 
-The differences, each measured on the bed below:
+The differences, each measured on the bed below. The first two are closed
+since 1576:
 
-1. **Signature type.** lnsd asks for `DESTINATION=TRANSIENT` without
-   `SIGNATURE_TYPE` (`session_create`,
-   `leviculum-std/src/interfaces/i2p/sam.rs:346`). i2pd 2.56 answers that
-   with a DSA-SHA1 destination: the probe read `cert_type=0 sig_type=0`
-   from the key lnsd stored, where rnsd's key read `cert_type=5
-   sig_type=7`. DSA-SHA1 is I2P's legacy type. It interoperates today
-   (all four arms below connect), but it is not what the reference makes,
-   and the address it yields is the one users publish.
-2. **Key file name.** lnsd stores the key as
-   `storage/i2p/i2p_iface_<index>.i2p`
-   (`leviculum-std/src/driver/interface_build/i2p.rs:48`), keyed by the
-   section's position in the file. An rnsd user who switches to lnsd on
-   the same config directory gets a **new address**, and every peer that
-   lists the old one loses them; reordering the `[interfaces]` sections
-   does the same to an lnsd user. The reference keys by section name and
-   transport identity, which survives both.
+1. **Signature type, closed.** lnsd asked for `DESTINATION=TRANSIENT`
+   without `SIGNATURE_TYPE`, and i2pd 2.56 answers that with a DSA-SHA1
+   destination: measured on the private bed, `cert_type=0 sig_type=0`,
+   where the same request with `SIGNATURE_TYPE=7` gave `cert_type=5
+   sig_type=7`, as rnsd's key does. Since 1576 every TRANSIENT session
+   asks for type 7 (`session_create`,
+   `leviculum-std/src/interfaces/i2p/sam.rs:365`), the endpoint logs the
+   type of the key it serves, and `just i2p-live` checks the type of a
+   fresh destination. A key stored before stays what it is: a stored key
+   goes to SAM without a type, so no running node changes its address.
+2. **Key file name, closed.** lnsd stored the key as
+   `storage/i2p/i2p_iface_<index>.i2p`, keyed by the section's position in
+   the file, so an rnsd user who switched to lnsd on the same config
+   directory got a new address. Since 1576 the key file is named as the
+   reference names it, old format first (`resolve_keyfile`,
+   `leviculum-std/src/interfaces/i2p/mod.rs:709`), and an existing
+   `i2p_iface_<index>.i2p` is renamed to the new name once, logged, so no
+   lnsd user loses an address either. Measured on the bed: a DSA key left
+   as `i2p_iface_0.i2p` was adopted (`I2P key adopted: .../i2p_iface_0.i2p
+   renamed to .../f25f4882...e8882.i2p (interface 'I2P'), the address is
+   unchanged`), lnsd served the same b32 with signature type 0, and rnsd
+   started next on the same directory published that b32 in `rnstatus`;
+   the other way round, the key rnsd wrote (`37afcf9e...d659.i2p`, type 7)
+   was the one lnsd served.
 3. **Status surface.** lnsd registers no parent `I2PInterface[...]` row
    and emits none of the three I2P fields (the client renderer says so:
    `leviculum-cli/src/lnstatus_render.rs:921`). Measured with Python's
@@ -219,16 +228,23 @@ whose error and timeout behaviour we would have to learn and pin again.
 **Decision: no crate.** SAM is a line protocol over TCP; the interface
 uses five of its commands.
 
-A Cargo feature `i2p` was asked for. It would gate no dependency at all
-(the interface uses tokio and the core's HDLC, both always present), so
-it buys only the ~900 lines of code out of a minimal binary. It is in the
-item list as optional, behind the items that change behaviour.
+A Cargo feature `i2p` was asked for. It gates no dependency at all (the
+interface uses tokio and the core's HDLC, both always present), so it buys
+only the ~900 lines of code out of a minimal binary. Since 1576 it exists,
+on by default in leviculum-std, lnsd (leviculum-cli), lnpnd and lnomad;
+without it an `I2PInterface` section refuses to start the daemon and names
+the feature, as `ble` and `serial` do, and `just lnsd-minimal` builds
+without it.
 
 ## The test bed
 
-`just i2p-live` (`scripts/run-i2p-live.sh`) starts one fresh i2pd that
-reseeds from the public network. That makes it slow, networked and not a
-cell. A **private I2P network** needs neither.
+Until 1576 `just i2p-live` started one fresh i2pd that reseeded from the
+public network, which made it slow, networked and not a cell. A **private
+I2P network** needs neither, and since 1576 it is in the tree:
+`scripts/i2p-privnet.sh [N] -- <command>` brings one up, runs the command
+with `SAM_1`..`SAM_N` (and `SAM_A`, `SAM_B`) in its environment and tears
+it down; `just i2p-live` runs both live tests on it, the loopback test's
+two ends on two different routers.
 
 ### Measured: a private net on loopback
 
@@ -237,7 +253,9 @@ Debian 13). N routers on 127.0.0.1, each with its own data directory
 under `~/.i2pd/` (Debian's AppArmor profile forbids `/tmp`), its own
 NTCP2 and SAM port, `netid = 97` so nothing can join the public network,
 `reservedrange = false` so loopback addresses are accepted, `nat =
-false`, `floodfill = true`, SSU2 off. Bootstrap without a reseed server:
+false`, `floodfill = true`, SSU2 off, and each router on **its own
+loopback address** (`127.97.0.<i>`, `--host` and `--address4`; see the
+shared-address trap below). Bootstrap without a reseed server:
 start every router once so it writes its `router.info`, stop them, zip
 the `router.info` files, restart all with `reseed.zipfile` pointing at
 the zip. No root, no docker, no netns.
@@ -268,6 +286,24 @@ the LeaseSet is published, `NAMING LOOKUP` answers in under 0.1 s.
 worst 54.4 s; put 120 s in the timeout ledger** so a slow tick sequence
 does not make a red.
 
+The tree script on 2026-11-08 (1576, five routers): first start 1.1 to
+1.2 s, SAM up 0.1 s after the restart; `just i2p-live` had its server
+session after 12.0 s, the client session on the second router and the
+stream after 23.0 s, the frame across after 23.1 s, both tests done in
+38.1 s.
+
+**The shared-address trap.** 1568's bed put every router on 127.0.0.1.
+i2pd refuses an inbound NTCP2 handshake while another from the same IP is
+still pending, and says so: `NTCP2: Incoming session from 127.0.0.1 is
+already pending`. On one address every router is the same IP to every
+other, and at the start all of them dial at once. In 15 runs of the A/B
+below on that bed the line appeared 1 to 10 times per run, and the runs
+with the most of it were the bad ones: 10 refusals and 44 failed tunnel
+tests in the run that took 110.7 s to its first probe; 7 refusals and 85
+failed tunnel tests in the one run whose link never carried a byte (below).
+With one address per router the line is gone (0 in 20 runs) and so was
+the dead run.
+
 ### Measured: rnsd and lnsd against each other
 
 The A/B driver is the same for both stacks: one config text (rnsd
@@ -286,11 +322,32 @@ S writes. Five routers.
 | lnsd | rnsd | 33.1 s | 10/10 |
 | lnsd | lnsd | 9.4 s | 10/10 |
 
-All four arms interoperate. The 6/10 run is **not explained**: probes 1-5
-answered in 2 to 10 ms, probe 6 in 10.3 s, 7-10 never; neither daemon
-logged a stream loss, and the run's i2pd logs went with the bed. Two
-reruns of the same arm were clean. Per the lab rule a sub-100 % run is a
-bug until shown otherwise; it is item 8 below. In three of four runs
+All four arms interoperate. 1568's 6/10 run: probes 1-5 answered in 2 to
+10 ms, probe 6 in 10.3 s, 7-10 never; neither daemon logged a stream loss,
+and the run's i2pd logs went with the bed. Two reruns of the same arm were
+clean.
+
+1576 reran the arm, S=lnsd C=rnsd, with i2pd at `loglevel=info` and every
+bed kept (`/home/lew/scratch/1576`, driver `ab.sh`). **On the 1568 bed (one
+address), 15 runs:** 14 came up, all 14 answered 10/10 (140/140), first
+probe 8.9 to 110.7 s after C's start; one never carried a byte. In that run
+rnsd's tunnel reported setup complete 6 s after its start, then `I2P tunnel
+became unresponsive` 22 s later, a broken pipe at 110 s, a rebuild, the
+same again every two minutes; lnsd as S logged its endpoint and never one
+accepted stream. The routers name the cause below both daemons: C's router
+logged `Streaming: Resend #1` to `#4` and `Streaming: No packets have been
+received yet` for the SYN of that stream, and all five routers failed 85
+tunnel tests between them, 34 on S's. Neither daemon lost a packet that
+reached it; the stream never reached S. **On the per-address bed, 20
+runs:** 200/200, first probe 8.9 to 72.7 s, no refusal line. The three
+slow ones (42.7, 62.2, 72.7 s) are rnsd's `NAMING LOOKUP` answered
+`INVALID_KEY` before S's LeaseSet had spread, then rnsd's own retry; no
+probe was lost in any of them.
+
+The 6/10 shape itself (a link that carried probes and then went silent)
+did not recur in 34 links that came up; its logs are gone, so its cause
+cannot be shown, but it is the shape a stream takes when the tunnels under
+it fail as above. In three of four runs
 with lnsd as S, `rnstatus` against S printed nothing within 20 s
 (against rnsd as S it printed both times); also unexplained, and not
 I2P-specific until shown.
@@ -357,14 +414,14 @@ Unhappy:
 
 | # | Item | Coder hours | Depends on |
 |---|---|---|---|
-| 1 | Private bed as a script (`scripts/i2p-privnet.sh`), and `just i2p-live` on it instead of the public network | 2 | — |
-| 2 | Ed25519: `SIGNATURE_TYPE=7` on every TRANSIENT session; an existing DSA key is kept, so no address changes; mock-SAM test on the command, live check on the stored key's type | 1 | — |
-| 3 | Key file named as the reference names it (section name and transport identity, old-format fallback), and an existing `i2p_iface_<n>.i2p` adopted once so no lnsd user loses an address | 2 | — |
+| 1 | Private bed as a script (`scripts/i2p-privnet.sh`), and `just i2p-live` on it instead of the public network (**done, 1576**) | 2 | — |
+| 2 | (**done, 1576**) Ed25519: `SIGNATURE_TYPE=7` on every TRANSIENT session; an existing DSA key is kept, so no address changes; mock-SAM test on the command, live check on the stored key's type | 1 | — |
+| 3 | (**done, 1576**) Key file named as the reference names it (section name and transport identity, old-format fallback), and an existing `i2p_iface_<n>.i2p` adopted once so no lnsd user loses an address | 2 | — |
 | 4 | Status surface: a parent `I2PInterface[<name>]` row with `i2p_b32`, `i2p_connectable` and its client count; peer rows named as the reference names them; `tunnelstate` from the read clock (20 s stale); bitrate 256 kbit/s | 4 | 3 |
 | 5 | Discovery: a connectable I2P interface publishes its b32 as `reachable_on` once known (runtime value, not config) | 2 | 3 |
 | 6 | periculum cells above, with i2pd in the cell image or host-run on the bed | 6 | 1, 2, 3, 4 |
-| 7 | `i2p` Cargo feature, default on, if the minimal build wants the code out (gates no dependency) | 1 | — |
-| 8 | Root-cause the 6/10 run: `i2p_peer_link` S=lnsd C=rnsd 20×, beds kept, i2pd at `loglevel=info` | 2 | 1 |
+| 7 | (**done, 1576**) `i2p` Cargo feature, default on, if the minimal build wants the code out (gates no dependency) | 1 | — |
+| 8 | (**done, 1576**) Root-cause the 6/10 run: `i2p_peer_link` S=lnsd C=rnsd 20×, beds kept, i2pd at `loglevel=info`; found the bed's shared address, 200/200 without it | 2 | 1 |
 
 Items 1, 2, 3 and 7 are independent and fit one batch. Nothing here
 touches the core: every item stays inside the interface, its builder and
