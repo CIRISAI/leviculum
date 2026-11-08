@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:159`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:165`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -424,7 +424,7 @@ positive control). It words the chats list scene in cells
 (`lines`, `loquax-m9/src/screen.rs:224`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
-mousefood (`draw`, `loquax-m9/src/render.rs:172`). Mousefood's own
+mousefood (`draw`, `loquax-m9/src/render.rs:178`). Mousefood's own
 `framebuffer` is off: the cells go straight into the caller's frame, and
 the crate's `framebuffer` feature turns it back on for the board's DMA
 measurement. What the slice settled on the host:
@@ -683,18 +683,19 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:181`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:187`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
 - **The panel:** ST7789 over SPI2 at 40 MHz with DMA, landscape. A draw
-  goes through mousefood into `loquax-m9`'s frame, which keeps the band
-  of rows it touched (`take_dirty`, `loquax-m9/src/frame.rs:85`), and the
-  board sends only that band through the row window (`flush`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:545`): the full frame's 30.8 ms
-  is the first draw's cost, a moved cursor sends two entries. The
-  redraw test drives one renderer through four keys and must equal a
-  fresh draw, its band flushed into a second frame
+  goes through mousefood into `loquax-m9`'s frame, which hands the rows
+  it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
+  since 1507 the board sends each run through its own row window by DMA
+  straight out of the frame (`window`,
+  `leviculum-esp/src/bin/thinknode_m9.rs:832`): the full frame is the
+  first draw's cost, a moved cursor sends two entries. The redraw test
+  drives one renderer through four keys and must equal a fresh draw, its
+  runs flushed into a second frame
   (`the_boards_redraw_and_its_band_equal_a_fresh_draw`).
 - **The model:** a fixture built in code, `no_std`, 13 conversations with
   umlauts, Greek and Cyrillic names, a pinned one of 16 messages over every
@@ -1111,7 +1112,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
 - **Pixels** is the map core's filler painting the view straight into
   the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:738`); the
   whole screen adds the bar's and the legend's cells and the pins
-  (`Renderer::show`, `loquax-m9/src/render.rs:204`).
+  (`Renderer::show`, `loquax-m9/src/render.rs:210`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
   drawn at four by eight source pixels a cell, encoded into glyphs and
   drawn by ratatui through mousefood. The atlas has two of the
@@ -1173,7 +1174,7 @@ cells first, every row in the map's ground, then the map over them, the
 names, the pins and the words; ratatui draws only cells that changed,
 so the next map leaves the blank rows alone, and the renderer clears
 its cells when the screen leaves the map (`leave_map`,
-`loquax-m9/src/render.rs:274`), or the list would keep map pixels where
+`loquax-m9/src/render.rs:300`), or the list would keep map pixels where
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
@@ -1356,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:597`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:695`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:434`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:488`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
