@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:838`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:840`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:699`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:747`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:488`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:491`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1372,7 +1372,15 @@ overflow, esp-hal reset it, and the bench of 2026-11-06 lost three
 `/sync` answers behind backbone announces
 (`leviculum-nrf/serial-mux/src/rx.rs` models both drivers). Every loss is
 said as `[UART] rx_lost= overrun= deframe_drop= rx_err=
-loop_gap_max_ms=`, on change and with each banner. What
+loop_gap_max_ms=`, on change and with each banner. The send side is a
+ring the interrupt feeds the FIFO from (1507), which drops its oldest
+whole record when the loop writes faster than the line takes. A record
+is a whole line with its line end, or a whole frame; a frame dump's
+line is one the ring never drops for another, and the dump's writer
+waits for room and then for its tail before the loop writes lossy again
+(1553: window 13 lost 2 to 28 lines in 19 dumps of 20 while line ends
+were records of their own). The `[UART]` line names the drops by kind as
+`tx_drop_kind=line:<n>,frame:<n>,dump:<n>`. What
 the bench pays: the keyboard lines are about 6 KB/s of the 11.5 KB/s the
 line carries at 115200 baud, so the node has the rest, which is more
 than a LoRa interface carries and less than a TCP one.
