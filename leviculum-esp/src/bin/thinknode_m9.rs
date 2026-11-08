@@ -140,7 +140,9 @@
 //!                           frame flushed; wait is the load's way through
 //!                           core 0, page_read the ring read inside it
 //! [CORES] census=done waited_ms=<n>   core 0 held still while the UI
-//!                           core's census ran (1521b), or census=late
+//!                           core's census ran (1521b), or census=late;
+//!                           the reader's type size only, both in the
+//!                           bench image (1554)
 //! KBRAW <ms> <hex>          one per answer that is no idle one: a timer
 //!                           polls every 10 ms into a queue the loop takes
 //!                           (1463); <ms> is the poll's time, not the line's
@@ -2092,8 +2094,15 @@ fn ui_main(
     // where every scene and draw lives now (1493).
     let stack_floor = core::ptr::addr_of!(APP_CORE_STACK) as usize;
     let mut probe = BoardProbe::over(stack_floor);
-    // Both type sizes (1532): the large one's lines say `<screen>-large`.
-    for size in Size::ALL {
+    // The reader's type size in a release boot; both in the bench image
+    // (1532, 1554), whose large lines say `<screen>-large`. The census is
+    // a measurement: walking every screen twice doubled the time core 0
+    // waits before the list (window 13, `waited_ms=6026` against 2857).
+    #[cfg(not(m9_bench))]
+    let sizes = [shown.overview.size];
+    #[cfg(m9_bench)]
+    let sizes = Size::ALL;
+    for size in sizes {
         for walked in fixture::SCREENS {
             let budget = walked.budget();
             let (mut walk_model, walk_row) = walked.walk();
