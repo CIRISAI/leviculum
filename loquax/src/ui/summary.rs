@@ -212,6 +212,12 @@ impl Summary {
             .then(|| self.reports.iter().rev().copied())
     }
 
+    /// The received messages it summed, each that has a row of its own
+    /// or not: what [`Summary::unread_rows`] counts `unread` back over.
+    pub fn received_count(&self) -> usize {
+        self.received.len()
+    }
+
     /// The newest received icon appearance: `None` when the summary is
     /// behind `messages`.
     pub fn appearance(&self, messages: &[Message]) -> Option<Option<(String, String)>> {

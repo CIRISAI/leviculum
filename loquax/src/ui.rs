@@ -866,15 +866,30 @@ impl Conversation {
     /// The unread count as the screens show it: a position report counts
     /// nothing (1209), it is a state and no message. [`Conversation::unread`]
     /// stays the messages, which the home's read marks name one by one.
+    ///
+    /// Unread messages beyond the received ones loaded lie in the part
+    /// not loaded, a conversation listed from its kept row (1521) that a
+    /// live page reached since: each counts, as the kept row counted it.
+    /// Before 1563 the badge of a chat of 776 unread fell to the 96 a
+    /// pull had brought, on a board's live pull and on the boot that
+    /// folds a ring's tail after its summary.
     pub fn unread_rows(&self) -> usize {
         if self.messages.is_empty() {
             if let Some(listing) = &self.listing {
                 return listing.unread_rows as usize;
             }
         }
-        self.summary
-            .unread_rows(&self.messages, self.unread)
-            .unwrap_or_else(|| self.unread_messages().len())
+        let (rows, received) = match self.summary.unread_rows(&self.messages, self.unread) {
+            Some(rows) => (rows, self.summary.received_count()),
+            None => (
+                self.unread_messages().len(),
+                self.messages
+                    .iter()
+                    .filter(|m| !m.outbound && !m.is_aside())
+                    .count(),
+            ),
+        };
+        rows + self.unread.saturating_sub(received)
     }
 
     /// The unread messages that ask for attention, oldest first: the raw
@@ -9736,6 +9751,49 @@ pub(crate) mod tests {
         assert_eq!(row.unread, 0);
         assert_eq!(row.listing.unread_rows, 0, "the badge goes too");
         assert!(row.unread_ids.is_empty());
+    }
+
+    /// 1563: a chat listed from its kept row with 776 unread, none of its
+    /// messages loaded, takes a live message: its badge says 777, not the
+    /// one message loaded. Before, a board's pull and the boot that folds
+    /// a ring's tail showed the unread of the loaded messages alone.
+    #[test]
+    fn a_live_message_on_a_kept_row_counts_the_unloaded_unread() {
+        let peer = [0x52; 16];
+        let mut model = UiModel::<Field>::new(&[]);
+        model.home_client = true;
+        model.list_apart = true;
+        model.restore_rows(
+            vec![(
+                listing::Row {
+                    peer,
+                    unread: 776,
+                    activity: 9,
+                    unread_ids: Vec::new(),
+                    listing: listing::Listing {
+                        line: String::from("alt"),
+                        moved: Some(9),
+                        unread_rows: 776,
+                        ..listing::Listing::default()
+                    },
+                },
+                1700,
+            )],
+            Vec::new(),
+        );
+        assert_eq!(model.conversations[0].unread_rows(), 776);
+        // The list is up: no chat is on the panel (the board's take).
+        model.selected = NONE_OPEN;
+        engine(&mut model, received_from(peer, ID2, "neu"));
+        let conversation = &model.conversations[0];
+        assert_eq!(conversation.messages.len(), 1);
+        assert_eq!(conversation.unread, 777);
+        assert_eq!(conversation.unread_rows(), 777, "the badge keeps the 776");
+        assert_eq!(
+            model.row(&peer).map(|row| row.listing.unread_rows),
+            Some(777),
+            "and the row the summary log keeps says it"
+        );
     }
 
     /// A frontend's text goes out as compose's does: a bubble of ours,
