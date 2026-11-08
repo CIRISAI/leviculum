@@ -122,6 +122,18 @@ pub struct Appended {
     pub erased: u32,
 }
 
+/// What [`Store::forget`] took out (1562).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Forgot {
+    /// Entries taken out.
+    pub entries: u64,
+    /// Their frames: more than the entries where one ran on into the
+    /// next sector.
+    pub frames: u32,
+    /// Sectors written again.
+    pub sectors: u32,
+}
+
 /// An ask restored at boot (1493): queued before the power went, no done
 /// frame behind it. The board queues it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +270,105 @@ impl Store {
         Ok(Some(opened))
     }
 
+    /// Take the entries `drop` names out of the log of the home tagged
+    /// `tag` on `dev` (1562, the bench's `bench forget`): every sector
+    /// that holds a frame of one is read, erased and written again with
+    /// its other frames in their order, its header as it was. Entries
+    /// are handed to `drop` oldest first, whole, as a boot reads them;
+    /// cursor marks, asks and dones are never dropped. `feed` is called
+    /// once per sector read and once per sector written, for a caller's
+    /// watchdog.
+    ///
+    /// What the log said before is no longer where it was: a summary
+    /// written for it is stale, and the caller drops it so the next boot
+    /// rebuilds. A power loss between a sector's erase and its write
+    /// loses that sector's entries, as a ring that went round does.
+    pub fn forget<S: Sectors>(
+        dev: &mut S,
+        tag: [u8; 8],
+        mut drop: impl FnMut(&Entry) -> bool,
+        feed: &dyn Fn(),
+    ) -> Result<Forgot, S::Error> {
+        let mut ours: Vec<(u32, u32)> = Vec::new();
+        let mut head = [0u8; HEADER];
+        for index in 0..dev.count() {
+            dev.read(index, 0, &mut head)?;
+            if let Some((seq, theirs)) = header(&head) {
+                if theirs == tag {
+                    ours.push((seq, index));
+                }
+            }
+        }
+        ours.sort_unstable();
+        let mut forgot = Forgot::default();
+        // The frames to leave out, by sector index, by offset.
+        let mut out: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        let mut buf = vec![0u8; SECTOR];
+        let mut part: Option<UnderWay> = None;
+        let mut previous: Option<u32> = None;
+        for &(seq, index) in &ours {
+            feed();
+            if previous.is_some_and(|p| p.wrapping_add(1) != seq) {
+                part = None;
+            }
+            previous = Some(seq);
+            dev.read(index, 0, &mut buf)?;
+            let mut at = HEADER;
+            while let Next::Frame {
+                flags,
+                payload,
+                next,
+            } = next_frame(&buf, at)
+            {
+                let here = at;
+                at = next;
+                if flags & (MARK | DONE) != 0 {
+                    continue;
+                }
+                let is_ask = flags & ASK != 0;
+                let (mut whole, mut lies) = match (flags & FIRST != 0, part.take()) {
+                    (true, _) => (Vec::new(), Vec::new()),
+                    (false, Some((started, started_ask, lies))) if started_ask == is_ask => {
+                        (started, lies)
+                    }
+                    (false, _) => continue,
+                };
+                whole.extend_from_slice(payload);
+                lies.push((index, here));
+                if flags & LAST == 0 {
+                    part = Some((whole, is_ask, lies));
+                    continue;
+                }
+                if is_ask {
+                    continue;
+                }
+                if decode(&whole).is_some_and(|entry| drop(&entry)) {
+                    forgot.entries += 1;
+                    for (sector, offset) in lies {
+                        out.entry(sector).or_default().push(offset);
+                        forgot.frames += 1;
+                    }
+                }
+            }
+        }
+        for (index, gone) in out {
+            feed();
+            dev.read(index, 0, &mut buf)?;
+            let mut kept = buf[..HEADER].to_vec();
+            let mut at = HEADER;
+            while let Next::Frame { next, .. } = next_frame(&buf, at) {
+                if !gone.contains(&at) {
+                    kept.extend_from_slice(&buf[at..next]);
+                }
+                at = next;
+            }
+            dev.erase(index)?;
+            dev.write(index, 0, &kept)?;
+            forgot.sectors += 1;
+        }
+        Ok(forgot)
+    }
+
     /// The log's frames read from `from` on, or whole when `None`.
     #[allow(clippy::type_complexity)]
     fn scan<S: Sectors>(
@@ -324,31 +435,26 @@ impl Store {
                 _ => HEADER,
             };
             let mut open = false;
-            while at + FRAME <= SECTOR {
-                let frame = &buf[at..at + FRAME];
-                if frame.iter().all(|&b| b == 0xFF) {
-                    open = buf[at..].iter().all(|&b| b == 0xFF);
-                    if !open {
-                        restored.torn += 1;
-                    }
-                    break;
-                }
-                let len = usize::from(u16::from_le_bytes([frame[0], frame[1]]));
-                let flags = frame[2];
-                let end = at + FRAME + len;
-                if end > SECTOR || frame[3] != 0 {
-                    restored.torn += 1;
-                    break;
-                }
-                let payload = &buf[at + FRAME..end];
-                let sum = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-                let checks = crc32_parts(&frame[..4], payload) == sum;
+            loop {
+                let next = next_frame(&buf, at);
                 lap(&mut spent.crc);
-                if !checks {
-                    restored.torn += 1;
-                    break;
-                }
-                at = at + FRAME + pad4(len);
+                let (flags, payload, after) = match next {
+                    Next::Open => {
+                        open = true;
+                        break;
+                    }
+                    Next::Torn => {
+                        restored.torn += 1;
+                        break;
+                    }
+                    Next::Full => break,
+                    Next::Frame {
+                        flags,
+                        payload,
+                        next,
+                    } => (flags, payload, next),
+                };
+                at = after;
                 if flags & MARK != 0 {
                     if let Ok(bytes) = <[u8; 8]>::try_from(payload) {
                         store.cursor = store.cursor.max(u64::from_le_bytes(bytes));
@@ -887,6 +993,55 @@ fn header(head: &[u8; HEADER]) -> Option<(u32, [u8; 8])> {
     let mut tag = [0u8; 8];
     tag.copy_from_slice(&head[12..20]);
     Some((seq, tag))
+}
+
+/// An entry [`Store::forget`] has begun to read: its bytes so far,
+/// whether an ask, and where its frames lie (sector index, offset).
+type UnderWay = (Vec<u8>, bool, Vec<(u32, usize)>);
+
+/// What lies at `at` of a sector's bytes `buf` (1562, shared by the
+/// boot's scan and [`Store::forget`]).
+enum Next<'a> {
+    /// Erased to the sector's end: where the next frame goes.
+    Open,
+    /// No room for another frame header.
+    Full,
+    /// Bytes that are no frame that checks: the end of a cut write.
+    Torn,
+    /// A frame that checks: its flags, its payload and where the frame
+    /// after it starts.
+    Frame {
+        flags: u8,
+        payload: &'a [u8],
+        next: usize,
+    },
+}
+
+fn next_frame(buf: &[u8], at: usize) -> Next<'_> {
+    let Some(frame) = buf.get(at..at + FRAME) else {
+        return Next::Full;
+    };
+    if frame.iter().all(|&b| b == 0xFF) {
+        return match buf[at..].iter().all(|&b| b == 0xFF) {
+            true => Next::Open,
+            false => Next::Torn,
+        };
+    }
+    let len = usize::from(u16::from_le_bytes([frame[0], frame[1]]));
+    let end = at + FRAME + len;
+    if end > buf.len() || frame[3] != 0 {
+        return Next::Torn;
+    }
+    let payload = &buf[at + FRAME..end];
+    let sum = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+    if crc32_parts(&frame[..4], payload) != sum {
+        return Next::Torn;
+    }
+    Next::Frame {
+        flags: frame[2],
+        payload,
+        next: (at + FRAME + pad4(len)).min(buf.len()),
+    }
 }
 
 /// The entries that start in sector `index`: what erasing it costs (one

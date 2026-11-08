@@ -339,3 +339,58 @@ fn open_after_reads_the_tail_alone() {
             .is_none()
     );
 }
+
+/// `forget` (1562): the entries it names are gone after a reboot, a long
+/// one that ran over three sectors with them, every other entry reads
+/// back whole and in order, the cursor, an ask and nothing torn stay, the
+/// store appends after a forget as before, and a forget that names
+/// nothing writes nothing.
+#[test]
+fn forget_takes_the_named_entries_out_and_leaves_the_rest_whole() {
+    let mut flash = MemFlash::new(16);
+    let (mut store, ..) = reopen(&mut flash, TAG);
+    let mut all: Vec<Entry> = (1..=30)
+        .map(|s| entry(s, 150 + (s as usize % 7) * 40))
+        .collect();
+    // The long one runs on over sectors; the 1-length is the drop's sign.
+    all.insert(10, entry(100, 9_000));
+    for page in all.chunks(4) {
+        let last = page.iter().map(|e| e.seq).max().unwrap_or(0);
+        store.append(&mut flash, page, last).expect("append");
+    }
+    store
+        .keep_ask(&mut flash, &[7; 16], 1, b"a request")
+        .expect("ask");
+    store.append(&mut flash, &[], 200).expect("mark");
+    let named = |e: &Entry| e.seq.is_multiple_of(3) || e.seq == 100;
+    let (writes, erases) = (flash.writes, flash.erases);
+    let forgot = Store::forget(&mut flash, TAG, |_| false, &|| ()).expect("nothing");
+    assert_eq!(forgot, Forgot::default());
+    assert_eq!(
+        (flash.writes, flash.erases),
+        (writes, erases),
+        "nothing named, nothing written"
+    );
+    let fed = core::cell::Cell::new(0u32);
+    let forgot = Store::forget(&mut flash, TAG, named, &|| fed.set(fed.get() + 1)).expect("forget");
+    assert_eq!(forgot.entries, 11, "ten of thirty and the long one");
+    assert!(forgot.frames >= 13, "the long one's parts: {forgot:?}");
+    assert!(fed.get() >= forgot.sectors, "fed per sector");
+    let mut asks = Vec::new();
+    let mut got = Vec::new();
+    let (store, restored, pending) = Store::open(&mut flash, TAG, |e| got.push(e)).expect("open");
+    asks.extend(pending);
+    let want: Vec<Entry> = all.iter().filter(|e| !named(e)).cloned().collect();
+    assert_eq!(got, want);
+    assert_eq!(restored.torn, 0);
+    assert_eq!(store.cursor(), 200, "the mark stays");
+    assert_eq!(asks.len(), 1, "the ask stays");
+    // The ring goes on after a forget.
+    let mut store = store;
+    store
+        .append(&mut flash, &[entry(201, 120)], 201)
+        .expect("after");
+    let (_, _, got) = reopen(&mut flash, TAG);
+    assert_eq!(got.last().map(|e| e.seq), Some(201));
+    assert_eq!(got.len(), want.len() + 1);
+}
