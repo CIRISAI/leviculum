@@ -75,6 +75,7 @@ pub(crate) mod sequence_counts;
 pub mod socket_hook;
 pub(crate) mod storage;
 pub(crate) mod sync_ext;
+pub mod table_budget;
 pub mod test_support;
 pub mod user;
 

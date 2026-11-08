@@ -4890,26 +4890,27 @@ mod tests {
                     "{codec:?}: {key} must survive as a list"
                 );
             }
-            // A None capacity has to survive the transcode as a None, not as
-            // a zero: zero would read as "ceiling reached".
+            // Every collection has a ceiling since order 1586 bounded the
+            // persisted known destinations and the remember stamps, so
+            // every capacity must survive the transcode as the number it
+            // is: a None would read as "unbounded", a zero as "ceiling
+            // reached".
             let Some(Value::List(rows)) = d.get(&HashableValue::String("collections".into()))
             else {
                 panic!("{codec:?}: collections must be a list")
             };
-            let unbounded = rows
-                .iter()
-                .filter_map(|r| match r {
-                    Value::Dict(row) => row
-                        .get(&HashableValue::String("capacity".into()))
-                        .map(|c| matches!(c, Value::None)),
-                    _ => None,
-                })
-                .filter(|is_none| *is_none)
-                .count();
-            assert!(
-                unbounded > 0,
-                "{codec:?}: a collection with no ceiling must decode as None"
-            );
+            assert!(!rows.is_empty(), "{codec:?}: no collections");
+            for row in rows {
+                let Value::Dict(row) = row else {
+                    panic!("{codec:?}: a collection row must be a dict")
+                };
+                let capacity = row.get(&HashableValue::String("capacity".into()));
+                assert!(
+                    matches!(capacity, Some(Value::I64(n)) if *n > 0),
+                    "{codec:?}: {:?} has capacity {capacity:?}",
+                    row.get(&HashableValue::String("name".into()))
+                );
+            }
         }
     }
 

@@ -1303,13 +1303,19 @@ impl leviculum_core::traits::Storage for Storage {
                 _ => row,
             })
             .collect();
-        counts.push(CollectionCount::unbounded(
+        // Both are bounded since order 1585, and the census says so with
+        // the rule's own figures (order 1586): memory keeps the newest
+        // `known_dest_cap` known destinations at load and after every
+        // flush, and the stamps go once they pass twice that.
+        counts.push(CollectionCount::bounded(
             "known_dest_entries",
             self.known_dest_entries.len(),
+            self.known_dest_cap,
         ));
-        counts.push(CollectionCount::unbounded(
+        counts.push(CollectionCount::bounded(
             "remembered_at",
             self.remembered_at.len(),
+            2 * self.known_dest_cap.max(1),
         ));
         counts
     }

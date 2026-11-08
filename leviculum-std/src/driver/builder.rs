@@ -98,6 +98,9 @@ pub struct ReticulumNodeBuilder {
     /// In-driver core processor (Codeberg #196), moved into the event loop by
     /// `ReticulumNode::start()`.
     core_processor: Option<Box<dyn CoreProcessor>>,
+    /// The host RAM the transport tables are fitted to; `None` reads
+    /// `/proc/meminfo` (order 1586, [`Self::host_ram_bytes`]).
+    host_ram_explicit: Option<Option<u64>>,
 }
 
 impl Default for ReticulumNodeBuilder {
@@ -139,6 +142,7 @@ impl ReticulumNodeBuilder {
             events_enabled: true,
             discovery_job_interval_secs_explicit: None,
             core_processor: None,
+            host_ram_explicit: None,
         }
     }
 
@@ -786,6 +790,18 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// The host RAM the transport tables are fitted to, in bytes (order
+    /// 1586, [`crate::table_budget::fit`]); `None` fits nothing and keeps
+    /// the profile's ceilings. Unset, the builder reads `/proc/meminfo`.
+    ///
+    /// For a test that asserts a ceiling, so its verdict does not depend on
+    /// the RAM of the host it runs on, and for an embedder that knows its
+    /// share better than the kernel's total.
+    pub fn host_ram_bytes(mut self, ram: Option<u64>) -> Self {
+        self.host_ram_explicit = Some(ram);
+        self
+    }
+
     /// The Reticulum config directory of the shared instance this client
     /// joins, where its RPC key comes from.
     ///
@@ -995,11 +1011,28 @@ impl ReticulumNodeBuilder {
         // most (order 1585): it forwards nothing, and the instance beside
         // it holds the network's tables and answers its path requests. The
         // config it read is the instance's own, sized for the instance.
-        let (table_caps, packet_hash_cap) = client_table_caps(
-            self.connect_instance_name.is_some(),
-            config.reticulum.table_caps(),
-            config.reticulum.packet_hash_cap(),
+        //
+        // Before that, the profile is fitted to the host's RAM and the
+        // config's own ceilings are written over it as they stand (order
+        // 1586, `table_budget`).
+        let host_ram = self
+            .host_ram_explicit
+            .unwrap_or_else(crate::proc_memory::host_ram_bytes);
+        let fitted = crate::table_budget::fit(
+            config.reticulum.profile_caps(),
+            crate::storage::FILE_STORAGE_PACKET_HASH_CAP,
+            host_ram,
         );
+        let client = self.connect_instance_name.is_some();
+        let (table_caps, packet_hash_cap) = client_table_caps(
+            client,
+            config.reticulum.table_caps_on(fitted.caps),
+            config
+                .reticulum
+                .max_packet_hashes
+                .unwrap_or(fitted.packet_hash_cap),
+        );
+        log_table_budget(&fitted, &table_caps, packet_hash_cap, client);
         let storage = Storage::new_with_limits(&storage_path, table_caps, packet_hash_cap)?;
         let clock = SystemClock::new();
         // Align the LoRa airtime bucket's anchor with Transport's
@@ -1356,6 +1389,55 @@ fn hex_full(hash: &[u8]) -> String {
     crate::storage::hex_encode(hash)
 }
 
+/// Say what the transport tables may take and why, and warn when the
+/// config's own ceilings ask for more than the host's share (order 1586).
+fn log_table_budget(
+    fitted: &crate::table_budget::TableBudget,
+    caps: &TableCaps,
+    packet_hash_cap: usize,
+    client: bool,
+) {
+    let mb = |bytes: u64| bytes / 1_000_000;
+    let modelled = crate::table_budget::modelled_bytes(caps, packet_hash_cap);
+    let role = if client { "local client" } else { "node" };
+    match fitted.budget_bytes() {
+        Some(budget) => {
+            tracing::info!(
+                "Transport tables ({role}): at most {} MB modelled of a {} MB share \
+                 (1/{} of {} MB RAM){}; identities {}, paths {}, destinations {}",
+                mb(modelled),
+                mb(budget),
+                crate::table_budget::RAM_SHARE_DIVISOR,
+                mb(fitted.ram_bytes.unwrap_or(0)),
+                if fitted.scaled() {
+                    format!(", profile of {} MB scaled to fit", mb(fitted.profile_bytes))
+                } else {
+                    String::new()
+                },
+                caps.identity_cap,
+                caps.path_cap,
+                caps.destination_cap,
+            );
+            if modelled > budget {
+                tracing::warn!(
+                    "Transport tables: the configured ceilings model {} MB, more than \
+                     the {} MB share of this host's RAM; they are kept as written",
+                    mb(modelled),
+                    mb(budget),
+                );
+            }
+        }
+        None => tracing::info!(
+            "Transport tables ({role}): at most {} MB modelled, host RAM unknown; \
+             identities {}, paths {}, destinations {}",
+            mb(modelled),
+            caps.identity_cap,
+            caps.path_cap,
+            caps.destination_cap,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1552,6 +1634,7 @@ mod tests {
             let node = ReticulumNodeBuilder::new()
                 .config(crate::ini_config::parse_ini(ini).expect("parse"))
                 .storage_path(td.path().to_path_buf())
+                .host_ram_bytes(None)
                 .build_sync()
                 .expect("build_sync failed");
             let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
@@ -1585,6 +1668,65 @@ mod tests {
             ),
             (Some(5_000), Some(25_000 / 2), Some(4_000), 172_800)
         );
+    }
+
+    /// Order 1586: every profile is fitted to the host's RAM before the
+    /// config's own ceilings are written over it, and a local client stays
+    /// within the client profile (order 1585) whatever the host.
+    #[test]
+    fn the_tables_are_fitted_to_the_host_and_a_configured_ceiling_is_kept() {
+        use leviculum_core::traits::Storage as _;
+        let caps = |client: bool, ini: &str, ram: Option<u64>| {
+            let td = tempfile::tempdir().expect("tempdir");
+            let mut builder = ReticulumNodeBuilder::new()
+                .config(crate::ini_config::parse_ini(ini).expect("parse"))
+                .storage_path(td.path().to_path_buf())
+                .host_ram_bytes(ram);
+            if client {
+                builder = builder
+                    .enable_transport(false)
+                    .connect_to_shared_instance("budget-test");
+            }
+            let node = builder.build_sync().expect("build_sync failed");
+            let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
+            let capacity = |name: &str| {
+                core.storage()
+                    .collection_counts()
+                    .into_iter()
+                    .find(|row| row.name == name)
+                    .and_then(|row| row.capacity)
+            };
+            (capacity("known_identities"), capacity("known_dest_entries"))
+        };
+        const MIAUHAUS_RAM: u64 = 1_855_332 * 1024;
+        // The daemon keeps the desktop profile where it fits...
+        assert_eq!(
+            caps(false, "[reticulum]\n", Some(64 << 30)),
+            (Some(50_000), Some(50_000))
+        );
+        // ...and is fitted on miauhaus's 1.9 GB.
+        let fitted = caps(false, "[reticulum]\n", Some(MIAUHAUS_RAM)).0;
+        assert!(
+            fitted.is_some_and(|n| n < 50_000 && n > 20_000),
+            "{fitted:?}"
+        );
+        // A configured ceiling is kept as written, whatever the RAM.
+        assert_eq!(
+            caps(
+                false,
+                "[reticulum]\n  max_identities = 45000\n",
+                Some(MIAUHAUS_RAM)
+            )
+            .0,
+            Some(45_000)
+        );
+        // A local client stays at the client profile on any host.
+        let client = TableCaps::local_client().identity_cap;
+        assert_eq!(
+            caps(true, "[reticulum]\n", Some(MIAUHAUS_RAM)).0,
+            Some(client)
+        );
+        assert_eq!(caps(true, "[reticulum]\n", None).0, Some(client));
     }
 
     /// An explicit builder expiry outranks the config's, like every other

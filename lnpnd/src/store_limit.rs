@@ -115,28 +115,10 @@ pub fn resolve(configured_bytes: Option<u64>, ram_bytes: Option<u64>) -> StoreLi
     }
 }
 
-/// `MemTotal` of a `/proc/meminfo` text, in bytes.
-pub fn parse_mem_total(meminfo: &str) -> Option<u64> {
-    meminfo.lines().find_map(|line| {
-        let rest = line.strip_prefix("MemTotal:")?;
-        let mut fields = rest.split_whitespace();
-        let value: u64 = fields.next()?.parse().ok()?;
-        // The kernel writes kB and means KiB.
-        match fields.next() {
-            Some("kB") => value.checked_mul(1024),
-            None => Some(value),
-            Some(_) => None,
-        }
-    })
-}
-
-/// The host's total RAM in bytes, `None` where `/proc/meminfo` cannot say.
-pub fn host_ram_bytes() -> Option<u64> {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .as_deref()
-        .and_then(parse_mem_total)
-}
+/// The host's RAM reader, shared with the transport tables' budget
+/// (`leviculum_std::table_budget`, order 1586): one rule for what "the
+/// host's RAM" means.
+pub use leviculum_std::proc_memory::{host_ram_bytes, parse_mem_total};
 
 /// Bytes as decimal megabytes, the unit the config's limit is written in.
 pub fn megabytes(bytes: u64) -> u64 {

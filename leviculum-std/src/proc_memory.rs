@@ -368,6 +368,32 @@ fn measured_live() -> Option<u64> {
     None
 }
 
+/// `MemTotal` of a `/proc/meminfo` text, in bytes.
+///
+/// The host's RAM bounds lnpnd's store index (`lnpnd/src/store_limit.rs`)
+/// and every transport table ([`crate::table_budget`]); both read it here.
+pub fn parse_mem_total(meminfo: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let rest = line.strip_prefix("MemTotal:")?;
+        let mut fields = rest.split_whitespace();
+        let value: u64 = fields.next()?.parse().ok()?;
+        // The kernel writes kB and means KiB.
+        match fields.next() {
+            Some("kB") => value.checked_mul(1024),
+            None => Some(value),
+            Some(_) => None,
+        }
+    })
+}
+
+/// The host's total RAM in bytes, `None` where `/proc/meminfo` cannot say.
+pub fn host_ram_bytes() -> Option<u64> {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .as_deref()
+        .and_then(parse_mem_total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -260,6 +260,9 @@ async fn the_hourly_flush_leaves_the_core_lock_free() {
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .storage_path(storage.path().to_path_buf())
+        // The field node's desktop ceilings, on any host (order 1586 fits
+        // them to the host's RAM otherwise).
+        .host_ram_bytes(None)
         .flush_interval_secs(FLUSH_INTERVAL_SECS)
         .core_processor(FieldShape {
             paths: paths.clone(),
@@ -367,11 +370,21 @@ async fn the_hourly_flush_leaves_the_core_lock_free() {
             .join("\n")
     );
 
-    // The production reader still reads what the flushes wrote.
+    // The production reader still reads what the flushes wrote. Memory
+    // keeps the newest `identity_cap` known destinations since order 1585
+    // and the file all of them, so the reader's ceiling is set above the
+    // field node's count: what it loads is what the file holds.
     let reader = NodeCoreBuilder::new().enable_transport(false).build(
         rand_core::OsRng,
         StdClock::new(),
-        StdStorage::new(storage.path()).expect("storage reopens"),
+        StdStorage::new_with_caps(
+            storage.path(),
+            leviculum_core::memory_storage::TableCaps {
+                identity_cap: KNOWN_DESTINATIONS + 1,
+                ..leviculum_core::memory_storage::TableCaps::desktop()
+            },
+        )
+        .expect("storage reopens"),
     );
     let known = reader
         .storage()
