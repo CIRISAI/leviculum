@@ -2927,6 +2927,10 @@ m9-sim-walk out="target/m9-sim-walk":
     grep -q '^\[PAGE\] name=compose ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the fixture walk never reached compose"; exit 1; }
     grep -q 'restore=resumed' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the real store's second boot did not resume"; exit 1; }
     grep -q '^\[STORE\] page_read ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL no chat page was read from the ring"; exit 1; }
+    grep -q '^\[PAGE\] name=house ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the house key never opened the overview"; exit 1; }
+    grep -q '^\[TYPE\] size=large via=row ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the overview's row did not switch the type"; exit 1; }
+    grep -q '^\[TYPE\] size=small via=hold ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the held house key did not switch the type"; exit 1; }
+    grep -q '^\[TYPE\] size=large via=boot ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the record did not keep the large type across the reboot"; exit 1; }
     echo "m9-sim-walk: PASS"
 
 # 1530, #232: the M9 in a window on the host: the panel at `scale` (2 or 3),

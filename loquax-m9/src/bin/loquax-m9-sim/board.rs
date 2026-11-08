@@ -40,14 +40,17 @@ use loquax::ui::listing::Row;
 use loquax::ui::strings::StrId;
 use loquax::ui::UiModel;
 use loquax_m9::field::Field;
+use loquax_m9::font::Size;
 use loquax_m9::frame::Frame;
 use loquax_m9::home::{self, How, Outgoing, Shelf};
+use loquax_m9::house::{self, Did, Overview};
 use loquax_m9::kbraw::{self, Presses, Protocol, Read};
 use loquax_m9::keyboard::{self, Key};
 use loquax_m9::map::{self, Map};
 use loquax_m9::pair::{self, Pairing};
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ROWS};
+
 use loquax_m9::{fixture, group, page};
 
 use crate::flash::Flash;
@@ -136,6 +139,8 @@ enum FromUi {
         pages: u32,
     },
     Load([u8; 16]),
+    /// The reader switched the type (1532): the record keeps it.
+    Type(Size),
 }
 
 /// What a turn's folds owe the I/O side (`Wants`).
@@ -163,6 +168,8 @@ pub struct Board {
     map: Map<'static>,
     model: Box<UiModel<Field>>,
     shown: Shown,
+    /// The house key's overview and the reader's type size (1532).
+    overview: Overview,
     row: usize,
     said: page::Said,
     drawn: screen::Drawn,
@@ -292,6 +299,7 @@ impl Board {
             map,
             model: Box::new(model),
             shown,
+            overview: Overview::new(Size::DEFAULT),
             row: 0,
             said: page::Said::default(),
             drawn: screen::Drawn::default(),
@@ -307,6 +315,17 @@ impl Board {
             frames: 0,
             owed: false,
         };
+        // The record's type (1532), as the board reads it at boot; a board
+        // without a record shows the default.
+        let size = match board.flash.home {
+            Some(_) => Size::of_large(board.flash.large_type),
+            None => Size::DEFAULT,
+        };
+        board.overview.restore(size);
+        house::set_size(size, &mut board.model, &mut board.renderer);
+        board
+            .log
+            .line("[TYPE] ", &format!("size={} via=boot", size.name()));
         board.redraw();
         board.drawn.drawn(&board.model);
         Ok(board)
@@ -333,6 +352,18 @@ impl Board {
     /// draws what the board shows, the walked model now, as the board's
     /// next turn does.
     pub fn show_screen(&mut self, byte: u8) -> Option<&'static str> {
+        // The goldens are the default size's (1532): a dump draws in it,
+        // the overview closed, and the reader's size comes back after.
+        let kept_overview = self.overview;
+        self.overview = Overview::new(Size::DEFAULT);
+        self.renderer.set_size(Size::DEFAULT);
+        let name = self.dump_screen(byte);
+        self.overview = kept_overview;
+        house::set_size(self.overview.size, &mut self.model, &mut self.renderer);
+        name
+    }
+
+    fn dump_screen(&mut self, byte: u8) -> Option<&'static str> {
         let name = if let Some(walked) = fixture::Screen::of(byte) {
             let (model, row) = walked.walk();
             *self.model = model;
@@ -387,14 +418,16 @@ impl Board {
     /// picture, pins and names are pixels and not in them.
     pub fn text(&self) -> Vec<String> {
         let look = self.look();
+        let (cols, rows) = self.overview.size.grid();
         let lines = match &self.shown.pairing {
-            Some(pairing) => pair::screen(pairing, self.shown.word, &look, COLS, ROWS),
+            Some(pairing) => pair::screen(pairing, self.shown.word, &look, cols, rows),
+            None if self.overview.open => self.overview.lines(&look, cols, rows),
             None if map::shown(&self.model) => {
                 let bare = map::view(&self.model)
                     .is_none_or(|(view, _)| !map::covers(self.map.region.header(), &view));
                 map::lines(&look, bare, COLS, ROWS)
             }
-            None => screen::lines(&screen::scene(&self.model), &look, COLS, ROWS),
+            None => screen::lines(&screen::scene(&self.model), &look, cols, rows),
         };
         lines
             .iter()
@@ -443,6 +476,7 @@ impl Board {
             row: self.row,
             home: self.shown.word,
             fault: self.shown.fault,
+            note: self.overview.note(),
             map: self.shown.map,
             ..Look::of(&self.model)
         }
@@ -536,6 +570,16 @@ impl Board {
                         let line = keyboard::key_line(ms, code, key);
                         self.log.raw(&line);
                         self.last_key = Some(line);
+                        // The house key and the open overview (1532);
+                        // the pairing has the keys while it shows.
+                        let took = match self.shown.pairing {
+                            None => self.overview.press(key, ms),
+                            Some(_) => None,
+                        };
+                        if let Some(did) = took {
+                            dirty |= self.did(did);
+                            continue;
+                        }
                         events.extend(key.event());
                         command = key.command();
                     }
@@ -586,6 +630,9 @@ impl Board {
         }
 
         let t_draw = std::time::Instant::now();
+        // A house tap's gap, the switch's word (1532).
+        let did = self.overview.tick(uptime_ms() as u32);
+        dirty |= self.did(did);
         dirty |= std::mem::take(&mut self.owed);
         dirty |= self.drawn.due(&self.model);
         let now = uptime_ms();
@@ -604,12 +651,29 @@ impl Board {
         (busy || dirty, t_draw.elapsed().as_millis() as u64, keys_ms)
     }
 
+    /// What the overview did (1532): the size set on the renderer and
+    /// the model, said in a `[TYPE]` line and sent for the record.
+    /// Whether the screen changed.
+    fn did(&mut self, did: Did) -> bool {
+        if let Some(size) = did.size {
+            house::set_size(size, &mut self.model, &mut self.renderer);
+            self.log
+                .line("[TYPE] ", &format!("size={} via={}", size.name(), did.via));
+            self.from_ui.push_back(FromUi::Type(size));
+        }
+        did.redraw
+    }
+
     /// `redraw`: the model, the pairing over it or the map, the rows that
     /// changed "flushed", the `[MAP]` and `[PAGE]` lines.
     fn redraw(&mut self) {
         let look = self.look();
+        let overview = self.overview;
         let drawn = match &self.shown.pairing {
             Some(pairing) => pair::draw(&mut self.renderer, pairing, self.shown.word, &look),
+            None if overview.open => self
+                .renderer
+                .text(|cols, rows| overview.lines(&look, cols, rows)),
             None => self.renderer.show(&self.model, &look, &mut self.map),
         };
         if drawn.is_err() {
@@ -630,12 +694,15 @@ impl Board {
                 ),
             );
         }
-        let at = page::of(
-            &self.model,
-            self.row,
-            self.shown.pairing.is_some(),
-            &self.renderer.window(),
-        );
+        let at = match self.shown.pairing.is_none() && overview.open {
+            true => page::house(),
+            false => page::of(
+                &self.model,
+                self.row,
+                self.shown.pairing.is_some(),
+                &self.renderer.window(),
+            ),
+        };
         let moved = self.said.say(at);
         if let Some((first, last)) = self.renderer.panel().take_dirty() {
             // No SPI: the flush is the frame itself, and takes no time.
@@ -682,6 +749,20 @@ impl Board {
                             address,
                         });
                     }
+                }
+                FromUi::Type(size) => {
+                    // The record's flag (1532): kept with a home, as the
+                    // board's record keeps it; a board without one keeps
+                    // it until the power goes.
+                    let kept = match self.flash.home {
+                        Some(_) => {
+                            self.flash.large_type = size.large();
+                            "yes"
+                        }
+                        None => "no reason=no-record",
+                    };
+                    self.log
+                        .line("[STORE] ", &format!("type={} kept={kept}", size.name()));
                 }
                 FromUi::Code(code) => {
                     // The join needs the node and a home: none in the sim.

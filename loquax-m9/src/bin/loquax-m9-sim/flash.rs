@@ -1,6 +1,7 @@
 //! The board's flash in the sim (1530): the `messages` partition as a
 //! [`MemFlash`] of its 1024 sectors, and in place of the client record the
-//! one thing of it the screen reads, the home's LXMF address. Saved to a
+//! two things of it the screen reads, the home's LXMF address and the
+//! reader's type size (1532, the record's byte 6). Saved to a
 //! file so a second run boots what the first one left, as a power cycle
 //! does; `--reboot-after` boots it again inside one run.
 //!
@@ -27,14 +28,22 @@ pub struct Flash {
     /// The home whose device the board is; `None` on a board without a
     /// client record, which opens on the pairing.
     pub home: Option<[u8; 16]>,
+    /// The record's large-type flag (1532); kept only with a home, as the
+    /// board keeps it only in its client record.
+    pub large_type: bool,
     pub messages: MemFlash,
 }
+
+/// The header byte's bits: a home follows, and its record's type flag.
+const HAS_HOME: u8 = 1;
+const LARGE_TYPE: u8 = 2;
 
 impl Flash {
     /// A board fresh off the flasher: no record, every sector erased.
     pub fn blank() -> Self {
         Self {
             home: None,
+            large_type: false,
             messages: MemFlash::new(SECTORS),
         }
     }
@@ -51,7 +60,8 @@ impl Flash {
                 path.display()
             ));
         }
-        let home = match head[8] {
+        let large_type = head[8] & LARGE_TYPE != 0;
+        let home = match head[8] & HAS_HOME {
             0 => None,
             _ => {
                 let mut address = [0u8; 16];
@@ -73,7 +83,11 @@ impl Flash {
             file.read_exact(sector)
                 .map_err(|e| format!("{}: sectors: {e}", path.display()))?;
         }
-        Ok(Self { home, messages })
+        Ok(Self {
+            home,
+            large_type: large_type && home.is_some(),
+            messages,
+        })
     }
 
     /// Write the image to `path`, whole.
@@ -82,7 +96,7 @@ impl Flash {
         out.extend_from_slice(MAGIC);
         match self.home {
             Some(address) => {
-                out.push(1);
+                out.push(HAS_HOME | if self.large_type { LARGE_TYPE } else { 0 });
                 out.extend_from_slice(&address);
             }
             None => {

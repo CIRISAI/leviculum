@@ -9,8 +9,11 @@
 //! frames into [`frame::Frame`] and pins them as PNG goldens
 //! (`tests/golden.rs`); the board will draw them into its panel.
 //!
-//! - [`font`]: the 10 x 20 atlas the cells are set in, 32 x 12 of them,
-//!   and what a cell measures on the panel (1428).
+//! - [`font`]: the two atlases the cells are set in, 9 x 15 (35 x 16
+//!   cells, the default) and 10 x 20 (32 x 12), and what a cell measures
+//!   on the panel (1428, 1532).
+//! - [`house`]: the house key's overview, its type switch, and the held
+//!   house key that switches the size (1532).
 //! - [`screen`]: the scene as styled lines, 32 x 12 cells, the chats list
 //!   and the delivery marks on their ASCII ladder (the atlas has no tick),
 //!   and which scene and cursor a model shows.
@@ -58,6 +61,7 @@ pub mod font;
 pub mod frame;
 pub mod group;
 pub mod home;
+pub mod house;
 pub mod kbraw;
 pub mod keyboard;
 pub mod keys;

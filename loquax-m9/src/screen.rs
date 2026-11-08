@@ -140,6 +140,9 @@ pub struct Look {
     /// not reach the flash, a join the record could not keep. It takes
     /// the home word's place at the bar's right end until it clears.
     pub fault: Option<loquax::ui::strings::StrId>,
+    /// The type switch's word (1532, [`crate::house`]): for a moment it
+    /// takes the bar's right end, before the fault and the home's word.
+    pub note: Option<loquax::ui::strings::StrId>,
     /// What the map shows over its picture (1531): the key hint and the
     /// corner credit, which the board's clock says ([`crate::map::Chrome`]).
     pub map: crate::map::Overlay,
@@ -158,6 +161,7 @@ impl Look {
             row: 0,
             home: None,
             fault: None,
+            note: None,
             map: crate::map::Overlay {
                 hint: None,
                 credit: false,
@@ -300,7 +304,8 @@ fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
     // A fault outranks the home's word (1493): a write that did not
     // land matters more than the fetch count.
     let word = look
-        .fault
+        .note
+        .or(look.fault)
         .map(|fault| {
             cut(
                 &loquax::ui::strings::Text::Key(fault, alloc::vec::Vec::new()).resolve(look.lang),

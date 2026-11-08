@@ -8,7 +8,8 @@
 //!
 //! `name` is the screen the keys are in: `chats`, `chat`, `compose`,
 //! `members`, `ask`, `pick`, `name` (a group's screens, [`Place`]), `map`,
-//! `pair` (the pairing screen), `search`, or `other`. `cursor` is the
+//! `pair` (the pairing screen), `house` (the overview, 1532, [`house`]),
+//! `search`, or `other`. `cursor` is the
 //! row the selection is on: the list's selected row in the whole order,
 //! the chat's message, the compose field's caret, the M9's own row on a
 //! group's sheet. `top` is the first row on screen in the same count: the
@@ -31,6 +32,16 @@ pub struct Page {
     pub cursor: usize,
     pub top: usize,
     pub zoom: Option<u8>,
+}
+
+/// The overview behind the house key (1532): one row, the type's.
+pub fn house() -> Page {
+    Page {
+        name: "house",
+        cursor: 0,
+        top: 0,
+        zoom: None,
+    }
 }
 
 /// The page `model` shows with the M9's `row` over a group's rows, the

@@ -15,7 +15,9 @@
 //! keeps ratatui's two buffers itself (what `Terminal` keeps) and makes
 //! the backend over the panel for each draw, in the size the draw is set
 //! in. Diffing against the last frame is as before; a draw in the other
-//! size clears the panel and draws whole. The map's cells are always the
+//! size clears the panel and draws whole. Both sizes' atlases and buffers
+//! are made with the renderer, so a draw in either keeps nothing on the
+//! heap, as before (the census's `draw_held`). The map's cells are always the
 //! large size's grid ([`crate::map`]); the reader's size is everything
 //! else's.
 
@@ -50,17 +52,15 @@ where
     D: DrawTarget<Color = Rgb565> + 'static,
 {
     panel: &'d mut D,
-    /// The last frame's cells and the one being drawn, ratatui's two
-    /// buffers, in the grid of `drawn`.
-    last: Buffer,
-    next: Buffer,
-    /// The size the buffers and the panel's cells are in; none before the
-    /// first draw.
-    drawn: Option<Size>,
+    /// Each size's last frame's cells and the one being drawn, ratatui's
+    /// two buffers, in that size's grid; small first.
+    grids: [Grid; 2],
+    /// The size the panel's cells are in now.
+    drawn: Size,
     /// The size the reader chose: everything but the map is set in it.
     size: Size,
     /// Each size's atlas, made once (each making leaks its table).
-    fonts: [Option<MonoFont<'static>>; 2],
+    fonts: [MonoFont<'static>; 2],
     /// The last draw put the map's pixels over the cells.
     map_drawn: bool,
     /// Where the last draw's screen stood (1533).
@@ -70,6 +70,23 @@ where
     clock: Option<fn() -> u64>,
     /// What the last map draw did; taken by the board's log.
     map_stats: Option<MapStats>,
+}
+
+/// One size's two buffers: the last frame's cells and the next one's.
+struct Grid {
+    last: Buffer,
+    next: Buffer,
+}
+
+impl Grid {
+    fn of(size: Size) -> Self {
+        let (cols, rows) = size.grid();
+        let area = Rect::new(0, 0, cols as u16, rows as u16);
+        Self {
+            last: Buffer::empty(area),
+            next: Buffer::empty(area),
+        }
+    }
 }
 
 /// One map draw, for the board's `[MAP]` line (1531): the zoom, the
@@ -95,11 +112,10 @@ where
     pub fn new(panel: &'d mut D) -> Result<Self, DrawError> {
         let mut renderer = Self {
             panel,
-            last: Buffer::empty(Rect::ZERO),
-            next: Buffer::empty(Rect::ZERO),
-            drawn: None,
+            grids: Size::ALL.map(Grid::of),
+            drawn: Size::DEFAULT,
             size: Size::DEFAULT,
-            fonts: [None, None],
+            fonts: Size::ALL.map(Size::atlas),
             map_drawn: false,
             window: screen::Window::default(),
             clock: None,
@@ -119,10 +135,9 @@ where
         self.size = size;
     }
 
-    /// The atlas of `size`, made the first time it is asked.
-    fn font(&mut self, size: Size) -> MonoFont<'static> {
-        let slot = &mut self.fonts[usize::from(size.large())];
-        *slot.get_or_insert_with(|| size.atlas())
+    /// The atlas of `size`.
+    fn font(&self, size: Size) -> MonoFont<'static> {
+        self.fonts[usize::from(size.large())]
     }
 
     /// mousefood over the panel in `size`'s atlas, for one draw. Every
@@ -142,15 +157,14 @@ where
         EmbeddedBackend::new(&mut *self.panel, config)
     }
 
-    /// The buffers and the panel in `size`'s grid: cleared to the ground
-    /// and blank, so the next draw draws every cell that is not blank.
+    /// The panel in `size`'s grid: cleared to the ground and the grid's
+    /// buffers blank, so the next draw draws every cell that is not blank.
     fn set_grid(&mut self, size: Size) -> Result<(), DrawError> {
-        let (cols, rows) = size.grid();
-        let area = Rect::new(0, 0, cols as u16, rows as u16);
         self.backend(size).clear().map_err(|_| DrawError)?;
-        self.last = Buffer::empty(area);
-        self.next = Buffer::empty(area);
-        self.drawn = Some(size);
+        let grid = &mut self.grids[usize::from(size.large())];
+        grid.last.reset();
+        grid.next.reset();
+        self.drawn = size;
         Ok(())
     }
 
@@ -259,8 +273,7 @@ where
     /// the last frame saw change: it holds the picture's rows blank.
     fn leave_map(&mut self) -> Result<(), DrawError> {
         if self.map_drawn {
-            let size = self.drawn.unwrap_or(self.size);
-            self.set_grid(size)?;
+            self.set_grid(self.drawn)?;
             self.map_drawn = false;
         }
         Ok(())
@@ -284,14 +297,22 @@ where
         size: Size,
         lines: impl FnOnce(usize, usize) -> alloc::vec::Vec<RLine>,
     ) -> Result<(), DrawError> {
-        if self.drawn != Some(size) {
+        if self.drawn != size {
             self.set_grid(size)?;
         }
-        let area = self.next.area;
+        let at = usize::from(size.large());
+        let area = self.grids[at].next.area;
         let lines = lines(area.width.into(), area.height.into());
-        Paragraph::new(to_ratatui_text(&lines)).render(area, &mut self.next);
-        let last = core::mem::take(&mut self.last);
-        let next = core::mem::take(&mut self.next);
+        Paragraph::new(to_ratatui_text(&lines)).render(area, &mut self.grids[at].next);
+        // The backend borrows the panel and the atlas, the diff the grid:
+        // the grid is moved out for the draw and back after.
+        let Grid { last, next } = core::mem::replace(
+            &mut self.grids[at],
+            Grid {
+                last: Buffer::default(),
+                next: Buffer::default(),
+            },
+        );
         let drawn = {
             let updates = last.diff(&next);
             let mut backend = self.backend(size);
@@ -301,8 +322,10 @@ where
         };
         let mut spare = last;
         spare.reset();
-        self.last = next;
-        self.next = spare;
+        self.grids[at] = Grid {
+            last: next,
+            next: spare,
+        };
         drawn.map_err(|_| DrawError)
     }
 

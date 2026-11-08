@@ -18,3 +18,11 @@ down
 enter
 dump 05-chat-after-reboot.png
 back
+
+# The type (1532): the held house key switches to the large size, and the
+# client record keeps it across a power cycle.
+hold home 1200
+wait 400
+dump 06-list-large.png
+reboot
+dump 07-list-large-after-reboot.png

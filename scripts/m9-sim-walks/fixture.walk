@@ -33,6 +33,19 @@ text Hallo M9
 dump 08-compose.png
 back
 
+# The house key (1532): a tap opens the overview once its gap passed, its
+# row switches the type, Back leaves; a held house key switches it back.
+home
+wait 400
+dump 09-house.png
+enter
+dump 09-house-large.png
+back
+dump 09-chat-large.png
+hold home 1200
+wait 400
+dump 09-chat-small.png
+
 # Every screen the goldens pin, through the board's FRAME_DUMP path.
 screen chats 10-chats.png
 screen chat 11-chat.png

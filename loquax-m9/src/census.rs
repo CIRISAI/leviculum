@@ -364,6 +364,15 @@ impl fmt::Display for SessionLine<'_> {
     }
 }
 
+/// A screen's name in a census line in `size` (1532): the default size's
+/// as before, the other's with its size after a dash, `chats-large`.
+pub fn screen_name(screen: &str, size: crate::font::Size) -> alloc::string::String {
+    match size == crate::font::Size::DEFAULT {
+        true => alloc::string::String::from(screen),
+        false => alloc::format!("{screen}-{}", size.name()),
+    }
+}
+
 /// The census line's words after the screen's name: what both steps cost
 /// and the verdict, `ok` or `over=<ceiling>`.
 pub struct Line<'a> {

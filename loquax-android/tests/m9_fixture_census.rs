@@ -13,6 +13,7 @@ use loquax::home::ask::LORA_PAGE_BYTES;
 use loquax::home::wire;
 use loquax_m9::census::{self, Census, Probe, Step};
 use loquax_m9::fixture::SCREENS;
+use loquax_m9::font::Size;
 use loquax_m9::frame::Frame;
 use loquax_m9::map::{Map, FIXTURE};
 use loquax_m9::render::Renderer;
@@ -95,7 +96,8 @@ impl Probe for HostProbe {
 
 /// The census the board prints, over the same models, held to the same
 /// budgets: the two screens of slice four, the group's seven of slice
-/// six (1366) and the map's two of slice seven (1375).
+/// six (1366) and the map's two of slice seven (1375), in both type sizes
+/// (1532), the large one's lines named `<screen>-large`.
 #[test]
 fn every_screen_keeps_the_boards_budgets() {
     let _serial = SERIAL
@@ -116,22 +118,26 @@ fn every_screen_keeps_the_boards_budgets() {
         map.painter.bytes()
     );
     assert!((painter_held as usize) < census::PAINTER_HELD);
-    for screen in SCREENS {
-        let budget = screen.budget();
-        let (model, row) = screen.walk();
-        let got: Census =
-            census::measure_at(&mut probe, &model, row, &mut renderer, &mut map).expect("draw");
-        let line = census::Line {
-            screen: screen.name(),
-            census: &got,
-            budget: &budget,
-        };
-        println!("[CENSUS] {line}");
-        assert!(
-            got.scene.peak > 0 && got.scene.stack > 0,
-            "{screen:?}: the probe measured nothing"
-        );
-        assert_eq!(budget.over(&got), None, "{line}");
+    for size in Size::ALL {
+        for screen in SCREENS {
+            let budget = screen.budget();
+            let (mut model, row) = screen.walk();
+            loquax_m9::house::set_size(size, &mut model, &mut renderer);
+            let got: Census =
+                census::measure_at(&mut probe, &model, row, &mut renderer, &mut map).expect("draw");
+            let name = census::screen_name(screen.name(), size);
+            let line = census::Line {
+                screen: &name,
+                census: &got,
+                budget: &budget,
+            };
+            println!("[CENSUS] {line}");
+            assert!(
+                got.scene.peak > 0 && got.scene.stack > 0,
+                "{screen:?}: the probe measured nothing"
+            );
+            assert_eq!(budget.over(&got), None, "{line}");
+        }
     }
 }
 

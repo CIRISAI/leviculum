@@ -132,11 +132,17 @@ pub fn file(text: &str) -> Result<Vec<Step>, String> {
                     .split_once(char::is_whitespace)
                     .ok_or_else(|| at(String::from("hold <key> <ms>")))?;
                 let (code, held) = (key(name)?, ms(held.trim())?);
+                // A press every HOLD_REPEAT_MS, as the bench injects: the
+                // press's own step is part of the interval (1532; before,
+                // the presses stood STEP_MS further apart than a hold's).
                 let repeat = u64::from(HOLD_REPEAT_MS);
                 let mut t = 0;
                 while t < held.max(1) {
                     steps.push(Step::Key(code));
-                    steps.push(Step::Wait(repeat.min(held.saturating_sub(t)).max(1)));
+                    let rest = repeat.min(held.saturating_sub(t)).saturating_sub(STEP_MS);
+                    if rest > 0 {
+                        steps.push(Step::Wait(rest));
+                    }
                     t += repeat;
                 }
             }
@@ -200,10 +206,11 @@ mod tests {
                 Step::Key(0xb6),
                 Step::Key(0x0d),
                 Step::Wait(500),
+                // A press every 200 ms: its own 150 ms step, then 50.
                 Step::Key(0xb5),
-                Step::Wait(200),
+                Step::Wait(50),
                 Step::Key(0xb5),
-                Step::Wait(200),
+                Step::Wait(50),
                 Step::Reboot,
                 Step::Dump(String::from("a.png")),
                 Step::Screen(10, String::from("p.png")),
