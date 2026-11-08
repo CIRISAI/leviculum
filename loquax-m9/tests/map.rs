@@ -196,7 +196,7 @@ fn a_kept_map_picture_is_copied_back_after_a_page_switch() {
     let (again, copied, stats) = press(M9Key::Char('M'), &mut model, &mut renderer);
     assert!(map::shown(&model));
     assert_eq!(again, 1, "back on the map: copied, not drawn");
-    assert_eq!(copied, 2);
+    assert_eq!(copied, 1, "the draw's own copy is not counted");
     let stats = stats.expect("a map draw");
     assert!(stats.kept);
     assert_eq!(stats.picture_us, 0);
@@ -204,6 +204,105 @@ fn a_kept_map_picture_is_copied_back_after_a_page_switch() {
     let (zoomed, _, stats) = press(M9Key::Char('+'), &mut model, &mut renderer);
     assert_eq!(zoomed, 2, "the zoom draws it");
     assert!(!stats.expect("a map draw").kept);
+}
+
+/// The kept picture's key is the view and the pins (1554): the key hint
+/// and the corner credit are words over it, so their going leaves the
+/// picture kept. Window 13 drew it three times on one open (at the open
+/// and each time a word over it went) and again on Map after Back. The
+/// board's walk with its chrome's clock ([`map::Chrome`]): open with the
+/// hint and the credit, the hint's second page, the hint and the credit
+/// gone, Back, Map (the hint again, the credit once a boot): one picture
+/// drawn, three copies, every frame the one a fresh, uncached draw with the same words
+/// gives. The control: a zoom draws it again.
+#[test]
+fn the_words_over_the_map_never_draw_its_picture_again() {
+    let mut model = fixture::model();
+    let mut panel = Frame::new();
+    let mut shown = Frame::new();
+    let mut map = Map::new(FIXTURE).expect("region");
+    map.keep_pictures();
+    let mut renderer = Renderer::new(&mut panel).expect("renderer");
+    let mut chrome = map::Chrome::default();
+    let mut row = 0;
+    let fresh = |model: &UiModel<Field>, look: &Look| {
+        let mut frame = Frame::new();
+        let mut map = Map::new(FIXTURE).expect("region");
+        Renderer::new(&mut frame)
+            .expect("renderer")
+            .show(model, look, &mut map)
+            .expect("draw");
+        frame
+    };
+    let mut step = |key: Option<M9Key>,
+                    now: u64,
+                    model: &mut UiModel<Field>,
+                    renderer: &mut Renderer<'_, Frame>,
+                    chrome: &mut map::Chrome| {
+        if let Some(key) = key {
+            group::press(model, &mut row, &event(key));
+        }
+        chrome.seen(map::shown(model), now);
+        let overlay = chrome.overlay(now, || !model.map_pins().is_empty());
+        let look = Look {
+            map: overlay,
+            ..Look::of(model)
+        };
+        renderer.show(model, &look, &mut map).expect("draw");
+        support::flush_runs(renderer.panel(), &mut shown);
+        assert_eq!(
+            shown.pixels(),
+            fresh(model, &look).pixels(),
+            "at {now} ms after {key:?} under {overlay:?}"
+        );
+        let kept = map.kept.as_ref().expect("kept");
+        (overlay, kept.drawn, kept.copied)
+    };
+    let (open, ..) = step(
+        Some(M9Key::Char('M')),
+        0,
+        &mut model,
+        &mut renderer,
+        &mut chrome,
+    );
+    assert!(open.hint.is_some() && open.credit, "{open:?}");
+    let (turned, ..) = step(None, 3_500, &mut model, &mut renderer, &mut chrome);
+    assert_ne!(turned.hint, open.hint, "the hint's second page: {turned:?}");
+    assert!(turned.credit);
+    let (bare, ..) = step(None, 6_500, &mut model, &mut renderer, &mut chrome);
+    assert_eq!(
+        bare,
+        map::Overlay::default(),
+        "the hint and the credit went"
+    );
+    step(
+        Some(M9Key::Back),
+        13_500,
+        &mut model,
+        &mut renderer,
+        &mut chrome,
+    );
+    assert!(!map::shown(&model));
+    let (again, drawn, copied) = step(
+        Some(M9Key::Char('M')),
+        14_000,
+        &mut model,
+        &mut renderer,
+        &mut chrome,
+    );
+    assert!(again.hint.is_some() && !again.credit, "{again:?}");
+    assert_eq!((drawn, copied), (1, 3), "draws 1, copies 3");
+    let stats = renderer.take_map_stats().expect("a map draw");
+    assert!(stats.kept);
+    // The control: a zoom is a new view, drawn.
+    let (_, zoomed, _) = step(
+        Some(M9Key::Char('+')),
+        14_500,
+        &mut model,
+        &mut renderer,
+        &mut chrome,
+    );
+    assert_eq!(zoomed, 2, "the zoom draws it");
 }
 
 /// A redraw that changes nothing flushes nothing (1455): the board

@@ -239,11 +239,10 @@ where
         let bare = !map::covers(map.region.header(), &view);
         let credit = (!bare).then(|| map::short_credit(&attribution));
         let bottom = map::bottom(model, &look.map, credit, look.lang);
-        // The picture takes the bottom row when it has no words (1531).
-        let painted = match bottom {
-            Some(_) => view,
-            None => map::with_bottom(&view),
-        };
+        // The picture always takes the bottom row (1554): the hint and the
+        // card are drawn over it, so a word that comes or goes leaves the
+        // picture as it is and only the copy shows what was under it.
+        let painted = map::with_bottom(&view);
         let corner = credit.filter(|_| look.map.credit);
         self.window = screen::Window::default();
         self.seen = None;
@@ -257,15 +256,18 @@ where
             zoom: view.zoom(),
             ..MapStats::default()
         };
-        // The names where no pin and no word is (1531).
-        let mut taken = map::pin_cells(&pins);
-        taken.extend(corner.map(map::credit_cells));
+        // The names where no pin is (1531). The words (the hint, the card,
+        // the corner credit) are overlays (1554): drawn over the picture
+        // after it, never part of its key, so a word that goes uncovers
+        // the picture kept under it.
+        let taken = map::pin_cells(&pins);
         match (&mut map.kept, bare) {
             (_, true) => {}
-            // The kept picture (1507): drawn when the view or the cells
-            // its names keep clear of moved, copied back every time.
+            // The kept picture (1507, 1554): drawn when the view or the
+            // pins moved, copied back every time.
             (Some(kept), false) => {
                 if kept.holds(&painted, &taken) {
+                    kept.copied = kept.copied.saturating_add(1);
                     stats.kept = true;
                     stats.names = self.names_kept;
                 } else {

@@ -192,8 +192,8 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> Option<(Viewport, Vec<PinCell
     Some((viewport, pins))
 }
 
-/// `view` grown by the bottom row, its top left corner kept: the picture
-/// when the bottom row has no words.
+/// `view` grown by the bottom row, its top left corner kept: the picture,
+/// which always takes the bottom row; its words are drawn over it (1554).
 pub fn with_bottom(view: &Viewport) -> Viewport {
     let (w, h) = view.size();
     let mut tall = *view;
@@ -673,12 +673,6 @@ where
     Ok(())
 }
 
-/// The cells the corner credit covers, for [`names`].
-pub fn credit_cells(credit: &str) -> (u16, u16, u16) {
-    let width = u16::try_from(fit_width(credit) + 2).unwrap_or(PICTURE.width);
-    (PICTURE.width.saturating_sub(width), 0, width)
-}
-
 /// Why the map was not drawn.
 #[derive(Debug)]
 pub enum MapError {
@@ -890,7 +884,7 @@ impl<'r> Map<'r> {
 
     /// Keep the picture between draws from here on (1507): a page switch
     /// back to the map, a key that moves no pin and a word that comes or
-    /// goes copy it back instead of drawing it. Its bytes, a panel's
+    /// goes (1554) copy it back instead of drawing it. Its bytes, a panel's
     /// worth, on the heap.
     pub fn keep_pictures(&mut self) -> usize {
         let kept = Kept::new();
@@ -910,16 +904,20 @@ pub type Clear = Vec<(u16, u16, u16)>;
 
 /// The map's picture with its names, as last drawn (1507, move 8 of the
 /// 2026-11-07 structure review's M9 list): a panel's worth of RGB565 and
-/// what it shows, the view and the cells the names kept clear of (the
-/// pins', the corner credit's). Drawn again only when either moved: a
-/// pan, a zoom, a pin that came or went.
+/// what it shows. Its key is the view and the pins' cells (1554); the
+/// region is the [`Map`]'s, one for the map's life. The words over the
+/// picture (the key hint, the pin's card, the corner credit) are no part
+/// of it: they are drawn over the copy, so one that goes shows the
+/// picture kept under it. Drawn again only when the key moved: a pan, a
+/// zoom, a pin that came or went.
 pub struct Kept {
     pixels: Vec<u16>,
-    /// The view and the clear cells of what `pixels` holds.
+    /// The view and the pins' cells of what `pixels` holds.
     holds: Option<(Viewport, Clear)>,
     /// The picture's size.
     size: (u32, u32),
-    /// Pictures drawn and pictures copied back, since it was made.
+    /// Pictures drawn, and draws that copied a kept picture back instead
+    /// of drawing it (a draw's own copy is not counted), since it was made.
     pub drawn: u32,
     pub copied: u32,
 }
@@ -998,9 +996,8 @@ impl Kept {
         });
         panel
             .fill_contiguous(&area, colours)
-            .map_err(|_| MapError::Draw)?;
-        self.copied = self.copied.saturating_add(1);
-        Ok(())
+            .map_err(|_| MapError::Draw)
+            .map(|_| ())
     }
 }
 
