@@ -13,6 +13,7 @@
 #![warn(unreachable_pub)]
 
 pub mod api;
+pub mod auto_bluetooth;
 pub mod auto_layer;
 pub mod auto_serial;
 pub mod auto_servers;

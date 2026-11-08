@@ -8,8 +8,8 @@
   # network's own discovered ones once enough stand. A pinned list:
   # server_list = host:port, host:port
   servers = yes
-  # BLE when an adapter is present (not built yet).
-  bluetooth = no
+  # BLE when an adapter is present, Columba-compatible.
+  bluetooth = yes
   # LNodes by their USB strings, RNodes after a second of
   # silence and one detect request, on USB serial ports.
   serial = yes

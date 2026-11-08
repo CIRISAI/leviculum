@@ -1341,6 +1341,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "AUTO_SERVER",
         required_keys: &["slot", "chosen", "reason", "from"],
     },
+    // The Bluetooth medium's verdict (`auto_bluetooth.rs`, #471 step 6):
+    // the adapter BlueZ named (`none` else), why (`present`, `no_adapter`,
+    // `powered_off`, `configured`, `not_built`), whether a section was
+    // attached and its name. Once, again when the verdict changes.
+    EventSchema {
+        name: "AUTO_BLUETOOTH",
+        required_keys: &["adapter", "reason", "attached", "section"],
+    },
     // The serial medium's verdict on one by-id entry (`auto_serial.rs`,
     // #471 step 5): the board an LNode names (`none` else), the by-id name
     // (`port`), `kind` (`lnode`, `rnode`, `bootloader`, `other`), why

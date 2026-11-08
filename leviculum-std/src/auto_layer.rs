@@ -5,8 +5,8 @@
 //! the four switches, the rule that turns a file, the host marker and the
 //! environment into one decision, and the medium it moves itself: the LAN
 //! (an AutoInterface). The servers medium is [`crate::auto_servers`] (step
-//! 3), serial is [`crate::auto_serial`] (step 5). Bluetooth is read and
-//! reported, and starts nothing until its step lands.
+//! 3), serial is [`crate::auto_serial`] (step 5), Bluetooth is
+//! [`crate::auto_bluetooth`] (step 6).
 //!
 //! The decision sits in front of the core. It edits the interface list a
 //! [`Config`] hands the builder, and the core never learns that an
@@ -37,7 +37,7 @@ pub struct AutoMedia {
     pub lan: bool,
     /// The shipped server list (step 3, [`crate::auto_servers`]).
     pub servers: bool,
-    /// BLE when an adapter is present (step 6; starts nothing yet).
+    /// BLE when an adapter is present (step 6, [`crate::auto_bluetooth`]).
     pub bluetooth: bool,
     /// LNodes and RNodes on USB serial ports (step 5, [`crate::auto_serial`]).
     pub serial: bool,
@@ -59,7 +59,7 @@ impl AutoMedia {
     pub const SHIPPED: Self = Self {
         lan: true,
         servers: true,
-        bluetooth: false,
+        bluetooth: true,
         serial: true,
     };
 
@@ -374,7 +374,7 @@ mod tests {
         };
         assert_eq!(
             layer.summary(),
-            "on reason=default lan=yes servers=yes bluetooth=no serial=yes"
+            "on reason=default lan=yes servers=yes bluetooth=yes serial=yes"
         );
     }
 

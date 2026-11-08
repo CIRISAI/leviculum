@@ -1758,7 +1758,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             "reticulum logging interfaces auto\n\
              Default Interface\n\
-             lan=yes servers=yes bluetooth=no serial=yes\n"
+             lan=yes servers=yes bluetooth=yes serial=yes\n"
         );
     }
 

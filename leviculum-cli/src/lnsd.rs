@@ -252,6 +252,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(scanner) = auto_serial.as_mut() {
         leviculum_std::auto_serial::apply(scanner, &mut config);
     }
+    // The Bluetooth medium (#471 step 6): BlueZ is asked for an adapter
+    // now, so a present one is a section like any other default section;
+    // a missing or powered-off one is a warning, asked again below.
+    let mut auto_bluetooth = leviculum_std::auto_bluetooth::for_layer(auto_layer, &config);
+    if let Some(medium) = auto_bluetooth.as_mut() {
+        leviculum_std::auto_bluetooth::apply(medium, &mut config).await;
+    }
 
     // Resource receive-window policy (Codeberg #85): env var, not a config
     // key, because the config format is shared with Python rnsd.
@@ -262,10 +269,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Reticulum daemon running");
 
-    // The serial rescan: every `RESCAN` a blocking pass over the by-id
-    // directory, its finds handed to the loop below, which attaches them.
+    // The automatic media's finds after the start, handed to the loop
+    // below, which attaches them.
     let (serial_tx, mut serial_rx) =
         tokio::sync::mpsc::channel::<leviculum_std::config::InterfaceConfig>(16);
+    // The Bluetooth rescan: a missing or powered-off adapter is asked for
+    // every `RESCAN` until one is taken; after that the BLE interface's own
+    // retry loop owns it.
+    if let Some(mut medium) = auto_bluetooth {
+        if medium.wants_probe() {
+            let tx = serial_tx.clone();
+            tokio::spawn(async move {
+                while medium.wants_probe() {
+                    tokio::time::sleep(leviculum_std::auto_bluetooth::RESCAN).await;
+                    if let Some(section) = leviculum_std::auto_bluetooth::check(&mut medium).await {
+                        let _ = tx.send(section).await;
+                        return;
+                    }
+                }
+            });
+        }
+    }
+    // The serial rescan: every `RESCAN` a blocking pass over the by-id
+    // directory.
     if let Some(mut scanner) = auto_serial {
         tokio::spawn(async move {
             loop {

@@ -3421,7 +3421,7 @@ mod tests {
         assert_eq!(
             auto_layer(&mut core),
             Some(Value::String(
-                "on reason=default lan=yes servers=yes bluetooth=no serial=yes".into()
+                "on reason=default lan=yes servers=yes bluetooth=yes serial=yes".into()
             ))
         );
     }
