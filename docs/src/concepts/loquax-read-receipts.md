@@ -132,7 +132,9 @@ which has no proof the sender ever sees
 ([receipts for propagated post](loquax-propagation-receipts.md)); since
 1462 for every message on the device, direct, propagated or pulled from the
 recipient's mailbox. The recipient's device sends it, not switchable, only
-to a sender whose message set bit 2. A client of a mailbox holds no
+to a sender whose message set bit 2. Every message is acknowledged that
+way except a bare receipt, one with no text and no field but the `lev`
+pair, so an answer that carries a receipt gets its own. A client of a mailbox holds no
 identity, so it hands its mailbox an arrived mark and the mailbox signs the
 receipt; the mailbox never sends one on its own, archiving is no device.
 Section 6 says why the proof is not enough.

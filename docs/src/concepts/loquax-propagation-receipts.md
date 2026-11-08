@@ -128,7 +128,7 @@ fields[0xFC] = map {
   would. Waiting for the first device to pull it, as the study proposed,
   would make the receipt depend on a phone being online, which a
   transport proof does not. A client of a home node acknowledges nothing
-  (`loquax/src/ui/arrival.rs:293`, `arrival_step`, returns at
+  (`loquax/src/ui/arrival.rs:283`, `arrival_step`, returns at
   `home_client`); the devices take the receipt that comes back from the
   peer as any device does.
 
@@ -145,12 +145,12 @@ fields[0xFC] = map {
   bare receipt of either kind; an answer a receipt rides on is a message
   and is acknowledged (1486), and so is a group's copy (1466).
 - **On a device that is its own node**: `arrived_here`
-  (`loquax/src/ui/arrival.rs:236`) owes it, once per message (the ledger
+  (`loquax/src/ui/arrival.rs:226`) owes it, once per message (the ledger
   line `arrival acknowledged to the sender`); `arrival_step`
-  (`loquax/src/ui/arrival.rs:283`) sends it after the read receipt's
+  (`loquax/src/ui/arrival.rs:273`) sends it after the read receipt's
   batch window, 5 s after the first arrival, alone or riding on the next
   message to that sender. Read wins: an id seen while read receipts go to
-  that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:399`).
+  that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:389`).
 - **On a home node** (since 1462): the home acknowledges nothing on its
   own; archiving is no device. A device that pulled the message hands the
   home an arrived mark (`MarkFlag::Arrived`), and the home's `arrived`
@@ -164,7 +164,7 @@ fields[0xFC] = map {
   holds, so only this receipt says the device has it
   ([the read-receipts page](loquax-read-receipts.md), section 6).
 - **Taking it**: `take_lev` (`loquax/src/ui/receipts.rs:212`) hands a
-  `0x07` to `apply_arrival` (`loquax/src/ui/arrival.rs:427`) before the
+  `0x07` to `apply_arrival` (`loquax/src/ui/arrival.rs:417`) before the
   read-receipts switch is looked at. A `0x07` alone carries no mark and
   does not change what the peer is believed to say about read receipts.
 
@@ -198,7 +198,7 @@ a line (`on the recipient's device: its receipt`, before 1462 `delivered
 via the propagation network`, `collected from the
 propagation network`, `not collected at the propagation node; perhaps via
 another`), so the words survive a restart; `arrival::witness`
-(`loquax/src/ui/arrival.rs:105`) reads it, and a proof that came first
+(`loquax/src/ui/arrival.rs:104`) reads it, and a proof that came first
 keeps the device's words. The mark itself is the delivered rung of
 `DELIVERY_GLYPHS`, unchanged.
 
@@ -365,7 +365,7 @@ other key in either map (`lev_status::announced_version`).
   and `unknown` leave it open; each answer logs
   `PN_STATUS_ASKED ids=N answered=N`, where answered counts the ids the
   node named with a word other than `unknown`. The answers fold into the
-  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:455`).
+  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:445`).
 
 ### Asking, as built (1409)
 

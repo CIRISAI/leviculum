@@ -42,7 +42,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use leviculum_lxmf::constants::{FIELD_AUDIO, FIELD_FILE_ATTACHMENTS, FIELD_IMAGE};
 use leviculum_lxmf::lev::{Lev, PropagationReceipt};
 use leviculum_lxmf::lev_status::MessageStatus;
 use leviculum_lxmf::message::Field;
@@ -172,27 +171,18 @@ pub fn rung_times(message: &Message) -> (Option<WallTime>, Option<WallTime>) {
 /// The acknowledgement rule (1462): a message on this device is
 /// acknowledged, however it came, when its own `lev` mark carries bit 2 and
 /// it is a message, not a bare receipt of either kind (no receipt of a
-/// receipt). A receipt is bare when nothing else came with it: no text, no
-/// attachment. A message that carries one, an answer with the read or
-/// device receipt riding on it (1486), is a message and is acknowledged.
-/// A group's copy is one too since 1466: its home passes the writer's bit 2
-/// on, and the receipt goes to the group, which counts it for the writer's
-/// two ticks. A group's status, membership or digest carries no bit 2. A
-/// stock sender's message has no mark and gets none.
+/// receipt). Bare is what the screen takes for a receipt alone and keeps
+/// no bubble of (`receipts::alone`, 1557): no text, no field but
+/// the namespace's pair. A message that carries one, an answer with the
+/// read or device receipt riding on it (1486), is a message and is
+/// acknowledged. A group's copy is one too since 1466: its home passes the
+/// writer's bit 2 on, and the receipt goes to the group, which counts it
+/// for the writer's two ticks. A group's status, membership or digest
+/// carries no bit 2. A stock sender's message has no mark and gets none.
 pub fn acknowledges(body: &[u8], fields: &[Field], lev: Option<&Lev>) -> bool {
     lev.is_some_and(|lev| {
-        let receipt = lev.receipt.is_some() || lev.propagation_receipt.is_some();
-        lev.supports_propagation_receipts() && !(receipt && is_bare(body, fields))
+        lev.supports_propagation_receipts() && !super::receipts::alone(body, fields, lev)
     })
-}
-
-/// Nothing but marks: no text and no attachment. A receipt alone is sent
-/// so, with an empty body and its `lev` field.
-fn is_bare(body: &[u8], fields: &[Field]) -> bool {
-    body.iter().all(u8::is_ascii_whitespace)
-        && !fields
-            .iter()
-            .any(|(key, _)| matches!(*key, FIELD_FILE_ATTACHMENTS | FIELD_IMAGE | FIELD_AUDIO))
 }
 
 /// The receipt alone to `peer`: the namespace with key `0x07` and no
@@ -521,6 +511,9 @@ impl<B> UiModel<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviculum_lxmf::constants::{
+        FIELD_AUDIO, FIELD_FILE_ATTACHMENTS, FIELD_IMAGE, FIELD_REACTION,
+    };
     use leviculum_lxmf::lev::{
         GroupCopy, Receipt, CAP_GROUPS, CAP_PROPAGATION_RECEIPTS, CAP_READ_RECEIPTS,
     };
@@ -588,9 +581,19 @@ mod tests {
                 "1486: an attachment {key} that carries one"
             );
         }
+        // 1557: bare is what the screen takes for a receipt alone
+        // (`receipts::alone`): any field beside the namespace's pair makes
+        // a message the screen keeps, and what it keeps it acknowledges.
+        let rider = arrival.fields().to_vec();
         assert!(
-            !acknowledges(b"", &[(0x02, vec![0xc0])], Some(&arrival)),
-            "a field that is no attachment leaves it bare"
+            !acknowledges(b"", &rider, Some(&arrival)),
+            "a receipt with its own namespace pair only is bare"
+        );
+        let mut reaction = rider.clone();
+        reaction.push((FIELD_REACTION, vec![0xc0]));
+        assert!(
+            acknowledges(b"", &reaction, Some(&arrival)),
+            "1557: a field that is no attachment is still a message"
         );
         let copy = Lev {
             group_copy: Some(GroupCopy {
