@@ -22,7 +22,7 @@
 //! which shows the key hint for a few seconds after the map opens and
 //! after a key the map does not know ([`Chrome`]), else the chosen pin's
 //! card with the data's credit, else more of the picture. The credit
-//! also stands in the picture's top right corner for two seconds the
+//! also stands in the picture's top right corner for five seconds the
 //! first time the map opens after a boot.
 //!
 //! A draw is the cells first, every row in the map's ground, then the
@@ -265,8 +265,11 @@ pub struct Overlay {
 pub const HINT_MS: u64 = 3_000;
 
 /// How long the credit stands in the picture's corner the first time
-/// the map opens after a boot.
-pub const CREDIT_MS: u64 = 2_000;
+/// the map opens after a boot: five seconds, the least the OSMF's
+/// attribution guidelines ("Licence/Attribution Guidelines", interactive
+/// maps) allow before an attribution collapses; their startup clause
+/// lets it stand once, not on every look.
+pub const CREDIT_MS: u64 = 5_000;
 
 /// The board's clock for the map's words (1531): when the map opened,
 /// when a key it does not know was pressed, and whether this boot showed
@@ -944,7 +947,7 @@ mod words_1531 {
 
     /// The clock: the hint stands three seconds after the map opens, the
     /// pins' page three more when there is a pin, none after; a key the
-    /// map does not know brings it back; the credit stands two seconds
+    /// map does not know brings it back; the credit stands five seconds
     /// on the boot's first open only.
     #[test]
     fn the_hint_and_the_credit_go_by_the_clock() {
@@ -959,7 +962,8 @@ mod words_1531 {
                 credit: true
             }
         );
-        assert!(!at(&chrome, 3_100, true).credit);
+        assert!(at(&chrome, 5_999, true).credit);
+        assert!(!at(&chrome, 6_000, true).credit);
         assert_eq!(at(&chrome, 3_999, true).hint, Some(StrId::MapKeys));
         assert_eq!(at(&chrome, 4_000, true).hint, Some(StrId::MapKeysPin));
         assert_eq!(at(&chrome, 4_000, false).hint, None);

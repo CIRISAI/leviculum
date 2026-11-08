@@ -1097,7 +1097,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
   feature range-checked. The region's tiles are already geometry; there
   is no other decode.
 - **Pixels** is the map core's filler painting the view straight into
-  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:735`); the
+  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:738`); the
   whole screen adds the bar's and the legend's cells and the pins
   (`Renderer::show`, `loquax-m9/src/render.rs:136`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
@@ -1116,7 +1116,7 @@ in place:
 | the 2 km region, z10 to z15 | 820,244 B | flash, read in place: none in PSRAM |
 | the fixture region the image carries | 197,972 B | flash |
 | the view's tiles, read out of a card instead | 81,850 to 201,070 B | PSRAM, per view |
-| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:691`) | 217,508 B | PSRAM |
+| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:694`) | 217,508 B | PSRAM |
 | a map draw's heap peak (census, below) | 75,404 B | PSRAM |
 | the cells' own per view, besides the painter's (source and cells) | 191,436 B braille, 120,204 B quadrants | PSRAM |
 | the panel's frame | 153,600 B | SRAM or PSRAM |
@@ -1139,20 +1139,20 @@ renderer is written twice; the cell renderer keeps the bar and the
 legend.
 
 **The screen** (`lines`, `loquax-m9/src/map.rs:221`; `pins`,
-`loquax-m9/src/map.rs:781`), as 1531 left it after Lew's evening at
+`loquax-m9/src/map.rs:784`), as 1531 left it after Lew's evening at
 the board on 2026-11-07: the map is in the light table, in the M9's
 finish (square caps, no casings, no buildings); the UI around it keeps
 its dark tokens. There is no title row and no legend: the picture is
 the whole panel, rows 0 to 10 for the model's fit and pins (320 x 220),
 and row 11 is the picture too whenever it has no words. Its words
-(`Chrome`, `loquax-m9/src/map.rs:277`; `bottom`,
-`loquax-m9/src/map.rs:390`): the key hint, "T näher  Y weiter
+(`Chrome`, `loquax-m9/src/map.rs:280`; `bottom`,
+`loquax-m9/src/map.rs:393`): the key hint, "T näher  Y weiter
 Pfeile schieben", for three seconds after the map opens and after a key
 it does not know, the pins' page for three more when there is a pin;
 then the chosen pin's card, its age and the data's credit, "©
-OpenStreetMap", at the right end; and the credit for two seconds in the
+OpenStreetMap", at the right end; and the credit for five seconds in the
 picture's top right corner the first time the map opens after a boot.
-The names (`names`, `loquax-m9/src/map.rs:515`) are set after the
+The names (`names`, `loquax-m9/src/map.rs:518`) are set after the
 picture and before the pins, by the map core's placement rule in three
 rounds: places, then streets and rivers centred on a straight stretch
 of their line (horizontal, the atlas cannot turn text), then from z15
