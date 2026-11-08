@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:246`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:320`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -683,7 +683,7 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:268`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:354`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:828`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:914`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:572`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:658`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1931,7 +1931,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2216`).
+both (`thinknode_m9.rs:2222`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2228`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2234`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2081,9 +2081,19 @@ take 126 µs into 400 entries, 170 µs into 4000). The same fold under
 the firmware's own two choices (`leviculum-heap-lab/tests/pull.rs`,
 the lab routes the host's global allocator into either): llff 134 µs
 at 400, 1919 µs at 4000 — fourteenfold; tlsf 75 µs and 110 µs — flat.
-The firmware links tlsf now (`leviculum-esp/src/lib.rs:61`, constant
+The firmware links tlsf now (`leviculum-esp/src/lib.rs:74`, constant
 time both ways, same `critical-section` lock held O(1) instead of
-O(walk)).
+O(walk)). Not through `embedded_alloc::TlsfHeap` since 1574: that
+wrapper keeps rlsf's 4228 B control block in its `static`, in `.bss`,
+and on the ESP32-S3 `.bss` comes off core 0's stack; the bench image of
+1569 fell to 107,100 B, under the 111,000 B floor, and its own build
+script refused it. `leviculum-esp/src/pool_tlsf.rs` writes the control
+block at the front of the heap region (rlsf's const `Tlsf::new()`, then
+`insert_free_block_ptr` on the rest), so the `static` is 24 B and the
+stack is back at 111,368 B (release) and 111,332 B (bench). On the M9
+the region is PSRAM, where rlsf's free-block headers already were.
+`leviculum-heap-lab/tests/placement.rs` holds the placement on the
+host, from the same file.
 
 **The instruments stay.** `[IDLE]` says what the flash ops cost the
 UI core per window: `park_ms= park_max_ms= park_ops=`, measured around
@@ -2099,7 +2109,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2283`), and the fold runs behind the list
+(`thinknode_m9.rs:2289`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:81`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
