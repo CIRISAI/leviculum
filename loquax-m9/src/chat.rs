@@ -232,8 +232,10 @@ fn head_of(chat: &Chat, g: usize, b: usize) -> usize {
 }
 
 /// The `area` rows of bubbles, the newest at the bottom, or the cursor's
-/// bubble there when it stands above the last screen; blank rows above
-/// when the chat is shorter; and the key of the topmost bubble drawn.
+/// bubble there when it stands above the last screen; when the bubbles
+/// from the first to the cursor's do not fill the screen, the first at the
+/// top and the newer ones under it; blank rows above only when the chat
+/// is shorter; and the key of the topmost bubble drawn.
 fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, Option<u64>) {
     let at: Vec<(usize, usize)> = chat
         .groups
@@ -281,6 +283,17 @@ fn bubbles(chat: &Chat, look: &Look, cols: usize, area: usize) -> (Vec<RLine>, O
     if out.len() > area {
         out.drain(..out.len() - area);
     }
+    // The screen that ends at the anchor reached the chat's first bubble
+    // with rows to spare (1544): the view clamps to the first bubble, and
+    // the newer ones fill the rows under the anchor. Blank rows stay only
+    // when the whole chat is shorter than the pane.
+    for k in end..at.len() {
+        if out.len() >= area {
+            break;
+        }
+        out.extend(item(k));
+    }
+    out.truncate(area);
     let blank = area - out.len();
     let mut rows = Vec::with_capacity(area);
     rows.extend((0..blank).map(|_| fill(RLine::default(), cols, RStyle::default())));

@@ -404,6 +404,120 @@ fn a_long_message_is_read_by_the_line_on_the_m9() {
     );
 }
 
+/// 1544, the bench walk's black chat (window 11a, dump 03): a chat like
+/// "Lew Mobile", a run of position reports folded into one "last position"
+/// bubble and nine short texts after it, opened at the newest and the
+/// ring's up held three times, ten answers 0xb5 each as the controller
+/// gives them. The held
+/// up climbs to the folded run, the chat's first bubble; the pane then
+/// shows that bubble at its top and the texts under it, never the bar
+/// alone at the bottom over a black body. Pinned, `m9-chat-top-held.png`.
+#[test]
+fn a_held_ring_up_to_the_chats_top_still_shows_the_chat() {
+    let peer = [0x4c; 16];
+    let mut model = UiModel::<Field>::new(&[peer]);
+    update(&mut model, UiEvent::Viewing(screen::viewing()));
+    clock(&mut model, 0);
+    let receive = |model: &mut UiModel<Field>, id: u8, body: &str, fields| {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
+                message_id: [id; 32],
+                source: peer,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields,
+                verified: true,
+            }),
+        );
+    };
+    // Eleven reports in a day fold into one bubble, the run's newest.
+    for n in 0..11u8 {
+        clock(&mut model, i64::from(n) * 60);
+        let at = T0 + i64::from(n) * 60;
+        receive(
+            &mut model,
+            n + 1,
+            "",
+            ugly_store::position(at, 48_137_000 + i32::from(n) * 37),
+        );
+    }
+    let texts = [
+        "Hier Lew. Die Nachricht habe ich erhalten.",
+        "Offline-Test UI-Walk",
+        "test",
+        "test an coluimba",
+        "noch einer",
+        "und noch einer, etwas laenger als eine Zeile",
+        "kurz",
+        "fast unten",
+        "der neueste",
+    ];
+    for (n, body) in texts.into_iter().enumerate() {
+        // An hour apart: each its own group, a blank row between.
+        clock(&mut model, 3_600 * (n as i64 + 1));
+        receive(&mut model, 0x40 + n as u8, body, Vec::new());
+    }
+    model.toasts.clear();
+    // Whatever the route, a pane at the chat's first bubble shows it at
+    // its top and the rows under it.
+    let not_black = |model: &UiModel<Field>, route: &str| {
+        let rows = text_of(model);
+        // The body: every row between the top bar and the compose line.
+        let body = &rows[1..rows.len() - 1];
+        let filled = body.iter().filter(|r| !r.trim().is_empty()).count();
+        assert!(
+            body.iter().any(|r| r.contains("Hier Lew")),
+            "{route}: the texts under the first bubble still show: {rows:#?}"
+        );
+        assert!(
+            body.iter()
+                .position(|r| r.contains(screen::BAR))
+                .is_some_and(|at| at < body.len() / 2),
+            "{route}: the first bubble at the top, its bar in the flow: {rows:#?}"
+        );
+        assert!(
+            filled * 2 >= body.len(),
+            "{route}: the pane draws the rows the view covers, not a black body: {rows:#?}"
+        );
+    };
+    let open = |model: &mut UiModel<Field>| {
+        model.focus = Pane::Conversations;
+        model.chat_anchor = None;
+        on_the_board(model, M9Key::Enter);
+        assert_eq!(model.focus, Pane::Messages);
+        let opened = text_of(model);
+        assert!(
+            opened.iter().any(|r| r.contains("der neueste")),
+            "{opened:#?}"
+        );
+    };
+    // The image the walk ran (a825cf3b, before 1529): the ring's up went to
+    // the model a message a press and the chat had no anchor, so the pane
+    // stood where the cursor's bubble alone puts it. A cursor moved without
+    // the M9's lines still draws that way.
+    open(&mut model);
+    for _ in 0..30 {
+        press(&mut model, M9Key::Up);
+    }
+    assert!(model.chat_anchor.is_none(), "this route leaves no anchor");
+    not_black(&model, "a message a press, no anchor");
+    // The board today: the walk's three holds, ten answers of the ring's
+    // up each, every answer a line (1529).
+    open(&mut model);
+    for _ in 0..30 {
+        let Read::Code(code) = MEASURED.read(&[0xb5; 8]) else {
+            panic!("a ring answer is a code");
+        };
+        let event = Key::of(code).and_then(Key::event).expect("the ring's up");
+        let mut row = 0;
+        loquax_m9::group::press(&mut model, &mut row, &event);
+    }
+    not_black(&model, "held on the board");
+    check("m9-chat-top-held.png", &shown(&model));
+}
+
 /// Slice two: the compose line typed into with the M9's keys. `i` writes,
 /// the letters go into the field, Backspace erases, Left moves the caret,
 /// Enter sends what the field holds and Back leaves the line with its text
