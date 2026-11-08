@@ -178,6 +178,7 @@
 //! [LOOP] turn_ms=<n> stage=<host|node|take|draw|keys> host=.. node=.. take=.. draw=.. keys=.. entries=<n>
 //! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n>  (1569, the UI core's slow turn: msgs the queue held, entries folded)
 //!                           a turn of the loop longer than 100 ms (1463)
+//! [FOLD] entries=<n> turns=<n> wall_us=<n> unpack_us=<n> step_us=<n> finish_us=<n> route_us=<n> alloc_us=<n> allocs=<n> alloc_bytes=<n> per_entry_us wall=<n> unpack=<n> step=<n> alloc=<n>  (1575, the bench image: a pulled page's fold on the UI core, said when its last entry is folded, summed over the turns it took)
 //! ```
 //!
 //! and the banner pair at boot and every five seconds for the first two
@@ -421,6 +422,14 @@ fn kb_drain() -> (Vec<kbraw::Press>, u32, u32) {
 // the critical section across each one, so the UI core is never parked
 // holding it and no interrupt here waits on it while the UI core is
 // parked (1534, `leviculum_esp::flash`, `parked`).
+
+/// A press waits in [`KB_PRESSES`] (1575): the UI core's fold asks after
+/// each entry and yields to the keys at once.
+fn kb_waiting() -> bool {
+    stall::locked(Core::Ui, Lock::Keys, || {
+        critical_section::with(|cs| KB_PRESSES.borrow_ref(cs).waiting())
+    })
+}
 
 /// What the I/O core hands the UI core.
 enum ToUi {
@@ -2376,6 +2385,15 @@ fn ui_main(
     // how much the I/O core's queue held — the window 16a watchdog
     // fired with this core in `drain` and nothing said what drain did.
     let mut ui_turns: u32 = 0;
+    // What the I/O core handed over and no turn took yet, in order, and
+    // the pulled page being folded a budget at a time (1575): one drain
+    // turn of window 16b folded 234 entries in 836 ms before it looked at
+    // the keys.
+    let mut backlog: VecDeque<ToUi> = VecDeque::new();
+    let mut folding = home::Folding::default();
+    // The bench's split of each page's fold, said when it is folded.
+    #[cfg(m9_bench)]
+    let mut fold_clock = bench::FoldClock::default();
     loop {
         wdt.feed();
         stall::turned(Core::Ui);
@@ -2427,13 +2445,62 @@ fn ui_main(
             dirty = true;
         }
 
-        // What the I/O core brought.
-        for message in ui_drain() {
+        // What the I/O core brought, behind what earlier turns left, in
+        // order (1575). A pulled page folds until the turn's budget is
+        // spent or a key waits ([`home::FOLD_BUDGET_US`]); its rest waits
+        // for the next turn, and no later message is taken before it is
+        // folded, so a fresh model never takes an old page's rest. The
+        // turn that folds a page's last entry ends its drain there: its
+        // rows go to the summary log this turn ([`home::Folding::rows_due`]).
+        backlog.extend(ui_drain());
+        let deadline = t_turn.saturating_add(home::FOLD_BUDGET_US);
+        loop {
+            if folding.busy() {
+                #[cfg(m9_bench)]
+                let mark = fold_clock.start();
+                let chunk = folding.fold(
+                    &mut model,
+                    &leviculum_esp::uptime_us,
+                    deadline,
+                    &mut kb_waiting,
+                );
+                turn_entries += chunk.looked as u32;
+                #[cfg(m9_bench)]
+                let t_route = leviculum_esp::uptime_us();
+                if route_out(&mut model, chunk.effects, &mut ids, &mut log, &mut wants) {
+                    dirty = true;
+                }
+                #[cfg(m9_bench)]
+                fold_clock.chunk(mark, t_route);
+                if let Some(entries) = chunk.done {
+                    // The page counts as folded once, at its last entry.
+                    wants.pages += 1;
+                    #[cfg(m9_bench)]
+                    {
+                        fold_clock.say(folding.take_spent(), &mut log);
+                        if arriving && bench::carries(&entries) {
+                            arriving = false;
+                            bench::folded(&mut model, &mut log);
+                            dirty = true;
+                        }
+                    }
+                    #[cfg(not(m9_bench))]
+                    let _ = entries;
+                    break;
+                }
+                if folding.busy() {
+                    break;
+                }
+            }
+            if leviculum_esp::uptime_us() >= deadline || kb_waiting() {
+                break;
+            }
+            let Some(message) = backlog.pop_front() else {
+                break;
+            };
             turn_msgs += 1;
-            match &message {
-                ToUi::Entries(entries, _) => turn_entries += entries.len() as u32,
-                ToUi::Page { entries, .. } => turn_entries += entries.len() as u32,
-                _ => {}
+            if let ToUi::Page { entries, .. } = &message {
+                turn_entries += entries.len() as u32;
             }
             match message {
                 ToUi::Model(taken) => {
@@ -2451,18 +2518,10 @@ fn ui_main(
                     dirty = true;
                 }
                 ToUi::Entries(entries, address) => {
-                    wants.pages += 1;
+                    // Folded from the top of the loop, this turn and the
+                    // next ones (1575).
                     reader.saw(&entries, leviculum_esp::uptime_ms());
-                    let (_, effects) = home::take(&mut model, &entries, &address);
-                    if route_out(&mut model, effects, &mut ids, &mut log, &mut wants) {
-                        dirty = true;
-                    }
-                    #[cfg(m9_bench)]
-                    if arriving && bench::carries(&entries) {
-                        arriving = false;
-                        bench::folded(&mut model, &mut log);
-                        dirty = true;
-                    }
+                    folding.begin(entries, address);
                 }
                 ToUi::Answer(answer) => {
                     let effects = home::answered(&mut model, answer);
@@ -2639,7 +2698,11 @@ fn ui_main(
         }
         // The rows after the asks: the marks they keep move the ring the
         // summary's state then says (1521).
-        if !wants.rows.is_empty() || !wants.gone.is_empty() || wants.pages > 0 {
+        // Held while a page is part-folded (1575): the summary log is
+        // written once a page, as before the drain yielded.
+        if folding.rows_due(&mut wants.rows, &mut wants.gone)
+            && (!wants.rows.is_empty() || !wants.gone.is_empty() || wants.pages > 0)
+        {
             log.send(FromUi::Rows {
                 rows: core::mem::take(&mut wants.rows),
                 gone: core::mem::take(&mut wants.gone),
@@ -2898,6 +2961,90 @@ mod bench {
     static PAGE_MESSAGES: AtomicU32 = AtomicU32::new(0);
     static PAGE_MARKS: AtomicU32 = AtomicU32::new(0);
     static PAGE_SECTORS: AtomicU32 = AtomicU32::new(0);
+
+    /// A pulled page's fold, split (1575): the turns it took, its wall
+    /// time on the UI core, the route of each chunk's effects, and the
+    /// allocator's share, calls and bytes, summed over the chunks; the
+    /// unpack, step and finish come from [`home::Folding::take_spent`].
+    /// Said as one `[FOLD]` line when the page's last entry is folded.
+    #[derive(Default)]
+    pub struct FoldClock {
+        turns: u32,
+        wall: u64,
+        route: u64,
+        alloc: u64,
+        calls: u32,
+        bytes: u32,
+    }
+
+    /// Where a chunk started: the clock, the cycles, the allocator's.
+    pub struct FoldMark {
+        t0: u64,
+        cycles: u32,
+        alloc: u32,
+        calls: u32,
+        bytes: u32,
+    }
+
+    impl FoldClock {
+        pub fn start(&self) -> FoldMark {
+            FoldMark {
+                t0: leviculum_esp::uptime_us(),
+                cycles: leviculum_esp::alloc_clock::now(),
+                alloc: leviculum_esp::alloc_clock::cycles(),
+                calls: leviculum_esp::alloc_clock::calls(),
+                bytes: leviculum_esp::alloc_clock::bytes(),
+            }
+        }
+
+        /// A chunk folded from `mark`, its route from `t_route`, to now.
+        pub fn chunk(&mut self, mark: FoldMark, t_route: u64) {
+            let now = leviculum_esp::uptime_us();
+            let wall = now.saturating_sub(mark.t0);
+            let all = leviculum_esp::alloc_clock::now().wrapping_sub(mark.cycles);
+            let alloc = leviculum_esp::alloc_clock::cycles().wrapping_sub(mark.alloc);
+            self.turns += 1;
+            self.wall += wall;
+            self.route += now.saturating_sub(t_route);
+            // The allocator's cycles as a share of the chunk's, in its
+            // microseconds: no clock rate assumed.
+            self.alloc += match all {
+                0 => 0,
+                n => u64::from(alloc) * wall / u64::from(n),
+            };
+            self.calls = self
+                .calls
+                .wrapping_add(leviculum_esp::alloc_clock::calls().wrapping_sub(mark.calls));
+            self.bytes = self
+                .bytes
+                .wrapping_add(leviculum_esp::alloc_clock::bytes().wrapping_sub(mark.bytes));
+        }
+
+        /// The page is folded: its `[FOLD]` line, and the clock afresh.
+        pub fn say(&mut self, (spent, entries): (home::TakeSpent, usize), log: &mut UiLog) {
+            let f = core::mem::take(self);
+            let per = |us: u64| us / entries.max(1) as u64;
+            log.line(
+                "[FOLD] ",
+                format!(
+                    "entries={entries} turns={} wall_us={} unpack_us={} step_us={} finish_us={} route_us={} alloc_us={} allocs={} alloc_bytes={} per_entry_us wall={} unpack={} step={} alloc={}",
+                    f.turns,
+                    f.wall,
+                    spent.unpack,
+                    spent.step,
+                    spent.finish,
+                    f.route,
+                    f.alloc,
+                    f.calls,
+                    f.bytes,
+                    per(f.wall),
+                    per(spent.unpack),
+                    per(spent.step),
+                    per(f.alloc),
+                ),
+            );
+        }
+    }
 
     /// Core 0 read an open's page in `us`.
     pub fn read(us: u32, cost: rows::PageCost) {

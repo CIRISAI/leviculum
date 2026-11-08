@@ -196,7 +196,10 @@ unsafe impl GlobalAlloc for CountedHeap {
             self.peak.fetch_max(live, Ordering::Relaxed);
         }
         #[cfg(m9_bench)]
-        alloc_clock::spent(t0);
+        {
+            alloc_clock::counted(layout.size());
+            alloc_clock::spent(t0);
+        }
         ptr
     }
 
@@ -207,7 +210,10 @@ unsafe impl GlobalAlloc for CountedHeap {
         // SAFETY: the caller's contract, passed through.
         unsafe { self.heap.dealloc(ptr, layout) };
         #[cfg(m9_bench)]
-        alloc_clock::spent(t0);
+        {
+            alloc_clock::counted(0);
+            alloc_clock::spent(t0);
+        }
     }
 }
 
@@ -235,8 +241,31 @@ pub mod alloc_clock {
         }
     }
 
+    /// Calls into the allocator and bytes it handed out, per core (1575,
+    /// the `[FOLD]` line's `allocs=` and `alloc_bytes=`): a free is a
+    /// call, a realloc counts the bytes it asked. Both wrap; a reader
+    /// takes differences.
+    static CALLS: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+    static BYTES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
     pub(crate) fn spent(t0: u32) {
         SPENT[core()].fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
+    }
+
+    pub(crate) fn counted(bytes: usize) {
+        let core = core();
+        CALLS[core].fetch_add(1, Ordering::Relaxed);
+        BYTES[core].fetch_add(bytes as u32, Ordering::Relaxed);
+    }
+
+    /// The calls into the allocator this core made so far.
+    pub fn calls() -> u32 {
+        CALLS[core()].load(Ordering::Relaxed)
+    }
+
+    /// The bytes the allocator handed this core so far.
+    pub fn bytes() -> u32 {
+        BYTES[core()].load(Ordering::Relaxed)
     }
 
     /// The cycles this core spent in the allocator so far.
