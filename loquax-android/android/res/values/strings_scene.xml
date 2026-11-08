@@ -413,4 +413,10 @@
     <string name="m9_not_saved">Not saved: memory error</string>
     <string name="m9_join_not_saved">Connected, but not saved: pair again after a restart</string>
     <string name="m9_no_identity">Memory error: this device cannot read its identity and cannot start. Restart it; if this stays, it needs service.</string>
+    <string name="m9_overview">Overview</string>
+    <string name="m9_type">Text</string>
+    <string name="m9_type_small">small</string>
+    <string name="m9_type_large">large</string>
+    <string name="m9_type_now_small">Text: small</string>
+    <string name="m9_type_now_large">Text: large</string>
 </resources>

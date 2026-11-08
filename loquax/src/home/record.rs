@@ -14,7 +14,10 @@
 //!      0    4  magic "LQXC"
 //!      4    1  version, 1
 //!      5    1  admission: 1 pending (a code typed, the join not done), 2 admitted
-//!      6    2  zero
+//!      6    1  the reader's settings (1532): bit 0 the large type on the
+//!                 M9; zero in a record written before, which reads as
+//!                 the small type, the default
+//!      7    1  zero
 //!      8   64  the device identity's private key
 //!     72   64  the home identity's public key
 //!    136   16  the admission token while pending, zero once admitted
@@ -45,6 +48,8 @@ const VERSION: u8 = 1;
 const PENDING: u8 = 1;
 const ADMITTED: u8 = 2;
 const SUMMED: usize = RECORD_LEN - 4;
+/// Byte 6's bit for the large type (1532).
+const LARGE_TYPE: u8 = 1;
 
 /// Where the device's admission stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +86,8 @@ pub struct ClientRecord {
     pub cursor: u64,
     /// The name the device joins under, at most [`NAME_MAX`] bytes.
     pub name: String,
+    /// The reader switched the board's type to the large size (1532).
+    pub large_type: bool,
 }
 
 impl ClientRecord {
@@ -100,6 +107,7 @@ impl ClientRecord {
             admission: Admission::Pending { token: code.token },
             cursor: 0,
             name: String::from(&name[..end]),
+            large_type: false,
         })
     }
 
@@ -151,6 +159,7 @@ impl ClientRecord {
         let mut out = [0u8; RECORD_LEN];
         out[..4].copy_from_slice(MAGIC);
         out[4] = VERSION;
+        out[6] = u8::from(self.large_type) & LARGE_TYPE;
         out[8..72].copy_from_slice(&self.device);
         out[72..136].copy_from_slice(&self.home);
         match self.admission {
@@ -210,6 +219,7 @@ impl ClientRecord {
             admission,
             cursor: u64::from_le_bytes(cursor),
             name: String::from(name),
+            large_type: bytes[6] & LARGE_TYPE != 0,
         };
         record.device_identity()?;
         Ok(Some(record))
@@ -321,6 +331,31 @@ mod tests {
         let pull = back.pull(412, 0, 1_000).expect("admitted").expect("ask");
         assert_eq!(pull.cursor(), Some(0x0102_0304_0506_0708));
         assert_eq!(pull.page_bytes(), Some(412));
+    }
+
+    /// The type's flag (1532) round-trips in byte 6 under the checksum; a
+    /// record written before it, byte 6 zero, reads as the small type, and
+    /// the bit flipped by hand without the checksum is a torn record.
+    #[test]
+    fn the_large_type_is_kept_and_an_older_record_reads_small() {
+        let device = Identity::generate(&mut rand_core::OsRng);
+        let mut record = ClientRecord::pending(&device, &code(), "M9").expect("record");
+        assert!(!record.large_type);
+        let small = record.encode();
+        assert_eq!(small[6], 0, "as a record before 1532 wrote it");
+        record.large_type = true;
+        let large = record.encode();
+        assert_eq!(large[6], 1);
+        let back = ClientRecord::decode(&large).expect("decode").expect("some");
+        assert!(back.large_type);
+        assert_eq!(back, record);
+        let back = ClientRecord::decode(&small).expect("decode").expect("some");
+        assert!(!back.large_type);
+        let mut forged = small;
+        forged[6] = 1;
+        assert_eq!(ClientRecord::decode(&forged), Err(RecordError::Torn));
+        let slot = slots::encode(&record, 3);
+        assert_eq!(slots::decode(&slot).map(|(r, _)| r.large_type), Some(true));
     }
 
     /// An erased or empty sector is no record; a flipped byte anywhere is a
