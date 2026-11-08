@@ -46,6 +46,11 @@ pub type LcdCs<'d> = peripherals::GPIO16<'d>;
 pub type LcdDc<'d> = peripherals::GPIO15<'d>;
 pub type LcdReset<'d> = peripherals::GPIO14<'d>;
 pub type LcdBacklight<'d> = peripherals::GPIO17<'d>;
+/// The panel's tearing-effect output (1507): GPIO19 in both variants
+/// (`thinknode-m9.md`, "Display": TE 19). No schematic says it; a line
+/// that never moves leaves the draws paced by the clock
+/// (`loquax_m9::pace`), and the boot says which.
+pub type LcdTe<'d> = peripherals::GPIO19<'d>;
 
 /// The panel's clock: 40 MHz, at which a full frame flushed in 30.8 ms
 /// from SRAM and 31.5 ms from PSRAM, 99.8 % of the line rate

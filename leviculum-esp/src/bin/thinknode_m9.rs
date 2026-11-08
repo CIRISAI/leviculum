@@ -69,6 +69,12 @@
 //! [STORE] page_read entries=<n> earlier=<n> ms=<ms>   (1521, a conversation opened or scrolled to its top)
 //! [HOME] sent id=<8 hex> waiting=<n> / send=failed ...         (1415, a line typed in a chat)
 //! [DISP] flush rows=0..239 ms=<ms> t=<ms>
+//! [DISP] pace=<te|clock> edges=<n> merged=<n> t=<ms>
+//!                           when what paces the draws changes (1507,
+//!                           `loquax_m9::pace`): te is the panel's blank on
+//!                           GPIO19, clock the 60 Hz fallback of a silent
+//!                           line; merged counts the turns whose change
+//!                           waited for the next frame's one draw
 //! [PAGE] name=<page> cursor=<n> top=<n> [zoom=<z>] t=<ms>
 //!                           after the draw, when the page or its cursor
 //!                           moved (1533, `loquax_m9::page`): what a bench
@@ -148,7 +154,7 @@ use esp_hal::system::{CpuControl, Stack};
 use esp_hal::{
     delay::Delay,
     dma_rx_buffer, dma_tx_buffer,
-    gpio::{Level, Output, OutputConfig},
+    gpio::{Event, Input, InputConfig, Io, Level, Output, OutputConfig},
     i2c::master::{Config as I2cConfig, I2c},
     main,
     psram::{Psram, PsramConfig, PsramMode, PsramSize, SpiRamFreq},
@@ -187,6 +193,7 @@ use loquax_m9::house::{self, Did, Overview};
 use loquax_m9::kbraw::{self, Presses, Protocol, Read};
 use loquax_m9::keyboard::{self, Key, POLL_MS};
 use loquax_m9::map::{self, Map};
+use loquax_m9::pace::{self, Pace};
 use loquax_m9::page;
 use loquax_m9::pair::{self, Pairing};
 use loquax_m9::render::Renderer;
@@ -236,6 +243,32 @@ static KB_POLL: Mutex<RefCell<Option<KbPoll>>> = Mutex::new(RefCell::new(None));
 static KB_PRESSES: Mutex<RefCell<Presses>> = Mutex::new(RefCell::new(Presses::new()));
 /// Polls whose I2C transfer failed.
 static KB_FAILS: AtomicU32 = AtomicU32::new(0);
+
+/// The panel's TE line (1507), the UI core's interrupt once `ui_main`
+/// listens on it: every rising edge is a vertical blank.
+static TE_LINE: Mutex<RefCell<Option<Input<'static>>>> = Mutex::new(RefCell::new(None));
+/// The blanks counted since boot.
+static TE_EDGES: AtomicU32 = AtomicU32::new(0);
+
+/// The GPIO interrupt, bound on the UI core: a TE edge counted. Nothing
+/// else on this board listens on a GPIO.
+#[esp_hal::handler]
+fn te_edge() {
+    critical_section::with(|cs| {
+        if let Some(te) = TE_LINE.borrow_ref_mut(cs).as_mut() {
+            if te.is_interrupt_set() {
+                te.clear_interrupt();
+                TE_EDGES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// The UI core's clock for the pace: microseconds, truncated to the
+/// wrapping `u32` [`Pace`] compares.
+fn pace_now() -> u32 {
+    leviculum_esp::uptime_us() as u32
+}
 
 /// The timer's tick: one read of the controller, its answer queued. The
 /// transfer is about a millisecond at 100 kHz, inside the critical
@@ -471,6 +504,8 @@ const CASET: u8 = 0x2A;
 const RASET: u8 = 0x2B;
 const RAMWR: u8 = 0x2C;
 const MADCTL: u8 = 0x36;
+/// Tearing effect line on (9.1.37); its one byte 0: the V-blank only.
+const TEON: u8 = 0x35;
 const COLMOD: u8 = 0x3A;
 const COLMOD_RGB565: u8 = 0x55;
 
@@ -534,6 +569,8 @@ impl Panel<'_> {
         self.cmd(MADCTL, &[m9::LCD_MADCTL])?;
         self.cmd(INVON, &[])?;
         self.cmd(NORON, &[])?;
+        // The blank on TE (1507): the draws are paced by it.
+        self.cmd(TEON, &[0x00])?;
         delay.delay_millis(10);
         self.cmd(DISPON, &[])
     }
@@ -924,6 +961,8 @@ fn main() -> ! {
     let lcd_dc: m9::LcdDc = p.GPIO15;
     let lcd_reset: m9::LcdReset = p.GPIO14;
     let lcd_backlight: m9::LcdBacklight = p.GPIO17;
+    let lcd_te: m9::LcdTe = p.GPIO19;
+    let io = Io::new(p.IO_MUX);
     let _vext = Output::new(vext, Level::Low, OutputConfig::default());
     let _lora_nss = Output::new(lora_nss, Level::High, OutputConfig::default());
     let _sd_cs = Output::new(sd_cs, Level::High, OutputConfig::default());
@@ -1143,7 +1182,7 @@ fn main() -> ! {
     // SAFETY: the one place this static is taken, before the core starts.
     let ui_stack = unsafe { &mut *addr_of_mut!(APP_CORE_STACK) };
     let started = cpu.start_app_core(ui_stack, move || {
-        ui_main(panel, model, shown, kb, seed, wdt1)
+        ui_main(panel, model, shown, kb, seed, wdt1, (io, lcd_te))
     });
     match &started {
         Ok(_) => log.line(
@@ -1559,9 +1598,19 @@ fn ui_main(
     kb: Protocol,
     seed: [u8; 32],
     wdt: Wdt<TIMG1<'static>>,
+    te: (Io<'static>, m9::LcdTe<'static>),
 ) -> ! {
     stall::stage(Core::Ui, Stage::Census);
     let mut log = UiLog;
+    // The TE line's interrupt on this core (1507): bound and listened to
+    // here, so its edges wake the core that draws.
+    let (mut io, te_pin) = te;
+    io.set_interrupt_handler(te_edge);
+    let mut te_line = Input::new(te_pin, InputConfig::default());
+    critical_section::with(|cs| {
+        te_line.listen(Event::RisingEdge);
+        TE_LINE.borrow_ref_mut(cs).replace(te_line);
+    });
     let mut frame = Frame::new();
     let before = leviculum_esp::heap_live();
     let Ok(mut renderer) = Renderer::new(&mut frame) else {
@@ -1687,6 +1736,15 @@ fn ui_main(
     // nothing.
     let mut drawn = screen::Drawn::default();
     drawn.drawn(&model);
+    // One draw per frame of the panel (1507): what the turns change is
+    // owed until the next blank, then drawn once.
+    let mut pace = Pace::new();
+    pace.drew(TE_EDGES.load(Ordering::Relaxed), pace_now());
+    let mut draw_owed = false;
+    // What paces the draws, as the last `[DISP] pace=` line said it.
+    let mut paced_by: Option<pace::Source> = None;
+    // Turns whose change the pace merged into a later frame's draw.
+    let mut merged: u32 = 0;
 
     // An opened chat's page on its way, for the `[OPEN]` line (1540).
     #[cfg(m9_bench)]
@@ -1897,8 +1955,7 @@ fn ui_main(
                             Some(_) => None,
                         };
                         if let Some(did) = took {
-                            dirty |=
-                                switched(did, &mut model, &mut renderer, &mut log, &mut asked);
+                            dirty |= switched(did, &mut model, &mut renderer, &mut log, &mut asked);
                             continue;
                         }
                         events.extend(key.event());
@@ -1973,7 +2030,20 @@ fn ui_main(
             shown.map = overlay;
             dirty = true;
         }
-        if dirty {
+        let edges = TE_EDGES.load(Ordering::Relaxed);
+        let now = pace_now();
+        let source = pace.source(edges, now);
+        if paced_by != Some(source) {
+            paced_by = Some(source);
+            log.line(
+                "[DISP] ",
+                alloc::format!("pace={} edges={edges} merged={merged}", source.name()),
+            );
+        }
+        draw_owed |= dirty;
+        if draw_owed && !pace.due(edges, now) {
+            merged = merged.saturating_add(u32::from(dirty));
+        } else if draw_owed {
             redraw(
                 &mut renderer,
                 &mut map,
@@ -1984,6 +2054,8 @@ fn ui_main(
                 &mut said,
                 &mut log,
             );
+            pace.drew(edges, now);
+            draw_owed = false;
             drawn.drawn(&model);
             #[cfg(m9_bench)]
             open.say(&mut log);
