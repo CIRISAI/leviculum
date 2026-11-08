@@ -101,14 +101,17 @@
 //!                           after the draw, when the page or its cursor
 //!                           moved (1533, `loquax_m9::page`): what a bench
 //!                           walk asserts without a dump
-//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> t=<ms>
+//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> ui_stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> t=<ms>
 //!                           on every loss and every five seconds (1440);
 //!                           stack_free is core 0's stack never touched
 //!                           since the boot's census, above the guard (1521b),
 //!                           `unset` before the first measure (1521c); the
 //!                           build's STACK_HEADROOM stack= is the same
-//!                           section's whole size, need= a floor borrowed
-//!                           from the LNode's node peak (#50), not a measure;
+//!                           section's whole size, need= the deepest use
+//!                           measured on this board plus a stated reserve
+//!                           (1582, scripts/build-m9-image.sh);
+//!                           ui_stack_free the UI core's the same, painted
+//!                           after its census, `unset` before (1582);
 //!                           tx_drop the records the send ring dropped, its
 //!                           oldest first, while the loop wrote faster than
 //!                           the line took (1507), tx_drop_kind the same
@@ -205,7 +208,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use critical_section::Mutex;
 
@@ -1059,38 +1062,69 @@ impl Probe for BoardProbe {
     }
 }
 
-/// Core 0's stack high-water mark (1521b): painted once below the
-/// caller's frame, read on every `[UART]` line as the bytes above the
-/// guard nothing has written since.
+/// A core's stack high-water mark (1521b; the UI core's since 1582):
+/// painted once below the caller's frame, read on every `[UART]` line as
+/// the bytes above the guard nothing has written since.
+#[derive(Clone, Copy)]
 struct StackWatch {
     low: usize,
     high: usize,
 }
 
 impl StackWatch {
+    /// Paints the calling core's stack from `floor` (its low end) plus
+    /// the guard up to just below the caller's frame.
     #[inline(never)]
-    fn paint() -> Self {
+    fn paint(floor: usize) -> Self {
         let here = 0u8;
         let sp = core::ptr::addr_of!(here) as usize;
-        let low = stack_bounds().0 + GUARD_SKIP;
+        let low = (floor + GUARD_SKIP).next_multiple_of(4);
         let high = sp.saturating_sub(FRAME_SKIP).max(low);
         for at in low..high {
-            // SAFETY: core 0's unused stack below the live frames, which
-            // this core owns; an interrupt that lands here writes over
-            // paint, which is what it is there to show.
+            // SAFETY: the calling core's unused stack below the live
+            // frames, which this core owns; an interrupt that lands here
+            // writes over paint, which is what it is there to show.
             unsafe { core::ptr::write_volatile(at as *mut u8, PAINT) };
         }
         Self { low, high }
     }
 
-    /// The bytes above the guard never written since [`StackWatch::paint`].
+    /// The bytes above the guard never written since [`StackWatch::paint`]:
+    /// read a word at a time (the UI core's is 150 KB of paint, every five
+    /// seconds), the first touched word then byte by byte. Safe to call
+    /// from the other core: it only reads, and a byte written meanwhile
+    /// is counted on the next line.
     fn free(&self) -> usize {
-        // SAFETY: as in `paint`; read only.
-        let touched = (self.low..self.high)
-            .find(|at| unsafe { core::ptr::read_volatile(*at as *const u8) } != PAINT)
+        const WORD: u32 = u32::from_ne_bytes([PAINT; 4]);
+        let mut at = self.low;
+        while at + 4 <= self.high {
+            // SAFETY: as in `paint`, aligned to 4 there; read only.
+            if unsafe { core::ptr::read_volatile(at as *const u32) } != WORD {
+                break;
+            }
+            at += 4;
+        }
+        let touched = (at..self.high)
+            // SAFETY: as above; read only.
+            .find(|b| unsafe { core::ptr::read_volatile(*b as *const u8) } != PAINT)
             .unwrap_or(self.high);
         touched - self.low
     }
+}
+
+/// The UI core's [`StackWatch`] for core 0's `[UART]` line (1582): its
+/// bounds, published once the UI core painted them after its census;
+/// `UI_WATCH_LOW` is 0 until then and the line says `unset`.
+static UI_WATCH_LOW: AtomicUsize = AtomicUsize::new(0);
+static UI_WATCH_HIGH: AtomicUsize = AtomicUsize::new(0);
+
+/// The UI core's watch, once it painted (1582).
+fn ui_watch() -> Option<StackWatch> {
+    let low = UI_WATCH_LOW.load(Ordering::Acquire);
+    (low != 0).then(|| StackWatch {
+        low,
+        high: UI_WATCH_HIGH.load(Ordering::Acquire),
+    })
 }
 
 fn halt_with_banner(log: &mut UartLog<'_>, heap: usize) -> ! {
@@ -1570,7 +1604,7 @@ fn main() -> ! {
     // From here on core 0's deepest frame is measured (1521b): the
     // restore, the loop, the flash, after the session census above
     // painted and read its own.
-    let watch = StackWatch::paint();
+    let watch = StackWatch::paint(stack_bounds().0);
     // A device of a home draws its home's chats: what its message store
     // kept (1476), then every pull; a board that is none opens on the
     // pairing, and Back from there shows the fixture as before (1415).
@@ -1714,6 +1748,7 @@ fn main() -> ! {
                 log.line("[BENCH] ", format_args!("inject=on"));
             }
             log.set_stack_free(watch.free());
+            log.set_ui_stack_free(ui_watch().map(|ui| ui.free()));
             log.say_rx_counts(true);
             // How much of the window each core waited (1507).
             let [io, ui] = leviculum_esp::idle::waited_us();
@@ -2309,6 +2344,12 @@ fn ui_main(
     // census, whose screens are measured as drawn without it.
     let kept = map.keep_pictures();
     log.line("[CENSUS] ", alloc::format!("map_kept held={kept}"));
+    // From here on the UI core's deepest frame is measured (1582), as
+    // core 0's is after its session census: the loop, the drain, the
+    // keys and every draw, said by core 0 as `ui_stack_free=`.
+    let ui = StackWatch::paint(stack_floor);
+    UI_WATCH_HIGH.store(ui.high, Ordering::Release);
+    UI_WATCH_LOW.store(ui.low, Ordering::Release);
     // Core 0 may run again (1521b).
     CENSUS_RUNNING.store(false, Ordering::Release);
 

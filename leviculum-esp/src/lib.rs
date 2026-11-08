@@ -607,6 +607,10 @@ pub struct UartLog<'d> {
     /// them, said on every `[UART]` line when the board measures it
     /// (1521b, [`UartLog::set_stack_free`]).
     stack_free: Option<usize>,
+    /// The UI core's the same (1582, [`UartLog::set_ui_stack_free`]):
+    /// `None` on a board with one core, which says no such key; `Some(None)`
+    /// before that core painted, said `unset`.
+    ui_stack_free: Option<Option<usize>>,
 }
 
 /// The most host bytes kept while the loop is busy: 8 KiB is fourteen
@@ -744,6 +748,7 @@ impl<'d> UartLog<'d> {
             tx_said: 0,
             after_frame: false,
             stack_free: None,
+            ui_stack_free: None,
         }
     }
 
@@ -785,6 +790,13 @@ impl<'d> UartLog<'d> {
     /// What the next `[UART]` line says as `stack_free=` (1521b).
     pub fn set_stack_free(&mut self, bytes: usize) {
         self.stack_free = Some(bytes);
+    }
+
+    /// What the next `[UART]` line says as `ui_stack_free=` (1582): the
+    /// second core's untouched stack, `None` while it is not painted yet.
+    /// A board that never calls this says no such key.
+    pub fn set_ui_stack_free(&mut self, bytes: Option<usize>) {
+        self.ui_stack_free = Some(bytes);
     }
 
     /// Host bytes lost because the board's keep was full.
@@ -831,8 +843,13 @@ impl<'d> UartLog<'d> {
             Some(free) => alloc::format!("{free}"),
             None => alloc::string::String::from("unset"),
         };
+        let ui = match self.ui_stack_free {
+            Some(Some(free)) => alloc::format!(" ui_stack_free={free}"),
+            Some(None) => alloc::string::String::from(" ui_stack_free=unset"),
+            None => alloc::string::String::new(),
+        };
         let body = alloc::format!(
-            "{counts} stack_free={free} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes} \
+            "{counts} stack_free={free}{ui} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes} \
              tx_drop_kind=line:{drop_line},frame:{drop_frame},dump:{drop_dump}"
         );
         self.text("[UART] ", &body);
