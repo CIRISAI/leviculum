@@ -33,7 +33,7 @@ use crate::stall::{self, Core, Lock};
 /// esp-storage's AutoPark stalls the other core wherever it is
 /// (`esp-storage-0.10.0/src/common.rs`, `pre_write`, then `post_write`
 /// unparks). The UI core takes the one cross-core critical section for
-/// every queue push, every key drain and every allocation (embedded-alloc's
+/// every queue push, every key drain and every allocation (the crate's
 /// heap locks with it), so it is often parked holding that spinlock. The
 /// ROM call itself runs with core 0's interrupts off (esp-storage's own
 /// lock), but they are on again between the op and the unpark, and the

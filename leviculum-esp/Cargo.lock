@@ -559,17 +559,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embedded-alloc"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2db634e07f552215f7a3572dc0a4d29760c637fcea5a8c18d2cc291f782c216c"
-dependencies = [
- "const-default",
- "critical-section",
- "rlsf",
-]
-
-[[package]]
 name = "embedded-can"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1267,7 +1256,6 @@ name = "leviculum-esp"
 version = "0.1.5"
 dependencies = [
  "critical-section",
- "embedded-alloc",
  "embedded-hal-async",
  "esp-bootloader-esp-idf",
  "esp-hal",
@@ -1279,6 +1267,7 @@ dependencies = [
  "loquax",
  "loquax-m9",
  "rand_core 0.6.4",
+ "rlsf",
 ]
 
 [[package]]

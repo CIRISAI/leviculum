@@ -41,6 +41,7 @@ pub mod flash;
 pub mod handheld;
 pub mod idle;
 pub mod mspi;
+pub mod pool_tlsf;
 pub mod serial_iface;
 pub mod stall;
 pub mod sx1262;
@@ -57,8 +58,11 @@ use critical_section::Mutex;
 // grows with the churn — the M9's pull drove core 0's host stage from
 // 170 ms to 2.5 s a turn and the UI core's drain past its 5 s watchdog
 // that way (window 16a; `leviculum-heap-lab/tests/pull.rs` shows the
-// same workload flat under tlsf and growing 14x under llff).
-use embedded_alloc::TlsfHeap as Heap;
+// same workload flat under tlsf and growing 14x under llff). Our own
+// wrapper rather than `embedded_alloc::TlsfHeap` (1574): that one keeps
+// rlsf's 4228 B control block in its `static`, which is `.bss`, which
+// is core 0's stack on the ESP32-S3; ours puts it inside the heap region
+// ([`pool_tlsf`]).
 use esp_hal::{
     clock::CpuClock,
     peripherals::{Peripherals, USB_DEVICE},
@@ -67,6 +71,7 @@ use esp_hal::{
     usb::usb_serial_jtag::UsbSerialJtag,
     Blocking,
 };
+use pool_tlsf::PoolTlsf;
 
 use boards::BoardConfig;
 use leviculum_serial_mux::rx::{RxCounts, RxKeep};
@@ -101,6 +106,72 @@ pub const FW_BUILD_STAMP: &str = concat!(
 // ---------------------------------------------------------------------
 // Heap
 // ---------------------------------------------------------------------
+
+/// rlsf behind the cross-core critical section, its control block in the
+/// region it manages ([`PoolTlsf`]): the `static` holds two pointers and
+/// a flag, not the 4228 B of bitmaps and list heads.
+struct Heap {
+    inner: Mutex<RefCell<Option<PoolTlsf>>>,
+}
+
+impl Heap {
+    const fn empty() -> Self {
+        Self {
+            inner: Mutex::new(RefCell::new(None)),
+        }
+    }
+
+    /// Place the heap in the `size` bytes at `start`. False when a heap
+    /// is already placed or the region cannot hold the control block and
+    /// a pool; the heap then stays as it was.
+    ///
+    /// # Safety
+    ///
+    /// [`PoolTlsf::place`]'s: the region is mapped, writable, and used by
+    /// nothing else for as long as the image runs.
+    unsafe fn init(&self, start: usize, size: usize) -> bool {
+        critical_section::with(|cs| {
+            let mut inner = self.inner.borrow_ref_mut(cs);
+            if inner.is_some() {
+                return false;
+            }
+            // SAFETY: the caller's contract.
+            *inner = unsafe { PoolTlsf::place(start, size) };
+            inner.is_some()
+        })
+    }
+
+    fn free(&self) -> usize {
+        critical_section::with(|cs| self.inner.borrow_ref(cs).as_ref().map_or(0, PoolTlsf::free))
+    }
+}
+
+// SAFETY: blocks come from rlsf under the lock, and go back to it with
+// the alignment they were asked with; before `init` nothing is handed out.
+unsafe impl GlobalAlloc for Heap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        critical_section::with(|cs| {
+            self.inner
+                .borrow_ref_mut(cs)
+                .as_mut()
+                .and_then(|tlsf| tlsf.allocate(layout))
+                .map_or(core::ptr::null_mut(), core::ptr::NonNull::as_ptr)
+        })
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let Some(ptr) = core::ptr::NonNull::new(ptr) else {
+            return;
+        };
+        critical_section::with(|cs| {
+            if let Some(tlsf) = self.inner.borrow_ref_mut(cs).as_mut() {
+                // SAFETY: the caller's contract: `ptr` came from `alloc`
+                // with this layout, so from this heap.
+                unsafe { tlsf.deallocate(ptr, layout.align()) };
+            }
+        });
+    }
+}
 
 /// The allocator, counted: what is live now and the most that was since
 /// [`heap_reset_peak`]. The count is what a board's census reads
@@ -243,17 +314,27 @@ pub fn heap_free() -> usize {
 /// measured it. 64 KiB is a placeholder against the ESP32-S3's 512 KiB of
 /// internal SRAM, deliberately smaller than the nRF's 96 KiB so that the
 /// first thing to move it is a measurement rather than a copied number.
+///
+/// rlsf's control block ([`pool_tlsf::PoolTlsf::CONTROL_BYTES`]) is taken
+/// from these bytes since 1574, not from `.bss` beside them.
 pub const HEAP_SIZE: usize = 64 * 1024;
+
+// The array always holds the control block and a pool behind it, so
+// `init_heap` cannot be refused for its size.
+const _: () = assert!(HEAP_SIZE > 2 * PoolTlsf::CONTROL_BYTES);
 
 /// Initialise the heap allocator. Called once by [`init`].
 fn init_heap() {
     static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
     // SAFETY: called once at startup, before anything concurrent exists.
     // `addr_of!` avoids forming a reference to the `static mut`.
-    unsafe {
+    // The array fits (the assertion beside HEAP_SIZE) and `init` runs
+    // once, so the placement cannot be refused; were it, every allocation
+    // would fail loudly in the allocation error handler.
+    let _placed = unsafe {
         let heap_start = core::ptr::addr_of!(HEAP_MEM) as usize;
-        HEAP.heap.init(heap_start, HEAP_SIZE);
-    }
+        HEAP.heap.init(heap_start, HEAP_SIZE)
+    };
 }
 
 /// Give the allocator `size` bytes at `start` instead of the [`HEAP_SIZE`]
@@ -265,7 +346,12 @@ fn init_heap() {
 /// Called once, instead of [`init`]'s heap, before any allocation; the
 /// region is mapped, writable, and used by nothing else for as long as the
 /// image runs.
-pub unsafe fn init_heap_at(start: usize, size: usize) {
+///
+/// False when the region cannot hold rlsf's control block (placed at its
+/// front, 1574) and a pool behind it, or a heap is already placed: the
+/// board then has no heap and says so.
+#[must_use]
+pub unsafe fn init_heap_at(start: usize, size: usize) -> bool {
     // SAFETY: the caller's contract.
     unsafe { HEAP.heap.init(start, size) }
 }

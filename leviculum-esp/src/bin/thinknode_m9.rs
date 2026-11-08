@@ -1267,7 +1267,13 @@ fn main() -> ! {
     }
     // SAFETY: once, before any allocation; the driver mapped `bytes` at
     // `start` and nothing else in this image touches PSRAM.
-    unsafe { leviculum_esp::init_heap_at(start as usize, bytes) };
+    if !unsafe { leviculum_esp::init_heap_at(start as usize, bytes) } {
+        log.line(
+            "[HEAP] ",
+            format_args!("region=psram bytes={bytes} state=down reason=placement-refused"),
+        );
+        halt_with_banner(&mut log, bytes);
+    }
     log.line(
         "[HEAP] ",
         format_args!("region=psram start={start:p} bytes={bytes}"),

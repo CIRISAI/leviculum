@@ -39,7 +39,7 @@ const REGION: usize = 256 << 20;
 pub enum Which {
     /// `embedded_alloc::LlffHeap`'s inner `linked_list_allocator`.
     Llff,
-    /// `embedded_alloc::TlsfHeap`'s inner `rlsf`.
+    /// `rlsf`, as the firmware places it ([`pool_tlsf`], 1574).
     Tlsf,
 }
 
@@ -79,7 +79,12 @@ impl Region {
     }
 }
 
-type Tlsf = rlsf::Tlsf<'static, usize, usize, { usize::BITS as usize }, { usize::BITS as usize }>;
+// The firmware's own TLSF wrapper, the one source (1574): the control
+// block placed inside the region, as the M9 links it.
+#[path = "../../leviculum-esp/src/pool_tlsf.rs"]
+pub mod pool_tlsf;
+
+use pool_tlsf::PoolTlsf;
 
 /// The heaps hold raw pointers into their (static, 'static) regions;
 /// moving the guard between threads moves only the handle.
@@ -90,13 +95,13 @@ unsafe impl<T> Send for Held<T> {}
 
 struct Router {
     llff: Mutex<Held<linked_list_allocator::Heap>>,
-    tlsf: Mutex<Held<Tlsf>>,
+    tlsf: Mutex<Option<PoolTlsf>>,
 }
 
 #[global_allocator]
 static ROUTER: Router = Router {
     llff: Mutex::new(Held(linked_list_allocator::Heap::empty())),
-    tlsf: Mutex::new(Held(Tlsf::new())),
+    tlsf: Mutex::new(None),
 };
 
 /// The guard, poison shrugged off: the allocator cannot panic while it
@@ -123,12 +128,9 @@ fn ensure_init(which: Which) {
             }
         }),
         Which::Tlsf => TLSF_INIT.call_once(|| {
-            let block = NonNull::slice_from_raw_parts(
-                NonNull::new(TLSF_MEM.start() as *mut u8).unwrap_or(NonNull::dangling()),
-                REGION,
-            );
-            // SAFETY: as above.
-            unsafe { locked(&ROUTER.tlsf).0.insert_free_block_ptr(block) };
+            // SAFETY: as above. A refused placement leaves `None`, and
+            // every lab allocation then spills and is counted.
+            *locked(&ROUTER.tlsf) = unsafe { PoolTlsf::place(TLSF_MEM.start(), REGION) };
         }),
     }
 }
@@ -145,7 +147,10 @@ unsafe impl GlobalAlloc for Router {
                 .allocate_first_fit(layout)
                 .map(NonNull::as_ptr)
                 .ok(),
-            MODE_TLSF => locked(&self.tlsf).0.allocate(layout).map(NonNull::as_ptr),
+            MODE_TLSF => locked(&self.tlsf)
+                .as_mut()
+                .and_then(|tlsf| tlsf.allocate(layout))
+                .map(NonNull::as_ptr),
             _ => None,
         };
         match (served, MODE.load(Ordering::Relaxed)) {
@@ -171,8 +176,10 @@ unsafe impl GlobalAlloc for Router {
             }
         } else if TLSF_MEM.holds(ptr) {
             if let Some(ptr) = NonNull::new(ptr) {
-                // SAFETY: as above.
-                unsafe { locked(&self.tlsf).0.deallocate(ptr, layout.align()) };
+                if let Some(tlsf) = locked(&self.tlsf).as_mut() {
+                    // SAFETY: as above.
+                    unsafe { tlsf.deallocate(ptr, layout.align()) };
+                }
             }
         } else {
             // SAFETY: the system made it.

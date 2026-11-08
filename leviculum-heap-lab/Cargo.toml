@@ -13,14 +13,16 @@ description = "The embedded heaps on the host: run the M9's real workload under 
 publish = false
 
 [dependencies]
-# The two allocators the firmware can link (leviculum-esp/src/lib.rs,
-# `use embedded_alloc::... as Heap`): embedded-alloc's `llff` wraps
-# linked_list_allocator, its `tlsf` wraps rlsf. The lab links the inner
-# crates directly — the wrapper adds only the critical-section lock,
-# which is not the data structure under measurement and has no host
-# implementation in this tree.
+# The two allocators the firmware has linked (leviculum-esp/src/lib.rs):
+# llff (embedded-alloc's, linked_list_allocator inside) before 1569, rlsf
+# since. The lab links the data structures without the firmware's
+# critical-section lock, which is not what is under measurement and has
+# no host implementation in this tree.
 linked_list_allocator = { version = "0.10", default-features = false }
-rlsf = { version = "0.2", default-features = false }
+# The tlsf side is the firmware's own wrapper (leviculum-esp/src/
+# pool_tlsf.rs, included by path, 1574): the control block inside the
+# region. `unstable` for `Tlsf::iter_blocks`, which its `free` walks.
+rlsf = { version = "0.2.3", default-features = false, features = ["unstable"] }
 
 [dev-dependencies]
 # The M9's real pull workload (tests/pull.rs): the board's model, its
