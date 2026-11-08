@@ -604,6 +604,11 @@ struct LaidCache {
     laid: alloc::sync::Arc<layout::Laid>,
 }
 
+/// The rows a list apart builds above and below the rows on screen
+/// ([`UiModel::list_window`], 1591): a key moves the screen by one row at
+/// most, and the next fold builds the window again around it.
+const APART_MARGIN: usize = 2;
+
 /// The stamps of the windows the last note left ([`UiModel::scene_owed`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct SceneOwed {
@@ -2325,14 +2330,20 @@ impl<B> UiModel<B> {
     /// rows in view and half a screen either side, the selected row
     /// inside. `(first, how many, the first row on screen)`, the last for
     /// a list apart only ([`UiModel::list_top`]).
+    ///
+    /// A list apart knows its first row on screen exactly (1546), so its
+    /// window is the rows in view and [`APART_MARGIN`] either side, not
+    /// half a screen (1591: every row built is cloned into each scene the
+    /// board draws).
     fn list_window(&self, order: &[usize]) -> (usize, usize, Option<usize>) {
         let visible = self.viewing.list_rows.max(1);
-        let build = order.len().min(visible.saturating_mul(2));
         if self.viewing.apart {
+            let build = order.len().min(visible.saturating_add(2 * APART_MARGIN));
             let top = self.list_top(order);
-            let first = top.saturating_sub(visible / 2).min(order.len() - build);
+            let first = top.saturating_sub(APART_MARGIN).min(order.len() - build);
             return (first, build, Some(top));
         }
+        let build = order.len().min(visible.saturating_mul(2));
         let at = order.iter().position(|&i| i == self.selected).unwrap_or(0);
         let first = at.saturating_sub(visible / 2).min(order.len() - build);
         (first, build, None)
