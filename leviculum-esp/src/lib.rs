@@ -620,9 +620,13 @@ impl<'d> UartLog<'d> {
                     "{counts} stack_free={free} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes}"
                 ),
             ),
+            // Before the first measure (1521c): the field is there and
+            // says so, so every `[UART]` line has the same keys.
             None => self.line(
                 "[UART] ",
-                format_args!("{counts} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes}"),
+                format_args!(
+                    "{counts} stack_free=unset tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes}"
+                ),
             ),
         }
     }

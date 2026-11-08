@@ -97,7 +97,11 @@
 //! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> t=<ms>
 //!                           on every loss and every five seconds (1440);
 //!                           stack_free is core 0's stack never touched
-//!                           since the boot's census, above the guard (1521b);
+//!                           since the boot's census, above the guard (1521b),
+//!                           `unset` before the first measure (1521c); the
+//!                           build's STACK_HEADROOM stack= is the same
+//!                           section's whole size, need= a floor borrowed
+//!                           from the LNode's node peak (#50), not a measure;
 //!                           tx_drop the records the send ring dropped, its
 //!                           oldest first, while the loop wrote faster than
 //!                           the line took (1507)
@@ -1476,7 +1480,8 @@ fn main() -> ! {
     // kept (1476), then every pull; a board that is none opens on the
     // pairing, and Back from there shows the fixture as before (1415).
     let restored = match stores.load_client() {
-        Ok(Some(record)) => node.client(record, batch, &mut stores, &mut log),
+        // No watchdog is armed yet: nothing to feed.
+        Ok(Some(record)) => node.client(record, batch, &mut stores, &mut log, &|| {}),
         Ok(None) => {
             log.line(
                 "[HOME] ",
@@ -1579,7 +1584,7 @@ fn main() -> ! {
     // From here core 0's loop feeds its watchdog every turn, and between
     // the messages of a long one (1534): a frame dump's lines took 4.6 s
     // of one turn on the bench (2026-11-07f), all of it the UART's.
-    let mut wdt: Watchdog<TIMG0<'static>> = Watchdog::arm(wdt0);
+    let wdt: Watchdog<TIMG0<'static>> = Watchdog::arm(wdt0);
     // After the first turn the loop never waits for the line (1507): a
     // full send ring drops its oldest record, counted on the `[UART]`
     // line. The first turn writes the UI core's census lines, all of them.
@@ -1658,7 +1663,14 @@ fn main() -> ! {
                             envelope::REFUSE_MALFORMED,
                         ),
                         Some(text) => {
-                            match node.take_code(text, &mut rng, &mut stores, batch, &mut log) {
+                            match node.take_code(
+                                text,
+                                &mut rng,
+                                &mut stores,
+                                batch,
+                                &mut log,
+                                &|| wdt.feed(),
+                            ) {
                                 Ok(taken) => {
                                     if let Some(taken) = taken {
                                         to_ui(ToUi::Model(Box::new(taken)));
@@ -1876,7 +1888,9 @@ fn main() -> ! {
                 }
                 FromUi::Code(text) => {
                     stall::stage(Core::Io, Stage::Code);
-                    match node.take_code(&text, &mut rng, &mut stores, batch, &mut log) {
+                    match node.take_code(&text, &mut rng, &mut stores, batch, &mut log, &|| {
+                        wdt.feed()
+                    }) {
                         Ok(Some(taken)) => {
                             to_ui(ToUi::Model(Box::new(taken)));
                             to_ui(ToUi::Word(node.word()));
@@ -2170,7 +2184,7 @@ fn ui_main(
     let mut chrome = map::Chrome::default();
 
     // From here the UI core's loop feeds its own watchdog (1534).
-    let mut wdt = Watchdog::arm(wdt);
+    let wdt = Watchdog::arm(wdt);
     loop {
         wdt.feed();
         stall::turned(Core::Ui);

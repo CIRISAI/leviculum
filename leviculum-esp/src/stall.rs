@@ -373,9 +373,10 @@ pub fn begin() {
 }
 
 /// A loop's watchdog: a timer group's MWDT, armed with stage 0 resetting
-/// the system after [`TIMEOUT_MS`], fed once per turn.
+/// the system after [`TIMEOUT_MS`], fed once per turn, and from inside a
+/// long store operation through a shared borrow (1521c, [`Watchdog::feed`]).
 pub struct Watchdog<TG: esp_hal::timer::timg::TimerGroupInstance> {
-    wdt: esp_hal::timer::timg::Wdt<TG>,
+    wdt: core::cell::RefCell<esp_hal::timer::timg::Wdt<TG>>,
 }
 
 impl<TG: esp_hal::timer::timg::TimerGroupInstance> Watchdog<TG> {
@@ -391,11 +392,15 @@ impl<TG: esp_hal::timer::timg::TimerGroupInstance> Watchdog<TG> {
         // (`esp-hal-1.2.1/src/timer/timg.rs`, `set_wdt_enabled`).
         wdt.enable();
         wdt.feed();
-        Self { wdt }
+        Self {
+            wdt: core::cell::RefCell::new(wdt),
+        }
     }
 
-    /// The loop is alive.
-    pub fn feed(&mut self) {
-        self.wdt.feed();
+    /// The loop is alive. A shared borrow (1521c): a store operation
+    /// longer than [`TIMEOUT_MS`] (a restore that folds the whole ring
+    /// after a code was taken) feeds it from its clock, a `Fn` hook.
+    pub fn feed(&self) {
+        self.wdt.borrow_mut().feed();
     }
 }

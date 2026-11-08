@@ -226,6 +226,7 @@ impl Handheld {
         stores: &mut Stores<'_>,
         batch: Batch,
         log: &mut UartLog<'_>,
+        feed: &dyn Fn(),
     ) -> Result<Option<UiModel<Field>>, CodeRefusal> {
         let device = Identity::generate(rng);
         let record = match board::admit(text, &device, DEVICE_NAME) {
@@ -240,7 +241,7 @@ impl Handheld {
             return Err(CodeRefusal::Persist);
         }
         log.line("[HOME] ", format_args!("code=taken saved=yes"));
-        Ok(self.client(record, batch, stores, log))
+        Ok(self.client(record, batch, stores, log, feed))
     }
 
     /// Become a device of the home `record` names, pulling in `batch`,
@@ -256,12 +257,19 @@ impl Handheld {
     /// when a code makes a new one, never for its cursor (1463): the store
     /// holds the cursor, and this agreement is the only reader of the
     /// record's.
+    ///
+    /// `feed` keeps the caller's watchdog fed through the restore (1521c):
+    /// a restore that folds the whole ring took 57 s to 100 s on the
+    /// bench, one entry at a time, and core 0's watchdog resets the chip
+    /// after 5 s unfed. The restore's clock calls it, several times per
+    /// entry; at boot, before the watchdog is armed, it does nothing.
     pub fn client(
         &mut self,
         mut record: ClientRecord,
         batch: Batch,
         stores: &mut Stores<'_>,
         log: &mut UartLog<'_>,
+        feed: &dyn Fn(),
     ) -> Option<UiModel<Field>> {
         let address = match loquax::home::lxmf_address(&record.home) {
             Ok(address) => address,
@@ -280,7 +288,10 @@ impl Handheld {
                 );
                 (m9home::model(address), None)
             }
-            Some(mut dev) => match m9home::restore_timed(&mut dev, address, &crate::uptime_us) {
+            Some(mut dev) => match m9home::restore_timed(&mut dev, address, &|| {
+                feed();
+                crate::uptime_us()
+            }) {
                 Ok(boot) => {
                     let (model, store, restored, pending) =
                         (boot.model, boot.shelf, boot.restored, boot.asks);
