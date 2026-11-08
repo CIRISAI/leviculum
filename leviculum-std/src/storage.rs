@@ -1175,6 +1175,18 @@ impl leviculum_core::traits::Storage for Storage {
         self.identities_gen = self.identities_gen.wrapping_add(1);
         self.remembered_at
             .insert(dest_hash, (unix_timestamp_secs(), self.identities_gen));
+        // Bounded by the identity table (order 1585): the stamps were
+        // dropped only by the hourly flush's fold, so a node hearing the
+        // network's announces held one for every identity of the hour,
+        // 111 kB/min at 40 announces a second in the mailbox soak. A stamp
+        // whose identity the table let go of is never folded, since the
+        // fold reads the table; once the stamps reach twice the table's
+        // ceiling those go, which keeps the work amortised.
+        if self.remembered_at.len() > 2 * self.known_dest_cap.max(1) {
+            let inner = &self.inner;
+            self.remembered_at
+                .retain(|hash, _| inner.get_identity(hash).is_some());
+        }
     }
 
     // Cleanup
@@ -1904,6 +1916,36 @@ mod tests {
             .load_all()
             .unwrap();
         assert_eq!(on_disk.len(), 8, "the file keeps every destination");
+    }
+
+    /// Order 1585: the remember stamps are held to what the identity
+    /// table still holds, not to an hour of announces.
+    #[test]
+    fn remember_stamps_are_held_to_the_identity_table() {
+        use leviculum_core::traits::Storage as CoreStorage;
+
+        let path = tempfile::tempdir().unwrap();
+        let caps = TableCaps {
+            identity_cap: 3,
+            ..TableCaps::desktop()
+        };
+        let mut storage = Storage::new_with_caps(&path, caps).unwrap();
+        for n in 0..50u8 {
+            CoreStorage::set_identity(
+                &mut storage,
+                [n; TRUNCATED_HASHBYTES],
+                Identity::generate(&mut rand_core::OsRng),
+            );
+        }
+        assert!(
+            storage.remembered_at.len() <= 6,
+            "{} stamps for a table of 3",
+            storage.remembered_at.len()
+        );
+        // The newest identity keeps its stamp for the fold.
+        assert!(storage
+            .remembered_at
+            .contains_key(&[49; TRUNCATED_HASHBYTES]));
     }
 
     #[test]
