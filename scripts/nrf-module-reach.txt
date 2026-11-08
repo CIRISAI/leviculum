@@ -7,7 +7,7 @@ src/announce.rs (630): log lora pn position telemetry
 src/banner.rs (56): log_critical media name
 src/battery.rs (324):
 src/bin/qspi-selftest.rs (634):
-src/bin/rak4631.rs (1482):
+src/bin/rak4631.rs (218):
 src/bin/sd-ram-probe.rs (294):
 src/bin/solarnode.rs (1506):
 src/bin/t1000e.rs (1379): feedback
@@ -16,7 +16,7 @@ src/ble/columba.rs (3225): info log radio_store warn
 src/ble/mod.rs (899): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
 src/boards/mod.rs (84): lora qspi radio_store telemetry
-src/boards/rak4631.rs (243): power
+src/boards/rak4631.rs (275): power
 src/boards/solarnode.rs (431): lora power qspi vext
 src/boards/t1000e.rs (394): button feedback power radio
 src/boards/t114.rs (259): power st7789
@@ -26,11 +26,11 @@ src/button.rs (107): power
 src/chtm.rs (71): log lora sx1262
 src/display.rs (222): log panel_facts
 src/events.rs (261): announce log pn transport_stats
-src/feedback.rs (274): led log
+src/feedback.rs (289): led log
 src/flash.rs (79):
 src/gnss.rs (598): boards log log_critical vext
 src/heap_census.rs (398): log pn
-src/led.rs (48): feedback log
+src/led.rs (52): feedback log
 src/lib.rs (754): log log_critical
 src/lora.rs (2747): announce chtm events log media pn radio radio_store set_irq_priorities
 src/media.rs (288): log telemetry

@@ -309,7 +309,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:2187-2189`, `Justfile:2251-2260`. See
+automatically. (`Justfile:2187-2189`, `Justfile:2256-2265`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -349,18 +349,20 @@ LEVICULUM_FLASH_ONLY=<PORT> bash scripts/nrf-flash.sh t114 bsp-t114
 
 (`Justfile:2171-2176`; usage forms `leviculum-nrf/README.md:31-36`)
 
-### `just flash-rak4631` — every RAK4631 (bare module)
+### `just flash-rak4631` — every RAK4631
 
-Flashes every attached RAK4631 / WisMesh Pocket V2 with the bare-module
-build (no baseboard peripherals).
+Flashes every attached RAK4631 / WisMesh Pocket V2 with the baseboard
+build, the one the `lnflash` bundle ships. Until 2026-10-28 this recipe
+flashed the bare-module build; Lew retired that build then (D5 of the
+node-loop diff), since the baseboard image runs on a bare module unharmed.
 
 ```sh
 LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  bash scripts/nrf-flash.sh rak4631 bsp-rak4631
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2190-2192`)
+(`Justfile:2188-2196`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -376,16 +378,17 @@ Expands to:
 ```sh
 LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF2_BOARD_ID=WisBlock-RAK4631-Board \
-  bash scripts/nrf-flash.sh rak4631 bsp-rak4631
+  bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2194-2198`)
+(`Justfile:2198-2202`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
 Flashes with all RAK19026 baseboard peripherals enabled (display, GNSS,
 battery). `--features rak-baseboard` aggregates the three baseboard
-features. Use this for a complete WisMesh Pocket V2.
+features. The same image `just flash-rak4631` flashes since the bare
+build was retired; the name stays for the hands and scripts that know it.
 
 ```sh
 LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
@@ -393,7 +396,7 @@ LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2200-2206`; `rak-baseboard` aggregate
+(`Justfile:2204-2212`; `rak-baseboard` aggregate
 `leviculum-nrf/Cargo.toml:453`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
@@ -416,7 +419,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:2251-2260`)
+(`Justfile:2256-2265`)
 
 ### SenseCAP T1000-E: serial DFU
 

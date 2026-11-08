@@ -32,6 +32,8 @@ src/gnss.rs: vext doc x2
 src/gnss.rs: vext::wait_ready x1
 src/led.rs: feedback doc x1
 src/led.rs: feedback::Sink x1
+src/led.rs: feedback::led_task doc x1
+src/led.rs: feedback::spawn_activity_led_with_boot_blink x1
 src/led.rs: feedback::spawn_led x1
 src/lora.rs: radio x1 doc x1
 src/lora.rs: radio::Error::Crc x1

@@ -24,7 +24,7 @@ and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:123`).
 Since 889 every board brings the button up with the same task
 (`leviculum-nrf/src/bin/t114.rs:150`,
 `leviculum-nrf/src/bin/solarnode.rs:582`,
-`leviculum-nrf/src/bin/rak4631.rs:539`,
+`leviculum-nrf/src/bin/rak4631.rs:149`,
 `leviculum-nrf/src/bin/t1000e.rs:528`). The T114 and the Solar Node used
 to say `[BTN] none` only because nobody had wired the task: neither pin
 is shared with anything the firmware drives, and the Solar Node's touch
@@ -40,8 +40,9 @@ opening, on a timer instead of a spin that held USB back
 `leviculum-nrf/src/bin/solarnode.rs:684`,
 `leviculum-nrf/src/bin/t1000e.rs:609`). The Pocket V2's two LEDs pulsed
 LoRa TX and RX activity (`leviculum-nrf/src/led.rs`), and a bare RAK4631
-module without the baseboard blinks a 1 Hz heartbeat
-(`leviculum-nrf/src/bin/rak4631.rs:1475`). The Solar Node's blue LED was
+module without the baseboard blinked a 1 Hz heartbeat (that build was
+retired on 2026-10-28, D5 of the node-loop diff, and the heartbeat with
+it). The Solar Node's blue LED was
 lit only by a HardFault. The T1000-E's buzzer had its enable held low
 for the life of the board.
 
@@ -118,8 +119,8 @@ on/off steps built from these constants:
 
 The players are `leviculum-nrf/src/feedback.rs`: one per LED
 (`led_task`, `leviculum-nrf/src/feedback.rs:154`) and the T1000-E's buzzer
-(`buzzer_task`, `leviculum-nrf/src/feedback.rs:238`). The buzzer sounds
-`BUZZER_TONE_HZ` (247 Hz, `leviculum-nrf/src/feedback.rs:230`), the B3 of
+(`buzzer_task`, `leviculum-nrf/src/feedback.rs:253`). The buzzer sounds
+`BUZZER_TONE_HZ` (247 Hz, `leviculum-nrf/src/feedback.rs:245`), the B3 of
 Meshtastic's own beep on this board, while a step is on. A pattern
 raised while another plays on the same sink replaces it. The Pocket V2's
 LEDs keep their activity pulses between patterns. Which event raises

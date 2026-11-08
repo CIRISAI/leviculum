@@ -2187,21 +2187,26 @@ rak4631_env := 'LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 LEVICULUM_UF
 
 # First flash from Meshtastic / blank firmware needs a manual RESET
 # double-tap (the stock app has no 1200-baud-touch handler). Subsequent
-# flashes use the touch path automatically.
+# flashes use the touch path automatically. The image is the baseboard one,
+# the build lnflash ships: the bare-module build is no target any more (D5,
+# Lew 2026-10-28), and a bare module runs this image unharmed
+# (docs/src/concepts/board-support-scope.md).
 [doc('Flash every attached RAK4631 (WisMesh Pocket V2) with our firmware')]
 flash-rak4631:
-    {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631
+    {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 
 #   just flash-rak4631-one /dev/ttyACM0
 #   just flash-rak4631-one /dev/leviculum-rak-transport
 [doc('Flash a single RAK4631 by port path or udev symlink')]
 flash-rak4631-one PORT:
-    LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631
+    LEVICULUM_FLASH_ONLY={{PORT}} {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 
 # Flash with all RAK19026 baseboard peripherals enabled — the WisMesh
 # Pocket V2 build. `--features rak-baseboard` aggregates the three
 # baseboard features (display, gnss, battery). This is the build the lnflash
-# bundle ships for this board (docs/src/concepts/board-support-scope.md).
+# bundle ships for this board (docs/src/concepts/board-support-scope.md),
+# and since D5 the one `flash-rak4631` flashes too; the name stays for the
+# hands and scripts that know it.
 [doc('Flash a RAK4631 with the WisMesh Pocket V2 baseboard peripherals')]
 flash-rak4631-pocket:
     {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
