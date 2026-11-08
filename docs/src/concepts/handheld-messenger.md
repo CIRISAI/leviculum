@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:234`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:246`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -683,7 +683,7 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:256`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:268`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:890`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:891`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:816`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:828`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:560`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:572`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1931,7 +1931,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2162`).
+both (`thinknode_m9.rs:2216`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2174`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2228`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,7 +2035,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:796`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:797`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2056,6 +2056,57 @@ counted only its loaded messages once a live one came in, 96 of 776
 unread. The unread beyond the received messages loaded now counts a row
 each (`Conversation::unread_rows`, `loquax/src/ui.rs:876`), on a live
 pull as on the tail boot.
+
+### The pull starved both cores in the allocator (1569)
+
+Window 16a (bench image of 9f53b300, store erased, 4266 entries
+re-pulled) refuted 1563's arbitration on the board: 73 `[DISP] flush`
+lines all said `waited_ms=0.000`, yet their `ms=` grew to 3658 — and a
+12,800-byte flush is one DMA chunk, 2.6 ms on the wire, so `ms=` was
+measuring when the loop's next pump looked, the UI core's turn time.
+Both wdt1 resets had core 1 in `drain`; core 0's `[LOOP] host=` grew
+from 170 ms to 2473 ms a turn along the pull and fell back to ~230 ms
+after each reset — the store unchanged, only the live heap emptied.
+The parks cannot say it: the whole pull wrote 417 sector writes and
+129 erases, about ten seconds inside `parked` of a 169 s pull.
+
+**The walk.** What both cores share and a reset empties is the heap.
+`embedded_alloc`'s llff choice is one free list, walked first-fit on
+every alloc and address-sorted on every free, inside the one
+cross-core critical section — so every allocation on either core
+walks a list that grows with the model's churn, and the other core's
+allocations spin on the section meanwhile. The fold itself is flat on
+the host (`loquax-m9/tests/turn.rs`, 1463, system allocator: a page's
+take 126 µs into 400 entries, 170 µs into 4000). The same fold under
+the firmware's own two choices (`leviculum-heap-lab/tests/pull.rs`,
+the lab routes the host's global allocator into either): llff 134 µs
+at 400, 1919 µs at 4000 — fourteenfold; tlsf 75 µs and 110 µs — flat.
+The firmware links tlsf now (`leviculum-esp/src/lib.rs:61`, constant
+time both ways, same `critical-section` lock held O(1) instead of
+O(walk)).
+
+**The instruments stay.** `[IDLE]` says what the flash ops cost the
+UI core per window: `park_ms= park_max_ms= park_ops=`, measured around
+each op's critical section (`leviculum_esp::flash::park`), and the
+bench image adds `alloc_ms0= alloc_ms1=`, each core's time inside the
+allocator (`alloc_clock::cycles_of`). The UI core says its own slow
+turn as `[LOOP] core=ui ... drain= ... msgs= folded=`
+(`thinknode_m9.rs`, 1569): the next starve names its stage and its
+queue depth instead of a bare `core1_stage=drain`.
+
+**The list that moves by itself after a boot.** After every resumed
+boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
+summary record, the cursor on row 12 and a bench `[OPEN]` with
+`keys=0`. That is 1546's preload: the boot's `house::set_size` asks
+the model, the model asks the cursor chat's page
+(`thinknode_m9.rs:2283`), and the fold runs behind the list
+(`behind_the_list`, `loquax-m9/src/home.rs:81`), so no read mark is
+queued — `route` takes marks only from `take_marks`, and the hidden
+fold queues none. The summary write beside it is the touched row with
+its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2057`, the
+a80038c2 rule); the cursor moves because the folded page gives the
+chat its real activity and the list re-sorts under a selection that
+follows the chat. A preload, not an open: nothing to stop for 1562/1564.
 
 ### Tracks on the M9 (1385, not built)
 
