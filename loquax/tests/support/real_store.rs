@@ -92,7 +92,7 @@ pub const VOICE: &[u8] = include_bytes!("../fixtures/real-voice.ogg");
 
 /// The bars still red, by name ([`bar`]). A plan step that turns one
 /// green takes it out here, or its test fails and says so.
-pub const KNOWN_REDS: &[&str] = &["phone.a_key_in_compose_builds_no_list"];
+pub const KNOWN_REDS: &[&str] = &[];
 
 /// Whether this build counts; a release build without loquax's
 /// `counters` feature counts nothing (`loquax::ui::counters`), and a bar

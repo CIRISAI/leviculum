@@ -14,8 +14,8 @@ use loquax_android::session::Session;
 use real_store::bar;
 use std::time::{Duration, Instant};
 
-/// The list rows a phone's screen shows, and as many again.
-const LIST_ON_SCREEN: u32 = 14;
+/// The list rows a phone's screen shows.
+const SCREEN_ROWS: u32 = 14;
 
 /// A session on the phone with its mailbox here, offline, over `dir`.
 fn start(dir: &std::path::Path) -> Session {
@@ -30,8 +30,9 @@ fn start(dir: &std::path::Path) -> Session {
 
 /// A key typed in the long chat's compose field, as Java sends it
 /// (`ChatActivity`: `Core.draft` on every change), builds no more list
-/// rows than the screen shows and as many again; the list is not even on
-/// screen while the chat is.
+/// rows than the screen shows and one (1595: the row it changed; the
+/// others are the last list's), makes the lists once, and the pump's
+/// turn after it makes them no second time.
 #[test]
 fn a_key_in_compose_builds_no_list() {
     if !real_store::counting() {
@@ -57,8 +58,9 @@ fn a_key_in_compose_builds_no_list() {
     // turn the bar saw the pump's last event, not the key, and went green
     // in three runs of four. Held, it reads the key's own work: its
     // `Draft` and the lists the request makes after it.
-    let counts = session.with_pump_held(|session| {
+    let (counts, builds, echo) = session.with_pump_held(|session| {
         session.reset_counters();
+        let before = session.scene_builds();
         session
             .request(Request::Draft {
                 peer: anna,
@@ -66,19 +68,30 @@ fn a_key_in_compose_builds_no_list() {
                 reply: String::new(),
             })
             .expect("a key");
-        session
+        let counts = session
             .counters()
-            .expect("counting() said this build counts")
+            .expect("counting() said this build counts");
+        let builds = session.scene_builds() - before;
+        // The pump's turn after the key (1595): it makes the lists again
+        // only for a change of its own, never for the key's, which the
+        // request's lists show. A minute turning inside this turn moves
+        // the lists' revision, and a build for that is no echo.
+        let revision = session.lists_revision();
+        let shown = session.scene_builds();
+        session.pump_once();
+        let echo = session.scene_builds() - shown;
+        let moved = session.lists_revision() != revision;
+        (counts, builds, if moved { 0 } else { echo })
     });
     session.stop();
-    println!("COUNTS phone.compose_key {counts}");
+    println!("COUNTS phone.compose_key {counts} builds={builds} echo={echo}");
     bar(
         "phone.a_key_in_compose_builds_no_list",
-        counts.rows_built <= 2 * LIST_ON_SCREEN,
+        counts.rows_built <= SCREEN_ROWS + 1 && builds == 1 && echo == 0,
         &format!(
-            "rows_built {} (bar {})",
+            "rows_built {} (bar {}), lists made {builds} (bar 1), by the pump's echo {echo} (bar 0)",
             counts.rows_built,
-            2 * LIST_ON_SCREEN
+            SCREEN_ROWS + 1
         ),
     );
 }

@@ -252,6 +252,16 @@ struct Inner {
     photos: std::cell::RefCell<std::collections::HashMap<[u8; 16], Option<String>>>,
     /// How often [`Inner::photo`] asked the file system, for the facade.
     photo_stats: std::cell::Cell<u64>,
+    /// The lists' rows as last made, by peer, with the stamp they were
+    /// made under (1595, [`Inner::row_stamp`]): a key that changed one
+    /// conversation makes that row again and reuses the other 299; before,
+    /// every request made all of them, twice with the pump's echo.
+    row_cache:
+        std::cell::RefCell<std::collections::HashMap<[u8; 16], (u64, schema::ConversationRow)>>,
+    /// The request's lists stand for what the model's state was when it
+    /// made them (1595): the pump's next turn does not make them again
+    /// for the request's own change, only for its own or a revision moved.
+    request_shown: bool,
     /// The thread the pump's last turn ran on (1496), for the facade.
     pump_thread: Option<String>,
     /// The peers added by a code while this session runs (walk finding
@@ -1262,6 +1272,20 @@ impl Session {
         f(self)
     }
 
+    /// One pump turn here and now (1595), as the pump's thread makes it:
+    /// with the pump held, a bar sees what the turn after a request does.
+    /// For the facade's bars.
+    #[doc(hidden)]
+    pub fn pump_once(&self) -> bool {
+        self.lock().pump()
+    }
+
+    /// The model's lists revision (1595), for the facade's bars.
+    #[doc(hidden)]
+    pub fn lists_revision(&self) -> u64 {
+        self.lock().model.lists_revision()
+    }
+
     /// Start the model's and the store's counts afresh. For the facade's
     /// bars.
     #[doc(hidden)]
@@ -1336,8 +1360,15 @@ impl Session {
     pub fn request(&self, request: schema::Request) -> Result<(), String> {
         let done = self.requested(request);
         // The lists as the request left them (1464), for a UI thread that
-        // asks while the pump holds the lock.
-        self.lock().show_scene();
+        // asks while the pump holds the lock; only when the request moved
+        // them (1595), and the pump's turn after it does not make them
+        // again for the same change.
+        let mut inner = self.lock();
+        if inner.dirty || inner.scene_at() != Some(inner.model.lists_revision()) {
+            inner.show_scene();
+            inner.request_shown = true;
+        }
+        drop(inner);
         self.wake.notify_one();
         done
     }
@@ -2208,6 +2239,8 @@ impl Inner {
             book: links::load(home),
             photos: std::cell::RefCell::default(),
             photo_stats: std::cell::Cell::new(0),
+            row_cache: std::cell::RefCell::default(),
+            request_shown: false,
             pump_thread: None,
             just_added: std::collections::BTreeSet::new(),
             keys_told: Arc::default(),
@@ -2337,6 +2370,11 @@ impl Inner {
             return false;
         }
         self.costs.window.pumps += 1;
+        // A request's own change is in the lists it made (1595): this
+        // turn's dirt starts afresh, and the `Changed` the change owes the
+        // screens is still said at the turn's end.
+        let shown = std::mem::take(&mut self.request_shown);
+        let owed = shown && std::mem::take(&mut self.dirty);
         // The engine's events a slice at a time (1446): each one folded is
         // a store commit, and a first pull of a big mailbox brings
         // thousands. The pump holds the session's lock for its whole turn,
@@ -2390,11 +2428,12 @@ impl Inner {
         let dirty = std::mem::take(&mut self.dirty);
         // The lists again only when what they show moved (1491): an idle
         // turn, the clock's three events folded, makes none, nor does a
-        // node the Browse tab heard of.
+        // node the Browse tab heard of, nor the request's own change its
+        // lists already show (1595).
         if dirty || self.scene_at() != Some(self.model.lists_revision()) {
             self.show_scene();
         }
-        if dirty {
+        if dirty || owed {
             // The lists first: a screen told `changed` reads them at once,
             // and may find the lock held by the next turn (1464).
             let _ = self.events.send(Event::Changed {
@@ -2804,6 +2843,7 @@ impl Inner {
         );
         links::save(&self.home, &self.book)?;
         self.model.names.link(peer, &name, &contact.lookup);
+        self.row_cache.get_mut().remove(&peer);
         self.dirty = true;
         Ok(())
     }
@@ -2814,6 +2854,7 @@ impl Inner {
         }
         links::save(&self.home, &self.book)?;
         self.model.names.unlink(&peer);
+        self.row_cache.get_mut().remove(&peer);
         self.dirty = true;
         self.photos.get_mut().remove(&peer);
         links::keep_photo(&self.home, &peer, None)
@@ -2972,10 +3013,13 @@ impl Inner {
     /// with `search` only those it finds ([`chat::row_matches`]), so the
     /// phone searches by the rule every loquax screen does (1217).
     fn listed(&self, order: Vec<usize>, search: Option<&str>) -> schema::Conversations {
-        let rows = found(&self.model, order, search)
-            .into_iter()
-            .map(|row| self.schema_row(row))
-            .collect();
+        let rows = match search {
+            Some(_) => found(&self.model, order, search)
+                .into_iter()
+                .map(|row| self.schema_row(row))
+                .collect(),
+            None => self.cached_rows(order),
+        };
         let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
             // The own avatar (1452 rule 4): the own name, the names' word
             // for us else the profile's from the mailbox; never the hash.
@@ -3019,6 +3063,58 @@ impl Inner {
 
     /// A scene's row in the facade's words (1217): what Java saw before
     /// the scene, and the scene's words in the phone's language.
+    /// The rows for `order`, each made again only when its stamp moved
+    /// ([`Inner::row_stamp`], 1595); the rest are the last list's.
+    fn cached_rows(&self, order: Vec<usize>) -> Vec<schema::ConversationRow> {
+        let mut cache = self.row_cache.borrow_mut();
+        // A peer no longer listed keeps no row.
+        if cache.len() > 2 * self.model.conversations.len() + 16 {
+            cache.clear();
+        }
+        order
+            .into_iter()
+            .map(|index| {
+                let peer = self.model.conversations[index].peer;
+                let stamp = self.row_stamp(index);
+                // The open conversation's row is made every time: what it
+                // shows (its draft, 1219) hangs on the chat being open,
+                // which no revision says.
+                let open = index == self.model.selected;
+                match cache.get(&peer) {
+                    Some((kept, row)) if *kept == stamp && !open => row.clone(),
+                    _ => {
+                        let row = self.schema_row(scene::row(&self.model, &peer));
+                        cache.insert(peer, (stamp, row.clone()));
+                        row
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// What a list row of conversation `index` is made from, as the
+    /// core's own list window keys its rows (`UiModel::list_stamp`): the
+    /// conversation's revision, the model-wide look (names, language, the
+    /// minute) and whether it is the open one, with the phone's language
+    /// and its address book's link for the peer (link and unlink drop the
+    /// row besides).
+    fn row_stamp(&self, index: usize) -> u64 {
+        let conversation = &self.model.conversations[index];
+        let mut stamp = 0xcbf2_9ce4_8422_2325u64;
+        for word in [
+            conversation.revision(),
+            self.model.look_rev(),
+            self.lang as u64,
+            u64::from(self.book.links.contains_key(&conversation.peer)),
+            // Open or not: the row that was open is made again when it
+            // closes.
+            u64::from(index == self.model.selected),
+        ] {
+            stamp = (stamp ^ word).wrapping_mul(0x0100_0000_01b3);
+        }
+        stamp
+    }
+
     fn schema_row(&self, row: scene::Row) -> schema::ConversationRow {
         let live = row
             .live
