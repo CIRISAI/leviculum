@@ -73,6 +73,7 @@ run   leviculum-std   t114_boot_lines            # reads the T114 binary, the sh
 run   leviculum-std   rak4631_boot_lines         # reads the RAK4631 binary, the shared node loop and the board file; the boot lines are the pre-move ones with D1, D2, D5 to D8 applied
 skip  leviculum-ui-iced desktop_theme              # its subject is the code (the desktop tone stream), and it opens a D-Bus connection
 run   lnflash         doc_board_catalogue        # reads catalogue.toml against the board facts the book repeats
+run   lnflash         bootloader_update          # reads memory.x and the RAK4631 pages against the vendored bootloader UF2: a moved page fails on push
 run   loquax          package_metadata           # reads loquax/Cargo.toml and leviculum-cli/Cargo.toml; the package depends on leviculum, which enables and starts lnsd
 
 # --------------------------------------------------------------- skip --------
