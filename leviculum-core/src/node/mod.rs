@@ -13595,6 +13595,11 @@ mod relay_route;
 pub use relay_route::ConnectViaError;
 // Channel frames with a deadline (+ciris, leviculum#94).
 mod timed;
+// Unordered link datagrams (+ciris, leviculum#102).
+mod datagram;
+#[cfg(test)]
+mod mvr_link_datagram;
+pub use crate::link::datagram::DatagramStats;
 pub use event::FrameExpiry;
 #[cfg(test)]
 mod mvr_relay_route;

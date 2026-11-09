@@ -38,6 +38,7 @@
 //! keepalives, and channel retransmissions.
 
 pub mod channel;
+pub mod datagram;
 
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
@@ -514,6 +515,8 @@ pub struct Link {
     via: Option<crate::relay_routes::LinkVia>,
     /// +ciris (leviculum#94): how old the peer's timed frames are on arrival.
     timed_age: channel::timed::AgeEstimator,
+    /// +ciris (leviculum#102): the unordered datagram path's sequence and counters.
+    datagrams: datagram::DatagramState,
     /// What one frame costs the frame behind it on the interface this link
     /// runs over, in milliseconds (`Interface::frame_turnaround_ms`). Zero
     /// for a medium with no post-TX wait, which is every interface but LoRa.
@@ -648,6 +651,7 @@ impl Link {
             first_hop_timeout_extra_ms: 0,
             via: None,
             timed_age: channel::timed::AgeEstimator::default(),
+            datagrams: datagram::DatagramState::default(),
             frame_turnaround_ms: 0,
             acquisition_ms: 0,
             outgoing_resource: None,
@@ -785,6 +789,7 @@ impl Link {
             first_hop_timeout_extra_ms: 0,
             via: None,
             timed_age: channel::timed::AgeEstimator::default(),
+            datagrams: datagram::DatagramState::default(),
             frame_turnaround_ms: 0,
             acquisition_ms: 0,
             outgoing_resource: None,
@@ -1237,6 +1242,17 @@ impl Link {
     /// +ciris (leviculum#94): the age estimator for the peer's timed frames.
     pub(crate) fn timed_age_mut(&mut self) -> &mut channel::timed::AgeEstimator {
         &mut self.timed_age
+    }
+
+    /// +ciris (leviculum#102): the unordered datagram path's state.
+    pub(crate) fn datagrams_mut(&mut self) -> &mut datagram::DatagramState {
+        &mut self.datagrams
+    }
+
+    /// +ciris (leviculum#102): what this link has sent and received as
+    /// datagrams.
+    pub fn datagram_stats(&self) -> datagram::DatagramStats {
+        self.datagrams.stats
     }
 
     pub(crate) fn set_first_hop_timeout_ms(&mut self, first_hop_timeout_ms: u64) {

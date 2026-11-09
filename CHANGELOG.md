@@ -11,6 +11,21 @@ git tag, not the version string. -->
 
 ## [Unreleased]
 
+### Added
+
+- Unordered, unreliable link datagrams for live media (leviculum#102).
+  `NodeCore::send_unordered` / `LinkHandle::send_unordered` send one
+  link-encrypted packet with the new context `PacketContext::Datagram`
+  (`0xF0`, unassigned in the reference), carrying a per-link `u32` sequence
+  number ahead of the payload. No window, receipt, proof or retransmit: the
+  peer gets `NodeEvent::LinkDatagramReceived { link_id, sequence, data }`
+  as each one decrypts, in arrival order, and does its own loss accounting
+  and jitter buffering. The interface gate still applies (`PacingDelay`),
+  and the payload limit is `link_datagram_mdu` (link MDU less 4). Counters
+  are in `link_datagram_stats`. A peer without #102 drops the packet at its
+  unknown-context gate, so use it only toward a peer known to speak it;
+  `try_send_timed` stays the fallback.
+
 ### Fixed
 
 - A link born on a punched direct path to a destination that is never
