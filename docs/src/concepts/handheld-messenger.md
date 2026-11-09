@@ -40,7 +40,7 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:506`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:516`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`loquax/Cargo.toml:284`, `loquax/Cargo.toml:288`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
@@ -804,7 +804,7 @@ bytes, and its MDU is 431 (`LORA_LINK_MDU`,
 `loquax/src/home/ask.rs:139`). A response longer than that goes as a
 resource (`leviculum-core/src/node/mod.rs:1827`), which is an
 advertisement, its parts and a proof. The home's own page bound is
-64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:332`). So
+64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:346`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
 that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 (`loquax/src/home/ask.rs:146`), 412 B, the longest answer that still fits
@@ -1178,7 +1178,7 @@ its cells when the screen leaves the map (`leave_map`,
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:6444`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:6447`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1305,7 +1305,7 @@ The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
 a branch in `lines` (`loquax-m9/src/screen.rs:225`) for the scene's
-`rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:824`), which
+`rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:863`), which
 the model already returns while the tab is in front (`rooms_scene`,
 `loquax/src/ui/scene.rs:1161`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
@@ -1314,7 +1314,7 @@ as `who text`, and one input line at the bottom on the chat's editor
 (`loquax-m9/src/field.rs:20`), nicks through `narrow` as every other
 text. In the key table it needs no verbs of its own: while the tab is in
 front the model takes the terminal's keys itself (`key`,
-`loquax/src/ui/rooms.rs:573`: characters into the line, Backspace,
+`loquax/src/ui/rooms.rs:612`: characters into the line, Backspace,
 Enter sends, Up and Down step the rooms, Esc closes the room and then
 the tab), so a `ROOMS_ROWS` table beside `LIST_ROWS` and `CHAT_ROWS` in
 `loquax-m9/src/keys.rs` maps the M9's navigation keys, Enter, back,
