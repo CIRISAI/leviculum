@@ -1920,6 +1920,12 @@ fn the_crosshair_centres_on_the_own_fix_and_the_frame_places_it() {
 /// pinch places anew fade in over as long; while one fades the frame is
 /// pending, so Java asks again; and with the fades done the frame at rest
 /// is the one a fresh renderer draws there, byte for byte.
+///
+/// The renderer draws on [`loquax::tiles::WORKERS`] threads whatever the
+/// host has (1610): a moving frame draws two tiles a thread, and on one
+/// CPU, or under a CPU quota, which `available_parallelism` reads as one,
+/// the pinch's frames still owed tiles at 150 ms and said `pending` for
+/// them, which this test read as a fade not over.
 #[test]
 fn names_fade_out_and_in_by_the_clock() {
     let first_home = home();
@@ -1938,6 +1944,7 @@ fn names_fade_out_and_in_by_the_clock() {
         (shown, rgba, names)
     };
     let _ = frame(&loquax_android::map::render(&rest, Some(Vec::new()), now()));
+    loquax_android::map::tune_tiles(&dir, Some(loquax::tiles::WORKERS), false);
     let (shown, _, names) = draw(&rest, 1000);
     assert!(
         !shown.pending,
