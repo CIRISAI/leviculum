@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:398`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:399`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -683,7 +683,7 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:433`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:434`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:1102`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:1103`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1154`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1171`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:831`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:832`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1931,7 +1931,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2694`).
+both (`thinknode_m9.rs:2728`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2706`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2740`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,7 +2035,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1008`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1009`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2081,7 +2081,7 @@ take 126 µs into 400 entries, 170 µs into 4000). The same fold under
 the firmware's own two choices (`leviculum-heap-lab/tests/pull.rs`,
 the lab routes the host's global allocator into either): llff 134 µs
 at 400, 1919 µs at 4000 — fourteenfold; tlsf 75 µs and 110 µs — flat.
-The firmware links tlsf now (`leviculum-esp/src/lib.rs:76`, constant
+The firmware links tlsf now (`leviculum-esp/src/lib.rs:77`, constant
 time both ways, same `critical-section` lock held O(1) instead of
 O(walk)). Not through `embedded_alloc::TlsfHeap` since 1574: that
 wrapper keeps rlsf's 4228 B control block in its `static`, in `.bss`,
@@ -2109,7 +2109,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2767`), and the fold runs behind the list
+(`thinknode_m9.rs:2801`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2435,7 +2435,7 @@ entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
 (the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
 could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
 heap at every step, as the forget's reopen and a taken code do
-(`leviculum-esp/src/bin/thinknode_m9.rs:1941`). The held bytes live in
+(`leviculum-esp/src/bin/thinknode_m9.rs:1942`). The held bytes live in
 2 KiB blocks, at most 35 s of the line (`RxHeld`,
 `leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
 the pool for 256 KiB in one piece, and 22 s was shorter than the
@@ -2461,7 +2461,7 @@ owed, the reboot `rebuilt`).
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside
 the take stage, so the walks read takes of 1 to 6 s. The dump is now
 timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
-`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2447`); `m9-walk.py`
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2472`); `m9-walk.py`
 takes `dump=` as the dump's turn and holds the rest of that turn to the
 bar.
 
@@ -2495,7 +2495,7 @@ first after. Drawing a message's detail on the M9 is a screen of its own,
 not built.
 
 The board now counts both ends of a key: `keys_ui=` beside `keys_rx=`
-in the `[UART]` line (`leviculum-esp/src/lib.rs:755`), the presses a UI
+in the `[UART]` line (`leviculum-esp/src/lib.rs:756`), the presses a UI
 turn read into a `KEY` line, and a press that reaches no turn is a
 `KEY_DROP reason=queue_full|malformed|value` line. A walk's `idle` step
 holds them to the walk (`check_keys`, `scripts/m9-walk.py:668`): the
@@ -2503,6 +2503,116 @@ frames sent since the boot against `keys_rx=`, and `keys_ui=` no less
 than `keys_rx=` (more is a hold's repeats or a stray code of the
 controller's). `scripts/m9-walks/chatkeys.walk` and `arrivechat.walk`
 are the probes again, opening "Bench" so each Enter stands on a message.
+
+### A key frame survives a flash erase (1613)
+
+Windows 21 to 23 pinned the loss 1612 saw on the line: a flash op runs
+with core 0's interrupts off — esp-storage wraps every ROM call in its
+own interrupt-masking lock (`esp-storage-0.10.0/src/lib.rs`,
+`maybe_with_critical_section`), so the mask is not ours to lift — and
+with the cache off, so the UI core was hardware-stalled too
+(esp-storage's AutoPark writes the RTC's `SW_CPU_STALL` clock stall:
+the core is frozen, no interrupt runs on it). For the whole op no CPU
+anywhere could take the UART FIFO: 128 bytes, 11.1 ms of the line at
+115200 baud, against erases measured per 5-second window over three
+pulls (`park_max_ms` in `rig-run/m9/2026-11-09{c,d,e}/pull.log`):
+
+| window | ops' windows | median max | largest |
+|---|---|---|---|
+| 21 | 147 | 45.3 ms | 58.6 ms |
+| 22 | 110 | 45.0 ms | 64.3 ms |
+| 23 | 110 | 45.2 ms | 60.0 ms |
+
+A 45 ms erase carries 518 bytes at line rate, a 64.3 ms one 741; the
+FIFO keeps 128 and the rest fell. The hang walks lost 4, 2 and 1 of
+~100 injected key frames (10 bytes each, `m9-walk.py`'s `key_frame`),
+every loss inside an erase, `overrun` rising with it. 1595's
+pre-op FIFO drain and 1597's counters shrank and named the loss; they
+could not close a window longer than the FIFO.
+
+The options of 1613, each against those numbers:
+
+- **(a) leave the interrupt mask:** the mask sits inside esp-storage,
+  and it is right — an interrupt through flash code would crash on the
+  dead cache. Lifting it means forking esp-storage AND proving every
+  core-0 handler and all it reaches IRAM-resident; the set includes the
+  TX ring, which 1507 put on the heap, which is PSRAM, behind the same
+  dead cache. The set is open-ended (it grows with every feature) and
+  partly unreachable by construction. Excluded.
+- **(b) UHCI DMA into internal RAM:** esp-hal 1.2.2's `uart::uhci` is
+  one-shot, and nothing can restart it mid-op — core 0 is masked, core
+  1 stalled — so the restart gap is the rest of the op, up to ~60 ms
+  against a 0.87 ms key frame. Worse, its end-of-frame triggers (line
+  idle, a 0xC0 separator our HDLC payloads may carry unescaped, the
+  packet threshold) can end the armed transfer *during* the op on
+  data- or timing-dependent input, falling back to the same 128-byte
+  FIFO. It lowers the probability; it cannot reach "loses none".
+  Excluded.
+- **(d) a larger FIFO plus shorter erases:** `rx_size` could grow to
+  512 bytes at most (the S3's 1 KiB UART RAM is shared by three
+  UARTs, and UART1 carries the GNSS receiver) — 44.4 ms, under the
+  45 ms *median* and far under the observed 64.3 ms. And the erase
+  cannot be shortened: one 4 KiB sector is the chip's atomic erase
+  unit and our ops already erase one sector per masked window.
+  Excluded by arithmetic alone.
+- **(c) input taken on the UI core — chosen, in the form the stall
+  made necessary:** the S3's park is a clock stall, so no handler runs
+  on a parked core; instead the UI core now parks *itself*
+  (`leviculum-esp/src/corepark.rs`). A flash op raises FROM_CPU_INTR2;
+  the UI core's handler acknowledges, clears its own INTENABLE, and
+  spins in internal RAM polling both receive FIFOs (UART0 host, UART1
+  GNSS) into two rings until core 0 says the op is done. One popper is
+  always live: core 0's interrupt whenever its interrupts are on, the
+  parked spin exactly while they are off.
+
+What makes the spin safe where the stall was needed: the handler is
+*entered* while the cache is still on (core 0 waits for the ack before
+the op starts, so esp-hal's dispatch through flash tables runs on
+readable flash), and from ack to done it touches only its own
+`.rwtext` code and literals, two rings and three handshake words in
+internal `.bss`, and peripheral registers, with INTENABLE zero so
+nothing else can dispatch. That is option (a)'s completeness proof at
+a provable size: the set is one function, and
+`scripts/build-m9-image.sh` checks the linked ELF on every build —
+`park_ipi` whole inside `.rwtext` and zero call or indirect-jump
+instructions in its body (removing `#[esp_hal::ram]` turns the gate
+red; the same scan counts 1034 calls in `main`).
+
+The protocol cannot recreate the 2026-11-07 hang (1534): the park
+interrupt cannot land inside a held critical section (acquire disables
+the core's interrupts first), so the UI core is never parked holding
+the section, and core 0 holds no lock while waiting for the ack. The
+section is therefore no longer held across the op at all; only the
+fallback — core 1 not armed yet, or not answering within 20 ms — still
+stalls the core the old way, under the section, and is counted
+(`park_fallback=` beside `park_coop=` on the `[IDLE]` line).
+
+Sizing, from the table: the host ring is 2048 bytes, 178 ms of the
+line, 3.1 times the 57 ms design bound and 2.8 times the worst
+observed window; the GNSS ring 1024. Both live in internal `.bss`
+(3 KiB against core 0's measured 75 KiB of stack headroom,
+`STACK_HEADROOM stack=170820 need=94976`). A ring full anyway counts
+into `rx_lost=` instead of hiding.
+
+Proven on the host before the board:
+`a_parked_poller_rides_a_57ms_mask_at_line_rate_without_loss`
+(`leviculum-nrf/serial-mux/src/park.rs`) drives key frames between
+node frames back to back at line rate across a modelled 57 ms mask —
+every byte arrives, in order; its positive control
+`the_fifo_alone_loses_at_every_size_the_uart_ram_allows` pins today's
+loss (528 bytes at 128, 272 at 384, 144 at 512) so the model cannot
+pass vacuously. The byte order holds because the handoffs bracket the
+window: core 0 masks its interrupts and sweeps the FIFO *before* the
+park, and harvests the rings into the keeps *before* it unmasks.
+
+The bench image now says every masked window as `[FLASH] op=erase|
+write ms=<n> at=<ms>` (`flash::park::take_records`), the per-op-kind
+distribution 1613 asked for first. The bar on the board (window 24):
+`keys_rx = keys_ui = presses` through a hang walk and a forget walk,
+`park_fallback=0`, and no `overrun` that counts a key frame. The
+proxy keeps injecting at full rate — a pacing retry would be the
+bench's crutch, and the product's line (lnsd under announce traffic)
+does not pace.
 
 ### Tracks on the M9 (1385, not built)
 
