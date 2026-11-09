@@ -253,6 +253,21 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Register `/dfu` beside `/status` on the remote-management destination
+    /// (OTA stage 1, Codeberg #235), under the same allow-list.
+    ///
+    /// This is the boards' verb and `lnsd` never sets it: a daemon cannot
+    /// enter a bootloader, so it does not serve a verb it could not carry out.
+    /// It exists so a host node can stand in for a board, e.g. to prove the
+    /// `lnmgmt dfu` sender against the core's own decision
+    /// (`leviculum_core::node::remote_dfu::dfu_command`), run from a
+    /// [`core_processor`](Self::core_processor). Without remote management in
+    /// the config it does nothing.
+    pub fn remote_dfu(mut self, enable: bool) -> Self {
+        self.core_builder = self.core_builder.remote_dfu(enable);
+        self
+    }
+
     /// Set the resource receive-window adaptation policy (Codeberg #85).
     /// Default: [`WindowPolicy::Current`]. Endpoint tools read it from the
     /// `LEVICULUM_RESOURCE_WINDOW_POLICY` environment variable via

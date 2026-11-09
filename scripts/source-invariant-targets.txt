@@ -219,6 +219,7 @@ skip  leviculum-std   obs_iface_name_whitespace  # drives the real emit sites in
 skip  leviculum-std   obs_outbound_route_events  # drives the real emit sites in-process; subject is the code
 skip  leviculum-std   port_alloc_multiprocess    # spawns processes to race port allocation
 skip  leviculum-std   public_node_config_acceptance # builds node configs in temp dirs; subject is the config builder
+skip  leviculum-std   remote_dfu_sender          # two in-process nodes over TCP loopback; subject is the /dfu sender
 skip  leviculum-std   rnsd_interop               # drives Python rnsd over sockets; Tier 1
 skip  leviculum-std   shared_instance_client_count # tokio runtime with a shared instance
 skip  leviculum-std   shared_instance_conflict   # tokio runtime with two competing instances

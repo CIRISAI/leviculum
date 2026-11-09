@@ -66,6 +66,7 @@ pub(crate) mod packet_hashlist;
 /// the anonymous-mapping histogram and the gap arithmetic (Codeberg #437).
 pub mod proc_memory;
 pub mod process;
+pub mod remote_dfu;
 pub mod remote_status;
 pub mod resolver;
 pub mod resource_policy;
