@@ -3621,25 +3621,39 @@ impl<B: InputBuffer + Default> Drop for Batch<'_, B> {
     }
 }
 
-/// The clock a home's entry is folded under (1594): the model's, held to
-/// when the home recorded the entry (`recorded_at`, unix seconds; 0 or
-/// less for unknown), so no message gets a time later than the home took
-/// it. A received message's shown time is its writer's held to the
-/// clock (`written_time`): folded under the model's own clock it was
-/// held to whenever the fold ran, so a writer whose clock ran ahead of
-/// ours got the pull's time in the row the pull kept and a later time
-/// when a page of it was read again (window 19: the preloaded row rose
-/// over a newer arrival to the list's top, and the cursor with it).
-/// `None` while the model knows no time: a fold without a clock gives no
-/// time, as before.
+/// The clock a home's entry is folded under (1594): when the home
+/// recorded the entry (`recorded_at`, unix seconds; 0 or less for
+/// unknown), in the model's offset, so no message gets a time later
+/// than the home took it. A received message's shown time is its
+/// writer's held to the clock (`written_time`): folded under the model's
+/// own clock it was held to whenever the fold ran, so a writer whose
+/// clock ran ahead of ours got the pull's time in the row the pull kept
+/// and a later time when a page of it was read again (window 19: the
+/// preloaded row rose over a newer arrival to the list's top, and the
+/// cursor with it).
+///
+/// The recorded time stands even where the model's clock is behind it
+/// (1597): the board's day is the newest stamp it has seen, told to the
+/// model on the next second's tick, so a pulled page is folded in the
+/// turn it came under a clock that has not yet seen its stamp. Held to
+/// the earlier of the two, window 21's "mark control" came out at the
+/// stale day, 16 s before the home took it; the row kept said so, and
+/// the page read after a reboot, under a clock past the stamp, gave the
+/// message its recorded time and moved the row. Nor does it wait for
+/// the model to know a time at all: a boot's rebuild and a page read
+/// before the first stamp folded with none and gave the messages no
+/// time, where a pull that knew the day gave them theirs, so a row's
+/// time depended on when its entries happened to be folded. An entry
+/// the home recorded carries its time; one without (`recorded_at` 0)
+/// folds under the model's clock, `None` while it knows none.
 pub fn recorded_now(now: Option<WallTime>, recorded_at: i64) -> Option<WallTime> {
-    now.map(|now| match recorded_at > 0 {
-        true => WallTime {
-            unix_secs: recorded_at.min(now.unix_secs),
-            ..now
-        },
+    match recorded_at > 0 {
+        true => Some(WallTime {
+            unix_secs: recorded_at,
+            offset_secs: now.map_or(0, |now| now.offset_secs),
+        }),
         false => now,
-    })
+    }
 }
 
 /// One event folded with what follows every fold, short of the note

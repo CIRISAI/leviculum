@@ -1543,10 +1543,9 @@ fn walk_twenty(archive: &Archive, mut flash: MemFlash, now: Option<loquax::when:
         .filter_map(|m| m.at)
         .map(|at| at.unix_secs)
         .max();
-    match now {
-        Some(_) => assert_eq!(newest, newest_of.get(&selected.peer).copied()),
-        None => assert_eq!(newest, None),
-    }
+    // A boot that does not know it yet gives them the home's record of
+    // them all the same (1597): the time is the entry's, not the clock's.
+    assert_eq!(newest, newest_of.get(&selected.peer).copied());
 }
 
 /// 1591, window 18: a write of every row to the summary log (the bench's
@@ -1853,4 +1852,119 @@ fn no_caller_can_write_the_summary_unbounded() {
         );
         assert_eq!(unbounded_writes(&source), Vec::<&str>::new(), "{file}");
     }
+}
+
+/// 1597, window 21's bench.walk: `[PAGE_MOVED] peer=f18f4927
+/// last_written=Some(…816)->Some(…832) moved=Some(…816)`. The bench
+/// sender's "mark control" reached the home before the marks walk; the
+/// board preloaded the sender's page at boot and took its day from that
+/// page's newest stamp (`Reader::saw`, the model told on the next
+/// second's tick), then the pull brought the message, recorded 16 s past
+/// that day, and folded it in the same turn, the model's clock not yet
+/// told the page's stamp. Each home entry is folded under the clock held
+/// to when the home recorded it (`recorded_now`), and that hold took the
+/// earlier of the two: the message came out at the stale day, and the
+/// row the summary kept said so. After a reboot the clock is past the
+/// stamp, the page's fold gave the message its recorded time, and the
+/// row rose. Replayed here as the board ran it: preload, the pull in
+/// the same turn, the open and the home's read mark, the reboot, the
+/// cursor on the sender, its page read and folded. The row's time does
+/// not move.
+#[test]
+fn a_page_read_after_a_reboot_keeps_its_rows_time() {
+    use loquax::home::wire::{mark_request, Mark, MarkFlag};
+    use loquax_m9::read::Reader;
+    let archive = Archive::new();
+    let address = archive.address;
+    let mut flash = summarised(&archive);
+    let mut boot = restore_settled(&mut flash, address).expect("resume");
+    let friend = &archive.friends[30];
+    let peer = lxmf_address(&friend.public_key_bytes()).expect("address");
+    let find = |model: &loquax::ui::UiModel<loquax_m9::field::Field>| {
+        model
+            .conversations
+            .iter()
+            .position(|c| c.peer == peer)
+            .expect("the sender's conversation")
+    };
+    let mut ids = || [0u8; 16];
+
+    // The boot preloads the sender's page; the next second tells the
+    // model the day from its newest stamp.
+    let mut reader = Reader::default();
+    let (page, _) = boot
+        .shelf
+        .page(&mut flash, peer, home::page_entries(), &address)
+        .expect("page");
+    reader.saw(&page, 5_400);
+    let _ = reader.tick(&mut boot.model, 6_000);
+    let day = boot.model.now.expect("the day from the page").unix_secs;
+
+    // The pull brings "mark control", written and recorded 16 s past
+    // that day, and folds it in the same turn: seen, not yet told.
+    let recorded = day + 16;
+    let control = Entry {
+        seq: boot.shelf.cursor() + 1,
+        kind: KIND_RECEIVED,
+        at: recorded,
+        packed: pack(friend, address, "mark control", recorded as f64),
+    };
+    let id = board::rows::entry_id(&control, &address).expect("id");
+    let mut pulled = |boot: &mut home::Boot, flash: &mut MemFlash, page: &[Entry]| {
+        reader.saw(page, 6_027);
+        home::keep(&mut boot.shelf, flash, page, &address).expect("keep");
+        let (_, effects) = home::take(&mut boot.model, page, &address);
+        let routed = home::route(&mut boot.model, effects, &mut ids);
+        boot.shelf.said(routed.rows, routed.gone);
+        settle(&mut boot.shelf, flash, Vec::new());
+    };
+    pulled(&mut boot, &mut flash, std::slice::from_ref(&control));
+    // The walk opens it; the home's read mark comes back.
+    let mark = Entry {
+        seq: control.seq + 1,
+        kind: loquax::home::KIND_MARK,
+        at: recorded + 2,
+        packed: mark_request(&Mark {
+            flag: MarkFlag::Read,
+            ids: vec![id],
+        }),
+    };
+    pulled(&mut boot, &mut flash, &[mark]);
+
+    // The reboot: the row from the summary, the clock past the stamp.
+    let mut boot = restore_settled(&mut flash, address).expect("reboot");
+    assert!(
+        matches!(boot.how, home::How::Resumed { .. }),
+        "{:?}",
+        boot.how
+    );
+    boot.model.now = Some(loquax::when::WallTime {
+        unix_secs: recorded + 60,
+        offset_secs: 0,
+    });
+    let at = find(&boot.model);
+    let listed = boot.model.conversations[at].last_written();
+    let place = boot.model.order().iter().position(|&i| i == at);
+    boot.model.selected = at;
+    let (page, earlier) = boot
+        .shelf
+        .page(&mut flash, peer, home::page_entries(), &address)
+        .expect("page");
+    assert!(
+        page.iter().any(|e| e.seq == control.seq),
+        "the page holds the message"
+    );
+    home::page_in(&mut boot.model, peer, &page, earlier, &address);
+    let at = find(&boot.model);
+    assert_eq!(
+        boot.model.conversations[at].last_written(),
+        listed,
+        "the page's fold moved the row's time"
+    );
+    assert_eq!(
+        boot.model.order().iter().position(|&i| i == at),
+        place,
+        "the page's fold moved the row"
+    );
+    assert_eq!(listed, Some(recorded), "the row says when the home took it");
 }
