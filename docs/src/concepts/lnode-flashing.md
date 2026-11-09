@@ -280,6 +280,12 @@ and no erase reaches one. That holds as long as the image stops below
 the store, which `memory.x`'s `ASSERT`s make a link error and the gate
 above reports as a number.
 
+A bootloader self-update is the one UF2 that does not keep the store: the
+running bootloader stages the new bootloader in the top ten pages of the
+window, `0xE0000`–`0xEA000` on a RAK4631, before it copies it into place,
+and nine of those pages are record-log pages
+([OTA stage 1](ota-stage-1-ble-dfu.md#bootloader-update)).
+
 The boot record (#380, `0xD9000`, one page) is the same case one page
 further down: it counts the boots a
 field board made while nobody was watching (`boot_count.rs`), so it has
@@ -616,7 +622,7 @@ Start with how wide the field actually is. The Meshtastic tree carries
 
 **Two transports cover 155 of the 160 flashable variants**, and we
 already own both: the UF2 path in `leviculum-nrf/tools/uf2-runner.sh`
-and the ESP path behind `Justfile:900`, which drives `esptool`. The
+and the ESP path behind `Justfile:901`, which drives `esptool`. The
 work is not building 162 things. It is separating two mechanisms
 cleanly and turning everything else into data.
 

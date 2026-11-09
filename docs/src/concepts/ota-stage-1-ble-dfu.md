@@ -56,6 +56,12 @@ recorded, and the bench measurement below reads it first.
   with `arm-none-eabi-objdump -M force-thumb` at its load address
   `0xF4000`. Its `INFO_UF2.TXT` string carries `Date: May 20 2023`, the
   same date the rig RAK reports, so it is the build on our board.
+  One correction to "binaries only": a source tree does sit beside the
+  images, `bootloader/RAK4630/Latest/WisCore_RAK4631_Bootloader/`. It
+  arrived with the 0.4.3 commit (`adbeffe`, 2023-05-20), its changelog
+  stops at Adafruit 0.6.2, and it is what the staging addresses in
+  [Bootloader update](#bootloader-update) are read from. For 0.4.4 RAK
+  published no source.
 
 | Question | 0.9.0 (T114) | 0.4.3 (RAK4631) |
 | --- | --- | --- |
@@ -88,7 +94,199 @@ stays worth having, but the "reconnect and push again" this page
 promised before holds only as long as the board is not reset in
 between, and even then the bootloader refuses the second start packet.
 RAK's 0.4.4 fixes this on the RAK; for the T114 family nothing
-published does. Updating the bootloader itself is out of scope here.
+published does. Lifting the RAK to 0.4.4 is the next section.
+
+## Bootloader update
+
+**Decided by Lew on 2026-11-09: the RAK4631 bootloader goes from 0.4.3 to
+0.4.4.** On 0.4.3 an interrupted BLE transfer leaves the board in USB DFU
+(the table above); on 0.4.4, by RAK's changelog, it stays in BLE DFU and the
+phone can try again. Nothing below has been run on a board yet: the bench
+window at the end is what turns it from read to measured. The Pocket V2
+shares the `Board-ID`, and its build is read first and decided on its own.
+
+### Which file, from where
+
+All from github.com/RAKWireless/WisBlock at commit `d3da249c` (2026-07-23,
+"Update RAK4631 bootloader to V0.4.4 with BLE OTA recovery."), vendored
+byte for byte with their licence under
+`lnflash/tests/fixtures/bootloader/rak4631/`:
+
+| File | Path at `d3da249c` | sha256 | Covers |
+| --- | --- | --- | --- |
+| `update-wiscore_rak4631_board_bootloader-0.4.4_nosd.uf2` | `bootloader/RAK4630/Latest/` | `6795b91c…d8297001` | 136 blocks, family `0xd663823c`: MBR `0x0..0xB00`, bootloader `0xF4000..0xFBB00`, config page `0xFD800..0xFD900`, UICR block `0x10001000` |
+| `wiscore_rak4631_board_bootloader-0.4.4.hex` | `bootloader/RAK4630/Latest/` | `29635d90…e1ca5bd` | bootloader `0xF4000..0xFBAB0`, config `0xFD800..0xFD858`, UICR words `0x10001014`/`0x10001018` |
+| `wiscore_rak4631_board_bootloader-0.4.3.hex` | `bootloader/RAK4630/Old/V0.4.3/` | `36525835…b885f6` | the way back, same layout, code to `0xFBFE8` |
+
+The INFO string the 0.4.4 image carries, at `0xFB90B`: `UF2 Bootloader
+0.4.4`, `Model: WisBlock RAK4631 Board`, `Board-ID: WisBlock-RAK4631-Board`,
+`Date: Jun 17 2026`, `Ver: 0.4.4`. Its config page is byte-identical to
+0.4.3's, including the bootloader ID `0x239A0029` that the running 0.4.3
+compares a self-update against before taking it (`write_block` in
+`src/usb/uf2/ghostfat.c` of RAK's tree).
+
+**The SoftDevice.** 0.4.4 is built against S140 6.1.1, as 0.4.3 was
+(`SD_VERSION = 6.1.1`, `Makefile` line 18 of RAK's tree); RAK's README says
+"softdevice version 140.6.1.1" (line 8). The bootloader does not bring its
+own SoftDevice in the `_nosd` UF2: the file's only blocks below the
+bootloader are the MBR's, `0x0..0xB00`, which the running bootloader skips
+(`ghostfat.c` line 557), so S140 7.3.0 stays where it is, and
+`INFO_UF2.TXT` keeps reporting it, as it does today under the same 6.1.1
+build of 0.4.3. **Refused here**: `wiscore_rak4631_board_bootloader-0.4.4_s140_6.1.1.zip`
+(its `manifest.json` is a `softdevice_bootloader` package with
+`sd_size` 151016, the 6.1.1 SoftDevice, and RAK's README drives it with
+`adafruit-nrfutil dfu serial`) and the `_s140_6.1.1.hex` (it carries
+`0x1000..0x25DE8`): both put 6.1.1 back, the downgrade that was the
+"Schein-Brick" of September. Whether the bootloader's own BLE DFU runs under
+7.3.0 is not something either build has been measured doing; that is the
+bench hour above, on 0.4.4 as on 0.4.3.
+
+**The stage-1 verb still fits.** Disassembled like 0.4.3 (load address
+`0xF4000`): `GPREGRET` is read at `0xF4830` (`ldr.w r7, [r2, #1308]`) and
+compared with `0xB1` (`0xF483A`), `0xA8` (`0xF4848`), `0x4E` (`0xF4854`),
+`0x57` (`0xF487E`) and `0x6D` (`0xF4892`), and cleared on the
+`0xB1`/`0xA8` path (`str.w r4, [r2, #1308]`, `r4 = 0`, `0xF4876`).
+`AdaDFU` is at `0xFB5DC`, the 128-bit service base at `0xFB621`. What is
+new is a store 0.4.3 does not have: `movs r2, #168` and
+`str.w r2, [r3, #1308]` at `0xF48DA`/`0xF48DC`, followed by
+`bl 0xF4770`, which is `NVIC_SystemReset` (`0x05FA0004` into
+`0xE000ED0C`). The bootloader writes `0xA8` itself and resets into its own
+BLE DFU, on the path where the application-validity check called at
+`0xF48A4` fails (the function at `0xF5468` reads the SoftDevice's info
+magic `0x51B1E5DB` at `0x3004`, then the bank state and its CRC). That is
+the mechanism behind RAK's changelog line. Which entries reach that path is
+not fully decoded; the bench reads it.
+
+### What the update writes, and where
+
+The file's own addresses are not where the bytes go. The **running** 0.4.3
+stages every bootloader block lower, inside the application window, and only
+after the last one asks the MBR to copy the staged image over itself: the
+`CFG_UF2_FAMILY_BOOT_ID` arm of `write_block` writes to
+`targetAddr - (BOOTLOADER_ADDR_END - USER_FLASH_END)`
+(`src/usb/uf2/ghostfat.c` line 545 in RAK's tree), and
+`SD_MBR_COMMAND_COPY_BL` copies `DFU_BL_IMAGE_MAX_SIZE` bytes from
+`BOOTLOADER_ADDR_NEW_RECIEVED` (`src/usb/msc_uf2.c` lines 200 to 211;
+the constants at `src/usb/uf2/uf2cfg.h` lines 21, 27 and 30). On the RAK,
+`0xFE000 - 0xEA000 = 0x14000`, so:
+
+| Step | Range | What is there on our board |
+| --- | --- | --- |
+| MBR blocks | `0x0..0xB00` | skipped |
+| Staging, code | `0xE0000..0xE7B00`, pages `0xE0000..0xE8000` | record log (`STORE`), pages 6 to 13 of 16 |
+| Staging, config page | `0xE9800..0xE9900`, page `0xE9000..0xEA000` | record log, page 15 |
+| UICR block | `0x10001000` | compared against `0xF4000`/`0xFE000`, not written |
+| MBR copy | `0xF4000..0xFE000` | the bootloader itself, below the MBR parameter page `0xFE000` and the settings page `0xFF000` |
+
+Each staged page is read, patched and rewritten whole (`flash_nrf5x_write`,
+`src/flash_nrf5x.c` line 69), so the rest of page `0xE7000` and of page
+`0xE9000` keeps its bytes, but a page header the record log needs on
+`0xE0000` to `0xE7000` is gone. **The records on those nine pages are
+lost.** The log mounts past foreign pages (`foreign_region_is_survivable`
+and `a_page_of_plausible_headers_is_sealed_rather_than_believed` in
+`leviculum-nrf/record-log/src/tests.rs`), so the board comes up with what
+the other seven held. On the bench RAK that is test traffic; on a board
+that carries other people's messages it is not, and the recipe asks.
+
+**The identity is outside every step.** Staging cannot reach above
+`USER_FLASH_END` (`0xEA000`) by construction, and the identity
+(`0xEC000`), radio (`0xEB000`) and telemetry (`0xEA000`) pages sit at or
+above it; the copy starts at `0xF4000`. Nothing touches `0x1000..0xD7000`
+(SoftDevice and application), the calendar ring or the boot record.
+
+`lnflash::bootloader_update::plan` is this table as code, and
+`lnflash/tests/bootloader_update.rs` holds it against the vendored UF2 and
+`leviculum-nrf/memory.x`: green on the real file, red on a block on the
+identity page, a bundled SoftDevice, an application image, a UICR naming
+another bootloader start, a missing UICR block, and a receiver whose staging
+would land on the identity page; protecting `STORE` refuses the real file,
+which is how the test knows the overlap is real. It also checks that the
+0.4.4 hex the SWD recovery writes is byte for byte what the UF2 installs.
+
+### The recipes
+
+* `just bootloader-info <port>` (or `-` to double-tap by hand): enters the
+  bootloader with the 1200-baud touch, mounts the volume read-only under
+  `/run/leviculum-uf2/`, prints `INFO_UF2.TXT` and the window top read
+  from `CURRENT.UF2`'s size, unmounts. The board stays in its bootloader;
+  its flash recipe brings the application back. A Pocket V2 does not leave
+  the bootloader on a power cycle, the battery holds it up.
+* `just bootloader-update-rak <uf2> [port]` (`scripts/lnode-bootloader.sh`):
+  1. the planner (`lnflash/examples/bootloader_plan.rs`) reads the UF2
+     against `memory.x` and refuses anything but staging into the record
+     log; it prints the record-log pages lost and the run asks for a
+     `yes` (`LEVICULUM_BL_ACCEPT_STORE_LOSS=1` says it ahead);
+  2. with a port, the board's `[IDENTITY]` line off its debug port; no
+     identity, no write;
+  3. touch (or double-tap) into 0.4.3; `INFO_UF2.TXT` must say
+     `WisBlock-RAK4631-Board`, `S140 7.3.0` and a window top of `0xEA000`,
+     the receiver the planner modelled;
+  4. the UF2 onto the volume mounted `-o flush`, no `sync` (the bootloader
+     resets under the last block, and a global sync would wait on a device
+     that is gone), and the volume must vanish within 30 s;
+  5. back into the bootloader (the touch again once the application is
+     back, or a double-tap); INFO must name the planner's version, the
+     same SoftDevice and the same window top;
+  6. our application through the runner `just flash-rak4631-one` uses,
+     which proves `[FW_BUILD]`; then `[IDENTITY]` must be the one from
+     step 2.
+
+### Recovery over SWD
+
+The bootloader is written by the MBR copy in one go; a board that loses
+power inside it, or a 0.4.4 that misbehaves, is recovered with the
+Raspberry Pi Debug Probe on the RAK's SWD pads
+([Probe debugging](../firmware/probe-debugging.md) has the wiring and the
+`--probe 2e8a:000c` selection). From the repo root, with
+`P="--chip nRF52840_xxAA --probe 2e8a:000c --protocol swd"`:
+
+```
+~/.cargo/bin/probe-rs info $P
+# keep the identity, radio and telemetry pages before writing anything
+~/.cargo/bin/probe-rs read $P b32 0xEA000 3072 > rak-appdata-0xEA000.txt
+# the UICR must already name the bootloader: expect 000f4000 000fe000
+~/.cargo/bin/probe-rs read $P b32 0x10001014 2
+# the bootloader alone, its UICR records stripped (.sec3 is the UICR pair);
+# the way back is the 0.4.3 hex in the same directory, stripped the same way
+mkdir -p target/tmp
+arm-none-eabi-objcopy -I ihex -O ihex --remove-section=.sec3 \
+    lnflash/tests/fixtures/bootloader/rak4631/wiscore_rak4631_board_bootloader-0.4.4.hex \
+    target/tmp/rak-bootloader-0.4.4-no-uicr.hex
+~/.cargo/bin/probe-rs download $P --binary-format hex target/tmp/rak-bootloader-0.4.4-no-uicr.hex
+# only if the SoftDevice is gone too (INFO names none, or the MBR reads blank)
+~/.cargo/bin/probe-rs download $P --binary-format hex \
+    lnflash/payload/t114/s140_nrf52_7.3.0_softdevice.hex
+~/.cargo/bin/probe-rs reset $P
+```
+
+then a double-tap and `just flash-rak4631-one`. The stripped hex covers
+`0xF4000..0xFBAB0` and `0xFD800..0xFD858`, so the pages it erases are the
+bootloader's own and nothing at or above `0xFE000` (the MBR parameter page,
+the bootloader settings with the application's validity). The UICR is left
+alone on purpose: it already holds `0xF4000`/`0xFE000`, and changing a UICR
+word means erasing the whole UICR, the board's other configuration words
+with it. Never `--chip-erase` or `--allow-erase-all`, which take the
+identity too. The 7.3.0 SoftDevice hex is the one `lnflash` ships (MBR at
+`0x0..0xB00`, SoftDevice at `0x1000..0x26498`). **A Pocket V2 is not reset
+by power-cycling it**: the battery keeps it running, so its way back into
+the bootloader is the needle in the pinhole.
+
+### At the bench, in this order
+
+Lew has the Debug Probe connected to the RAK before step 3.
+
+1. `just bootloader-info <pocket port>`, then `just flash-rak4631-one` on it
+   to bring it back. Its build decides whether the Pocket follows; nothing
+   is written to it in this window.
+2. `just bootloader-info <rak port>`, then `just flash-rak4631-one`: 0.4.3,
+   `S140 7.3.0`, window top `0xEA000` expected.
+3. `just bootloader-update-rak lnflash/tests/fixtures/bootloader/rak4631/update-wiscore_rak4631_board_bootloader-0.4.4_nosd.uf2 <rak port>`;
+   the `BL_PLAN`, `BL_INFO` and `BL_UPDATE` lines are the record.
+4. One double-tap on the RAK: the UF2 drive must come up (the USB way back
+   still works), then `just flash-rak4631-one`.
+5. The DFU hour and the sniffer above, on 0.4.4, and then the case this is
+   for: a transfer started from the phone and cut off, after which the RAK
+   must still advertise `AdaDFU` and take a second, complete transfer.
 
 ## What is built (Codeberg #235 and its neighbours)
 

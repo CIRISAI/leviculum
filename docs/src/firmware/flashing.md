@@ -261,7 +261,7 @@ The firmware crate `leviculum-nrf` is its own Cargo workspace, separate
 from the repo-root workspace, and is cross-compiled. The flash recipes
 hand the board's binary and features to `scripts/nrf-flash.sh`, which
 runs cargo in `leviculum-nrf` through `scripts/nrf-rustflags.sh`.
-(`Justfile:2181-2184`)
+(`Justfile:2182-2185`)
 
 A plain build (no flash) is:
 
@@ -309,7 +309,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:2209-2211`, `Justfile:2278-2287`. See
+automatically. (`Justfile:2210-2212`, `Justfile:2302-2311`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -329,7 +329,7 @@ against mixed firmware versions. Use this as your default for T114s.
 bash scripts/nrf-flash.sh t114 bsp-t114
 ```
 
-(`Justfile:2185-2187`; rationale `leviculum-nrf/README.md:25`)
+(`Justfile:2186-2188`; rationale `leviculum-nrf/README.md:25`)
 
 ### `just flash-one PORT` — a single T114
 
@@ -347,7 +347,7 @@ Expands to:
 LEVICULUM_FLASH_ONLY=<PORT> bash scripts/nrf-flash.sh t114 bsp-t114
 ```
 
-(`Justfile:2193-2198`; usage forms `leviculum-nrf/README.md:31-36`)
+(`Justfile:2194-2199`; usage forms `leviculum-nrf/README.md:31-36`)
 
 ### `just flash-rak4631` — every RAK4631
 
@@ -362,7 +362,7 @@ LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2210-2218`)
+(`Justfile:2211-2219`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -381,7 +381,7 @@ LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2220-2224`)
+(`Justfile:2221-2225`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
@@ -396,7 +396,7 @@ LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2226-2234`; `rak-baseboard` aggregate
+(`Justfile:2227-2235`; `rak-baseboard` aggregate
 `leviculum-nrf/Cargo.toml:453`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
@@ -419,7 +419,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:2278-2287`)
+(`Justfile:2302-2311`)
 
 ### SenseCAP T1000-E: serial DFU
 

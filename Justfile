@@ -340,6 +340,7 @@ rnode-chip-offsets:
 [doc('Shellcheck the flash-runner and CI shell scripts')]
 nrf-shellcheck:
     shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
+        scripts/lnode-bootloader.sh \
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
         scripts/rig-cell.sh scripts/test-rig-cell.sh \
         scripts/device-watchdog.sh scripts/test-device-watchdog.sh \
@@ -2232,6 +2233,29 @@ flash-rak4631-one PORT:
 [doc('Flash a RAK4631 with the WisMesh Pocket V2 baseboard peripherals')]
 flash-rak4631-pocket:
     {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
+
+# Which bootloader build a board carries: touch PORT (or "-" and double-tap
+# by hand), mount the volume read-only, print INFO_UF2.TXT, give it back. The
+# board stays in its bootloader afterwards; its own flash recipe brings the
+# application back (a Pocket V2 does not leave it on a power cycle, the
+# battery holds it). Run on the Pocket and the RAK before any update:
+# docs/src/concepts/ota-stage-1-ble-dfu.md, "Bootloader update".
+#   just bootloader-info /dev/leviculum-rak-transport
+[doc('Print INFO_UF2.TXT of an LNode bootloader (- = double-tap by hand)')]
+bootloader-info PORT:
+    LEVICULUM_USB_PID=0002 bash scripts/lnode-bootloader.sh info {{PORT}}
+
+# Lift a RAK4631's bootloader to the build in UF2 (RAK's update-*_nosd.uf2;
+# 0.4.4 is vendored at lnflash/tests/fixtures/bootloader/rak4631/). The
+# planner refuses an image that would stage outside the record log, the run
+# reads INFO before and after, flashes our application as flash-rak4631-one
+# does and asserts [IDENTITY] kept. PORT "-" means double-tap by hand and
+# leaves the identity unverified. The procedure, the recovery over SWD and
+# why the record log loses pages: docs/src/concepts/ota-stage-1-ble-dfu.md.
+#   just bootloader-update-rak lnflash/tests/fixtures/bootloader/rak4631/update-wiscore_rak4631_board_bootloader-0.4.4_nosd.uf2 /dev/leviculum-rak-transport
+[doc('Lift a RAK4631 bootloader from a self-update UF2, reflash our firmware')]
+bootloader-update-rak UF2 PORT="-":
+    {{rak4631_env}} bash scripts/lnode-bootloader.sh update-rak {{UF2}} {{PORT}}
 
 # What every SenseCAP Solar Node flash recipe tells the runner about this
 # board. The Board-ID is the XIAO MODULE's, not this product's: a DIY XIAO
