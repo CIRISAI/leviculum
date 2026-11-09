@@ -208,8 +208,14 @@ pub fn tile_range(b: &Bounds, z: u8) -> (Vec<RangeInclusive<u32>>, RangeInclusiv
     let s = 32 - u32::from(z);
     let col = |lon| (u64::from(x_of_lon(lon)) >> s) as u32;
     let row = |lat| (u64::from(y_of_lat(lat)) >> s) as u32;
-    let (x0, x1) = (col(b.west), col(b.east));
     let last = ((1u64 << z) - 1) as u32;
+    // 180 E is the world's east edge, the last column; its x wraps to 0,
+    // which made a box out to 180 E one column wide (1477's world cut).
+    let x1 = match b.east >= 1_800_000_000 {
+        true => last,
+        false => col(b.east),
+    };
+    let x0 = col(b.west);
     let xs = if b.west < b.east {
         vec![x0..=x1]
     } else {
@@ -912,4 +918,30 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
         complete: true,
     });
     Ok(stats)
+}
+
+#[cfg(test)]
+mod range_1477 {
+    use super::*;
+
+    /// A box out to 180 E holds every column (1477): before, 180 E wrapped
+    /// to column 0 and a whole-world cut came out one column wide.
+    #[test]
+    fn a_box_to_the_east_edge_holds_every_column() {
+        let world = Bounds {
+            west: -1_800_000_000,
+            south: -850_000_000,
+            east: 1_800_000_000,
+            north: 850_000_000,
+        };
+        for z in 0..=5u8 {
+            let (xs, ys) = tile_range(&world, z);
+            let n = (1u32 << z) - 1;
+            assert_eq!(xs, vec![0..=n], "z{z}");
+            assert_eq!(ys, 0..=n, "z{z}");
+        }
+        // Control: a box short of the edge keeps its own east column.
+        let west_half = Bounds { east: 0, ..world };
+        assert_eq!(tile_range(&west_half, 2).0, vec![0..=2]);
+    }
 }
