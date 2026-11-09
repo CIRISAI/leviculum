@@ -393,7 +393,7 @@ codec2 = { version = "0.3.1", optional = true }
 # the version leviculum-cli already ships.
 # `hooks` for the store's commit counter (1489): the commit hook is only
 # set where the counters are on.
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "hooks"], optional = true }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "hooks"], optional = true }
 # The structured event log (docs/src/structured-event-logs.md) is a tracing
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true
