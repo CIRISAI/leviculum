@@ -5151,6 +5151,48 @@ mod tests {
         assert_eq!(create.intent, Intent::Group(Verb::Create));
     }
 
+    mod late_message {
+        include!("../tests/support/late_message.rs");
+    }
+
+    /// 1505, a late message sits at its sent time: the window draws Anna's
+    /// chat of the shared fixture, the message she wrote last night at
+    /// 22:10 that came today at 14:05 second under last night's day, the
+    /// `new` rule above it, today's two below; pixel for pixel the golden,
+    /// light, 900 x 560.
+    #[test]
+    fn a_late_message_is_the_windows_golden() {
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        late_message::late_message(&mut model, 1_799_971_200, 3600);
+        model.toasts.clear();
+        let (w, h) = (900, 560);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let bodies: Vec<String> = app
+            .scene
+            .chat
+            .as_ref()
+            .expect("the chat")
+            .groups
+            .iter()
+            .flat_map(|g| &g.bubbles)
+            .map(|b| b.bubble.body.clone())
+            .collect();
+        assert_eq!(
+            bodies,
+            [
+                "Gute Nacht",
+                "Kommst du morgen mit?",
+                "Bis gleich am Bahnhof",
+                "Bin unterwegs"
+            ]
+        );
+        map::tests::same_as("gui-late-message.png", &shoot(&app, w, h), w, h);
+    }
+
     mod group_ticks {
         include!("../tests/support/group_ticks.rs");
     }

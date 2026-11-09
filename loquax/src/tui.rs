@@ -2277,6 +2277,43 @@ mod tests {
         frame_text(drawn.buffer)
     }
 
+    mod late_message {
+        include!("../tests/support/late_message.rs");
+    }
+
+    /// 1505, a late message sits at its sent time: the terminal draws
+    /// Anna's chat of the shared fixture, the message she wrote last night
+    /// at 22:10 that came today at 14:05 under last night's day line, the
+    /// `new` rule above it, today's two below; the golden is the screen,
+    /// 80 by 24.
+    #[test]
+    fn a_late_message_is_the_terminals_golden() {
+        let mut model = Model::new(&[]);
+        model.address = Some([0x30; 16]);
+        late_message::late_message(&mut model, 1_799_971_200, 3600);
+        model.focus = loquax::ui::Pane::Messages;
+        model.toasts.clear();
+        let screen = whole_screen(&model);
+        // The chat's rows, right of the list's (which names our last line).
+        let lines: Vec<&str> = screen.lines().collect();
+        let row = |words: &str| {
+            lines
+                .iter()
+                .rposition(|l| l.contains(words))
+                .unwrap_or_else(|| panic!("{words:?} is not on the screen:\n{screen}"))
+        };
+        assert!(row("Gute Nacht") < row("Kommst du morgen mit?"), "{screen}");
+        assert!(
+            row("Kommst du morgen mit?") < row("Bis gleich am Bahnhof"),
+            "{screen}"
+        );
+        assert!(
+            row("Bis gleich am Bahnhof") < row("Bin unterwegs"),
+            "{screen}"
+        );
+        same_text("tui-late-message.txt", &screen);
+    }
+
     mod group_ticks {
         include!("../tests/support/group_ticks.rs");
     }

@@ -1054,3 +1054,43 @@ fn a_chat_redraw_is_the_frame_a_fresh_draw_gives() {
         changed_rows(&frame, &fresh)
     );
 }
+
+mod late_message {
+    include!("../../loquax/tests/support/late_message.rs");
+}
+
+/// 1505, a late message sits at its sent time: the M9 draws Anna's chat of
+/// the shared fixture, the message she wrote last night at 22:10 that came
+/// today at 14:05 second, under last night's day, today's two below.
+#[test]
+fn a_late_message_is_the_golden_frame() {
+    let mut model = UiModel::<Field>::new(&[]);
+    model.address = Some([0x30; 16]);
+    late_message::late_message(&mut model, 1_799_971_200, 3600);
+    model.focus = Pane::Messages;
+    model.toasts.clear();
+    let scene = model.scene(LayoutClass::Compact);
+    let look = group_look(&model);
+    let rows: Vec<String> = screen::lines(&scene, &look, grid(&model).0, grid(&model).1)
+        .iter()
+        .map(row_text)
+        .collect();
+    let row = |words: &str| {
+        rows.iter()
+            .rposition(|r| r.contains(words))
+            .unwrap_or_else(|| panic!("{words:?} is not on the screen: {rows:#?}"))
+    };
+    assert!(
+        row("Gute Nacht") < row("Kommst du morgen mit?"),
+        "{rows:#?}"
+    );
+    assert!(
+        row("Kommst du morgen mit?") < row("Bis gleich am Bahnhof"),
+        "{rows:#?}"
+    );
+    assert!(
+        row("Bis gleich am Bahnhof") < row("Bin unterwegs"),
+        "{rows:#?}"
+    );
+    check("m9-late-message.png", &draw_in(&scene, &look));
+}

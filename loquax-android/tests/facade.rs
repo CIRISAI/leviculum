@@ -7305,6 +7305,46 @@ fn a_groups_one_and_two_ticks_are_the_phones_golden() {
     );
 }
 
+mod late_message {
+    include!("../../loquax/tests/support/late_message.rs");
+}
+
+/// 1505, a late message sits at its sent time, on the phone: Anna's chat of
+/// the shared fixture as Java reads its rows, in German, the message she
+/// wrote last night at 22:10 that came today at 14:05 second, under last
+/// night's day, and today's two below with their own day. Pinned as
+/// `golden/late-message.json`; `LOQUAX_WRITE_GOLDEN=1` writes it again.
+#[test]
+fn a_late_message_is_the_phones_golden() {
+    use loquax_android::session;
+    let mut model = loquax::ui::UiModel::<session::Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    let c = late_message::late_message(&mut model, 1_799_971_200, 3600);
+    let rows = session::rows(&model, c, Lang::De);
+    let bodies: Vec<&str> = rows.iter().map(|r| r.body.as_str()).collect();
+    assert_eq!(
+        bodies,
+        [
+            "Gute Nacht",
+            "Kommst du morgen mit?",
+            "Bis gleich am Bahnhof",
+            "Bin unterwegs"
+        ]
+    );
+    let mut got = serde_json::to_string_pretty(&serde_json::json!({ "rows": rows })).expect("json");
+    got.push('\n');
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/late-message.json");
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, &got).expect("write the golden");
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "late-message.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
+    );
+}
+
 mod relay_group {
     include!("../../loquax/tests/support/relay_group.rs");
 }
