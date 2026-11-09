@@ -4604,6 +4604,15 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
         }
         _ => Vec::new(),
     };
+    // Where the own fix is (1477): Enter with no pin chosen, or on the own
+    // pin, jumps there.
+    let own_at = model.bar.own_fix.map(|fix| {
+        leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(
+            fix.latitude_e6,
+            fix.longitude_e6,
+        ))
+    });
+    let own = model.address;
     let Some(state) = model.map.as_mut() else {
         return Vec::new();
     };
@@ -4642,11 +4651,21 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
                 }
             }
         }
-        MapCmd::Open => {
-            if let Some(peer) = state.selected {
-                return open_pin(model, peer);
+        MapCmd::Open => match (state.selected, own_at) {
+            // Jump to me (1477): no pin chosen, or the own pin, and a fix.
+            (None, Some(at)) => {
+                let (centre, zoom) = map::fit_at(at, area, &setup);
+                state.centre = centre;
+                state.zoom = zoom;
             }
-        }
+            (Some(peer), Some(at)) if Some(peer) == own => {
+                let (centre, zoom) = map::fit_at(at, area, &setup);
+                state.centre = centre;
+                state.zoom = zoom;
+            }
+            (Some(peer), _) => return open_pin(model, peer),
+            (None, None) => {}
+        },
         MapCmd::Close => {
             model.map = None;
             model.map_press = None;
@@ -14818,6 +14837,53 @@ pub(crate) mod tests {
         update(&mut model, key(KeyCode::Tab));
         update(&mut model, key(KeyCode::Enter));
         assert!(model.map.is_some());
+    }
+
+    /// Jump to me (1477): Enter on the map with no pin chosen centres on
+    /// the own fix at the deepest zoom a region holds there; Enter on the
+    /// own pin does the same instead of saying it is you. Control: without
+    /// a fix Enter leaves the view where it was.
+    #[test]
+    fn enter_without_a_chosen_pin_jumps_to_the_own_fix() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.address = Some([0x01; 16]);
+        update(
+            &mut model,
+            UiEvent::MapSetup(map::MapSetup {
+                cell_px: (2, 4),
+                zooms: (0, 20),
+                regions: vec![florence()],
+                ..map::MapSetup::default()
+            }),
+        );
+        update(&mut model, key(KeyCode::Char('M')));
+        let before = model.map.expect("open");
+        assert_eq!(before.selected, None);
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.map, Some(before), "control: no fix, no jump");
+        let here = fix_at(43_774_000, 11_258_000, 0)
+            .location
+            .expect("a location");
+        update(&mut model, UiEvent::OwnFix(Some(here)));
+        if let Some(state) = model.map.as_mut() {
+            state.selected = None;
+        }
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("still open");
+        let at = projected(43_774_000, 11_258_000);
+        let (centre, zoom) = map::fit_at(at, model.map_area(), &model.map_setup);
+        assert_eq!((state.centre, state.zoom), (centre, zoom));
+        assert_ne!(state.zoom, before.zoom, "it zoomed to the place");
+        // The own pin chosen: the same jump, no toast, the map stays.
+        if let Some(state) = model.map.as_mut() {
+            state.selected = Some([0x01; 16]);
+            state.zoom = 0;
+        }
+        model.toasts.clear();
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("still open");
+        assert_eq!((state.centre, state.zoom), (centre, zoom));
+        assert!(model.toasts.is_empty(), "{:?}", model.toasts);
     }
 
     /// The peer's conversation with a text, an older report, a text and
