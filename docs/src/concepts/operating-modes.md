@@ -15,15 +15,15 @@ today:
 
 - **LoRa transport, with the receiver always on.** When the queue is
   empty the radio task parks in continuous receive and does not re-arm a
-  window (`leviculum-nrf/src/lora.rs:2638-2640`). There is no receive
+  window (`leviculum-nrf/src/lora.rs:2648-2650`). There is no receive
   duty cycle anywhere in the image.
 - **BLE for Columba** ([Bluetooth interfaces](bluetooth-interfaces.md)).
 - **The propagation node role** ([An LXMF propagation node on a
   board](propagation-node-on-a-board.md)). `pn.rs` is in every image: all
   four board binaries load its configuration at boot
-  (`leviculum-nrf/src/node_loop.rs:720`, which the T114 and the RAK4631
-  run, `leviculum-nrf/src/bin/solarnode.rs:718`,
-  `leviculum-nrf/src/bin/t1000e.rs:637`).
+  (`leviculum-nrf/src/node_loop.rs:724`, which the T114 and the RAK4631
+  run, `leviculum-nrf/src/bin/solarnode.rs:722`,
+  `leviculum-nrf/src/bin/t1000e.rs:641`).
 - **Telemetry at the announce cadence** ([Announce
   cadence](announce-cadence.md), [Telemetry](telemetry.md)).
 

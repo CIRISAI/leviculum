@@ -90,7 +90,7 @@ the whole interface did, so every single-link carrier is unchanged and
 so is lnsd's BLE interface, whose peripheral role notifies its
 subscribed centrals as one group and cannot address a subset of them.
 The firmware implements it (`try_send_excluding_peer`,
-`leviculum-nrf/firmware/src/ble_link.rs:683`), where the decision is a pure
+`leviculum-nrf/firmware/src/ble_link.rs:692`), where the decision is a pure
 function of the registry (`TxAim`,
 `leviculum-nrf/ble-tx/src/registry.rs:919`). Without it a path request
 from the phone died at the board: one `InterfaceId` covered both links,
@@ -111,8 +111,8 @@ so both still send the announce to the whole interface.
 
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
-`leviculum-nrf/src/node_loop.rs:434`) and hardcoded in the interface
-itself (`BleInterface`, `leviculum-nrf/firmware/src/ble_link.rs:602`), with the
+`leviculum-nrf/src/node_loop.rs:438`) and hardcoded in the interface
+itself (`BleInterface`, `leviculum-nrf/firmware/src/ble_link.rs:611`), with the
 announce gate naming the same constant (`BLE_IFACE`,
 `leviculum-nrf/src/announce.rs:89`). The fan-out is a task that maps
 the hint onto a per-link queue (`tx_fanout_task`,
@@ -122,9 +122,9 @@ the hint onto a per-link queue (`tx_fanout_task`,
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
 disappears (`handle_packet_from_peer`,
-`leviculum-nrf/src/node_loop.rs:1303`;
-`handle_interface_peer_lost`, `leviculum-nrf/src/node_loop.rs:1335`;
-`handle_interface_peer_up`, `leviculum-nrf/src/node_loop.rs:1347`; the
+`leviculum-nrf/src/node_loop.rs:1331`;
+`handle_interface_peer_lost`, `leviculum-nrf/src/node_loop.rs:1363`;
+`handle_interface_peer_up`, `leviculum-nrf/src/node_loop.rs:1375`; the
 T114 and the RAK4631 run that loop), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,

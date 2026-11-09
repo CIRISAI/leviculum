@@ -102,6 +102,9 @@ pub mod radio_store;
 /// region `memory.x` reserves behind the image. Nothing is stored in it yet —
 /// the module carries the mount and the bench instrument that exercises it.
 pub mod record_store;
+/// The board's `/dfu` verb (OTA stage 1, #235): enter BLE DFU on an
+/// allow-listed command from the mesh.
+pub mod remote_dfu;
 pub mod remote_status;
 pub mod rng;
 // T114 ST7789 status display — rides with the BSP (not the V2's

@@ -234,7 +234,11 @@ async fn main(spawner: Spawner) {
     // mast — an unattended node announcing a management destination with
     // nobody on the list is advertising a door (#235).
     if let leviculum_nrf::mgmt::RemoteMgmtDecision::Enabled(allowed) = &mgmt_allow {
-        builder = builder.remote_management(true, allowed.clone());
+        // `/dfu` beside `/status`, under the same list (#235): a
+        // board can enter its bootloader, so it serves the verb.
+        builder = builder
+            .remote_management(true, allowed.clone())
+            .remote_dfu(true);
     }
 
     let identity_loaded = {
@@ -801,6 +805,9 @@ async fn main(spawner: Spawner) {
     // own locals; expanded only after a dispatch, never inside the
     // select, so the engine's awaits cannot be cancelled (the DropBomb
     // rule, `leviculum_nrf::record_store` module docs).
+    // An accepted `/dfu` command's reply, parked by the engine pass for the
+    // exit at the top of the loop (#235).
+    let mut dfu_exit: Option<leviculum_core::transport::TickOutput> = None;
     macro_rules! pn_step {
         ($events:expr) => {
             // Board-visible core-event lines (LINK_REFUSED, #388) render
@@ -814,6 +821,15 @@ async fn main(spawner: Spawner) {
             {
                 let mut status_out = leviculum_core::transport::TickOutput::empty();
                 leviculum_nrf::remote_status::handle_events(&mut node, $events, &mut status_out);
+                // #235, OTA stage 1: `/dfu`. A refusal's typed reply rides
+                // this dispatch; an accepted command is parked for the exit
+                // at the top of the loop, the one place it is expanded.
+                leviculum_nrf::remote_dfu::handle_events(
+                    &mut node,
+                    $events,
+                    &mut status_out,
+                    &mut dfu_exit,
+                );
                 if !status_out.actions.is_empty() {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
@@ -846,6 +862,18 @@ async fn main(spawner: Spawner) {
     // 9. Telemetry evaluation tick (only while a target is configured)
     // 10. User button press that announces (#459; never on a board without one)
     loop {
+        // #235: an accepted `/dfu` leaves from here: reply handed over and
+        // waited for, then the bootloader magic and the reset. Does not
+        // return when a command is parked.
+        leviculum_nrf::remote_dfu::exit_if_commanded(&mut node, &mut dfu_exit, |node, out| {
+            if !out.actions.is_empty() {
+                let mut ifaces: [&mut dyn Interface; 3] =
+                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                let dispatched = dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
+                leviculum_firmware::dispatch::settle("remote-dfu", node, &dispatched);
+            }
+        })
+        .await;
         transport_stats.poll(&node);
         // Close a `[DROP]` rate-limit window that expired without a further
         // drop to carry its summary (#346): the silence after a storm is the

@@ -1,9 +1,9 @@
 # OTA stage 1: entering BLE DFU on a command from the mesh
 
 **Status: stage 1 active since 2026-11-09 (Lew).** Most of what it
-needs on the board was built for Codeberg #235; what is left is one
-verb, one sender, one package per board and the cells that prove them
-(the last two sections).
+needs on the board was built for Codeberg #235, and the board's `/dfu`
+verb since; what is left is one sender, one package per board and the
+cells that prove them (the last two sections).
 
 Every firmware update this project has ever shipped ended with a hand on
 the board: a cable, or a needle in a pinhole
@@ -59,7 +59,7 @@ recorded, and the bench measurement below reads it first.
 
 | Question | 0.9.0 (T114) | 0.4.3 (RAK4631) |
 | --- | --- | --- |
-| Magic that selects BLE DFU | `0xA8`, `DFU_MAGIC_OTA_RESET` "entered by soft reset, SD is not inited yet" (`Adafruit_nRF52_Bootloader/src/main.c:110`); UF2 is `0x57` (`Adafruit_nRF52_Bootloader/src/main.c:112`), the value our touch writes (`leviculum-nrf/src/usb.rs:236`) | Same: `ldr.w r4, [r3, #1308]` reads `0x4000051C` (`GPREGRET`) at `0xF483A`, `cmp r4, #177` (`0xB1`) at `0xF483E`, `sub.w r1, r4, #168` (`0xA8`, the compare-to-zero idiom) at `0xF484A`, `0x4E` and `0x57` at `0xF486C`/`0xF4870` |
+| Magic that selects BLE DFU | `0xA8`, `DFU_MAGIC_OTA_RESET` "entered by soft reset, SD is not inited yet" (`Adafruit_nRF52_Bootloader/src/main.c:110`); UF2 is `0x57` (`Adafruit_nRF52_Bootloader/src/main.c:112`), the value our touch writes (`leviculum-nrf/src/usb.rs:236-237`) | Same: `ldr.w r4, [r3, #1308]` reads `0x4000051C` (`GPREGRET`) at `0xF483A`, `cmp r4, #177` (`0xB1`) at `0xF483E`, `sub.w r1, r4, #168` (`0xA8`, the compare-to-zero idiom) at `0xF484A`, `0x4E` and `0x57` at `0xF486C`/`0xF4870` |
 | How the magic is consumed | `_ota_dfu` is set from it (`Adafruit_nRF52_Bootloader/src/main.c:229`) and the register is cleared on entry (`Adafruit_nRF52_Bootloader/src/main.c:243`) | Cleared on entry: `str.w r1, [r2, #1308]` with `r1 = 0` at `0xF489C` |
 | Does it leave DFU mode by itself | **No.** OTA entry calls `bootloader_dfu_start(_ota_dfu, 0, false)` (`Adafruit_nRF52_Bootloader/src/main.c:305`); the only startup timer is armed on the serial branch, never when `ota` is true (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/bootloader.c:333-347`); advertising runs with `BLE_GAP_ADV_TIMEOUT_GENERAL_UNLIMITED` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:58`); the one advertising timeout that ends DFU counts down directed advertising (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:808-815`), which is used only when an application handed the bootloader bond data (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:1034`); our firmware never does | **No, as far as the image shows.** The call site takes the timeout `3000` only when the application asked for single-tap reset or the magic was `0x57` or `0x4E`, and `0` otherwise (`movw r1, #3000` at `0xF4A98`, `mov r1, r2` with `r2 = 0` at `0xF4AA0`, `bl` at `0xF4AA4`), the same shape as `Adafruit_nRF52_Bootloader/src/main.c:301-306`. The advertising duration inside the transport is not decoded; the bench hour settles it |
 | What it advertises | Name `AdaDFU` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:50`, put into the advertisement at `Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:645`); the Nordic legacy DFU service `0x1530` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/ble/ble_services/ble_dfu/ble_dfu.h:36`) on base `23D1BCEA-5F78-2315-DEEF-1212…` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/ble/ble_services/ble_dfu/ble_dfu.c:472`), i.e. `00001530-1212-EFDE-1523-785FEABCD123`, as a 128-bit UUID (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:646`); connectable undirected every 25 ms (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:57`) | `AdaDFU` at file offset `0xB72C` of the image and the same 128-bit base at `0xB761`; interval not decoded |
@@ -96,10 +96,15 @@ published does. Updating the bootloader itself is out of scope here.
 | --- | --- |
 | Allow-list as a flash record in the protected band; a blank page decodes to "nobody" | `LMGA` record, 136 B, `leviculum-nrf/src/telemetry.rs:253`; the codec in `leviculum-core/src/mgmt_allow_store.rs:61` (magic) and `leviculum-core/src/mgmt_allow_store.rs:84` (eight identities at most) |
 | The board loads it at boot and says so | `load_at_boot`, `leviculum-nrf/src/mgmt.rs:126`; the `[MGMT] disabled (no allow-list)` banner, `leviculum-nrf/src/mgmt.rs:163` |
-| "Identified link plus allow-list" before any verb is answered, in the core and path-generic | `enable_remote_management`, `leviculum-core/src/node/mod.rs:902`, registering `/status` under `RequestPolicy::AllowList` at `leviculum-core/src/node/mod.rs:934` |
+| "Identified link plus allow-list" before any verb is answered, in the core and path-generic | `enable_remote_management`, `leviculum-core/src/node/mod.rs:907`, registering `/status` under `RequestPolicy::AllowList` at `leviculum-core/src/node/mod.rs:946` |
 | A board answering a request over the mesh | `/status`, `leviculum-nrf/src/remote_status.rs` |
 | Setting the list over the cable | `lnflash --management-identity` / `--clear-management`, `lnflash/src/mgmt.rs:253` |
-| Writing a `GPREGRET` magic and resetting under a live SoftDevice, with no await between | `leviculum-nrf/src/usb.rs:236-260`, Codeberg #249 |
+| Writing a `GPREGRET` magic and resetting under a live SoftDevice, with no await between | `write_gpregret`, `leviculum-nrf/src/usb.rs:409`, the one seam both the UF2 touch (`leviculum-nrf/src/usb.rs:236-238`) and `/dfu` call, Codeberg #249 |
+| The `/dfu` verb: registered beside `/status` under the same `RequestPolicy::AllowList`, only on a node built with `remote_dfu` (the boards; `lnsd` never serves it) | `leviculum-core/src/node/mod.rs:942`, the builder flag at `leviculum-core/src/node/builder.rs:287`, the decision in the engine-pass macro at `leviculum-nrf/src/node_loop.rs:828` and the exit at the top of the main loop, `leviculum-nrf/src/node_loop.rs:869`, expanded once (in the macro, per arm, it cost 6.4 KiB of flash), the same in the T1000-E and solar node binaries |
+| A refused request is visible: still dropped, nothing leaves because of it, but the core raises `NodeEvent::RequestRefused` with the requester (or none) | `leviculum-core/src/node/link_management.rs:2462`, the variant at `leviculum-core/src/node/event.rs:523` |
+| What a `/dfu` event means, and the typed reply: one msgpack fixint, `0` accepted, `1` not listed, `2` no identity | `dfu_command`, `leviculum-core/src/node/remote_dfu.rs:131`; `DfuVerdict`, `leviculum-core/src/node/remote_dfu.rs:61` |
+| The exit order: reply handed over, waited for until every carrier's queue reports it gone (bounded by 20 s, above the LoRa queue's 18 s stale-drop age), then `0xA8`, then reset | `exit_to_dfu`, `leviculum-core/src/node/remote_dfu.rs:280`, behind `DfuExit` (`leviculum-core/src/node/remote_dfu.rs:254`); the magic at `leviculum-core/src/node/remote_dfu.rs:42`, the bound at `leviculum-core/src/node/remote_dfu.rs:51`; the board's side in `leviculum-nrf/src/remote_dfu.rs:131` (hand-over) and `leviculum-nrf/src/remote_dfu.rs:136` (LoRa settled through the reply, serial queue empty, BLE census empty) |
+| Both lines on the debug port, before the reply | `MGMT_DFU accepted=yes from=<identity> reason=accepted` and `MGMT_DFU accepted=no from=<identity\|none> reason=not-listed\|no-identity`, the body in `leviculum-nrf/log-line/src/lib.rs:195`; host side the `MGMT_DFU` trace event ([Structured event logs](../structured-event-logs.md)) |
 | A boot counter that survives the trip | `record_at_boot`, `leviculum-nrf/src/boot_count.rs:76`, Codeberg #380 |
 | A legacy DFU package and the init-packet constants the bootloader checks | for the T1000-E only, `scripts/t1000e-dfu-package.sh`; the constants checked are `ADAFRUIT_DEVICE_TYPE` (`Adafruit_nRF52_Bootloader/src/dfu_init.c:84`) and the SoftDevice id (`Adafruit_nRF52_Bootloader/src/dfu_init.c:178`) |
 
@@ -115,37 +120,24 @@ stays what it was, a cable protocol, and stage 1 does not touch it.
 
 ## What is left
 
-**The `/dfu` verb.** A second request handler on the management
-destination, under the same `RequestPolicy::AllowList`. Python-RNS
-serves `/status` and `/path` there and never asks for `/dfu`, so the
-path is an extension no Python peer can trip over; a refusal for a
-non-listed identity is the core's existing one. On an accepted request
-the board does three things in this order, and the order is the whole
-of it:
+**The `/dfu` verb is built** (table above). What the host tests hold
+(`leviculum-core/src/node/remote_dfu.rs`, `mod tests`): a listed identity
+is accepted and told so, an unlisted one and a link without identity are
+refused with their typed reply, an empty list refuses the identity it
+would otherwise hold, a node built without `remote_dfu` does not serve the
+verb, a refused `/status` is not read as `/dfu`; the reply is handed over
+and waited for before the magic, a carrier that never transmits is given
+up on at exactly the bound, and the magic is `0xA8`. What they cannot
+hold is the syscall and the reset on a board: that is the bench window's
+(a T114 and a RAK into DFU, the hour below, a pin reset brings the
+application back).
 
-1. **Acknowledge, and let the acknowledgement leave.** Over the mesh the
-   reply is the only evidence the command arrived; a board that resets
-   first is, from the far end, a board that heard nothing. "Leave" means
-   handed to the interface and transmitted, which on LoRa is airtime,
-   not a function return: the reset waits for the reply's packet to go
-   out, bounded by a timeout so a stuck interface cannot hold the board
-   in limbo.
-2. **Write `0xA8` to `GPREGRET`** through `sd_power_gpregret_clr` /
-   `sd_power_gpregret_set`, the same syscall branch as the UF2 path. Not
-   `0xB1` (`DFU_MAGIC_OTA_APPJUM`): that one means "the SoftDevice is
-   already initialised, jump", which only the Adafruit Arduino core's
-   own DFU service arranges.
-3. **Reset**, with no await, allocation or logging after the write.
-
-The board logs the accepted command with the requesting identity before
-step 1, and a refused one with the same line shape, so the unhappy path
-is visible on the debug port and in the cells.
-
-Sending `/dfu` twice is harmless: the second one either reaches a board
-already in DFU, which is not listening, or a board that came back.
-Nothing about the carrier matters to the board
-([Interface isolation](interface-isolation.md)); a command that only
-works at one hop does not solve this page's problem.
+Two properties of the verb, unchanged from the design. Sending `/dfu`
+twice is harmless: the second one either reaches a board already in DFU,
+which is not listening, or a board that came back. Nothing about the
+carrier matters to the board ([Interface isolation](interface-isolation.md));
+the wait reads all three carriers' queues rather than the one the reply
+went out on, so the core keeps the routing decision.
 
 **The sender.** A new Leviculum client beside `lnstatus` in
 `leviculum-cli` (working name `lnmgmt dfu -R <transport hash> -i

@@ -15,7 +15,7 @@
 //!
 //! ## The board this models
 //!
-//! `leviculum-nrf/src/node_loop.rs:434-476` — three interfaces, serial 0,
+//! `leviculum-nrf/src/node_loop.rs:438-480` — three interfaces, serial 0,
 //! LoRa 1, BLE 2, all three `Gateway`, `enable_transport(true)`,
 //! `max_queued_announces(8)`. The board registers NO interface as a
 //! shared-instance local client, which is the fact this file is really

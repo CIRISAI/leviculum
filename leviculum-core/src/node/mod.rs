@@ -44,6 +44,7 @@
 mod builder;
 mod event;
 mod link_management;
+pub mod remote_dfu;
 pub mod remote_status;
 // Gated on `tracing`: the mvr captures structured tracing output to prove the
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
@@ -899,7 +900,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// `allowed` is the set of identity hashes permitted to query; an empty
     /// list registers the handler but rejects every requester (Python parity:
     /// the ACL is consulted even when empty).
-    fn enable_remote_management(&mut self, allowed: Vec<[u8; TRUNCATED_HASHBYTES]>) {
+    ///
+    /// `dfu` also registers `/dfu` beside `/status`, under the same list
+    /// ([`remote_dfu`], Codeberg #235). Python never asks for that path, so
+    /// no Python peer can trip over it.
+    fn enable_remote_management(&mut self, allowed: Vec<[u8; TRUNCATED_HASHBYTES]>, dfu: bool) {
         let identity_bytes = match self.transport.identity().private_key_bytes() {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -931,6 +936,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // IN/SINGLE destinations accept links by default; the client
         // establishes a link, identifies, then issues the `/status` request.
         self.register_destination(mgmt_dest);
+        if dfu {
+            self.register_request_handler(
+                hash,
+                remote_dfu::DFU_PATH,
+                request::RequestPolicy::AllowList(allowed.clone()),
+            );
+        }
         self.register_request_handler(hash, "/status", request::RequestPolicy::AllowList(allowed));
         self.remote_mgmt_dest_hash = Some(hash);
         self.mgmt_destinations.push(hash);

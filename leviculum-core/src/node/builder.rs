@@ -44,6 +44,7 @@ pub struct NodeCoreBuilder {
     respond_to_probes: bool,
     remote_management: bool,
     remote_management_allowed: Vec<[u8; crate::constants::TRUNCATED_HASHBYTES]>,
+    remote_dfu: bool,
     max_incoming_resource_size: usize,
     max_incoming_resources_per_link: usize,
     decompresses: bool,
@@ -67,6 +68,7 @@ impl NodeCoreBuilder {
             respond_to_probes: false,
             remote_management: false,
             remote_management_allowed: Vec::new(),
+            remote_dfu: false,
             max_incoming_resource_size: RESOURCE_MAX_INCOMING_SIZE,
             max_incoming_resources_per_link: RESOURCE_MAX_INCOMING_PER_LINK,
             decompresses: cfg!(feature = "compression"),
@@ -275,6 +277,18 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Also serve `/dfu` on the remote-management destination, under the
+    /// same allow-list as `/status` (OTA stage 1, Codeberg #235).
+    ///
+    /// Only a node that can actually enter a bootloader asks for this: the
+    /// nRF52 boards. A daemon never does, so `lnsd` does not answer a verb it
+    /// could not carry out. Without [`Self::remote_management`] this does
+    /// nothing. See [`crate::node::remote_dfu`].
+    pub fn remote_dfu(mut self, enable: bool) -> Self {
+        self.remote_dfu = enable;
+        self
+    }
+
     /// Set the maximum incoming resource size in bytes.
     ///
     /// Resources advertised with `transfer_size` above this limit are
@@ -379,7 +393,7 @@ impl NodeCoreBuilder {
         }
 
         if self.remote_management {
-            node.enable_remote_management(self.remote_management_allowed);
+            node.enable_remote_management(self.remote_management_allowed, self.remote_dfu);
         }
 
         if let Some(names) = self.peer_up_pull_names {
@@ -455,7 +469,7 @@ impl NodeCoreBuilder {
         }
 
         if self.remote_management {
-            node.enable_remote_management(self.remote_management_allowed);
+            node.enable_remote_management(self.remote_management_allowed, self.remote_dfu);
         }
 
         if let Some(names) = self.peer_up_pull_names {

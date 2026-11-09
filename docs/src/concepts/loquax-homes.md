@@ -171,7 +171,7 @@ fresh random ratchet when it announces after its interval
 every 30 minutes, and keeps 512 (`reference/Reticulum/RNS/Destination.py:85`,
 `:90`). A sender keeps one ratchet per destination, the last it heard
 (`reference/Reticulum/RNS/Identity.py:440`); ours does the same
-(`known_remote_ratchet`, `leviculum-core/src/node/mod.rs:4095`). The
+(`known_remote_ratchet`, `leviculum-core/src/node/mod.rs:4107`). The
 receiver tries its ring and then the identity key
 (`reference/Reticulum/RNS/Identity.py:910-912`), which cannot open a
 packet sealed to a ratchet. A packet routed to the home without the
@@ -229,7 +229,7 @@ interface the request came in on
 path response needs the filter too.
 
 The core can already announce on one interface,
-`announce_destination_on_interface` (`leviculum-core/src/node/mod.rs:1010`).
+`announce_destination_on_interface` (`leviculum-core/src/node/mod.rs:1022`).
 The path response filter and the one-hour fallback are new. Planned
 (slice H3).
 

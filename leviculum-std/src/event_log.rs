@@ -518,6 +518,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RESPONSE_TX",
         required_keys: &["len", "link", "request_id"],
     },
+    // OTA stage 1 (#235): a `/dfu` request on the management destination,
+    // decided. `from` is the link's identity hash or `none`; `reason` is
+    // `accepted`, `not-listed` or `no-identity`. The boards print the same
+    // key set as their `MGMT_DFU` line (leviculum_log_line::MgmtDfuBody).
+    EventSchema {
+        name: "MGMT_DFU",
+        required_keys: &["accepted", "from", "reason"],
+    },
     // OBS-2: periodic per-reason drop summary at the PATH_TABLE cadence (~10s).
     // Surfaces the always-on drop counters (including the high-volume overheard
     // path) without per-packet flooding.

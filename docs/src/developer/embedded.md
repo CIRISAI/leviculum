@@ -46,13 +46,13 @@ timer expired  ─► handle_timeout()            ├─► TickOutput { actions
 The three entry points (signatures in the
 [reference](rust-api-spec.md#nodecorer-c-s)):
 
-- `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1114`. Feed one
+- `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1126`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:2912`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:2924`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
-- `next_deadline()` (`leviculum-core/src/node/mod.rs:2942`). The earliest timer
+- `next_deadline()` (`leviculum-core/src/node/mod.rs:2954`). The earliest timer
   deadline in milliseconds, or `None` if no timer is pending. Sleep until this,
   or until a packet arrives, whichever comes first.
 
@@ -66,8 +66,8 @@ The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
 loop: the deadline comes from `next_deadline`
-(`leviculum-nrf/src/node_loop.rs:858-863`) and the wait from Embassy's `select4`
-(`leviculum-nrf/src/node_loop.rs:916-939`). The board selects over ten event
+(`leviculum-nrf/src/node_loop.rs:875-880`) and the wait from Embassy's `select4`
+(`leviculum-nrf/src/node_loop.rs:933-956`). The board selects over ten event
 sources; the loop below narrows that to the three interfaces (serial, LoRa,
 BLE) and the timer:
 
@@ -161,7 +161,7 @@ let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 
 `build` consumes the builder and the platform triple and returns the
 `NodeCore<R, C, S>`. A driver with an inline-storage `S` must not call it:
-use `build_boxed` (`leviculum-core/src/node/builder.rs:423`), which
+use `build_boxed` (`leviculum-core/src/node/builder.rs:437`), which
 configures through the box. `Box::new(builder.build(..))` holds a full-size
 `NodeCore` as a by-value local on the way into the box, and with
 `EmbeddedStorage` that was upwards of 40 KB twice over — it gave the T114 a

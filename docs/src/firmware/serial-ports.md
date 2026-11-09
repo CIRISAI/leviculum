@@ -229,7 +229,7 @@ the channel. Under Python-RNS `rnsd` they are inert: its
 `SerialInterface` reads port settings only and pushes nothing to the
 board, which then keeps whatever profile is in its flash — the compiled
 `eu_medium` default (869.463 MHz, BW 125 kHz, SF8, CR4/5, 22 dBm;
-`leviculum-nrf/src/lora.rs:631-660`, `RadioConfig::eu_medium`) or the
+`leviculum-nrf/src/lora.rs:641-670`, `RadioConfig::eu_medium`) or the
 preset chosen at flash time. The values above are that default written
 out, so a Python-driven LNode and an `lnsd`-driven one land on the same
 channel. Changing the channel of a Python-driven board is a reflash
@@ -262,7 +262,7 @@ lnstest diag --config /etc/reticulum
 
 A standalone LNode answers probes on one destination,
 `rnstransport.probe`, and announces it 15 s after boot and then every
-2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:873`;
+2 hours (`schedule_initial_mgmt_announce`, `leviculum-core/src/node/mod.rs:874`;
 `MGMT_ANNOUNCE_INTERVAL_MS`, `leviculum-core/src/constants.rs:219`).
 The hash is carried in the announce itself, but it is also printed on
 the debug port — the `probe=` field of the `[IDENTITY]` banner, repeated

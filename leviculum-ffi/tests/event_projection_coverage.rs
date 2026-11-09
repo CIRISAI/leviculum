@@ -35,6 +35,14 @@ const INTENTIONALLY_OTHER: &[&str] = &[
     // of the application — no link exists to accept, and the initiator's
     // establishment retry owns recovery.
     "LinkRefused",
+    // A request an `AllowList` handler refused (#235): the core still drops
+    // it and sends nothing, exactly as before the event existed. It is for
+    // an endpoint that owes a typed refusal of its own (the board's `/dfu`)
+    // and for a board's debug line. A C application's `AllowList` handler
+    // (`lev_register_request_handler`) keeps the reference's behaviour, a
+    // silent drop the requester's own timeout resolves, so the refusal asks
+    // nothing of it; a typed code would be ABI surface with no caller.
+    "RequestRefused",
     // An announce this node learned from and relayed nowhere: pure
     // instrumentation, and the wrong shape for a C application entirely. It
     // reports the ABSENCE of a route onward for somebody else's announce,

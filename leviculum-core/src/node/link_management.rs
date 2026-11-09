@@ -2449,15 +2449,23 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 // Allowed
             }
             super::request::RequestPolicy::AllowList(list) => {
-                let allowed = link
-                    .remote_identity()
-                    .map(|id| list.contains(id.hash()))
-                    .unwrap_or(false);
+                let requester = link.remote_identity().map(|id| *id.hash());
+                let allowed = requester.is_some_and(|hash| list.contains(&hash));
                 if !allowed {
                     crate::tracing::debug!(
                         link = %HexShort(link_id.as_bytes()),
                         "Request: identity not in allow list, dropping"
                     );
+                    // Still dropped: no reply leaves because of this. The
+                    // event is for an endpoint whose verb owes a typed
+                    // refusal and a board that logs who knocked (#235).
+                    self.events.push(NodeEvent::RequestRefused {
+                        link_id,
+                        destination_hash,
+                        request_id,
+                        path,
+                        requester,
+                    });
                     return RequestDispatch::Ignored;
                 }
             }

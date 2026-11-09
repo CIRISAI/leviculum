@@ -179,6 +179,44 @@ impl core::fmt::Display for LinkRefusedBody {
     }
 }
 
+/// The body of the firmware's `MGMT_DFU` line (OTA stage 1, #235): a
+/// `/dfu` request on the management destination, decided, rendered from
+/// `leviculum_core::node::remote_dfu::DfuCommand` for the reason
+/// [`LinkRefusedBody`] is. Same key set as the core's `MGMT_DFU` trace event.
+///
+/// ```text
+/// MGMT_DFU accepted=yes from=<32 hex> reason=accepted
+/// MGMT_DFU accepted=no from=<32 hex|none> reason=not-listed|no-identity
+/// ```
+///
+/// `from` is the WHOLE identity hash, not a 4-byte correlator: the operator
+/// reads it against the allow-list `lnflash --management-identity` wrote, and
+/// on an accepted line it is the only record of who sent the board away.
+pub struct MgmtDfuBody {
+    /// Whether the board enters DFU.
+    pub accepted: bool,
+    /// The link's identity, `None` when it never identified.
+    pub from: Option<[u8; 16]>,
+    /// The verdict's kebab word (`DfuVerdict::reason`).
+    pub reason: &'static str,
+}
+
+impl core::fmt::Display for MgmtDfuBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let accepted = if self.accepted { "yes" } else { "no" };
+        write!(f, "accepted={accepted} from=")?;
+        match &self.from {
+            Some(from) => {
+                for byte in from {
+                    write!(f, "{byte:02x}")?;
+                }
+            }
+            None => f.write_str("none")?,
+        }
+        write!(f, " reason={}", self.reason)
+    }
+}
+
 /// The body of the firmware's `LINK_CLOSED` line (867), rendered from the
 /// core's `NodeEvent::LinkClosed` for the reason [`LinkRefusedBody`] is.
 ///
@@ -598,6 +636,33 @@ mod tests {
         assert_eq!(
             line("LINK_REFUSED ", format_args!("{body}"), 42),
             "LINK_REFUSED reason=budget links=5 max=5 dest=ab01cd23 t=42\r\n"
+        );
+    }
+
+    /// The two `/dfu` lines the bench window greps (#235): the accepted
+    /// one names the sender in full, the refused one says why.
+    #[test]
+    fn the_mgmt_dfu_lines_have_the_shape_the_bench_greps() {
+        let mut from = [0u8; 16];
+        from[0] = 0xab;
+        from[15] = 0x01;
+        let accepted = MgmtDfuBody {
+            accepted: true,
+            from: Some(from),
+            reason: "accepted",
+        };
+        assert_eq!(
+            line("MGMT_DFU ", format_args!("{accepted}"), 9),
+            "MGMT_DFU accepted=yes from=ab000000000000000000000000000001 reason=accepted t=9\r\n"
+        );
+        let refused = MgmtDfuBody {
+            accepted: false,
+            from: None,
+            reason: "no-identity",
+        };
+        assert_eq!(
+            line("MGMT_DFU ", format_args!("{refused}"), 10),
+            "MGMT_DFU accepted=no from=none reason=no-identity t=10\r\n"
         );
     }
 

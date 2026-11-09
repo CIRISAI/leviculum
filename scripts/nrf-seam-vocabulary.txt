@@ -94,6 +94,8 @@ src/radio_store.rs: flash::shared_flash doc x1
 src/record_store.rs: ble doc x1
 src/record_store.rs: flash::SharedFlash x4 doc x1
 src/record_store.rs: usb doc x1
+src/remote_dfu.rs: usb::outgoing_drained x1
+src/remote_dfu.rs: usb::write_gpregret x1 doc x1
 src/st7789.rs: log_stack x2
 src/st7789.rs: vext::wait_ready x1 doc x1
 src/store_spike.rs: flash::SharedFlash x1
