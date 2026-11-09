@@ -34,6 +34,7 @@
 //!
 //! The framing itself is `leviculum_core::framing::hdlc`, unchanged.
 
+pub mod park;
 pub mod rx;
 pub mod tx;
 
