@@ -63,6 +63,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     static final String ADD_CODE = "add_code";
     /** The saved state's key of the selected tab. */
     private static final String TAB = "tab";
+    /** Explore, the browser or the rooms in front at a rotation (1618). */
+    private static final String FRONT = "front";
     /** Every row the library listed, and those the search leaves. */
     private final List<Map<String, Object>> all = new ArrayList<>();
     private final List<Map<String, Object>> rows = new ArrayList<>();
@@ -167,6 +169,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             subView(this);
         } else {
             tabs(savedInstanceState != null && savedInstanceState.getBoolean(TAB, false));
+            String front = savedInstanceState == null ? "" : savedInstanceState.getString(FRONT, "");
+            if (front.equals("explore")) {
+                explore();
+            } else if (front.equals("browse")) {
+                browse();
+            } else if (front.equals("rooms")) {
+                rooms();
+            }
         }
         if (savedInstanceState == null) {
             mapAt(getIntent());
@@ -178,6 +188,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             public void onClick(View v) {
                 if (onMap) {
                     mapPane.search();
+                    return;
+                }
+                // One search on Explore (walk 14): its own field.
+                if (onExplore) {
+                    explorePane.focus();
                     return;
                 }
                 searching(query.getVisibility() != View.VISIBLE);
@@ -419,6 +434,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.pane_explore).setVisibility(View.VISIBLE);
         title.setText(R.string.tab_explore);
         exploreTab(true);
+        // Landscape keeps the list its room (walk 13: one and a half
+        // rows): the bar folds away, the tab's field stays.
+        boolean wide = getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        findViewById(R.id.bar).setVisibility(wide ? View.GONE : View.VISIBLE);
         explorePane.show();
     }
 
@@ -427,6 +447,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         if (onExplore) {
             onExplore = false;
             findViewById(R.id.pane_explore).setVisibility(View.GONE);
+            findViewById(R.id.bar).setVisibility(View.VISIBLE);
         }
     }
 
@@ -570,6 +591,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putBoolean(TAB, onMap);
+        // Explore and what it opened survive a rotation too (walk 8).
+        state.putString(FRONT, onExplore ? "explore" : onBrowse ? "browse" : onRooms ? "rooms" : "");
     }
 
     /**
@@ -878,6 +901,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 if (onMap) {
                     // A position that came moves its pin.
                     mapPane.ask();
+                }
+                if (onExplore) {
+                    // A page or a server heard, or the home's list (walk
+                    // 2 of 17024c3a: the list never refreshed itself).
+                    explorePane.draw();
                 }
             }
         }

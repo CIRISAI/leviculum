@@ -132,6 +132,21 @@ class ExploreScreen(unittest.TestCase):
         no_field = [n for n in EXPLORE_SCREEN if not n.is_id("explore_search")]
         self.assertEqual(walk.explore_problems(no_field), ["no explore_search"])
 
+    def test_the_titles_are_the_catalogues_in_the_phones_language(self):
+        # 1618, walk 15: the German Pixel failed on English literals.
+        de = walk.catalogue_words("de-DE", walk.EXPLORE_TITLE_KEYS)
+        self.assertEqual(de, ["Seiten", "Öffentliche Räume"])
+        self.assertEqual(walk.catalogue_words("en-US", walk.EXPLORE_TITLE_KEYS),
+                         ["Pages", "Public rooms"])
+        self.assertEqual(walk.catalogue_words("xx", walk.EXPLORE_TITLE_KEYS),
+                         ["Pages", "Public rooms"], "a language the app lacks: English")
+        german = [n for n in EXPLORE_SCREEN if n.text not in ("Pages", "Public rooms")] + [
+            node("", "Seiten"), node("", "Öffentliche Räume")]
+        self.assertEqual(walk.explore_problems(german, de), [])
+        # The control: the English titles on the German screen.
+        self.assertEqual(walk.explore_problems(german),
+                         ["no section 'Pages'", "no section 'Public rooms'"])
+
     def test_a_fourth_tab_is_a_problem(self):
         browse = EXPLORE_SCREEN + [node("tab_browse", desc="Browse")]
         self.assertEqual(

@@ -1,33 +1,58 @@
 package network.leviculum.loquax;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.content.DialogInterface;
 import android.graphics.Typeface;
 import android.text.Editable;
+import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.AdapterView;
+import android.widget.BaseAdapter;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ListView;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Explore (1578): the pages and the public rooms under one button, as the
  * window and the terminal carry it. On top the search field, which also
- * takes a pasted address, and the order's toggle; the pages under their
- * headings (bookmarks, today, this week, older), a tap opens one in the
- * browser, a long press or the star bookmarks it; then the rooms the
- * reader is in, the hubs Loquax ships, and the hubs heard on the mesh.
- * Every word and every order is the library's ({@link Core#exploreScreen});
- * a tap is a verb ({@link Core#explore}) and what the library then shows
- * (the list, a page, a hub's rooms) the Activity follows.
+ * takes a pasted address, and the order's toggle; under them one list:
+ * the pages under their headings (bookmarks, today, this week, older), a
+ * tap opens one in the browser, the star bookmarks it, a long press opens
+ * its menu; then the rooms the reader is in, the servers Loquax ships and
+ * those heard on the mesh, a tap opening a server's sheet. Every word and
+ * every order is the library's ({@link Core#exploreScreen}); a tap is a
+ * verb ({@link Core#explore}) and what the library then shows (the list,
+ * a page, a server's rooms) the Activity follows.
+ *
+ * <p>Since 1618 (the walk of 17024c3a on the Pixel) the list is a
+ * {@link ListView}: only the visible rows are views, every row has a
+ * stable id, and a new answer keeps the scroll; a search starts at the
+ * top. The field is the source of truth and an answer to an older
+ * {@code typed} verb never writes it back, and an answer that comes while
+ * a finger is on the list waits for the finger to lift
+ * ({@link ExploreRows}).
  */
 final class ExplorePane {
     /** What the pane hands back to the Activity. */
@@ -38,19 +63,54 @@ final class ExplorePane {
         /** A page it opened is in front: the browser. */
         void page();
 
-        /** A hub's rooms it opened are in front. */
+        /** A server's rooms it opened are in front. */
         void rooms();
+    }
+
+    /** One row of the list: what it is, its key and its words. */
+    private static final class Row {
+        static final int TITLE = 0;
+        static final int NOTE = 1;
+        static final int HEADING = 2;
+        static final int ADDRESS = 3;
+        static final int PAGE = 4;
+        static final int ROOM = 5;
+        static final int SERVER = 6;
+        static final int KINDS = 7;
+
+        final int kind;
+        final String key;
+        final String words;
+        final Map<String, Object> item;
+        final int index;
+
+        Row(int kind, String key, String words, Map<String, Object> item, int index) {
+            this.kind = kind;
+            this.key = key;
+            this.words = words;
+            this.item = item;
+            this.index = index;
+        }
     }
 
     private final Activity screen;
     private final Host host;
     private final EditText field;
     private final TextView sort;
-    private final LinearLayout list;
-    /** The field's text as the library last had it: no echo of a draw back as a verb. */
+    private final ListView list;
+    private final ExploreRows<Row> rows = new ExploreRows<Row>();
+    private final Adapter adapter = new Adapter();
+    /** The field's text as last sent: no echo of a draw back as a verb. */
     private String typed = "";
+    /** `typed` verbs sent and not yet answered. */
+    private int inFlight;
+    /** The query the list was last drawn for: a new one starts at the top. */
+    private String drawnFor;
     /** What the tab showed last: Back decides by it. */
     private Map<String, Object> last;
+    /** The server's sheet on screen, and its server. */
+    private AlertDialog sheet;
+    private String sheetFor = "";
 
     ExplorePane(Activity activity, Host host) {
         this.screen = activity;
@@ -63,12 +123,13 @@ final class ExplorePane {
 
         LinearLayout top = new LinearLayout(activity);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        top.setPadding(dp(12), dp(8), dp(12), dp(4));
+        top.setPadding(dp(12), dp(4), dp(12), dp(2));
         field = new EditText(activity);
         field.setSingleLine(true);
         field.setImeOptions(EditorInfo.IME_ACTION_GO);
         field.setId(R.id.explore_search);
         field.setTextColor(activity.getColor(R.color.text));
+        field.setHintTextColor(activity.getColor(R.color.text_secondary));
         field.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int start, int count, int after) {
@@ -83,7 +144,8 @@ final class ExplorePane {
                 String now = s.toString();
                 if (!now.equals(typed)) {
                     typed = now;
-                    verb("typed", now, "", 0);
+                    inFlight++;
+                    verb("typed", now, "", 0, true);
                 }
             }
         });
@@ -95,9 +157,14 @@ final class ExplorePane {
             }
         });
         top.addView(field, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        // A fixed width: the field's never moves with the toggle's words
+        // (walk 13: 685 or 911 px).
         sort = new TextView(activity);
         sort.setTextSize(13);
-        sort.setPadding(dp(12), dp(8), dp(4), dp(8));
+        sort.setSingleLine(true);
+        sort.setEllipsize(TextUtils.TruncateAt.END);
+        sort.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        sort.setPadding(dp(8), dp(8), dp(4), dp(8));
         sort.setTextColor(activity.getColor(R.color.accent));
         sort.setId(R.id.explore_sort);
         sort.setOnClickListener(new View.OnClickListener() {
@@ -106,15 +173,37 @@ final class ExplorePane {
                 verb("az", "", "", Core.bool(last, "az") ? 0 : 1);
             }
         });
-        top.addView(sort);
+        top.addView(sort, new LinearLayout.LayoutParams(dp(132), ViewGroup.LayoutParams.WRAP_CONTENT));
         column.addView(top);
 
-        ScrollView scroll = new ScrollView(activity);
-        list = new LinearLayout(activity);
-        list.setOrientation(LinearLayout.VERTICAL);
+        list = new ListView(activity) {
+            @Override
+            public boolean dispatchTouchEvent(MotionEvent event) {
+                finger(event);
+                return super.dispatchTouchEvent(event);
+            }
+        };
         list.setId(R.id.explore_list);
-        scroll.addView(list);
-        column.addView(scroll, new LinearLayout.LayoutParams(
+        list.setDivider(null);
+        list.setAdapter(adapter);
+        list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+            @Override
+            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
+                tapped(rows.at(position));
+            }
+        });
+        list.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
+            @Override
+            public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
+                Row row = rows.at(position);
+                if (row.kind != Row.PAGE) {
+                    return false;
+                }
+                menu(view, row.item);
+                return true;
+            }
+        });
+        column.addView(list, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
     }
 
@@ -123,17 +212,98 @@ final class ExplorePane {
         verb("tab", "", "", 0);
     }
 
+    /** The bar's magnifier on Explore (walk 14): the tab's own field, with the keyboard. */
+    void focus() {
+        field.requestFocus();
+        InputMethodManager keyboard =
+                (InputMethodManager) screen.getSystemService(Context.INPUT_METHOD_SERVICE);
+        keyboard.showSoftInput(field, InputMethodManager.SHOW_IMPLICIT);
+    }
+
     /** Back: the field cleared; false with an empty field, as last drawn. */
     boolean back() {
-        if (last == null || Core.str(last, "query").isEmpty()) {
+        if (field.getText().length() == 0) {
             return false;
         }
         field.setText("");
         return true;
     }
 
-    /** A verb on the engine's thread (1446); the tab drawn after it. */
-    private void verb(final String verb, final String text, final String dest, final int index) {
+    /** A finger on the list (walk 3): the library holds its order, and so does the pane. */
+    private void finger(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            rows.down();
+            verb("touch", "", "", 1, false, false);
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            if (rows.up()) {
+                adapter.notifyDataSetChanged();
+            }
+            verb("touch", "", "", 0);
+        }
+    }
+
+    private void tapped(Row row) {
+        switch (row.kind) {
+            case Row.PAGE:
+                verb("open", "", Core.str(row.item, "dest"), 0);
+                break;
+            case Row.ADDRESS:
+                verb("address", "", "", 0);
+                break;
+            case Row.ROOM:
+                verb("room", "", "", row.index);
+                break;
+            case Row.SERVER:
+                verb("hub", "", Core.str(row.item, "dest"), 0);
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** A page's menu (walk 9): bookmark or not, open, copy its address. */
+    private void menu(View anchor, final Map<String, Object> page) {
+        final String dest = Core.str(page, "dest");
+        PopupMenu popup = new PopupMenu(screen, anchor);
+        Menu items = popup.getMenu();
+        boolean marked = Core.bool(page, "bookmarked");
+        items.add(0, R.string.explore_open, 0, R.string.explore_open);
+        items.add(0, R.string.explore_bookmark, 1,
+                marked ? R.string.explore_unbookmark : R.string.explore_bookmark);
+        items.add(0, R.string.explore_copy_address, 2, R.string.explore_copy_address);
+        popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
+            @Override
+            public boolean onMenuItemClick(MenuItem item) {
+                int id = item.getItemId();
+                if (id == R.string.explore_open) {
+                    verb("open", "", dest, 0);
+                } else if (id == R.string.explore_bookmark) {
+                    verb("bookmark", "", dest, 0);
+                } else if (id == R.string.explore_copy_address) {
+                    String url = Core.str(page, "url");
+                    ClipboardManager clip =
+                            (ClipboardManager) screen.getSystemService(Context.CLIPBOARD_SERVICE);
+                    clip.setPrimaryClip(ClipData.newPlainText("address", url.isEmpty() ? dest : url));
+                    Toast.makeText(screen, R.string.explore_copied, Toast.LENGTH_SHORT).show();
+                }
+                return true;
+            }
+        });
+        popup.show();
+    }
+
+    private void verb(String verb, String text, String dest, int index) {
+        verb(verb, text, dest, index, false, true);
+    }
+
+    private void verb(String verb, String text, String dest, int index, boolean typing) {
+        verb(verb, text, dest, index, typing, true);
+    }
+
+    /** A verb on the engine's thread (1446); the tab drawn after it where `drawn`. */
+    private void verb(final String verb, final String text, final String dest, final int index,
+            final boolean typing, final boolean drawn) {
         Engine.run(new Engine.Call() {
             @Override
             public String run() {
@@ -142,10 +312,15 @@ final class ExplorePane {
         }, new Engine.Said() {
             @Override
             public void said(String error) {
+                if (typing) {
+                    inFlight--;
+                }
                 if (error != null) {
                     Toast.makeText(screen, error, Toast.LENGTH_SHORT).show();
                 }
-                draw();
+                if (drawn) {
+                    draw();
+                }
             }
         });
     }
@@ -172,191 +347,363 @@ final class ExplorePane {
         last = shown;
         String showing = Core.str(shown, "showing");
         if (showing.equals("browse")) {
+            closeSheet();
             host.page();
             return;
         }
         if (showing.equals("rooms")) {
+            closeSheet();
             host.rooms();
             return;
         }
         if (!showing.equals("list")) {
+            closeSheet();
             host.left();
             return;
         }
         String query = Core.str(shown, "query");
-        if (!query.equals(field.getText().toString())) {
+        if (ExploreRows.echo(query, inFlight, field.getText().toString())) {
             typed = query;
             field.setText(query);
             field.setSelection(query.length());
         }
         field.setHint(Core.str(shown, "placeholder"));
         sort.setText(Core.str(shown, "sort"));
-        list.removeAllViews();
-        list.addView(title(Core.str(shown, "pages_title")));
-        note(Core.str(shown, "pages_off"));
+        if (rows.offer(flatten(shown))) {
+            adapter.notifyDataSetChanged();
+        }
+        if (drawnFor != null && !drawnFor.equals(query)) {
+            list.setSelection(0);
+        }
+        drawnFor = query;
+        sheet(shown);
+    }
+
+    /** The answer as the list's rows, in its order. */
+    private List<Row> flatten(Map<String, Object> shown) {
+        List<Row> out = new ArrayList<Row>();
+        out.add(new Row(Row.TITLE, "title:pages", Core.str(shown, "pages_title"), null, 0));
+        note(out, "off", Core.str(shown, "pages_off"));
         String address = Core.str(shown, "address");
         if (!address.isEmpty()) {
-            TextView open = line(address, 17, R.color.accent);
-            open.setId(R.id.explore_address);
-            open.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    verb("address", "", "", 0);
-                }
-            });
-            list.addView(open);
+            out.add(new Row(Row.ADDRESS, "address", address, null, 0));
         }
         for (Map<String, Object> page : Core.list(shown, "pages")) {
             String heading = Core.str(page, "heading");
             if (!heading.isEmpty()) {
-                list.addView(heading(heading));
+                out.add(new Row(Row.HEADING, "heading:" + heading, heading, null, 0));
             }
-            list.addView(page(page));
+            out.add(new Row(Row.PAGE, "page:" + Core.str(page, "dest"), Core.str(page, "label"), page, 0));
         }
-        note(Core.str(shown, "pages_empty"));
-        list.addView(title(Core.str(shown, "rooms_title")));
+        note(out, "pages_empty", Core.str(shown, "pages_empty"));
+        out.add(new Row(Row.TITLE, "title:rooms", Core.str(shown, "rooms_title"), null, 0));
         List<Map<String, Object>> joined = Core.list(shown, "joined");
         for (int i = 0; i < joined.size(); i++) {
-            list.addView(room(joined.get(i), i));
+            Map<String, Object> room = joined.get(i);
+            out.add(new Row(Row.ROOM, "room:" + Core.str(room, "name"), Core.str(room, "name"), room, i));
         }
         for (Map<String, Object> hub : Core.list(shown, "hubs")) {
-            list.addView(hub(hub));
+            out.add(new Row(Row.SERVER, "server:" + Core.str(hub, "dest"), Core.str(hub, "name"), hub, 0));
         }
         List<Map<String, Object>> heard = Core.list(shown, "heard");
         if (!heard.isEmpty()) {
-            list.addView(heading(Core.str(shown, "heard_title")));
+            String title = Core.str(shown, "heard_title");
+            out.add(new Row(Row.HEADING, "heading:heard", title, null, 0));
             for (Map<String, Object> hub : heard) {
-                list.addView(hub(hub));
+                out.add(new Row(Row.SERVER, "heard:" + Core.str(hub, "dest"), Core.str(hub, "name"), hub, 0));
             }
         }
-        note(Core.str(shown, "rooms_empty"));
+        note(out, "rooms_empty", Core.str(shown, "rooms_empty"));
+        return out;
     }
 
-    /** A page's row: its name over when it was seen; a tap opens, a long press or the star bookmarks. */
-    private View page(Map<String, Object> page) {
-        final String dest = Core.str(page, "dest");
-        LinearLayout row = new LinearLayout(screen);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(16), dp(8), dp(8), dp(8));
-        row.setBackgroundResource(android.R.drawable.list_selector_background);
-        row.setTag("explore_page_" + dest);
-        LinearLayout words = new LinearLayout(screen);
-        words.setOrientation(LinearLayout.VERTICAL);
-        TextView name = new TextView(screen);
-        name.setText(Core.str(page, "label"));
-        name.setTextSize(17);
-        name.setTextColor(screen.getColor(R.color.text));
-        words.addView(name);
-        String said = Core.str(page, "said");
+    private static void note(List<Row> out, String key, String words) {
+        if (!words.isEmpty()) {
+            out.add(new Row(Row.NOTE, "note:" + key, words, null, 0));
+        }
+    }
+
+    /**
+     * A server's sheet (walk 10): its name, when it was heard and how far,
+     * the one button that makes it the public rooms' server with what that
+     * tells the server, and the rooms it named, a tap joining one. Opening
+     * it changes nothing; closing it says so to the library.
+     */
+    private void sheet(Map<String, Object> shown) {
+        final String dest = Core.str(shown, "sheet_dest");
+        if (dest.isEmpty()) {
+            closeSheet();
+            return;
+        }
+        if (sheet != null && sheet.isShowing() && dest.equals(sheetFor)) {
+            return;
+        }
+        closeSheet();
+        sheetFor = dest;
+        LinearLayout body = new LinearLayout(screen);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(24), dp(4), dp(24), dp(8));
+        String said = Core.str(shown, "sheet_said");
         if (!said.isEmpty()) {
-            TextView seen = new TextView(screen);
-            seen.setText(said);
-            seen.setTextSize(13);
-            seen.setTextColor(screen.getColor(R.color.text_secondary));
-            words.addView(seen);
+            body.addView(words(said, 14, R.color.text_secondary));
         }
-        row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        TextView star = new TextView(screen);
-        star.setText(Core.bool(page, "bookmarked") ? "★" : "☆");
-        star.setTextSize(22);
-        star.setPadding(dp(12), 0, dp(8), 0);
-        star.setTextColor(screen.getColor(R.color.accent));
-        star.setTag("explore_star_" + dest);
-        star.setOnClickListener(new View.OnClickListener() {
+        if (Core.bool(shown, "sheet_chosen")) {
+            TextView inUse = words(Core.str(shown, "sheet_button"), 16, R.color.text);
+            inUse.setPadding(0, dp(12), 0, dp(4));
+            body.addView(inUse);
+        } else {
+            Button use = new Button(screen);
+            use.setText(Core.str(shown, "sheet_button"));
+            use.setAllCaps(false);
+            use.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    sheetFor = "";
+                    closeSheet();
+                    verb("use", "", dest, 0);
+                }
+            });
+            body.addView(use);
+            body.addView(words(Core.str(shown, "sheet_notice"), 13, R.color.text_secondary));
+        }
+        TextView title = words(Core.str(shown, "sheet_rooms_title"), 16, R.color.text);
+        title.setTypeface(null, Typeface.BOLD);
+        title.setPadding(0, dp(16), 0, dp(4));
+        body.addView(title);
+        for (final String room : Core.words(shown, "sheet_rooms")) {
+            TextView join = words(room, 17, R.color.accent);
+            join.setPadding(0, dp(10), 0, dp(10));
+            join.setBackgroundResource(android.R.drawable.list_selector_background);
+            join.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    sheetFor = "";
+                    closeSheet();
+                    verb("join", room, dest, 0);
+                }
+            });
+            body.addView(join);
+        }
+        String none = Core.str(shown, "sheet_no_rooms");
+        if (!none.isEmpty()) {
+            body.addView(words(none, 14, R.color.text_secondary));
+        }
+        ScrollView scroll = new ScrollView(screen);
+        scroll.addView(body);
+        sheet = new AlertDialog.Builder(screen)
+                .setTitle(Core.str(shown, "sheet_name"))
+                .setView(scroll)
+                .setNegativeButton(Core.str(shown, "sheet_close"), null)
+                .create();
+        sheet.setOnDismissListener(new DialogInterface.OnDismissListener() {
             @Override
-            public void onClick(View v) {
-                verb("bookmark", "", dest, 0);
+            public void onDismiss(DialogInterface dialog) {
+                // Closed by the reader: the library closes it too.
+                if (dest.equals(sheetFor)) {
+                    sheetFor = "";
+                    verb("close", "", "", 0);
+                }
             }
         });
-        row.addView(star);
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                verb("open", "", dest, 0);
-            }
-        });
-        row.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override
-            public boolean onLongClick(View v) {
-                verb("bookmark", "", dest, 0);
-                return true;
-            }
-        });
-        return row;
+        sheet.show();
     }
 
-    /** A room the reader is in: its name, the globe and its word, the unread. */
-    private View room(Map<String, Object> room, final int index) {
+    /** The sheet off the screen, by the library's word: no verb back. */
+    private void closeSheet() {
+        if (sheet != null) {
+            sheetFor = "";
+            if (sheet.isShowing()) {
+                sheet.dismiss();
+            }
+            sheet = null;
+        }
+    }
+
+    /** The list's rows: only the visible ones are views, each by its stable id. */
+    private final class Adapter extends BaseAdapter {
+        @Override
+        public int getCount() {
+            return rows.size();
+        }
+
+        @Override
+        public Object getItem(int position) {
+            return rows.at(position);
+        }
+
+        @Override
+        public long getItemId(int position) {
+            return ExploreRows.id(rows.at(position).key);
+        }
+
+        @Override
+        public boolean hasStableIds() {
+            return true;
+        }
+
+        @Override
+        public int getViewTypeCount() {
+            return Row.KINDS;
+        }
+
+        @Override
+        public int getItemViewType(int position) {
+            return rows.at(position).kind;
+        }
+
+        @Override
+        public boolean isEnabled(int position) {
+            int kind = rows.at(position).kind;
+            return kind == Row.ADDRESS || kind == Row.PAGE || kind == Row.ROOM || kind == Row.SERVER;
+        }
+
+        @Override
+        public View getView(int position, View convert, ViewGroup parent) {
+            Row row = rows.at(position);
+            switch (row.kind) {
+                case Row.TITLE:
+                    return title(convert, row.words);
+                case Row.NOTE:
+                    return note(convert, row.words);
+                case Row.HEADING:
+                    return heading(convert, row.words);
+                case Row.ADDRESS:
+                    return address(convert, row.words);
+                case Row.PAGE:
+                    return item(convert, row, Core.str(row.item, "said"), true);
+                case Row.ROOM:
+                    return item(convert, row, room(row.item), false);
+                default:
+                    return item(convert, row, Core.str(row.item, "value"), false);
+            }
+        }
+    }
+
+    /** A room's line under its name: the globe and its word, the unread. */
+    private static String room(Map<String, Object> room) {
         long unread = Core.num(room, "unread");
-        String words = Core.str(room, "name") + "  🌐 " + Core.str(room, "public")
-                + (unread > 0 ? "  (" + unread + ")" : "");
-        TextView row = line(words, 17, R.color.text);
-        if (unread > 0) {
-            row.setTypeface(null, Typeface.BOLD);
+        return "🌐 " + Core.str(room, "public") + (unread > 0 ? " · " + unread : "");
+    }
+
+    /**
+     * A page's, a room's or a server's row, one type for all (walk 13): the
+     * name over its line, the star on a page.
+     */
+    private View item(View convert, Row row, String said, boolean starred) {
+        LinearLayout view = convert instanceof LinearLayout ? (LinearLayout) convert : null;
+        if (view == null) {
+            view = new LinearLayout(screen);
+            view.setGravity(Gravity.CENTER_VERTICAL);
+            view.setPadding(dp(16), dp(8), dp(8), dp(8));
+            view.setMinimumHeight(dp(56));
+            LinearLayout words = new LinearLayout(screen);
+            words.setOrientation(LinearLayout.VERTICAL);
+            TextView name = new TextView(screen);
+            name.setTextSize(17);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            name.setTextColor(screen.getColor(R.color.text));
+            words.addView(name);
+            TextView line = new TextView(screen);
+            line.setTextSize(13);
+            line.setSingleLine(true);
+            line.setEllipsize(TextUtils.TruncateAt.END);
+            line.setTextColor(screen.getColor(R.color.text_secondary));
+            words.addView(line);
+            view.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            TextView star = new TextView(screen);
+            star.setTextSize(22);
+            star.setPadding(dp(16), dp(8), dp(8), dp(8));
+            star.setTextColor(screen.getColor(R.color.accent));
+            view.addView(star);
         }
-        row.setTag("explore_room_" + index);
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                verb("room", "", "", index);
-            }
-        });
-        return row;
+        LinearLayout words = (LinearLayout) view.getChildAt(0);
+        TextView name = (TextView) words.getChildAt(0);
+        TextView line = (TextView) words.getChildAt(1);
+        TextView star = (TextView) view.getChildAt(1);
+        boolean bold = row.kind == Row.ROOM && Core.num(row.item, "unread") > 0;
+        boolean chosen = row.kind == Row.SERVER && Core.bool(row.item, "chosen");
+        name.setText(row.words + (chosen ? " ✓" : ""));
+        name.setTypeface(null, bold ? Typeface.BOLD : Typeface.NORMAL);
+        line.setText(said);
+        line.setVisibility(said.isEmpty() ? View.GONE : View.VISIBLE);
+        view.setTag(tag(row));
+        if (starred) {
+            final String dest = Core.str(row.item, "dest");
+            star.setVisibility(View.VISIBLE);
+            star.setText(Core.bool(row.item, "bookmarked") ? "★" : "☆");
+            star.setTag("explore_star_" + dest);
+            star.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    verb("bookmark", "", dest, 0);
+                }
+            });
+        } else {
+            star.setVisibility(View.GONE);
+            star.setOnClickListener(null);
+            star.setClickable(false);
+        }
+        return view;
     }
 
-    /** A hub: its name, the mark on the one in force, how far. */
-    private View hub(Map<String, Object> hub) {
-        final String dest = Core.str(hub, "dest");
-        String value = Core.str(hub, "value");
-        String words = Core.str(hub, "name") + (Core.bool(hub, "chosen") ? "  ✓" : "")
-                + (value.isEmpty() ? "" : "  · " + value);
-        TextView row = line(words, 17, R.color.text);
-        row.setTag("explore_hub_" + dest);
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                verb("hub", "", dest, 0);
-            }
-        });
-        return row;
+    /** The tags the project walk finds rows by. */
+    private static String tag(Row row) {
+        switch (row.kind) {
+            case Row.PAGE:
+                return "explore_page_" + Core.str(row.item, "dest");
+            case Row.ROOM:
+                return "explore_room_" + row.index;
+            case Row.SERVER:
+                return "explore_hub_" + Core.str(row.item, "dest");
+            default:
+                return null;
+        }
     }
 
-    private TextView line(String words, int size, int colour) {
-        TextView view = new TextView(screen);
+    private TextView address(View convert, String words) {
+        TextView view = reuse(convert, 17, R.color.accent);
+        view.setPadding(dp(16), dp(12), dp(16), dp(12));
+        view.setId(R.id.explore_address);
         view.setText(words);
+        return view;
+    }
+
+    private TextView title(View convert, String words) {
+        TextView view = reuse(convert, 18, R.color.text);
+        view.setTypeface(null, Typeface.BOLD);
+        view.setPadding(dp(16), dp(16), dp(16), dp(4));
+        view.setText(words);
+        return view;
+    }
+
+    private TextView heading(View convert, String words) {
+        TextView view = reuse(convert, 13, R.color.text_secondary);
+        view.setPadding(dp(16), dp(10), dp(16), dp(2));
+        view.setText(words);
+        return view;
+    }
+
+    private TextView note(View convert, String words) {
+        TextView view = reuse(convert, 13, R.color.text_secondary);
+        view.setPadding(dp(16), dp(8), dp(16), dp(8));
+        view.setText(words);
+        return view;
+    }
+
+    private TextView reuse(View convert, int size, int colour) {
+        TextView view = convert instanceof TextView ? (TextView) convert : new TextView(screen);
         view.setTextSize(size);
         view.setTextColor(screen.getColor(colour));
-        view.setPadding(dp(16), dp(10), dp(16), dp(10));
-        view.setBackgroundResource(android.R.drawable.list_selector_background);
         return view;
     }
 
-    private TextView title(String words) {
+    private TextView words(String text, int size, int colour) {
         TextView view = new TextView(screen);
-        view.setText(words);
-        view.setTextSize(18);
-        view.setTypeface(null, Typeface.BOLD);
-        view.setTextColor(screen.getColor(R.color.text));
-        view.setPadding(dp(16), dp(16), dp(16), dp(4));
+        view.setText(text);
+        view.setTextSize(size);
+        view.setTextColor(screen.getColor(colour));
         return view;
-    }
-
-    private TextView heading(String words) {
-        TextView view = new TextView(screen);
-        view.setText(words);
-        view.setTextSize(13);
-        view.setTextColor(screen.getColor(R.color.text_secondary));
-        view.setPadding(dp(16), dp(10), dp(16), dp(2));
-        return view;
-    }
-
-    /** One sentence of the library's, where it says one. */
-    private void note(String words) {
-        if (!words.isEmpty()) {
-            TextView view = heading(words);
-            view.setPadding(dp(16), dp(8), dp(16), dp(8));
-            list.addView(view);
-        }
     }
 
     private int dp(int value) {

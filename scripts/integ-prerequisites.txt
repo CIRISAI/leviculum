@@ -217,6 +217,10 @@ command:java loquax-android/fling the_phone_draws_nothing_while_nothing_changes
 command:javac loquax-android/fling the_server_field_follows_a_typed_code
 command:java loquax-android/fling the_server_field_follows_a_typed_code
 
+# The Explore pane's rules (1618): ExploreRows.java run with its host test.
+command:javac loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
+command:java loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
+
 # The engine's questions (1496): Engine.java over host stand-ins for
 # Handler, Looper and Log, run with its host test.
 command:javac loquax-android/fling a_question_that_throws_reaches_its_failure_path

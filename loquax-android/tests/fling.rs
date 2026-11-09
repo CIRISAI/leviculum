@@ -207,6 +207,46 @@ fn the_server_field_follows_a_typed_code() {
     assert!(out.contains("checks passed"), "{out}");
 }
 
+/// The Explore pane's rules (1618, the walk of 17024c3a):
+/// `ExploreRows.java` run on the host with
+/// `tests/java/ExploreRowsTest.java`. 32 characters typed fast all stay
+/// in the field (the control, the rule before, loses some, as the Pixel
+/// lost 10 of 32), and a row under a finger stays while a new order
+/// arrives (the control lands on the walk's wrong row).
+#[test]
+fn the_explore_field_keeps_every_character_and_rows_hold_under_a_finger() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("explore-rows-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/ExploreRows.java"))
+        .arg(manifest.join("tests/java/ExploreRowsTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.ExploreRowsTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
 /// When nothing changes, nothing is drawn (1455): `Quiet.java`, the rules
 /// the phone's screens ask before drawing again, run on the host with
 /// `tests/java/QuietTest.java`. The map's live ring pulses for its first

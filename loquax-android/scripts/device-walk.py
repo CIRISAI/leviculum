@@ -194,9 +194,37 @@ MAP_CHROME_IDS = ["load", "fit", "theme"]
 # Explore (1578), three and no fourth.
 TABS = ["tab_chats", "tab_map", "tab_explore"]
 # Explore's list (1578): its field, its order's toggle, its list, and the
-# two section titles the library words.
+# two section titles the library words. The titles are the catalogue's
+# (`explore_pages`, `explore_rooms`) in the phone's language, read from the
+# generated strings_scene.xml: English literals failed on the German Pixel
+# before they checked anything (1618, walk 15).
 EXPLORE_IDS = ["explore_search", "explore_sort", "explore_list"]
-EXPLORE_TITLES = ["Pages", "Public rooms"]
+EXPLORE_TITLE_KEYS = ["explore_pages", "explore_rooms"]
+ANDROID_RES = Path(__file__).resolve().parent.parent / "android" / "res"
+
+
+def catalogue_words(lang: str, keys: list[str]) -> list[str]:
+    """The catalogue's `keys` in `lang` (a locale tag, `de-DE` or `en`), as
+    the app shows them: the language's strings_scene.xml, English where
+    the phone speaks one the app does not."""
+    base = lang.replace("_", "-").split("-")[0].lower()
+    path = ANDROID_RES / ("values" if base in ("", "en") else f"values-{base}") / "strings_scene.xml"
+    if not path.exists():
+        path = ANDROID_RES / "values" / "strings_scene.xml"
+    found = {}
+    for item in ET.parse(path).getroot().iter("string"):
+        found[item.get("name")] = (item.text or "").replace("\\'", "'").replace('\\"', '"')
+    return [found[key] for key in keys]
+
+
+def phone_lang(dev) -> str:
+    """The phone's language as a locale tag: the user's choice, else the
+    build's."""
+    for prop in ("persist.sys.locale", "ro.product.locale"):
+        said = dev.shell(f"getprop {prop}", check=False).strip()
+        if said:
+            return said
+    return "en"
 NOT_DECODED = "did not decode"
 # The settings' entries in the list's order (1199, SettingsActivity.PAGES).
 SETTINGS_PAGES = [
@@ -1241,15 +1269,18 @@ def tab_ids(nodes: list[Node]) -> list[str]:
     return out
 
 
-def explore_problems(nodes: list[Node]) -> list[str]:
+def explore_problems(nodes: list[Node], titles: list[str] | None = None) -> list[str]:
     """What is wrong with Explore's dump (1578): a missing field, toggle or
-    list, a section without its title, or a tab bar other than exactly
+    list, a section without its title (`titles`, the catalogue's in the
+    phone's language; English without), or a tab bar other than exactly
     Chats, Map and Explore."""
     problems = []
     for rid in EXPLORE_IDS:
         if not find(nodes, rid=rid):
             problems.append(f"no {rid}")
-    for title in EXPLORE_TITLES:
+    if titles is None:
+        titles = catalogue_words("en", EXPLORE_TITLE_KEYS)
+    for title in titles:
         if not find(nodes, text=title):
             problems.append(f"no section {title!r}")
     tabs = tab_ids(nodes)
@@ -4481,8 +4512,20 @@ class Walk:
         dev = self.need_device()
         dev.tap_node(self.wait_id("tab_explore", 10)[0])
         self.wait_id("explore_list", 10)
+        titles = catalogue_words(phone_lang(dev), EXPLORE_TITLE_KEYS)
         nodes = dev.dump()
-        problems = explore_problems(nodes)
+        # The list draws only what is visible (1618): the rooms' title may
+        # be below; scroll for it, keeping every row seen.
+        seen = list(nodes)
+        for _ in range(12):
+            if find(seen, text=titles[-1]):
+                break
+            box = find(dev.dump(), rid="explore_list")[0]
+            x = (box.bounds[0] + box.bounds[2]) // 2
+            dev.swipe(x, box.bounds[3] - 40, x, box.bounds[1] + 40, 250)
+            time.sleep(0.5)
+            seen.extend(dev.dump())
+        problems = explore_problems(seen, titles)
         if problems:
             raise StepFailed("; ".join(problems))
         order = find(nodes, rid="explore_sort")[0].text
