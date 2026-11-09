@@ -469,6 +469,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_PACED",
         required_keys: &["dst", "iface", "release_ms"],
     },
+    // A pending announce rebroadcast cancelled because a copy of the SAME
+    // announce (packet hash `ph`, the entry's) was heard further on (order
+    // 1617): `reason` is `passed_on` (hops + 1, the local-rebroadcast limit
+    // reached) or `forwarded` (hops + 2 while the retransmit was still in
+    // the future). `hops` is the copy's, `iface` where it was heard.
+    EventSchema {
+        name: "ANN_REBROADCAST_CANCELLED",
+        required_keys: &["dst", "ph", "hops", "iface", "reason"],
+    },
     // A received announce that found a targeted path response still in its
     // grace (1262): the response stays, carrying this newer emission, and
     // the announce's rebroadcast waits in the held slot until the response

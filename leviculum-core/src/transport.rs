@@ -7428,26 +7428,57 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // rebroadcast ourselves (`retries > 0`). Without this guard, a neighbor
                 // heard within the jitter window of the initial entry could cancel our
                 // first-ever fire, violating the Python on-wire count.
-                if packet.hops == existing.hops.saturating_add(1) {
+                //
+                // Both arms count only a copy OF THE ENTRY'S ANNOUNCE, and the
+                // forwarded arm only while the retransmit is still in the
+                // future (order 1617, Refs #232). We keyed both on the
+                // destination and let the forwarded arm cancel any pending
+                // retransmit: Python's echo of a local client's PREVIOUS
+                // announce (hops + 2) then cancelled the client's renamed
+                // announce, whose entry starts at retries =
+                // PATHFINDER_RETRIES and is due the moment it lands, before
+                // it ever left, and the Python peer kept the old name. The
+                // reference also keys on the destination (Transport.py:1724)
+                // but wants `now < retransmit_timeout` (:1736), which a
+                // retransmit due now fails; a copy of another emission says
+                // nothing about whether this one was passed on either. The
+                // packet hash leaves out hops and the transport id, so every
+                // relay of one announce shares it. Wire unchanged; the
+                // deviation only keeps an announce on its way that nobody
+                // has forwarded yet.
+                let hops_on = packet.hops.wrapping_sub(existing.hops);
+                let copy_hash = if hops_on == 1 || hops_on == 2 {
+                    Some(crate::packet::packet_hash(raw))
+                } else {
+                    None
+                };
+                let echoes_entry = copy_hash.is_some()
+                    && copy_hash == Some(crate::packet::packet_hash(&existing.raw_packet));
+                let mut cancelled = None;
+                if echoes_entry && hops_on == 1 {
                     existing.local_rebroadcasts = existing.local_rebroadcasts.saturating_add(1);
                     if existing.retries > 0 && existing.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX
                     {
                         existing.retransmit_at_ms = None;
-                        crate::tracing::trace!(
-                            dest = %HexShort(&dest_hash),
-                            "Rebroadcasted announce has been passed on to another node, no further tries needed"
-                        );
+                        cancelled = Some("passed_on");
                     }
-                } else if packet.hops == existing.hops.saturating_add(2)
+                } else if echoes_entry
                     && existing.retries > 0
-                    && existing.retransmit_at_ms.is_some()
+                    && existing.retransmit_at_ms.is_some_and(|due| now < due)
                 {
                     // Another node forwarded our rebroadcast (hops+2 means they got
                     // our retransmit at hops+1 and forwarded it)
                     existing.retransmit_at_ms = None;
-                    crate::tracing::trace!(
-                        dest = %HexShort(&dest_hash),
-                        "Rebroadcasted announce has been forwarded by another node, no further tries needed"
+                    cancelled = Some("forwarded");
+                }
+                if let (Some(reason), Some(h)) = (cancelled, copy_hash) {
+                    crate::tracing::debug!(
+                        event = "ANN_REBROADCAST_CANCELLED",
+                        dst = %HexShort(&dest_hash),
+                        ph = %HexShort(&h[..PKT_PH_BYTES]),
+                        hops = packet.hops,
+                        iface = %self.iface_name(interface_index),
+                        reason = reason,
                     );
                 }
 
@@ -18978,7 +19009,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:8077), a deliberate anti-replay
+            // `random_blobs` (transport.rs:8108), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

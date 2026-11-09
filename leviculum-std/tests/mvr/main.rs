@@ -61,7 +61,7 @@ pub use harness::port_alloc;
 /// Per-thread arming was necessary and not sufficient. libtest gives each
 /// test its own thread, so no other test's *own* allocations land in this
 /// window — but `tracing` dispatch runs on the thread that emits the event,
-/// and `EventLogLayer::emit`, under `on_event` (`leviculum-std/src/event_log.rs:2343`)
+/// and `EventLogLayer::emit`, under `on_event` (`leviculum-std/src/event_log.rs:2352`)
 /// pushes one `String` into the buffer of EVERY capture handle any test has
 /// registered, "regardless of which test emitted it" (that module's own doc).
 /// So the code under test emitting `PKT_TX`
@@ -393,6 +393,7 @@ mod a_returning_phone_is_asked_for_its_stored_mail;
 mod a_stranger_inside_the_port_handoff_window;
 mod a_third_announce_on_a_fresh_interface_waits_at_python;
 mod an_application_path_request_inside_the_interval_leaves;
+mod an_older_emissions_echo_keeps_the_renamed_announce;
 mod announce_emission_unix_time;
 mod burst_continuation_contends_inside_its_own_answer;
 mod cad_tears_down_the_frame_it_then_detects;

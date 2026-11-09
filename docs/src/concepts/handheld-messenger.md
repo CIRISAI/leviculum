@@ -1499,7 +1499,7 @@ phone pulls from; the bench line is lnsd on schneckenschreck, the
 rendezvous, the home behind it. lnsd's serial interface to the M9 needs
 `interface_mode = gateway`: in the default full mode a path request
 from the board for the home is not discovered onwards
-(`leviculum-core/src/transport.rs:12753`, only access point, gateway
+(`leviculum-core/src/transport.rs:12784`, only access point, gateway
 and roaming re-originate), and the join ends in `NoPath`. The M9 sets
 its own end to Gateway already (`leviculum-esp/src/handheld.rs:175`).
 

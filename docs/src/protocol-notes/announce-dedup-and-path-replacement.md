@@ -329,3 +329,35 @@ a network interface is untouched. Deviation rule: the wire is unchanged,
 a Python peer stores whatever valid announce it is sent
 (`Identity.validate_announce` runs before its path rule), and the change
 delivers the client's newest app data, which §3's rule would lose.
+
+## 8. An echo cancels only the announce it echoes
+
+The reference stops retransmitting an announce when it hears a
+neighbour pass it on (`Transport.py:1724`): a copy one hop further
+counts towards `LOCAL_REBROADCASTS_MAX`, and a copy two hops further,
+while `now < retransmit_timeout` (`:1736`), ends the entry at once.
+Both arms key on the destination hash alone.
+
+Since order 1617 `handle_announce` counts a copy for either arm only
+when its packet hash equals the one of the announce the entry holds,
+and the two-hop arm wants the retransmit still in the future, as the
+reference does; ours had asked only that one was pending. The case it
+closes: a local client announces A1, the instance sends it, the client
+disconnects (its path goes), and the next client of the same identity
+announces A2 with a new display name. A2's entry is due at once. In
+the same millisecond, before the scheduler ran, the Python peer's
+relay of A1 came back two hops on, matched the destination, and
+cancelled A2; the peer kept the old name
+(`lnmsg_send_reaches_a_python_lxmf_receiver`, 1611's dump). A copy of
+another emission says nothing about whether this one was passed on.
+
+The mvr is `leviculum-std/tests/mvr/an_older_emissions_echo_keeps_the_renamed_announce.rs`:
+the field case, the packet half alone on a relayed retransmit, the
+timing half alone, and the control that a copy of the same announce
+still cancels. The wire is unchanged; the deviation only keeps an
+announce on its way that nobody has forwarded yet.
+
+One difference stays, noted here because the control has to work
+around it: our replay gate runs before this check and the reference's
+after it (`:1772`), so an identical copy normally never reaches either
+arm here.

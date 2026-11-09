@@ -319,7 +319,7 @@ fn a_home_opens_what_a_sender_encrypted_to_the_other_homes_ratchet() {
 /// home LAN or the internet side, where the always-on home lives) hears the
 /// always-on home A on one interface and the phone home B on another. The
 /// path table follows the newest emission at any hop count
-/// (`leviculum-core/src/transport.rs:7534-7536` for equal or fewer hops,
+/// (`leviculum-core/src/transport.rs:7565-7567` for equal or fewer hops,
 /// `:7379-7382` for more; `RNS/Transport.py:1765`, `:1809-1810`), so every
 /// announce of the other home moves it: A, B, A gives three different
 /// interfaces in a row, a flap at the announce cadence.
