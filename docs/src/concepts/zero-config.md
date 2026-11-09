@@ -606,6 +606,12 @@ The function is `find_or_start` (`leviculum-std/src/instance.rs`), and
   pid=none` or `INSTANCE started=yes via=unix|tcp pid=<pid>`. The command
   line tools print it on stderr after a start, and after a find too under
   `-v`; Loquax writes it to its log only, its screen being its stderr.
+- **Loquax's lookup** (1598): its window and terminal ask for a running
+  daemon by `--instance` (or `--config`) alone, else by the name in
+  `$LNMSG_HOME/reticulum/config`, then the one in `~/.reticulum/config`,
+  then as `default`, and only when none answers start lnsd in
+  `$LNMSG_HOME/reticulum` (1570), its `INSTANCE` line carrying
+  `source=flag|home|default-dir|none`.
 - **Two tools at once.** The find and the start run under an exclusive
   `flock` on `.lnsd-start.lock` in the config directory: the first starts
   the daemon, the second finds it once it holds the lock. Two directories

@@ -3649,3 +3649,157 @@ fn with_an_lnsd_to_start_the_messenger_starts_it_in_its_own_home_and_it_goes_wit
         }
     }
 }
+
+/// An lnsd the test runs and stops, killed on drop so a failed assertion
+/// leaves none behind.
+struct RunningLnsd(Option<std::process::Child>);
+
+impl RunningLnsd {
+    /// Stop it and wait, so its log is complete.
+    fn stop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for RunningLnsd {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Start the release lnsd on `config_dir`, its output in `log`, and wait
+/// until its shared instance `instance` answers.
+fn run_lnsd(lnsd: &Path, config_dir: &Path, instance: &str, log: &Path) -> RunningLnsd {
+    let out = std::fs::File::create(log).expect("lnsd log");
+    let err = out.try_clone().expect("lnsd log");
+    let mut command = Command::new(lnsd);
+    command
+        .arg("-c")
+        .arg(config_dir)
+        .env("LEVICULUM_NO_AUTO", "1")
+        .env_remove("LEVICULUM_EVENT_LOG")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+    let running = RunningLnsd(Some(
+        leviculum_std::process::spawn_supervised(command).expect("spawn lnsd"),
+    ));
+    let config = leviculum_std::config::Config::load(config_dir.join("config")).expect("config");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while leviculum_std::instance::find(Some(&config), instance).is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "lnsd on {} never answered on {instance}:\n{}",
+            config_dir.display(),
+            std::fs::read_to_string(log).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    running
+}
+
+/// 1598: the messenger with only `LNMSG_HOME` set (no `--config`, no
+/// `--instance`) finds the user's running lnsd, whose config in
+/// `~/.reticulum` names its own instance, and starts none in
+/// `$LNMSG_HOME/reticulum`. Since 1570 it read the instance name from the
+/// moved home only, asked for `default`, found nothing and started a daemon
+/// of its own beside the node's (the read-receipt conformance cell, red on
+/// the land gate of 2c68a84b).
+#[test]
+fn with_only_lnmsg_home_set_the_messenger_finds_the_users_running_daemon() {
+    let lnsd = release_lnsd();
+    for (n, front) in [&[][..], &["tui"][..]].into_iter().enumerate() {
+        let instance = format!("loquax-finds-{}-{n}", std::process::id());
+        let lnmsg_home = tempfile::tempdir().expect("state dir");
+        let home = tempfile::tempdir().expect("user home");
+        let users = home.path().join(".reticulum");
+        std::fs::create_dir(&users).expect("~/.reticulum");
+        std::fs::write(
+            users.join("config"),
+            format!(
+                "[reticulum]\n  share_instance = Yes\n  instance_name = {instance}\n\n[interfaces]\n"
+            ),
+        )
+        .expect("config");
+        let daemon_log = home.path().join("running-lnsd.log");
+        let mut running = run_lnsd(&lnsd, &users, &instance, &daemon_log);
+
+        let (code, stdout, stderr) =
+            run_messenger(front, "C.UTF-8", lnmsg_home.path(), home.path(), &lnsd);
+        running.stop();
+        assert_eq!(code, Some(1), "{front:?} stderr: {stderr}");
+        assert!(stdout.is_empty(), "{front:?} stdout: {stdout}");
+        assert_eq!(
+            stderr,
+            "loquax: the terminal view needs a terminal on its input and output; \
+             run it in one, or \"loquax gui\" for the window\n",
+            "{front:?}: the daemon answered, so the screen is what failed"
+        );
+
+        let started = lnmsg_home.path().join("reticulum").join("lnsd.log");
+        assert!(
+            !started.exists(),
+            "{front:?}: the messenger started a daemon of its own:\n{}",
+            std::fs::read_to_string(&started).unwrap_or_default()
+        );
+        let tui_log = std::fs::read_to_string(lnmsg_home.path().join("tui.log")).expect("tui.log");
+        let line = tui_log
+            .lines()
+            .find(|l| l.contains("INSTANCE"))
+            .unwrap_or_else(|| panic!("{front:?}: no INSTANCE line:\n{tui_log}"));
+        assert!(
+            line.contains("found") && !line.contains("started"),
+            "{front:?}: {line}"
+        );
+        assert!(line.contains("source=default-dir"), "{front:?}: {line}");
+        let log = std::fs::read_to_string(&daemon_log).expect("running lnsd log");
+        assert!(
+            log.contains("Local client connected"),
+            "{front:?}: the messenger never reached the running daemon:\n{log}"
+        );
+    }
+}
+
+/// 1598's control: with only `LNMSG_HOME` set and no daemon on any name the
+/// lookup asks for, the messenger still starts one, in its own home
+/// (`source=none`, no config anywhere), as 1570 decided. The lookup asks
+/// for `default` last, so a host that runs a default daemon of its own is
+/// found there instead: the test asserts that branch where it holds.
+#[test]
+fn with_only_lnmsg_home_set_and_no_daemon_the_messenger_starts_one_in_its_home() {
+    let lnsd = release_lnsd();
+    let host_default = leviculum_std::instance::find(None, "default").is_some();
+    let lnmsg_home = tempfile::tempdir().expect("state dir");
+    let home = tempfile::tempdir().expect("user home");
+    let (code, _, stderr) = run_messenger(&[], "C.UTF-8", lnmsg_home.path(), home.path(), &lnsd);
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(
+        entries(home.path()).is_empty(),
+        "the messenger wrote into the user's home: {:?}",
+        entries(home.path())
+    );
+    let tui_log = std::fs::read_to_string(lnmsg_home.path().join("tui.log")).expect("tui.log");
+    let line = tui_log
+        .lines()
+        .find(|l| l.contains("INSTANCE"))
+        .unwrap_or_else(|| panic!("no INSTANCE line:\n{tui_log}"));
+    assert!(line.contains("source=none"), "{line}");
+    let started = lnmsg_home.path().join("reticulum").join("lnsd.log");
+    match host_default {
+        true => {
+            assert!(line.contains("found"), "{line}");
+            assert!(!started.exists(), "a daemon was started beside the host's");
+        }
+        false => {
+            assert!(line.contains("started"), "{line}");
+            let daemon_log = std::fs::read_to_string(&started).expect("lnsd.log");
+            assert!(
+                daemon_log.contains("Received SIGTERM"),
+                "the daemon was not stopped with the messenger:\n{daemon_log}"
+            );
+        }
+    }
+}

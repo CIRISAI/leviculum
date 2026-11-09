@@ -1464,21 +1464,39 @@ pub(crate) async fn start(
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
     let display_name = display_name::from_process(None).map_err(crate::usage)?;
-    let config_dir = crate::daemon_config_dir(options.config.clone());
-    let instance = options
-        .instance
-        .clone()
-        .unwrap_or_else(|| crate::instance_name(&config_dir));
     // The terminal and the window attach to a shared instance; where none
     // answers they start lnsd as their child (#471 step 4), which goes when
     // they do. Quiet: the screen is stderr, the line goes to the log file.
-    let daemon = leviculum_std::instance::for_tool(
-        &config_dir,
-        &instance,
-        options.no_start,
-        leviculum_std::instance::Report::Quiet,
-    )
-    .map_err(|error| crate::no_start(error, &instance))?;
+    // Every running daemon the lookup names is tried before one is started
+    // (1598).
+    let lookup = crate::daemon_lookup(options.config.clone(), options.instance.clone());
+    let mut daemon = None;
+    let mut answered = lookup.start.clone();
+    for look in &lookup.looks {
+        let mut request = leviculum_std::instance::Request::new(&look.dir, &look.instance);
+        request.no_start = true;
+        request.report = leviculum_std::instance::Report::Quiet;
+        request.source = Some(look.source.as_str());
+        if let Ok(Some(found)) = leviculum_std::instance::for_request(&request) {
+            daemon = Some(found);
+            answered = look.clone();
+            break;
+        }
+    }
+    if daemon.is_none() {
+        let start = &lookup.start;
+        let mut request = leviculum_std::instance::Request::new(&start.dir, &start.instance);
+        request.no_start = options.no_start;
+        request.report = leviculum_std::instance::Report::Quiet;
+        request.source = Some(start.source.as_str());
+        daemon = leviculum_std::instance::for_request(&request)
+            .map_err(|error| crate::no_start(error, &start.instance))?;
+    }
+    let crate::Look {
+        dir: config_dir,
+        instance,
+        ..
+    } = answered;
     let storage_dir =
         crate::storage_dir(&home).map_err(|error| crate::failure(error, "no-daemon"))?;
 
