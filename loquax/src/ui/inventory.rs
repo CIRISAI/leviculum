@@ -888,6 +888,14 @@ pub const INVENTORY: &[Row] = &[
         terminal: KEY,
         m9: missing("no menu screen and no key for it on the M9 (super::settings::PLACES)"),
     },
+    Row {
+        intent: "RoomsHub",
+        action: "the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577)",
+        phone: at(SESSION, "Query::RoomsHub"),
+        window: at(GUI, "Intent::RoomsHub"),
+        terminal: at(UI, "Intent::RoomsHub(rooms::HubPick::Paste)"),
+        m9: missing("no settings on the M9"),
+    },
 ];
 
 /// A cell as the page shows it.

@@ -144,6 +144,7 @@ pub mod group_scene;
 pub mod groups;
 pub mod history;
 pub mod hit;
+pub mod hubs;
 pub mod info;
 pub mod intent;
 pub mod inventory;
@@ -3400,6 +3401,13 @@ pub enum UiEffect {
         key: &'static str,
         value: &'static str,
     },
+    /// Write `key = <hash in hex>` to the config, or take the key out
+    /// with `None` (1577: `rooms_hub`, the public rooms' hub the settings
+    /// chose; `rooms_told`, the hub the reader was told about).
+    RememberHash {
+        key: &'static str,
+        hash: Option<[u8; 16]>,
+    },
     /// Show the photo of the message `key` of `peer`'s conversation whole
     /// (1220): the phone's viewer, the window's overlay. Its bytes are in
     /// the message's fields ([`photos::photo_bytes`]).
@@ -4249,7 +4257,9 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
         }
         return Vec::new();
     }
-    if model.detail_open() {
+    // A palette that asks over the settings (1577: another hub's
+    // address) takes the keys before the settings' rows do.
+    if model.detail_open() && model.palette.is_none() {
         // The profile's "Share my address" (1443): the code to the
         // clipboard, as the window's button does.
         if model.profile_open && key.code == KeyCode::Char('s') {
@@ -7567,7 +7577,22 @@ fn settings_key<B: InputBuffer + Default>(
         return Some(model.show_settings(Some(entry.section)));
     }
     let row = screen.rows.iter().find(|r| r.key == Some(c))?;
-    let command = match row.action.as_ref()?.intent {
+    let command = match row.action.as_ref()?.intent.clone() {
+        // The public rooms' hub (1577): a shipped one or none at once,
+        // another asked for in the palette.
+        intent::Intent::RoomsHub(rooms::HubPick::Paste) => {
+            model.palette = Some(Palette {
+                ask: Some(contacts::Ask::RoomsHub),
+                ..Palette::default()
+            });
+            return Some(Vec::new());
+        }
+        intent::Intent::RoomsHub(rooms::HubPick::Hub(hub)) => {
+            return Some(rooms::choose(model, rooms::HubChoice::Hub(hub)));
+        }
+        intent::Intent::RoomsHub(rooms::HubPick::None) => {
+            return Some(rooms::choose(model, rooms::HubChoice::None));
+        }
         intent::Intent::Profile => PaletteCommand::MyCode,
         intent::Intent::Theme => PaletteCommand::Theme,
         intent::Intent::PhotoSize(_) => PaletteCommand::PhotoSize,

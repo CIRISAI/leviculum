@@ -857,6 +857,16 @@ final class Core {
         return query(request);
     }
 
+    /**
+     * The Advanced page's public rooms' hub (1577): with `set` ("none", or
+     * a hub's address) chosen, the lines in force either way.
+     */
+    static Map<String, Object> roomsHub(String set) {
+        Map<String, Object> request = map("t", "roomshub");
+        if (set != null) request.put("set", set);
+        return query(request);
+    }
+
     /** The next event, or null; blocks up to waitMs. */
     static Map<String, Object> nextEvent(int waitMs) {
         byte[] bytes = Native.nextEvent(waitMs);

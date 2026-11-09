@@ -64,6 +64,28 @@ pub enum RoomAsk {
     Close,
 }
 
+/// The settings' hub row (1577): what a press on one of its lines asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HubPick {
+    /// No public rooms.
+    None,
+    /// This hub, one of [`super::hubs::shipped`].
+    Hub([u8; 16]),
+    /// "Another hub: paste its address": the terminal asks for it in the
+    /// palette, the window has its field; the phone sends the text
+    /// itself ([`HubChoice::Address`]).
+    Paste,
+}
+
+/// The hub the reader chose (1577), as the model takes it: none, a hash,
+/// or the text pasted, which the model reads as an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HubChoice {
+    None,
+    Hub([u8; 16]),
+    Address(String),
+}
+
 /// Why the link to the hub is down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Down {
@@ -170,6 +192,10 @@ pub struct Rooms {
     pub people: bool,
     /// The input line.
     pub input: String,
+    /// The hub the reader was last told, before the first link to it,
+    /// that their name is visible to everyone in a room (1577): the
+    /// config's `rooms_told`.
+    pub told: Option<[u8; 16]>,
 }
 
 impl Default for Rooms {
@@ -185,6 +211,7 @@ impl Default for Rooms {
             selected: None,
             people: false,
             input: String::new(),
+            told: None,
         }
     }
 }
@@ -278,6 +305,8 @@ pub enum RoomsEvent {
     People(bool),
     /// The open room's menu: "Leave room".
     Leave,
+    /// The settings chose the public rooms' hub (1577).
+    Hub(HubChoice),
 }
 
 /// A tab chosen: the Rooms come to the front, any other sends them back.
@@ -312,8 +341,85 @@ fn link<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
         HubState::Linking | HubState::Ready => Vec::new(),
         HubState::Off | HubState::Down(_) => {
             model.rooms.state = HubState::Linking;
-            Vec::from([UiEffect::Rooms(RoomAsk::Open { hub })])
+            let mut effects = Vec::new();
+            // Before the first link to a hub, once (1577): the hub learns
+            // the reader's identity when the link identifies, and the
+            // rooms show their name.
+            if model.rooms.told != Some(hub) {
+                model.rooms.told = Some(hub);
+                let text = Text::key(StrId::RoomsNameVisible).resolve(model.lang);
+                model.toast(ToastKind::Info, text);
+                effects.push(UiEffect::RememberHash {
+                    key: "rooms_told",
+                    hash: Some(hub),
+                });
+            }
+            effects.push(UiEffect::Rooms(RoomAsk::Open { hub }));
+            effects
         }
+    }
+}
+
+/// The hub the settings chose (1577): the link to the old one closes, the
+/// rooms of the old one go, the tab is there with a hub and gone without,
+/// and the config keeps the choice. An address that is none is said, and
+/// nothing changes.
+pub(super) fn choose<B>(model: &mut UiModel<B>, choice: HubChoice) -> Vec<UiEffect> {
+    let hub = match choice {
+        HubChoice::None => None,
+        HubChoice::Hub(hub) => Some(hub),
+        HubChoice::Address(text) => match crate::address::parse(&text) {
+            Ok(hub) => Some(hub),
+            Err(_) => {
+                let text = Text::key(StrId::RoomsHubBad).resolve(model.lang);
+                model.toast(ToastKind::Error, text);
+                return Vec::new();
+            }
+        },
+    };
+    if model.rooms.hub == hub {
+        return Vec::new();
+    }
+    let mut effects = Vec::new();
+    if matches!(model.rooms.state, HubState::Linking | HubState::Ready) {
+        effects.push(UiEffect::Rooms(RoomAsk::Close));
+    }
+    let told = model.rooms.told;
+    model.rooms = Rooms {
+        enabled: hub.is_some(),
+        hub,
+        told,
+        ..Rooms::default()
+    };
+    effects.push(UiEffect::RememberHash {
+        key: "rooms_hub",
+        hash: hub,
+    });
+    let said = match hub {
+        Some(_) => Text::Key(
+            StrId::RoomsHubChosen,
+            Vec::from([Arg::Text(alloc::boxed::Box::new(hub_label(&model.rooms)))]),
+        ),
+        None => Text::key(StrId::RoomsHubOff),
+    };
+    let said = said.resolve(model.lang);
+    model.toast(ToastKind::Info, said);
+    effects
+}
+
+/// The chosen hub in the reader's words (1577): a shipped hub's name, the
+/// name the hub gave in its welcome, or "Your own hub"; "None" without
+/// one. Never its hash.
+pub fn hub_label(rooms: &Rooms) -> Text {
+    let Some(hub) = rooms.hub else {
+        return Text::key(StrId::RoomsHubNone);
+    };
+    if let Some(shipped) = super::hubs::named(&hub) {
+        return Text::Raw(shipped.name);
+    }
+    match &rooms.hub_name {
+        Some(name) if !name.trim().is_empty() => Text::Raw(name.clone()),
+        _ => Text::key(StrId::RoomsHubOwn),
     }
 }
 
@@ -451,6 +557,7 @@ pub(super) fn fold<B: InputBuffer + Default>(
             };
             return ask(model, RoomAsk::Part { room });
         }
+        RoomsEvent::Hub(choice) => return choose(model, choice),
     }
     Vec::new()
 }
@@ -634,7 +741,13 @@ pub struct RoomRow {
     pub selected: bool,
     /// The room's round avatar, its first letter, as a chat's.
     pub avatar: Avatar,
+    /// The word beside the name with the globe mark (1577): "public". A
+    /// room is open to everyone on its hub, unlike a chat or a group.
+    pub public: Text,
 }
+
+/// The mark drawn before [`RoomRow::public`] where a glyph can be.
+pub const PUBLIC_MARK: &str = "\u{1F310}";
 
 /// A verb of the open room's menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -725,6 +838,7 @@ pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
             unread: r.unread,
             selected: rooms.selected == Some(i),
             avatar: avatar(&r.name),
+            public: Text::key(StrId::RoomsPublic),
         })
         .collect();
     let offset = model.now.map_or(0, |now| now.offset_secs);
@@ -866,6 +980,7 @@ impl RoomsNode {
                 "unread": r.unread,
                 "selected": r.selected,
                 "avatar": avatar_json(&r.avatar),
+                "public": r.public.to_json(),
             })).collect::<Vec<_>>(),
             "open": self.open.as_ref().map(|room| json!({
                 "name": room.name,
@@ -930,6 +1045,158 @@ mod tests {
         model
     }
 
+    /// 1577: the settings choose a shipped hub: the tab appears, the
+    /// config keeps it, nothing links yet. The first opening tells the
+    /// reader, before the link, that their name is visible, and the config
+    /// keeps that it was said; the next opening links without it. Another
+    /// hub closes the link and forgets the old rooms; none takes the tab
+    /// away and the key out.
+    #[test]
+    fn a_hub_chosen_shows_the_tab_and_the_first_link_says_the_name_is_seen() {
+        let community = crate::ui::hubs::shipped()[0].hash;
+        let mut model = UiModel::<Buffer>::new(&[]);
+        assert!(!model.rooms.enabled);
+        let effects = rooms(&mut model, RoomsEvent::Hub(HubChoice::Hub(community)));
+        assert_eq!(
+            effects,
+            [UiEffect::RememberHash {
+                key: "rooms_hub",
+                hash: Some(community)
+            }],
+            "kept, and no link before the tab is opened"
+        );
+        assert!(model.rooms.enabled, "the tab appears at once");
+        assert_eq!(hub_label(&model.rooms), Text::Raw("RNS Community".into()));
+        let effects = update(&mut model, UiEvent::Tab(TabId::Rooms));
+        assert_eq!(
+            effects,
+            [
+                UiEffect::RememberHash {
+                    key: "rooms_told",
+                    hash: Some(community)
+                },
+                UiEffect::Rooms(RoomAsk::Open { hub: community })
+            ]
+        );
+        let told = model.current_toast().map(|t| t.text.clone());
+        assert_eq!(
+            told.as_deref(),
+            Some("Your name is visible to everyone in the room."),
+            "said before the link"
+        );
+        rooms(
+            &mut model,
+            RoomsEvent::Welcomed {
+                name: Some("rnscommunity".into()),
+                body_limit: 350,
+            },
+        );
+        rooms(
+            &mut model,
+            RoomsEvent::Joined {
+                room: "general".into(),
+                nick: None,
+            },
+        );
+        // Back, and the link down: the next opening links, saying nothing.
+        rooms(&mut model, RoomsEvent::Down(Down::Lost));
+        update(&mut model, UiEvent::Tab(TabId::Chats));
+        assert_eq!(
+            update(&mut model, UiEvent::Tab(TabId::Rooms)),
+            [UiEffect::Rooms(RoomAsk::Open { hub: community })],
+            "told once"
+        );
+        rooms(
+            &mut model,
+            RoomsEvent::Welcomed {
+                name: None,
+                body_limit: 350,
+            },
+        );
+        // Another hub: the link closes, the old rooms go.
+        let effects = rooms(&mut model, RoomsEvent::Hub(HubChoice::Hub(HUB)));
+        assert_eq!(
+            effects,
+            [
+                UiEffect::Rooms(RoomAsk::Close),
+                UiEffect::RememberHash {
+                    key: "rooms_hub",
+                    hash: Some(HUB)
+                }
+            ]
+        );
+        assert!(model.rooms.rooms.is_empty() && !model.rooms.open);
+        assert_eq!(model.rooms.state, HubState::Off);
+        assert_eq!(
+            hub_label(&model.rooms),
+            Text::key(StrId::RoomsHubOwn),
+            "no hash"
+        );
+        // None: the tab goes, the key comes out.
+        let effects = rooms(&mut model, RoomsEvent::Hub(HubChoice::None));
+        assert_eq!(
+            effects,
+            [UiEffect::RememberHash {
+                key: "rooms_hub",
+                hash: None
+            }]
+        );
+        assert!(!model.rooms.enabled);
+        assert_eq!(hub_label(&model.rooms), Text::key(StrId::RoomsHubNone));
+    }
+
+    /// 1577: an address pasted is read as one; what is none is said and
+    /// changes nothing (the control); the same hub again asks nothing.
+    #[test]
+    fn a_pasted_hub_is_an_address_or_nothing_changes() {
+        let mut model = UiModel::<Buffer>::new(&[]);
+        assert!(rooms(
+            &mut model,
+            RoomsEvent::Hub(HubChoice::Address("lab".into()))
+        )
+        .is_empty());
+        assert!(!model.rooms.enabled);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.clone()).as_deref(),
+            Some("That is no hub's address.")
+        );
+        let effects = rooms(
+            &mut model,
+            RoomsEvent::Hub(HubChoice::Address(
+                " <0707070707070707070707070707070707> ".into(),
+            )),
+        );
+        assert!(effects.is_empty(), "33 digits are no address: {effects:?}");
+        let effects = rooms(
+            &mut model,
+            RoomsEvent::Hub(HubChoice::Address(
+                " 07070707070707070707070707070707 ".into(),
+            )),
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::RememberHash {
+                key: "rooms_hub",
+                hash: Some(HUB)
+            }]
+        );
+        assert!(rooms(&mut model, RoomsEvent::Hub(HubChoice::Hub(HUB))).is_empty());
+    }
+
+    /// 1577: a joined room says it is public, in the reader's language,
+    /// with the globe beside the word where the frontend draws one.
+    #[test]
+    fn a_room_in_the_list_is_marked_public() {
+        let model = in_lab();
+        let node = node(&model);
+        assert_eq!(node.rows[0].public, Text::key(StrId::RoomsPublic));
+        assert_eq!(
+            node.rows[0].public.resolve(crate::ui::strings::Lang::De),
+            "öffentlich"
+        );
+        assert_eq!(PUBLIC_MARK, "\u{1F310}");
+    }
+
     fn say(model: &mut UiModel<Buffer>, typed: &str) -> Vec<UiEffect> {
         rooms(model, RoomsEvent::Typed(typed.into()));
         rooms(model, RoomsEvent::Submit)
@@ -943,6 +1210,8 @@ mod tests {
         assert!(!model.rooms.showing());
         model.rooms.enabled = true;
         model.rooms.hub = Some(HUB);
+        // Told before (1577): the opening links and says nothing more.
+        model.rooms.told = Some(HUB);
         assert_eq!(
             update(&mut model, UiEvent::Tab(TabId::Rooms)),
             vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]

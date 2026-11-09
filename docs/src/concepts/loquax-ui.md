@@ -586,6 +586,88 @@ the guard that every target draws every section it does not mark
 missing or n/a, and that a phone, a window and a terminal draw all nine.
 The inventory's `Settings` row points to it.
 
+### Built 2026-11-09, the public rooms' hubs
+
+Lew, 2026-11-08 (1577): Loquax offers the popular public room hubs, and
+a user never needs the protocol's name. The only community list (the
+Reticulum wiki's RRC page, last changed 2026-09-04) and four operators'
+pages published seven `rrc.hub` destinations; two warned a hash changes
+on a redeploy. So the list ships only what answered.
+
+**The measurement**, 2026-11-09 from the coder host, with
+`loquax/examples/rrc_hubs_probe.rs`: a node of its own dialled the
+shipped entry servers (`leviculum.network:4242` and the Sauerland
+testnet, `38.242.217.238:4242`), listened for `rrc.hub` announces in
+three windows of 560 s (06:41 to 07:09 CET, plus a 60 s smoke run
+before and the 120 s before the opening round), then opened each hub
+with Loquax's own hub link (`loquax::rooms_link`: path, link, Identify,
+HELLO until WELCOME, six seconds for the hub's notices, then it left;
+it joined no room and said nothing). A hub that did not answer was
+tried a second time (07:13), and `just rrc-hubs-check 60` ran the
+whole round a third time (07:50).
+
+| hub | destination | announce heard | hops | WELCOME | rooms the hub named | shipped |
+|---|---|---|---|---|---|---|
+| RNS Community | `28c7c1a6…` | yes (window 3) | 4 to 5 | yes, as `rnscommunity`, three of three | `general` ("/join general for the main room!") | yes |
+| ShadowLink (TSK-0) | `c3fd7454…` | yes (windows 1 and 3) | 3 to 6 | yes, as `ShadowLink TSK-0`, three of three | none named (published: `teskeslab`) | yes |
+| HADARC | `e7fd7f9e…` | yes (windows 1 and 3) | 4 | yes, as `HADARC_rrc`, three of three | none named (published: `general`) | yes |
+| RNS Moscow | `42a97b1b…` | no | 3 to 4 (path request) | yes, as `rns.moscow`, three of three | none named | yes |
+| Radio Oxford (OXMESH) | `5da9b708…` | no | 5 to 6 (path request) | no at 07:09, yes at 07:13 and 07:50, as `RADIOXFORD` | none named (published: `#radioxford`) | yes |
+| MichMesh | `1303a636…` | no | 4 to 6 (path request) | no, three of three | – | no: published, not reached on 2026-11-09 |
+| Amber Hubs on NomadNet | `085b5d6a…` | no | 5 to 8 (path request) | no, three of three | – | no: published, not reached on 2026-11-09 |
+
+MichMesh and Amber answer path requests (a path came back every time)
+but no link came up to a WELCOME within the link's budgets (30 s for
+the link, five HELLOs five seconds apart). They are recorded as
+`[[unreached]]` in the list, not offered, and the check tries them
+again.
+
+**Hubs the web does not know.** The windows heard 79 distinct `rrc.hub`
+announces; 76 are none of the seven, among them (by the name in their
+announce) Gothenburg SE, villa, Hollywood Chat, Cornwall UK, CTRS,
+Reticulum Community VIE, Chicago Offline, UTN Oregon, SoCal Public RRC,
+RMAP.WORLD RRC Hub, Chatsurfer-RRC, CascadiaRRC, Minuteman RRC,
+Save Europe, Colorado Mesh, meshage.me Chat Hub, viennahub, Le Salon FR,
+EuskalReticulum, Montreal, Whatcom County Mesh Chat and four without a
+name. The smoke run opened the three it had heard: Gothenburg and villa
+answered a WELCOME, Hollywood Chat did not. None ships: a hub joins the list with a source that
+publishes it, as the seven did. The full list with hashes and hops is
+the probe's output (`HEARD` lines), which `just rrc-hubs-check` writes
+to `target/tmp/rrc-hubs/probe.txt`.
+
+**The list is data**, `loquax/assets/hubs.toml` (name, hash, the rooms
+the hub's welcome named, the published rooms, the source, the day
+measured), compiled in by `loquax::ui::hubs`. `just rrc-hubs-check`
+(default 1800 s of listening) measures again and exits 1 on a shipped
+hub that did not answer or an unreached one that now does: a stale hash
+is a finding, not a surprise. No hub is connected to on its own; the
+list is what the settings offer.
+
+**The settings row**, in Advanced on the phone, the window and the
+terminal, from one function (`settings::hub_rows`): "Public rooms: hub"
+with the hub in force by its name, each shipped hub by its name with a
+mark on the one in force (keys `1` to `5` on the terminal), "None"
+(`0`), "Another hub: paste its address" (`a`, the terminal's palette
+asks; the window has a field; the phone an `EditText`, through
+`Query::RoomsHub`), and "Your name is visible to everyone in the room."
+A pasted hub is named by the name its welcome gave, else "Your own
+hub", never by its hash. The config key stays `rooms_hub`; the Rooms tab
+appears as soon as a hub is chosen, and the hub link runs idle on every
+target until one is, so no restart is needed.
+
+**The word.** A joined room is listed with the globe and "public"
+("öffentlich") beside its name. The catalogue carries no "RRC" and no
+"Relay Chat" anywhere a user reads (`no_string_names_the_protocol`), nor
+does a shipped hub's name. The first time a user opens a hub, before
+the link, the toast says "Your name is visible to everyone in the room."
+(the hub learns the identity on Identify); the config's `rooms_told`
+keeps that it was said.
+
+Goldens: `loquax/tests/golden/tui-settings-advanced.txt`,
+`gui-settings-advanced-light.png`, and the room's row in
+`tui-rooms-room.txt`, `gui-rooms-room.png` and the phone's
+`loquax-android/tests/golden/rooms-room.json`.
+
 ### The intent inventory
 
 Every user action as the intent it raises, and per target whether it is
@@ -697,6 +779,7 @@ it). A missing cell is the next order.
 | `ReadReceipts` | the switch "Send read receipts" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no settings on the M9 |
 | `DeleteAllRegions` | the Maps page's Delete all | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
 | `Settings` | the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (key) | **missing**: no menu screen and no key for it on the M9 (super::settings::PLACES) |
+| `RoomsHub` | the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577) | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: no settings on the M9 |
 <!-- intent-inventory:end -->
 
 ## 2. Decision: what honesty about delivery looks like

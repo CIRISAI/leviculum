@@ -64,6 +64,9 @@ pub enum Ask {
     DeleteAllMaps,
     /// A path the shell reads (1371): `Enter` hands it over.
     Path(PathFor),
+    /// Another hub for the public rooms (1577): `Enter` takes the address
+    /// typed or pasted.
+    RoomsHub,
 }
 
 /// What a typed path is for (1371): the terminal's picker.
@@ -130,6 +133,12 @@ impl<B> UiModel<B> {
             Ask::Code { .. } => vec![
                 "your friend's code or address".to_string(),
                 "Enter opens the conversation".to_string(),
+            ],
+            Ask::RoomsHub => vec![
+                super::strings::Text::key(super::strings::StrId::RoomsHubPasteHint)
+                    .resolve(self.lang),
+                super::strings::Text::key(super::strings::StrId::RoomsNameVisible)
+                    .resolve(self.lang),
             ],
             group => self.group_ask_rows(group),
         }
@@ -278,6 +287,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             Ask::Rename(peer) => self.rename(peer, &typed),
             Ask::React { peer, target } => self.react(peer, target, &typed),
             Ask::Code { name } => self.take_code(&typed, name),
+            Ask::RoomsHub => super::rooms::choose(self, super::rooms::HubChoice::Address(typed)),
             group => self.answer_group_ask(group, typed),
         }
     }

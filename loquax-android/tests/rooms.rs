@@ -83,11 +83,18 @@ fn the_phone_works_a_room_through_the_schema() {
     let (_home, mut model) = phone(Some(HUB));
     assert!(!screen(&model).open, "closed until the tab is tapped");
 
-    // The tab asks the hub link to link, once.
+    // The tab asks the hub link to link, once; the first time the reader
+    // is told their name is visible, and the config keeps that (1577).
     let effects = tap(&mut model, "tab", "", 0);
     assert_eq!(
         effects,
-        [UiEffect::Rooms(RoomAsk::Open { hub: HUB })],
+        [
+            UiEffect::RememberHash {
+                key: "rooms_told",
+                hash: Some(HUB)
+            },
+            UiEffect::Rooms(RoomAsk::Open { hub: HUB })
+        ],
         "{effects:?}"
     );
     assert!(tap(&mut model, "tab", "", 0).is_empty(), "linking already");
@@ -128,6 +135,8 @@ fn the_phone_works_a_room_through_the_schema() {
         &mut model,
         line("marcel", LineKind::Msg, "Moin aus Kiel", false),
     );
+    // The room is listed as public, in the phone's language (1577).
+    assert_eq!(screen(&model).rows[0].public, "öffentlich");
     let effects = tap(&mut model, "say", "/me winkt", 0);
     assert_eq!(
         effects,

@@ -1,0 +1,24 @@
+┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
+│No conversations yet:   ││                                                    │
+│:new conversation starts││                                                    │
+│o┌ Advanced ────────────────────────────────────────────────────────────────┐ │
+│c│Relay                                                                     │ │
+│ │While your mailbox is offline, mail for you waits at a relay in the       │ │
+│ │network, which Loquax chooses by itself.                                  │ │
+│ │Public rooms: hub: None                                                   │ │
+│ │1  RNS Community                                                          │ │
+│ │2  ShadowLink                                                             │ │
+│ │3  HADARC                                                                 │ │
+│ │4  RNS Moscow                                                             │ │
+│ │5  Radio Oxford                                                           │ │
+│ │0  None: ✓                                                                │ │
+│ │a  Another hub: paste its address                                         │ │
+│ │Your name is visible to everyone in the room.                             │ │
+│ │?  Help                                                                   │ │
+│ │                                                                          │ │
+│ │a row's key runs it · q back                                              │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

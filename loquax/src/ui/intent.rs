@@ -80,6 +80,7 @@
 //! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
 //! | the Maps page's last row (1290), `Request::DeleteRegions` | `DeleteAllRegions` (`confirmed` tells the asked from the asking) |
 //! | the window's gear (`Message::Settings`), the phone's ⋮ menu, `Command::Settings`, `S` (1450) | `Settings` |
+//! | the Advanced section's hub lines, `Query::RoomsHub` (1577) | `RoomsHub` |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
 //! | `keys::Action::Newline`, `ClearDraft` | the same names |
@@ -494,6 +495,9 @@ pub enum Intent {
     /// The settings (1450): the list of the nine sections with `None`,
     /// one of them opened with its section (`super::settings`).
     Settings(Option<super::settings::Section>),
+    /// The public rooms' hub (1577), a line of the Advanced section: a
+    /// shipped hub, none, or another to paste.
+    RoomsHub(super::rooms::HubPick),
 }
 
 impl Intent {
@@ -677,6 +681,9 @@ impl Intent {
             Intent::DeleteAllRegions { .. } => StrId::DeleteAllRegionsYes,
             Intent::Settings(None) => StrId::Settings,
             Intent::Settings(Some(section)) => section.title(),
+            Intent::RoomsHub(super::rooms::HubPick::None) => StrId::RoomsHubNone,
+            Intent::RoomsHub(super::rooms::HubPick::Hub(_)) => StrId::RoomsHub,
+            Intent::RoomsHub(super::rooms::HubPick::Paste) => StrId::RoomsHubPaste,
         }
     }
 }

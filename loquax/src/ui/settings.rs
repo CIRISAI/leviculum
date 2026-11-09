@@ -395,12 +395,57 @@ pub fn rows<B>(model: &UiModel<B>, target: Target, section: Section) -> Vec<Page
             false => Vec::new(),
         },
         Section::Backup => Vec::from([note(StrId::SettingsBackupDesktop)]),
-        Section::Advanced => Vec::from([
-            note(StrId::PropagationNode),
-            note(StrId::PropagationNodeText),
-            verb(StrId::Help, None, '?', Intent::Help),
-        ]),
+        Section::Advanced => {
+            let mut rows = Vec::from([
+                note(StrId::PropagationNode),
+                note(StrId::PropagationNodeText),
+            ]);
+            rows.extend(hub_rows(model));
+            rows.push(verb(StrId::Help, None, '?', Intent::Help));
+            rows
+        }
     }
+}
+
+/// The public rooms' hub (1577), in Advanced on every target: the line
+/// that says which, each shipped hub by its name with a mark on the one
+/// in force (keys `1` on), none (`0`), another to paste (`a`), and what
+/// a hub learns. Never a hash.
+pub fn hub_rows<B>(model: &UiModel<B>) -> Vec<PageRow> {
+    use super::rooms::HubPick;
+    let chosen = model.rooms.hub;
+    let mark = |on: bool| on.then(|| Text::Raw(alloc::string::String::from("\u{2713}")));
+    let mut rows = Vec::from([PageRow {
+        label: Text::key(StrId::RoomsHub),
+        value: Some(super::rooms::hub_label(&model.rooms)),
+        key: None,
+        action: None,
+    }]);
+    let shipped = super::hubs::shipped();
+    let own = chosen.is_some_and(|hub| !shipped.iter().any(|h| h.hash == hub));
+    for (i, hub) in shipped.into_iter().enumerate() {
+        let key = char::from_digit(u32::try_from(i + 1).unwrap_or(0), 10);
+        rows.push(PageRow {
+            label: Text::Raw(hub.name),
+            value: mark(chosen == Some(hub.hash)),
+            key,
+            action: Some(Action::of(Intent::RoomsHub(HubPick::Hub(hub.hash)))),
+        });
+    }
+    rows.push(PageRow {
+        label: Text::key(StrId::RoomsHubNone),
+        value: mark(chosen.is_none()),
+        key: Some('0'),
+        action: Some(Action::of(Intent::RoomsHub(HubPick::None))),
+    });
+    rows.push(PageRow {
+        label: Text::key(StrId::RoomsHubPaste),
+        value: own.then(|| super::rooms::hub_label(&model.rooms)),
+        key: Some('a'),
+        action: Some(Action::of(Intent::RoomsHub(HubPick::Paste))),
+    });
+    rows.push(note(StrId::RoomsNameVisible));
+    rows
 }
 
 #[cfg(test)]

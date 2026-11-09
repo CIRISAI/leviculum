@@ -141,6 +141,9 @@ pub struct Seen {
     /// The newest text the browser copied, with its serial (1369): a new
     /// one goes to the window's clipboard.
     pub copied: Option<(u64, String)>,
+    /// The public rooms' hub lines of the Advanced section (1577), as the
+    /// core says them ([`loquax::ui::settings::hub_rows`]).
+    pub hubs: Vec<loquax::ui::settings::PageRow>,
 }
 
 /// The hosted browser as the window draws it (1369): lnomad's model as
@@ -221,6 +224,7 @@ impl Seen {
                 _ => None,
             },
             copied: browsing.copied.clone(),
+            hubs: loquax::ui::settings::hub_rows(model),
         }
     }
 
@@ -594,6 +598,10 @@ pub enum Message {
     NewAddress(String),
     /// What the new group's name field holds now (1307).
     GroupName(String),
+    /// What the Advanced section's hub field holds now (1577).
+    HubTyped(String),
+    /// The hub field's address taken (its button, or `Enter`).
+    HubTake,
     /// What the position sheet's field holds now (1371).
     Position(String),
     /// What the row menu's rename field holds now (1371).
@@ -940,6 +948,8 @@ struct App {
     search: String,
     /// The new conversation's field while it is open.
     new_address: Option<String>,
+    /// The Advanced section's field for another hub's address (1577).
+    hub_field: String,
     /// The position sheet's field while it is open (1371).
     position: Option<String>,
     /// The row menu's rename field while it is open (1371): whose, and
@@ -1045,6 +1055,7 @@ impl App {
                 photo: None,
                 browse: None,
                 copied: None,
+                hubs: Vec::new(),
             },
             asks,
             track_cache: std::cell::RefCell::new(None),
@@ -1075,6 +1086,7 @@ impl App {
             flipped: false,
             search: String::new(),
             new_address: None,
+            hub_field: String::new(),
             position: None,
             renaming: None,
             map_shown: false,
@@ -1215,6 +1227,15 @@ impl App {
             }
             Message::GroupName(typed) => {
                 self.tell(UiEvent::Group(loquax::ui::groups::Verb::Name(typed)));
+            }
+            Message::HubTyped(typed) => self.hub_field = typed,
+            Message::HubTake => {
+                let typed = core::mem::take(&mut self.hub_field);
+                if !typed.trim().is_empty() {
+                    self.tell(UiEvent::Rooms(loquax::ui::rooms::RoomsEvent::Hub(
+                        loquax::ui::rooms::HubChoice::Address(typed),
+                    )));
+                }
             }
             Message::NewGo => {
                 let typed = self.new_address.clone().unwrap_or_default();
@@ -1453,6 +1474,19 @@ impl App {
             }
             Intent::ReadReceipts { on } => {
                 self.tell(UiEvent::ReadReceipts(on.apply(self.seen.receipts)));
+            }
+            // The public rooms' hub (1577): a shipped one or none at once,
+            // another from the field, which a press on its line focuses.
+            Intent::RoomsHub(pick) => {
+                use loquax::ui::rooms::{HubChoice, HubPick, RoomsEvent};
+                let choice = match pick {
+                    HubPick::Hub(hub) => HubChoice::Hub(hub),
+                    HubPick::None => HubChoice::None,
+                    HubPick::Paste => {
+                        return iced::widget::operation::focus(chat::HUB_FIELD);
+                    }
+                };
+                self.tell(UiEvent::Rooms(RoomsEvent::Hub(choice)));
             }
             Intent::DeleteAllRegions { confirmed: false } => {
                 self.maps_usage = self.maps().usage();
@@ -3299,6 +3333,7 @@ mod tests {
             photo: None,
             browse: None,
             copied: None,
+            hubs: Vec::new(),
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -3555,6 +3590,7 @@ mod tests {
             photo: None,
             browse: None,
             copied: None,
+            hubs: loquax::ui::settings::hub_rows(model),
         }
     }
 
@@ -5591,6 +5627,55 @@ mod tests {
         assert_eq!(app.class(), LayoutClass::Wide);
         assert!(app.scene.list.is_some() && app.scene.chat.is_some());
         assert_eq!(app.scene.top.id, NodeId::TopBar);
+    }
+
+    /// 1577: Advanced holds the public rooms' hub (the golden): the
+    /// shipped hubs by name with the mark on none, a press on one tells the
+    /// model, the model's answer moves the mark, and the field's address
+    /// goes to the model as typed. No hash on the page.
+    #[test]
+    fn advanced_chooses_the_public_rooms_hub() {
+        use loquax::ui::rooms::{HubChoice, HubPick, RoomsEvent};
+        use loquax::ui::settings::Section;
+        let (w, h) = (900, 700);
+        let (mut app, mut rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Settings);
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Advanced))));
+        assert_eq!(app.settings_at, Some(Section::Advanced));
+        assert_eq!(app.seen.hubs.len(), 9, "{:?}", app.seen.hubs);
+        map::tests::same_as("gui-settings-advanced-light.png", &shoot(&app, w, h), w, h);
+        let community = loquax::ui::hubs::shipped()[0].hash;
+        let _ = app.update(Message::Intent(Intent::RoomsHub(HubPick::Hub(community))));
+        assert_eq!(
+            told(&mut rx),
+            [UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Hub(community)))]
+        );
+        let mut model = chat_model();
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Hub(community))),
+        );
+        let _ = app.update(Message::Seen(Box::new(seen_of(&model))));
+        let chosen: Vec<bool> = app.seen.hubs.iter().map(|r| r.value.is_some()).collect();
+        assert_eq!(
+            chosen[..3],
+            [true, true, false],
+            "the line, then RNS Community"
+        );
+        let _ = app.update(Message::HubTyped(
+            " 07070707070707070707070707070707 ".into(),
+        ));
+        let _ = app.update(Message::HubTake);
+        assert_eq!(
+            told(&mut rx),
+            [UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Address(
+                " 07070707070707070707070707070707 ".into()
+            )))]
+        );
+        assert!(app.hub_field.is_empty(), "the field empties");
+        let _ = app.update(Message::HubTake);
+        assert!(told(&mut rx).is_empty(), "an empty field tells nothing");
     }
 
     /// The settings page (1233, one structure since 1450): the gear opens

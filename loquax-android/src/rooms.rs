@@ -51,6 +51,7 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> RoomsScreen {
                 initials: row.avatar.initials.clone(),
                 icon_fg: hex(row.avatar.fg),
                 icon_bg: hex(row.avatar.bg),
+                public: row.public.resolve(lang),
             })
             .collect(),
         input: node.input.clone(),

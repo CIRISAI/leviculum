@@ -45,13 +45,13 @@ leviculum_ui::catalogue! {
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";
     RoomsLive = "rooms_live", "A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.", "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.";
-    RoomsNoHub = "rooms_no_hub", "No rooms set up yet. rooms_hub in the config names their server.", "Noch keine Räume eingerichtet. rooms_hub in der Konfiguration nennt ihren Server.";
+    RoomsNoHub = "rooms_no_hub", "No public rooms yet. Choose a hub under Settings, Advanced.", "Noch keine öffentlichen Räume. Wähl einen Hub unter Einstellungen, Erweitert.";
     RoomsLinking = "rooms_linking", "Connecting…", "Verbinde…";
     RoomsNoPath = "rooms_no_path", "The rooms cannot be reached. Is their server on this network?", "Die Räume sind nicht erreichbar. Ist ihr Server in diesem Netz?";
     RoomsNoAnswer = "rooms_no_answer", "The rooms did not answer. Try again later.", "Die Räume haben nicht geantwortet. Versuch es später noch einmal.";
     RoomsLost = "rooms_lost", "The connection to the rooms broke. Open the Rooms again to reconnect.", "Die Verbindung zu den Räumen ist abgerissen. Öffne die Räume erneut, um neu zu verbinden.";
     RoomsLeft = "rooms_left", "Not connected.", "Nicht verbunden.";
-    RoomsOff = "rooms_off", "There are no Rooms here; rooms_hub in the config turns them on.", "Hier gibt es keine Räume; rooms_hub in der Konfiguration schaltet sie ein.";
+    RoomsOff = "rooms_off", "There are no public rooms here yet. Choose a hub under Settings, Advanced.", "Hier gibt es noch keine öffentlichen Räume. Wähl einen Hub unter Einstellungen, Erweitert.";
     RoomsHowToJoin = "rooms_how_to_join", "Type a room's name, like #lab, to join it.", "Tipp den Namen eines Raums, etwa #lab, um ihm beizutreten.";
     RoomsNotReady = "rooms_not_ready", "Not connected yet. Wait a moment and try again.", "Noch nicht verbunden. Warte kurz und versuch es noch einmal.";
     RoomsNotIn = "rooms_not_in", "You are not in %1$s. Join it first.", "Du bist nicht in %1$s. Tritt ihm zuerst bei.";
@@ -71,6 +71,17 @@ leviculum_ui::catalogue! {
     RoomsPeople = "rooms_people", "Who is here", "Wer hier ist";
     RoomsPeopleNote = "rooms_people_note", "Everyone who came in or wrote while you were here.", "Alle, die hereinkamen oder schrieben, während du hier warst.";
     RoomsLeave = "rooms_leave", "Leave room", "Raum verlassen";
+    // 1577: the public rooms' hub, chosen in the settings, and the mark of a public room.
+    RoomsPublic = "rooms_public", "public", "öffentlich";
+    RoomsHub = "rooms_hub_setting", "Public rooms: hub", "Öffentliche Räume: Hub";
+    RoomsHubNone = "rooms_hub_none", "None", "Keiner";
+    RoomsHubOwn = "rooms_hub_own", "Your own hub", "Eigener Hub";
+    RoomsHubPaste = "rooms_hub_paste", "Another hub: paste its address", "Anderer Hub: Adresse einfügen";
+    RoomsHubPasteHint = "rooms_hub_paste_hint", "The hub's address", "Adresse des Hubs";
+    RoomsHubBad = "rooms_hub_bad", "That is no hub's address.", "Das ist keine Adresse eines Hubs.";
+    RoomsHubChosen = "rooms_hub_chosen", "Public rooms on %1$s.", "Öffentliche Räume auf %1$s.";
+    RoomsHubOff = "rooms_hub_off", "No public rooms.", "Keine öffentlichen Räume.";
+    RoomsNameVisible = "rooms_name_visible", "Your name is visible to everyone in the room.", "Dein Name ist im Raum für alle sichtbar.";
     Settings = "settings", "Settings", "Einstellungen";
     // 1450 (walk 1, finding 21): the settings' nine sections, one list on
     // every target (`super::settings`), in the phone's order.
@@ -641,6 +652,27 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), count, "a key twice");
+    }
+
+    /// A reader never reads the protocol's name (1577): "public rooms",
+    /// never RRC or Relay Chat, in either language.
+    #[test]
+    fn no_string_names_the_protocol() {
+        for (_, key, en, de) in CATALOGUE {
+            for text in [en, de] {
+                let lower = text.to_lowercase();
+                assert!(
+                    !lower.contains("rrc")
+                        && !lower.contains("relay chat")
+                        && !lower.contains("rooms_hub"),
+                    "{key}: {text}"
+                );
+            }
+        }
+        // The control: the check reads the catalogue's words.
+        assert!(CATALOGUE
+            .iter()
+            .any(|(_, _, en, _)| en.to_lowercase().contains("public rooms")));
     }
 
     #[test]

@@ -334,7 +334,7 @@ final class RoomsPane {
         });
     }
 
-    /** A room of the list: its avatar, its name and unread count; a tap opens it. */
+    /** A room of the list: its avatar, its name, the public mark and unread count; a tap opens it. */
     private View row(Map<String, Object> row, final int index) {
         LinearLayout line = new LinearLayout(screen);
         line.setGravity(Gravity.CENTER_VERTICAL);
@@ -347,7 +347,9 @@ final class RoomsPane {
         line.addView(avatar, new LinearLayout.LayoutParams(dp(48), dp(48)));
         TextView words = new TextView(screen);
         long unread = Core.num(row, "unread");
-        words.setText(name);
+        // A room is public (1577): the globe and the word beside the name.
+        String open = Core.str(row, "public");
+        words.setText(open.isEmpty() ? name : name + "  \uD83C\uDF10 " + open);
         words.setTextSize(17);
         words.setTypeface(null, unread > 0 ? Typeface.BOLD : Typeface.NORMAL);
         words.setTextColor(screen.getColor(R.color.text));

@@ -816,6 +816,13 @@ pub enum Query {
         #[serde(default)]
         set: Option<bool>,
     },
+    /// The Advanced page's public rooms' hub (1577): `set` chosen when
+    /// given (`none`, or a hub's address, shipped or pasted), the choice
+    /// in force answered as [`RoomsHubChoice`].
+    RoomsHub {
+        #[serde(default)]
+        set: Option<String>,
+    },
     /// The Privacy page's "Send read receipts" (1233): `set` stored when
     /// given, the switch in force answered as [`ReceiptsChoice`].
     Receipts {
@@ -1115,6 +1122,40 @@ pub struct ReceiptsChoice {
     pub v: u32,
     pub ok: bool,
     pub on: bool,
+}
+
+/// What [`Query::RoomsHub`] answers (1577): the Advanced page's lines on
+/// the public rooms' hub, in the phone's language, as the window and the
+/// terminal show them (`loquax::ui::settings::hub_rows`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsHubChoice {
+    pub v: u32,
+    pub ok: bool,
+    /// Why `set` was not taken: an address that is none.
+    #[serde(default)]
+    pub error: String,
+    /// "Public rooms: hub", and the hub in force by its name.
+    pub title: String,
+    pub current: String,
+    /// The shipped hubs, then "None"; `chosen` marks the one in force.
+    pub hubs: Vec<RoomsHubRow>,
+    /// "Another hub: paste its address", the field's hint, and the own
+    /// hub's name while one is in force.
+    pub paste: String,
+    pub hint: String,
+    #[serde(default)]
+    pub own: String,
+    /// What a hub learns: the reader's name is visible in its rooms.
+    pub note: String,
+}
+
+/// A line of [`RoomsHubChoice::hubs`]: its name, whether it is in force,
+/// and the word Java sends back as `set` to choose it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsHubRow {
+    pub name: String,
+    pub chosen: bool,
+    pub set: String,
 }
 
 /// What [`Query::Shared`] answers: the positions we sent, newest first, at
@@ -2285,6 +2326,9 @@ pub struct RoomsRow {
     pub icon_fg: String,
     #[serde(default)]
     pub icon_bg: String,
+    /// The word beside the name with the globe mark (1577): "public".
+    #[serde(default)]
+    pub public: String,
 }
 
 /// A verb of the open room's menu (1450).

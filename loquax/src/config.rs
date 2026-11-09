@@ -30,6 +30,10 @@
 //! held back until the tab's fetch has been seen on a device.
 //! `rooms_hub`, a hub's `rrc.hub` destination hash (1379): the Reticulum
 //! Relay Chat hub the Rooms tab links to; unset, there is no Rooms tab.
+//! The settings' Advanced section writes it (1577), from the shipped hubs
+//! (`loquax/assets/hubs.toml`) or an address pasted. `rooms_told`, the
+//! hub the reader was last told that their name is visible in its rooms,
+//! before the first link to it (1577).
 //! And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
@@ -147,6 +151,9 @@ pub struct Config {
     /// `rooms_hub` (1379): the `rrc.hub` destination of the Reticulum
     /// Relay Chat hub the Rooms tab links to; unset, there is no tab.
     pub rooms_hub: Option<[u8; 16]>,
+    /// `rooms_told` (1577): the hub the reader was told, before the first
+    /// link to it, that their name is visible in its rooms.
+    pub rooms_told: Option<[u8; 16]>,
     /// `send_on_enter`, when the file sets it; unset is on.
     pub send_on_enter: Option<bool>,
     /// `home_wake`, when the file sets it; unset is on.
@@ -523,6 +530,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         for (name, slot) in [
             ("propagation_node", &mut config.propagation_node),
             ("rooms_hub", &mut config.rooms_hub),
+            ("rooms_told", &mut config.rooms_told),
         ] {
             if key.trim() != name {
                 continue;
@@ -607,6 +615,21 @@ impl core::error::Error for LoadError {}
 pub fn save(home: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
     let text = read_text(home)?;
     save_text(home, &set(&text, key, value))
+}
+
+/// Write `key = <hash in hex>` into `home/config`, or take `key` out with
+/// `None` (1577, `UiEffect::RememberHash`); the other lines kept.
+#[cfg(feature = "std")]
+pub fn save_hash(home: &std::path::Path, key: &str, hash: Option<[u8; 16]>) -> std::io::Result<()> {
+    let text = read_text(home)?;
+    let next = match hash {
+        Some(hash) => {
+            let hex: String = hash.iter().map(|b| alloc::format!("{b:02x}")).collect();
+            set(&text, key, &hex)
+        }
+        None => unset(&text, key),
+    };
+    save_text(home, &next)
 }
 
 /// `home/config`'s text, empty when there is no file.
@@ -737,6 +760,25 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// 1577: the settings' hub written and taken out again, the other
+    /// lines kept, and read back as the next start reads it.
+    #[test]
+    fn a_hub_is_saved_and_taken_out() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        save(dir.path(), "read_receipts", "off").expect("a line before");
+        let hub = [0x28u8; 16];
+        save_hash(dir.path(), "rooms_hub", Some(hub)).expect("save");
+        save_hash(dir.path(), "rooms_told", Some(hub)).expect("save");
+        let config = load(dir.path()).expect("load");
+        assert_eq!(config.rooms_hub, Some(hub));
+        assert_eq!(config.rooms_told, Some(hub));
+        save_hash(dir.path(), "rooms_hub", None).expect("unset");
+        let config = load(dir.path()).expect("load");
+        assert_eq!(config.rooms_hub, None);
+        assert_eq!(config.rooms_told, Some(hub), "the other hash kept");
+        assert_eq!(config.read_receipts, Some(false), "the other line kept");
     }
 
     #[test]

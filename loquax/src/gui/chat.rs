@@ -60,6 +60,9 @@ const ROOM_FACE: f32 = 28.0;
 
 /// The search field's id: the top bar's search focuses it.
 pub const SEARCH_FIELD: &str = "search";
+/// The Advanced section's field for another hub's address (1577), which a
+/// press on "Another hub: paste its address" focuses.
+pub const HUB_FIELD: &str = "rooms-hub";
 
 /// The position sheet's field's id (1371): "Type my position" focuses it.
 pub const POSITION_FIELD: &str = "position";
@@ -454,6 +457,7 @@ impl App {
             Section::Advanced => column![
                 say(self.word(StrId::PropagationNode).to_string()),
                 quiet(self.word(StrId::PropagationNodeText).to_string()),
+                self.hub_rows(t),
                 container(link(
                     self.word(StrId::Help),
                     Message::Intent(Intent::Help),
@@ -463,6 +467,63 @@ impl App {
             ]
             .into(),
         }
+    }
+
+    /// The public rooms' hub (1577), the core's lines: which hub, each
+    /// shipped one and none with a mark on the one in force, a press
+    /// choosing it, the field for another's address, and what a hub
+    /// learns.
+    fn hub_rows(&self, t: Colours) -> Element<'_, Message> {
+        use loquax::ui::intent::Intent;
+        use loquax::ui::rooms::HubPick;
+        let lang = self.lang;
+        let mut rows = column![].spacing(4).padding([12, 16]);
+        for row in &self.seen.hubs {
+            let label = row.label.resolve(lang);
+            let value = row.value.as_ref().map(|v| v.resolve(lang));
+            match row.action.as_ref().map(|a| &a.intent) {
+                Some(Intent::RoomsHub(HubPick::Paste)) => {
+                    let words = match value {
+                        Some(own) => format!("● {label}: {own}"),
+                        None => format!("○ {label}"),
+                    };
+                    rows = rows.push(text(words).size(15).color(colour(t.text)));
+                    let field = text_input(
+                        &Text::key(StrId::RoomsHubPasteHint).resolve(lang),
+                        &self.hub_field,
+                    )
+                    .id(HUB_FIELD)
+                    .on_input(Message::HubTyped)
+                    .on_submit(Message::HubTake)
+                    .size(15)
+                    .padding([6, 10]);
+                    rows = rows.push(
+                        row![
+                            field,
+                            button(text("OK").size(15)).on_press(Message::HubTake)
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    );
+                }
+                Some(intent) => {
+                    let mark = if value.is_some() { "●" } else { "○" };
+                    rows = rows.push(link(
+                        &format!("{mark} {label}"),
+                        Message::Intent(intent.clone()),
+                        t,
+                    ));
+                }
+                None if value.is_some() => {
+                    let words = format!("{label}: {}", value.unwrap_or_default());
+                    rows = rows.push(text(words).size(16).color(colour(t.text)));
+                }
+                None => {
+                    rows = rows.push(text(label).size(14).color(colour(t.text_secondary)));
+                }
+            }
+        }
+        rows.into()
     }
 
     /// A row of words and a switch, on in the accent as the phone's.
@@ -525,12 +586,19 @@ impl App {
             .iter()
             .enumerate()
             .fold(column![].spacing(2), |list, (i, room)| {
+                // A room is public (1577): the globe and the word beside
+                // its name.
                 let mut line = row![
                     avatar(&room.avatar, size::BAR_AVATAR, t),
-                    text(room.name.clone())
-                        .size(size::ROW_NAME)
-                        .color(ink)
-                        .width(Length::Fill),
+                    text(room.name.clone()).size(size::ROW_NAME).color(ink),
+                    text(format!(
+                        "{} {}",
+                        loquax::ui::rooms::PUBLIC_MARK,
+                        room.public.resolve(lang)
+                    ))
+                    .size(13)
+                    .color(quiet)
+                    .width(Length::Fill),
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center);

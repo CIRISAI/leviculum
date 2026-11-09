@@ -13,6 +13,7 @@ import android.content.DialogInterface;
 import android.text.format.DateUtils;
 import android.text.format.Formatter;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.Switch;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
@@ -877,6 +878,11 @@ public class SettingsActivity extends Activity implements Events.Listener {
         body.addView(node);
         body.addView(padded(text(getString(R.string.propagation_node_text), 14,
                 R.color.text_secondary)));
+        hubs = new LinearLayout(this);
+        hubs.setOrientation(LinearLayout.VERTICAL);
+        body.addView(hubs, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        roomsHub(null);
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(16), dp(16), dp(16), dp(4));
@@ -916,6 +922,91 @@ public class SettingsActivity extends Activity implements Events.Listener {
         });
         body.addView(stop, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    /** The public rooms' hub lines (1577), filled by {@link #roomsHub}. */
+    private LinearLayout hubs;
+
+    /**
+     * The public rooms' hub (1577): `set` chosen when given ("none", or a
+     * hub's address), then the lines as the core answers them, the same
+     * as the window's and the terminal's Advanced section: which hub, the
+     * shipped ones with a mark on the one in force, none, a field to
+     * paste another, and what a hub learns. Asked on the engine's thread.
+     */
+    private void roomsHub(final String set) {
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.roomsHub(set);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (isDestroyed()) {
+                    return;
+                }
+                String error = Core.str(answer, "error");
+                if (!error.isEmpty()) {
+                    android.widget.Toast.makeText(SettingsActivity.this, error,
+                            android.widget.Toast.LENGTH_LONG).show();
+                }
+                hubLines(answer);
+            }
+        });
+    }
+
+    private void hubLines(Map<String, Object> answer) {
+        hubs.removeAllViews();
+        TextView title = text(Core.str(answer, "title"), 16, R.color.text);
+        title.setPadding(dp(16), dp(24), dp(16), 0);
+        hubs.addView(title);
+        hubs.addView(padded(text(Core.str(answer, "current"), 14, R.color.text_secondary)));
+        for (Map<String, Object> hub : Core.list(answer, "hubs")) {
+            final String set = Core.str(hub, "set");
+            String mark = Core.bool(hub, "chosen") ? "\u2713  " : "     ";
+            TextView line = text(mark + Core.str(hub, "name"), 16, R.color.text);
+            line.setPadding(dp(16), dp(12), dp(16), dp(12));
+            line.setTag("rooms_hub_" + set);
+            line.setBackgroundResource(android.R.drawable.list_selector_background);
+            line.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    roomsHub(set);
+                }
+            });
+            hubs.addView(line, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        String own = Core.str(answer, "own");
+        TextView paste = text((own.isEmpty() ? "     " : "\u2713  ") + Core.str(answer, "paste")
+                + (own.isEmpty() ? "" : ": " + own), 16, R.color.text);
+        paste.setPadding(dp(16), dp(12), dp(16), 0);
+        hubs.addView(paste);
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), 0, dp(16), dp(4));
+        final EditText field = new EditText(this);
+        field.setHint(Core.str(answer, "hint"));
+        field.setSingleLine(true);
+        field.setTag("rooms_hub_field");
+        row.addView(field, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button take = new Button(this);
+        take.setText(android.R.string.ok);
+        take.setTag("rooms_hub_take");
+        take.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String typed = field.getText().toString().trim();
+                if (!typed.isEmpty()) {
+                    roomsHub(typed);
+                }
+            }
+        });
+        row.addView(take);
+        hubs.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        hubs.addView(padded(text(Core.str(answer, "note"), 14, R.color.text_secondary)));
     }
 
     /**

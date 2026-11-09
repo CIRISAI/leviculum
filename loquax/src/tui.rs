@@ -1772,7 +1772,18 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
                 0 => Style::default(),
                 _ => Style::default().add_modifier(Modifier::BOLD),
             };
-            Line::from(Span::styled(format!("{mark}{}{unread}", row.name), style))
+            // A room is public (1577): the globe, where the terminal
+            // draws one, and the word beside the name.
+            let public = row.public.resolve(lang);
+            let public = match model.ascii {
+                true => format!(" ({public})"),
+                false => format!(" {} {public}", loquax::ui::rooms::PUBLIC_MARK),
+            };
+            Line::from(vec![
+                Span::styled(format!("{mark}{}", row.name), style),
+                Span::styled(public, Style::default().add_modifier(Modifier::DIM)),
+                Span::styled(unread, style),
+            ])
         })
         .collect();
     frame.render_widget(
@@ -2450,6 +2461,59 @@ mod tests {
         assert_eq!(model.settings, None, "closed");
     }
 
+    /// 1577: Advanced holds the public rooms' hub (the golden): the
+    /// shipped hubs by name, `1` chooses the first and the line says it,
+    /// `a` asks for another's address in the palette, which `Enter` takes,
+    /// and `0` chooses none. No hash on screen.
+    #[test]
+    fn advanced_chooses_the_public_rooms_hub_by_key_and_by_address() {
+        use loquax::ui::settings::Section;
+        use loquax::ui::UiEffect;
+        let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let enter = UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut model = Model::new(&[]);
+        update(&mut model, key('S'));
+        update(&mut model, key('9'));
+        assert_eq!(model.settings, Some(Some(Section::Advanced)));
+        let shown = whole_screen(&model);
+        assert!(shown.contains("Public rooms: hub: None"), "{shown}");
+        same_text("tui-settings-advanced.txt", &shown);
+        let community = loquax::ui::hubs::shipped()[0].hash;
+        assert_eq!(
+            update(&mut model, key('1')),
+            [UiEffect::RememberHash {
+                key: "rooms_hub",
+                hash: Some(community)
+            }]
+        );
+        assert!(model.rooms.enabled, "the Rooms tab is there");
+        let shown = whole_screen(&model);
+        assert!(
+            shown.contains("Public rooms: hub: RNS Community"),
+            "{shown}"
+        );
+        assert!(shown.contains("1  RNS Community: \u{2713}"), "{shown}");
+        update(&mut model, key('a'));
+        assert!(model.palette.is_some(), "the palette asks");
+        let asked = whole_screen(&model);
+        assert!(asked.contains("The hub's address"), "{asked}");
+        for c in "07070707070707070707070707070707".chars() {
+            update(&mut model, key(c));
+        }
+        assert_eq!(
+            update(&mut model, enter),
+            [UiEffect::RememberHash {
+                key: "rooms_hub",
+                hash: Some([0x07; 16])
+            }]
+        );
+        let shown = whole_screen(&model);
+        assert!(shown.contains("Public rooms: hub: Your own hub"), "{shown}");
+        assert!(!shown.contains("0707070707"), "no hash on screen\n{shown}");
+        update(&mut model, key('0'));
+        assert!(!model.rooms.enabled, "none: no tab");
+    }
+
     /// 1379: the Rooms tab in the terminal: `R` brings it and asks the
     /// shell to link to the hub; the hub's welcome, a join, Bob's line, his
     /// action, the hub's notice and the echo of our own line make the
@@ -2467,6 +2531,8 @@ mod tests {
         let off = model.clone();
         model.rooms.enabled = true;
         model.rooms.hub = Some(HUB);
+        // Told before (1577): no sentence over the golden.
+        model.rooms.told = Some(HUB);
         let effects = update(&mut model, key('R'));
         assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
         assert!(model.rooms.showing());

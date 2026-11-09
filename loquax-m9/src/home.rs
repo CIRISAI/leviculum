@@ -1359,6 +1359,7 @@ fn effect_name(effect: &UiEffect) -> &'static str {
         UiEffect::MapDrawing(_) => "map-drawing",
         UiEffect::Import => "import",
         UiEffect::Remember { .. } => "remember",
+        UiEffect::RememberHash { .. } => "remember-hash",
         UiEffect::ShowPhoto { .. } => "show-photo",
         UiEffect::OpenFile { .. } => "open-file",
         UiEffect::PlayVoice { .. } => "play-voice",

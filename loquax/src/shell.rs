@@ -539,6 +539,20 @@ impl Shell {
                 }
                 // A setting changed on screen (1233): the next start reads
                 // it; a file that would not take it is said.
+                UiEffect::RememberHash { key, hash } => {
+                    if let Err(error) = loquax::config::save_hash(&self.context.home, key, hash) {
+                        let line = format!(
+                            "{}: {key} not saved: {error}",
+                            self.context
+                                .home
+                                .join(loquax::config::CONFIG_FILE)
+                                .display()
+                        );
+                        tracing::warn!("{line}");
+                        self.afterwards.push(line.clone());
+                        answers.push(UiEvent::Notice(line));
+                    }
+                }
                 UiEffect::Remember { key, value } => {
                     if let Err(error) = loquax::config::save(&self.context.home, key, value) {
                         let line = format!(
@@ -1674,18 +1688,16 @@ pub(crate) async fn start(
         true => crate::browsing::Browsing::start(&attached, browse_identity.clone(), &home),
         false => crate::browsing::Browsing::off(),
     };
-    // The Rooms (1379): a tab and a hub link where the config names a hub,
-    // over the node attached above, identified with the reader's identity
-    // and shown by the reader's name; without one nothing is lent.
+    // The Rooms (1379): a tab where the config names a hub, and a hub
+    // link over the node attached above, identified with the reader's
+    // identity and shown by the reader's name. The link runs with no hub
+    // too, idle until asked (1577): the settings choose a hub while the
+    // app runs, and the tab appears at once.
     model.rooms.hub = config.rooms_hub;
     model.rooms.enabled = config.rooms_hub.is_some();
-    let rooming = match config.rooms_hub {
-        Some(_) => {
-            let nick = Some(display_name.name.clone()).filter(|n| !n.is_empty());
-            loquax::rooms_link::Rooming::start(&attached, browse_identity, nick)
-        }
-        None => loquax::rooms_link::Rooming::off(),
-    };
+    model.rooms.told = config.rooms_told;
+    let nick = Some(display_name.name.clone()).filter(|n| !n.is_empty());
+    let rooming = loquax::rooms_link::Rooming::start(&attached, browse_identity, nick);
     // The microphone (1276): the system's recorder, where it has one; the
     // window offers the microphone only then.
     let mic = crate::mic::Mic::of_process();

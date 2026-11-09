@@ -637,10 +637,11 @@ impl Session {
         inner.redials_seen = network.redials();
         inner.costs.opened = Some(opened_rx);
         inner.network = network.clone();
-        // The Rooms (1384), where the config names a hub, as on the
-        // desktop: identified as the Browse tab identifies, and shown by
-        // the mailbox's name when it is here.
-        if inner.model.rooms.enabled {
+        // The Rooms (1384), as on the desktop: identified as the Browse
+        // tab identifies, and shown by the mailbox's name when it is here.
+        // The link runs with no hub too, idle until asked (1577): the
+        // Advanced page chooses one while the app runs.
+        {
             let nick = match &here {
                 Some(_) => Some(mailbox::name(&home)).filter(|name| !name.is_empty()),
                 None => None,
@@ -1854,6 +1855,33 @@ impl Session {
                     effects,
                 )));
             }
+            // The Advanced page's public rooms' hub (1577): the core's
+            // rows ([`loquax::ui::settings::hub_rows`]) in the phone's
+            // language; an address that is none changes nothing and says so.
+            schema::Query::RoomsHub { set } => {
+                let mut inner = self.lock();
+                let mut error = String::new();
+                if let Some(set) = set {
+                    let choice = match set.trim() {
+                        "" | "none" => Some(loquax::ui::rooms::HubChoice::None),
+                        text => match loquax::address::parse(text) {
+                            Ok(hub) => Some(loquax::ui::rooms::HubChoice::Hub(hub)),
+                            Err(_) => None,
+                        },
+                    };
+                    match choice {
+                        Some(choice) => {
+                            inner.apply(UiEvent::Rooms(loquax::ui::rooms::RoomsEvent::Hub(choice)))
+                        }
+                        None => error = Text::key(StrId::RoomsHubBad).resolve(inner.lang),
+                    }
+                }
+                return Ok(schema::encode(&rooms_hub_choice(
+                    &inner.model,
+                    inner.lang,
+                    error,
+                )));
+            }
             schema::Query::Receipts { set } => {
                 let mut inner = self.lock();
                 if let Some(on) = set {
@@ -1974,6 +2002,7 @@ impl Session {
             | schema::Query::MapTheme { .. }
             | schema::Query::MapFling { .. }
             | schema::Query::Receipts { .. }
+            | schema::Query::RoomsHub { .. }
             | schema::Query::PhotoSize { .. }
             | schema::Query::Photo { .. }
             | schema::Query::Staged { .. }
@@ -2160,6 +2189,7 @@ impl Inner {
         // on the terminal and the window.
         model.rooms.hub = config.rooms_hub;
         model.rooms.enabled = config.rooms_hub.is_some();
+        model.rooms.told = config.rooms_told;
         model.reading.on = config.read_receipts.unwrap_or(true);
         model.photo_size = config.photo_size.unwrap_or_default();
         model.bar.abilities = compose::Abilities::phone(camera);
@@ -2710,6 +2740,16 @@ impl Inner {
                 // A setting changed on a page (1233): the config in the
                 // app's directory, which the next start reads; the
                 // screens draw the marks again.
+                // The public rooms' hub the Advanced page chose (1577).
+                UiEffect::RememberHash { key, hash } => {
+                    if let Err(error) = loquax::config::save_hash(&self.home, key, hash) {
+                        let _ = self.events.send(Event::Notice {
+                            v: VERSION,
+                            text: format!("{key} not saved: {error}"),
+                        });
+                    }
+                    self.dirty = true;
+                }
                 UiEffect::Remember { key, value } => {
                     if let Err(error) = loquax::config::save(&self.home, key, value) {
                         let _ = self.events.send(Event::Notice {
@@ -4697,6 +4737,53 @@ pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
     loquax::address::parse_id(text).ok_or_else(|| format!("'{text}' is not a message id"))
 }
 
+/// The Advanced page's public rooms' hub (1577) for the phone: the
+/// core's rows ([`loquax::ui::settings::hub_rows`]) in `lang`, each line
+/// with the word Java sends back to choose it (`none`, or the hub's
+/// destination, which is never shown).
+pub fn rooms_hub_choice<B>(
+    model: &loquax::ui::UiModel<B>,
+    lang: Lang,
+    error: String,
+) -> schema::RoomsHubChoice {
+    use loquax::ui::intent::Intent;
+    use loquax::ui::rooms::HubPick;
+    let mut choice = schema::RoomsHubChoice {
+        v: VERSION,
+        ok: error.is_empty(),
+        error,
+        ..schema::RoomsHubChoice::default()
+    };
+    for row in loquax::ui::settings::hub_rows(model) {
+        let label = row.label.resolve(lang);
+        let value = row.value.as_ref().map(|v| v.resolve(lang));
+        match row.action.map(|a| a.intent) {
+            Some(Intent::RoomsHub(HubPick::Hub(hub))) => choice.hubs.push(schema::RoomsHubRow {
+                name: label,
+                chosen: value.is_some(),
+                set: hub.iter().map(|b| format!("{b:02x}")).collect(),
+            }),
+            Some(Intent::RoomsHub(HubPick::None)) => choice.hubs.push(schema::RoomsHubRow {
+                name: label,
+                chosen: value.is_some(),
+                set: "none".to_string(),
+            }),
+            Some(Intent::RoomsHub(HubPick::Paste)) => {
+                choice.paste = label;
+                choice.own = value.unwrap_or_default();
+            }
+            Some(_) => {}
+            None if choice.title.is_empty() => {
+                choice.title = label;
+                choice.current = value.unwrap_or_default();
+            }
+            None => choice.note = label,
+        }
+    }
+    choice.hint = Text::key(StrId::RoomsHubPasteHint).resolve(lang);
+    choice
+}
+
 /// The settings' sections as the phone lists them (1450): the core's one
 /// list for the phone (`loquax::ui::settings::entries`), in `lang`.
 pub fn settings_list(lang: Lang) -> schema::SettingsList {
@@ -4743,6 +4830,48 @@ mod tests {
             ]
         );
         assert!(list.sections.iter().all(|s| !s.summary.is_empty()));
+    }
+
+    /// 1577: the Advanced page's hub lines are the core's, in the phone's
+    /// language: the line that says which, the shipped hubs and none with
+    /// the mark on the one in force and the word that chooses each, the
+    /// paste line and what a hub learns. An own hub is named by its words,
+    /// never by its hash.
+    #[test]
+    fn the_hub_lines_are_the_cores_in_the_phones_language() {
+        use loquax::ui::rooms::{HubChoice, RoomsEvent};
+        let mut model = UiModel::<Line>::new(&[]);
+        let choice = rooms_hub_choice(&model, Lang::De, String::new());
+        assert!(choice.ok);
+        assert_eq!(choice.title, "Öffentliche Räume: Hub");
+        assert_eq!(choice.current, "Keiner");
+        let names: Vec<&str> = choice.hubs.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "RNS Community",
+                "ShadowLink",
+                "HADARC",
+                "RNS Moscow",
+                "Radio Oxford",
+                "Keiner"
+            ]
+        );
+        assert_eq!(choice.hubs[0].set, "28c7c1a68c735693aa8e6b8193ed44b2");
+        assert_eq!(choice.hubs[5].set, "none");
+        assert!(choice.hubs[5].chosen && !choice.hubs[0].chosen);
+        assert_eq!(choice.paste, "Anderer Hub: Adresse einfügen");
+        assert_eq!(choice.note, "Dein Name ist im Raum für alle sichtbar.");
+        assert!(choice.own.is_empty());
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Hub([0x07; 16]))),
+        );
+        let choice = rooms_hub_choice(&model, Lang::De, String::new());
+        assert_eq!(choice.current, "Eigener Hub");
+        assert_eq!(choice.own, "Eigener Hub");
+        assert!(choice.hubs.iter().all(|h| !h.chosen));
+        assert!(!schema::encode(&choice).is_empty());
     }
     use super::*;
 
