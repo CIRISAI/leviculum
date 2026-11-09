@@ -52,6 +52,13 @@ fn a_key_in_compose_builds_no_list() {
     session
         .request(Request::Open { peer: anna.clone() })
         .expect("open");
+    // The start through first (1600): the engine's `Ready` and the pull
+    // it starts land on whichever pump turn comes next, and when that was
+    // the probe's turn below, the turn made the lists for an engine event
+    // of its own (`redraws(Engine(_))`), not for the key: red in 2 of 6
+    // runs on 68761e32, 10 of 12 loaded runs here. Waited for, the start's
+    // events are folded before the key, every time.
+    wait_started(&session);
     // The pump held (1587): `update` starts the count afresh for every
     // event, and the request wakes the pump, whose turn folds the clock
     // (`Clock`, `Tick`, `Elapsed`) and builds nothing; read after such a
@@ -81,7 +88,15 @@ fn a_key_in_compose_builds_no_list() {
         session.pump_once();
         let echo = session.scene_builds() - shown;
         let moved = session.lists_revision() != revision;
-        (counts, builds, if moved { 0 } else { echo })
+        // A turn that folded a change of its own builds for that change;
+        // the rule promises only that the request's own change is not
+        // built twice. After the start none is left offline: this says so
+        // if one comes.
+        let own = session.last_turn_was_its_own();
+        if own {
+            println!("ECHO the probe's turn folded a change of its own");
+        }
+        (counts, builds, if moved || own { 0 } else { echo })
     });
     session.stop();
     println!("COUNTS phone.compose_key {counts} builds={builds} echo={echo}");
@@ -106,6 +121,39 @@ fn fixture_session(dir: &std::path::Path) -> Session {
     first.stop();
     drop(real_store::fill_store_for(dir, me));
     start(dir)
+}
+
+/// Wait until the session's start is through (1600, `Session::started`):
+/// the engine said it is ready and its first pull ended.
+fn wait_started(session: &Session) {
+    let begin = Instant::now();
+    while !session.started() {
+        assert!(
+            begin.elapsed() < Duration::from_secs(60),
+            "the session's start never finished"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Wait until `window` from now does not turn the wall clock's minute
+/// (1600): the model's look counts the minute (`look_fingerprint`, the
+/// rows' ago-words move by it), so the lists are made again once a
+/// minute, as they should be. The fixture's own idle keeps inside a
+/// minute for the same reason (`real_store::idle`).
+fn inside_a_minute(window: Duration) {
+    let second = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64() % 60.0)
+            .unwrap_or(0.0)
+    };
+    let room = 60.0 - window.as_secs_f64() - 1.0;
+    let at = second();
+    if at > room {
+        // Half a second into the next minute: its turn is folded.
+        std::thread::sleep(Duration::from_secs_f64(60.0 - at + 0.5));
+    }
 }
 
 /// Wait until the session made no list for `quiet`, at most `most`:
@@ -138,6 +186,11 @@ fn an_idle_phone_builds_no_list() {
     let dir = tempfile::tempdir().expect("app dir");
     let session = fixture_session(dir.path());
     let settled = settle(&session, Duration::from_secs(2), Duration::from_secs(30));
+    // A minute turning in the window made the lists once, by the rule
+    // (1600): 5 reds in 24 loaded runs, every one with its window across
+    // :00 and the pump's build at :00.09 with nothing dirty and the lists
+    // revision moved; no green window crossed a minute.
+    inside_a_minute(Duration::from_millis(real_store::IDLE_MS + 500));
     let before = session.scene_builds();
     let begin = Instant::now();
     let mut asked = 0;

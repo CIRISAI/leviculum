@@ -262,6 +262,10 @@ struct Inner {
     /// made them (1595): the pump's next turn does not make them again
     /// for the request's own change, only for its own or a revision moved.
     request_shown: bool,
+    /// Whether the pump's last turn changed something of its own (1600):
+    /// an engine event, a pull's end, a setting saved. A bar on the
+    /// request's echo reads it to tell an echo from the turn's own work.
+    turn_own: bool,
     /// The thread the pump's last turn ran on (1496), for the facade.
     pump_thread: Option<String>,
     /// The peers added by a code while this session runs (walk finding
@@ -1281,6 +1285,24 @@ impl Session {
         self.lock().pump()
     }
 
+    /// Whether the pump's last turn changed something of its own (1600):
+    /// what it folded beside the request it followed. For the facade's
+    /// bars.
+    #[doc(hidden)]
+    pub fn last_turn_was_its_own(&self) -> bool {
+        self.lock().turn_own
+    }
+
+    /// Whether the session's start is through (1600): the engine said it
+    /// is ready, and no pull runs, is owed or left a backlog.
+    /// Until then the pump's turns fold the start's own events, and a bar
+    /// on one request reads them with it. For the facade's bars.
+    #[doc(hidden)]
+    pub fn started(&self) -> bool {
+        let inner = self.lock();
+        inner.model.address.is_some() && !inner.pulling && !inner.pull_owed && !inner.backlog
+    }
+
     /// The model's lists revision (1595), for the facade's bars.
     #[doc(hidden)]
     pub fn lists_revision(&self) -> u64 {
@@ -2271,6 +2293,7 @@ impl Inner {
             photo_stats: std::cell::Cell::new(0),
             row_cache: std::cell::RefCell::default(),
             request_shown: false,
+            turn_own: false,
             pump_thread: None,
             just_added: std::collections::BTreeSet::new(),
             keys_told: Arc::default(),
@@ -2456,6 +2479,7 @@ impl Inner {
         self.quiet(UiEvent::Tick);
         self.apply(UiEvent::Elapsed(elapsed));
         let dirty = std::mem::take(&mut self.dirty);
+        self.turn_own = dirty;
         // The lists again only when what they show moved (1491): an idle
         // turn, the clock's three events folded, makes none, nor does a
         // node the Browse tab heard of, nor the request's own change its
