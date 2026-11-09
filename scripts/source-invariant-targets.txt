@@ -285,6 +285,7 @@ skip  loquax-m9        turn                       # a list draw and a page take 
 skip  loquax-m9        operation_counts           # a key down the M9 list counted over the real fixture against its bar (1489); subject is the code
 skip  loquax-m9        restore_counts             # the M9 restore, a pulled page and one new message counted over a 1489-shaped store, the per-entry fold as control (1514); subject is the code
 skip  loquax-m9        page                       # the M9 [PAGE] line walked over the fixture with the board's keys and one renderer: page, cursor, top, zoom (1533); subject is the code
+skip  loquax-m9        gnss                       # the M9 receiver's sentences parsed, its sky and duty walked and the map's corner drawn against PNG goldens (1477); subject is the code
 skip  loquax-m9        read                       # the M9 reads by its viewport: the board's draw says the bubbles whose last line showed, the dwell sees them, the seen mark is routed and kept over a reboot, each with its control (1541); subject is the code
 skip  loquax-m9        bench                      # the bench never touches a real chat: arrivals into "Bench" only, a release restore lists none, no mark to the home, bench forget takes 1540's and the flagged out (1562); subject is the code
 skip  loquax-m9        drain                      # the UI core's drain played over a test clock: a budget per turn, a key yields the fold, pages counted once and rows once a page, the unbudgeted loop as control (1575); subject is the code
