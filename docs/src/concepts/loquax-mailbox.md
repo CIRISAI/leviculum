@@ -552,3 +552,56 @@ sawtooth, and resident plus swap falling.
 Not yet bounded here, and named so: the history store is SQLite on disk,
 its page cache SQLite's own; a device's sync load (the 1489 fixture and
 the bench board) is not part of the soak's default load.
+
+## 4. Pages and bookmarks the home remembers (1579)
+
+Lew, 2026-11-08: a phone switched on shows a long list of NomadNet pages
+at once, not only the few whose announces reached it since. The home
+hears its net all day, so it keeps the list for its devices, and the
+bookmarks of the identity with it (`loquax/src/home/pages.rs`).
+
+**What the home keeps.** Every `nomadnetwork.node` announce its node
+hears becomes a row of `home_pages` (store schema 18,
+`loquax/src/store/pages.rs`): lnomad's `DiscoveredNode` (destination,
+newest name, first and last seen, hops) and how many announces it heard,
+one type for the home and the browser. A row takes a new stamp when it
+is new, its name or hops changed, or an hour passed since its kept
+`last_seen` (`PAGE_REFRESH_SECS`); any other announce only counts. At
+most 4 096 rows (`PAGES_CAP`), the one heard longest ago going first,
+never the one just heard. A nameless announce never clears a name.
+
+**The bookmarks.** `home_bookmarks` keeps one row a URL (lnomad's
+`<dest_hex>:<path>`): title, the writing device's clock in unix
+milliseconds, and whether it was cleared. The newer stamp wins
+(`bookmark_wins`), on a tie the tombstone, then the larger title, so
+every home and device decides one way. A clearing is kept as a
+tombstone, so a device that was off learns it. At most 1 024 rows
+(`BOOKMARKS_CAP`), the oldest tombstone going first, then the oldest
+bookmark.
+
+**The ask.** Not archive entries: a page row changes every hour of
+announces and a mesh holds thousands, so the rows keep a table and one
+change counter of their own, and never move a message cursor or wake a
+device.
+
+```text
+/pages    [since: uint, (page: uint)]   -> [status, stamp: uint, more: bool, [row, ...]]
+  row:    [0, dest: bin16, name: str, first: int, last: int, hops: uint, count: uint]
+        | [1, url: str, title: str, at: int, deleted: bool]
+/bookmark [url: str, title: str, at: int, deleted: bool] -> [status]
+```
+
+The device asks with the stamp of the last answer and gets the rows that
+changed after it, oldest change first; an answer is at most 32 KiB
+(`PAGES_ANSWER_MAX`) or the bound the device asks, and says `more`. A
+stamp past the home's newest is a device that counted with another home,
+and gets the whole list. Both paths refuse a device not admitted. A home
+from before 1579 has no handler and stays silent; the device keeps the
+list it heard itself.
+
+**Measured** (`home::client::tests::pages_and_a_bookmark_reach_a_second_device_over_a_link`,
+2026-11-09, coder host, two nodes over loopback TCP, debug build): the
+full list of 2 000 rows with names of 15 to 18 characters and one
+bookmark is 100 969 bytes in four answers, each a resource, and took
+52 ms. Over BLE it is not measured yet: the same four answers, about 50
+bytes a row.

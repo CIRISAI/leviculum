@@ -836,6 +836,50 @@ a restart forgets them until they are heard again. The home's list
 survives a restart in its archive, and a new device gets it on its
 first pull.
 
+### Built 2026-11-09, the pages list comes from the home (1579)
+
+Lew, 2026-11-08: the list of NomadNet pages a reader can open must not
+depend on the announces that happen to reach the phone. The Browse tab's
+list (and the Entdecken list 1578 builds on it) has two sources, folded
+into one lnomad registry (`lnomad::discovery::NomadNodeRegistry`):
+
+1. **What this device's own fetch hears**, `BrowseEvent::Node`, as
+   before. A device without a home (standalone, or lnomad itself) has
+   only this, as lnomad always had.
+2. **What the home heard**, `BrowseEvent::Home` (`loquax/src/ui/browse.rs`,
+   `home_pages`): after every pull from the home, the desktop shell
+   (`Shell::ask_pages`, `loquax/src/shell.rs`) and the phone's session
+   (`ask_pages`, `loquax-android/src/session.rs`) ask `/pages` with the
+   stamp the device holds (`Browse::shared`). The first ask of a run
+   brings the whole list, later ones the rows that changed. Each page
+   row becomes the same `DiscoveredNode` an announce would, so the list
+   does not know or show where a row came from. The stamp is held in
+   memory, as the registry is: a start asks for the whole list again.
+
+**Bookmarks are the identity's.** A bookmark the reader sets or clears
+on any device goes to the home (`Browse::outgoing`, handed by
+`runner::hand_bookmarks`) stamped with the device's clock, and comes back
+to every device in the next `/pages`. The newer stamp wins, a cleared
+bookmark travels as a tombstone (`loquax-mailbox.md`, section 4). A
+change the home has not echoed yet stays pending and is handed again
+before the next ask, and an older row from the home does not undo it.
+The desktop's `browse-bookmarks.toml`, lnomad's format, is the import:
+its bookmarks are handed with the time the file was written, so a newer
+word from another device wins.
+
+**What 1578 reads:** `model.browse.model.node_registry` (both sources,
+name, hops, first and last seen) and `model.browse.model.bookmarks` (the
+identity's, merged). lnomad's registry keeps 500 nodes
+(`lnomad::discovery::NODE_CAPACITY`), the oldest inserted going first, so
+a home list of more than that shows the 500 that changed last; raising it
+on the hosts with room is 1578's call.
+
+**Not built in this pass, owed:** the periculum cell
+`loquax_pages_from_home` (it lives in periculum, outside this tree); the
+M9's Browse tab asks no `/pages` yet; the phone keeps no bookmarks past
+the session itself, so its home is where they live; a pending change is
+held in memory and a restart before the home took it loses it.
+
 ### The intent inventory
 
 Every user action as the intent it raises, and per target whether it is
