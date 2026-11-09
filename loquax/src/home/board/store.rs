@@ -846,7 +846,7 @@ impl Store {
 
     /// How many sectors [`Store::append`] of `entries` would open, each
     /// one an erase unless a quiet moment erased it ahead (1597): the
-    /// placement [`Store::put_spans`] makes, the page's mark with it,
+    /// placement `Store::put_spans` makes, the page's mark with it,
     /// nothing written. A writer bounded in erases asks before it
     /// writes.
     pub fn opens(&self, entries: &[Entry]) -> u32 {

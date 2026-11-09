@@ -962,7 +962,7 @@ impl RowLog {
     /// budget at a time ahead of what else is owed; its SNAP record goes
     /// with its last record, and the newest state with it, so the log
     /// may then take back every sector before it. Once the ring is
-    /// [`SNAP_MARGIN`] sectors short of the last whole snapshot's first,
+    /// `SNAP_MARGIN` sectors short of the last whole snapshot's first,
     /// the snapshot's records alone are written until it ends. Before,
     /// a write that found the snapshot late wrote everything owed in
     /// one call (window 21's hang.walk: 246 to 473 records, 22 to 31
