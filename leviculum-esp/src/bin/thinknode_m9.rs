@@ -543,13 +543,16 @@ impl UiLog {
     }
 }
 
-/// The UI core's stack: the open chat's census ceilings, scene and draw
-/// added up (`census::CHAT`, the 184,000 B the build script held the
-/// one stack to before 1493), rounded up to whole KiB. The build
-/// script's floor is the board's measured peak plus 16 KiB since 1594
-/// (65,504 B); the array is not shrunk to it yet.
-const UI_STACK: usize = 184 * 1024;
-const _: () = assert!(UI_STACK >= 184_000);
+/// The UI core's stack: 120 KiB since 1595, 54 KiB over the build
+/// script's floor (the board's measured peak plus 16 KiB, 65,504 B since
+/// 1594). Window 20's least `ui_stack_free` was 139,632 B of 184 KiB, the
+/// most the UI core ever took 48,784 B; core 0 sat at 29,864 B free after
+/// the join. This array is a static in internal RAM, and core 0's stack
+/// is what the linker leaves of that RAM (the ELF's `.stack` section,
+/// the build's `STACK_HEADROOM stack=`), so the 64 KiB taken off here are
+/// core 0's.
+const UI_STACK: usize = 120 * 1024;
+const _: () = assert!(UI_STACK >= 65_504 + 32 * 1024);
 
 static mut APP_CORE_STACK: Stack<UI_STACK> = Stack::new();
 
