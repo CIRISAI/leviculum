@@ -266,3 +266,134 @@ fn an_unsignalled_leg_runs_at_the_base() {
     );
     assert_eq!((n.initiator, n.responder), (MTU as u32, MTU as u32));
 }
+
+/// A responder that hears two copies of one request. Returns, per copy in
+/// the order delivered, how many packets it sent back, then its link table
+/// size and the MTU of the one link.
+fn responder_hears_both(direct_first: bool) -> (Vec<usize>, usize, u32, Option<usize>) {
+    let identity = Identity::generate(&mut OsRng);
+    let signing_key = identity.ed25519_verifying().to_bytes();
+    let mut receiver = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "av",
+        &["derived"],
+    )
+    .unwrap();
+    dest.set_accepts_links(true);
+    let dest_hash = *dest.hash();
+    receiver.register_destination(dest);
+    let r_tcp = add_iface(&mut receiver, "R_tcp", Some(TCP));
+    let r_direct = add_iface(&mut receiver, "R_direct", Some(DIRECT));
+
+    let mut sender = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+    let s_tcp = add_iface(&mut sender, "S_tcp", Some(TCP));
+    let s_direct = add_iface(&mut sender, "S_direct", Some(DIRECT));
+    let (link_id, _, out) = sender.connect(dest_hash, &signing_key).unwrap();
+    let tcp_copy = (r_tcp, request_on(&out, s_tcp));
+    let direct_copy = (r_direct, request_on(&out, s_direct));
+    let order = if direct_first {
+        [direct_copy, tcp_copy]
+    } else {
+        [tcp_copy, direct_copy]
+    };
+    let back: Vec<usize> = order
+        .iter()
+        .map(|(iface, copy)| action_data(&receiver.handle_packet(InterfaceId(*iface), copy)).len())
+        .collect();
+    let link = receiver.link(&link_id).expect("the link");
+    (
+        back,
+        receiver.links.len(),
+        link.negotiated_mtu(),
+        link.attached_interface(),
+    )
+}
+
+/// (a) and (c): a responder hearing both copies makes one link and proves
+/// once. The first copy to arrive wins, at the smaller of what it offered
+/// and what its receiving interface signals; a later copy on a wider or a
+/// narrower interface changes nothing. The rule is fixed (first arrival);
+/// which copy arrives first is the media's.
+#[test]
+fn a_responder_hearing_both_copies_makes_one_link_and_proves_once() {
+    let (back, links, mtu, attached) = responder_hears_both(true);
+    assert_eq!(back, std::vec![1, 0], "one proof, for the first copy only");
+    assert_eq!((links, mtu, attached), (1, DIRECT, Some(1)));
+
+    let (back, links, mtu, attached) = responder_hears_both(false);
+    assert_eq!(back, std::vec![1, 0], "one proof, for the first copy only");
+    assert_eq!((links, mtu, attached), (1, TCP, Some(0)));
+}
+
+/// (b): a relay hearing both copies forwards one. The case that reaches a
+/// relay at all is a shared instance whose local client owns the
+/// destination (`for_local`): the copies are Type1 without a transport id,
+/// which any other transit node drops as overheard. Before, the second copy
+/// overwrote the first's link entry and went to the client too.
+#[test]
+fn a_relay_hearing_both_copies_forwards_one() {
+    // R: a local client of relay A, owning the destination.
+    let identity = Identity::generate(&mut OsRng);
+    let signing_key = identity.ed25519_verifying().to_bytes();
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "av",
+        &["derived"],
+    )
+    .unwrap();
+    dest.set_accepts_links(true);
+    let dest_hash = *dest.hash();
+    let announce = dest
+        .announce(None, &mut OsRng, TEST_TIME_MS, TEST_TIME_MS / 1000)
+        .unwrap();
+    let mut buf = [0u8; MTU];
+    let len = announce.pack(&mut buf).unwrap();
+
+    let mut relay = NodeCoreBuilder::new().enable_transport(true).build(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        crate::memory_storage::MemoryStorage::with_defaults(),
+    );
+    let a_client = relay
+        .transport
+        .register_interface(std::boxed::Box::new(MockInterface::new("A_client", 0)));
+    relay.set_interface_name(a_client, String::from("A_client"));
+    relay.set_interface_local_client(a_client, true);
+    let a_tcp = relay
+        .transport
+        .register_interface(std::boxed::Box::new(MockInterface::new("A_tcp", 0)));
+    relay.set_interface_name(a_tcp, String::from("A_tcp"));
+    relay.set_interface_hw_mtu(a_tcp, TCP);
+    let a_direct = relay
+        .transport
+        .register_interface(std::boxed::Box::new(MockInterface::new("A_direct", 0)));
+    relay.set_interface_name(a_direct, String::from("A_direct"));
+    relay.set_interface_hw_mtu(a_direct, DIRECT);
+    let _ = relay.handle_packet(InterfaceId(a_client), &buf[..len]);
+
+    // I: reaches A on two interfaces and never heard the announce.
+    let mut sender = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+    let s_tcp = add_iface(&mut sender, "S_tcp", Some(TCP));
+    let s_direct = add_iface(&mut sender, "S_direct", Some(DIRECT));
+    let (_, routed, out) = sender.connect(dest_hash, &signing_key).unwrap();
+    assert!(!routed);
+
+    let to_client = |o: &TickOutput| {
+        o.actions
+            .iter()
+            .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == a_client))
+            .count()
+    };
+    let first = relay.handle_packet(InterfaceId(a_direct), &request_on(&out, s_direct));
+    let second = relay.handle_packet(InterfaceId(a_tcp), &request_on(&out, s_tcp));
+    assert_eq!(
+        (to_client(&first), to_client(&second)),
+        (1, 0),
+        "the relay forwards the first copy and drops the second"
+    );
+}
