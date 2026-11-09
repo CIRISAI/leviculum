@@ -772,6 +772,9 @@ pub fn messages_timed<B: InputBuffer + Default>(
         let Some(event) = event else {
             continue;
         };
+        // The clock held to when the home recorded the entry (1594): the
+        // time the pull's fold gave the same message.
+        scratch.now = crate::ui::recorded_now(now, entry.at);
         let _ = update(&mut scratch, UiEvent::Engine(event));
         let Some(conversation) = scratch.conversations.iter_mut().find(|c| c.peer == peer) else {
             continue;

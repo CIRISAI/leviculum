@@ -3441,6 +3441,19 @@ impl<'a, B: InputBuffer + Default> Batch<'a, B> {
         self.effects.extend(effects);
     }
 
+    /// Fold `event`, an entry the home recorded at `recorded_at` (unix
+    /// seconds, 0 for unknown), with the model's clock held to that time
+    /// for this event alone (1594, [`recorded_now`]): a message's time
+    /// then is the same whenever its entry is folded, by the pull, by a
+    /// page read later or by a boot, and reading a page never lifts its
+    /// conversation in the list.
+    pub fn fold_recorded(&mut self, event: UiEvent, recorded_at: i64) {
+        let now = self.model.now;
+        self.model.now = recorded_now(now, recorded_at);
+        self.fold(event);
+        self.model.now = now;
+    }
+
     /// Take out the conversations the fold left with nothing to list
     /// (1521c): no message and no row kept for one ([`UiModel::row`]), an
     /// invitation's group no message reached or a chat whose every message
@@ -3485,6 +3498,27 @@ impl<B: InputBuffer + Default> Drop for Batch<'_, B> {
     fn drop(&mut self) {
         self.note();
     }
+}
+
+/// The clock a home's entry is folded under (1594): the model's, held to
+/// when the home recorded the entry (`recorded_at`, unix seconds; 0 or
+/// less for unknown), so no message gets a time later than the home took
+/// it. A received message's shown time is its writer's held to the
+/// clock (`written_time`): folded under the model's own clock it was
+/// held to whenever the fold ran, so a writer whose clock ran ahead of
+/// ours got the pull's time in the row the pull kept and a later time
+/// when a page of it was read again (window 19: the preloaded row rose
+/// over a newer arrival to the list's top, and the cursor with it).
+/// `None` while the model knows no time: a fold without a clock gives no
+/// time, as before.
+pub fn recorded_now(now: Option<WallTime>, recorded_at: i64) -> Option<WallTime> {
+    now.map(|now| match recorded_at > 0 {
+        true => WallTime {
+            unix_secs: recorded_at.min(now.unix_secs),
+            ..now
+        },
+        false => now,
+    })
 }
 
 /// One event folded with what follows every fold, short of the note

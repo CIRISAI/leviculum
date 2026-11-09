@@ -115,7 +115,7 @@ fn fold_until(
             spent.unpack += t1.saturating_sub(t0);
             looked += 1;
             if let Some(event) = event {
-                batch.fold(UiEvent::Engine(event));
+                batch.fold_recorded(UiEvent::Engine(event), entry.at);
                 taken += 1;
                 spent.step += clock().saturating_sub(t1);
             }
@@ -855,7 +855,7 @@ fn resume_tail<S: Sectors>(
         }
         index.take(entry, *span, true);
         if let Some(event) = event {
-            batch.fold(UiEvent::Engine(event));
+            batch.fold_recorded(UiEvent::Engine(event), entry.at);
             step += clock().saturating_sub(u);
         }
     }
@@ -982,7 +982,7 @@ fn rebuild<S: Sectors>(
             }
             index.take(&entry, span, true);
             if let Some(event) = event {
-                batch.fold(UiEvent::Engine(event));
+                batch.fold_recorded(UiEvent::Engine(event), entry.at);
                 step += clock().saturating_sub(t1);
             }
         },

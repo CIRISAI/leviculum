@@ -72,19 +72,29 @@ impl Archive {
     }
 
     fn entries(&self) -> Vec<Entry> {
+        self.entries_ahead(0.0)
+    }
+
+    /// [`Archive::entries`] with the friends' clocks `ahead` seconds ahead
+    /// of the home that recorded their messages (1594): each received
+    /// message says it was written later than the home took it; our own
+    /// answers go by the home's clock.
+    fn entries_ahead(&self, ahead: f64) -> Vec<Entry> {
         (1..=MESSAGES)
             .map(|seq| {
                 let friend = &self.friends[friend_of(seq)];
                 let theirs = lxmf_address(&friend.public_key_bytes()).expect("address");
                 let at = 1_762_000_000.0 + seq as f64;
+                let written = at + ahead;
                 let (kind, packed) = match seq % 5 {
+                    // Our own answers by the home's clock.
                     0 => (
                         KIND_SENT,
                         pack(&self.me, theirs, &format!("Antwort {seq}"), at),
                     ),
                     _ => (
                         KIND_RECEIVED,
-                        pack(friend, self.address, &format!("Nachricht {seq}"), at),
+                        pack(friend, self.address, &format!("Nachricht {seq}"), written),
                     ),
                 };
                 Entry {
@@ -1216,6 +1226,89 @@ fn twenty_presses_down_move_the_cursor_twenty_rows() {
     for now in [Some(clock), None] {
         walk_twenty(&archive, flash.clone(), now);
     }
+    preloaded_rows_keep_their_places(&archive);
+}
+
+/// 1594, window 19: the arm "a preloaded row keeps its place among rows
+/// with newer and older activity". The rows were kept by a pull whose
+/// clock stood before the writers' (their clocks an hour ahead of the
+/// home's), so every message's time was held to the pull's; an arrival
+/// came after the pull and led the list; the reader then moved down it,
+/// and every row the cursor reached preloaded its page under a later
+/// clock, its messages came out with their writers' later times, and
+/// the row rose over the arrival to the top (the bench's "Cem 2" over
+/// "Bench", `open longest` four chats instead of fourteen). Each press
+/// moves the cursor one row and no row moves.
+fn preloaded_rows_keep_their_places(archive: &Archive) {
+    const HOUR: i64 = 3600;
+    let recorded_last = 1_762_000_000 + MESSAGES as i64;
+    let pulled = loquax::when::WallTime {
+        unix_secs: recorded_last + 10,
+        offset_secs: 0,
+    };
+    // The pull: page by page into the ring and the model, the rows the
+    // model said into the summary log, as the board's loop does.
+    let mut flash = MemFlash::new(2048);
+    let mut boot = home::restore(&mut flash, archive.address).expect("empty boot");
+    boot.model.now = Some(pulled);
+    let mut ids = || [0u8; 16];
+    let mut take = |boot: &mut home::Boot, flash: &mut MemFlash, page: &[Entry]| {
+        home::keep(&mut boot.shelf, flash, page, &archive.address).expect("keep");
+        let (_, effects) = home::take(&mut boot.model, page, &archive.address);
+        let routed = home::route(&mut boot.model, effects, &mut ids);
+        boot.shelf.said(routed.rows, routed.gone);
+        boot.shelf.flush(flash, Vec::new).expect("flush");
+    };
+    for page in archive.entries_ahead(HOUR as f64).chunks(72) {
+        take(&mut boot, &mut flash, page);
+    }
+    // The boot after: listed from the rows, the clock two hours on, and
+    // a message from a newcomer that arrived after the pull.
+    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    assert!(
+        matches!(boot.how, home::How::Resumed { .. }),
+        "{:?}",
+        boot.how
+    );
+    boot.model.now = Some(loquax::when::WallTime {
+        unix_secs: pulled.unix_secs + 2 * HOUR,
+        ..pulled
+    });
+    let newcomer = Identity::generate(&mut OsRng);
+    let arrived = pulled.unix_secs + 60;
+    let arrival = Entry {
+        seq: MESSAGES + 1,
+        kind: KIND_RECEIVED,
+        at: arrived,
+        packed: pack(&newcomer, archive.address, "Neu hier", arrived as f64),
+    };
+    take(&mut boot, &mut flash, &[arrival]);
+    let peers = |model: &loquax::ui::UiModel<loquax_m9::field::Field>| -> Vec<[u8; 16]> {
+        model
+            .order()
+            .into_iter()
+            .map(|i| model.conversations[i].peer)
+            .collect()
+    };
+    let before = peers(&boot.model);
+    assert_eq!(
+        before[0],
+        lxmf_address(&newcomer.public_key_bytes()).expect("address"),
+        "the arrival after the pull leads the list"
+    );
+    let start = cursor(&boot.model);
+    let mut row = start;
+    let mut read = 0;
+    for press in 1..=6 {
+        read += press_and_preload(&mut boot, &mut flash, &archive.address, &mut row, 0xb6);
+        assert_eq!(
+            peers(&boot.model),
+            before,
+            "press {press}: a preloaded page moved a row"
+        );
+        assert_eq!(cursor(&boot.model), start + press, "press {press}");
+    }
+    assert!(read >= 6, "each row reached preloads its page: {read}");
 }
 
 fn walk_twenty(archive: &Archive, mut flash: MemFlash, now: Option<loquax::when::WallTime>) {
