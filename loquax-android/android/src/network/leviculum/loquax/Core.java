@@ -277,6 +277,22 @@ final class Core {
         return query(map("t", "rooms"));
     }
 
+    /**
+     * A verb of the Explore tab (1578): `tab`, `chats`, `typed` with the
+     * search field's text, `az` (index 1 for A to Z), `open` and
+     * `bookmark` with a page's destination, `address`, `room` with the
+     * index of a room the reader is in, `hub` with a hub's destination;
+     * the error in words, or null.
+     */
+    static String explore(String verb, String text, String dest, int index) {
+        return command(map("t", "explore", "verb", verb, "text", text, "dest", dest, "index", index));
+    }
+
+    /** The Explore tab as the library words it (1578). */
+    static Map<String, Object> exploreScreen() {
+        return query(map("t", "explore"));
+    }
+
     /** The settings' sections (1450), the one list of every target: `sections` with `key`, `title`, `summary`. */
     static Map<String, Object> settingsList() {
         return query(map("t", "settings"));

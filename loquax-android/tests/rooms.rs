@@ -83,9 +83,14 @@ fn the_phone_works_a_room_through_the_schema() {
     let (_home, mut model) = phone(Some(HUB));
     assert!(!screen(&model).open, "closed until the tab is tapped");
 
-    // The tab asks the hub link to link, once; the first time the reader
-    // is told their name is visible, and the config keeps that (1577).
-    let effects = tap(&mut model, "tab", "", 0);
+    // The tab links nothing (1578); the first join links, once, and the
+    // first time the reader is told their name is visible, and the config
+    // keeps that (1577). The join waits for the hub's welcome.
+    assert!(
+        tap(&mut model, "tab", "", 0).is_empty(),
+        "opening links nothing"
+    );
+    let effects = tap(&mut model, "say", "#lab", 0);
     assert_eq!(
         effects,
         [
@@ -99,23 +104,23 @@ fn the_phone_works_a_room_through_the_schema() {
     );
     assert!(tap(&mut model, "tab", "", 0).is_empty(), "linking already");
     // Before the welcome a line is not sent, and stays in the field.
-    assert!(tap(&mut model, "say", "#lab", 0).is_empty());
-    assert_eq!(screen(&model).input, "#lab");
+    assert!(tap(&mut model, "say", "hello", 0).is_empty());
+    assert_eq!(screen(&model).input, "hello");
 
-    hub(
+    let effects = update(
         &mut model,
-        RoomsEvent::Welcomed {
+        UiEvent::Rooms(RoomsEvent::Welcomed {
             name: Some("periculum".to_string()),
             body_limit: 350,
-        },
+        }),
     );
-    let effects = tap(&mut model, "say", "#lab", 0);
     assert_eq!(
         effects,
         [UiEffect::Rooms(RoomAsk::Join {
             room: "#lab".to_string(),
             key: None
-        })]
+        })],
+        "the welcome sends the join that linked"
     );
     hub(
         &mut model,
@@ -221,9 +226,12 @@ fn without_a_hub_there_is_no_tab() {
     let tabs = model.scene(LayoutClass::Compact).tabs.expect("the tab bar");
     assert!(tabs.items.iter().all(|tab| tab.id != TabId::Rooms));
 
+    // The rooms are Explore's (1578): with a hub or without, the bar is
+    // the same three buttons.
     let (_home, model) = phone(Some(HUB));
     let tabs = model.scene(LayoutClass::Compact).tabs.expect("the tab bar");
-    assert!(tabs.items.iter().any(|tab| tab.id == TabId::Rooms));
+    assert!(tabs.items.iter().all(|tab| tab.id != TabId::Rooms));
+    assert!(tabs.items.iter().any(|tab| tab.id == TabId::Explore));
 }
 
 #[test]

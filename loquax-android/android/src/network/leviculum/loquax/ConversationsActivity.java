@@ -84,6 +84,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     /** The Rooms tab is in front (1384), and its pane once built. */
     private boolean onRooms;
     private RoomsPane roomsPane;
+    /** Explore's list is in front (1578), and its pane once built. */
+    private boolean onExplore;
+    private ExplorePane explorePane;
     private MapPane mapPane;
     /** The map was opened on a friend from a pin: Back goes to the chats. */
     private boolean mapFromPin;
@@ -245,50 +248,16 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 select(true);
             }
         });
-        findViewById(R.id.tab_browse).setOnClickListener(new View.OnClickListener() {
+        // Explore (1578): the pages and the public rooms under one
+        // button, always there; the browser and a hub's rooms are opened
+        // from its list.
+        findViewById(R.id.tab_explore).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                browse();
+                explore();
             }
         });
-        tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
-        // The tab shows where the library has it (1337 pass two): off in the
-        // APK until its fetch through the phone's own node was seen on a device.
-        // Asked on the engine's thread (1464), hidden until it answers.
-        findViewById(R.id.tab_browse).setVisibility(View.GONE);
-        Engine.ask(new Engine.Ask<Boolean>() {
-            @Override
-            public Boolean ask() {
-                return Core.bool(Core.browseScreen(), "enabled");
-            }
-        }, new Engine.Got<Boolean>() {
-            @Override
-            public void got(Boolean enabled) {
-                findViewById(R.id.tab_browse).setVisibility(enabled ? View.VISIBLE : View.GONE);
-            }
-        });
-        findViewById(R.id.tab_rooms).setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                rooms();
-            }
-        });
-        tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, false);
-        // The tab shows where the config names a hub (1384), as on the
-        // terminal and the window: the library says so, on the engine's
-        // thread (1464).
-        findViewById(R.id.tab_rooms).setVisibility(View.GONE);
-        Engine.ask(new Engine.Ask<Boolean>() {
-            @Override
-            public Boolean ask() {
-                return Core.bool(Core.roomsScreen(), "enabled");
-            }
-        }, new Engine.Got<Boolean>() {
-            @Override
-            public void got(Boolean enabled) {
-                findViewById(R.id.tab_rooms).setVisibility(enabled ? View.VISIBLE : View.GONE);
-            }
-        });
+        tint(R.id.tab_explore_icon, R.id.tab_explore_label, Glyph.Kind.SEARCH, false);
         select(map);
     }
 
@@ -305,14 +274,16 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             mapPane.pause();
         }
         leaveBrowse();
+        hideExplore();
         onMap = false;
         onRooms = true;
         if (roomsPane == null) {
             roomsPane = new RoomsPane(this, new RoomsPane.Host() {
                 @Override
                 public void left() {
+                    // Back to Explore, which opened them (1578).
                     if (onRooms) {
-                        select(false);
+                        explore();
                     }
                 }
             });
@@ -321,12 +292,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.pane_map).setVisibility(View.GONE);
         findViewById(R.id.pane_rooms).setVisibility(View.VISIBLE);
         title.setText(R.string.tab_rooms);
-        tint(R.id.tab_chats_icon, R.id.tab_chats_label, Glyph.Kind.CHAT, false);
-        tint(R.id.tab_map_icon, R.id.tab_map_label, Glyph.Kind.PIN, false);
-        tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, true);
-        findViewById(R.id.tab_chats).setSelected(false);
-        findViewById(R.id.tab_map).setSelected(false);
-        findViewById(R.id.tab_rooms).setSelected(true);
+        exploreTab(true);
         roomsPane.show();
     }
 
@@ -341,8 +307,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 }
             });
             findViewById(R.id.pane_rooms).setVisibility(View.GONE);
-            tint(R.id.tab_rooms_icon, R.id.tab_rooms_label, Glyph.Kind.HASH, false);
-            findViewById(R.id.tab_rooms).setSelected(false);
+            exploreTab(false);
         }
     }
 
@@ -357,8 +322,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 }
             });
             findViewById(R.id.pane_browse).setVisibility(View.GONE);
-            tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, false);
-            findViewById(R.id.tab_browse).setSelected(false);
+            exploreTab(false);
         }
     }
 
@@ -374,14 +338,16 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             mapPane.pause();
         }
         leaveRooms();
+        hideExplore();
         onMap = false;
         onBrowse = true;
         if (browsePane == null) {
             browsePane = new BrowsePane(this, new BrowsePane.Host() {
                 @Override
                 public void left() {
+                    // Back to Explore, which opened it (1578).
                     if (onBrowse) {
-                        select(false);
+                        explore();
                     }
                 }
             });
@@ -390,13 +356,92 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.pane_map).setVisibility(View.GONE);
         findViewById(R.id.pane_browse).setVisibility(View.VISIBLE);
         title.setText(R.string.tab_browse);
-        tint(R.id.tab_chats_icon, R.id.tab_chats_label, Glyph.Kind.CHAT, false);
-        tint(R.id.tab_map_icon, R.id.tab_map_label, Glyph.Kind.PIN, false);
-        tint(R.id.tab_browse_icon, R.id.tab_browse_label, Glyph.Kind.SEARCH, true);
-        findViewById(R.id.tab_chats).setSelected(false);
-        findViewById(R.id.tab_map).setSelected(false);
-        findViewById(R.id.tab_browse).setSelected(true);
+        exploreTab(true);
         browsePane.show();
+    }
+
+    /** The Explore button lit (the list, the browser or a hub's rooms in front) or not. */
+    private void exploreTab(boolean on) {
+        if (on) {
+            tint(R.id.tab_chats_icon, R.id.tab_chats_label, Glyph.Kind.CHAT, false);
+            tint(R.id.tab_map_icon, R.id.tab_map_label, Glyph.Kind.PIN, false);
+            findViewById(R.id.tab_chats).setSelected(false);
+            findViewById(R.id.tab_map).setSelected(false);
+        }
+        tint(R.id.tab_explore_icon, R.id.tab_explore_label, Glyph.Kind.SEARCH, on);
+        findViewById(R.id.tab_explore).setSelected(on);
+    }
+
+    /**
+     * Explore (1578): the pages and the public rooms, its pane drawn by
+     * {@link ExplorePane} from the library's screen. A page it opens is
+     * the browser, a hub it picks the rooms; both come back here.
+     */
+    private void explore() {
+        if (query.getVisibility() == View.VISIBLE) {
+            searching(false);
+        }
+        if (onMap && mapPane != null) {
+            mapPane.pause();
+        }
+        if (onBrowse) {
+            onBrowse = false;
+            findViewById(R.id.pane_browse).setVisibility(View.GONE);
+        }
+        if (onRooms) {
+            onRooms = false;
+            findViewById(R.id.pane_rooms).setVisibility(View.GONE);
+        }
+        onMap = false;
+        onExplore = true;
+        if (explorePane == null) {
+            explorePane = new ExplorePane(this, new ExplorePane.Host() {
+                @Override
+                public void left() {
+                    if (onExplore) {
+                        select(false);
+                    }
+                }
+
+                @Override
+                public void page() {
+                    browse();
+                }
+
+                @Override
+                public void rooms() {
+                    ConversationsActivity.this.rooms();
+                }
+            });
+        }
+        findViewById(R.id.pane_chats).setVisibility(View.GONE);
+        findViewById(R.id.pane_map).setVisibility(View.GONE);
+        findViewById(R.id.pane_explore).setVisibility(View.VISIBLE);
+        title.setText(R.string.tab_explore);
+        exploreTab(true);
+        explorePane.show();
+    }
+
+    /** Explore's list gives way to what it opened; the model keeps it open beneath. */
+    private void hideExplore() {
+        if (onExplore) {
+            onExplore = false;
+            findViewById(R.id.pane_explore).setVisibility(View.GONE);
+        }
+    }
+
+    /** Explore gives way to the chats or the map, if it is in front. */
+    private void leaveExplore() {
+        if (onExplore) {
+            hideExplore();
+            Engine.run(new Engine.Call() {
+                @Override
+                public String run() {
+                    return Core.explore("chats", "", "", 0);
+                }
+            });
+            exploreTab(false);
+        }
     }
 
     /** Show the map (`true`) or the chats, each pane keeping its state. */
@@ -407,6 +452,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         onMap = map;
         leaveBrowse();
         leaveRooms();
+        leaveExplore();
         if (map && mapPane == null) {
             mapPane = new MapPane(this, new MapPane.Host() {
                 @Override
@@ -662,16 +708,23 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             searching(false);
             return;
         }
-        // An open room's back to the list, then the chats (1384).
+        // An open room's back to the list, then Explore (1384, 1578).
         if (onRooms) {
             if (!roomsPane.back()) {
-                select(false);
+                explore();
             }
             return;
         }
-        // The browser's back while it has one, then the chats (1337).
+        // The browser's back while it has one, then Explore (1337, 1578).
         if (onBrowse) {
             if (!browsePane.back()) {
+                explore();
+            }
+            return;
+        }
+        // Explore's field cleared, then the chats (1578).
+        if (onExplore) {
+            if (!explorePane.back()) {
                 select(false);
             }
             return;

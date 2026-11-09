@@ -893,8 +893,9 @@ it). A missing cell is the next order.
 <!-- intent-inventory:begin (loquax/src/ui/inventory.rs) -->
 | intent | what the user does | phone | window | terminal | M9 |
 |---|---|---|---|---|---|
-| `Tab` | a tab of the bar (Chats, Map, Browse, Rooms) | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no key switches the tab |
+| `Tab` | a tab of the bar (Chats, Map, Explore) | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no key switches the tab |
 | `Browse` | a verb of the hosted browser in the Browse tab | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: the M9 has no Browse tab |
+| `Explore` | the Explore tab: search, order, open a page, bookmark it, open a room, pick a hub | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: the M9 has no third button; a key and a list screen for it (handheld page) |
 | `Back` | back: the bar's arrow, Esc, the M9's back key, leaving the profile | built (`session.rs`) | built (`gui.rs`) | built (key) | built (`keys.rs`) |
 | `OpenChat` | a tap or click on a conversation's row | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | built (`keys.rs`) |
 | `CloseChat` | leave the open chat for the list | built (`session.rs`) | built (`gui.rs`) | n/a: the list stands beside the chat; Back moves the keys to it | n/a: Back moves the keys to the list |

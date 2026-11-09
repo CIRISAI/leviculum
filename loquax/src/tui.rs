@@ -1713,6 +1713,9 @@ pub fn draw_screen(
     if model.rooms.showing() {
         return draw_rooms(frame, model);
     }
+    if loquax::ui::explore::Explore::showing(model) {
+        return draw_explore(frame, model);
+    }
     match model.browse.showing() {
         true => lnomad::tui::view(
             &model.browse.model,
@@ -1847,6 +1850,163 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
             "Enter send │ Alt-p who is here │ Alt-l leave room │ Esc back".to_string()
         }
         None => "Enter join │ ↑↓ rooms │ Esc chats".to_string(),
+    };
+    frame.render_widget(
+        Paragraph::new(foot),
+        Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+    );
+}
+
+/// The Explore tab (1578) over the whole terminal: its name on top, the
+/// search field, the pages under their headings (`name ·hash4`, when last
+/// seen, hops, `*` for a bookmark), then the public rooms: the rooms the
+/// reader is in, the hubs and the hubs heard on the mesh. The cursor's
+/// row is marked `▌`; the window scrolls to keep it in view. Under it the
+/// keys or the toast.
+fn draw_explore(frame: &mut Frame, model: &Model) {
+    use loquax::ui::strings::{Arg as SaidArg, StrId, Text as Said};
+    let lang = model.lang;
+    let node = loquax::ui::explore::node(model);
+    let area = frame.area();
+    if area.height < 6 || area.width < 20 {
+        return;
+    }
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let quiet = Style::default().add_modifier(Modifier::DIM);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            Said::key(StrId::TabExplore).resolve(lang),
+            bold,
+        ))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let pages = &node.pages;
+    let field = match pages.query.is_empty() {
+        true => Line::from(vec![
+            Span::raw("▏"),
+            Span::styled(pages.placeholder.resolve(lang), quiet),
+        ]),
+        false => Line::from(format!("{}▏", pages.query)),
+    };
+    frame.render_widget(
+        Paragraph::new(field).block(pane_block(&pages.sort.resolve(lang), true, Borders::ALL)),
+        Rect::new(area.x, area.y + 1, area.width, 3),
+    );
+    let mark = |on: bool| if on { "▌" } else { " " };
+    let mut lines: Vec<Line> = Vec::new();
+    let mut at: Option<usize> = None;
+    lines.push(Line::from(Span::styled(pages.title.resolve(lang), bold)));
+    if let Some(off) = &pages.off {
+        lines.push(Line::from(Span::styled(off.resolve(lang), quiet)));
+    }
+    if let Some((url, cursor)) = &pages.address {
+        if *cursor {
+            at = Some(lines.len());
+        }
+        let words = Said::Key(
+            StrId::ExploreOpenAddress,
+            Vec::from([SaidArg::Str(url.clone())]),
+        );
+        lines.push(Line::from(format!(
+            "{}{}",
+            mark(*cursor),
+            words.resolve(lang)
+        )));
+    }
+    for group in &pages.groups {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", group.heading.resolve(lang)),
+            quiet,
+        )));
+        for page in &group.rows {
+            if page.cursor {
+                at = Some(lines.len());
+            }
+            let mut said = Vec::new();
+            if let Some(seen) = &page.seen {
+                said.push(seen.resolve(lang));
+            }
+            if let Some(hops) = &page.hops {
+                said.push(hops.resolve(lang));
+            }
+            let star = if page.bookmarked { "* " } else { "  " };
+            lines.push(Line::from(vec![
+                Span::raw(format!("{}{star}{}", mark(page.cursor), page.label)),
+                Span::styled(format!("  {}", said.join(" · ")), quiet),
+            ]));
+        }
+    }
+    if let Some(empty) = &pages.empty {
+        lines.push(Line::from(Span::styled(empty.resolve(lang), quiet)));
+    }
+    let rooms = &node.rooms;
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(rooms.title.resolve(lang), bold)));
+    for (i, room) in rooms.joined.iter().enumerate() {
+        let cursor = rooms.joined_cursor == Some(i);
+        if cursor {
+            at = Some(lines.len());
+        }
+        let unread = match room.unread {
+            0 => String::new(),
+            n => format!(" ({n})"),
+        };
+        let public = room.public.resolve(lang);
+        let public = match model.ascii {
+            true => format!(" ({public})"),
+            false => format!(" {} {public}", loquax::ui::rooms::PUBLIC_MARK),
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{}{}", mark(cursor), room.name)),
+            Span::styled(public, quiet),
+            Span::raw(unread),
+        ]));
+    }
+    let hub = |row: &loquax::ui::explore::HubRow, lines: &mut Vec<Line>, at: &mut Option<usize>| {
+        if row.cursor {
+            *at = Some(lines.len());
+        }
+        let chosen = if row.chosen { " ✓" } else { "" };
+        let value = row
+            .value
+            .as_ref()
+            .map(|v| v.resolve(lang))
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::raw(format!(
+                "{}{}{chosen}",
+                mark(row.cursor),
+                row.name.resolve(lang)
+            )),
+            Span::styled(format!("  {value}"), quiet),
+        ]));
+    };
+    for row in &rooms.hubs {
+        hub(row, &mut lines, &mut at);
+    }
+    if !rooms.heard.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", rooms.heard_title.resolve(lang)),
+            quiet,
+        )));
+        for row in &rooms.heard {
+            hub(row, &mut lines, &mut at);
+        }
+    }
+    if let Some(empty) = &rooms.empty {
+        lines.push(Line::from(Span::styled(empty.resolve(lang), quiet)));
+    }
+    let body = Rect::new(area.x, area.y + 4, area.width, area.height - 5);
+    let inner = usize::from(body.height.saturating_sub(2)).max(1);
+    let skip = at.map_or(0, |at| (at + 1).saturating_sub(inner));
+    let lines: Vec<Line> = lines.into_iter().skip(skip).collect();
+    frame.render_widget(
+        Paragraph::new(lines).block(pane_block("", false, Borders::ALL)),
+        body,
+    );
+    let foot = match model.current_toast() {
+        Some(toast) => toast.text.clone(),
+        None => "Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats".to_string(),
     };
     frame.render_widget(
         Paragraph::new(foot),
@@ -2684,9 +2844,18 @@ mod tests {
         model.rooms.hub = Some(HUB);
         // Told before (1577): no sentence over the golden.
         model.rooms.told = Some(HUB);
+        // Opening the rooms links nothing; the first join does (1578).
         let effects = update(&mut model, key('R'));
-        assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
+        assert_eq!(effects, vec![]);
         assert!(model.rooms.showing());
+        for c in "#lab".chars() {
+            update(&mut model, key(c));
+        }
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
         for event in [
             RoomsEvent::Welcomed {
                 name: Some("periculum".into()),
@@ -2785,6 +2954,72 @@ mod tests {
         update(&mut off, key('R'));
         assert!(!off.rooms.showing());
         assert!(!whole_screen(&off).contains("A room is live"));
+    }
+
+    /// 1578: `E` brings Explore to the front over the whole terminal: the
+    /// field, the pages under their headings (a bookmark on top, then by
+    /// last seen), the public rooms with the shipped hubs and the ones
+    /// heard; the golden. Enter on a page opens lnomad's screen, its `q`
+    /// comes back to the list, Esc leaves for the chats.
+    #[test]
+    fn explore_is_one_screen_for_pages_and_rooms() {
+        use lnomad::DiscoveredNode;
+        let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        use loquax::ui::browse::BrowseEvent;
+        const NOW: i64 = 1_800_000_000;
+        let node = |byte: u8, name: &str, ago: i64, hops| DiscoveredNode {
+            dest_hash: [byte; 16],
+            name: Some(name.to_string()),
+            first_seen: (NOW - ago) as u64,
+            last_seen: (NOW - ago) as u64,
+            hops: Some(hops),
+        };
+        let mut model = Model::new(&[]);
+        model.browse.enabled = true;
+        model.now = Some(loquax::when::WallTime {
+            unix_secs: NOW,
+            offset_secs: 0,
+        });
+        browse_like_the_terminal(&mut model);
+        for found in [
+            node(0x5a, "Marcel's node", 600, 2),
+            node(0x7c, "Relay Süd", 2 * 86_400, 1),
+        ] {
+            update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+        }
+        model.browse.model.bookmarks.add(lnomad::Bookmark {
+            url: format!("{}:/page/index.mu", "7c".repeat(16)),
+            title: "Relay Süd".to_string(),
+        });
+        update(&mut model, key('E'));
+        assert!(loquax::ui::explore::Explore::showing(&model));
+        let list = whole_screen(&model);
+        for words in ["Explore", "Pages", "Bookmarks", "Today", "Public rooms"] {
+            assert!(list.contains(words), "{words:?} in\n{list}");
+        }
+        same_text("tui-explore.txt", &list);
+        // Down to Marcel's row (the bookmark is first), Enter opens it.
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        );
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        assert!(model.browse.showing());
+        update(&mut model, key('q'));
+        assert!(
+            loquax::ui::explore::Explore::showing(&model),
+            "back to the list"
+        );
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert!(!model.explore.open);
+        assert!(!whole_screen(&model).contains("Public rooms"));
     }
 
     /// 1369: the Browse tab in the terminal is lnomad's own screen, drawn

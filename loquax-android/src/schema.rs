@@ -163,6 +163,9 @@
 //! [`Query::Rooms`] with its [`RoomsScreen`]. An older app sends neither
 //! and shows no Rooms tab; the session links to no hub until the tab is
 //! opened.
+//! Explore (1578) came within version 1 too: [`Request::Explore`] and
+//! [`Query::Explore`] with its [`ExploreScreen`]. An older app sends
+//! neither and keeps its Browse and Rooms buttons.
 
 use serde::{Deserialize, Serialize};
 
@@ -533,6 +536,20 @@ pub enum Request {
         #[serde(default)]
         index: i64,
     },
+    /// A verb of the Explore tab (1578): `tab`, `chats`, `typed` (the
+    /// search field's `text`), `az` (`index` 1 for A-Z), `open` (a page's
+    /// `dest`), `address` (the field's address), `bookmark` (a page's
+    /// `dest`), `room` (the `index`th room the reader is in), `hub` (a
+    /// hub's `dest`).
+    Explore {
+        verb: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        dest: String,
+        #[serde(default)]
+        index: i64,
+    },
     #[serde(rename = "addcontact")]
     AddContact {
         lxma: String,
@@ -857,6 +874,8 @@ pub enum Query {
     Browse,
     /// The Rooms tab (1384); answered as [`RoomsScreen`].
     Rooms,
+    /// The Explore tab (1578); answered as [`ExploreScreen`].
+    Explore,
     /// The settings' sections (1450), the one list every target shows
     /// (`loquax::ui::settings`); answered as [`SettingsList`].
     Settings,
@@ -2294,6 +2313,91 @@ pub struct RoomsScreen {
     /// With no room open, where the room would be: how to join one.
     #[serde(default)]
     pub empty: String,
+}
+
+/// What [`Query::Explore`] answers (1578): the Explore tab
+/// (`loquax::ui::explore::node`) in the phone's language, flat for
+/// `MsgPack.java`. Java draws it and decides nothing: the order, the
+/// headings, what a row opens are the library's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExploreScreen {
+    pub v: u32,
+    /// What is in front: `list` (the tab's list), `browse` (a page it
+    /// opened), `rooms` (a hub's rooms it opened), or empty while the tab
+    /// is behind.
+    #[serde(default)]
+    pub showing: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub pages_title: String,
+    /// The search field: what it holds and its hint.
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub placeholder: String,
+    /// The order's toggle: its words, and A-Z on.
+    #[serde(default)]
+    pub sort: String,
+    #[serde(default)]
+    pub az: bool,
+    /// "Open" and the address while the field holds one; empty otherwise.
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub pages: Vec<ExplorePage>,
+    /// The one sentence where there is no page to list.
+    #[serde(default)]
+    pub pages_empty: String,
+    /// The one sentence where pages cannot be opened on this device.
+    #[serde(default)]
+    pub pages_off: String,
+    #[serde(default)]
+    pub rooms_title: String,
+    /// The rooms the reader is in.
+    #[serde(default)]
+    pub joined: Vec<RoomsRow>,
+    /// The hubs Loquax ships and the reader's own.
+    #[serde(default)]
+    pub hubs: Vec<ExploreHub>,
+    /// "Hubs in your mesh", and those heard announcing.
+    #[serde(default)]
+    pub heard_title: String,
+    #[serde(default)]
+    pub heard: Vec<ExploreHub>,
+    #[serde(default)]
+    pub rooms_empty: String,
+}
+
+/// A page of [`ExploreScreen`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplorePage {
+    /// The heading over it, on the first row of a group; empty after.
+    #[serde(default)]
+    pub heading: String,
+    /// Its destination in hex, what `open` and `bookmark` send.
+    pub dest: String,
+    /// `name ·hash4`.
+    pub label: String,
+    /// "seen 2 h ago · 3 hops".
+    #[serde(default)]
+    pub said: String,
+    #[serde(default)]
+    pub bookmarked: bool,
+}
+
+/// A hub of [`ExploreScreen`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExploreHub {
+    /// Its destination in hex, what `hub` sends.
+    pub dest: String,
+    pub name: String,
+    /// How far, "suggested", "no answer".
+    #[serde(default)]
+    pub value: String,
+    /// The public rooms' hub in force.
+    #[serde(default)]
+    pub chosen: bool,
 }
 
 /// What [`Query::Settings`] answers (1450, walk 1 finding 21): the

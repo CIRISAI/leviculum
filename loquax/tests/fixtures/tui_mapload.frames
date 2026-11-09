@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: before the load ---
-┌  tui───────────────────┐┌● map────────────────────────────────── loading map ┐
+┌  tui───────────────────┐┌● map───────────────── loading the map of this area ┐
 │▌them             14:00 ││  ·        · ·                        · ·        ·  │
 │▌◎ position · live   ⌖  ││ ·        ·             100 m            ·        · │
 │                        ││·       ·         · · ·      · · ·         ·       ·│
@@ -99,7 +99,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: loading the area ---
-┌  tui───────────────────┐┌● map────────────────────────────────── loading map ┐
+┌  tui───────────────────┐┌● map───────────────── loading the map of this area ┐
 │▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │

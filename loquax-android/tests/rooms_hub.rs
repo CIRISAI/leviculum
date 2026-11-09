@@ -113,12 +113,14 @@ async fn the_phone_joins_a_room_and_its_line_comes_back_as_you() {
     let (welcomed, joined, echoed, long, parted) = tokio::task::spawn_blocking(move || {
         let closed = screen(&s);
         assert!(closed.enabled && !closed.open, "the tab is there, closed");
+        // Opening the rooms links nothing; the first join does (1578),
+        // and the hub's welcome sends it.
         rooms(&s, "tab", "", 0);
+        rooms(&s, "say", "#lab", 0);
         let welcomed = until(&s, 60, "the hub's welcome", |shown| {
             shown.open && shown.status.is_empty()
         });
-        assert!(welcomed.open && welcomed.room.is_empty(), "{welcomed:?}");
-        rooms(&s, "say", "#lab", 0);
+        assert!(welcomed.open, "{welcomed:?}");
         let joined = until(&s, 30, "the room", |shown| shown.room == "#lab");
         rooms(&s, "say", "rrc line from the phone", 0);
         let echoed = until(&s, 30, "the echo", |shown| {
@@ -160,7 +162,10 @@ async fn the_phone_joins_a_room_and_its_line_comes_back_as_you() {
     assert_eq!((ours.who.as_str(), ours.ours), ("you", true));
     assert!(echoed.input.is_empty(), "a line that went leaves the field");
     assert!(long.lines.len() == echoed.lines.len());
-    assert!(parted.room.is_empty() && welcomed.rows.is_empty());
+    // The join rides on the welcome now (1578), so the welcomed screen may
+    // already list #lab; after the part nothing is.
+    assert!(parted.room.is_empty() && parted.rows.is_empty());
+    assert!(welcomed.status.is_empty(), "the link was up: {welcomed:?}");
 
     {
         let seen = hub.seen.lock().expect("seen");

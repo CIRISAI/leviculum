@@ -312,7 +312,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:252`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:256`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -813,7 +813,7 @@ or fills a gap it leaves:
   blank row under the last of them when an unpinned one follows. No key and
   no mouse target, as the element text has it.
 - **The palette ranks** a name typed whole and then one it begins before
-  the scattered matches (`leviculum-ui/src/commands.rs:264`); without it
+  the scattered matches (`leviculum-ui/src/commands.rs:268`); without it
   `:pin` and `Enter` ran `previous conversation`, whose letters hold
   `p`, `i`, `n` in order.
 - **The unread count** and the `new` rule survive a restart: a conversation
@@ -945,7 +945,7 @@ first rung it is.
 `auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `loquax`'s config file
-  (`loquax/src/config.rs:352`, which holds `key = value` lines), `auto` the
+  (`loquax/src/config.rs:358`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
   has it (`lnomad/src/main.rs:57`);
@@ -954,7 +954,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/intent.rs:350`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:5932`).
+  (`loquax/src/ui.rs:5948`).
 
 #### 3. What colour carries and what it must not carry alone
 

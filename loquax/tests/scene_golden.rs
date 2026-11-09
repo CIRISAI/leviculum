@@ -317,6 +317,72 @@ fn the_group_screens_are_the_golden_scenes() {
     );
 }
 
+/// 1578: the Explore tab, the pages and the public rooms under one button,
+/// in both classes: a bookmark on top, the pages a home and the device
+/// heard by last seen under "Today", "This week" and "Older", the shipped
+/// hubs, and a hub heard on the mesh; then the same list A-Z and filtered
+/// by a short hash.
+#[test]
+fn the_explore_tab_is_the_golden_scene() {
+    use lnomad::DiscoveredNode;
+    use loquax::ui::browse::BrowseEvent;
+    use loquax::ui::explore::ExploreEvent;
+    use loquax::ui::scene::TabId;
+
+    const NOW: i64 = 1_800_000_000;
+    let node = |byte: u8, name: Option<&str>, ago: i64, hops| DiscoveredNode {
+        dest_hash: [byte; 16],
+        name: name.map(str::to_string),
+        first_seen: (NOW - ago) as u64,
+        last_seen: (NOW - ago) as u64,
+        hops,
+    };
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    model.browse.enabled = true;
+    model.now = Some(loquax::when::WallTime {
+        unix_secs: NOW,
+        offset_secs: 3_600,
+    });
+    for found in [
+        node(0x5a, Some("Marcel's node"), 600, Some(2)),
+        node(0x7c, Some("Relay Süd"), 2 * 86_400, Some(1)),
+        node(0x3d, None, 20 * 86_400, None),
+        node(0x41, Some("Bergwacht"), 5 * 3_600, Some(4)),
+    ] {
+        update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+    }
+    model.browse.model.bookmarks.add(lnomad::Bookmark {
+        url: format!("{}:/page/index.mu", "7c".repeat(16)),
+        title: "Relay Süd".to_string(),
+    });
+    update(
+        &mut model,
+        UiEvent::Rooms(loquax::ui::rooms::RoomsEvent::Heard(
+            loquax::ui::hubs::HeardHub {
+                hash: [0x99; 16],
+                name: Some("Werkstatt".to_string()),
+                hops: Some(3),
+                first: NOW - 60,
+                last: NOW - 60,
+                answered: None,
+            },
+        )),
+    );
+    update(&mut model, UiEvent::Tab(TabId::Explore));
+    check("scene-explore.json", &model.scene(LayoutClass::Compact));
+    check("scene-explore-wide.json", &model.scene(LayoutClass::Wide));
+    update(&mut model, UiEvent::Explore(ExploreEvent::Az(true)));
+    update(
+        &mut model,
+        UiEvent::Explore(ExploreEvent::Typed("·5a".to_string())),
+    );
+    check(
+        "scene-explore-search.json",
+        &model.scene(LayoutClass::Compact),
+    );
+}
+
 /// 1337: the Browse tab as the phone and the M9 get it, lnomad's scene
 /// inside Loquax's: the list it opens on (two NomadNet nodes the announces
 /// named), a page from the first, and the same page with its form field

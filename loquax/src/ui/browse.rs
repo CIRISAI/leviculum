@@ -55,6 +55,16 @@ pub struct Browse {
     pub outgoing: Vec<crate::home::pages::BookmarkRow>,
 }
 
+/// How many NomadNet nodes the hosted browser keeps (1578): as many as a
+/// home remembers on a desktop and a phone, which have the memory, so the
+/// Explore list a home hands over is whole; lnomad's own
+/// [`lnomad::discovery::NODE_CAPACITY`] on the M9, whose heap is counted.
+pub const REGISTRY: usize = if cfg!(feature = "std") {
+    4096
+} else {
+    lnomad::discovery::NODE_CAPACITY
+};
+
 /// The browser's cells before the platform says its size: the M9's 53 by
 /// 24 (section 2.2 of the concept page).
 pub const CELLS: (u16, u16) = (53, 24);
@@ -67,6 +77,7 @@ impl Default for Browse {
             ..Model::default()
         };
         model.relayout(usize::from(CELLS.0).saturating_sub(1).max(1));
+        model.node_registry.set_capacity(REGISTRY);
         Browse {
             enabled: false,
             open: false,
@@ -196,7 +207,7 @@ pub(super) fn tab<B: InputBuffer + Default>(model: &mut UiModel<B>, tab: TabId) 
     match tab {
         TabId::Browse if model.browse.enabled => model.browse.show(model.lang),
         TabId::Browse => {}
-        TabId::Chats | TabId::Map | TabId::Rooms => model.browse.open = false,
+        TabId::Chats | TabId::Map | TabId::Rooms | TabId::Explore => model.browse.open = false,
     }
     Vec::new()
 }
@@ -303,6 +314,7 @@ pub fn effects_of<B: InputBuffer + Default>(
                     model.select(index);
                     model.focus = Pane::Compose;
                     model.browse.open = false;
+                    model.explore.open = false;
                 }
             }
             Effect::Quit => {
@@ -463,7 +475,11 @@ mod tests {
         let scene = model.scene(LayoutClass::Compact);
         assert_eq!(scene.screen, ScreenId::Browse);
         let tabs = scene.tabs.expect("the tab bar");
-        assert_eq!(tabs.active, TabId::Browse);
+        assert_eq!(
+            tabs.active,
+            TabId::Explore,
+            "the browser is Explore's (1578)"
+        );
         let browser = scene.browse.expect("the browser's scene");
         let places = browser.places.expect("the places panel");
         assert!(
@@ -487,7 +503,10 @@ mod tests {
         let mut model = UiModel::<Buffer>::new(&[]);
         update(&mut model, UiEvent::Tab(TabId::Browse));
         let scene = model.scene(LayoutClass::Compact);
-        assert_eq!(scene.screen, ScreenId::Chats);
+        // No browser: Explore's list, which says pages cannot be opened.
+        assert_eq!(scene.screen, ScreenId::Explore);
+        let explore = scene.explore.expect("Explore's list");
+        assert!(explore.pages.off.is_some());
         let tabs = scene.tabs.expect("the tab bar");
         assert!(tabs.items.iter().all(|tab| tab.id != TabId::Browse));
         assert!(browse(&mut model, BrowseIntent::Places).is_empty());
@@ -504,11 +523,26 @@ mod tests {
         let model = phone();
         let tabs = model.scene(LayoutClass::Compact).tabs.expect("tabs");
         let ids: Vec<_> = tabs.items.iter().map(|tab| tab.id).collect();
-        assert_eq!(ids, [TabId::Chats, TabId::Map, TabId::Browse]);
+        // Three buttons and no fourth (1578): the pages are Explore's.
+        assert_eq!(ids, [TabId::Chats, TabId::Map, TabId::Explore]);
         assert_eq!(
-            LoquaxNode::Tab(TabId::Browse).resource(),
-            "tab_browse",
+            LoquaxNode::Tab(TabId::Explore).resource(),
+            "tab_explore",
             "the device walk finds it"
+        );
+        let off = UiModel::<Buffer>::new(&[]);
+        let ids: Vec<_> = off
+            .scene(LayoutClass::Compact)
+            .tabs
+            .expect("tabs")
+            .items
+            .iter()
+            .map(|tab| tab.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [TabId::Chats, TabId::Map, TabId::Explore],
+            "never gone"
         );
     }
 
@@ -809,6 +843,16 @@ mod tests {
         update(&mut model, key('q'));
         assert!(!model.browse.open, "its quit leaves the tab");
         assert!(!model.quit);
+        // Explore's list, which opened it, is in front again (1578); its
+        // Esc leaves for the chats.
+        assert!(crate::ui::explore::Explore::showing(&model));
+        update(
+            &mut model,
+            UiEvent::Key(leviculum_ui::input::KeyEvent::new(
+                leviculum_ui::input::KeyCode::Esc,
+                leviculum_ui::input::KeyModifiers::NONE,
+            )),
+        );
         // Behind, `?` is the messenger's help.
         update(&mut model, key('?'));
         assert!(model.help);

@@ -1795,6 +1795,8 @@ pub(crate) async fn start(
     model.rooms.hub = config.rooms_hub;
     model.rooms.enabled = config.rooms_hub.is_some();
     model.rooms.told = config.rooms_told;
+    // The Explore tab's order (1578), per device.
+    model.explore.az = config.explore_az.unwrap_or(false);
     let nick = Some(display_name.name.clone()).filter(|n| !n.is_empty());
     let rooming = loquax::rooms_link::Rooming::start(&attached, browse_identity, nick);
     // The microphone (1276): the system's recorder, where it has one; the

@@ -2042,6 +2042,8 @@ impl Session {
             schema::Query::Zoom(ask) => return Ok(crate::viewer::answer(&ask)),
             // The Rooms tab (1384).
             schema::Query::Rooms => crate::rooms::encode(&inner.model, inner.lang, VERSION),
+            // The Explore tab (1578).
+            schema::Query::Explore => crate::explore::encode(&inner.model, inner.lang, VERSION),
             // The settings' sections (1450).
             schema::Query::Settings => schema::encode(&settings_list(inner.lang)),
             schema::Query::Links => schema::encode(&schema::Links {
@@ -2217,6 +2219,8 @@ impl Inner {
         model.rooms.hub = config.rooms_hub;
         model.rooms.enabled = config.rooms_hub.is_some();
         model.rooms.told = config.rooms_told;
+        // The Explore tab's order (1578), per device.
+        model.explore.az = config.explore_az.unwrap_or(false);
         model.reading.on = config.read_receipts.unwrap_or(true);
         model.photo_size = config.photo_size.unwrap_or_default();
         model.bar.abilities = compose::Abilities::phone(camera);
@@ -4092,7 +4096,8 @@ pub enum Platform {
     /// intent carried, the tab switch, or the page view's size.
     Browse(UiEvent),
     /// A verb of the Rooms tab (1384), as the model's events: the tab
-    /// switch, a room opened, or the input line typed and sent.
+    /// switch, a room opened, or the input line typed and sent; and one of
+    /// the Explore tab (1578), which are model events the same way.
     Rooms(Vec<UiEvent>),
 }
 
@@ -4215,6 +4220,16 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
         }
         R::Rooms { verb, text, index } => {
             return crate::rooms::events(&verb, &text, index)
+                .map(|events| Decoded::Platform(Platform::Rooms(events)))
+        }
+        // Explore (1578): its verbs are the model's events, as the Rooms'.
+        R::Explore {
+            verb,
+            text,
+            dest,
+            index,
+        } => {
+            return crate::explore::events(&verb, &text, &dest, index)
                 .map(|events| Decoded::Platform(Platform::Rooms(events)))
         }
         R::Rename { peer, name } => Intent::Rename {

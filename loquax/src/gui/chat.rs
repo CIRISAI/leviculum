@@ -313,6 +313,8 @@ impl App {
             // The Rooms (1379): talk, as the chats, until a room icon is
             // drawn.
             TabId::Rooms => Icon::Chats,
+            // Explore (1578): what one looks for, pages and rooms.
+            TabId::Explore => Icon::Search,
         };
         let badge = tab.badge.map(|count| {
             chrome::badge(count, size::BADGE_TEXT - 2.0, size::BADGE_CORNER, p).padding([0, 5])
@@ -336,8 +338,8 @@ impl App {
         let active = match self.screen {
             super::Screen::Chats | super::Screen::Settings => TabId::Chats,
             super::Screen::Map => TabId::Map,
-            super::Screen::Browse => TabId::Browse,
-            super::Screen::Rooms => TabId::Rooms,
+            // The browser and a hub's rooms are opened from Explore.
+            super::Screen::Browse | super::Screen::Rooms | super::Screen::Explore => TabId::Explore,
         };
         let items = tabs
             .items
@@ -696,6 +698,201 @@ impl App {
                 right.push(container(text(notice.clone()).size(13).color(quiet)).padding([0, 16]));
         }
         container(row![left, right.width(Length::Fill)].height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// The Explore tab (1578): the pages and the public rooms under one
+    /// button, one scroll. On top the search field, which also takes a
+    /// pasted address, and the order's toggle; the pages under their
+    /// headings, a press opens one, the star bookmarks it; then the rooms
+    /// the reader is in, the hubs Loquax ships and the reader's own, and
+    /// the hubs heard on the mesh. Each section says in one sentence when
+    /// it has nothing.
+    pub(super) fn explore_pane(&self) -> Element<'_, Message> {
+        use loquax::ui::explore::ExploreEvent;
+        let Some(node) = &self.seen.scene.explore else {
+            return Space::new().into();
+        };
+        let t = self.tokens();
+        let p = palette(t);
+        let lang = self.lang;
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let heading =
+            |words: String| container(text(words).size(13).color(quiet)).padding([10, 16]);
+        let pages = &node.pages;
+        let field = text_input(&pages.placeholder.resolve(lang), &pages.query)
+            .on_input(|typed| Message::Explore(ExploreEvent::Typed(typed)))
+            .on_submit(Message::Explore(ExploreEvent::OpenAddress))
+            .size(size::BODY)
+            .padding([10, 16])
+            .style(move |theme: &Theme, status| {
+                let mut style = text_input::default(theme, status);
+                style.background = Background::Color(colour(t.bar));
+                style.border = border::rounded(size::COMPOSE_CORNER);
+                style
+            });
+        let sort = button(text(pages.sort.resolve(lang)).size(13))
+            .on_press(Message::Explore(ExploreEvent::Az(!pages.az)))
+            .style(button::text);
+        let mut list = column![
+            container(
+                text(pages.title.resolve(lang))
+                    .size(size::ROW_NAME)
+                    .color(ink)
+            )
+            .padding([12, 16]),
+            container(row![field, sort].spacing(8).align_y(Alignment::Center)).padding([0, 12]),
+        ]
+        .spacing(2);
+        if let Some(off) = &pages.off {
+            list = list.push(heading(off.resolve(lang)));
+        }
+        if let Some((url, _)) = &pages.address {
+            let words = Text::Key(
+                StrId::ExploreOpenAddress,
+                Vec::from([Arg::Str(url.clone())]),
+            );
+            list = list.push(chrome::list_item(
+                container(text(words.resolve(lang)).size(size::ROW_NAME).color(ink))
+                    .padding([8, 16]),
+                false,
+                Message::Explore(ExploreEvent::OpenAddress),
+                p,
+            ));
+        }
+        for group in &pages.groups {
+            list = list.push(heading(group.heading.resolve(lang)));
+            for page in &group.rows {
+                let mut said = Vec::new();
+                if let Some(seen) = &page.seen {
+                    said.push(seen.resolve(lang));
+                }
+                if let Some(hops) = &page.hops {
+                    said.push(hops.resolve(lang));
+                }
+                let star = button(
+                    text(if page.bookmarked {
+                        "\u{2605}"
+                    } else {
+                        "\u{2606}"
+                    })
+                    .size(18),
+                )
+                .on_press(Message::Explore(ExploreEvent::Bookmark(page.dest)))
+                .style(button::text);
+                let line = row![
+                    column![
+                        text(page.label.clone()).size(size::ROW_NAME).color(ink),
+                        text(said.join(" · ")).size(13).color(quiet),
+                    ]
+                    .width(Length::Fill),
+                    star,
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center);
+                list = list.push(chrome::list_item(
+                    container(line).padding([6, 16]),
+                    // The terminal's cursor is the terminal's: the pointer
+                    // marks nothing here.
+                    false,
+                    Message::Explore(ExploreEvent::OpenPage(page.dest)),
+                    p,
+                ));
+            }
+        }
+        if let Some(empty) = &pages.empty {
+            list = list.push(heading(empty.resolve(lang)));
+        }
+        let rooms = &node.rooms;
+        list = list.push(
+            container(
+                text(rooms.title.resolve(lang))
+                    .size(size::ROW_NAME)
+                    .color(ink),
+            )
+            .padding([16, 16]),
+        );
+        for (i, room) in rooms.joined.iter().enumerate() {
+            let mut line = row![
+                avatar(&room.avatar, size::BAR_AVATAR, t),
+                text(room.name.clone()).size(size::ROW_NAME).color(ink),
+                text(format!(
+                    "{} {}",
+                    loquax::ui::rooms::PUBLIC_MARK,
+                    room.public.resolve(lang)
+                ))
+                .size(13)
+                .color(quiet)
+                .width(Length::Fill),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center);
+            if room.unread > 0 {
+                line = line.push(chrome::badge(
+                    room.unread,
+                    size::BADGE_TEXT,
+                    size::BADGE_CORNER,
+                    p,
+                ));
+            }
+            list = list.push(chrome::list_item(
+                container(line).padding([8, 16]),
+                false,
+                Message::Explore(ExploreEvent::OpenRoom(i)),
+                p,
+            ));
+        }
+        let hub = |hub: &loquax::ui::explore::HubRow| {
+            let mut words = hub.name.resolve(lang);
+            if hub.chosen {
+                words.push_str(" \u{2713}");
+            }
+            let value = hub
+                .value
+                .as_ref()
+                .map(|v| v.resolve(lang))
+                .unwrap_or_default();
+            chrome::list_item(
+                container(
+                    row![
+                        text(words)
+                            .size(size::ROW_NAME)
+                            .color(ink)
+                            .width(Length::Fill),
+                        text(value).size(13).color(quiet),
+                    ]
+                    .spacing(12)
+                    .align_y(Alignment::Center),
+                )
+                .padding([8, 16]),
+                false,
+                Message::Explore(ExploreEvent::Hub(hub.hash)),
+                p,
+            )
+        };
+        for row in &rooms.hubs {
+            list = list.push(hub(row));
+        }
+        if !rooms.heard.is_empty() {
+            list = list.push(heading(rooms.heard_title.resolve(lang)));
+            for row in &rooms.heard {
+                list = list.push(hub(row));
+            }
+        }
+        if let Some(empty) = &rooms.empty {
+            list = list.push(heading(empty.resolve(lang)));
+        }
+        if let Some(notice) = &self.seen.notice {
+            list = list.push(heading(notice.clone()));
+        }
+        container(scrollable(list.padding([0, 0])).height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_: &Theme| container::Style {

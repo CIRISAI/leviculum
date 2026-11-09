@@ -103,4 +103,9 @@
     <item name="take_back" type="id" />
     <item name="profile_advanced" type="id" />
     <item name="profile_advanced_body" type="id" />
+    <!-- Explore (1578): what the device walk finds the tab's list by. -->
+    <item name="explore_search" type="id" />
+    <item name="explore_sort" type="id" />
+    <item name="explore_list" type="id" />
+    <item name="explore_address" type="id" />
 </resources>

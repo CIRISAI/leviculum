@@ -4763,6 +4763,29 @@
           "args": [],
           "key": "map"
         }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_explore"
+          },
+          "resource": "tab_explore",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
+        },
+        "badge": null,
+        "id": "Explore",
+        "label": {
+          "args": [],
+          "key": "tab_explore"
+        }
       }
     ]
   },

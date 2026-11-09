@@ -28,6 +28,8 @@
 //! writes. `browse_tab`, `off` (the default) or `on` (1337, 1369):
 //! whether the phone, the window and the terminal show the Browse tab,
 //! held back until the tab's fetch has been seen on a device.
+//! `explore_az`, `off` (the default) or `on` (1578): whether the Explore
+//! tab lists the pages A-Z instead of last seen first; its toggle writes it.
 //! `rooms_hub`, a hub's `rrc.hub` destination hash (1379): the Reticulum
 //! Relay Chat hub the Rooms tab links to; unset, there is no Rooms tab.
 //! The settings' Advanced section writes it (1577), from the shipped hubs
@@ -191,6 +193,9 @@ pub struct Config {
     /// held back until its fetch has landed on a device, and switched on
     /// by this key alone meanwhile.
     pub browse_tab: Option<bool>,
+    /// `explore_az`, when the file sets it; unset is off (1578): the
+    /// Explore tab's pages by last seen, the newest first.
+    pub explore_az: Option<bool>,
     /// `photo_size`, when the file sets it; unset is `phone`.
     pub photo_size: Option<crate::ui::photos::PhotoSize>,
     /// `map_drawing.<context>` lines: each context and the drawing
@@ -332,6 +337,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             ("map_fling", &mut config.map_fling),
             ("read_receipts", &mut config.read_receipts),
             ("browse_tab", &mut config.browse_tab),
+            ("explore_az", &mut config.explore_az),
             ("rendezvous_dial", &mut config.rendezvous_dial),
         ] {
             if key.trim() == name {

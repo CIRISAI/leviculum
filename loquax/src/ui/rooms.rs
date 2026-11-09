@@ -205,6 +205,9 @@ pub struct Rooms {
     /// The page of hubs the settings show (1599): the first
     /// [`super::settings::HUB_PAGE`] hubs on 0, "More…" turns it.
     pub hub_page: usize,
+    /// Joins asked before the hub answered (1578): the first join links,
+    /// and the hub's welcome sends them.
+    pub queued: Vec<RoomAsk>,
 }
 
 impl Default for Rooms {
@@ -223,6 +226,7 @@ impl Default for Rooms {
             told: None,
             heard: super::hubs::Heard::default(),
             hub_page: 0,
+            queued: Vec::new(),
         }
     }
 }
@@ -326,7 +330,9 @@ pub enum RoomsEvent {
 }
 
 /// A tab chosen: the Rooms come to the front, any other sends them back.
-/// The first time, the shell links to the hub.
+/// Opening them links nothing (1578, the privacy sentence of 1577): the
+/// hub learns of the reader on the first join, which links
+/// ([`submit`]), or when rooms joined before are open again.
 pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
     match tab {
         TabId::Rooms if model.rooms.enabled => {
@@ -338,10 +344,13 @@ pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
             {
                 room.unread = 0;
             }
-            link(model)
+            match model.rooms.rooms.is_empty() {
+                true => Vec::new(),
+                false => link(model),
+            }
         }
         TabId::Rooms => Vec::new(),
-        TabId::Chats | TabId::Map | TabId::Browse => {
+        TabId::Chats | TabId::Map | TabId::Browse | TabId::Explore => {
             model.rooms.open = false;
             Vec::new()
         }
@@ -401,10 +410,14 @@ pub(super) fn choose<B>(model: &mut UiModel<B>, choice: HubChoice) -> Vec<UiEffe
         effects.push(UiEffect::Rooms(RoomAsk::Close));
     }
     let told = model.rooms.told;
+    // The hubs heard stay (1578): Explore lists them beside the one chosen,
+    // and choosing one is no reason to forget the others.
+    let heard = core::mem::take(&mut model.rooms.heard);
     model.rooms = Rooms {
         enabled: hub.is_some(),
         hub,
         told,
+        heard,
         ..Rooms::default()
     };
     effects.push(UiEffect::RememberHash {
@@ -478,8 +491,9 @@ pub(super) fn fold<B: InputBuffer + Default>(
             }
             rooms.hub_name = name;
             rooms.body_limit = body_limit;
-            // A link that came back joins again what it was in.
-            let again: Vec<UiEffect> = rooms
+            // A link that came back joins again what it was in, and the
+            // first link the joins that asked for it (1578).
+            let mut again: Vec<UiEffect> = rooms
                 .rooms
                 .iter()
                 .map(|r| {
@@ -489,6 +503,7 @@ pub(super) fn fold<B: InputBuffer + Default>(
                     })
                 })
                 .collect();
+            again.extend(rooms.queued.drain(..).map(UiEffect::Rooms));
             return again;
         }
         RoomsEvent::Joined { room, nick } => {
@@ -705,15 +720,25 @@ fn submit<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
         model.toast(ToastKind::Info, text);
         return Vec::new();
     };
-    let effects = self::ask(model, asked);
-    if !effects.is_empty() {
+    let effects = self::ask(model, asked.clone());
+    if !effects.is_empty() || model.rooms.queued.contains(&asked) {
         model.rooms.input.clear();
     }
     effects
 }
 
-/// `asked` to the hub, or, before it answered, a toast that says so.
+/// `asked` to the hub, or, before it answered, a toast that says so. A
+/// join before the hub answered links to it and waits for its welcome
+/// (1578): the first join is what opens the link.
 fn ask<B>(model: &mut UiModel<B>, asked: RoomAsk) -> Vec<UiEffect> {
+    if model.rooms.state != HubState::Ready
+        && model.rooms.hub.is_some()
+        && matches!(asked, RoomAsk::Join { .. })
+    {
+        model.rooms.queued.retain(|q| q != &asked);
+        model.rooms.queued.push(asked);
+        return link(model);
+    }
     if model.rooms.state != HubState::Ready {
         let text = refused(&Refusal::NotReady).resolve(model.lang);
         model.toast(ToastKind::Error, text);
@@ -1067,6 +1092,9 @@ mod tests {
         model.rooms.enabled = true;
         model.rooms.hub = Some(HUB);
         update(&mut model, UiEvent::Tab(TabId::Rooms));
+        // The first join links (1578), and tells once.
+        rooms(&mut model, RoomsEvent::Typed("#lab".into()));
+        rooms(&mut model, RoomsEvent::Submit);
         rooms(
             &mut model,
             RoomsEvent::Welcomed {
@@ -1085,11 +1113,10 @@ mod tests {
     }
 
     /// 1577: the settings choose a shipped hub: the tab appears, the
-    /// config keeps it, nothing links yet. The first opening tells the
-    /// reader, before the link, that their name is visible, and the config
-    /// keeps that it was said; the next opening links without it. Another
-    /// hub closes the link and forgets the old rooms; none takes the tab
-    /// away and the key out.
+    /// config keeps it, nothing links yet. Opening the rooms links nothing
+    /// either (1578); the first join tells the reader, before the link,
+    /// that their name is visible, and the config keeps that it was said.
+    /// The hub's welcome sends the join that asked for the link.
     #[test]
     fn a_hub_chosen_shows_the_tab_and_the_first_link_says_the_name_is_seen() {
         let community = crate::ui::hubs::shipped()
@@ -1111,6 +1138,9 @@ mod tests {
         assert!(model.rooms.enabled, "the tab appears at once");
         assert_eq!(hub_label(&model.rooms), Text::Raw("RNS Community".into()));
         let effects = update(&mut model, UiEvent::Tab(TabId::Rooms));
+        assert_eq!(effects, [], "opening the rooms links nothing (1578)");
+        assert_eq!(model.rooms.told, None, "nothing told yet");
+        let effects = say(&mut model, "#lab");
         assert_eq!(
             effects,
             [
@@ -1120,6 +1150,29 @@ mod tests {
                 },
                 UiEffect::Rooms(RoomAsk::Open { hub: community })
             ]
+        );
+        assert!(model.rooms.input.is_empty(), "the join waits for the hub");
+        let welcomed = rooms(
+            &mut model,
+            RoomsEvent::Welcomed {
+                name: None,
+                body_limit: 350,
+            },
+        );
+        assert_eq!(
+            welcomed,
+            [UiEffect::Rooms(RoomAsk::Join {
+                room: "#lab".into(),
+                key: None
+            })],
+            "the join that asked for the link"
+        );
+        rooms(
+            &mut model,
+            RoomsEvent::Joined {
+                room: "#lab".into(),
+                nick: None,
+            },
         );
         let told = model.current_toast().map(|t| t.text.clone());
         assert_eq!(
@@ -1245,26 +1298,41 @@ mod tests {
         rooms(model, RoomsEvent::Submit)
     }
 
+    /// 1578: opening the rooms links nothing; the first join links, once,
+    /// and a second join while it links waits with the first. Rooms
+    /// joined before link again when they are opened, and a link that
+    /// came back joins again what it was in.
     #[test]
-    fn the_tab_links_once_and_a_link_that_came_back_joins_again() {
+    fn the_first_join_links_once_and_a_link_that_came_back_joins_again() {
         let mut model = UiModel::<Buffer>::new(&[]);
         // The control: no hub, no tab, nothing asked.
         assert!(update(&mut model, UiEvent::Tab(TabId::Rooms)).is_empty());
         assert!(!model.rooms.showing());
         model.rooms.enabled = true;
         model.rooms.hub = Some(HUB);
-        // Told before (1577): the opening links and says nothing more.
+        // Told before (1577): the join links and says nothing more.
         model.rooms.told = Some(HUB);
+        assert!(
+            update(&mut model, UiEvent::Tab(TabId::Rooms)).is_empty(),
+            "opening links nothing"
+        );
+        assert_eq!(model.rooms.state, HubState::Off);
         assert_eq!(
-            update(&mut model, UiEvent::Tab(TabId::Rooms)),
+            say(&mut model, "#lab"),
             vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
         );
         assert_eq!(model.rooms.state, HubState::Linking);
-        update(&mut model, UiEvent::Tab(TabId::Chats));
-        assert!(
-            update(&mut model, UiEvent::Tab(TabId::Rooms)).is_empty(),
-            "linking already"
+        assert!(say(&mut model, "#garden").is_empty(), "linking already");
+        assert_eq!(model.rooms.queued.len(), 2, "both joins wait");
+        let welcomed = rooms(
+            &mut model,
+            RoomsEvent::Welcomed {
+                name: None,
+                body_limit: 350,
+            },
         );
+        assert_eq!(welcomed.len(), 2);
+        assert!(model.rooms.queued.is_empty());
 
         let mut model = in_lab();
         rooms(&mut model, RoomsEvent::Down(Down::Lost));
@@ -1357,12 +1425,18 @@ mod tests {
         );
         // The control: at the limit it goes.
         assert_eq!(say(&mut model, &"x".repeat(350)).len(), 1);
-        // And before the hub answered nothing goes.
+        // And before the hub answered no line goes: a join links (1578),
+        // a room's line has no room to go to.
         let mut early = UiModel::<Buffer>::new(&[]);
         early.rooms.enabled = true;
         early.rooms.hub = Some(HUB);
+        early.rooms.told = Some(HUB);
         update(&mut early, UiEvent::Tab(TabId::Rooms));
-        assert!(say(&mut early, "#lab").is_empty());
+        assert!(say(&mut early, "/part #lab").is_empty());
+        assert_eq!(
+            say(&mut early, "#lab"),
+            vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
+        );
     }
 
     #[test]
@@ -1386,8 +1460,8 @@ mod tests {
         let tab = tabs
             .items
             .iter()
-            .find(|t| t.id == TabId::Rooms)
-            .expect("the tab");
+            .find(|t| t.id == TabId::Explore)
+            .expect("the tab: the rooms live under Explore (1578)");
         assert_eq!(tab.badge, Some(1));
         update(&mut model, UiEvent::Tab(TabId::Rooms));
         assert_eq!(model.rooms.rooms[0].unread, 0);

@@ -669,6 +669,9 @@ pub enum Message {
     /// The Rooms tab said this (1379): the input's text, its Enter, a
     /// room chosen.
     Rooms(loquax::ui::rooms::RoomsEvent),
+    /// The Explore tab said this (1578): the search field's text, the
+    /// order, a page, a bookmark, a room, a hub.
+    Explore(loquax::ui::explore::ExploreEvent),
     /// The left button on a text that selects (1444, 1475): a press, a
     /// drag over it, the release.
     PickText(
@@ -712,6 +715,7 @@ impl Message {
                 | Message::Probed
                 | Message::Browse(_)
                 | Message::Rooms(_)
+                | Message::Explore(_)
         )
     }
 }
@@ -728,6 +732,8 @@ pub enum Screen {
     Browse,
     /// The Rooms tab (1379), while the model has it in front.
     Rooms,
+    /// The Explore tab's list (1578), while the model has it in front.
+    Explore,
 }
 
 /// Thousandths of a step a line of the wheel zooms: a notch is a step.
@@ -1043,6 +1049,8 @@ struct App {
     /// The reader left the Rooms tab (1379) and the model has not said so
     /// yet, as [`App::browse_left`].
     rooms_left: bool,
+    /// The reader left the Explore tab (1578), as [`App::browse_left`].
+    explore_left: bool,
 }
 
 impl App {
@@ -1149,6 +1157,7 @@ impl App {
             probe: None,
             browse_left: false,
             rooms_left: false,
+            explore_left: false,
         }
     }
 
@@ -1467,7 +1476,15 @@ impl App {
                 // A section goes back to the settings' list (1450).
                 (None, Screen::Settings) if self.settings_at.is_some() => self.settings_at = None,
                 (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
+                // The browser and a hub's rooms go back to Explore, which
+                // opened them (1578); Explore goes back to the chats.
                 (None, Screen::Browse | Screen::Rooms) => {
+                    self.browse_left = true;
+                    self.rooms_left = true;
+                    self.explore_left = false;
+                    self.tell(UiEvent::Tab(TabId::Explore));
+                }
+                (None, Screen::Explore) => {
                     self.leave_browse();
                     self.screen = Screen::Chats;
                 }
@@ -1613,7 +1630,20 @@ impl App {
                 self.rooms_left = false;
                 self.tell(UiEvent::Tab(TabId::Rooms));
             }
+            // Explore (1578): the model brings its list to the front, and
+            // what it opens (the browser, a hub's rooms) the window follows.
+            Intent::Tab(TabId::Explore) => {
+                self.explore_left = false;
+                self.browse_left = false;
+                self.rooms_left = false;
+                self.tell(UiEvent::Tab(TabId::Explore));
+            }
             Intent::Browse(intent) => self.tell(UiEvent::Browse(BrowseEvent::Intent(intent))),
+            Intent::Explore(said) => {
+                self.browse_left = false;
+                self.rooms_left = false;
+                self.tell(UiEvent::Explore(said));
+            }
             Intent::Menu(id) => {
                 self.menu = id;
                 self.deleting = None;
@@ -1856,8 +1886,9 @@ impl App {
         let key = leviculum_ui_iced::key::chord(event)?;
         let pane = match (self.screen, self.scene.top.id) {
             (Screen::Map, _) => Pane::Map,
-            // The Rooms' input field has the keys while it is in front.
-            (Screen::Browse | Screen::Rooms, _) => return None,
+            // The Rooms' input field has the keys while it is in front,
+            // and Explore's search field (1578).
+            (Screen::Browse | Screen::Rooms | Screen::Explore, _) => return None,
             (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
             (Screen::Chats | Screen::Settings, _) => Pane::Conversations,
         };
@@ -1931,6 +1962,7 @@ impl App {
         let task = self.update_inner(message);
         self.browse_sync();
         self.rooms_sync();
+        self.explore_sync();
         leviculum_ui_iced::fps::update(start, start.elapsed());
         match copy {
             Some(copy) => Task::batch([copy, task]),
@@ -2004,6 +2036,31 @@ impl App {
         if self.screen == Screen::Rooms || self.seen.scene.rooms.is_some() {
             self.rooms_left = true;
             self.tell(UiEvent::Tab(TabId::Chats));
+        }
+        if self.screen == Screen::Explore || self.seen.scene.explore.is_some() {
+            self.explore_left = true;
+            self.tell(UiEvent::Tab(TabId::Chats));
+        }
+    }
+
+    /// The window follows the model's Explore list (1578), but for a
+    /// [`Seen`] from before the reader left it; the browser and a hub's
+    /// rooms it opens are their own screens ([`App::browse_sync`],
+    /// [`App::rooms_sync`]).
+    fn explore_sync(&mut self) {
+        match (self.seen.scene.explore.is_some(), self.screen) {
+            (false, _) => {
+                self.explore_left = false;
+                if self.screen == Screen::Explore {
+                    self.screen = Screen::Chats;
+                }
+            }
+            (true, Screen::Explore) => {}
+            (true, _) if self.explore_left => {}
+            (true, _) => {
+                self.screen = Screen::Explore;
+                self.menu = None;
+            }
         }
     }
 
@@ -2130,6 +2187,9 @@ impl App {
             Message::Rooms(said) => {
                 self.tell(UiEvent::Rooms(said));
                 return Task::none();
+            }
+            Message::Explore(said) => {
+                return self.intent(Intent::Explore(said));
             }
             // The Browse tab in front has the keys, as the model routes
             // them (1369).
@@ -2687,6 +2747,7 @@ impl App {
             (Screen::Map, _, _) => self.map_view(),
             (Screen::Browse, _, _) => self.browse_view(),
             (Screen::Rooms, _, _) => self.rooms_view(),
+            (Screen::Explore, _, _) => self.explore_pane(),
             (Screen::Settings, _, _) => self.settings_pane(),
             // A group's screens (1307) take the chat's place, or the
             // whole stack's on a narrow window.
@@ -6775,6 +6836,95 @@ mod tests {
         let _ = app.update(Message::Seen(seen(&model)));
         assert_eq!(app.screen, Screen::Chats);
         assert!(app.seen.scene.rooms.is_none());
+    }
+
+    /// 1578: Explore beside the rail, one scroll for the pages and the
+    /// public rooms, the golden: a bookmark, a page heard today and one
+    /// older, the hubs. A press on a page is the model's verb, and the
+    /// window follows the model into the browser and back to the list;
+    /// Chats leaves it, and a picture from before does not bring it back.
+    #[test]
+    fn explore_is_one_scroll_beside_the_rail() {
+        use lnomad::DiscoveredNode;
+        use loquax::ui::browse::BrowseEvent;
+        use loquax::ui::explore::ExploreEvent;
+        const NOW: i64 = 1_800_000_000;
+        let node = |byte: u8, name: &str, ago: i64, hops| DiscoveredNode {
+            dest_hash: [byte; 16],
+            name: Some(name.to_string()),
+            first_seen: (NOW - ago) as u64,
+            last_seen: (NOW - ago) as u64,
+            hops: Some(hops),
+        };
+        let (w, h) = (1100u32, 640u32);
+        let mut model = chat_model();
+        model.browse.enabled = true;
+        model.now = Some(loquax::when::WallTime {
+            unix_secs: NOW,
+            offset_secs: 0,
+        });
+        for found in [
+            node(0x5a, "Marcel's node", 600, 2),
+            node(0x7c, "Relay Süd", 2 * 86_400, 1),
+            node(0x3d, "Bergwacht", 20 * 86_400, 4),
+        ] {
+            update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+        }
+        model.browse.model.bookmarks.add(lnomad::Bookmark {
+            url: format!("{}:/page/index.mu", "7c".repeat(16)),
+            title: "Relay Süd".to_string(),
+        });
+        // The browser rides in the picture as the shell sends it.
+        let pictures: crate::browsing::Pictures = Arc::default();
+        let seen = |model: &crate::shell::Model| {
+            let mut seen = seen_of(model);
+            seen.browse = model.browse.showing().then(|| Browsed {
+                model: Arc::new(model.browse.model.clone()),
+                scene: model.browse.model.scene(),
+                pictures: Arc::clone(&pictures),
+                epoch: 1,
+            });
+            Box::new(seen)
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Seen(seen(&model)));
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Explore)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Explore)]);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Explore);
+        let list = shoot(&app, w, h);
+        map::tests::same_as("gui-explore.png", &list, w, h);
+
+        let _ = app.update(Message::Explore(ExploreEvent::OpenPage([0x5a; 16])));
+        assert_eq!(
+            told(&mut rx),
+            vec![UiEvent::Explore(ExploreEvent::OpenPage([0x5a; 16]))]
+        );
+        update(
+            &mut model,
+            UiEvent::Explore(ExploreEvent::OpenPage([0x5a; 16])),
+        );
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Browse, "the browser it opened");
+        // The browser is told the window's theme and cells, as ever.
+        let _ = told(&mut rx);
+        // The browser's quit gives the list back.
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Intent(lnomad::Intent::Quit)),
+        );
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Explore);
+
+        let stale = seen(&model);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Chats)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Chats)]);
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Seen(stale));
+        assert_eq!(app.screen, Screen::Chats, "a picture from before");
     }
 
     #[test]

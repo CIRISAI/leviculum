@@ -294,7 +294,7 @@
       "role": "tab_bar",
       "selected": false
     },
-    "active": "Browse",
+    "active": "Explore",
     "id": "tabs",
     "items": [
       {
@@ -348,22 +348,22 @@
           "enabled": true,
           "label": {
             "args": [],
-            "key": "tab_browse"
+            "key": "tab_explore"
           },
-          "resource": "tab_browse",
+          "resource": "tab_explore",
           "role": "tab",
           "selected": true
         },
         "action": {
           "enabled": true,
-          "intent": "Tab(Browse)",
-          "label_key": "tab_browse"
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
         },
         "badge": null,
-        "id": "Browse",
+        "id": "Explore",
         "label": {
           "args": [],
-          "key": "tab_browse"
+          "key": "tab_explore"
         }
       }
     ]

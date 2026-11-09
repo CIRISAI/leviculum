@@ -84,6 +84,10 @@ pub enum TabId {
     /// Reticulum Relay Chat's rooms on a hub (1379), where
     /// [`super::rooms::Rooms::enabled`] says so.
     Rooms,
+    /// Explore (1578): the pages and the public rooms under one button,
+    /// the bar's third and last. Browse and Rooms are no buttons of the
+    /// bar any more: they are what Explore opens.
+    Explore,
 }
 
 /// A node's stable identity: a renderer diffs on it, hit tests to it, and
@@ -175,6 +179,7 @@ impl NodeId {
             NodeId::Tab(TabId::Map) => "tab_map".to_string(),
             NodeId::Tab(TabId::Browse) => "tab_browse".to_string(),
             NodeId::Tab(TabId::Rooms) => "tab_rooms".to_string(),
+            NodeId::Tab(TabId::Explore) => "tab_explore".to_string(),
             NodeId::List => "list".to_string(),
             NodeId::Row(peer) => format!("row_{}", to_hex(peer)),
             NodeId::Pin(peer) => format!("pin_{}", to_hex(peer)),
@@ -1000,6 +1005,8 @@ pub enum ScreenId {
     Browse,
     /// The Rooms tab in front (1379).
     Rooms,
+    /// The Explore tab's list in front (1578).
+    Explore,
 }
 
 /// One screen's nodes.
@@ -1028,6 +1035,10 @@ pub struct Scene {
     pub browse: Option<lnomad::app::scene::Scene>,
     /// The Rooms surface while its tab is in front (1379).
     pub rooms: Option<super::rooms::RoomsNode>,
+    /// The Explore tab's list while it is in front (1578), boxed: inline
+    /// it grew every scene by its size, and the M9's chats scene, which
+    /// never holds it, went over its stack budget (108 360 of 100 000 B).
+    pub explore: Option<alloc::boxed::Box<super::explore::ExploreNode>>,
     /// The profile over the screen while it is open (1443).
     pub profile: Option<super::profile::ProfileScreen>,
 }
@@ -1061,11 +1072,8 @@ impl<B> UiModel<B> {
     /// The content scene, its chat built when `chat_open` and one is
     /// selected.
     fn content_scene_of(&self, class: LayoutClass, chat_open: bool) -> Scene {
-        if self.browse.enabled && self.browse.open {
-            return self.counted(browse_scene(self)).in_class(class);
-        }
-        if self.rooms.showing() {
-            return self.counted(rooms_scene(self)).in_class(class);
+        if let Some(scene) = self.tab_scene() {
+            return self.counted(scene).in_class(class);
         }
         let open = self
             .conversations
@@ -1096,9 +1104,29 @@ impl<B> UiModel<B> {
             members: super::group_scene::member_sheet(self),
             browse: None,
             rooms: None,
+            explore: None,
             profile: None,
         })
         .in_class(class)
+    }
+
+    /// The browser, a hub's rooms or Explore's list, whichever is in
+    /// front, in a frame of its own: each built inline here put its own
+    /// `Scene` temporaries on the stack of every scene, and the M9's chats
+    /// scene, which builds none of them, went from 89 400 to 108 360 B
+    /// (1578, the board's budget is 100 000).
+    #[inline(never)]
+    fn tab_scene(&self) -> Option<Scene> {
+        if self.browse.enabled && self.browse.open {
+            return Some(browse_scene(self));
+        }
+        if self.rooms.showing() {
+            return Some(rooms_scene(self));
+        }
+        if super::explore::Explore::showing(self) {
+            return Some(explore_scene(self));
+        }
+        None
     }
 
     /// The list the fold left for the viewport (1490), built by the
@@ -1151,6 +1179,7 @@ fn browse_scene<B>(model: &UiModel<B>) -> Scene {
         members: None,
         browse: Some(model.browse.model.scene()),
         rooms: None,
+        explore: None,
         profile: None,
     }
 }
@@ -1178,6 +1207,35 @@ fn rooms_scene<B>(model: &UiModel<B>) -> Scene {
         members: None,
         browse: None,
         rooms: Some(super::rooms::node(model)),
+        explore: None,
+        profile: None,
+    }
+}
+
+/// The Explore tab's list in front (1578): Loquax's bar titled Explore,
+/// its tab bar with Explore active, and the two sections as the whole
+/// content, in both classes.
+fn explore_scene<B>(model: &UiModel<B>) -> Scene {
+    let mut top = me_bar(model);
+    top.title = Text::key(StrId::TabExplore);
+    top.actions = Vec::new();
+    top.a11y = A11y::of(NodeId::TopBar, Role::Bar, Text::key(StrId::TabExplore));
+    Scene {
+        class: LayoutClass::Wide,
+        screen: ScreenId::Explore,
+        top,
+        tabs: model.viewing.tabs.then(|| tabs(model)),
+        list: None,
+        chat: None,
+        sheet: None,
+        whereabouts: None,
+        card: None,
+        chips: Vec::new(),
+        new_group: None,
+        members: None,
+        browse: None,
+        rooms: None,
+        explore: Some(alloc::boxed::Box::new(super::explore::node(model))),
         profile: None,
     }
 }
@@ -1371,16 +1429,19 @@ fn me_bar<B>(model: &UiModel<B>) -> TopBar {
 }
 
 /// The tab bar: Chats with the count of chats holding unread messages,
-/// and the map.
+/// the map, and Explore (1578), always: three buttons and no fourth (Lew,
+/// 2026-11-08). The browser and a hub's rooms are opened from Explore, so
+/// Explore is the active tab while either is in front, and its badge is
+/// the rooms' unread lines.
 fn tabs<B>(model: &UiModel<B>) -> Tabs {
     let unread = model
         .listed()
         .filter(|&c| model.conversations[c].unread_rows() > 0)
         .count();
     let unread = u32::try_from(unread).unwrap_or(u32::MAX);
+    let exploring = model.explore.open || model.browse.showing() || model.rooms.showing();
     let active = match model.map {
-        _ if model.browse.enabled && model.browse.open => TabId::Browse,
-        _ if model.rooms.showing() => TabId::Rooms,
+        _ if exploring => TabId::Explore,
         Some(_) => TabId::Map,
         None => TabId::Chats,
     };
@@ -1399,6 +1460,7 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
         0 => Text::key(StrId::TabChats),
         n => Text::Key(StrId::TabChatsUnread, Vec::from([Arg::Int(i64::from(n))])),
     };
+    let rooms_unread: u32 = model.rooms.rooms.iter().map(|r| r.unread).sum();
     Tabs {
         id: NodeId::Tabs,
         items: Vec::from([
@@ -1409,26 +1471,13 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
                 chats_spoken,
             ),
             tab(TabId::Map, StrId::Map, None, Text::key(StrId::Map)),
-        ])
-        .into_iter()
-        .chain(model.browse.enabled.then(|| {
             tab(
-                TabId::Browse,
-                StrId::TabBrowse,
-                None,
-                Text::key(StrId::TabBrowse),
-            )
-        }))
-        .chain(model.rooms.enabled.then(|| {
-            let unread: u32 = model.rooms.rooms.iter().map(|r| r.unread).sum();
-            tab(
-                TabId::Rooms,
-                StrId::TabRooms,
-                (unread > 0).then_some(unread),
-                Text::key(StrId::TabRooms),
-            )
-        }))
-        .collect(),
+                TabId::Explore,
+                StrId::TabExplore,
+                (rooms_unread > 0).then_some(rooms_unread),
+                Text::key(StrId::TabExplore),
+            ),
+        ]),
         active,
         a11y: A11y::of(NodeId::Tabs, Role::TabBar, Text::key(StrId::TabChats)),
     }
@@ -2404,6 +2453,7 @@ impl Scene {
             ScreenId::Chat { peer } => json!({ "chat": hex(&peer) }),
             ScreenId::Browse => json!("browse"),
             ScreenId::Rooms => json!("rooms"),
+            ScreenId::Explore => json!("explore"),
         };
         map.insert("screen".into(), screen);
         map.insert("top".into(), self.top.to_json());
@@ -2458,6 +2508,9 @@ impl Scene {
         }
         if let Some(rooms) = &self.rooms {
             map.insert("rooms".into(), rooms.to_json());
+        }
+        if let Some(explore) = &self.explore {
+            map.insert("explore".into(), explore.to_json());
         }
         if let Some(profile) = &self.profile {
             map.insert("profile".into(), profile.to_json());

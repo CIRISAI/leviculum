@@ -172,6 +172,10 @@ pub enum Intent {
     /// intent, carried, never one of Loquax's arms. A frontend hands it to
     /// the model as [`super::UiEvent::Browse`].
     Browse(lnomad::Intent),
+    /// A verb of the Explore tab (1578): the search field, the order, a
+    /// page's row, its bookmark, a room, a hub. A frontend hands it to the
+    /// model as [`super::UiEvent::Explore`].
+    Explore(super::explore::ExploreEvent),
     /// Back out one level: compose to messages to the list, an overlay
     /// closes, the map gives the conversation back.
     Back,
@@ -542,6 +546,7 @@ impl Intent {
             Intent::Tab(TabId::Map) => StrId::Map,
             Intent::Tab(TabId::Browse) | Intent::Browse(_) => StrId::TabBrowse,
             Intent::Tab(TabId::Rooms) => StrId::TabRooms,
+            Intent::Tab(TabId::Explore) | Intent::Explore(_) => StrId::TabExplore,
             Intent::Back => StrId::Back,
             Intent::OpenChat { .. } => StrId::Open,
             Intent::CloseChat => StrId::Close,
@@ -744,6 +749,7 @@ impl From<Command> for Intent {
             Command::MapDrawing => Intent::MapDrawing,
             Command::Browse => Intent::Tab(TabId::Browse),
             Command::Rooms => Intent::Tab(TabId::Rooms),
+            Command::Explore => Intent::Tab(TabId::Explore),
             Command::Rename => Intent::Rename {
                 peer: Target::Open,
                 name: None,

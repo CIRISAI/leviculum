@@ -103,6 +103,7 @@ STEPS = [
     "settings",
     "receipts",
     "profile",
+    "explore",
     "first_start_qr",
     "pencil_scan",
     "share_in_contact",
@@ -189,8 +190,13 @@ THEME_AUTO = "Like the phone"
 # their old ids; neither may be on screen.
 MAP_CHROME_TEXTS = ["Load area", "All", "\u263e", "\u2600"]
 MAP_CHROME_IDS = ["load", "fit", "theme"]
-# The tab bar's tabs (activity_conversations.xml): Chats and Map.
-TABS = ["tab_chats", "tab_map"]
+# The tab bar's tabs (activity_conversations.xml): Chats, Map and
+# Explore (1578), three and no fourth.
+TABS = ["tab_chats", "tab_map", "tab_explore"]
+# Explore's list (1578): its field, its order's toggle, its list, and the
+# two section titles the library words.
+EXPLORE_IDS = ["explore_search", "explore_sort", "explore_list"]
+EXPLORE_TITLES = ["Pages", "Public rooms"]
 NOT_DECODED = "did not decode"
 # The settings' entries in the list's order (1199, SettingsActivity.PAGES).
 SETTINGS_PAGES = [
@@ -1235,9 +1241,26 @@ def tab_ids(nodes: list[Node]) -> list[str]:
     return out
 
 
+def explore_problems(nodes: list[Node]) -> list[str]:
+    """What is wrong with Explore's dump (1578): a missing field, toggle or
+    list, a section without its title, or a tab bar other than exactly
+    Chats, Map and Explore."""
+    problems = []
+    for rid in EXPLORE_IDS:
+        if not find(nodes, rid=rid):
+            problems.append(f"no {rid}")
+    for title in EXPLORE_TITLES:
+        if not find(nodes, text=title):
+            problems.append(f"no section {title!r}")
+    tabs = tab_ids(nodes)
+    if tabs != TABS:
+        problems.append(f"tabs {tabs}, want {TABS}")
+    return problems
+
+
 def map_screen_problems(nodes: list[Node]) -> list[str]:
     """What is wrong with the Map tab's dump (1199): any of the old header
-    controls, or a tab bar other than exactly Chats and Map."""
+    controls, or a tab bar other than exactly Chats, Map and Explore."""
     problems = []
     for text in MAP_CHROME_TEXTS:
         if find(nodes, text=text):
@@ -4448,6 +4471,30 @@ class Walk:
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
         return f"address={shown} qr=shown share=shown back=chats"
+
+    def step_explore(self) -> str:
+        """Explore (1578): the third tab opens the pages and the public
+        rooms on one screen, its field, its order's toggle and both
+        sections there whatever the mesh holds; the toggle turns the order
+        and back; Back goes to the chats."""
+        self.back_to_chats()
+        dev = self.need_device()
+        dev.tap_node(self.wait_id("tab_explore", 10)[0])
+        self.wait_id("explore_list", 10)
+        nodes = dev.dump()
+        problems = explore_problems(nodes)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        order = find(nodes, rid="explore_sort")[0].text
+        dev.tap_node(find(nodes, rid="explore_sort")[0])
+        time.sleep(0.8)
+        turned = find(dev.dump(), rid="explore_sort")[0].text
+        if turned == order:
+            raise StepFailed(f"the order's toggle stayed {order!r}")
+        dev.tap_node(find(dev.dump(), rid="explore_sort")[0])
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        return f"sections=2 order={order!r}->{turned!r} back=chats"
 
     def screen_codes(self, name: str) -> list[str]:
         """The QR codes on screen, read by zbarimg from a screenshot kept

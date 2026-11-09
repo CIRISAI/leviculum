@@ -651,6 +651,15 @@ pub const ROWS: &[Row<Action>] = {
             &[&[key(Char('R'), Mods::Plain, run(C::Rooms), COMMAND_PANES)]],
         )
         .palette("rooms"),
+        // The Explore tab (1578): the pages and the public rooms under
+        // one button. In the tab its search field and its cursor have the
+        // keys (`crate::ui::explore::key`).
+        Row::new(
+            "the pages and the public rooms (the Explore tab)",
+            MAP_GROUP,
+            &[&[key(Char('E'), Mods::Plain, run(C::Explore), COMMAND_PANES)]],
+        )
+        .palette("explore"),
         Row::new(
             "this conversation's peer on the map",
             MAP_GROUP,

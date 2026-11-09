@@ -42,6 +42,33 @@ leviculum_ui::catalogue! {
     TabChatsUnread = "tab_chats_unread", "Chats, %1$d with unread messages", "Chats, %1$d mit ungelesenen Nachrichten";
     Map = "map", "Map", "Karte";
     TabBrowse = "tab_browse", "Browse", "Seiten";
+    // 1578: Explore, the pages and the public rooms under one button.
+    TabExplore = "tab_explore", "Explore", "Entdecken";
+    ExplorePages = "explore_pages", "Pages", "Seiten";
+    ExploreRooms = "explore_rooms", "Public rooms", "Öffentliche Räume";
+    ExploreSearchHint = "explore_search_hint", "Search a name, or paste an address", "Namen suchen oder Adresse einfügen";
+    ExploreSortSeen = "explore_sort_seen", "Last seen first", "Zuletzt gesehen zuerst";
+    ExploreSortAz = "explore_sort_az", "A to Z", "A bis Z";
+    ExploreBookmarks = "explore_bookmarks", "Bookmarks", "Lesezeichen";
+    ExploreToday = "explore_today", "Today", "Heute";
+    ExploreThisWeek = "explore_this_week", "This week", "Diese Woche";
+    ExploreOlder = "explore_older", "Older", "Älter";
+    ExploreAz = "explore_az", "All pages", "Alle Seiten";
+    ExploreNoMatch = "explore_no_match", "No page matches “%1$s”.", "Keine Seite passt zu „%1$s“.";
+    ExploreNoPages = "explore_no_pages", "No pages known yet: they appear here as soon as your mailbox or this device hears one.", "Noch keine Seiten bekannt: sie erscheinen hier, sobald dein Postfach oder dieses Gerät eine hört.";
+    ExplorePagesOff = "explore_pages_off", "Pages cannot be opened on this device yet.", "Seiten lassen sich auf diesem Gerät noch nicht öffnen.";
+    ExploreNoRooms = "explore_no_rooms", "No public rooms within reach.", "Keine öffentlichen Räume in Reichweite.";
+    ExploreHeardHubs = "explore_heard_hubs", "Hubs in your mesh", "Hubs in deinem Netz";
+    ExploreSeenNow = "explore_seen_now", "seen just now", "gerade eben gesehen";
+    ExploreSeenMinutes = "explore_seen_minutes", "seen %1$d min ago", "zuletzt gesehen vor %1$d min";
+    ExploreSeenHours = "explore_seen_hours", "seen %1$d h ago", "zuletzt gesehen vor %1$d h";
+    ExploreSeenDay = "explore_seen_day", "seen yesterday", "zuletzt gesehen gestern";
+    ExploreSeenDays = "explore_seen_days", "seen %1$d days ago", "zuletzt gesehen vor %1$d Tagen";
+    ExploreHop = "explore_hop", "1 hop", "1 Hop";
+    ExploreHops = "explore_hops", "%1$d hops", "%1$d Hops";
+    ExploreOpenAddress = "explore_open_address", "Open %1$s", "%1$s öffnen";
+    ExploreBookmark = "explore_bookmark", "Bookmark", "Lesezeichen setzen";
+    ExploreUnbookmark = "explore_unbookmark", "Remove bookmark", "Lesezeichen entfernen";
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";
     RoomsLive = "rooms_live", "A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.", "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.";

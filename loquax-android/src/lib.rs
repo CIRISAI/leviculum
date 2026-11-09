@@ -25,6 +25,7 @@
 #[cfg(target_os = "android")]
 pub mod bitmap;
 pub mod browser;
+pub mod explore;
 pub mod friends;
 pub mod links;
 pub mod mailbox;

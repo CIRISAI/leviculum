@@ -2627,7 +2627,9 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     )
     .await;
     let before = frame(&frames, "before the load");
-    assert!(before.contains("loading map"), "{before}");
+    // The place's region is what the screen shows: the title says so in
+    // words since 1527 (`MAP_LOADING_HERE`), not the older "loading map".
+    assert!(before.contains("loading the map of this area"), "{before}");
     // No region holds the place yet: the radar meanwhile (1386), centred
     // on the one pin, which it says, at the fit's zoom the region keeps.
     assert!(
@@ -2646,7 +2648,7 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     assert!(held.contains("the map here is loaded already"), "{held}");
     let loading = frame(&frames, "loading the area");
     assert!(
-        loading.contains("─ loading map") && !loading.contains("z9"),
+        loading.contains("─ loading the map of this area") && !loading.contains("z9"),
         "{loading}"
     );
     let lines: Vec<&str> = log
@@ -2654,15 +2656,16 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
         .filter_map(|l| l.find("MAPLOAD ").map(|at| &l[at..]))
         .collect();
     let count = |word: &str| lines.iter().filter(|l| l.starts_with(word)).count();
-    assert_eq!(
-        (
-            count("MAPLOAD start"),
-            count("MAPLOAD done"),
-            count("MAPLOAD failed")
-        ),
-        (2, 2, 0),
-        "{lines:#?}"
+    // Since 1527 the terminal runs the scheduler too: besides the place's
+    // region and the zoomed-out area it loads the screen's neighbours
+    // (`MAPLOAD view ... here= ahead=`). Every load that starts lands, none
+    // fails, and there are at least the two this script asks for.
+    let (started, done, failed) = (
+        count("MAPLOAD start"),
+        count("MAPLOAD done"),
+        count("MAPLOAD failed"),
     );
+    assert!(started >= 2 && started == done && failed == 0, "{lines:#?}");
     assert!(
         lines
             .iter()
@@ -2675,14 +2678,15 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
             .any(|l| l.starts_with("MAPLOAD start") && l.contains("reason=view")),
         "{lines:#?}"
     );
-    // Two regions written, each under the autoload's prefix.
+    // A region a load, each its own file under the autoload's prefix.
     let files: Vec<&str> = lines
         .iter()
         .filter(|l| l.starts_with("MAPLOAD done"))
         .filter_map(|l| l.split(" file=").nth(1)?.split(' ').next())
         .collect();
-    assert_eq!(files.len(), 2, "{lines:#?}");
-    assert_ne!(files[0], files[1]);
+    assert_eq!(files.len(), done, "{lines:#?}");
+    let distinct: std::collections::BTreeSet<&&str> = files.iter().collect();
+    assert_eq!(distinct.len(), files.len(), "{files:?}");
     assert!(
         files
             .iter()

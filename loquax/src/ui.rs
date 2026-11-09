@@ -140,6 +140,7 @@ pub mod compose;
 pub mod contacts;
 pub mod copy_mode;
 pub mod counters;
+pub mod explore;
 pub mod files;
 pub mod group_scene;
 pub mod groups;
@@ -1452,6 +1453,9 @@ pub struct UiModel<B> {
     pub browse: browse::Browse,
     /// The Rooms tab: Reticulum Relay Chat on a hub (1379).
     pub rooms: rooms::Rooms,
+    /// The Explore tab (1578): the pages and the public rooms under one
+    /// button.
+    pub explore: explore::Explore,
     /// The language the model's own sentences from the catalogue are said
     /// in ([`strings::StrId`]): English unless the shell knows better, as
     /// the phone does.
@@ -1663,6 +1667,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             groups_changed: BTreeSet::new(),
             browse: browse::Browse::default(),
             rooms: rooms::Rooms::default(),
+            explore: explore::Explore::default(),
             lang: strings::Lang::En,
             debug_overlay: false,
             ops: counters::Ops::new(),
@@ -3325,6 +3330,8 @@ pub enum UiEvent {
     /// What the Rooms are told (1379): what the hub said, and the
     /// reader's verbs in the Rooms tab.
     Rooms(rooms::RoomsEvent),
+    /// The reader's verbs in the Explore tab (1578).
+    Explore(explore::ExploreEvent),
 }
 
 impl UiEvent {
@@ -3760,12 +3767,14 @@ impl<B: InputBuffer + Default> UiModel<B> {
 fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     match event {
         UiEvent::Tab(tab) => {
-            let mut effects = browse::tab(model, tab);
+            let mut effects = explore::tab(model, tab);
+            effects.extend(browse::tab(model, tab));
             effects.extend(rooms::tab(model, tab));
             effects
         }
         UiEvent::Browse(event) => browse::fold(model, event),
         UiEvent::Rooms(event) => rooms::fold(model, event),
+        UiEvent::Explore(event) => explore::fold(model, event),
         UiEvent::MapSetup(setup) => {
             if let Some(state) = model.map.as_mut() {
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
@@ -3794,6 +3803,12 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Key(key) if model.rooms.showing() => {
             model.touched();
             rooms::key(model, key)
+        }
+        // The Explore tab's list in front: its search field and its
+        // cursor have the keys (1578).
+        UiEvent::Key(key) if explore::Explore::showing(model) => {
+            model.touched();
+            explore::key(model, key)
         }
         UiEvent::Key(key) => {
             model.touched();
@@ -5785,6 +5800,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
         }
         PaletteCommand::Browse => browse::open(model),
         PaletteCommand::Rooms => rooms::open(model),
+        PaletteCommand::Explore => explore::tab(model, scene::TabId::Explore),
         PaletteCommand::MapDrawing => {
             if model.map_setup.drawings.is_empty() {
                 model.toast(ToastKind::Info, "the map is drawn one way here".to_string());

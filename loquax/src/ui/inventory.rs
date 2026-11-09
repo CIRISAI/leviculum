@@ -95,7 +95,7 @@ const NO_RECEIVER: &str = "no position receiver";
 pub const INVENTORY: &[Row] = &[
     Row {
         intent: "Tab",
-        action: "a tab of the bar (Chats, Map, Browse, Rooms)",
+        action: "a tab of the bar (Chats, Map, Explore)",
         phone: at(JAVA_LIST, "R.id.tab_map"),
         window: at(GUI, "Intent::Tab"),
         terminal: PALETTE,
@@ -108,6 +108,14 @@ pub const INVENTORY: &[Row] = &[
         window: at(GUI, "Intent::Browse"),
         terminal: at(UI, "UiEvent::Browse(event)"),
         m9: missing("the M9 has no Browse tab"),
+    },
+    Row {
+        intent: "Explore",
+        action: "the Explore tab: search, order, open a page, bookmark it, open a room, pick a hub",
+        phone: at(SESSION, "R::Explore {"),
+        window: at(GUI, "Intent::Explore"),
+        terminal: at(UI, "explore::key(model, key)"),
+        m9: missing("the M9 has no third button; a key and a list screen for it (handheld page)"),
     },
     Row {
         intent: "Back",
