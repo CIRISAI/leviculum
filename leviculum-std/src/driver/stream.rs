@@ -295,3 +295,7 @@ mod tests {
 // +ciris (leviculum#94): frames with a deadline, in a child module so no
 // cited line here moves.
 mod timed;
+
+// +ciris (leviculum#102): unordered datagrams, in a child module for the
+// same reason.
+mod datagram;

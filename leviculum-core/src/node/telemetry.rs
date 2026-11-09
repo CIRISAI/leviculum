@@ -298,6 +298,7 @@ impl crate::transport::TransportStats {
             D::ChannelDecryptFail => self.drops_channel_decrypt_fail as u64,
             D::ResourceFull => self.drops_resource_full as u64,
             D::ResourceCompressed => self.drops_resource_compressed as u64,
+            D::DatagramShed => self.drops_datagram_shed,
         }
     }
 }

@@ -1785,7 +1785,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// a board (860). Until then these exits logged at trace or debug level
     /// only, which a board compiles out, so a phone's packets on a link the
     /// board terminated could vanish with no line at all (858 §Q6).
-    fn drop_link_packet(&mut self, packet: &Packet, rx: LinkRx<'_>, reason: DropReason) {
+    pub(super) fn drop_link_packet(&mut self, packet: &Packet, rx: LinkRx<'_>, reason: DropReason) {
         self.transport
             .record_node_layer_drop(rx.raw_hash, packet, rx.interface_index, reason);
     }
@@ -1858,6 +1858,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             PacketContext::Keepalive => self.handle_keepalive_packet(link_id, packet, now_ms),
             PacketContext::LinkClose => self.handle_close_packet(link_id, packet),
             PacketContext::Channel => self.handle_channel_packet(link_id, packet, rx, now_ms),
+            PacketContext::Datagram => self.handle_datagram_packet(link_id, packet, rx, now_ms),
             PacketContext::ResourceAdv => {
                 self.handle_resource_adv(link_id, packet, rx, now_ms);
             }
@@ -5222,7 +5223,7 @@ mod receipt_tracker_tests {
 /// (860): the wire hash the delivering path held, which names the packet as
 /// `ph=`, and the interface it arrived on.
 #[derive(Clone, Copy)]
-struct LinkRx<'a> {
+pub(super) struct LinkRx<'a> {
     raw_hash: Option<&'a [u8; 32]>,
     interface_index: usize,
 }

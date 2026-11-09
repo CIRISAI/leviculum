@@ -11,6 +11,39 @@ git tag, not the version string. -->
 
 ## [Unreleased]
 
+### Added
+
+- Unordered, unreliable link datagrams for live media (leviculum#102).
+  `NodeCore::send_unordered`, `LinkHandle::send_unordered` and the
+  never-waiting `LinkHandle::try_send_unordered` send one link-encrypted
+  packet with the new context `PacketContext::Datagram` (`0xF0`, unassigned
+  in the reference), carrying a per-link `u32` sequence number ahead of the
+  payload. No window, receipt, proof or retransmit: the peer gets
+  `NodeEvent::LinkDatagramReceived { link_id, sequence, data }` as each one
+  decrypts, in arrival order, and does its own loss accounting and jitter
+  buffering. The payload limit is `link_datagram_mdu` (link MDU less 4) and
+  counters are in `link_datagram_stats`.
+  - The interface gate still applies (`PacingDelay`). A datagram an
+    interface has no room for is shed and counted
+    (`DropReason::DatagramShed`), never queued for retry and never reported
+    as an interface error, so a flood can neither evict Channel frames,
+    proofs or keepalives from the retry queue nor open the per-peer circuit
+    breaker that would shed them.
+  - The receiver keeps a 64-wide sliding replay window on `sequence`
+    (`ReplayWindow`, RFC 4303 style, serial arithmetic across the wrap); a
+    replayed or too-old datagram is dropped before it is delivered, counts
+    as liveness or reaches the direct-link fallback logic. A repeat inside
+    the window counts as `replayed`, one 64 or more behind as `late`.
+  - The receiver keeps a quarter of the host's data-plane event slots (at
+    least one; `datagram_sink_reserve_for`, set from
+    `data_channel_capacity` by leviculum-std) for the Channel: with no more
+    room than that an arriving datagram is shed and counted, so a flood
+    never holds the Channel's delivery budget at 0.
+  - A peer without #102 drops the packet at its unknown-context gate (an
+    older leviculum, counted) or silently (Python, which still refreshes the
+    link's inbound clock); the sender sees nothing. Use it only toward a
+    peer known to speak it; `try_send_timed` stays the fallback.
+
 ### Fixed
 
 - A link born on a punched direct path to a destination that is never

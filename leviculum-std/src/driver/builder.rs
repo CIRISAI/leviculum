@@ -1245,6 +1245,11 @@ impl ReticulumNodeBuilder {
 
         let mut node_core = core_builder.build(rand_core::OsRng, clock, storage);
         node_core.set_defer_resource_assembly(self.assemble_resources_off_lock);
+        // +ciris (leviculum#102): keep a quarter of the data plane for the
+        // Channel when datagrams flood it, whatever the configured capacity.
+        node_core.set_datagram_sink_reserve(leviculum_core::node::datagram_sink_reserve_for(
+            data_channel_capacity,
+        ));
         // The facilitator address is resolved at each proposal; until then
         // the core knows only the policy and the probe protocol.
         node_core.set_direct_link_config(leviculum_core::node::DirectLinkConfig {

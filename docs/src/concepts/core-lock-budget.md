@@ -25,9 +25,9 @@ anything with the same profile:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1610` |
+| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1614` |
 | `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:89` |
-| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1645` |
+| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1649` |
 
 Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
@@ -36,7 +36,7 @@ the caller rebuilds once. The std driver calls the three phases itself
 (`leviculum-std/src/driver/mod.rs:4394`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1730`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1734`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.
@@ -284,7 +284,7 @@ offering one.
 ### The one call the seam hands out that this page forbids
 
 `NodeCore::send_resource` is `pub`
-(`leviculum-core/src/node/mod.rs:1936`) and therefore reachable on the
+(`leviculum-core/src/node/mod.rs:1940`) and therefore reachable on the
 `&mut StdNodeCore` a processor hook holds. It is the 141 ms composed
 call this page opens with — one line, in consumer code, behind the
 driver and under the lock. `PROCESSOR_TICK_BUDGET` reports it 141 ms
@@ -384,7 +384,7 @@ informatively:
 
 | event | where | says |
 | --- | --- | --- |
-| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6911`) | announce handling itself took ≥ 100 ms |
+| `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6958`) | announce handling itself took ≥ 100 ms |
 | `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:5081`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1809`) | one batch write to the log file took ≥ 50 ms |
 

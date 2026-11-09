@@ -323,6 +323,59 @@ async fn a_link_born_on_the_punched_path_runs_at_its_mtu() {
     }
 }
 
+/// leviculum#102: datagrams cross a punched path as one packet each, with
+/// their sequence numbers, at up to the link MDU less four bytes, and the
+/// counters on both ends agree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn datagrams_cross_the_punched_path_with_their_sequence() {
+    let (t, mut a, mut b, link_id, handle, hash) = linked_through_relay(accepter(), None).await;
+    upgrade(&mut a, &mut b, &link_id, &hash).await;
+
+    let mdu = b.node.link_datagram_mdu(&link_id).expect("B's link");
+    assert_eq!(mdu, b.node.link_mdu(&link_id).unwrap() - 4);
+    const N: u32 = 20;
+    for i in 0..N {
+        // Half through the waiting send, half through the one that never
+        // waits: one sequence either way.
+        let seq = if i % 2 == 0 {
+            handle.send_unordered(&vec![i as u8; mdu]).await
+        } else {
+            handle.try_send_unordered(&vec![i as u8; mdu])
+        }
+        .expect("send a datagram");
+        assert_eq!(seq, i, "sequence numbers count from zero");
+    }
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while seen.len() < N as usize {
+        match tokio::time::timeout_at(deadline, a.rx.recv()).await {
+            Ok(Some(NodeEvent::LinkDatagramReceived {
+                link_id: id,
+                sequence,
+                data,
+            })) if id == link_id => {
+                assert_eq!(data, vec![sequence as u8; mdu], "datagram {sequence}");
+                seen.push(sequence);
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, (0..N).collect::<Vec<_>>(), "every datagram arrives");
+    let sent = b.node.link_datagram_stats(&link_id).unwrap();
+    let got = a.node.link_datagram_stats(&link_id).unwrap();
+    assert_eq!((sent.sent, got.received), (u64::from(N), u64::from(N)));
+    assert_eq!(sent.sent_bytes, got.received_bytes);
+    assert!(
+        handle.send_unordered(&vec![0; mdu + 1]).await.is_err(),
+        "one byte over the datagram MDU is refused"
+    );
+    if let Some(mut t) = t {
+        t.node.stop().await.expect("stop relay");
+    }
+}
+
 /// Propose the upgrade from B and wait until both ends report it and A is
 /// one hop from B over the punched path.
 async fn upgrade(

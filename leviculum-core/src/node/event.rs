@@ -694,6 +694,24 @@ pub enum NodeEvent {
         /// The processor method that panicked: `"on_event"` or `"on_tick"`.
         hook: &'static str,
     },
+
+    /// +ciris (leviculum#102): a datagram arrived on a link
+    /// ([`NodeCore::send_unordered`](crate::node::NodeCore::send_unordered)).
+    ///
+    /// Delivered as it decrypted, never held for order: `sequence` is the
+    /// sender's per-link count, so a gap is a loss (or a datagram still on
+    /// its way) and a smaller number than the last is a late one. What to
+    /// do with either is the application's. Like every data-plane event it
+    /// is dropped, not held, when the consumer is behind.
+    LinkDatagramReceived {
+        /// The link ID
+        link_id: LinkId,
+        /// The sender's sequence number for this datagram, wrapping after
+        /// `u32::MAX`.
+        sequence: u32,
+        /// The payload
+        data: Vec<u8>,
+    },
 }
 
 /// Delivery plane a [`NodeEvent`] belongs to.
@@ -727,6 +745,7 @@ impl NodeEvent {
             NodeEvent::LinkEstablished { link_id, .. }
             | NodeEvent::MessageReceived { link_id, .. }
             | NodeEvent::LinkDataReceived { link_id, .. }
+            | NodeEvent::LinkDatagramReceived { link_id, .. }
             | NodeEvent::LinkStale { link_id, .. }
             | NodeEvent::LinkRecovered { link_id, .. }
             | NodeEvent::ChannelRetransmit { link_id, .. }
@@ -814,6 +833,7 @@ impl NodeEvent {
             | NodeEvent::DeliveryFailed { .. }
             | NodeEvent::MessageReceived { .. }
             | NodeEvent::LinkDataReceived { .. }
+            | NodeEvent::LinkDatagramReceived { .. }
             | NodeEvent::LinkDeliveryConfirmed { .. }
             | NodeEvent::LinkDeliveryFailed { .. }
             | NodeEvent::ChannelRetransmit { .. }
@@ -959,6 +979,7 @@ impl NodeEvent {
             NodeEvent::MessageReceived { .. } => "MessageReceived",
             NodeEvent::ChannelMessageExpired { .. } => "ChannelMessageExpired",
             NodeEvent::LinkDataReceived { .. } => "LinkDataReceived",
+            NodeEvent::LinkDatagramReceived { .. } => "LinkDatagramReceived",
             NodeEvent::LinkStale { .. } => "LinkStale",
             NodeEvent::LinkRecovered { .. } => "LinkRecovered",
             NodeEvent::ChannelRetransmit { .. } => "ChannelRetransmit",

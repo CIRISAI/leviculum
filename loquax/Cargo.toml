@@ -218,7 +218,7 @@ qrcodegen = { version = "1.8.0", optional = true }
 # The history (`history`): bundled, so the musl-static binary carries its
 # SQLite and FTS5 (the build probe of loquax-storage.md, "Options", C), at
 # the version leviculum-cli already ships.
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"], optional = true }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"], optional = true }
 # The structured event log (docs/src/structured-event-logs.md) is a tracing
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true

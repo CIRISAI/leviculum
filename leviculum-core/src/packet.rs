@@ -114,6 +114,10 @@ pub enum PacketContext {
     LinkProof,
     Lrrtt,
     Lrproof,
+    /// +ciris (leviculum#102): an unordered, unreliable link datagram
+    /// ([`crate::link::datagram`]). `0xF0`, a byte the reference does not
+    /// assign, so a stock peer drops it at its own local gate.
+    Datagram,
     /// A context byte this implementation does not assign a meaning to.
     ///
     /// Carries the byte verbatim so the packet re-packs bit-identically and
@@ -148,6 +152,7 @@ impl PacketContext {
             0xFD => PacketContext::LinkProof,
             0xFE => PacketContext::Lrrtt,
             0xFF => PacketContext::Lrproof,
+            0xF0 => PacketContext::Datagram,
             other => PacketContext::Unknown(other),
         }
     }
@@ -177,6 +182,7 @@ impl PacketContext {
             PacketContext::LinkProof => 0xFD,
             PacketContext::Lrrtt => 0xFE,
             PacketContext::Lrproof => 0xFF,
+            PacketContext::Datagram => 0xF0,
             PacketContext::Unknown(byte) => byte,
         }
     }

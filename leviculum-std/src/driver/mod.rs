@@ -7023,6 +7023,25 @@ fn dispatch_output(
         output.actions,
         ifac_configs,
     );
+    // +ciris (leviculum#102): a datagram a full interface refused is shed,
+    // not queued for retry; count it where the node's drops are counted.
+    if result
+        .drops
+        .iter()
+        .any(|(_, r)| *r == leviculum_core::transport::DropReason::DatagramShed)
+    {
+        let shed = leviculum_core::transport::DispatchResult {
+            retries: Vec::new(),
+            errors: Vec::new(),
+            drops: result
+                .drops
+                .iter()
+                .filter(|(_, r)| *r == leviculum_core::transport::DropReason::DatagramShed)
+                .copied()
+                .collect(),
+        };
+        inner.lock_recover().record_dispatch_drops(&shed);
+    }
 
     // Log dispatch errors.
     //
@@ -12307,6 +12326,141 @@ mod tests {
             1,
             "the node-wide shed gauge must see it"
         );
+    }
+
+    /// leviculum#102 review: a datagram a full interface refuses is shed and
+    /// counted, and is NOT a send failure. Fed to the per-peer breaker it
+    /// would open the circuit after three ticks, and an open circuit sheds
+    /// the link's Channel frames, keepalives and requests too. Here a flood
+    /// of datagrams meets a full interface for many ticks; the breaker stays
+    /// closed, and once the interface drains a Channel frame goes out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_datagram_flood_at_a_full_interface_never_opens_the_breaker() {
+        use crate::interfaces::{
+            InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket,
+        };
+        use leviculum_core::transport::{Action, InterfaceId, TickOutput};
+
+        let (core, _td) = shared_test_core();
+        let mut registry = InterfaceRegistry::new();
+        let completions = CompletionRegistry::new();
+        let (_inc_tx, inc_rx) = tokio::sync::mpsc::channel(1);
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(1);
+        // Full from the start: every send is refused with BufferFull.
+        out_tx
+            .try_send(OutgoingPacket {
+                data: Arc::from(&[0u8; 4][..]),
+                high_priority: false,
+                peer: None,
+                ph: None,
+            })
+            .expect("one slot");
+        registry.register(InterfaceHandle {
+            next_tag: None,
+            info: InterfaceInfo {
+                transit: false,
+                id: InterfaceId(9),
+                name: "punched".into(),
+                hw_mtu: Some(1400),
+                is_local_client: false,
+                bitrate: None,
+                announce_cap_bitrate: None,
+                tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
+                acquisition: None,
+                frame_turnaround_ms: None,
+                ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Udp,
+                ingress_control: Some(false),
+            },
+            incoming: inc_rx,
+            outgoing: out_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+            credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
+        });
+        // A link DATA packet, header type 1: flags, hops, link id, context.
+        let frame = |context: u8| {
+            let mut f = vec![0x00, 0x00];
+            f.extend_from_slice(&[0x5A; 16]);
+            f.push(context);
+            f.extend_from_slice(&[0xAB; 64]);
+            f
+        };
+        let counters = PlaneCounters::default();
+        let mut breakers: BTreeMap<usize, breaker::PeerBreaker> = BTreeMap::new();
+        let mut retry_queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
+        let tick = |actions: Vec<Action>,
+                    breakers: &mut BTreeMap<usize, breaker::PeerBreaker>,
+                    retry_queues: &mut BTreeMap<usize, RetryQueue>,
+                    registry: &mut InterfaceRegistry| {
+            let mut output = TickOutput::empty();
+            output.actions = actions;
+            dispatch_output(
+                output,
+                registry,
+                None,
+                &core,
+                retry_queues,
+                &mut std::collections::BTreeSet::new(),
+                &mut BTreeMap::new(),
+                &BTreeMap::new(),
+                None,
+                None,
+                None,
+                &mut BTreeMap::new(),
+                &completions,
+                &mut SegmentAssembler::new(segments::DEFAULT_MAX_ASSEMBLED_RESOURCE_SIZE),
+                &counters,
+                breakers,
+                None,
+            );
+        };
+        let ticks = 3 * breaker::BREAKER_TRIP_THRESHOLD as usize;
+        for _ in 0..ticks {
+            let flood = (0..8)
+                .map(|_| Action::SendPacket {
+                    iface: InterfaceId(9),
+                    data: frame(0xF0),
+                    peer: None,
+                })
+                .collect();
+            tick(flood, &mut breakers, &mut retry_queues, &mut registry);
+        }
+        let now = core.lock_recover().now_ms();
+        let state = breakers.get_mut(&9).map(|b| b.state(now));
+        assert!(
+            matches!(state, None | Some(breaker::BreakerState::Closed)),
+            "a datagram flood must not open the circuit: {state:?}"
+        );
+        assert!(
+            retry_queues.values().all(|q| q.is_empty()),
+            "shed datagrams never reach the retry queue"
+        );
+        assert_eq!(
+            core.lock_recover().transport_stats().drops_datagram_shed(),
+            (ticks * 8) as u64,
+            "every shed datagram is counted"
+        );
+
+        // The interface drains; the link's Channel frame goes out.
+        let _ = out_rx.try_recv();
+        tick(
+            vec![Action::SendPacket {
+                iface: InterfaceId(9),
+                data: frame(0x0E),
+                peer: None,
+            }],
+            &mut breakers,
+            &mut retry_queues,
+            &mut registry,
+        );
+        let sent = out_rx
+            .try_recv()
+            .expect("the Channel frame reached the interface");
+        assert_eq!(sent.data[18], 0x0E);
     }
 
     /// leviculum#66 — a proof is never shed, in any breaker state. Dropping the
