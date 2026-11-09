@@ -383,6 +383,8 @@ pub struct Session {
     scene: Arc<Mutex<Scene>>,
     /// Wakes the pump when a request may have started work (1176).
     wake: Arc<tokio::sync::Notify>,
+    /// The pump makes no turn while set ([`Session::with_pump_held`]).
+    held: Arc<std::sync::atomic::AtomicBool>,
     events: Mutex<Receiver<Event>>,
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
     /// The mailbox, when it is on this phone.
@@ -660,6 +662,8 @@ impl Session {
         let inner = Arc::new(parking_lot::Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         let pump_wake = Arc::clone(&wake);
+        let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pump_held = Arc::clone(&held);
         let handle = runtime.handle().clone();
         // The pump on an OS thread of its own (1496), in the runtime's
         // context for its timers and what it spawns: its commits block
@@ -680,6 +684,13 @@ impl Session {
                             () = network.turned() => {}
                         }
                         let mut inner = pumped.lock();
+                        // Held (1587): no turn, read under the lock so a
+                        // turn under way when the hold came has ended; a
+                        // stop still ends the pump.
+                        if pump_held.load(std::sync::atomic::Ordering::SeqCst) && !inner.gone {
+                            wait = PUMP;
+                            continue;
+                        }
                         if inner.pump_thread.is_none() {
                             inner.pump_thread = std::thread::current().name().map(str::to_string);
                         }
@@ -697,6 +708,7 @@ impl Session {
             waiting,
             scene,
             wake,
+            held,
             events: Mutex::new(events_rx),
             runtime: Mutex::new(Some(runtime)),
             here: Mutex::new(here),
@@ -1225,6 +1237,29 @@ impl Session {
     pub fn counters(&self) -> Option<loquax::ui::counters::Counters> {
         let inner = self.lock();
         Some(inner.model.counters()? + inner.store.counters()?)
+    }
+
+    /// Run `f` with the pump making no turn (1587), then wake it: a bar
+    /// that counts one request reads what that request built, not the
+    /// pump's next turn, whose clock events start the model's count afresh
+    /// (`loquax::ui::update`) and which a request wakes. The hold is read
+    /// under the session's lock, so a turn under way when it is set ends
+    /// before `f` runs. For the facade's bars.
+    #[doc(hidden)]
+    pub fn with_pump_held<T>(&self, f: impl FnOnce(&Self) -> T) -> T {
+        use std::sync::atomic::Ordering;
+        struct Release<'a>(&'a Session);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                self.0.held.store(false, Ordering::SeqCst);
+                self.0.wake.notify_one();
+            }
+        }
+        self.held.store(true, Ordering::SeqCst);
+        let _release = Release(self);
+        // The turn under way, if one is, ends here.
+        drop(self.lock());
+        f(self)
     }
 
     /// Start the model's and the store's counts afresh. For the facade's

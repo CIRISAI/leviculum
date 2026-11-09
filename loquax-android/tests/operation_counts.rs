@@ -51,17 +51,25 @@ fn a_key_in_compose_builds_no_list() {
     session
         .request(Request::Open { peer: anna.clone() })
         .expect("open");
-    session.reset_counters();
-    session
-        .request(Request::Draft {
-            peer: anna,
-            body: "B".to_string(),
-            reply: String::new(),
-        })
-        .expect("a key");
-    let counts = session
-        .counters()
-        .expect("counting() said this build counts");
+    // The pump held (1587): `update` starts the count afresh for every
+    // event, and the request wakes the pump, whose turn folds the clock
+    // (`Clock`, `Tick`, `Elapsed`) and builds nothing; read after such a
+    // turn the bar saw the pump's last event, not the key, and went green
+    // in three runs of four. Held, it reads the key's own work: its
+    // `Draft` and the lists the request makes after it.
+    let counts = session.with_pump_held(|session| {
+        session.reset_counters();
+        session
+            .request(Request::Draft {
+                peer: anna,
+                body: "B".to_string(),
+                reply: String::new(),
+            })
+            .expect("a key");
+        session
+            .counters()
+            .expect("counting() said this build counts")
+    });
     session.stop();
     println!("COUNTS phone.compose_key {counts}");
     bar(
