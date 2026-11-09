@@ -78,10 +78,21 @@ fn ugly_model(home: &Path) -> UiModel<Field> {
 }
 
 /// The chats list at the M9's class, nothing open.
+///
+/// The scene carries every row (1595): the board builds only the rows on
+/// its screen, and [`with_cursor`] moves the cursor through rows the
+/// scene must already hold. A list viewed whole, not apart, draws the
+/// frame the board's list draws (no top kept: the cursor's own lowest
+/// line, as a list apart with nothing selected), so the goldens stand.
 fn list_scene() -> Scene {
     let home = tempfile::tempdir().expect("home");
     let mut model = ugly_model(home.path());
     model.selected = NONE_OPEN;
+    model.viewing = loquax::ui::Viewing {
+        list_rows: loquax::ui::Viewing::ALL.list_rows,
+        apart: false,
+        ..model.viewing
+    };
     model.scene(LayoutClass::Compact)
 }
 

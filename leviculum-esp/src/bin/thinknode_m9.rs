@@ -179,7 +179,7 @@
 //! [KB] answer=mixed t=<ms>  after one whose bytes disagree
 //! [KB] queue_lost=<n> read_failed=<n>   when either count moved (1463)
 //! [LOOP] turn_ms=<n> stage=<host|node|take|draw|keys> host=.. node=.. take=.. draw=.. keys=.. entries=<n>
-//! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n> rows_us=.. layout_us=.. blit_us=.. flush_us=.. [rows_allocs=.. rows_alloc_us=.. rows_wait_us=.. draw_allocs=.. draw_alloc_us=.. draw_wait_us=.. in the bench image, 1594]  (1569, the UI core's slow turn: msgs the queue held, entries folded; 1591, the turn's draw split: the scene's rows, their layout into cells, the changed cells into the frame, the wait for the last flush)
+//! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n> rows_us=.. layout_us=.. blit_us=.. flush_us=.. [rows_allocs=.. rows_alloc_us=.. rows_wait_us=.. draw_allocs=.. draw_alloc_us=.. draw_wait_us=.. in the bench image, 1594; rows_built=.. the list rows the scene carried, 1595]  (1569, the UI core's slow turn: msgs the queue held, entries folded; 1591, the turn's draw split: the scene's rows, their layout into cells, the changed cells into the frame, the wait for the last flush)
 //!                           a turn of the loop longer than 100 ms (1463)
 //! [FOLD] entries=<n> turns=<n> wall_us=<n> unpack_us=<n> step_us=<n> finish_us=<n> route_us=<n> alloc_us=<n> allocs=<n> alloc_bytes=<n> per_entry_us wall=<n> unpack=<n> step=<n> alloc=<n>  (1575, the bench image: a pulled page's fold on the UI core, said when its last entry is folded, summed over the turns it took)
 //! ```
@@ -1168,6 +1168,10 @@ struct DrawSpent {
     rows_alloc: bench::AllocSpent,
     #[cfg(m9_bench)]
     draw_alloc: bench::AllocSpent,
+    /// The list rows the scene carried (1595): the screen's, never the
+    /// whole list.
+    #[cfg(m9_bench)]
+    rows_built: u32,
 }
 
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
@@ -1224,6 +1228,7 @@ fn redraw(
     {
         spent.draw_alloc = mark.spent();
         spent.rows_alloc = bench::take_scene_allocs();
+        spent.rows_built = bench::take_scene_rows();
     }
     let split = renderer.take_split();
     spent.rows = split.scene_us;
@@ -2946,8 +2951,8 @@ fn ui_main(
             let heap = {
                 let (r, d) = (draw_spent.rows_alloc, draw_spent.draw_alloc);
                 alloc::format!(
-                    " rows_allocs={} rows_alloc_us={} rows_wait_us={} draw_allocs={} draw_alloc_us={} draw_wait_us={}",
-                    r.calls, r.us, r.wait_us, d.calls, d.us, d.wait_us
+                    " rows_allocs={} rows_alloc_us={} rows_wait_us={} draw_allocs={} draw_alloc_us={} draw_wait_us={} rows_built={}",
+                    r.calls, r.us, r.wait_us, d.calls, d.us, d.wait_us, draw_spent.rows_built
                 )
             };
             #[cfg(not(m9_bench))]
@@ -3345,6 +3350,10 @@ mod bench {
         SCENE_ALLOCS.store(rows.calls, Ordering::Relaxed);
         SCENE_ALLOC_US.store(rows.us, Ordering::Relaxed);
         SCENE_WAIT_US.store(rows.wait_us, Ordering::Relaxed);
+        SCENE_ROWS.store(
+            scene.list.as_ref().map_or(0, |l| l.rows.len()) as u32,
+            Ordering::Relaxed,
+        );
         renderer.scene_took((t1 - t0).as_micros());
         let drawn = renderer.draw(&scene, look);
         SCENE_US.store((t1 - t0).as_micros() as u32, Ordering::Relaxed);
@@ -3395,6 +3404,13 @@ mod bench {
     static SCENE_ALLOCS: AtomicU32 = AtomicU32::new(0);
     static SCENE_ALLOC_US: AtomicU32 = AtomicU32::new(0);
     static SCENE_WAIT_US: AtomicU32 = AtomicU32::new(0);
+    /// The list rows the last scene carried (1595, `rows_built=`).
+    static SCENE_ROWS: AtomicU32 = AtomicU32::new(0);
+
+    /// The last scene's list rows, once; zero after a map draw.
+    pub fn take_scene_rows() -> u32 {
+        SCENE_ROWS.swap(0, Ordering::Relaxed)
+    }
 
     /// The last scene's [`AllocSpent`], once; zero after a map draw.
     pub fn take_scene_allocs() -> AllocSpent {

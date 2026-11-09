@@ -1434,17 +1434,23 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
     }
 }
 
-/// The list as the model orders it, built whole: the cold path, for a
-/// model changed outside `update` ([`UiModel::note_changes`] keeps the
-/// windowed one).
+/// The list as the model orders it, its window built afresh: the cold
+/// path, for a model changed outside `update` ([`UiModel::built_list`]
+/// keeps the fold's). The window, never the whole order (1595): the M9's
+/// fold hides the selection behind the list and gives it back outside
+/// `update` (`loquax_m9::home`), so every draw of a pull came here, and
+/// this built all 302 rows of the board's list where it shows seven
+/// (window 20: 5,700 allocator calls and 282 ms a draw). The order is
+/// the whole list's, its keys only; the rows are the screen's.
 fn list<B>(model: &UiModel<B>) -> List {
     let order = model.order();
     let total = order.len();
-    let top = model.viewing.apart.then(|| model.list_top(&order));
+    let (first, len, top) = model.list_window(&order);
+    let window = order[first..first + len].to_vec();
     List {
         id: NodeId::List,
-        rows: rows(model, order),
-        first: 0,
+        rows: rows(model, window),
+        first,
         total,
         top,
         empty: Text::key(StrId::NoConversations),
