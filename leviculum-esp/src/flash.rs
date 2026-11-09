@@ -51,6 +51,10 @@ use crate::stall::{self, Core, Lock};
 /// and holds the next one off ([`crate::mspi`]): the bus that DMA reads is
 /// the one the op takes.
 fn parked<R>(f: impl FnOnce() -> R) -> R {
+    // The op below holds this core's interrupts off (1595): the UART's
+    // receive interrupt waits for its end, an erase up to 57 ms against
+    // the FIFO's 11 ms, so the FIFO goes into it empty.
+    crate::drain_rx_fifo();
     crate::mspi::flash(|| {
         stall::locked(Core::Io, Lock::Flash, || {
             let t0 = crate::uptime_us();

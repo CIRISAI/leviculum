@@ -729,6 +729,30 @@ static RX_HELD_LOST: AtomicU32 = AtomicU32::new(0);
 /// FIFO overflows seen, and bytes the UART flagged.
 static RX_OVERRUNS: AtomicU32 = AtomicU32::new(0);
 static RX_ERRORS: AtomicU32 = AtomicU32::new(0);
+/// Key frames the host sent that the loop took (1595, the bench's
+/// `TYPE_KEY_INJECT`): the `[UART]` line's `keys_rx=`, so a key frame lost
+/// in a FIFO overrun shows as a press the walker sent and this did not
+/// count, without the proxy's log.
+static KEYS_RX: AtomicU32 = AtomicU32::new(0);
+
+/// One key frame taken from the host ([`KEYS_RX`]).
+pub fn count_key_rx() {
+    KEYS_RX.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Empty the receive FIFO into the keep now (1595): before a flash op,
+/// which holds this core's interrupts off for as long as it takes (an
+/// erase 45 to 57 ms in window 20) while the FIFO holds 128 bytes, 11 ms
+/// of the line. The op then starts with the whole FIFO free, not with
+/// up to the interrupt's threshold of it taken already. A board whose
+/// log is not the UART's does nothing.
+pub fn drain_rx_fifo() {
+    critical_section::with(|cs| {
+        if let Some(uart) = PORT.borrow_ref_mut(cs).as_mut() {
+            pull_rx(uart.split_mut().0, &mut RX_BYTES.borrow_ref_mut(cs));
+        }
+    });
+}
 
 /// Empty the receive FIFO into the keep, counting an overflow (esp-hal
 /// has already reset the FIFO and dropped its bytes) and a flagged byte.
@@ -962,9 +986,10 @@ impl<'d> UartLog<'d> {
             Some(None) => alloc::string::String::from(" ui_stack_free=unset"),
             None => alloc::string::String::new(),
         };
+        let keys = KEYS_RX.load(Ordering::Relaxed);
         let body = alloc::format!(
             "{counts} stack_free={free}{ui} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes} \
-             tx_drop_kind=line:{drop_line},frame:{drop_frame},dump:{drop_dump}"
+             tx_drop_kind=line:{drop_line},frame:{drop_frame},dump:{drop_dump} keys_rx={keys}"
         );
         self.text("[UART] ", &body);
     }

@@ -1120,3 +1120,41 @@ fn a_late_message_is_the_golden_frame() {
     );
     check("m9-late-message.png", &draw_in(&scene, &look));
 }
+
+/// 1595, window 20's hang.walk: a Back lost in a FIFO overrun left the
+/// board in the chat, and every later Back "changed nothing". It did
+/// what Back does: in a chat, Enter opens the message's detail view, and
+/// Back leaves what it is in, the detail first, the chat with the next.
+/// One Back short, the walk's Enter and Back pairs opened and closed the
+/// detail from then on, the page `chat` throughout. The M9's rule (UI
+/// decisions 2026-11-07) holds: each Back leaves one level.
+#[test]
+fn back_leaves_the_detail_then_the_chat() {
+    let home = tempfile::tempdir().expect("home");
+    let mut model = on_the_list(home.path());
+    let mut row = 0;
+    let place = |model: &UiModel<Field>| loquax_m9::group::Place::of(model);
+    loquax_m9::group::press(&mut model, &mut row, &event(M9Key::Enter));
+    assert_eq!(
+        place(&model),
+        loquax_m9::group::Place::Chat,
+        "Enter opens the chat"
+    );
+    assert!(model.detail.is_none());
+    loquax_m9::group::press(&mut model, &mut row, &event(M9Key::Enter));
+    assert!(model.detail.is_some(), "Enter in the chat opens the detail");
+    assert_eq!(place(&model), loquax_m9::group::Place::Chat);
+    loquax_m9::group::press(&mut model, &mut row, &event(M9Key::Back));
+    assert!(model.detail.is_none(), "Back leaves the detail");
+    assert_eq!(
+        place(&model),
+        loquax_m9::group::Place::Chat,
+        "and stays in the chat"
+    );
+    loquax_m9::group::press(&mut model, &mut row, &event(M9Key::Back));
+    assert_eq!(
+        place(&model),
+        loquax_m9::group::Place::List,
+        "the next Back leaves the chat"
+    );
+}

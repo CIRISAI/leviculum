@@ -101,7 +101,7 @@
 //!                           after the draw, when the page or its cursor
 //!                           moved (1533, `loquax_m9::page`): what a bench
 //!                           walk asserts without a dump
-//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> ui_stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> t=<ms>
+//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> ui_stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> keys_rx=<n> t=<ms>
 //!                           on every loss and every five seconds (1440);
 //!                           stack_free is core 0's stack never touched
 //!                           since the boot's census, above the guard (1521b),
@@ -3251,6 +3251,7 @@ mod bench {
     /// A `TYPE_KEY_INJECT` payload taken: the press queued and the hold
     /// kept, and the frame that answers it, an ack or a named refusal.
     pub fn take(payload: &[u8], kb: Protocol, inject: &mut Inject) -> Vec<u8> {
+        leviculum_esp::count_key_rx();
         match envelope::decode_key_inject_payload(payload) {
             None => envelope::encode_refusal(envelope::TYPE_KEY_INJECT, envelope::REFUSE_MALFORMED),
             Some(asked) if !asked.valid() => {
