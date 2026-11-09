@@ -1,0 +1,69 @@
+# The public rooms' hubs Loquax offers (1577, #232), compiled in
+# (`loquax::ui::hubs`). A hub ships only when it answered: an announce or a
+# path, a link, and a WELCOME to a HELLO, measured with
+# `loquax/examples/rrc_hubs_probe.rs` over the shipped entry servers
+# (leviculum.network:4242 and the Sauerland testnet, 38.242.217.238:4242).
+# `just rrc-hubs-check` measures again and diffs against this file, so a
+# stale hash is a finding, not a surprise. No hub is connected to on its
+# own: this is the list the settings offer.
+#
+# Keys of a [[hub]]: name (what the settings show; never the protocol's
+# name), hash (its `rrc.hub` destination), rooms (what the hub's own
+# welcome named), published_rooms (what the source names), source (where
+# the hash was published), measured (the day it answered).
+# An [[unreached]] entry was published and did not answer on the day
+# named; it is not offered, and the check tries it again.
+
+[[hub]]
+name = "RNS Community"
+hash = "28c7c1a68c735693aa8e6b8193ed44b2"
+rooms = ["general"]
+published_rooms = []
+source = "https://reticulum.miraheze.org/wiki/RRC"
+measured = "2026-11-09"
+
+[[hub]]
+name = "ShadowLink"
+hash = "c3fd74541dafc8b7077bc8a25a2c2302"
+rooms = []
+published_rooms = ["teskeslab"]
+source = "https://lucasteske.dev"
+measured = "2026-11-09"
+
+[[hub]]
+name = "HADARC"
+hash = "e7fd7f9efd6608ca4ade879d18646eed"
+rooms = []
+published_rooms = ["general"]
+source = "https://vk2ma.github.io/HowTos"
+measured = "2026-11-09"
+
+[[hub]]
+name = "RNS Moscow"
+hash = "42a97b1b07147b898f78a610dfbba587"
+rooms = []
+published_rooms = []
+source = "https://reticulum.miraheze.org/wiki/RRC"
+measured = "2026-11-09"
+
+[[hub]]
+name = "Radio Oxford"
+hash = "5da9b708e8afda9e3f27715cf2140cee"
+rooms = []
+published_rooms = ["#radioxford"]
+source = "https://oxmesh.org/reticulum.html"
+measured = "2026-11-09"
+
+[[unreached]]
+name = "MichMesh"
+hash = "1303a636cf76ffffcf359761f0867e37"
+published_rooms = ["#lobby"]
+source = "https://michme.sh/docs/Reticulum/Services/"
+not_reached = "2026-11-09"
+
+[[unreached]]
+name = "Amber Hubs on NomadNet"
+hash = "085b5d6ade4a19687ff9f62e8d6f257e"
+published_rooms = []
+source = "https://reticulum.miraheze.org/wiki/RRC"
+not_reached = "2026-11-09"

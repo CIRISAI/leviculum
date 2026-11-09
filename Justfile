@@ -2701,6 +2701,46 @@ lnomad-gui:
 loquax-strings:
     LOQUAX_WRITE_STRINGS=1 cargo test -p loquax --lib ui::strings::tests::the_phone_reads_the_catalogue
 
+# 1577, #232: the public rooms' hubs Loquax offers, measured again. The probe
+# (`loquax/examples/rrc_hubs_probe.rs`) dials the shipped entry servers, listens
+# `listen` seconds for `rrc.hub` announces, then opens every hub of
+# `loquax/assets/hubs.toml` with Loquax's own hub link (HELLO until WELCOME,
+# then it leaves; it joins nothing and says nothing). A shipped hub that did not
+# answer, or an unreached one that now does, is a finding and the recipe exits
+# 1: the list is data, and a stale hash is a finding, not a surprise. The
+# probe's lines and the announces heard land in `target/tmp/rrc-hubs/`. Needs
+# the internet; about `listen` seconds plus up to 100 s a hub that does not
+# answer.
+[doc('Measure the shipped public room hubs again (#232)')]
+rrc-hubs-check listen="1800":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=target/tmp/rrc-hubs
+    mkdir -p "$out"
+    cargo run -q -p loquax --example rrc_hubs_probe -- --listen {{listen}} --open listed --hubs loquax/assets/hubs.toml > "$out/probe.txt" 2> "$out/probe.err"
+    awk '/^\[\[hub\]\]/ {k="hub"} /^\[\[unreached\]\]/ {k="unreached"} /^hash *=/ {gsub(/[" ]/, "", $0); split($0, h, "="); print h[2], k}' loquax/assets/hubs.toml > "$out/listed.txt"
+    findings=0
+    while read -r hash kind; do
+        line="$(grep -F "HUB hash=$hash " "$out/probe.txt" || true)"
+        welcome="$(sed -n 's/.* welcome=\([^ ]*\).*/\1/p' <<< "$line")"
+        case "$kind:$welcome" in
+            hub:yes|unreached:yes) echo "ANSWERED $kind $line" ;;
+            hub:*) echo "FINDING shipped hub did not answer: ${line:-HUB hash=$hash (not probed)}"; findings=$((findings + 1)) ;;
+            unreached:*) echo "STILL-UNREACHED $line" ;;
+        esac
+        if [ "$kind:$welcome" = "unreached:yes" ]; then
+            echo "FINDING an unreached hub answers now: $line"
+            findings=$((findings + 1))
+        fi
+    done < "$out/listed.txt"
+    heard="$(grep -c '^HEARD' "$out/probe.txt" || true)"
+    echo "HEARD $heard rrc.hub announces in {{listen}} s (the list is in $out/probe.txt)"
+    if [ "$findings" -gt 0 ]; then
+        echo "rrc-hubs-check: $findings finding(s): update loquax/assets/hubs.toml and the page's measurement"
+        exit 1
+    fi
+    echo "rrc-hubs-check: the list is as measured"
+
 # 1147, #232: the messenger is Loquax in prose (Lew, 2026-10-30); `loquax` is
 # the command, the package, the crate and every path, so in the docs it is code,
 # a path, a hyphenated page name or a man page's bold command. Refuses a bare
