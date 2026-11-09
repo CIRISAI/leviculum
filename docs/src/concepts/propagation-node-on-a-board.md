@@ -65,6 +65,13 @@ carries the operator verbs `/pn/get/stats`, `/pn/peer/sync` and
 `LXMRouter.py:91`) and is behind an allow-list, so it is not part of
 what a stranger can drive.
 
+A propagation node is no traffic oracle: it never answers a question about
+an arbitrary destination hash. Peer sync puts every foreign mailbox entry in
+its store, so an endpoint that told a stranger what it holds for a named
+address would reveal per-address volume and timing for the whole mesh; the
+only read path stays the identity-bound `/get`, which serves a client
+nothing but its own destination's entries.
+
 Messages move in three shapes, and only three:
 
 1. **A client uploads one message.** A single link packet carrying
@@ -856,6 +863,11 @@ somebody sends a message.
   `LXMRouter.py:45`). B assumes a cap we enforce ourselves keeps the
   peer-set arithmetic survivable; three Python routers in range would
   show whether it does.
+- **What full peer participation costs inbound.** A node in the peer
+  network receives the entire LXMF propagation traffic of the reachable
+  mesh, not only what its own users send. The storage and bandwidth that
+  takes has not been measured on a real node, and it sets the hardware
+  floor.
 - **Whether 16 pages is the right size.** 68 would buy 38 years and cost
   the image 212 KiB of headroom. The number lives in `memory.x` and the
   trade is argued there; changing it later is a reformat, which `mount`

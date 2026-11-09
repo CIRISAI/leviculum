@@ -444,12 +444,13 @@ link plus a resource transfer, where a report is a single packet. Both
 figures belong in a port's own arithmetic; neither is a licence to skip
 it.
 
-There is no third shape. Reticulum has no multi-hop broadcast at all —
-see [Public channels over
-LXMF](public-channels.md#1-why-the-obvious-approach-does-not-work), which
-settles this at the protocol level rather than by what two apps happen to
-implement. LXMF's `FIELD_GROUP` is conversation metadata and not a
-delivery mechanism; it would not produce a broadcast even if every
+There is no third shape. Reticulum has no multi-hop broadcast at all: a
+GROUP or PLAIN destination can never be announced
+(`Destination.py:251-252`), and any receiving node drops such a packet once
+`hops > 1` (`Transport.py:1354-1373`), so its reach is one hop plus locally
+attached clients. That settles it at the protocol level rather than by what
+two apps happen to implement. LXMF's `FIELD_GROUP` is conversation metadata
+and not a delivery mechanism; it would not produce a broadcast even if every
 viewer read it.
 
 ### Relaying someone else's readings needs permission

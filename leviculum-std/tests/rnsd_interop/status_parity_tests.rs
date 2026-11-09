@@ -2078,7 +2078,7 @@ fn assert_inventory_parity(lnsd: &[InventoryRow], rnsd: &[InventoryRow], phase: 
 ///   2. one connected TCP peer, waited for by the path it announces (a state
 ///      both stacks reach observably, never a sleep).
 ///
-/// Deliberate, pinned deviations (see `docs/src/concepts/client-tools.md`):
+/// Deliberate, pinned deviations, each a decision this test holds in place:
 ///   * an IPC client's `short_name` carries a connection index that the
 ///     reference derives from the LIVE client count at accept time
 ///     (LocalInterface.py:441); ours mirrors that, but the index is templated
