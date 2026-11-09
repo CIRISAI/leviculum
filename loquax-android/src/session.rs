@@ -204,6 +204,8 @@ struct Inner {
     sending: bool,
     pull_owed: bool,
     pulling: bool,
+    /// The running `/pages` ask (1579), one at a time.
+    pages_asking: Option<tokio::task::JoinHandle<()>>,
     /// Whether the user asked for the pull owed (Refresh), and what the
     /// status line is told of the running one (1136).
     pull_asked: bool,
@@ -2269,6 +2271,7 @@ impl Inner {
             sending: false,
             pull_owed: false,
             pulling: false,
+            pages_asking: None,
             pull_asked: false,
             pull_line: PullLine::default(),
             finished_tx,
@@ -2870,6 +2873,16 @@ impl Inner {
             self.runtime
                 .spawn(runner::hand_petnames(self.client.clone(), petnames, BUDGET));
         }
+        // The Browse tab's bookmark changes (1579): the phone keeps none
+        // past the session, its home keeps them for every device.
+        let bookmarks = std::mem::take(&mut self.model.browse.outgoing);
+        if !bookmarks.is_empty() {
+            self.runtime.spawn(runner::hand_bookmarks(
+                self.client.clone(),
+                bookmarks,
+                BUDGET,
+            ));
+        }
         let states = self.model.take_peer_states();
         if !states.is_empty() {
             self.runtime.spawn(runner::hand_peer_states(
@@ -3042,7 +3055,35 @@ impl Inner {
         if let Some(say) = self.pull_line.ended(&end.result) {
             self.say(say);
         }
+        let pulled = end.result.is_ok();
         self.apply(UiEvent::FetchDone(end.result));
+        if pulled {
+            self.ask_pages();
+        }
+    }
+
+    /// After a pull (1579): the pages the home heard and the identity's
+    /// bookmarks after the stamp the phone holds, the pending bookmark
+    /// changes handed first. One ask at a time.
+    fn ask_pages(&mut self) {
+        if self
+            .pages_asking
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        let client = self.client.clone();
+        let pending = self.model.browse.shared.pending();
+        let stamp = self.model.browse.shared.stamp;
+        let done = self.finished_tx.clone();
+        let wake = Arc::clone(&self.wake);
+        self.pages_asking = Some(self.runtime.spawn(async move {
+            if let Some(event) = runner::home_pages(client, pending, stamp, BUDGET).await {
+                let _ = done.send(Finished::Event(event));
+                wake.notify_one();
+            }
+        }));
     }
 
     /// The two lists into [`Inner::scene`] (1464), and the digest of the

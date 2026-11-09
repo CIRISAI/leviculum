@@ -410,6 +410,13 @@ pub enum OutboxEvent {
     /// screen lists it among the hubs ([`crate::ui::rooms::RoomsEvent::Heard`]);
     /// a home keeps it for its devices.
     HubAnnounced { hub: crate::ui::hubs::HeardHub },
+    /// A NomadNet node announced its pages (1579, `nomadnetwork.node`),
+    /// heard by this node, timed and with the hops of the hearing. A home
+    /// keeps it for its devices ([`crate::home::pages`]); a device's
+    /// Browse tab lists the nodes its own fetch hears.
+    PageAnnounced {
+        node: lnomad::discovery::DiscoveredNode,
+    },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.
     SyncLinked,

@@ -430,6 +430,7 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::Uploaded { .. }
                 | OutboxEvent::MeshPosition { .. }
                 | OutboxEvent::HubAnnounced { .. }
+                | OutboxEvent::PageAnnounced { .. }
                 | OutboxEvent::SyncLinked
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. }

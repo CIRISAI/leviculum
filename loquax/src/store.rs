@@ -131,7 +131,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 17;
+pub const SCHEMA_VERSION: i32 = 18;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -437,7 +437,38 @@ const SCHEMA_V17: &str = "
 ALTER TABLE conversations ADD COLUMN listing BLOB;
 ";
 
+/// What schema 18 adds to schema 17 (1579, [`crate::home::pages`]): the
+/// NomadNet pages the home heard (`home_pages`, one row a node, at most
+/// [`crate::home::pages::PAGES_CAP`]) and the identity's bookmarks with
+/// their tombstones (`home_bookmarks`, keyed by lnomad's URL, `at` the
+/// writing device's clock in unix milliseconds). `stamp` is the home's
+/// change counter, shared by both tables: a device asks for the rows with
+/// a stamp after its own.
+const SCHEMA_V18: &str = "
+CREATE TABLE home_pages(
+    identity BLOB NOT NULL,
+    dest BLOB NOT NULL,
+    name TEXT,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    hops INTEGER,
+    count INTEGER NOT NULL,
+    stamp INTEGER NOT NULL,
+    PRIMARY KEY (identity, dest));
+CREATE INDEX home_pages_by_stamp ON home_pages(identity, stamp);
+CREATE TABLE home_bookmarks(
+    identity BLOB NOT NULL,
+    url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    deleted INTEGER NOT NULL,
+    stamp INTEGER NOT NULL,
+    PRIMARY KEY (identity, url));
+CREATE INDEX home_bookmarks_by_stamp ON home_bookmarks(identity, stamp);
+";
+
 pub mod groups;
+pub mod pages;
 
 /// The model's key of the row at seq 0. The model counts keys unsigned
 /// ([`Message::activity`]) and imported history sits below seq 0, so a key is
@@ -490,6 +521,9 @@ const TABLES_V12: [&str; 1] = ["client_groups"];
 
 /// The tables schema 15 adds.
 const TABLES_V15: [&str; 2] = ["pn_asks", "pn_nodes"];
+
+/// The tables schema 18 adds.
+const TABLES_V18: [&str; 2] = ["home_pages", "home_bookmarks"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -662,6 +696,7 @@ impl Store {
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
              {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} {SCHEMA_V17} \
+             {SCHEMA_V18} \
              PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
@@ -759,6 +794,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 18 {
+            if let Some(missing) = missing(&TABLES_V18) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate(version);
         }
@@ -829,7 +869,10 @@ impl Store {
                 if version < 16 {
                     batch.push_str(SCHEMA_V16);
                 }
-                batch.push_str(SCHEMA_V17);
+                if version < 17 {
+                    batch.push_str(SCHEMA_V17);
+                }
+                batch.push_str(SCHEMA_V18);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");

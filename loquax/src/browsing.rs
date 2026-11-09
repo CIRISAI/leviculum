@@ -46,10 +46,24 @@ pub(crate) fn set_up(model: &mut Model, home: &Path, on: bool) {
     let browser = &mut model.browse.model;
     let bookmarks = home.join(BOOKMARKS_FILE);
     browser.bookmarks = Bookmarks::load(&bookmarks);
+    // The file is the import (1579): on a device of a home its bookmarks
+    // wait to be handed there, stamped when the file was written, so a
+    // newer word from another device wins over them. A device without a
+    // home never hands them.
+    let written = std::fs::metadata(&bookmarks)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        });
     browser.bookmarks_path = Some(bookmarks);
     let pins = home.join(PINS_FILE);
     browser.pins = lnomad::names::PinStore::load(&pins);
     browser.pins_path = Some(pins);
+    let browse = &mut model.browse;
+    browse.shared.loaded(&browse.model.bookmarks);
+    browse.shared.import(&browse.model.bookmarks, written);
 }
 
 /// What the shell folds for the browser: one of Loquax's events, or one of

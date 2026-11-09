@@ -792,6 +792,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             // For every device of the home (1599); it wakes nobody.
                             archive_hub(&mut store, &hub, archive_cap_bytes);
                         }
+                        OutboxEvent::PageAnnounced { node } => {
+                            // For every device of the home (1579): its `/pages`.
+                            keep_page(&mut store, &node);
+                        }
                         OutboxEvent::Announced { destination, name, path_response } => {
                             if let Some(name) = name.filter(|_| destination != address) {
                                 heard_name(
@@ -1731,6 +1735,27 @@ fn archive_hub(store: &mut Store, hub: &crate::ui::hubs::HeardHub, cap: u64) -> 
         Ok(None) => None,
         Err(error) => {
             tracing::warn!("HOME archive: {error}");
+            None
+        }
+    }
+}
+
+/// Keep a NomadNet node the home heard announcing (1579,
+/// [`super::pages`]): its row's new stamp, when the hearing said something
+/// new; a hearing that only counted says nothing in the log.
+fn keep_page(store: &mut Store, node: &lnomad::discovery::DiscoveredNode) -> Option<u64> {
+    match store.page_heard(node) {
+        Ok(Some(stamp)) => {
+            tracing::info!(
+                "HOME page kept node={} hops={} stamp={stamp}",
+                crate::address::to_hex(&node.dest_hash),
+                node.hops.map_or(-1, i64::from)
+            );
+            Some(stamp)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!("HOME pages: {error}");
             None
         }
     }

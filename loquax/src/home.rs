@@ -17,6 +17,8 @@
 //!   `/watch`, their answers, and the wake.
 //! - [`wake`]: which watching link is owed a wake, on the home node.
 //! - [`relation`]: which announced names the home node archives.
+//! - [`pages`]: the NomadNet pages the home heard and the identity's
+//!   bookmarks, `/pages` and `/bookmark` (1579).
 //! - `watch`: a client's watching link, kept up while it runs.
 //! - [`outgoing`]: the home node's outbox policy, direct at once, a
 //!   propagated copy on failure, direct retries for seven days.
@@ -40,6 +42,7 @@ pub mod board;
 pub mod code;
 pub mod keepalive;
 pub mod outgoing;
+pub mod pages;
 pub mod record;
 pub mod relation;
 pub mod wake;
@@ -198,6 +201,18 @@ pub const GROUP_ADD_PATH: &str = "/groupadd";
 
 /// 1307 pass four: the admin deletes a group the home hosts, for everyone.
 pub const GROUP_DELETE_PATH: &str = "/groupdelete";
+
+/// The NomadNet pages the home heard and the identity's bookmarks that
+/// changed after a stamp (1579, [`pages`]): the device's stamp in, the
+/// rows after it out. Not archive entries: a page row changes on every
+/// hour of announces and a mesh holds thousands, so they keep a table and
+/// a stamp of their own and never move a message cursor.
+pub const PAGES_PATH: &str = "/pages";
+
+/// A bookmark a device set or cleared (1579, [`pages::BookmarkRow`]): the
+/// row in, a status out. The home keeps the newer by stamp, and every
+/// device of the identity gets it with its next `/pages`.
+pub const BOOKMARK_PATH: &str = "/bookmark";
 
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;

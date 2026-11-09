@@ -45,6 +45,14 @@ pub struct Browse {
     pub open: bool,
     /// lnomad's model, hosted ([`Model::hosted`]).
     pub model: Model,
+    /// On a device of a home (1579): the stamp of the page rows it holds
+    /// and the bookmarks it shares with the home
+    /// ([`crate::home::pages::Shared`]).
+    pub shared: crate::home::pages::Shared,
+    /// Bookmark changes the reader made, for the shell to hand the home
+    /// (`/bookmark`); empty on a device without a home, whose shell never
+    /// takes them.
+    pub outgoing: Vec<crate::home::pages::BookmarkRow>,
 }
 
 /// The browser's cells before the platform says its size: the M9's 53 by
@@ -63,6 +71,8 @@ impl Default for Browse {
             enabled: false,
             open: false,
             model,
+            shared: crate::home::pages::Shared::new(),
+            outgoing: Vec::new(),
         }
     }
 }
@@ -127,6 +137,10 @@ pub enum BrowseEvent {
     DownloadFailed(Text),
     /// An announce named a NomadNet node (`nomadnetwork.node`).
     Node(DiscoveredNode),
+    /// The home's `/pages` answer (1579): the nodes it heard, listed as
+    /// nodes this device heard itself, and the bookmarks of the identity,
+    /// applied by stamp ([`crate::home::pages::Shared::apply`]).
+    Home(crate::home::pages::Delta),
     /// The page's area in cells, columns by rows.
     Resize { cols: u16, rows: u16 },
     /// The platform draws in this theme now (the window's light or dark,
@@ -160,6 +174,7 @@ impl BrowseEvent {
             },
             BrowseEvent::Failed(why) => AppEvent::LoadFailed(why),
             BrowseEvent::Node(node) => AppEvent::NodeDiscovered(node),
+            BrowseEvent::Home(delta) => return Err(Aside::Home(delta)),
             BrowseEvent::Resize { cols, rows } => AppEvent::Resize(cols, rows),
             BrowseEvent::Address(value) => return Err(Aside::Typed(value)),
             BrowseEvent::Theme(theme) => return Err(Aside::Theme(theme)),
@@ -171,6 +186,7 @@ impl BrowseEvent {
 /// What a [`BrowseEvent`] is when it is no event of the browser's.
 enum Aside {
     Identify([u8; 16], bool),
+    Home(crate::home::pages::Delta),
     Typed(String),
     Theme(leviculum_ui::theme::Theme),
 }
@@ -192,7 +208,7 @@ pub(super) fn fold<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     event: BrowseEvent,
 ) -> Vec<UiEffect> {
-    if !model.browse.enabled && !matches!(event, BrowseEvent::Node(_)) {
+    if !model.browse.enabled && !matches!(event, BrowseEvent::Node(_) | BrowseEvent::Home(_)) {
         return Vec::new();
     }
     model.browse.model.lang = model.lang;
@@ -202,6 +218,7 @@ pub(super) fn fold<B: InputBuffer + Default>(
             model.browse.model.note_identify(dest, on);
             Vec::new()
         }
+        Err(Aside::Home(delta)) => home_pages(model, delta),
         Err(Aside::Typed(value)) => lnomad::app::type_address(&mut model.browse.model, &value),
         Err(Aside::Theme(theme)) => {
             if model.browse.model.theme != theme {
@@ -211,6 +228,28 @@ pub(super) fn fold<B: InputBuffer + Default>(
         }
     };
     effects_of(model, effects)
+}
+
+/// The home's rows into the browser (1579): every node into its list, the
+/// bookmarks by stamp, saved when they changed. The stamp moves to the
+/// answer's.
+fn home_pages<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    delta: crate::home::pages::Delta,
+) -> Vec<Effect> {
+    let browse = &mut model.browse;
+    let mut effects = Vec::new();
+    for node in delta.nodes() {
+        effects.extend(browse.fold(AppEvent::NodeDiscovered(node.clone())));
+    }
+    if browse
+        .shared
+        .apply(&mut browse.model.bookmarks, delta.bookmarks())
+    {
+        effects.push(Effect::SaveBookmarks);
+    }
+    browse.shared.stamp = delta.stamp;
+    effects
 }
 
 /// Fold one of lnomad's own events into the hosted browser: a key or the
@@ -269,6 +308,17 @@ pub fn effects_of<B: InputBuffer + Default>(
             Effect::Quit => {
                 model.browse.model.quit = false;
                 model.browse.open = false;
+            }
+            Effect::SaveBookmarks => {
+                // A change the reader made goes to the home (1579); one the
+                // home brought is no change here.
+                let at = i64::try_from(model.browse.model.wall_now())
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(1000);
+                let browse = &mut model.browse;
+                let rows = browse.shared.local(&browse.model.bookmarks, at);
+                browse.outgoing.extend(rows);
+                out.push(UiEffect::Browse(Effect::SaveBookmarks));
             }
             other => out.push(UiEffect::Browse(other)),
         }
@@ -333,6 +383,77 @@ mod tests {
             fields: Vec::new(),
             is_file: false,
         }))
+    }
+
+    /// 1579: the home's answer lists its nodes beside the one this device
+    /// heard, applies the identity's bookmarks and saves them, and moves
+    /// the stamp; what the home brought is no change to hand back. A
+    /// bookmark the reader adds is. The standalone arm: a device that never
+    /// hears its home lists the nodes its own announces named, and its
+    /// stamp stays 0.
+    #[test]
+    fn the_homes_pages_and_bookmarks_join_the_list_and_only_a_local_change_goes_back() {
+        use crate::home::pages::{BookmarkRow, Delta, PageRow, Row};
+        let alone = phone();
+        assert_eq!(alone.browse.model.node_registry.len(), 1);
+        assert_eq!(alone.browse.shared.stamp, 0);
+        let mut model = phone();
+        model.browse.model.clock = Some(1_800_000_100);
+        let set = BookmarkRow {
+            url: "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c:/page/index.mu".into(),
+            title: "Relay Süd".into(),
+            at: 1_800_000_000_000,
+            deleted: false,
+        };
+        let effects = update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 9,
+                more: false,
+                rows: vec![
+                    Row::Page(PageRow {
+                        node: node([0x7c; 16], "Relay Süd"),
+                        count: 4,
+                    }),
+                    Row::Bookmark(set.clone()),
+                ],
+            })),
+        );
+        assert_eq!(effects, [UiEffect::Browse(Effect::SaveBookmarks)]);
+        assert_eq!(model.browse.model.node_registry.len(), 2);
+        assert!(model.browse.model.bookmarks.contains(&set.url));
+        assert_eq!(model.browse.shared.stamp, 9);
+        assert!(model.browse.outgoing.is_empty(), "the home's own row");
+        model.browse.model.bookmarks.add(lnomad::Bookmark {
+            url: "5a5a:/page/index.mu".into(),
+            title: "Marcel's node".into(),
+        });
+        let effects = effects_of(&mut model, vec![Effect::SaveBookmarks]);
+        assert_eq!(effects, [UiEffect::Browse(Effect::SaveBookmarks)]);
+        assert_eq!(
+            model.browse.outgoing,
+            [BookmarkRow {
+                url: "5a5a:/page/index.mu".into(),
+                title: "Marcel's node".into(),
+                at: 1_800_000_100_000,
+                deleted: false,
+            }]
+        );
+        assert_eq!(model.browse.shared.pending().len(), 1);
+        // A host without the tab still keeps the home's list for later.
+        let mut off = UiModel::<Buffer>::new(&[]);
+        update(
+            &mut off,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 3,
+                more: false,
+                rows: vec![Row::Page(PageRow {
+                    node: node(NODE, "Marcel's node"),
+                    count: 1,
+                })],
+            })),
+        );
+        assert_eq!(off.browse.model.node_registry.len(), 1);
     }
 
     #[test]

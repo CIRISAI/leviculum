@@ -271,6 +271,9 @@ pub(crate) struct Shell {
     pub(crate) browsing: crate::browsing::Browsing,
     /// The Rooms' hub link (1379), where the config names a hub.
     rooming: loquax::rooms_link::Rooming,
+    /// On a client of a home node: the running `/pages` ask (1579), one at
+    /// a time.
+    pages_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -682,6 +685,7 @@ impl Shell {
         self.hand_marks();
         self.hand_petnames();
         self.hand_peer_states();
+        self.hand_bookmarks();
         let writes = self.model.take_writes();
         if let Err(error) = self.store.write(&writes) {
             loquax::events::store_failed(&error.to_string());
@@ -1188,8 +1192,55 @@ impl Shell {
                 );
             }
         }
+        let pulled = end.result.is_ok();
         self.judge(&end);
         self.apply(UiEvent::FetchDone(end.result.map_err(|e| e.to_string())));
+        if pulled {
+            self.ask_pages();
+        }
+    }
+
+    /// On a client of a home node, after a pull (1579): the pages the home
+    /// heard and the bookmarks of the identity after the stamp this device
+    /// holds, with the bookmark changes still pending handed first. One
+    /// ask at a time.
+    fn ask_pages(&mut self) {
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        if self
+            .pages_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        let pending = self.model.browse.shared.pending();
+        let stamp = self.model.browse.shared.stamp;
+        let budget = self.context.timeout;
+        let done = self.done_tx.clone();
+        self.pages_task = Some(tokio::spawn(async move {
+            if let Some(event) = runner::home_pages(client, pending, stamp, budget).await {
+                let _ = done.send(Finished::Event(event));
+            }
+        }));
+    }
+
+    /// The bookmark changes the reader made (1579), handed to the home on a
+    /// task of their own, as petnames are; a device without a home keeps
+    /// them to itself.
+    fn hand_bookmarks(&mut self) {
+        let rows = std::mem::take(&mut self.model.browse.outgoing);
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        if rows.is_empty() {
+            return;
+        }
+        self.mark_tasks.retain(|task| !task.is_finished());
+        let budget = self.context.timeout;
+        self.mark_tasks
+            .push(tokio::spawn(runner::hand_bookmarks(client, rows, budget)));
     }
 
     /// The history a pull or the palette's `import` wrote into the store,
@@ -1816,6 +1867,7 @@ pub(crate) async fn start(
         mic,
         browsing,
         rooming,
+        pages_task: None,
     };
     Ok((shell, config))
 }

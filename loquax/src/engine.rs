@@ -1910,6 +1910,23 @@ impl Engine {
                 });
             }
         }
+        // A NomadNet node announcing its pages (1579): a home keeps it for
+        // its devices, so a device switched on lists every page the home
+        // heard (`crate::home::pages`).
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if lnomad::discovery::is_nomad_node_announce(announce) {
+                let at = core.emission_secs();
+                self.emit(OutboxEvent::PageAnnounced {
+                    node: lnomad::discovery::DiscoveredNode {
+                        dest_hash: *announce.destination_hash().as_bytes(),
+                        name: lnomad::discovery::decode_node_name(announce.app_data()),
+                        first_seen: at,
+                        last_seen: at,
+                        hops: core.hops_to(announce.destination_hash()).map(u32::from),
+                    },
+                });
+            }
+        }
         if matches!(self.state, State::Client(_)) {
             return out;
         }
@@ -2391,6 +2408,61 @@ mod tests {
             [false],
             "the member announced"
         );
+    }
+
+    /// 1579: a NomadNet node's `nomadnetwork.node` announce reaches the seam
+    /// as the row lnomad's registry makes of the same announce (one type,
+    /// one decoder), named, with its hops; the control: another aspect of
+    /// the same name is no page.
+    #[test]
+    fn a_nomadnet_announce_reaches_the_seam_as_lnomads_row() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let pages = |events: &[OutboxEvent]| -> Vec<lnomad::discovery::DiscoveredNode> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::PageAnnounced { node } => Some(node.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let node = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&node, "nomadnetwork", &["node"], b"Marcel's node"),
+        );
+        let heard = pages(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        let mut registry = lnomad::NomadNodeRegistry::new();
+        assert!(registry.observe_parts(
+            &lnomad::nomad_node_name_hash(),
+            heard[0].dest_hash,
+            b"Marcel's node",
+            heard[0].hops,
+            heard[0].last_seen,
+        ));
+        assert_eq!(registry.nodes(), [&heard[0]]);
+        assert_eq!(heard[0].name.as_deref(), Some("Marcel's node"));
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        let other = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&other, "nomadnetwork", &["other"], b"x"),
+        );
+        assert!(pages(&events).is_empty(), "another aspect: {events:?}");
     }
 
     /// 1599: a hub's `rrc.hub` announce reaches the seam as a heard hub,

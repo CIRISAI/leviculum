@@ -372,6 +372,69 @@ pub async fn hand_petnames(
     }
 }
 
+/// The bookmark changes a fold made (1579), handed to the home in order:
+/// the screen has them already. One the home did not take stays pending in
+/// the model and goes again before the next `/pages`.
+pub async fn hand_bookmarks(
+    client: HomeClient,
+    rows: Vec<super::pages::BookmarkRow>,
+    budget: Duration,
+) {
+    for row in rows {
+        let outcome = super::client::bookmark(
+            &client.node,
+            &client.public_key,
+            &client.device,
+            &row,
+            budget,
+        )
+        .await;
+        match outcome {
+            Ok(()) => tracing::info!("HOME bookmark deleted={} at={}", row.deleted, row.at),
+            Err(error) => tracing::warn!(
+                "HOME bookmark deleted={} at={} not taken: {error}",
+                row.deleted,
+                row.at
+            ),
+        }
+    }
+}
+
+/// The home's pages and bookmarks after `stamp` (1579): the changes still
+/// pending go first, so the answer carries their echo, then `/pages`. The
+/// event the model folds, `None` when the home did not answer (a home from
+/// before 1579 among them), and the device keeps the list it heard.
+pub async fn home_pages(
+    client: HomeClient,
+    pending: Vec<super::pages::BookmarkRow>,
+    stamp: u64,
+    budget: Duration,
+) -> Option<UiEvent> {
+    hand_bookmarks(client.clone(), pending, budget).await;
+    match super::client::pages(
+        &client.node,
+        &client.public_key,
+        &client.device,
+        stamp,
+        budget * 2,
+    )
+    .await
+    {
+        Ok(delta) => {
+            tracing::info!(
+                "HOME pages pulled rows={} stamp={}",
+                delta.rows.len(),
+                delta.stamp
+            );
+            Some(UiEvent::Browse(crate::ui::browse::BrowseEvent::Home(delta)))
+        }
+        Err(error) => {
+            tracing::warn!("HOME pages: {error}");
+            None
+        }
+    }
+}
+
 /// The peer states a fold set, handed to the home node in order (1146), as
 /// petnames are.
 pub async fn hand_peer_states(

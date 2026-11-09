@@ -121,6 +121,8 @@ pub fn answer(
         super::GROUP_PATH => group(store, home, data, device, now),
         super::GROUP_ADD_PATH => group_add(store, home, data, device, now),
         super::GROUP_DELETE_PATH => group_delete(store, home, data, device, now),
+        super::PAGES_PATH => Answer::only(pages(store, data, device)),
+        super::BOOKMARK_PATH => Answer::only(bookmark(store, data, device)),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -907,6 +909,79 @@ fn lev_out(
 
 /// A client's petname for a peer, kept as an archive entry: the newest of
 /// each peer, the same one again appending nothing.
+/// `/pages` (1579): the page and bookmark rows after the device's stamp,
+/// cut to its bound or to [`super::pages::PAGES_ANSWER_MAX`]. A stamp past
+/// the home's newest is a device that counted with another home (a
+/// move, a store made again): it gets the whole list.
+fn pages(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
+    use super::pages;
+    let Ok((since, bound)) = pages::read_pages_request(data) else {
+        return wire::status_answer(Status::Malformed);
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "pages") {
+        return refused;
+    }
+    let bytes = bound
+        .and_then(|b| usize::try_from(b).ok())
+        .unwrap_or(pages::PAGES_ANSWER_MAX)
+        .min(pages::PAGES_ANSWER_MAX);
+    let read = store.pages_newest().and_then(|newest| {
+        let since = if since > newest { 0 } else { since };
+        // A row takes at least 20 bytes, so no answer holds more.
+        let limit = (bytes / 20).max(1);
+        store
+            .pages_since(since, limit)
+            .map(|(rows, behind)| (since, rows, behind))
+    });
+    match read {
+        Ok((since, rows, behind)) => {
+            let delta = pages::fit(rows, since, bytes, behind);
+            let answer = pages::pages_answer(&delta);
+            tracing::info!(
+                "HOME pages device={} since={since} rows={} stamp={} more={} bytes={}",
+                crate::address::to_hex(&device),
+                delta.rows.len(),
+                delta.stamp,
+                delta.more,
+                answer.len()
+            );
+            answer
+        }
+        Err(error) => {
+            tracing::warn!("HOME pages: {error}");
+            wire::status_answer(Status::Failed)
+        }
+    }
+}
+
+/// `/bookmark` (1579): a device's bookmark set or cleared; kept when it is
+/// newer than the home's, and `Ok` either way, since the newer word is the
+/// one every device gets.
+fn bookmark(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
+    let Ok(row) = super::pages::read_bookmark_request(data) else {
+        return wire::status_answer(Status::Malformed);
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "bookmark") {
+        return refused;
+    }
+    match store.bookmark_put(&row) {
+        Ok(stamp) => {
+            tracing::info!(
+                "HOME bookmark device={} deleted={} at={} stamp={}",
+                crate::address::to_hex(&device),
+                row.deleted,
+                row.at,
+                stamp.map_or_else(|| "-".to_string(), |s| s.to_string())
+            );
+            wire::status_answer(Status::Ok)
+        }
+        Err(error) => {
+            tracing::warn!("HOME bookmark: {error}");
+            wire::status_answer(Status::Failed)
+        }
+    }
+}
+
 fn petname(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: i64) -> Vec<u8> {
     let Ok((peer, _)) = wire::read_petname_entry(data) else {
         return wire::status_answer(Status::Malformed);
@@ -1379,6 +1454,110 @@ mod tests {
     fn admitted(store: &mut Store) {
         store.issue_token(&TOKEN, "laptop", 90).expect("issue");
         assert_eq!(join(store, LAPTOP, TOKEN), Status::Ok);
+    }
+
+    fn pages_ask(
+        store: &mut Store,
+        device: [u8; 16],
+        since: u64,
+        bound: Option<u64>,
+    ) -> Result<crate::home::pages::Delta, Status> {
+        let answer = answer(
+            store,
+            &home(),
+            crate::home::PAGES_PATH,
+            &crate::home::pages::pages_request(since, bound),
+            Some(device),
+            100.0,
+        );
+        crate::home::pages::read_pages_answer(&answer.bytes).expect("answer")
+    }
+
+    /// 1579: `/pages` refuses a device not admitted; an admitted one gets
+    /// the whole list from stamp 0 page by page at its bound, then the
+    /// delta after its stamp, and a bookmark one device set reaches the
+    /// next ask; a stamp past the home's newest gets the list again.
+    #[test]
+    fn pages_bring_the_list_then_the_delta_and_a_bookmark_comes_back() {
+        use crate::home::pages::{self, BookmarkRow};
+        let (_dir, mut store) = store();
+        assert_eq!(
+            pages_ask(&mut store, LAPTOP, 0, None),
+            Err(Status::NotAdmitted)
+        );
+        admitted(&mut store);
+        for i in 0..2000u32 {
+            let mut dest = [0u8; 16];
+            dest[..4].copy_from_slice(&i.to_be_bytes());
+            store
+                .page_heard(&lnomad::discovery::DiscoveredNode {
+                    dest_hash: dest,
+                    name: Some(alloc::format!("NomadNet node {i}")),
+                    first_seen: 1_800_000_000,
+                    last_seen: 1_800_000_000,
+                    hops: Some(3),
+                })
+                .expect("heard");
+        }
+        let mut stamp = 0;
+        let mut rows = 0;
+        let mut asks = 0;
+        let mut bytes = 0;
+        loop {
+            let answer = answer(
+                &mut store,
+                &home(),
+                crate::home::PAGES_PATH,
+                &pages::pages_request(stamp, None),
+                Some(LAPTOP),
+                100.0,
+            );
+            bytes += answer.bytes.len();
+            assert!(answer.bytes.len() <= pages::PAGES_ANSWER_MAX);
+            let delta = pages::read_pages_answer(&answer.bytes)
+                .expect("answer")
+                .expect("ok");
+            asks += 1;
+            rows += delta.rows.len();
+            stamp = delta.stamp;
+            if !delta.more {
+                break;
+            }
+        }
+        assert_eq!(rows, 2000);
+        assert!((3..=6).contains(&asks), "{asks} asks, {bytes} bytes");
+        let lora = pages_ask(
+            &mut store,
+            LAPTOP,
+            0,
+            Some(crate::home::ask::LORA_PAGE_BYTES as u64),
+        )
+        .expect("ok");
+        assert!(lora.more && !lora.rows.is_empty());
+        assert!(pages::pages_answer(&lora).len() <= crate::home::ask::LORA_PAGE_BYTES);
+        assert!(pages_ask(&mut store, LAPTOP, stamp, None)
+            .expect("ok")
+            .rows
+            .is_empty());
+        let set = BookmarkRow {
+            url: "00000001000000000000000000000000:/page/index.mu".into(),
+            title: "Node one".into(),
+            at: 1_800_000_000_000,
+            deleted: false,
+        };
+        let taken = answer(
+            &mut store,
+            &home(),
+            crate::home::BOOKMARK_PATH,
+            &pages::bookmark_request(&set),
+            Some(LAPTOP),
+            100.0,
+        );
+        assert_eq!(read_status(&taken.bytes), Ok(Status::Ok));
+        let delta = pages_ask(&mut store, LAPTOP, stamp, None).expect("ok");
+        assert_eq!(delta.bookmarks().collect::<Vec<_>>(), [&set]);
+        let again = pages_ask(&mut store, LAPTOP, delta.stamp + 1000, None).expect("ok");
+        assert!(again.more && !again.rows.is_empty(), "another home's stamp");
     }
 
     /// 1348: a German admin's phone of 1307 pass six still sends its
