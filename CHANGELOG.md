@@ -11,6 +11,8 @@ git tag, not the version string. -->
 
 ## [Unreleased]
 
+## [0.34.0+ciris.2] — CIRIS fork
+
 ### Added
 
 - Unordered, unreliable link datagrams for live media (leviculum#102).
@@ -71,6 +73,22 @@ git tag, not the version string. -->
     own interface still gets the cached proof. A relay that already
     forwarded a request drops a copy heard on another interface instead of
     overwriting its link entry, and still forwards a same-interface repeat.
+
+### Security
+
+- rusqlite 0.41.1 (bundled SQLite past RUSTSEC-2026-0459). Only
+  `leviculum-cli`'s lntd store and `loquax`'s history store use it.
+
+### Consumer notes
+
+- `PacketContext` gained `Datagram`, `NodeEvent` gained
+  `LinkDatagramReceived`, and `DropReason` gained `DatagramShed`; an
+  exhaustive match must add them.
+- Send datagrams only toward a peer known to speak #102 (the sender cannot
+  tell otherwise): carry a capability bit in your own handshake and fall back
+  to `try_send_timed`.
+- #104 needs both ends at 0.34.0+ciris.2 for the probed MTU; an older peer
+  stays at the base 500.
 
 ## [0.34.0+ciris.1] — CIRIS fork
 
