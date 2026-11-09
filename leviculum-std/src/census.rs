@@ -7,7 +7,7 @@
 //! the same three numbers; they live here so the two lines measure alike.
 //! The process-wide sections (allocator, mappings, the `gap:` arithmetic)
 //! are [`crate::reticulum::compose_diagnostic_dump`]'s, reached through
-//! [`compose_multi_node_dump`] when a process carries several nodes.
+//! [`compose_multi_node_dump`](crate::census::compose_multi_node_dump) when a process carries several nodes.
 
 /// `VmRSS` of this process in kB, 0 where `/proc/self/status` cannot say.
 pub fn rss_kb() -> u64 {
