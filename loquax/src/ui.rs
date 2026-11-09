@@ -1273,6 +1273,14 @@ pub struct UiModel<B> {
     changed: BTreeSet<([u8; 16], u64)>,
     /// Conversations whose own state (pin, unread) a fold changed.
     changed_peers: BTreeSet<[u8; 16]>,
+    /// Conversations made since the last note (1594): a note scoped to
+    /// what a batch named ([`Batch`]) refreshes them too.
+    made: Vec<[u8; 16]>,
+    /// The conversations the running batch's events named (1594,
+    /// [`Batch`]), and the scoped note's indices: kept between notes, so
+    /// a chunk's note allocates nothing for its scope.
+    note_scope: Vec<[u8; 16]>,
+    note_indices: Vec<usize>,
     /// What earlier folds changed and the store has not drained
     /// ([`UiModel::take_writes`] reads both halves): each note's set as
     /// it was, merged only by the drain (1591: a merge per note was an
@@ -1578,6 +1586,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             show_archived: false,
             changed: BTreeSet::new(),
             changed_peers: BTreeSet::new(),
+            made: Vec::new(),
+            note_scope: Vec::new(),
+            note_indices: Vec::new(),
             owed_changed: Vec::new(),
             owed_peers: BTreeSet::new(),
             owed_groups: BTreeSet::new(),
@@ -1854,6 +1865,7 @@ impl<B> UiModel<B> {
             Some(index) => index,
             None => {
                 self.names.meet(peer);
+                self.made.push(peer);
                 self.conversations.push(Conversation::new(peer));
                 self.conversations.len() - 1
             }
@@ -1994,6 +2006,19 @@ impl<B> UiModel<B> {
     /// note moves them into the owed shadows the store drains, so the
     /// poke costs the fold's changes, never what accumulated.
     fn note_changes(&mut self) -> bool {
+        self.note_changes_in(false)
+    }
+
+    /// [`UiModel::note_changes`], refreshing only the conversations a
+    /// batch's events named when `scoped` (1594, [`Batch`]): those in
+    /// `note_scope`, with the fold's own sets, the conversations made
+    /// since the last note and the open one. The full walk refreshed the
+    /// summary and the row fingerprint of every conversation at every
+    /// note, 300 of them per chunk of a pulled page (window 19: 3.66 ms
+    /// per entry on the board, about 11 ms a chunk). A build with debug
+    /// assertions walks the rest as well, bumps what the scope missed,
+    /// and fails the assertion naming it: the tests compare the two.
+    fn note_changes_in(&mut self, scoped: bool) -> bool {
         // The fold's own sets are asked in place (1591): a set of the
         // poked peers built per note was the note's own allocations, paid
         // once per batch however small the batch.
@@ -2010,7 +2035,36 @@ impl<B> UiModel<B> {
         };
         let mut bumped = core::mem::take(&mut self.bumped);
         bumped.clear();
-        for (index, conversation) in self.conversations.iter_mut().enumerate() {
+        let mut named = core::mem::take(&mut self.note_scope);
+        let mut indices = core::mem::take(&mut self.note_indices);
+        indices.clear();
+        if scoped {
+            // The scope's conversations, each found once.
+            named.extend(peers.iter().chain(groups.iter()).chain(self.made.iter()));
+            let mut last = None;
+            for (peer, _) in changed.iter() {
+                if last != Some(*peer) {
+                    named.push(*peer);
+                    last = Some(*peer);
+                }
+            }
+            if let Some(open) = self.conversations.get(self.selected) {
+                named.push(open.peer);
+            }
+            named.sort_unstable();
+            named.dedup();
+            let conversations = &self.conversations;
+            indices.extend(
+                named
+                    .iter()
+                    .filter_map(|peer| conversations.iter().position(|c| c.peer == *peer)),
+            );
+            indices.sort_unstable();
+        }
+        named.clear();
+        self.note_scope = named;
+        self.made.clear();
+        let mut note = |index: usize, conversation: &mut Conversation, bumped: &mut Vec<usize>| {
             let refreshed = conversation
                 .summary
                 .refresh(conversation.peer, &conversation.messages);
@@ -2020,8 +2074,39 @@ impl<B> UiModel<B> {
                 conversation.revision = Rev::at(conversation.revision.get().wrapping_add(1));
                 self.listing_owed.insert(conversation.peer);
                 bumped.push(index);
+                return true;
+            }
+            false
+        };
+        if !scoped {
+            for (index, conversation) in self.conversations.iter_mut().enumerate() {
+                note(index, conversation, &mut bumped);
+            }
+        } else {
+            for &index in &indices {
+                note(index, &mut self.conversations[index], &mut bumped);
+            }
+            // The full walk beside it, in a build with debug assertions:
+            // a conversation the scope missed is bumped all the same and
+            // named.
+            #[cfg(debug_assertions)]
+            {
+                let mut missed = Vec::new();
+                for (index, conversation) in self.conversations.iter_mut().enumerate() {
+                    if indices.binary_search(&index).is_err()
+                        && note(index, conversation, &mut bumped)
+                    {
+                        missed.push(crate::address::to_hex(&conversation.peer));
+                    }
+                }
+                bumped.sort_unstable();
+                debug_assert!(
+                    missed.is_empty(),
+                    "a scoped note missed conversations a full walk bumps: {missed:?}"
+                );
             }
         }
+        self.note_indices = indices;
         // Into the owed shadows the store drains: moved whole when they
         // are drained already, no node copied.
         fn owe<T: Ord>(owed: &mut BTreeSet<T>, more: BTreeSet<T>) {
@@ -3419,6 +3504,27 @@ pub struct Batch<'a, B: InputBuffer + Default> {
     model: &'a mut UiModel<B>,
     effects: Vec<UiEffect>,
     folded: bool,
+    /// Whether every event folded so far named its conversations
+    /// (1594): the note then refreshes those
+    /// ([`UiModel::note_changes_in`], the names in the model's
+    /// `note_scope`), not all. False once an event whose reach the batch
+    /// cannot name was folded.
+    scoped: bool,
+}
+
+/// The conversations a home's entry names when folded (1594): the
+/// sender of a received message, the recipient of a sent one, the
+/// announcer of a name; a mark names none of its own (the messages it
+/// marks are in the fold's change sets). `None` for an event of another
+/// reach: its batch notes every conversation.
+fn named_by(event: &UiEvent) -> Option<Option<[u8; 16]>> {
+    match event {
+        UiEvent::Engine(OutboxEvent::Received { source, .. }) => Some(Some(*source)),
+        UiEvent::Engine(OutboxEvent::HomeSent { destination, .. }) => Some(Some(*destination)),
+        UiEvent::Engine(OutboxEvent::Announced { destination, .. }) => Some(Some(*destination)),
+        UiEvent::Engine(OutboxEvent::HomeMarked { .. }) => Some(None),
+        _ => None,
+    }
 }
 
 impl<'a, B: InputBuffer + Default> Batch<'a, B> {
@@ -3429,6 +3535,7 @@ impl<'a, B: InputBuffer + Default> Batch<'a, B> {
             model,
             effects: Vec::new(),
             folded: false,
+            scoped: true,
         }
     }
 
@@ -3436,6 +3543,11 @@ impl<'a, B: InputBuffer + Default> Batch<'a, B> {
     pub fn fold(&mut self, event: UiEvent) {
         if !core::mem::replace(&mut self.folded, true) {
             self.model.ops.reset();
+        }
+        match named_by(&event) {
+            Some(Some(peer)) if self.scoped => self.model.note_scope.push(peer),
+            Some(_) => {}
+            None => self.scoped = false,
         }
         let effects = step(self.model, event);
         self.effects.extend(effects);
@@ -3487,7 +3599,8 @@ impl<'a, B: InputBuffer + Default> Batch<'a, B> {
         if !core::mem::take(&mut self.folded) {
             return;
         }
-        self.model.note_changes();
+        self.model
+            .note_changes_in(core::mem::replace(&mut self.scoped, true));
         self.model.keep_top();
         self.model.revision = self.model.revision.wrapping_add(1);
         self.model.ask_page(&mut self.effects);
