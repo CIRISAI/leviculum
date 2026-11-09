@@ -195,7 +195,7 @@
 //! KEY <ms> code=0x6b name=k after a KBRAW line that carries a press (1427)
 //! [KB] answer=mixed t=<ms>  after one whose bytes disagree
 //! [KB] queue_lost=<n> read_failed=<n>   when either count moved (1463)
-//! [LOOP] turn_ms=<n> stage=<host|node|take|draw|keys> host=.. node=.. take=.. draw=.. keys=.. entries=<n>
+//! [LOOP] turn_ms=<n> stage=<host|node|take|dump|draw|keys> host=.. node=.. take=.. dump=.. draw=.. keys=.. entries=<n>  (dump: the bench's screen dump written out, apart from take since 1603)
 //! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n> rows_us=.. layout_us=.. blit_us=.. flush_us=.. [rows_allocs=.. rows_alloc_us=.. rows_wait_us=.. draw_allocs=.. draw_alloc_us=.. draw_wait_us=.. in the bench image, 1594; rows_built=.. the list rows the scene carried, 1595]  (1569, the UI core's slow turn: msgs the queue held, entries folded; 1591, the turn's draw split: the scene's rows, their layout into cells, the changed cells into the frame, the wait for the last flush)
 //!                           a turn of the loop longer than 100 ms (1463)
 //! [FOLD] entries=<n> turns=<n> wall_us=<n> unpack_us=<n> step_us=<n> finish_us=<n> route_us=<n> alloc_us=<n> allocs=<n> alloc_bytes=<n> per_entry_us wall=<n> unpack=<n> step=<n> alloc=<n>  (1575, the bench image: a pulled page's fold on the UI core, said when its last entry is folded, summed over the turns it took)
@@ -721,6 +721,9 @@ struct Turn {
     host: u64,
     node: u64,
     take: u64,
+    /// A screen dump's lines written out (1603): bench tooling, not the
+    /// product's take, which window 22 read as takes of 1 to 6 s.
+    dump: u64,
     draw: u64,
     keys: u64,
 }
@@ -729,7 +732,7 @@ impl Turn {
     /// Say the turn as a `[LOOP]` line when it took longer than
     /// [`SLOW_TURN_MS`].
     fn say(&self, log: &mut UartLog<'_>, entries: u64) {
-        let total = self.host + self.node + self.take + self.draw + self.keys;
+        let total = self.host + self.node + self.take + self.dump + self.draw + self.keys;
         if total <= SLOW_TURN_MS {
             return;
         }
@@ -737,6 +740,7 @@ impl Turn {
             ("host", self.host),
             ("node", self.node),
             ("take", self.take),
+            ("dump", self.dump),
             ("draw", self.draw),
             ("keys", self.keys),
         ];
@@ -747,8 +751,8 @@ impl Turn {
         log.line(
             "[LOOP] ",
             format_args!(
-                "turn_ms={total} stage={slowest} host={} node={} take={} draw={} keys={} entries={entries}",
-                self.host, self.node, self.take, self.draw, self.keys
+                "turn_ms={total} stage={slowest} host={} node={} take={} dump={} draw={} keys={} entries={entries}",
+                self.host, self.node, self.take, self.dump, self.draw, self.keys
             ),
         );
     }
@@ -2332,7 +2336,9 @@ fn main() -> ! {
         }
         to_ui_word(node.word());
 
-        // What the UI core asked for.
+        // What the UI core asked for. A dump's lines are timed apart
+        // (1603): `turn.dump`, not the take.
+        let mut dump_ms = 0;
         for message in io_drain() {
             wdt.feed();
             match message {
@@ -2421,12 +2427,14 @@ fn main() -> ! {
                 // drop nothing either (1553: window 13 lost 2 to 28 lines
                 // of 19 dumps in 20 to the lossy writes behind the tail).
                 FromUi::Dump(lines) => {
-                    stall::stage(Core::Io, Stage::Line);
+                    stall::stage(Core::Io, Stage::Dump);
+                    let t_dump = uptime_ms();
                     for line in lines {
                         log.dump_line(&line);
                         wdt.feed();
                     }
                     log.wait_dump_out(&mut || wdt.feed());
+                    dump_ms += uptime_ms().saturating_sub(t_dump);
                 }
                 FromUi::Gnss(wanted) => gnss_run.wanted = wanted,
                 FromUi::Type(size) => {
@@ -2484,7 +2492,8 @@ fn main() -> ! {
             node.quiet(&mut stores, &mut log);
         }
 
-        turn.take = uptime_ms().saturating_sub(t_take);
+        turn.take = uptime_ms().saturating_sub(t_take).saturating_sub(dump_ms);
+        turn.dump = dump_ms;
         turn.say(&mut log, node.entries());
         if core::mem::take(&mut first_turn) {
             log.set_lossy(true);

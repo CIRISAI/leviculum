@@ -121,6 +121,10 @@ pub enum Stage {
     KbCount = 12,
     /// Core 0: waiting for its next interrupt (1507, `idle`).
     IoIdle = 13,
+    /// Core 0: the bench's screen dump written out (1603): apart from
+    /// the line it shared before, as `[LOOP]`'s `dump=` is apart from
+    /// `take=`.
+    Dump = 14,
     /// Core 1: the I/O core's messages folded.
     Drain = 20,
     /// Core 1: the key presses folded.
@@ -156,6 +160,7 @@ impl Stage {
             11 => "quiet",
             12 => "kb-count",
             13 => "idle",
+            14 => "dump",
             20 => "drain",
             21 => "keys",
             22 => "draw",

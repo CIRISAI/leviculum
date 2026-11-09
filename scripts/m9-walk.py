@@ -588,7 +588,16 @@ class Walk:
             if self.forgetting:
                 self.forget_turn = max(self.forget_turn or 0, ms)
                 return
-            if self.dumping and self.dump_turn is None and f.get("stage") == "take":
+            # Since 1603 core 0 times a dump's lines apart (`dump=`, stage
+            # `dump`): the dump's turn is that field, and what is left of
+            # the turn is the product's, held to the bar like any other.
+            dump = number(f, "dump")
+            if dump is not None and dump > 0:
+                if self.dumping and self.dump_turn is None:
+                    self.dump_turn = dump
+                ms -= dump
+            elif self.dumping and self.dump_turn is None and f.get("stage") == "take":
+                # An image before 1603: the dump inside the take stage.
                 # The dump's turn: core 0 wrote its lines (4.4 to 5 s in
                 # window 11a), a cost of the bench's dump, not of the UI.
                 self.dump_turn = ms
@@ -1110,8 +1119,10 @@ class FakeBoard(threading.Thread):
     def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
                  release=False, slow_turn=False, slow_drain=False, tops=(0, 5, 2), torn=False,
                  stuck_zoom=False, trail_ms=0, marks="guarded",
-                 home=None, torn_loop=False):
+                 home=None, torn_loop=False, dump_take_ms=20):
         super().__init__(daemon=True)
+        # 1603: the product's take in a dump's turn, beside its dump=.
+        self.dump_take_ms = dump_take_ms
         # 1562: the home its client record names; None says client=none.
         self.home = SELFTEST_HOME if home is None else home
         self.arrived = 0
@@ -1279,7 +1290,7 @@ class FakeBoard(threading.Thread):
                      "frames=6 sectors=2 summary_erased=112 ms=6200",
                      "[STORE] sectors=896 used=3 entries=40 restore=rebuilt restore_ms=2900 t=9000",
                      "[BENCH] forget=reopened",
-                     "[LOOP] turn_ms=9100 stage=take host=0 node=0 take=9100 draw=0 keys=0 entries=40")
+                     "[LOOP] turn_ms=9100 stage=take host=0 node=0 take=9100 dump=0 draw=0 keys=0 entries=40")
             self.arrived = 0
         elif kind == TYPE_FRAME_DUMP:
             w, h = 4, 4
@@ -1302,7 +1313,9 @@ class FakeBoard(threading.Thread):
                      # passing with it is the exemption's positive control.
                      "[LOOP] core=ui turn_ms=600 stage=drain drain=550 keys=0 send=0 draw=50 "
                      "msgs=1 folded=0 turn=42",
-                     "[LOOP] turn_ms=4400 stage=take host=0 node=0 take=4400 draw=0 keys=0 entries=40")
+                     # Since 1603 the dump's lines are their own stage.
+                     f"[LOOP] turn_ms={4400 + self.dump_take_ms} stage=dump host=0 node=0 "
+                     f"take={self.dump_take_ms} dump=4400 draw=0 keys=0 entries=40")
 
 
 SELFTEST_WALK = """
@@ -1422,6 +1435,12 @@ def selftest():
         got, w, _ = walk("slow", slow_ms=150)
         if got == 0 or not any("to its frame" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a 150 ms frame passed the 100 ms bar")
+            rc = 1
+        # 1603: a dump's turn is exempt by its dump= alone; a slow take
+        # in the same turn is the product's and fails the bar.
+        got, w, _ = walk("dumptake", dump_take_ms=300)
+        if got == 0 or not any("turn_ms=4700" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a 300 ms take beside a dump passed the bar", w.fails)
             rc = 1
         got, w, _ = walk("lossy", grow_rx=True)
         if got == 0 or not any("rx_lost grew" in f for f in w.fails):
