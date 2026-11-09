@@ -1,24 +1,24 @@
 Explore
 ┌● Last seen first─────────────────────────────────────────────────────────────┐
-│▏Search a name, or paste an address                                           │
+│▏Search                                                                       │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌  ────────────────────────────────────────────────────────────────────────────┐
 │Pages                                                                         │
 │ Bookmarks                                                                    │
-│▌* Relay Süd ·7c7c  seen 2 days ago · 1 hop                                   │
+│▌* Relay Süd  seen 2 days ago · directly reachable                            │
 │ Today                                                                        │
-│   Marcel's node ·5a5a  seen 10 min ago · 2 hops                              │
+│   Marcel's node  seen 10 min ago · reachable over 2 stations                 │
 │                                                                              │
 │Public rooms                                                                  │
-│ RNS Moscow  3 hops away                                                      │
-│ Cascadia  3 hops away                                                        │
-│ Chatsurfer  3 hops away                                                      │
-│ CTRS  3 hops away                                                            │
-│ Minuteman  3 hops away                                                       │
-│ RMAP.WORLD Hub  3 hops away                                                  │
-│ Save Europe  3 hops away                                                     │
-│ SoCal Public  3 hops away                                                    │
-│ UTN Oregon  3 hops away                                                      │
-│ HADARC  4 hops away                                                          │
+│ RNS Moscow  reachable over 3 stations                                        │
+│ Cascadia  reachable over 3 stations                                          │
+│ Chatsurfer  reachable over 3 stations                                        │
+│ CTRS  reachable over 3 stations                                              │
+│ Minuteman  reachable over 3 stations                                         │
+│ RMAP.WORLD Hub  reachable over 3 stations                                    │
+│ Save Europe  reachable over 3 stations                                       │
+│ SoCal Public  reachable over 3 stations                                      │
+│ UTN Oregon  reachable over 3 stations                                        │
+│ HADARC  reachable over 4 stations                                            │
 └──────────────────────────────────────────────────────────────────────────────┘
 Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats

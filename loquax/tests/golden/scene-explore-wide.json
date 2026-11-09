@@ -23,7 +23,9 @@
                 "args": [],
                 "key": "explore_hop"
               },
-              "label": "Relay Süd ·7c7c",
+              "label": {
+                "raw": "Relay Süd"
+              },
               "seen": {
                 "args": [
                   2
@@ -50,7 +52,9 @@
                 ],
                 "key": "explore_hops"
               },
-              "label": "Marcel's node ·5a5a",
+              "label": {
+                "raw": "Marcel's node"
+              },
               "seen": {
                 "args": [
                   10
@@ -69,7 +73,9 @@
                 ],
                 "key": "explore_hops"
               },
-              "label": "Bergwacht ·4141",
+              "label": {
+                "raw": "Bergwacht"
+              },
               "seen": {
                 "args": [
                   5
@@ -91,7 +97,10 @@
               "cursor": false,
               "dest": "3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
               "hops": null,
-              "label": "·3d3d",
+              "label": {
+                "args": [],
+                "key": "explore_unnamed_page"
+              },
               "seen": {
                 "args": [
                   20
@@ -128,6 +137,12 @@
           "name": {
             "raw": "Werkstatt"
           },
+          "seen": {
+            "args": [
+              1
+            ],
+            "key": "explore_seen_minutes"
+          },
           "value": {
             "args": [
               3
@@ -148,6 +163,7 @@
           "name": {
             "raw": "RNS Moscow"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -162,6 +178,7 @@
           "name": {
             "raw": "Cascadia"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -176,6 +193,7 @@
           "name": {
             "raw": "Chatsurfer"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -190,6 +208,7 @@
           "name": {
             "raw": "CTRS"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -204,6 +223,7 @@
           "name": {
             "raw": "Minuteman"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -218,6 +238,7 @@
           "name": {
             "raw": "RMAP.WORLD Hub"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -232,6 +253,7 @@
           "name": {
             "raw": "Save Europe"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -246,6 +268,7 @@
           "name": {
             "raw": "SoCal Public"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -260,6 +283,7 @@
           "name": {
             "raw": "UTN Oregon"
           },
+          "seen": null,
           "value": {
             "args": [
               3
@@ -274,6 +298,7 @@
           "name": {
             "raw": "HADARC"
           },
+          "seen": null,
           "value": {
             "args": [
               4
@@ -288,7 +313,8 @@
         "args": [],
         "key": "explore_rooms"
       }
-    }
+    },
+    "sheet": null
   },
   "list": null,
   "screen": "explore",

@@ -1254,7 +1254,7 @@ mod tests {
         assert!(!model.rooms.enabled);
         assert_eq!(
             model.current_toast().map(|t| t.text.clone()).as_deref(),
-            Some("That is no hub's address.")
+            Some("That is no server's address.")
         );
         let effects = rooms(
             &mut model,

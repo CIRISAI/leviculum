@@ -1858,11 +1858,12 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
 }
 
 /// The Explore tab (1578) over the whole terminal: its name on top, the
-/// search field, the pages under their headings (`name ·hash4`, when last
-/// seen, hops, `*` for a bookmark), then the public rooms: the rooms the
-/// reader is in, the hubs and the hubs heard on the mesh. The cursor's
-/// row is marked `▌`; the window scrolls to keep it in view. Under it the
-/// keys or the toast.
+/// search field, the pages under their headings (the name, when last
+/// seen, how far, `*` for a bookmark), then the public rooms: the rooms
+/// the reader is in, the servers and the servers heard on the mesh. A
+/// server's sheet (1618) takes the body's place while it is open. The
+/// cursor's row is marked `▌`; the window scrolls to keep it in view.
+/// Under it the keys or the toast.
 fn draw_explore(frame: &mut Frame, model: &Model) {
     use loquax::ui::strings::{Arg as SaidArg, StrId, Text as Said};
     let lang = model.lang;
@@ -1931,7 +1932,11 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
             }
             let star = if page.bookmarked { "* " } else { "  " };
             lines.push(Line::from(vec![
-                Span::raw(format!("{}{star}{}", mark(page.cursor), page.label)),
+                Span::raw(format!(
+                    "{}{star}{}",
+                    mark(page.cursor),
+                    page.label.resolve(lang)
+                )),
                 Span::styled(format!("  {}", said.join(" · ")), quiet),
             ]));
         }
@@ -1968,10 +1973,12 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
         }
         let chosen = if row.chosen { " ✓" } else { "" };
         let value = row
-            .value
-            .as_ref()
+            .seen
+            .iter()
+            .chain(row.value.iter())
             .map(|v| v.resolve(lang))
-            .unwrap_or_default();
+            .collect::<Vec<_>>()
+            .join(" · ");
         lines.push(Line::from(vec![
             Span::raw(format!(
                 "{}{}{chosen}",
@@ -1996,6 +2003,58 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
     if let Some(empty) = &rooms.empty {
         lines.push(Line::from(Span::styled(empty.resolve(lang), quiet)));
     }
+    let mut keys = "Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats";
+    if let Some(sheet) = &node.sheet {
+        // A server's sheet (1618): its name, how far, the button, the
+        // rooms it named; nothing is chosen until Enter on the button.
+        keys = "Enter use or join │ ↑↓ move │ Esc close";
+        lines = Vec::new();
+        at = None;
+        lines.push(Line::from(Span::styled(sheet.name.resolve(lang), bold)));
+        let said: Vec<String> = sheet
+            .seen
+            .iter()
+            .chain(sheet.far.iter())
+            .map(|t| t.resolve(lang))
+            .collect();
+        if !said.is_empty() {
+            lines.push(Line::from(Span::styled(said.join(" · "), quiet)));
+        }
+        lines.push(Line::from(""));
+        let mut row = 0;
+        if !sheet.chosen {
+            if sheet.cursor == row {
+                at = Some(lines.len());
+            }
+            lines.push(Line::from(format!(
+                "{}[ {} ]",
+                mark(sheet.cursor == row),
+                sheet.button.resolve(lang)
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", sheet.notice.resolve(lang)),
+                quiet,
+            )));
+            row += 1;
+        } else {
+            lines.push(Line::from(format!(" ✓ {}", sheet.button.resolve(lang))));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            sheet.rooms_title.resolve(lang),
+            bold,
+        )));
+        for room in &sheet.rooms {
+            if sheet.cursor == row {
+                at = Some(lines.len());
+            }
+            lines.push(Line::from(format!("{}{room}", mark(sheet.cursor == row))));
+            row += 1;
+        }
+        if let Some(none) = &sheet.no_rooms {
+            lines.push(Line::from(Span::styled(none.resolve(lang), quiet)));
+        }
+    }
     let body = Rect::new(area.x, area.y + 4, area.width, area.height - 5);
     let inner = usize::from(body.height.saturating_sub(2)).max(1);
     let skip = at.map_or(0, |at| (at + 1).saturating_sub(inner));
@@ -2006,7 +2065,7 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
     );
     let foot = match model.current_toast() {
         Some(toast) => toast.text.clone(),
-        None => "Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats".to_string(),
+        None => keys.to_string(),
     };
     frame.render_widget(
         Paragraph::new(foot),
@@ -2772,7 +2831,7 @@ mod tests {
         update(&mut model, key('9'));
         assert_eq!(model.settings, Some(Some(Section::Advanced)));
         let shown = whole_screen(&model);
-        assert!(shown.contains("Public rooms: hub: None"), "{shown}");
+        assert!(shown.contains("Server for public rooms: None"), "{shown}");
         same_text("tui-settings-advanced.txt", &shown);
         let shipped = loquax::ui::hubs::shipped();
         // More: the next ten, and back.
@@ -2797,17 +2856,20 @@ mod tests {
         assert!(model.rooms.enabled, "the Rooms tab is there");
         let shown = whole_screen(&model);
         assert!(
-            shown.contains(&format!("Public rooms: hub: {}", shipped[0].name)),
+            shown.contains(&format!("Server for public rooms: {}", shipped[0].name)),
             "{shown}"
         );
         assert!(
-            shown.contains(&format!("1  {}: 3 hops away · \u{2713}", shipped[0].name)),
+            shown.contains(&format!(
+                "1  {}: reachable over 3 stations · \u{2713}",
+                shipped[0].name
+            )),
             "{shown}"
         );
         update(&mut model, key('a'));
         assert!(model.palette.is_some(), "the palette asks");
         let asked = whole_screen(&model);
-        assert!(asked.contains("The hub's address"), "{asked}");
+        assert!(asked.contains("The server's address"), "{asked}");
         for c in "07070707070707070707070707070707".chars() {
             update(&mut model, key(c));
         }
@@ -2819,7 +2881,10 @@ mod tests {
             }]
         );
         let shown = whole_screen(&model);
-        assert!(shown.contains("Public rooms: hub: Your own hub"), "{shown}");
+        assert!(
+            shown.contains("Server for public rooms: Your own server"),
+            "{shown}"
+        );
         assert!(!shown.contains("0707070707"), "no hash on screen\n{shown}");
         update(&mut model, key('n'));
         assert!(!model.rooms.enabled, "none: no tab");
@@ -3020,6 +3085,42 @@ mod tests {
         );
         assert!(!model.explore.open);
         assert!(!whole_screen(&model).contains("Public rooms"));
+    }
+
+    /// 1618: a server's row opens its sheet in the terminal and changes
+    /// nothing: its name, how far, the button and the rooms it named;
+    /// `Esc` closes it back to the list, and `Enter` on the button makes
+    /// it the public rooms' server. The golden is the sheet.
+    #[test]
+    fn a_servers_row_opens_its_sheet_and_changes_nothing() {
+        let key = |code| UiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        let mut model = Model::new(&[]);
+        model.browse.enabled = true;
+        browse_like_the_terminal(&mut model);
+        let shipped = loquax::ui::hubs::shipped();
+        let Some(hub) = shipped.first() else {
+            return;
+        };
+        update(&mut model, key(KeyCode::Char('E')));
+        update(
+            &mut model,
+            UiEvent::Explore(loquax::ui::explore::ExploreEvent::Hub(hub.hash)),
+        );
+        let sheet = whole_screen(&model);
+        assert!(sheet.contains(&hub.name), "{sheet}");
+        assert!(sheet.contains("Use this server for rooms"), "{sheet}");
+        assert!(!sheet.to_lowercase().contains("hops"), "{sheet}");
+        same_text("tui-explore-sheet.txt", &sheet);
+        assert_eq!(model.rooms.hub, None, "opening it chose nothing");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.explore.sheet.is_none());
+        assert!(loquax::ui::explore::Explore::showing(&model));
+        update(
+            &mut model,
+            UiEvent::Explore(loquax::ui::explore::ExploreEvent::Hub(hub.hash)),
+        );
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.rooms.hub, Some(hub.hash), "the button chose it");
     }
 
     /// 1369: the Browse tab in the terminal is lnomad's own screen, drawn

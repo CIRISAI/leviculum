@@ -253,6 +253,7 @@ skip  loquax-android   browse                     # the Browse tab's verbs and s
 skip  loquax-android   browse_census              # counts the Browse tab's heap with a global allocator (1337); subject is the code
 skip  loquax-android   browse_fetch               # the Browse tab's fetch through the phone's own node against an in-process transport and page node over loopback TCP (1337); subject is the code
 skip  loquax-android   device_walk_script         # starts python3 on the device walk's parser tests; subject is the script's code
+skip  loquax-android   explore                    # the Explore tab's verbs, order under a finger and server sheet through the facade in Java's bytes (1618); subject is the code
 skip  loquax-android   facade                     # the facade against an in-process home node and transport over a loopback TCP socket; subject is the code
 skip  loquax-android   fling                      # starts javac and java on Fling.java and its host test; subject is the code
 skip  loquax-android   glyph                      # Glyph.java against the core's mark shapes, and the shapes rasterised; subject is the code

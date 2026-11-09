@@ -726,6 +726,9 @@ impl App {
         let quiet = colour(t.text_secondary);
         let heading =
             |words: String| container(text(words).size(13).color(quiet)).padding([10, 16]);
+        if let Some(sheet) = &node.sheet {
+            return self.server_sheet(sheet);
+        }
         let pages = &node.pages;
         let field = text_input(&pages.placeholder.resolve(lang), &pages.query)
             .on_input(|typed| Message::Explore(ExploreEvent::Typed(typed)))
@@ -789,7 +792,9 @@ impl App {
                 .style(button::text);
                 let line = row![
                     column![
-                        text(page.label.clone()).size(size::ROW_NAME).color(ink),
+                        text(page.label.resolve(lang))
+                            .size(size::ROW_NAME)
+                            .color(ink),
                         text(said.join(" · ")).size(13).color(quiet),
                     ]
                     .width(Length::Fill),
@@ -854,24 +859,24 @@ impl App {
             if hub.chosen {
                 words.push_str(" \u{2713}");
             }
-            let value = hub
-                .value
-                .as_ref()
+            // A server's row as a page's (1618): the name over when it was
+            // heard and how far.
+            let said = hub
+                .seen
+                .iter()
+                .chain(hub.value.iter())
                 .map(|v| v.resolve(lang))
-                .unwrap_or_default();
+                .collect::<Vec<_>>()
+                .join(" · ");
             chrome::list_item(
                 container(
-                    row![
-                        text(words)
-                            .size(size::ROW_NAME)
-                            .color(ink)
-                            .width(Length::Fill),
-                        text(value).size(13).color(quiet),
+                    column![
+                        text(words).size(size::ROW_NAME).color(ink),
+                        text(said).size(13).color(quiet),
                     ]
-                    .spacing(12)
-                    .align_y(Alignment::Center),
+                    .width(Length::Fill),
                 )
-                .padding([8, 16]),
+                .padding([6, 16]),
                 false,
                 Message::Explore(ExploreEvent::Hub(hub.hash)),
                 p,
@@ -893,6 +898,89 @@ impl App {
             list = list.push(heading(notice.clone()));
         }
         container(scrollable(list.padding([0, 0])).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// A server's sheet over Explore (1618): its name, when it was heard
+    /// and how far, the one button that makes it the public rooms' server
+    /// with what that tells it, and the rooms it named, a press joining
+    /// one. Nothing is chosen by opening it.
+    fn server_sheet<'a>(
+        &'a self,
+        sheet: &'a loquax::ui::explore::HubSheet,
+    ) -> Element<'a, Message> {
+        use loquax::ui::explore::ExploreEvent;
+        let t = self.tokens();
+        let p = palette(t);
+        let lang = self.lang;
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let said = sheet
+            .seen
+            .iter()
+            .chain(sheet.far.iter())
+            .map(|v| v.resolve(lang))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let mut list = column![
+            row![
+                text(sheet.name.resolve(lang))
+                    .size(size::BAR_NAME)
+                    .color(ink)
+                    .width(Length::Fill),
+                button(text(sheet.close.resolve(lang)).size(13))
+                    .on_press(Message::Explore(ExploreEvent::CloseSheet))
+                    .style(button::text),
+            ]
+            .align_y(Alignment::Center)
+            .padding([12, 16]),
+            container(text(said).size(13).color(quiet)).padding([0, 16]),
+        ]
+        .spacing(6);
+        if sheet.chosen {
+            list = list.push(
+                container(text(sheet.button.resolve(lang)).size(size::BODY).color(ink))
+                    .padding([10, 16]),
+            );
+        } else {
+            list = list.push(
+                container(
+                    button(text(sheet.button.resolve(lang)).size(size::BODY))
+                        .on_press(Message::Explore(ExploreEvent::UseHub(sheet.hash))),
+                )
+                .padding([10, 16]),
+            );
+            list = list.push(
+                container(text(sheet.notice.resolve(lang)).size(13).color(quiet)).padding([0, 16]),
+            );
+        }
+        list = list.push(
+            container(
+                text(sheet.rooms_title.resolve(lang))
+                    .size(size::ROW_NAME)
+                    .color(ink),
+            )
+            .padding([12, 16]),
+        );
+        for room in &sheet.rooms {
+            list = list.push(chrome::list_item(
+                container(text(room.clone()).size(size::ROW_NAME).color(ink)).padding([8, 16]),
+                false,
+                Message::Explore(ExploreEvent::JoinRoom(sheet.hash, room.clone())),
+                p,
+            ));
+        }
+        if let Some(none) = &sheet.no_rooms {
+            list = list
+                .push(container(text(none.resolve(lang)).size(13).color(quiet)).padding([4, 16]));
+        }
+        container(scrollable(list).height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_: &Theme| container::Style {

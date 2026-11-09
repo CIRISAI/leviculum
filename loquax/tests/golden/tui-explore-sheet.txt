@@ -1,0 +1,24 @@
+Explore
+┌● Last seen first─────────────────────────────────────────────────────────────┐
+│▏Search                                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌  ────────────────────────────────────────────────────────────────────────────┐
+│RNS Moscow                                                                    │
+│reachable over 3 stations                                                     │
+│                                                                              │
+│▌[ Use this server for rooms ]                                                │
+│  Your name is visible to everyone in the room.                               │
+│                                                                              │
+│Its rooms                                                                     │
+│This server has named no rooms yet. Use it, then type a room's name to join.  │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter use or join │ ↑↓ move │ Esc close

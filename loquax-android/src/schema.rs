@@ -540,7 +540,10 @@ pub enum Request {
     /// search field's `text`), `az` (`index` 1 for A-Z), `open` (a page's
     /// `dest`), `address` (the field's address), `bookmark` (a page's
     /// `dest`), `room` (the `index`th room the reader is in), `hub` (a
-    /// hub's `dest`).
+    /// hub's `dest`: its sheet opens, 1618), `use` (the sheet's button,
+    /// its `dest`), `join` (a room on the sheet: `dest` and the room's
+    /// name in `text`), `close` (the sheet) and `touch` (`index` 1 while a
+    /// finger is on the list, 0 when it lifts).
     Explore {
         verb: String,
         #[serde(default)]
@@ -2367,6 +2370,33 @@ pub struct ExploreScreen {
     pub heard: Vec<ExploreHub>,
     #[serde(default)]
     pub rooms_empty: String,
+    /// A server's sheet over the list (1618): its `dest`, empty while
+    /// none is open.
+    #[serde(default)]
+    pub sheet_dest: String,
+    #[serde(default)]
+    pub sheet_name: String,
+    /// "seen 2 h ago · reachable over 5 stations".
+    #[serde(default)]
+    pub sheet_said: String,
+    /// The server is the public rooms' in force: the button is a line.
+    #[serde(default)]
+    pub sheet_chosen: bool,
+    /// "Use this server for rooms", or that it is in use.
+    #[serde(default)]
+    pub sheet_button: String,
+    /// What using it tells the server: the reader's name.
+    #[serde(default)]
+    pub sheet_notice: String,
+    #[serde(default)]
+    pub sheet_rooms_title: String,
+    /// The rooms its welcome named, each a `join`.
+    #[serde(default)]
+    pub sheet_rooms: Vec<String>,
+    #[serde(default)]
+    pub sheet_no_rooms: String,
+    #[serde(default)]
+    pub sheet_close: String,
 }
 
 /// A page of [`ExploreScreen`].
@@ -2377,13 +2407,17 @@ pub struct ExplorePage {
     pub heading: String,
     /// Its destination in hex, what `open` and `bookmark` send.
     pub dest: String,
-    /// `name ·hash4`.
+    /// The name alone; `·hash4` after it only where two names look alike;
+    /// "Unnamed page" without one (1618).
     pub label: String,
-    /// "seen 2 h ago · 3 hops".
+    /// "seen 2 h ago · reachable over 3 stations".
     #[serde(default)]
     pub said: String,
     #[serde(default)]
     pub bookmarked: bool,
+    /// What it opens, the address the menu's "Copy address" copies.
+    #[serde(default)]
+    pub url: String,
 }
 
 /// A hub of [`ExploreScreen`].
@@ -2392,7 +2426,8 @@ pub struct ExploreHub {
     /// Its destination in hex, what `hub` sends.
     pub dest: String,
     pub name: String,
-    /// How far, "suggested", "no answer".
+    /// When it was heard, how far, "suggested", "no answer", as a page's
+    /// `said` (1618).
     #[serde(default)]
     pub value: String,
     /// The public rooms' hub in force.

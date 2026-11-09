@@ -7,25 +7,33 @@
 //! the hosted browser's `node_registry`), the nodes this device heard
 //! itself (the same registry), and the identity's bookmarks. The newest
 //! name wins (the registry keeps the latest announce's), the row says
-//! `name ·hash4`, when it was last seen, its hops when known, and a mark
-//! when it is bookmarked. The order is bookmarks first, then last seen
+//! the name alone (1618: `·hash4` only where two names look alike, as the
+//! chat list since 1452; "Unnamed page" where a node gave none), when it
+//! was last seen, how far when known, and a mark when it is bookmarked. The order is bookmarks first, then last seen
 //! first, grouped "Today", "This week", "Older" (Lew, 2026-11-09: an
 //! announce list is a liveness list; a newcomer knows no names, so A-Z
-//! gives no orientation). A-Z is a toggle, kept per device. The search
-//! field filters by name and short hash (1227: a name is a search, never
-//! a lookup) and takes a pasted address or `nomadnet://` form, the
-//! secondary way in. Opening a page is lnomad's fetch and render in the
+//! gives no orientation). A-Z is a toggle, kept per device. A new order
+//! is applied at most once a second and never while a finger is on the
+//! list (1618: the walk tapped one page and opened the next), so a row
+//! never moves under a finger. The search field filters by name (1227: a
+//! name is a search, never a lookup), never by a hash's letters (1618),
+//! and takes a pasted address or `nomadnet://` form, the secondary way
+//! in. Opening a page is lnomad's fetch and render in the
 //! browser the tab hosts ([`super::browse`]).
 //!
 //! **The public rooms** are the rooms the reader is in, the hubs Loquax
-//! ships (1577), the hubs heard on the mesh (1599, "Hubs in your mesh")
-//! and the reader's own hub. A hub's row chooses it and shows its rooms,
-//! where a room's name joins one; the hub link opens on the first join,
-//! never on opening the tab (the privacy sentence of 1577).
+//! ships (1577), the hubs heard on the mesh (1599, "Servers in your mesh")
+//! and the reader's own hub. The reader's word for a hub is "server"
+//! (1618). A hub's row opens its sheet and changes nothing: its name, how
+//! far, the rooms its welcome named (a tap joins one) and the one button
+//! that makes it the public rooms' hub. The hub link opens on the first
+//! join, never on opening the tab or the sheet (the privacy sentence of
+//! 1577).
 //!
 //! The tab never disappears: with nothing reachable each section says so
 //! in one sentence.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -53,7 +61,23 @@ pub struct Explore {
     pub az: bool,
     /// The terminal's cursor over the tab's rows ([`picks`]).
     pub cursor: usize,
+    /// A hub's sheet is open over the list (1618).
+    pub sheet: Option<[u8; 16]>,
+    /// The terminal's cursor over the sheet's rows ([`sheet_picks`]).
+    pub sheet_cursor: usize,
+    /// The pages' order as last applied (1618): each page's destination
+    /// and its heading. Empty before the first; a page heard since stands
+    /// after them until the next is applied.
+    pub order: Vec<([u8; 16], StrId)>,
+    /// When it was applied, on the model's monotonic clock.
+    pub applied_ms: Option<u64>,
+    /// A finger is down on the list: no new order until it lifts.
+    pub held: bool,
 }
+
+/// The least time between two orders applied on their own (1618): a
+/// new announce moves the list at most once a second.
+pub const SETTLE_MS: u64 = 1_000;
 
 impl Explore {
     /// The tab's list is what is in front: not the browser or a hub's
@@ -74,21 +98,33 @@ pub enum ExploreEvent {
     OpenPage([u8; 16]),
     /// The address the search field holds, opened.
     OpenAddress,
-    /// A long press or the menu on a page's row: bookmarked, or not.
+    /// The star or the page's menu: bookmarked, or not.
     Bookmark([u8; 16]),
     /// A room the reader is in, opened (an index into the Rooms' list).
     OpenRoom(usize),
-    /// A hub's row: it is the public rooms' hub from now on, and its rooms
-    /// show. Nothing is linked until a room is joined.
+    /// A hub's row: its sheet opens. Nothing is chosen and nothing linked
+    /// (1618).
     Hub([u8; 16]),
+    /// The sheet's button: this hub is the public rooms' hub from now on,
+    /// and its rooms show. Nothing is linked until a room is joined.
+    UseHub([u8; 16]),
+    /// One of the rooms the sheet lists: the hub is used, and the room
+    /// joined, which links.
+    JoinRoom([u8; 16], String),
+    /// The sheet closes.
+    CloseSheet,
+    /// A finger came down on the list (`true`) or lifted (1618): while it
+    /// is down no new order is applied.
+    Touch(bool),
 }
 
 /// A page's row as the tab draws it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageRow {
     pub dest: [u8; 16],
-    /// `name ·hash4`, `·hash4` for a node that gave no name.
-    pub label: String,
+    /// The name alone; `name ·hash4` only where another page's name looks
+    /// the same; "Unnamed page" for a node that gave none (1618).
+    pub label: Text,
     /// "seen 2 h ago"; none for a bookmark never heard.
     pub seen: Option<Text>,
     pub hops: Option<Text>,
@@ -110,8 +146,11 @@ pub struct PageGroup {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HubRow {
     pub hash: [u8; 16],
-    /// Its name; "Unnamed hub" for a nameless announce, never a hash.
+    /// Its name; "Server without a name" for a nameless announce, never a
+    /// hash.
     pub name: Text,
+    /// When it was last heard, as a page's row says it (1618).
+    pub seen: Option<Text>,
     /// How far, "suggested", "no answer".
     pub value: Option<Text>,
     /// The public rooms' hub in force.
@@ -154,11 +193,37 @@ pub struct RoomsSection {
     pub empty: Option<Text>,
 }
 
+/// A hub's sheet (1618): what a tap on its row shows, changing nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HubSheet {
+    pub hash: [u8; 16],
+    pub name: Text,
+    /// "reachable over 5 stations", when known.
+    pub far: Option<Text>,
+    pub seen: Option<Text>,
+    /// The public rooms' hub in force: the button says so instead.
+    pub chosen: bool,
+    /// "Use this server for rooms", or "Your rooms are on this server."
+    pub button: Text,
+    /// What using it tells the hub: the reader's name (1577).
+    pub notice: Text,
+    pub rooms_title: Text,
+    /// The rooms its welcome named, each a join.
+    pub rooms: Vec<String>,
+    /// The one sentence where it named none.
+    pub no_rooms: Option<Text>,
+    pub close: Text,
+    /// The terminal's cursor: 0 the button, then the rooms.
+    pub cursor: usize,
+}
+
 /// The tab as the frontends draw it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExploreNode {
     pub pages: PagesNode,
     pub rooms: RoomsSection,
+    /// A hub's sheet over the list (1618).
+    pub sheet: Option<HubSheet>,
 }
 
 /// One of the tab's rows, in the order the terminal's cursor walks them.
@@ -177,6 +242,8 @@ pub struct Known {
     pub name: Option<String>,
     /// Unix seconds; 0 for a bookmark never heard.
     pub last_seen: u64,
+    /// Unix seconds; 0 for a bookmark never heard.
+    pub first_seen: u64,
     pub hops: Option<u32>,
     /// The first bookmark on it, by its url.
     pub bookmark: Option<String>,
@@ -218,8 +285,9 @@ pub fn known(model: &lnomad::Model) -> Vec<Known> {
         .into_iter()
         .map(|n| Known {
             dest: n.dest_hash,
-            name: n.name.clone(),
+            name: n.name.clone().filter(|name| !name.trim().is_empty()),
             last_seen: n.last_seen,
+            first_seen: n.first_seen,
             hops: n.hops,
             bookmark: None,
         })
@@ -241,6 +309,7 @@ pub fn known(model: &lnomad::Model) -> Vec<Known> {
                 dest,
                 name: Some(bookmark.title.clone()).filter(|t| !t.trim().is_empty()),
                 last_seen: 0,
+                first_seen: 0,
                 hops: None,
                 bookmark: Some(bookmark.url.clone()),
             }),
@@ -249,35 +318,167 @@ pub fn known(model: &lnomad::Model) -> Vec<Known> {
     out
 }
 
-/// Whether `known` matches the search: its label, case folded, holds the
-/// query, or its hash starts with it (a short hash with or without `·`).
-pub fn matches(known: &Known, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
+/// Whether a row named `name` at `dest` matches the search (1618): the
+/// name, case folded, holds the query, or the query is an address and
+/// names `dest`. Never a hash's letters: "a" found every row whose short
+/// hash held an "a".
+pub fn matches_name(name: Option<&str>, dest: &[u8; 16], query: &str) -> bool {
+    let query = query.trim();
     if query.is_empty() {
         return true;
     }
-    let label = lnomad::names::site_label(known.name.as_deref(), &known.dest).to_lowercase();
-    let hex = crate::address::to_hex(&known.dest);
-    let bare = query.trim_start_matches('·');
-    label.contains(&query) || (!bare.is_empty() && hex.starts_with(bare))
+    if let Some(url) = address(query) {
+        return bookmark_dest(&url) == Some(*dest);
+    }
+    let query = query.to_lowercase();
+    name.is_some_and(|name| name.to_lowercase().contains(&query))
+}
+
+/// Whether `known` matches the search ([`matches_name`]).
+pub fn matches(known: &Known, query: &str) -> bool {
+    matches_name(known.name.as_deref(), &known.dest, query)
 }
 
 /// The pages in the tab's order: bookmarks first, then by last seen, the
-/// newest first, or by name with `az`; a tie by hash, so the order is
-/// stable.
+/// newest first, or by name with `az`, where a page without a name comes
+/// after the named ones, the first heard newest first (1618: they stood
+/// on top of A); a tie by hash, so the order is stable.
 pub fn ordered(mut pages: Vec<Known>, az: bool) -> Vec<Known> {
-    let name = |k: &Known| k.name.as_deref().unwrap_or("").to_lowercase();
+    let name = |k: &Known| k.name.as_deref().map(str::to_lowercase);
     pages.sort_by(|a, b| {
         b.bookmark
             .is_some()
             .cmp(&a.bookmark.is_some())
             .then_with(|| match az {
-                true => name(a).cmp(&name(b)),
+                true => match (name(a), name(b)) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    (Some(_), None) => core::cmp::Ordering::Less,
+                    (None, Some(_)) => core::cmp::Ordering::Greater,
+                    (None, None) => b.first_seen.cmp(&a.first_seen),
+                },
                 false => b.last_seen.cmp(&a.last_seen),
             })
             .then_with(|| a.dest.cmp(&b.dest))
     });
     pages
+}
+
+/// The heading a page stands under: bookmarks, A-Z's one, or its age.
+fn heading(page: &Known, az: bool, now_secs: u64, offset: i32) -> StrId {
+    match (&page.bookmark, az) {
+        (Some(_), _) => StrId::ExploreBookmarks,
+        (None, true) => StrId::ExploreAz,
+        (None, false) => match age(
+            i64::try_from(now_secs).unwrap_or(i64::MAX),
+            i64::try_from(page.last_seen).unwrap_or(0),
+            offset,
+        ) {
+            Age::Today => StrId::ExploreToday,
+            Age::ThisWeek => StrId::ExploreThisWeek,
+            Age::Older => StrId::ExploreOlder,
+        },
+    }
+}
+
+/// Every page the device knows in the order the model would apply now,
+/// each under its heading.
+fn fresh<B>(model: &UiModel<B>) -> Vec<(Known, StrId)> {
+    let (now_secs, offset) = now(model);
+    let az = model.explore.az;
+    ordered(known(&model.browse.model), az)
+        .into_iter()
+        .map(|k| {
+            let h = heading(&k, az, now_secs, offset);
+            (k, h)
+        })
+        .collect()
+}
+
+/// Every page in the order last applied (1618): the pages of
+/// [`Explore::order`] where they stood, under the heading they had, then
+/// the pages heard since in the fresh order. Before the first order, the
+/// fresh one.
+fn arranged<B>(model: &UiModel<B>) -> Vec<(Known, StrId)> {
+    let fresh = fresh(model);
+    let order = &model.explore.order;
+    if order.is_empty() {
+        return fresh;
+    }
+    let mut slot: BTreeMap<[u8; 16], usize> = BTreeMap::new();
+    for (i, (dest, _)) in order.iter().enumerate() {
+        slot.insert(*dest, i);
+    }
+    let mut placed: Vec<Option<(Known, StrId)>> = (0..order.len()).map(|_| None).collect();
+    let mut later = Vec::new();
+    for (known, heading) in fresh {
+        match slot.get(&known.dest) {
+            Some(&i) => {
+                let kept = order.get(i).map_or(heading, |(_, h)| *h);
+                if let Some(at) = placed.get_mut(i) {
+                    *at = Some((known, kept));
+                }
+            }
+            None => later.push((known, heading)),
+        }
+    }
+    placed.into_iter().flatten().chain(later).collect()
+}
+
+/// Apply the fresh order (1618): `force` for the reader's own verbs (the
+/// tab opened, a search, the toggle, a bookmark), else at most once in
+/// [`SETTLE_MS`] and never while a finger is down.
+pub(super) fn settle<B>(model: &mut UiModel<B>, force: bool) {
+    if !model.explore.open {
+        return;
+    }
+    if !force {
+        if model.explore.held {
+            return;
+        }
+        if let Some(at) = model.explore.applied_ms {
+            if model.elapsed_ms < at.saturating_add(SETTLE_MS) {
+                return;
+            }
+        }
+    }
+    let order: Vec<([u8; 16], StrId)> =
+        fresh(model).into_iter().map(|(k, h)| (k.dest, h)).collect();
+    if !force && order == model.explore.order {
+        return;
+    }
+    model.explore.order = order;
+    model.explore.applied_ms = Some(model.elapsed_ms);
+}
+
+/// The pages the tab lists: arranged, filtered by the search.
+fn listed<B>(model: &UiModel<B>) -> Vec<(Known, StrId)> {
+    arranged(model)
+        .into_iter()
+        .filter(|(k, _)| matches(k, &model.explore.query))
+        .collect()
+}
+
+/// How many pages bear each look of a name ([`crate::names::skeleton`]).
+fn looks(pages: &[Known]) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for name in pages.iter().filter_map(|k| k.name.as_deref()) {
+        *out.entry(crate::names::skeleton(name)).or_insert(0) += 1;
+    }
+    out
+}
+
+/// A page's label (1618): the name alone, its short hash after it only
+/// where another page's name looks the same, "Unnamed page" without one.
+fn label(page: &Known, looks: &BTreeMap<String, usize>) -> Text {
+    match &page.name {
+        Some(name) => match looks.get(&crate::names::skeleton(name)) {
+            Some(n) if *n > 1 => {
+                Text::Raw(format!("{name} {}", crate::names::hash_suffix(&page.dest)))
+            }
+            _ => Text::Raw(name.clone()),
+        },
+        None => Text::key(StrId::ExploreUnnamedPage),
+    }
 }
 
 /// The address the search field holds, as the browser opens it: a
@@ -337,21 +538,31 @@ pub fn picks<B>(model: &UiModel<B>) -> Vec<Pick> {
     if address(&model.explore.query).is_some() {
         out.push(Pick::Address);
     }
-    out.extend(
-        ordered(
-            known(&model.browse.model)
-                .into_iter()
-                .filter(|k| matches(k, &model.explore.query))
-                .collect(),
-            model.explore.az,
-        )
-        .into_iter()
-        .map(|k| Pick::Page(k.dest)),
-    );
+    out.extend(listed(model).into_iter().map(|(k, _)| Pick::Page(k.dest)));
     out.extend((0..model.rooms.rooms.len()).map(Pick::Room));
     let (hubs, heard) = hub_lists(model);
     out.extend(hubs.iter().chain(heard.iter()).map(|h| Pick::Hub(h.hash)));
     out
+}
+
+/// A hub's name as its row says it.
+fn hub_name<B>(model: &UiModel<B>, hub: &super::settings::Offered) -> Text {
+    match &hub.name {
+        Some(name) => Text::Raw(name.clone()),
+        None if !hub.shipped && !hub.heard => super::rooms::hub_label(&model.rooms),
+        None => Text::key(StrId::RoomsHubUnnamed),
+    }
+}
+
+/// How far a hub is, in stations (1618), when known.
+fn far(hops: Option<u8>) -> Option<Text> {
+    match hops? {
+        0 | 1 => Some(Text::key(StrId::RoomsHubHop)),
+        n => Some(Text::Key(
+            StrId::RoomsHubHops,
+            Vec::from([Arg::Int(i64::from(n))]),
+        )),
+    }
 }
 
 /// The hubs the section lists: the first [`super::settings::HUB_PAGE`]
@@ -384,28 +595,26 @@ fn hub_lists<B>(
                 shipped: false,
                 heard: false,
                 answered: None,
+                last: None,
             });
         }
     }
+    // The search filters them too (1618), by name or a pasted address.
+    let query = model.explore.query.clone();
+    let keep = |o: &super::settings::Offered| {
+        let name = hub_name(model, o).resolve(model.lang);
+        matches_name(Some(&name), &o.hash, &query)
+    };
+    hubs.retain(|o| keep(o));
+    let heard = heard.into_iter().filter(|o| keep(o)).collect();
     (hubs, heard)
 }
 
 fn hub_row<B>(model: &UiModel<B>, hub: &super::settings::Offered, cursor: Option<&Pick>) -> HubRow {
     let chosen = model.rooms.hub == Some(hub.hash);
-    let name = match &hub.name {
-        Some(name) => Text::Raw(name.clone()),
-        None if !hub.shipped && !hub.heard => super::rooms::hub_label(&model.rooms),
-        None => Text::key(StrId::RoomsHubUnnamed),
-    };
+    let name = hub_name(model, hub);
     let mut parts = Vec::new();
-    match hub.hops {
-        Some(1) => parts.push(Text::key(StrId::RoomsHubHop)),
-        Some(n) => parts.push(Text::Key(
-            StrId::RoomsHubHops,
-            Vec::from([Arg::Int(i64::from(n))]),
-        )),
-        None => {}
-    }
+    parts.extend(far(hub.hops));
     if hub.shipped && hub.heard {
         parts.push(Text::key(StrId::RoomsHubSuggested));
     }
@@ -417,13 +626,83 @@ fn hub_row<B>(model: &UiModel<B>, hub: &super::settings::Offered, cursor: Option
         1 => parts.pop(),
         _ => Some(Text::Join(parts)),
     };
+    let (now_secs, _) = now(model);
     HubRow {
         hash: hub.hash,
         name,
+        seen: hub
+            .last
+            .and_then(|last| seen(now_secs, u64::try_from(last).unwrap_or(0))),
         value,
         chosen,
         cursor: cursor == Some(&Pick::Hub(hub.hash)),
     }
+}
+
+/// The hub the sheet is about, as [`hub_lists`] offers it, or as the
+/// settings know it where the search hides its row.
+fn sheet_hub<B>(model: &UiModel<B>, hash: [u8; 16]) -> super::settings::Offered {
+    super::settings::offered_hubs(&model.rooms)
+        .into_iter()
+        .find(|o| o.hash == hash)
+        .unwrap_or(super::settings::Offered {
+            hash,
+            name: None,
+            hops: None,
+            shipped: false,
+            heard: false,
+            answered: None,
+            last: None,
+        })
+}
+
+/// The rooms the hub's welcome named, as shipped.
+fn sheet_rooms(hash: &[u8; 16]) -> Vec<String> {
+    super::hubs::named(hash)
+        .map(|h| h.rooms)
+        .unwrap_or_default()
+}
+
+/// The sheet's rows in the terminal cursor's order: the button (while
+/// the hub is not in force), then the rooms.
+pub fn sheet_picks<B>(model: &UiModel<B>) -> usize {
+    let Some(hash) = model.explore.sheet else {
+        return 0;
+    };
+    usize::from(model.rooms.hub != Some(hash)) + sheet_rooms(&hash).len()
+}
+
+/// The open sheet as the frontends draw it.
+fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
+    let hash = model.explore.sheet?;
+    let hub = sheet_hub(model, hash);
+    let chosen = model.rooms.hub == Some(hash);
+    let rooms = sheet_rooms(&hash);
+    let (now_secs, _) = now(model);
+    Some(HubSheet {
+        hash,
+        name: hub_name(model, &hub),
+        far: far(hub.hops),
+        seen: hub
+            .last
+            .and_then(|last| seen(now_secs, u64::try_from(last).unwrap_or(0))),
+        chosen,
+        button: Text::key(match chosen {
+            true => StrId::ExploreServerInUse,
+            false => StrId::ExploreServerUse,
+        }),
+        notice: Text::key(StrId::RoomsNameVisible),
+        rooms_title: Text::key(StrId::ExploreServerRooms),
+        no_rooms: rooms
+            .is_empty()
+            .then(|| Text::key(StrId::ExploreServerNoRooms)),
+        rooms,
+        close: Text::key(StrId::ExploreServerClose),
+        cursor: model
+            .explore
+            .sheet_cursor
+            .min(sheet_picks(model).saturating_sub(1)),
+    })
 }
 
 /// The tab for the frontends.
@@ -431,33 +710,16 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
     let explore = &model.explore;
     let picks = picks(model);
     let cursor = picks.get(explore.cursor.min(picks.len().saturating_sub(1)));
-    let (now_secs, offset) = now(model);
+    let (now_secs, _) = now(model);
     let all = known(&model.browse.model);
     let any = !all.is_empty();
-    let pages = ordered(
-        all.into_iter()
-            .filter(|k| matches(k, &explore.query))
-            .collect(),
-        explore.az,
-    );
+    let looks = looks(&all);
+    let pages = listed(model);
     let mut groups: Vec<PageGroup> = Vec::new();
-    for page in pages {
-        let heading = match (&page.bookmark, explore.az) {
-            (Some(_), _) => StrId::ExploreBookmarks,
-            (None, true) => StrId::ExploreAz,
-            (None, false) => match age(
-                i64::try_from(now_secs).unwrap_or(i64::MAX),
-                i64::try_from(page.last_seen).unwrap_or(0),
-                offset,
-            ) {
-                Age::Today => StrId::ExploreToday,
-                Age::ThisWeek => StrId::ExploreThisWeek,
-                Age::Older => StrId::ExploreOlder,
-            },
-        };
+    for (page, heading) in pages {
         let row = PageRow {
             dest: page.dest,
-            label: lnomad::names::site_label(page.name.as_deref(), &page.dest),
+            label: label(&page, &looks),
             seen: seen(now_secs, page.last_seen),
             hops: hops(page.hops),
             bookmarked: page.bookmark.is_some(),
@@ -505,8 +767,11 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
         Some(Pick::Room(i)) => Some(*i),
         _ => None,
     };
-    let empty = (rooms_node.rows.is_empty() && hubs.is_empty() && heard.is_empty())
-        .then(|| Text::key(StrId::ExploreNoRooms));
+    let empty = (rooms_node.rows.is_empty()
+        && hubs.is_empty()
+        && heard.is_empty()
+        && explore.query.trim().is_empty())
+    .then(|| Text::key(StrId::ExploreNoRooms));
     ExploreNode {
         pages,
         rooms: RoomsSection {
@@ -518,6 +783,7 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
             heard,
             empty,
         },
+        sheet: sheet(model),
     }
 }
 
@@ -530,6 +796,8 @@ pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
             model.browse.open = false;
             model.rooms.open = false;
             model.explore.cursor = 0;
+            model.explore.held = false;
+            settle(model, true);
         }
         TabId::Browse | TabId::Rooms => model.explore.open = true,
         TabId::Chats | TabId::Map => model.explore.open = false,
@@ -544,12 +812,16 @@ pub(super) fn fold<B: InputBuffer + Default>(
 ) -> Vec<UiEffect> {
     match event {
         ExploreEvent::Typed(text) => {
-            model.explore.query = text;
-            model.explore.cursor = 0;
+            if model.explore.query != text {
+                model.explore.query = text;
+                model.explore.cursor = 0;
+                settle(model, true);
+            }
             Vec::new()
         }
         ExploreEvent::Az(on) => {
             model.explore.az = on;
+            settle(model, true);
             Vec::from([UiEffect::Remember {
                 key: "explore_az",
                 value: if on { "on" } else { "off" },
@@ -571,7 +843,11 @@ pub(super) fn fold<B: InputBuffer + Default>(
             Some(url) => open_url(model, url),
             None => Vec::new(),
         },
-        ExploreEvent::Bookmark(dest) => bookmark(model, dest),
+        ExploreEvent::Bookmark(dest) => {
+            let effects = bookmark(model, dest);
+            settle(model, true);
+            effects
+        }
         ExploreEvent::OpenRoom(index) => {
             if index >= model.rooms.rooms.len() {
                 return Vec::new();
@@ -580,10 +856,39 @@ pub(super) fn fold<B: InputBuffer + Default>(
             super::rooms::fold(model, RoomsEvent::Show(Some(index)))
         }
         ExploreEvent::Hub(hash) => {
+            model.explore.sheet = Some(hash);
+            model.explore.sheet_cursor = 0;
+            Vec::new()
+        }
+        ExploreEvent::UseHub(hash) => {
+            model.explore.sheet = None;
             let mut effects = super::rooms::choose(model, HubChoice::Hub(hash));
             show_rooms(model);
             effects.extend(super::rooms::fold(model, RoomsEvent::Show(None)));
             effects
+        }
+        ExploreEvent::JoinRoom(hash, room) => {
+            model.explore.sheet = None;
+            let mut effects = super::rooms::choose(model, HubChoice::Hub(hash));
+            show_rooms(model);
+            effects.extend(super::rooms::fold(model, RoomsEvent::Show(None)));
+            effects.extend(super::rooms::fold(
+                model,
+                RoomsEvent::Typed(format!("/join {room}")),
+            ));
+            effects.extend(super::rooms::fold(model, RoomsEvent::Submit));
+            effects
+        }
+        ExploreEvent::CloseSheet => {
+            model.explore.sheet = None;
+            Vec::new()
+        }
+        ExploreEvent::Touch(down) => {
+            model.explore.held = down;
+            if !down {
+                settle(model, false);
+            }
+            Vec::new()
         }
     }
 }
@@ -650,6 +955,29 @@ pub(super) fn key<B: InputBuffer + Default>(
     use leviculum_ui::input::{KeyCode, KeyModifiers};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // A hub's sheet over the list (1618): the arrows walk the button and
+    // the rooms, Enter takes the one under the cursor, Esc closes it.
+    if let Some(hash) = model.explore.sheet {
+        let rows = sheet_picks(model);
+        let button = usize::from(model.rooms.hub != Some(hash));
+        let at = model.explore.sheet_cursor.min(rows.saturating_sub(1));
+        match key.code {
+            KeyCode::Up => model.explore.sheet_cursor = at.saturating_sub(1),
+            KeyCode::Down if rows > 0 => model.explore.sheet_cursor = (at + 1).min(rows - 1),
+            KeyCode::Enter if rows > 0 => {
+                if at < button {
+                    return fold(model, ExploreEvent::UseHub(hash));
+                }
+                if let Some(room) = sheet_rooms(&hash).into_iter().nth(at - button) {
+                    return fold(model, ExploreEvent::JoinRoom(hash, room));
+                }
+            }
+            KeyCode::Esc => model.explore.sheet = None,
+            KeyCode::Char('g') if ctrl => model.explore.sheet = None,
+            _ => {}
+        }
+        return Vec::new();
+    }
     let picks = picks(model);
     let under = picks
         .get(model.explore.cursor.min(picks.len().saturating_sub(1)))
@@ -668,10 +996,12 @@ pub(super) fn key<B: InputBuffer + Default>(
         KeyCode::Char(c) if !ctrl && !alt => {
             model.explore.query.push(c);
             model.explore.cursor = 0;
+            settle(model, true);
         }
         KeyCode::Backspace => {
             model.explore.query.pop();
             model.explore.cursor = 0;
+            settle(model, true);
         }
         KeyCode::Up => model.explore.cursor = model.explore.cursor.saturating_sub(1),
         KeyCode::Down if !picks.is_empty() => {
@@ -689,6 +1019,7 @@ pub(super) fn key<B: InputBuffer + Default>(
         KeyCode::Esc if !model.explore.query.is_empty() => {
             model.explore.query.clear();
             model.explore.cursor = 0;
+            settle(model, true);
         }
         KeyCode::Esc => model.explore.open = false,
         _ => {}
@@ -699,7 +1030,7 @@ pub(super) fn key<B: InputBuffer + Default>(
 fn page_json(row: &PageRow) -> Value {
     json!({
         "dest": crate::address::to_hex(&row.dest),
-        "label": row.label,
+        "label": row.label.to_json(),
         "seen": row.seen.as_ref().map(Text::to_json),
         "hops": row.hops.as_ref().map(Text::to_json),
         "bookmarked": row.bookmarked,
@@ -712,6 +1043,7 @@ fn hub_json(row: &HubRow) -> Value {
     json!({
         "hash": crate::address::to_hex(&row.hash),
         "name": row.name.to_json(),
+        "seen": row.seen.as_ref().map(Text::to_json),
         "value": row.value.as_ref().map(Text::to_json),
         "chosen": row.chosen,
         "cursor": row.cursor,
@@ -751,6 +1083,20 @@ impl ExploreNode {
                 "heard": r.heard.iter().map(hub_json).collect::<Vec<_>>(),
                 "empty": r.empty.as_ref().map(Text::to_json),
             },
+            "sheet": self.sheet.as_ref().map(|s| json!({
+                "hash": crate::address::to_hex(&s.hash),
+                "name": s.name.to_json(),
+                "far": s.far.as_ref().map(Text::to_json),
+                "seen": s.seen.as_ref().map(Text::to_json),
+                "chosen": s.chosen,
+                "button": s.button.to_json(),
+                "notice": s.notice.to_json(),
+                "rooms_title": s.rooms_title.to_json(),
+                "rooms": s.rooms,
+                "no_rooms": s.no_rooms.as_ref().map(Text::to_json),
+                "close": s.close.to_json(),
+                "cursor": s.cursor,
+            })),
         })
     }
 }
@@ -821,7 +1167,7 @@ mod tests {
         node.pages
             .groups
             .iter()
-            .flat_map(|g| g.rows.iter().map(|r| r.label.clone()))
+            .flat_map(|g| g.rows.iter().map(|r| r.label.resolve(Lang::En)))
             .collect()
     }
 
@@ -833,10 +1179,7 @@ mod tests {
         let mut model = phone();
         update(&mut model, UiEvent::Tab(TabId::Explore));
         let shown = node(&model);
-        assert_eq!(
-            labels(&shown),
-            ["Zebra Hof ·1111", "Alpha Relay ·2222", "·3333"]
-        );
+        assert_eq!(labels(&shown), ["Zebra Hof", "Alpha Relay", "Unnamed page"]);
         assert_eq!(
             headings(&shown),
             [
@@ -852,7 +1195,7 @@ mod tests {
         );
         assert_eq!(
             first.seen.as_ref().map(|t| t.resolve(Lang::De)).as_deref(),
-            Some("zuletzt gesehen vor 1 h")
+            Some("gesehen vor 1 Std.")
         );
         assert_eq!(
             first.hops,
@@ -861,7 +1204,7 @@ mod tests {
         // A bookmark on the oldest puts it on top, under its own heading.
         explore(&mut model, ExploreEvent::Bookmark([0x33; 16]));
         let shown = node(&model);
-        assert_eq!(labels(&shown)[0], "·3333");
+        assert_eq!(labels(&shown)[0], "Unnamed page");
         assert_eq!(headings(&shown)[0], StrId::ExploreBookmarks);
         assert!(shown.pages.groups[0].rows[0].bookmarked);
         // A-Z: the bookmark stays on top, the rest by name.
@@ -874,10 +1217,7 @@ mod tests {
             }]
         );
         let shown = node(&model);
-        assert_eq!(
-            labels(&shown),
-            ["·3333", "Alpha Relay ·2222", "Zebra Hof ·1111"]
-        );
+        assert_eq!(labels(&shown), ["Unnamed page", "Alpha Relay", "Zebra Hof"]);
         assert_eq!(
             headings(&shown),
             [StrId::ExploreBookmarks, StrId::ExploreAz]
@@ -942,28 +1282,44 @@ mod tests {
         assert_eq!(all.len(), 5, "{:?}", labels(&shown));
         let alpha = all.iter().find(|r| r.dest == [0x22; 16]).expect("alpha");
         assert!(alpha.bookmarked);
-        assert_eq!(alpha.label, "Alpha Relay ·2222", "the announced name wins");
+        assert_eq!(
+            alpha.label,
+            Text::Raw("Alpha Relay".into()),
+            "the announced name wins"
+        );
         assert!(
             alpha.url.ends_with(":/page/news.mu"),
             "the bookmarked page opens"
         );
         let zebra = all.iter().find(|r| r.dest == [0x11; 16]).expect("zebra");
-        assert_eq!(zebra.label, "Zebra Hof Neu ·1111", "the newest name wins");
+        assert_eq!(
+            zebra.label,
+            Text::Raw("Zebra Hof Neu".into()),
+            "the newest name wins"
+        );
         let never = all.iter().find(|r| r.dest == [0x55; 16]).expect("bookmark");
         assert_eq!(never.seen, None);
-        assert_eq!(never.label, "Never heard ·5555");
+        assert_eq!(never.label, Text::Raw("Never heard".into()));
     }
 
-    /// The field filters by name and short hash, and takes an address or
-    /// its `nomadnet://` form, which opens through the browser.
+    /// The field filters by name, never by a hash's letters (1618), and
+    /// takes an address or its `nomadnet://` form, which opens through the
+    /// browser.
     #[test]
-    fn the_field_filters_by_name_and_hash_and_opens_an_address() {
+    fn the_field_filters_by_name_and_opens_an_address() {
         let mut model = phone();
         update(&mut model, UiEvent::Tab(TabId::Explore));
         explore(&mut model, ExploreEvent::Typed("alpha".into()));
-        assert_eq!(labels(&node(&model)), ["Alpha Relay ·2222"]);
-        explore(&mut model, ExploreEvent::Typed("·33".into()));
-        assert_eq!(labels(&node(&model)), ["·3333"]);
+        assert_eq!(labels(&node(&model)), ["Alpha Relay"]);
+        // The walk's "a" found "SPECTRO RNS ·ea54" by its hash: a short
+        // hash's letters find nothing now.
+        explore(&mut model, ExploreEvent::Typed("33".into()));
+        assert!(labels(&node(&model)).is_empty());
+        explore(&mut model, ExploreEvent::Typed("·11".into()));
+        assert!(labels(&node(&model)).is_empty());
+        // A pasted address finds its page.
+        explore(&mut model, ExploreEvent::Typed("33".repeat(16)));
+        assert_eq!(labels(&node(&model)), ["Unnamed page"]);
         explore(&mut model, ExploreEvent::Typed("nobody".into()));
         let shown = node(&model);
         assert!(labels(&shown).is_empty());
@@ -1079,7 +1435,20 @@ mod tests {
         assert_eq!(shown.rooms.heard.len(), 1);
         assert_eq!(shown.rooms.heard[0].name, Text::Raw("Werkstatt".into()));
         assert_eq!(shown.rooms.heard_title, Text::key(StrId::ExploreHeardHubs));
+        // The row opens the sheet and changes nothing (1618).
         let effects = explore(&mut model, ExploreEvent::Hub(hub));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(model.rooms.hub, None);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.name, Text::Raw("Werkstatt".into()));
+        assert!(!sheet.chosen);
+        assert_eq!(
+            sheet.far.as_ref().map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("über 2 Stationen erreichbar")
+        );
+        assert_eq!(sheet.button, Text::key(StrId::ExploreServerUse));
+        let effects = explore(&mut model, ExploreEvent::UseHub(hub));
+        assert!(node(&model).sheet.is_none());
         assert!(
             effects
                 .iter()
@@ -1134,7 +1503,7 @@ mod tests {
             update(&mut model, key(KeyCode::Char(c)));
         }
         assert_eq!(model.explore.query, "zeb");
-        assert_eq!(labels(&node(&model)), ["Zebra Hof ·1111"]);
+        assert_eq!(labels(&node(&model)), ["Zebra Hof"]);
         let effects = update(&mut model, key(KeyCode::Enter));
         assert_eq!(effects.len(), 1, "the page is fetched: {effects:?}");
         assert!(model.browse.showing());
@@ -1155,5 +1524,211 @@ mod tests {
         let model = UiModel::<Buffer>::new(&[]);
         assert_eq!(model.browse.model.node_registry.capacity(), 4096);
         assert_eq!(crate::ui::browse::REGISTRY, crate::home::pages::PAGES_CAP);
+    }
+
+    /// A name alone, its short hash only where two pages' names look the
+    /// same (1618, the chat list's rule since 1452); "Unnamed page" never
+    /// a hash, and under A-Z after the named ones, not on top.
+    #[test]
+    fn a_page_is_its_name_and_a_hash_only_on_a_collision() {
+        let mut model = phone();
+        update(
+            &mut model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Node(heard(
+                0x44,
+                Some("alpha relay"),
+                7_200,
+                None,
+            ))),
+        );
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let shown = labels(&node(&model));
+        assert!(shown.contains(&"Zebra Hof".to_string()), "{shown:?}");
+        assert!(
+            shown.contains(&"Alpha Relay ·2222".to_string()),
+            "{shown:?}"
+        );
+        assert!(
+            shown.contains(&"alpha relay ·4444".to_string()),
+            "{shown:?}"
+        );
+        assert!(shown
+            .iter()
+            .all(|l| l == "Unnamed page" || !l.starts_with('·')));
+        explore(&mut model, ExploreEvent::Az(true));
+        let az = labels(&node(&model));
+        assert_eq!(
+            az.last().map(String::as_str),
+            Some("Unnamed page"),
+            "{az:?}"
+        );
+        assert_eq!(
+            Text::key(StrId::ExploreUnnamedPage).resolve(Lang::De),
+            "Unbenannte Seite"
+        );
+    }
+
+    fn order(model: &UiModel<Buffer>) -> Vec<[u8; 16]> {
+        node(model)
+            .pages
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter().map(|r| r.dest))
+            .collect()
+    }
+
+    /// Rows never move under a finger (1618): a page heard while a finger
+    /// is down keeps every row where it stood, and so does the next tick;
+    /// the new order comes when the finger lifts, and on its own at most
+    /// once a second. The walk tapped "Radio RPi4" and opened "IranTalk".
+    #[test]
+    fn a_row_never_moves_under_a_finger_and_the_order_settles_once_a_second() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Elapsed(10_000));
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let before = order(&model);
+        assert_eq!(before[2], [0x33; 16]);
+        explore(&mut model, ExploreEvent::Touch(true));
+        // The oldest page is heard again: fresh, it would come first.
+        let again = |model: &mut UiModel<Buffer>| {
+            update(
+                model,
+                UiEvent::Browse(crate::ui::browse::BrowseEvent::Node(heard(
+                    0x33, None, 0, None,
+                ))),
+            );
+        };
+        again(&mut model);
+        update(&mut model, UiEvent::Elapsed(12_000));
+        assert_eq!(
+            order(&model),
+            before,
+            "nothing moves while the finger is down"
+        );
+        // The row under the finger is the one it came down on.
+        assert_eq!(picks(&model)[2], Pick::Page([0x33; 16]));
+        explore(&mut model, ExploreEvent::Touch(false));
+        assert_eq!(order(&model)[0], [0x33; 16], "the order comes on the lift");
+        // Without a finger, a page heard within the second waits for it.
+        update(
+            &mut model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Node(heard(
+                0x22,
+                Some("Alpha Relay"),
+                0,
+                Some(1),
+            ))),
+        );
+        assert_eq!(order(&model)[0], [0x33; 16], "within the second: as it was");
+        update(&mut model, UiEvent::Elapsed(13_100));
+        assert_eq!(
+            order(&model)[0],
+            [0x22; 16],
+            "a second later: the new order"
+        );
+        // The control: the order without the hold is the fresh one.
+        let fresh: Vec<[u8; 16]> = fresh(&model).into_iter().map(|(k, _)| k.dest).collect();
+        assert_eq!(order(&model), fresh);
+    }
+
+    /// Searching filters the servers too (1618), by their names.
+    #[test]
+    fn the_search_filters_the_servers() {
+        let mut model = phone();
+        for (byte, name) in [(0x91, "Werkstatt"), (0x92, "Bergwacht")] {
+            update(
+                &mut model,
+                UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                    hash: [byte; 16],
+                    name: Some(name.into()),
+                    hops: Some(2),
+                    first: NOW - 60,
+                    last: NOW - 60,
+                    answered: None,
+                })),
+            );
+        }
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        assert_eq!(node(&model).rooms.heard.len(), 2);
+        explore(&mut model, ExploreEvent::Typed("werk".into()));
+        let shown = node(&model);
+        assert_eq!(shown.rooms.heard.len(), 1);
+        assert_eq!(shown.rooms.heard[0].name, Text::Raw("Werkstatt".into()));
+        assert!(shown.rooms.hubs.iter().all(|h| h
+            .name
+            .resolve(Lang::En)
+            .to_lowercase()
+            .contains("werk")));
+        assert_eq!(
+            shown.rooms.empty, None,
+            "a search says no 'nothing in reach'"
+        );
+        // A server's row says when it was heard, as a page's.
+        assert_eq!(
+            shown.rooms.heard[0].seen,
+            Some(Text::Key(StrId::ExploreSeenMinutes, vec![Arg::Int(1)]))
+        );
+    }
+
+    /// A shipped server's room on its sheet joins: the server is used, and
+    /// the join links, as the first join does (1577).
+    #[test]
+    fn a_room_on_a_servers_sheet_joins_it() {
+        let Some(hub) = crate::ui::hubs::shipped()
+            .into_iter()
+            .find(|h| !h.rooms.is_empty())
+        else {
+            return;
+        };
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::Hub(hub.hash));
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms, hub.rooms);
+        assert_eq!(sheet.no_rooms, None);
+        let room = hub.rooms[0].clone();
+        let effects = explore(&mut model, ExploreEvent::JoinRoom(hub.hash, room.clone()));
+        assert_eq!(model.rooms.hub, Some(hub.hash));
+        assert!(
+            effects.contains(&UiEffect::Rooms(RoomAsk::Open { hub: hub.hash })),
+            "{effects:?}"
+        );
+        assert_eq!(model.scene(LayoutClass::Compact).screen, ScreenId::Rooms);
+        let _ = room;
+    }
+
+    /// A server without a name is "Server without a name", never an empty
+    /// row (1618: a shipped entry's name "" stood as "  · 5 Hops").
+    #[test]
+    fn a_nameless_server_is_said_so() {
+        let mut model = phone();
+        let nameless = crate::ui::hubs::shipped()
+            .into_iter()
+            .find(|h| h.name.trim().is_empty());
+        let hash = match nameless {
+            Some(h) => h.hash,
+            None => [0x93; 16],
+        };
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                hash,
+                name: Some(String::new()),
+                hops: Some(5),
+                first: NOW - 60,
+                last: NOW - 60,
+                answered: None,
+            })),
+        );
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let shown = node(&model);
+        let row = shown
+            .rooms
+            .hubs
+            .iter()
+            .chain(shown.rooms.heard.iter())
+            .find(|h| h.hash == hash)
+            .expect("the row");
+        assert_eq!(row.name.resolve(Lang::De), "Server ohne Namen");
     }
 }

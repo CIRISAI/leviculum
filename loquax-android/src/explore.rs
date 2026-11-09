@@ -31,13 +31,21 @@ fn hub(row: &model_explore::HubRow, lang: Lang) -> ExploreHub {
     ExploreHub {
         dest: hex(&row.hash),
         name: row.name.resolve(lang),
-        value: row
-            .value
-            .as_ref()
-            .map(|v| v.resolve(lang))
-            .unwrap_or_default(),
+        value: said(row.seen.iter().chain(row.value.iter()), lang),
         chosen: row.chosen,
     }
+}
+
+/// Texts said one after the other, ` · ` between.
+fn said<'a>(parts: impl Iterator<Item = &'a Text>, lang: Lang) -> String {
+    parts
+        .map(|t| t.resolve(lang))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn text_or_empty(text: &Option<Text>, lang: Lang) -> String {
+    text.as_ref().map(|t| t.resolve(lang)).unwrap_or_default()
 }
 
 fn hex(bytes: &[u8; 16]) -> String {
@@ -74,24 +82,21 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             .groups
             .iter()
             .flat_map(|group| {
-                group.rows.iter().enumerate().map(move |(i, row)| {
-                    let said: Vec<String> = row
-                        .seen
-                        .iter()
-                        .chain(row.hops.iter())
-                        .map(|t| t.resolve(lang))
-                        .collect();
-                    ExplorePage {
+                group
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, row)| ExplorePage {
                         heading: match i {
                             0 => group.heading.resolve(lang),
                             _ => String::new(),
                         },
                         dest: hex(&row.dest),
-                        label: row.label.clone(),
-                        said: said.join(" · "),
+                        label: row.label.resolve(lang),
+                        said: said(row.seen.iter().chain(row.hops.iter()), lang),
                         bookmarked: row.bookmarked,
-                    }
-                })
+                        url: row.url.clone(),
+                    })
             })
             .collect(),
         pages_empty: pages
@@ -126,6 +131,52 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             .as_ref()
             .map(|t| t.resolve(lang))
             .unwrap_or_default(),
+        sheet_dest: node
+            .sheet
+            .as_ref()
+            .map(|s| hex(&s.hash))
+            .unwrap_or_default(),
+        sheet_name: node
+            .sheet
+            .as_ref()
+            .map(|s| s.name.resolve(lang))
+            .unwrap_or_default(),
+        sheet_said: node
+            .sheet
+            .as_ref()
+            .map(|s| said(s.seen.iter().chain(s.far.iter()), lang))
+            .unwrap_or_default(),
+        sheet_chosen: node.sheet.as_ref().is_some_and(|s| s.chosen),
+        sheet_button: node
+            .sheet
+            .as_ref()
+            .map(|s| s.button.resolve(lang))
+            .unwrap_or_default(),
+        sheet_notice: node
+            .sheet
+            .as_ref()
+            .map(|s| s.notice.resolve(lang))
+            .unwrap_or_default(),
+        sheet_rooms_title: node
+            .sheet
+            .as_ref()
+            .map(|s| s.rooms_title.resolve(lang))
+            .unwrap_or_default(),
+        sheet_rooms: node
+            .sheet
+            .as_ref()
+            .map(|s| s.rooms.clone())
+            .unwrap_or_default(),
+        sheet_no_rooms: node
+            .sheet
+            .as_ref()
+            .map(|s| text_or_empty(&s.no_rooms, lang))
+            .unwrap_or_default(),
+        sheet_close: node
+            .sheet
+            .as_ref()
+            .map(|s| s.close.resolve(lang))
+            .unwrap_or_default(),
     }
 }
 
@@ -148,6 +199,10 @@ pub fn events(verb: &str, text: &str, to: &str, index: i64) -> Result<Vec<UiEven
             usize::try_from(index).map_err(|_| format!("no room {index}"))?,
         )),
         "hub" => explore(ExploreEvent::Hub(dest(to)?)),
+        "use" => explore(ExploreEvent::UseHub(dest(to)?)),
+        "join" => explore(ExploreEvent::JoinRoom(dest(to)?, text.to_string())),
+        "close" => explore(ExploreEvent::CloseSheet),
+        "touch" => explore(ExploreEvent::Touch(index != 0)),
         other => return Err(format!("no explore verb {other:?}")),
     })
 }
@@ -179,6 +234,34 @@ mod tests {
         assert_eq!(
             events("typed", "marcel", "", 0),
             Ok(vec![UiEvent::Explore(ExploreEvent::Typed("marcel".into()))])
+        );
+        // 1618: the sheet's verbs and the finger on the list.
+        assert_eq!(
+            events("hub", "", &node, 0),
+            Ok(vec![UiEvent::Explore(ExploreEvent::Hub([0x5a; 16]))])
+        );
+        assert_eq!(
+            events("use", "", &node, 0),
+            Ok(vec![UiEvent::Explore(ExploreEvent::UseHub([0x5a; 16]))])
+        );
+        assert_eq!(
+            events("join", "#lobby", &node, 0),
+            Ok(vec![UiEvent::Explore(ExploreEvent::JoinRoom(
+                [0x5a; 16],
+                "#lobby".into()
+            ))])
+        );
+        assert_eq!(
+            events("close", "", "", 0),
+            Ok(vec![UiEvent::Explore(ExploreEvent::CloseSheet)])
+        );
+        assert_eq!(
+            events("touch", "", "", 1),
+            Ok(vec![UiEvent::Explore(ExploreEvent::Touch(true))])
+        );
+        assert_eq!(
+            events("touch", "", "", 0),
+            Ok(vec![UiEvent::Explore(ExploreEvent::Touch(false))])
         );
         // The controls: a bad destination and an unknown verb are refused.
         assert!(events("open", "", "zz", 0).is_err());

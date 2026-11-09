@@ -424,6 +424,8 @@ pub struct Offered {
     pub heard: bool,
     /// `Some(false)`: it gave no answer when last opened.
     pub answered: Option<bool>,
+    /// When it was last heard, unix seconds; `None` for one never heard.
+    pub last: Option<i64>,
 }
 
 /// The hubs in the order the settings offer them (1599): the heard ones
@@ -438,13 +440,19 @@ pub fn offered_hubs(rooms: &super::rooms::Rooms) -> Vec<Offered> {
         .iter()
         .map(|h| {
             let listed = shipped.iter().find(|s| s.hash == h.hash);
+            // A name that is empty is none (1618: the walk saw a row with
+            // no name at all where a shipped entry's name was "").
+            let named = |name: &Option<alloc::string::String>| {
+                name.clone().filter(|n| !n.trim().is_empty())
+            };
             Offered {
                 hash: h.hash,
-                name: listed.map(|s| s.name.clone()).or_else(|| h.name.clone()),
+                name: named(&listed.map(|s| s.name.clone())).or_else(|| named(&h.name)),
                 hops: h.hops,
                 shipped: listed.is_some(),
                 heard: true,
                 answered: h.answered,
+                last: Some(h.last),
             }
         })
         .collect();
@@ -453,12 +461,13 @@ pub fn offered_hubs(rooms: &super::rooms::Rooms) -> Vec<Offered> {
             continue;
         }
         out.push(Offered {
-            name: Some(hub.name).filter(|n| !n.is_empty()),
+            name: Some(hub.name).filter(|n| !n.trim().is_empty()),
             hash: hub.hash,
             hops: hub.hops,
             shipped: true,
             heard: false,
             answered: None,
+            last: None,
         });
     }
     out
@@ -638,14 +647,20 @@ mod tests {
                 None => r.label.resolve(Lang::En),
             })
             .collect();
-        assert_eq!(said[0], "Public rooms: hub: Villa");
+        assert_eq!(said[0], "Server for public rooms: Villa");
         assert_eq!(
-            said[1], "Unnamed hub: 2 hops away",
+            said[1], "Server without a name: reachable over 2 stations",
             "a tie: the closer first"
         );
-        assert_eq!(said[2], "Villa: 4 hops away · no answer · \u{2713}");
-        assert_eq!(said[3], "HADARC: 4 hops away · suggested");
-        assert_eq!(said[4], shipped[0].name.clone() + ": 3 hops away");
+        assert_eq!(
+            said[2],
+            "Villa: reachable over 4 stations · no answer · \u{2713}"
+        );
+        assert_eq!(said[3], "HADARC: reachable over 4 stations · suggested");
+        assert_eq!(
+            said[4],
+            shipped[0].name.clone() + ": reachable over 3 stations"
+        );
         assert!(
             said.iter()
                 .all(|s| !s.contains("a1a1") && !s.contains("rrc")),

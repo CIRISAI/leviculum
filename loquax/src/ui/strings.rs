@@ -46,7 +46,7 @@ leviculum_ui::catalogue! {
     TabExplore = "tab_explore", "Explore", "Entdecken";
     ExplorePages = "explore_pages", "Pages", "Seiten";
     ExploreRooms = "explore_rooms", "Public rooms", "Öffentliche Räume";
-    ExploreSearchHint = "explore_search_hint", "Search a name, or paste an address", "Namen suchen oder Adresse einfügen";
+    ExploreSearchHint = "explore_search_hint", "Search", "Suchen";
     ExploreSortSeen = "explore_sort_seen", "Last seen first", "Zuletzt gesehen zuerst";
     ExploreSortAz = "explore_sort_az", "A to Z", "A bis Z";
     ExploreBookmarks = "explore_bookmarks", "Bookmarks", "Lesezeichen";
@@ -58,27 +58,37 @@ leviculum_ui::catalogue! {
     ExploreNoPages = "explore_no_pages", "No pages known yet: they appear here as soon as your mailbox or this device hears one.", "Noch keine Seiten bekannt: sie erscheinen hier, sobald dein Postfach oder dieses Gerät eine hört.";
     ExplorePagesOff = "explore_pages_off", "Pages cannot be opened on this device yet.", "Seiten lassen sich auf diesem Gerät noch nicht öffnen.";
     ExploreNoRooms = "explore_no_rooms", "No public rooms within reach.", "Keine öffentlichen Räume in Reichweite.";
-    ExploreHeardHubs = "explore_heard_hubs", "Hubs in your mesh", "Hubs in deinem Netz";
-    ExploreSeenNow = "explore_seen_now", "seen just now", "gerade eben gesehen";
-    ExploreSeenMinutes = "explore_seen_minutes", "seen %1$d min ago", "zuletzt gesehen vor %1$d min";
-    ExploreSeenHours = "explore_seen_hours", "seen %1$d h ago", "zuletzt gesehen vor %1$d h";
-    ExploreSeenDay = "explore_seen_day", "seen yesterday", "zuletzt gesehen gestern";
-    ExploreSeenDays = "explore_seen_days", "seen %1$d days ago", "zuletzt gesehen vor %1$d Tagen";
-    ExploreHop = "explore_hop", "1 hop", "1 Hop";
-    ExploreHops = "explore_hops", "%1$d hops", "%1$d Hops";
+    ExploreHeardHubs = "explore_heard_hubs", "Servers in your mesh", "Server in deinem Netz";
+    ExploreSeenNow = "explore_seen_now", "seen just now", "gesehen gerade eben";
+    ExploreSeenMinutes = "explore_seen_minutes", "seen %1$d min ago", "gesehen vor %1$d Min.";
+    ExploreSeenHours = "explore_seen_hours", "seen %1$d h ago", "gesehen vor %1$d Std.";
+    ExploreSeenDay = "explore_seen_day", "seen yesterday", "gesehen gestern";
+    ExploreSeenDays = "explore_seen_days", "seen %1$d days ago", "gesehen vor %1$d Tagen";
+    ExploreHop = "explore_hop", "directly reachable", "direkt erreichbar";
+    ExploreHops = "explore_hops", "reachable over %1$d stations", "über %1$d Stationen erreichbar";
     ExploreOpenAddress = "explore_open_address", "Open %1$s", "%1$s öffnen";
     ExploreBookmark = "explore_bookmark", "Bookmark", "Lesezeichen setzen";
     ExploreUnbookmark = "explore_unbookmark", "Remove bookmark", "Lesezeichen entfernen";
+    // 1618 (walk of 17024c3a): the page's menu, a nameless page, and a server's sheet.
+    ExploreOpen = "explore_open", "Open", "Öffnen";
+    ExploreCopyAddress = "explore_copy_address", "Copy address", "Adresse kopieren";
+    ExploreCopied = "explore_copied", "Address copied", "Adresse kopiert";
+    ExploreUnnamedPage = "explore_unnamed_page", "Unnamed page", "Unbenannte Seite";
+    ExploreServerUse = "explore_server_use", "Use this server for rooms", "Diesen Server für Räume nutzen";
+    ExploreServerInUse = "explore_server_in_use", "Your rooms are on this server.", "Deine Räume laufen über diesen Server.";
+    ExploreServerRooms = "explore_server_rooms", "Its rooms", "Seine Räume";
+    ExploreServerNoRooms = "explore_server_no_rooms", "This server has named no rooms yet. Use it, then type a room's name to join.", "Dieser Server hat noch keine Räume genannt. Nutz ihn und tipp dann den Namen eines Raums.";
+    ExploreServerClose = "explore_server_close", "Close", "Schließen";
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";
     RoomsLive = "rooms_live", "A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.", "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.";
-    RoomsNoHub = "rooms_no_hub", "No public rooms yet. Choose a hub under Settings, Advanced.", "Noch keine öffentlichen Räume. Wähl einen Hub unter Einstellungen, Erweitert.";
+    RoomsNoHub = "rooms_no_hub", "No public rooms yet. Choose a server under Explore.", "Noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.";
     RoomsLinking = "rooms_linking", "Connecting…", "Verbinde…";
     RoomsNoPath = "rooms_no_path", "The rooms cannot be reached. Is their server on this network?", "Die Räume sind nicht erreichbar. Ist ihr Server in diesem Netz?";
     RoomsNoAnswer = "rooms_no_answer", "The rooms did not answer. Try again later.", "Die Räume haben nicht geantwortet. Versuch es später noch einmal.";
     RoomsLost = "rooms_lost", "The connection to the rooms broke. Open the Rooms again to reconnect.", "Die Verbindung zu den Räumen ist abgerissen. Öffne die Räume erneut, um neu zu verbinden.";
     RoomsLeft = "rooms_left", "Not connected.", "Nicht verbunden.";
-    RoomsOff = "rooms_off", "There are no public rooms here yet. Choose a hub under Settings, Advanced.", "Hier gibt es noch keine öffentlichen Räume. Wähl einen Hub unter Einstellungen, Erweitert.";
+    RoomsOff = "rooms_off", "There are no public rooms here yet. Choose a server under Explore.", "Hier gibt es noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.";
     RoomsHowToJoin = "rooms_how_to_join", "Type a room's name, like #lab, to join it.", "Tipp den Namen eines Raums, etwa #lab, um ihm beizutreten.";
     RoomsNotReady = "rooms_not_ready", "Not connected yet. Wait a moment and try again.", "Noch nicht verbunden. Warte kurz und versuch es noch einmal.";
     RoomsNotIn = "rooms_not_in", "You are not in %1$s. Join it first.", "Du bist nicht in %1$s. Tritt ihm zuerst bei.";
@@ -100,18 +110,18 @@ leviculum_ui::catalogue! {
     RoomsLeave = "rooms_leave", "Leave room", "Raum verlassen";
     // 1577: the public rooms' hub, chosen in the settings, and the mark of a public room.
     RoomsPublic = "rooms_public", "public", "öffentlich";
-    RoomsHub = "rooms_hub_setting", "Public rooms: hub", "Öffentliche Räume: Hub";
+    RoomsHub = "rooms_hub_setting", "Server for public rooms", "Server für öffentliche Räume";
     RoomsHubNone = "rooms_hub_none", "None", "Keiner";
-    RoomsHubOwn = "rooms_hub_own", "Your own hub", "Eigener Hub";
-    RoomsHubPaste = "rooms_hub_paste", "Another hub: paste its address", "Anderer Hub: Adresse einfügen";
-    RoomsHubPasteHint = "rooms_hub_paste_hint", "The hub's address", "Adresse des Hubs";
-    RoomsHubBad = "rooms_hub_bad", "That is no hub's address.", "Das ist keine Adresse eines Hubs.";
+    RoomsHubOwn = "rooms_hub_own", "Your own server", "Eigener Server";
+    RoomsHubPaste = "rooms_hub_paste", "Another server: paste its address", "Anderer Server: Adresse einfügen";
+    RoomsHubPasteHint = "rooms_hub_paste_hint", "The server's address", "Adresse des Servers";
+    RoomsHubBad = "rooms_hub_bad", "That is no server's address.", "Das ist keine Adresse eines Servers.";
     RoomsHubChosen = "rooms_hub_chosen", "Public rooms on %1$s.", "Öffentliche Räume auf %1$s.";
     RoomsHubOff = "rooms_hub_off", "No public rooms.", "Keine öffentlichen Räume.";
     // 1599: hubs heard on the mesh, offered closest and newest first.
-    RoomsHubUnnamed = "rooms_hub_unnamed", "Unnamed hub", "Hub ohne Namen";
-    RoomsHubHop = "rooms_hub_hop", "1 hop away", "1 Hop entfernt";
-    RoomsHubHops = "rooms_hub_hops", "%1$d hops away", "%1$d Hops entfernt";
+    RoomsHubUnnamed = "rooms_hub_unnamed", "Server without a name", "Server ohne Namen";
+    RoomsHubHop = "rooms_hub_hop", "directly reachable", "direkt erreichbar";
+    RoomsHubHops = "rooms_hub_hops", "reachable over %1$d stations", "über %1$d Stationen erreichbar";
     RoomsHubSuggested = "rooms_hub_suggested", "suggested", "empfohlen";
     RoomsHubNoAnswer = "rooms_hub_no_answer", "no answer", "keine Antwort";
     RoomsHubMore = "rooms_hub_more", "More…", "Mehr…";
@@ -701,12 +711,45 @@ mod tests {
                         && !lower.contains("rooms_hub"),
                     "{key}: {text}"
                 );
+                // 1618: a WhatsApp reader knows neither word; the UI says
+                // "server" and how far, never "hub" or "hops".
+                assert!(
+                    !plain_words(text).iter().any(|w| forbidden_word(w)),
+                    "{key}: {text}"
+                );
             }
         }
         // The control: the check reads the catalogue's words.
         assert!(CATALOGUE
             .iter()
             .any(|(_, _, en, _)| en.to_lowercase().contains("public rooms")));
+        // The control of 1618's words: the check catches them in both
+        // languages, and spares a word that only holds the letters.
+        assert!(plain_words("Hubs in deinem Netz")
+            .iter()
+            .any(|w| forbidden_word(w)));
+        assert!(plain_words("1 Hop entfernt")
+            .iter()
+            .any(|w| forbidden_word(w)));
+        assert!(plain_words("%1$d hops away")
+            .iter()
+            .any(|w| forbidden_word(w)));
+        assert!(!plain_words("Schublade, Shop, Hopfen")
+            .iter()
+            .any(|w| forbidden_word(w)));
+    }
+
+    /// The words of `text`, lower case, split at whatever is no letter.
+    fn plain_words(text: &str) -> Vec<String> {
+        text.split(|c: char| !c.is_alphabetic())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    }
+
+    /// "hub", "hubs", "hop", "hops" (1618).
+    fn forbidden_word(word: &str) -> bool {
+        matches!(word, "hub" | "hubs" | "hop" | "hops")
     }
 
     #[test]

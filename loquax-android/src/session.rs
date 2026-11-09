@@ -2210,10 +2210,10 @@ impl Inner {
         // of it is read by arriving.
         model.history = loquax::home::client::history_owed(home);
         model.list_apart = true;
-        // The phone hosts lnomad as its Browse tab (1337), behind the
-        // config's `browse_tab` until the fetch through the phone's own
-        // node (pass two) has been seen on a device: off in the APK.
-        model.browse.enabled = config.browse_tab.unwrap_or(false);
+        // The phone hosts lnomad (1337), opened from Explore: on unless
+        // the config's `browse_tab` says off (1618: the walk found every
+        // page listed and none openable).
+        model.browse.enabled = config.browse_on();
         // The Rooms tab is there where the config names a hub (1384), as
         // on the terminal and the window.
         model.rooms.hub = config.rooms_hub;
@@ -4943,7 +4943,7 @@ mod tests {
         let mut model = UiModel::<Line>::new(&[]);
         let choice = rooms_hub_choice(&model, Lang::De, String::new());
         assert!(choice.ok);
-        assert_eq!(choice.title, "Öffentliche Räume: Hub");
+        assert_eq!(choice.title, "Server für öffentliche Räume");
         assert_eq!(choice.current, "Keiner");
         // 1599: the closest ten of the shipped list, "More…", then none.
         let names: Vec<&str> = choice.hubs.iter().map(|h| h.name.as_str()).collect();
@@ -4951,7 +4951,7 @@ mod tests {
         assert_eq!(names[0], "RNS Moscow");
         assert_eq!((names[10], names[11]), ("Mehr…", "Keiner"));
         assert_eq!(choice.hubs[0].set, "42a97b1b07147b898f78a610dfbba587");
-        assert_eq!(choice.hubs[0].detail, "3 Hops entfernt");
+        assert_eq!(choice.hubs[0].detail, "über 3 Stationen erreichbar");
         assert_eq!(choice.hubs[10].set, "more");
         assert_eq!(choice.hubs[11].set, "none");
         assert!(choice.hubs[11].chosen && !choice.hubs[0].chosen);
@@ -4960,7 +4960,7 @@ mod tests {
         let all = rooms_hub_choice(&model, Lang::De, String::new());
         assert_eq!(all.hubs.len(), loquax::ui::hubs::shipped().len() + 1);
         assert!(all.hubs.iter().all(|h| h.set != "more"));
-        assert_eq!(choice.paste, "Anderer Hub: Adresse einfügen");
+        assert_eq!(choice.paste, "Anderer Server: Adresse einfügen");
         assert_eq!(choice.note, "Dein Name ist im Raum für alle sichtbar.");
         assert!(choice.own.is_empty());
         update(
@@ -4968,8 +4968,8 @@ mod tests {
             UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Hub([0x07; 16]))),
         );
         let choice = rooms_hub_choice(&model, Lang::De, String::new());
-        assert_eq!(choice.current, "Eigener Hub");
-        assert_eq!(choice.own, "Eigener Hub");
+        assert_eq!(choice.current, "Eigener Server");
+        assert_eq!(choice.own, "Eigener Server");
         assert!(choice.hubs.iter().all(|h| !h.chosen));
         assert!(!schema::encode(&choice).is_empty());
     }

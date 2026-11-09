@@ -1,0 +1,283 @@
+//! The Explore tab through the facade (1618, the walk of 17024c3a on the
+//! Pixel): requests in the bytes the app's Java writes, the model's fold,
+//! and the answer Java reads, with no JNI and no network.
+//!
+//! What the Java does with the answer (the field that never loses a
+//! character, the list that keeps a row under a finger) is
+//! `ExploreRows.java`, run on the host by `fling.rs`; this is the
+//! library's half: the order it answers while a finger is down, the
+//! words it says, and a server's sheet that changes nothing.
+
+use leviculum_ui::strings::Lang;
+use lnomad::DiscoveredNode;
+use loquax::ui::browse::BrowseEvent;
+use loquax::ui::{update, UiEffect, UiEvent, UiModel};
+use loquax_android::explore;
+use loquax_android::schema::{self, ExploreScreen, Request};
+use loquax_android::session::{self, Decoded, Platform};
+
+mod support {
+    pub mod java;
+}
+use support::java::{java_map, Java};
+
+/// 2027-01-15 12:00 UTC.
+const NOW: i64 = 1_800_000_000;
+
+/// A phone's model with the browser on, as the session sets it from a
+/// config without `browse_tab` (on since 1618), three pages heard.
+fn phone() -> (tempfile::TempDir, UiModel<session::Line>) {
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let store = loquax::store::Store::open_in(home.path(), me).expect("the store");
+    let mut model = session::known(home.path(), &store).expect("a model");
+    let config = loquax::config::load(home.path()).expect("no config");
+    model.browse.enabled = config.browse_on();
+    model.lang = Lang::De;
+    update(
+        &mut model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs: NOW,
+            offset_secs: 0,
+        }),
+    );
+    update(&mut model, UiEvent::Elapsed(10_000));
+    for (byte, name, ago) in [
+        (0x11, Some("Radio RPi4"), 600),
+        (0x22, Some("IranTalk"), 3_600),
+        (0x33, None, 7_200),
+    ] {
+        heard(&mut model, byte, name, ago);
+    }
+    (home, model)
+}
+
+fn heard(model: &mut UiModel<session::Line>, byte: u8, name: Option<&str>, ago: i64) {
+    let at = u64::try_from(NOW - ago).expect("positive");
+    update(
+        model,
+        UiEvent::Browse(BrowseEvent::Node(DiscoveredNode {
+            dest_hash: [byte; 16],
+            name: name.map(ToString::to_string),
+            first_seen: at,
+            last_seen: at,
+            hops: Some(5),
+        })),
+    );
+}
+
+/// What Java's `Core.explore` sends, decoded as the session decodes it,
+/// folded.
+fn tap(
+    model: &mut UiModel<session::Line>,
+    verb: &str,
+    text: &str,
+    dest: &str,
+    index: i64,
+) -> Vec<UiEffect> {
+    let request: Request = schema::decode(&java_map(&[
+        ("t", Java::Str("explore")),
+        ("verb", Java::Str(verb)),
+        ("text", Java::Str(text)),
+        ("dest", Java::Str(dest)),
+        ("index", Java::Long(index)),
+    ]))
+    .expect("a request");
+    match session::decode(request).expect("an explore verb") {
+        Decoded::Platform(Platform::Rooms(events)) => events
+            .into_iter()
+            .flat_map(|event| update(model, event))
+            .collect(),
+        _ => panic!("an explore verb is the platform's"),
+    }
+}
+
+/// What Java reads back for the tab.
+fn screen(model: &UiModel<session::Line>) -> ExploreScreen {
+    schema::decode(&explore::encode(model, Lang::De, 1)).expect("the answer")
+}
+
+fn labels(shown: &ExploreScreen) -> Vec<String> {
+    shown.pages.iter().map(|p| p.label.clone()).collect()
+}
+
+/// Walk 4: a page opens. The browser is on where the config does not
+/// say off, so the banner is gone and a tap fetches the page.
+#[test]
+fn a_page_opens_and_no_banner_says_it_cannot() {
+    let (_home, mut model) = phone();
+    assert!(model.browse.enabled, "on unless the config says off");
+    tap(&mut model, "tab", "", "", 0);
+    let shown = screen(&model);
+    assert_eq!(shown.pages_off, "");
+    let effects = tap(&mut model, "open", "", &"11".repeat(16), 0);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, UiEffect::Browse(lnomad::Effect::Navigate(_)))),
+        "{effects:?}"
+    );
+    assert_eq!(screen(&model).showing, "browse");
+}
+
+/// Walk 5 and 13: a row is its name alone, a nameless page "Unbenannte
+/// Seite", and the line under it one wording of "gesehen" and how far in
+/// stations, never "Hops".
+#[test]
+fn a_row_is_a_name_and_its_line_says_seen_and_how_far() {
+    let (_home, mut model) = phone();
+    tap(&mut model, "tab", "", "", 0);
+    let shown = screen(&model);
+    assert_eq!(
+        labels(&shown),
+        ["Radio RPi4", "IranTalk", "Unbenannte Seite"]
+    );
+    assert_eq!(
+        shown.pages[0].said,
+        "gesehen vor 10 Min. · über 5 Stationen erreichbar"
+    );
+    assert_eq!(shown.placeholder, "Suchen");
+    assert!(labels(&shown).iter().all(|l| !l.contains('·')), "no hash");
+    // The library's own words; a server's own name may say what it likes.
+    for text in shown
+        .pages
+        .iter()
+        .map(|p| p.said.clone())
+        .chain(shown.hubs.iter().map(|h| h.value.clone()))
+        .chain([shown.heard_title.clone(), shown.rooms_title.clone()])
+    {
+        assert!(!text.contains("  "), "no double space: {text:?}");
+        let lower = text.to_lowercase();
+        assert!(!lower.contains("hop") && !lower.contains("hub"), "{text}");
+    }
+}
+
+/// Walk 1: 32 characters typed fast, each one a `typed` verb; the
+/// library ends with all 32, and each answer in between holds the text of
+/// its verb, older than the field: the echo Java no longer writes back
+/// (`ExploreRows.java`, `echo`).
+#[test]
+fn thirty_two_fast_characters_all_arrive() {
+    let (_home, mut model) = phone();
+    tap(&mut model, "tab", "", "", 0);
+    let typed = "0123456789abcdef0123456789abcdef";
+    let mut answers = Vec::new();
+    for end in 1..=typed.len() {
+        tap(&mut model, "typed", &typed[..end], "", 0);
+        answers.push(screen(&model).query);
+    }
+    assert_eq!(screen(&model).query, typed);
+    assert_eq!(answers.len(), 32);
+    assert!(answers.iter().zip(1..).all(|(q, n)| q.len() == n));
+}
+
+/// Walk 3: a tap during a re-sort hits the row that was under the finger.
+/// The finger comes down on the third row; a page is heard that would
+/// stand first; every answer while the finger is down keeps the order,
+/// and the tap on the third row opens the page that was there. The new
+/// order comes after the lift.
+#[test]
+fn a_tap_during_a_resort_hits_the_row_under_the_finger() {
+    let (_home, mut model) = phone();
+    tap(&mut model, "tab", "", "", 0);
+    let before = screen(&model);
+    let under = before.pages[2].dest.clone();
+    tap(&mut model, "touch", "", "", 1);
+    heard(&mut model, 0x33, Some("Neu gehört"), 0);
+    update(&mut model, UiEvent::Elapsed(12_000));
+    let during = screen(&model);
+    let dests = |s: &ExploreScreen| s.pages.iter().map(|p| p.dest.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        dests(&during),
+        dests(&before),
+        "nothing moved under the finger"
+    );
+    tap(&mut model, "touch", "", "", 0);
+    let effects = tap(&mut model, "open", "", &under, 2);
+    let opened = effects.iter().find_map(|e| match e {
+        UiEffect::Browse(lnomad::Effect::Navigate(target)) => Some(target.dest_hash),
+        _ => None,
+    });
+    assert_eq!(
+        opened,
+        Some([0x33; 16]),
+        "the row that was under the finger"
+    );
+    let after = screen(&model);
+    assert_eq!(
+        after.pages[0].dest, under,
+        "the new order came after the lift"
+    );
+    // The control: without the hold the heard page moves first at once.
+    let (_home2, mut free) = phone();
+    tap(&mut free, "tab", "", "", 0);
+    heard(&mut free, 0x33, Some("Neu gehört"), 0);
+    update(&mut free, UiEvent::Elapsed(12_000));
+    assert_eq!(screen(&free).pages[0].dest, "33".repeat(16));
+}
+
+/// Walk 7: a search finds names and a pasted address, never a hash's
+/// letters, and filters the servers too.
+#[test]
+fn the_search_finds_names_and_addresses_only() {
+    let (_home, mut model) = phone();
+    tap(&mut model, "tab", "", "", 0);
+    tap(&mut model, "typed", "11", "", 0);
+    assert!(
+        labels(&screen(&model)).is_empty(),
+        "a hash's letters find nothing"
+    );
+    tap(&mut model, "typed", "radio", "", 0);
+    assert_eq!(labels(&screen(&model)), ["Radio RPi4"]);
+    tap(&mut model, "typed", &"22".repeat(16), "", 0);
+    assert_eq!(labels(&screen(&model)), ["IranTalk"]);
+    tap(&mut model, "typed", "zzzz-no-server", "", 0);
+    let shown = screen(&model);
+    assert!(
+        shown.hubs.is_empty() && shown.heard.is_empty(),
+        "{:?}",
+        shown.hubs
+    );
+}
+
+/// Walk 10, 6: a tap on a server opens its sheet and changes nothing; the
+/// sheet names it, says how far in stations, and its button makes it the
+/// public rooms' server.
+#[test]
+fn a_server_opens_its_sheet_and_only_the_button_chooses_it() {
+    let (_home, mut model) = phone();
+    tap(&mut model, "tab", "", "", 0);
+    let shown = screen(&model);
+    let Some(first) = shown.hubs.first().cloned() else {
+        return;
+    };
+    assert!(!first.name.trim().is_empty(), "no nameless row");
+    let effects = tap(&mut model, "hub", "", &first.dest, 0);
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(model.rooms.hub, None, "the tap chose nothing");
+    let sheet = screen(&model);
+    assert_eq!(sheet.sheet_dest, first.dest);
+    assert_eq!(sheet.sheet_name, first.name);
+    assert_eq!(sheet.sheet_button, "Diesen Server für Räume nutzen");
+    assert!(
+        sheet.sheet_said.contains("Stationen"),
+        "{}",
+        sheet.sheet_said
+    );
+    tap(&mut model, "close", "", "", 0);
+    assert_eq!(screen(&model).sheet_dest, "");
+    tap(&mut model, "hub", "", &first.dest, 0);
+    let effects = tap(&mut model, "use", "", &first.dest, 0);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            UiEffect::RememberHash {
+                key: "rooms_hub",
+                ..
+            }
+        )),
+        "{effects:?}"
+    );
+    assert_eq!(screen(&model).showing, "rooms");
+}

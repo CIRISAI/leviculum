@@ -498,8 +498,8 @@ mod tests {
 
     #[test]
     fn a_host_without_the_tab_has_none_and_drops_its_verbs() {
-        // The control of every test here: a host whose config leaves
-        // `browse_tab` off, the default on every target.
+        // The control of every test here: a host whose config turns
+        // `browse_tab` off (on is the default since 1618).
         let mut model = UiModel::<Buffer>::new(&[]);
         update(&mut model, UiEvent::Tab(TabId::Browse));
         let scene = model.scene(LayoutClass::Compact);

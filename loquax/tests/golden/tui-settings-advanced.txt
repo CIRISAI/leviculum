@@ -2,20 +2,20 @@
 │N│Relay                                                                     │ │
 │:│While your mailbox is offline, mail for you waits at a relay in the       │ │
 │o│network, which Loquax chooses by itself.                                  │ │
-│c│Public rooms: hub: None                                                   │ │
-│ │1  RNS Moscow: 3 hops away                                                │ │
-│ │2  Cascadia: 3 hops away                                                  │ │
-│ │3  Chatsurfer: 3 hops away                                                │ │
-│ │4  CTRS: 3 hops away                                                      │ │
-│ │5  Minuteman: 3 hops away                                                 │ │
-│ │6  RMAP.WORLD Hub: 3 hops away                                            │ │
-│ │7  Save Europe: 3 hops away                                               │ │
-│ │8  SoCal Public: 3 hops away                                              │ │
-│ │9  UTN Oregon: 3 hops away                                                │ │
-│ │0  HADARC: 4 hops away                                                    │ │
+│c│Server for public rooms: None                                             │ │
+│ │1  RNS Moscow: reachable over 3 stations                                  │ │
+│ │2  Cascadia: reachable over 3 stations                                    │ │
+│ │3  Chatsurfer: reachable over 3 stations                                  │ │
+│ │4  CTRS: reachable over 3 stations                                        │ │
+│ │5  Minuteman: reachable over 3 stations                                   │ │
+│ │6  RMAP.WORLD Hub: reachable over 3 stations                              │ │
+│ │7  Save Europe: reachable over 3 stations                                 │ │
+│ │8  SoCal Public: reachable over 3 stations                                │ │
+│ │9  UTN Oregon: reachable over 3 stations                                  │ │
+│ │0  HADARC: reachable over 4 stations                                      │ │
 │ │m  More…                                                                  │ │
 │ │n  None: ✓                                                                │ │
-│ │a  Another hub: paste its address                                         │ │
+│ │a  Another server: paste its address                                      │ │
 │ │Your name is visible to everyone in the room.                             │ │
 │ │?  Help                                                                   │ │
 │ │                                                                          │ ┤

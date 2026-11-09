@@ -25,7 +25,9 @@
                 ],
                 "key": "explore_hops"
               },
-              "label": "Marcel's node ·5a5a",
+              "label": {
+                "raw": "Marcel's node"
+              },
               "seen": {
                 "args": [
                   10
@@ -42,7 +44,7 @@
         "args": [],
         "key": "explore_search_hint"
       },
-      "query": "·5a",
+      "query": "marcel",
       "sort": {
         "args": [],
         "key": "explore_sort_az"
@@ -54,175 +56,20 @@
     },
     "rooms": {
       "empty": null,
-      "heard": [
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "99999999999999999999999999999999",
-          "name": {
-            "raw": "Werkstatt"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        }
-      ],
+      "heard": [],
       "heard_title": {
         "args": [],
         "key": "explore_heard_hubs"
       },
-      "hubs": [
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "42a97b1b07147b898f78a610dfbba587",
-          "name": {
-            "raw": "RNS Moscow"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "fcf451c9dd57fb262f30bf60ba9aa562",
-          "name": {
-            "raw": "Cascadia"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "0de5818cbe93fedab3ce82d02750aa9c",
-          "name": {
-            "raw": "Chatsurfer"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "741da32223fa46db2f284ca9c20496b1",
-          "name": {
-            "raw": "CTRS"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "68dda18a26508d81b53fb94407882121",
-          "name": {
-            "raw": "Minuteman"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "6ffeb457f58d8bd2041b3585caa9cc1e",
-          "name": {
-            "raw": "RMAP.WORLD Hub"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "ceadff8d8ee0e319ec2b9b456b650c10",
-          "name": {
-            "raw": "Save Europe"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "4f07b6e366835a159519cc854a57c9f7",
-          "name": {
-            "raw": "SoCal Public"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "472c760aa181f889902959e9d6de5ac7",
-          "name": {
-            "raw": "UTN Oregon"
-          },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
-        },
-        {
-          "chosen": false,
-          "cursor": false,
-          "hash": "e7fd7f9efd6608ca4ade879d18646eed",
-          "name": {
-            "raw": "HADARC"
-          },
-          "value": {
-            "args": [
-              4
-            ],
-            "key": "rooms_hub_hops"
-          }
-        }
-      ],
+      "hubs": [],
       "joined": [],
       "joined_cursor": null,
       "title": {
         "args": [],
         "key": "explore_rooms"
       }
-    }
+    },
+    "sheet": null
   },
   "list": null,
   "screen": "explore",

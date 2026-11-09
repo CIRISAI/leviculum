@@ -373,12 +373,24 @@ fn the_explore_tab_is_the_golden_scene() {
     check("scene-explore.json", &model.scene(LayoutClass::Compact));
     check("scene-explore-wide.json", &model.scene(LayoutClass::Wide));
     update(&mut model, UiEvent::Explore(ExploreEvent::Az(true)));
+    // A search finds a name, never a hash's letters (1618).
     update(
         &mut model,
-        UiEvent::Explore(ExploreEvent::Typed("·5a".to_string())),
+        UiEvent::Explore(ExploreEvent::Typed("marcel".to_string())),
     );
     check(
         "scene-explore-search.json",
+        &model.scene(LayoutClass::Compact),
+    );
+    // A server's row opens its sheet and changes nothing (1618).
+    update(
+        &mut model,
+        UiEvent::Explore(ExploreEvent::Typed(String::new())),
+    );
+    update(&mut model, UiEvent::Explore(ExploreEvent::Hub([0x99; 16])));
+    assert_eq!(model.rooms.hub, None);
+    check(
+        "scene-explore-sheet.json",
         &model.scene(LayoutClass::Compact),
     );
 }

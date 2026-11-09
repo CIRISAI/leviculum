@@ -3772,7 +3772,13 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             effects.extend(rooms::tab(model, tab));
             effects
         }
-        UiEvent::Browse(event) => browse::fold(model, event),
+        UiEvent::Browse(event) => {
+            let effects = browse::fold(model, event);
+            // A page heard moves Explore's order, at most once a second
+            // and never under a finger (1618).
+            explore::settle(model, false);
+            effects
+        }
         UiEvent::Rooms(event) => rooms::fold(model, event),
         UiEvent::Explore(event) => explore::fold(model, event),
         UiEvent::MapSetup(setup) => {
@@ -3829,6 +3835,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::Elapsed(ms) => {
             model.elapsed_ms = ms;
+            explore::settle(model, false);
             auto_sync(model)
         }
         UiEvent::Resumed => schedule(model, SyncEvent::Resume),

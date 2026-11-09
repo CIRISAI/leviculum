@@ -1778,10 +1778,11 @@ pub(crate) async fn start(
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
     model.reading.on = config.read_receipts.unwrap_or(true);
     model.photo_size = config.photo_size.unwrap_or_default();
-    // The Browse tab (1369), behind the config's `browse_tab` as on the
-    // phone: off unless the file says on. On, its fetch runs over the
-    // node attached above; off, the node is lent to nobody, as before.
-    let browse_tab = config.browse_tab.unwrap_or(false);
+    // The browser (1369), opened from Explore: on unless the config's
+    // `browse_tab` says off (1618: Explore is the browser's way in, and a
+    // tab that lists pages it cannot open is broken). On, its fetch runs
+    // over the node attached above; off, the node is lent to nobody.
+    let browse_tab = config.browse_on();
     crate::browsing::set_up(&mut model, &home, browse_tab);
     let browsing = match browse_tab {
         true => crate::browsing::Browsing::start(&attached, browse_identity.clone(), &home),
