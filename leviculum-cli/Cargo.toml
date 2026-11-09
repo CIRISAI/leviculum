@@ -107,7 +107,7 @@ mimalloc = { version = "0.1", optional = true, default-features = false }
 # `lnstest diag` re-serialises the (secret-redacted) Config to TOML for the bundle.
 toml.workspace = true
 tempfile = "3"
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
 
 # `cargo deb -p leviculum-cli --target x86_64-unknown-linux-musl`
 # builds a .deb whose binaries are statically linked and therefore
