@@ -57,6 +57,17 @@ pub enum Nmea {
     /// GSV: a constellation's satellites in view (the talker's two
     /// letters, the count).
     Gsv { talker: [u8; 2], in_view: u8 },
+    /// `$PAIR001,<command>,<result>`: the receiver's answer to a `$PAIR`
+    /// command. The M9 recorded `$PAIR001,002,1` then `$PAIR001,002,0`
+    /// at power-up (window 22, 2026-11-09): 1 while the command runs, 0
+    /// once it has.
+    Ack { command: u16, result: u8 },
+    /// Any other `$PAIR` sentence: the version answer (`$PAIR021`), the
+    /// system message (`$PAIR011`), the aiding request (`$PAIR010`).
+    Pair { command: u16 },
+    /// A standard sentence with a good checksum that the board does not
+    /// read: GLL, GSA, VTG, ZDA, which the init switches off.
+    Unread { talker: [u8; 2], kind: [u8; 3] },
 }
 
 /// Joins the receiver's bytes into lines, `$` to the line end; a line
@@ -112,17 +123,31 @@ impl Lines {
 }
 
 /// The sentence `line` holds (`$..*hh`, no line end), or `None` for a
-/// bad checksum, another sentence, or a field that does not read.
+/// bad checksum or a head that is neither a standard sentence nor a
+/// `$PAIR` one.
 pub fn parse(line: &[u8]) -> Option<Nmea> {
     let body = checked(line)?;
     let mut fields = body.split(|&b| b == b',');
     let head = fields.next()?;
-    if head.len() != 5 {
+    let f: alloc::vec::Vec<&[u8]> = fields.collect();
+    let get = |i: usize| f.get(i).copied().unwrap_or(b"");
+    if let Some(id) = head.strip_prefix(b"PAIR") {
+        if id.len() != 3 {
+            return None;
+        }
+        let command = u16::try_from(uint(id)?).ok()?;
+        if command != 1 {
+            return Some(Nmea::Pair { command });
+        }
+        return Some(Nmea::Ack {
+            command: u16::try_from(uint(get(0))?).ok()?,
+            result: u8::try_from(uint(get(1))?).ok()?,
+        });
+    }
+    if head.len() != 5 || !head.iter().all(u8::is_ascii_uppercase) {
         return None;
     }
     let talker = [head[0], head[1]];
-    let f: alloc::vec::Vec<&[u8]> = fields.collect();
-    let get = |i: usize| f.get(i).copied().unwrap_or(b"");
     match &head[2..] {
         b"GGA" => Some(Nmea::Gga {
             quality: uint(get(5)).unwrap_or(0) as u8,
@@ -143,7 +168,10 @@ pub fn parse(line: &[u8]) -> Option<Nmea> {
             talker,
             in_view: uint(get(2)).unwrap_or(0).min(255) as u8,
         }),
-        _ => None,
+        _ => Some(Nmea::Unread {
+            talker,
+            kind: [head[2], head[3], head[4]],
+        }),
     }
 }
 
@@ -297,9 +325,16 @@ pub struct Receiver {
     fix: Option<(Location, u64)>,
     /// Whether the latest RMC said A.
     valid: bool,
-    /// Sentences that passed their checksum, all of them.
+    /// The sentences read: GGA, GSV and RMC with a good checksum. The
+    /// init's gate counts these.
     pub sentences: u32,
-    /// Lines that did not.
+    /// The receiver's `$PAIR` sentences: answers to our commands and its
+    /// own power-up messages. Window 22 recorded seven before the first
+    /// command went out.
+    pub replies: u32,
+    /// Standard sentences with a good checksum the board does not read.
+    pub unread: u32,
+    /// Lines with a bad checksum or a head that is no sentence.
     pub rejected: u32,
 }
 
@@ -326,12 +361,20 @@ impl Receiver {
     /// Take `line` at `now_ms`; a new fix when it made one.
     pub fn line(&mut self, line: &[u8], now_ms: u64) -> Option<Location> {
         let Some(nmea) = parse(line) else {
-            if line.starts_with(b"$G") {
-                self.rejected = self.rejected.saturating_add(1);
-            }
+            self.rejected = self.rejected.saturating_add(1);
             return None;
         };
-        self.sentences = self.sentences.saturating_add(1);
+        match nmea {
+            Nmea::Ack { .. } | Nmea::Pair { .. } => {
+                self.replies = self.replies.saturating_add(1);
+                return None;
+            }
+            Nmea::Unread { .. } => {
+                self.unread = self.unread.saturating_add(1);
+                return None;
+            }
+            _ => self.sentences = self.sentences.saturating_add(1),
+        }
         match nmea {
             Nmea::Gga {
                 quality,
@@ -387,6 +430,7 @@ impl Receiver {
                 self.fix = Some((location, now_ms));
                 Some(location)
             }
+            Nmea::Ack { .. } | Nmea::Pair { .. } | Nmea::Unread { .. } => None,
         }
     }
 
@@ -443,11 +487,13 @@ impl Receiver {
             None => String::from("none"),
         };
         alloc::format!(
-            "state={} sats={} in_view={} hdop={hdop} age_s={age} sentences={} rejected={}",
+            "state={} sats={} in_view={} hdop={hdop} age_s={age} sentences={} replies={} unread={} rejected={}",
             self.sky(now_ms).word(),
             self.sats,
             self.in_view(),
             self.sentences,
+            self.replies,
+            self.unread,
             self.rejected
         )
     }

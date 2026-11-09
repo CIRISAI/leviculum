@@ -2,14 +2,16 @@
 //! model takes, the sky the map's corner says, and when the receiver is
 //! powered.
 //!
-//! The bench capture of 2026-10-26 (`/home/lew/rig-run/m9-2026-10-26/`)
-//! logged counters only, no sentence (the community port's probe build
-//! printed `[GNSS] bytes= sentences=`), so the sentences below are written
-//! in the shape the AG3352 sends with the init of `AirohaInit::ag3352`
-//! (GGA, GSV and RMC each second, `GN` for the combined fix, a talker per
-//! constellation for GSV) and their checksums computed here. The firmware
-//! echoes the first sentences of every power-up as `[GNSS] nmea=` lines,
-//! so the next bench window records the real ones.
+//! The searching sentences are the board's own: window 22 (2026-11-09,
+//! `/home/lew/rig-run/m9/2026-11-09d/map/board.log`, the `[GNSS] nmea=`
+//! lines) recorded the first twelve lines of a power-up indoors, no sky.
+//! Seven are `$PAIR` sentences, all of them before the init's first
+//! command went out (`pair-sleep-lock sent` at t=6406, the last of them
+//! at t=6355): the module's own power-up messages, not answers to us.
+//! The sentences of a fix are still WRITTEN, in the shape the recorded
+//! ones have (`GN` for the combined fix, a talker per constellation for
+//! GSV, the signal id last), with their checksums computed here, until a
+//! window with a sky records them.
 
 use leviculum_lxmf::telemetry::Location;
 use loquax::ui::strings::Lang;
@@ -30,25 +32,52 @@ fn line(body: &str) -> Vec<u8> {
     format!("${body}*{sum:02X}\r\n").into_bytes()
 }
 
-/// A second of a receiver that searches: no fix, four satellites in view
-/// over two constellations.
+/// The first twelve lines of a power-up on the board, verbatim (window
+/// 22): the module's `$PAIR` power-up messages, then a second without a
+/// sky, no satellite in view in any of the four constellations.
+const RECORDED: [&str; 12] = [
+    "$PAIR001,002,1*38",
+    "$PAIR001,021,0*38",
+    "$PAIR011,001*27",
+    "$PAIR010,1,-1*16",
+    "$PAIR010,2,-1*15",
+    "$PAIR001,002,0*39",
+    "$PAIR001,021,0*38",
+    "$GNGGA,235942.013,,,,,0,0,,,M,,M,,*5F",
+    "$GPGSV,1,1,00,1*64",
+    "$GLGSV,1,1,00,1*78",
+    "$GAGSV,1,1,00,7*73",
+    "$GBGSV,1,1,00,1*76",
+];
+
+/// The recorded lines as the UART brings them, CRLF after each.
 fn searching() -> Vec<u8> {
+    RECORDED
+        .iter()
+        .flat_map(|l| [l.as_bytes(), b"\r\n"].concat())
+        .collect()
+}
+
+/// WRITTEN, no sky recorded yet: a searching second with satellites in
+/// view over two constellations, for the sum the corner shows.
+fn searching_in_view() -> Vec<u8> {
     [
-        line("GNGGA,053010.000,,,,,0,00,,,M,,M,,"),
-        line("GPGSV,1,1,03,05,40,083,,13,22,301,,15,61,180,,0"),
-        line("GLGSV,1,1,01,70,35,120,,0"),
+        line("GNGGA,053010.000,,,,,0,0,,,M,,M,,"),
+        line("GPGSV,1,1,03,05,40,083,,13,22,301,,15,61,180,,1"),
+        line("GLGSV,1,1,01,70,35,120,,1"),
         line("GNRMC,053010.000,V,,,,,,,091126,,,N,V"),
     ]
     .concat()
 }
 
-/// A second with a fix over Florence: 8 in use, HDOP 0.9, 62.3 m.
+/// WRITTEN, no sky recorded yet: a second with a fix over Florence, 8 in
+/// use, HDOP 0.9, 62.3 m.
 fn fixed(time: &str) -> Vec<u8> {
     [
         line(&format!(
             "GNGGA,{time},4346.4000,N,01115.3600,E,1,08,0.9,62.3,M,47.0,M,,"
         )),
-        line("GPGSV,2,1,06,05,40,083,32,13,22,301,28,15,61,180,40,18,10,040,20,0"),
+        line("GPGSV,2,1,06,05,40,083,32,13,22,301,28,15,61,180,40,18,10,040,20,1"),
         line(&format!(
             "GNRMC,{time},A,4346.4000,N,01115.3600,E,1.94,87.50,091126,,,A,V"
         )),
@@ -89,7 +118,7 @@ fn the_three_sentences_read_with_their_fields() {
             unix: Some(1_794_202_212),
         })
     );
-    let gsv = line("GBGSV,1,1,02,07,40,083,,10,22,301,,0");
+    let gsv = line("GBGSV,1,1,02,07,40,083,,10,22,301,,1");
     assert_eq!(
         gnss::parse(&gsv[..gsv.len() - 2]),
         Some(Nmea::Gsv {
@@ -97,9 +126,95 @@ fn the_three_sentences_read_with_their_fields() {
             in_view: 2
         })
     );
-    // The AG3352's own answers are no sentence of the three.
-    let pair = line("PAIR021,AG3352,V1.0");
-    assert_eq!(gnss::parse(&pair[..pair.len() - 2]), None);
+    // The AG3352's own sentences read as what they are: an answer to a
+    // command, another `$PAIR`, a standard sentence the board does not
+    // read. None of them is a fix's sentence, none is rejected.
+    assert_eq!(
+        gnss::parse(b"$PAIR001,002,1*38"),
+        Some(Nmea::Ack {
+            command: 2,
+            result: 1
+        })
+    );
+    assert_eq!(
+        gnss::parse(b"$PAIR010,1,-1*16"),
+        Some(Nmea::Pair { command: 10 })
+    );
+    let version = line("PAIR021,AG3352,V1.0");
+    assert_eq!(
+        gnss::parse(&version[..version.len() - 2]),
+        Some(Nmea::Pair { command: 21 })
+    );
+    let gll = line("GNGLL,,,,,235942.013,V,N");
+    assert_eq!(
+        gnss::parse(&gll[..gll.len() - 2]),
+        Some(Nmea::Unread {
+            talker: *b"GN",
+            kind: *b"GLL"
+        })
+    );
+    // A head that is no sentence is none.
+    let junk = line("PAIRX,1");
+    assert_eq!(gnss::parse(&junk[..junk.len() - 2]), None);
+}
+
+/// Every recorded line passes the parser's checksum as recorded, the
+/// `$GAGSV` with its signal id 7 included: each reads, none is `None`.
+#[test]
+fn every_recorded_line_passes_its_checksum() {
+    for l in RECORDED {
+        assert!(gnss::parse(l.as_bytes()).is_some(), "{l}");
+    }
+    assert_eq!(
+        gnss::parse(b"$GAGSV,1,1,00,7*73"),
+        Some(Nmea::Gsv {
+            talker: *b"GA",
+            in_view: 0
+        })
+    );
+    // The control: the same line with the signal id the instruction's copy
+    // had (1) fails the recorded checksum.
+    assert_eq!(gnss::parse(b"$GAGSV,1,1,00,1*73"), None);
+}
+
+/// The recorded power-up as the receiver counts it: five sentences read
+/// (the GGA, four GSV), the seven `$PAIR` lines replies, nothing
+/// rejected; searching with none in view. Then the lines the window's
+/// `rejected=14` most likely were: GLL, GSA, VTG or ZDA, standard
+/// sentences the init switches off, which are unread, not rejected; only
+/// a bad checksum is.
+#[test]
+fn the_recorded_power_up_counts_its_lines_by_what_they_are() {
+    let mut rx = Receiver::new();
+    rx.power(true, 5_774);
+    assert!(feed(&mut rx, &searching(), 6_405).is_empty());
+    assert_eq!(
+        (rx.sentences, rx.replies, rx.unread, rx.rejected),
+        (5, 7, 0, 0)
+    );
+    assert_eq!(rx.sky(6_405), Sky::Searching { in_view: 0 });
+    assert!(rx.line_words(6_405).starts_with(
+        "state=searching sats=0 in_view=0 hdop=none age_s=none \
+         sentences=5 replies=7 unread=0 rejected=0"
+    ));
+
+    let unread = [
+        line("GNGLL,,,,,235943.013,V,N"),
+        line("GNGSA,A,1,,,,,,,,,,,,,,,,1"),
+        line("GNVTG,,T,,M,,N,,K,N"),
+        line("GNZDA,235943.013,,,,,"),
+    ]
+    .concat();
+    feed(&mut rx, &unread, 7_000);
+    assert_eq!((rx.unread, rx.rejected), (4, 0));
+    let mut bad = line("GNGLL,,,,,235944.013,V,N");
+    bad[3] ^= 0x01;
+    feed(&mut rx, &bad, 8_000);
+    assert_eq!((rx.unread, rx.rejected), (4, 1));
+    assert_eq!(
+        rx.sentences, 5,
+        "the init's gate counts read sentences only"
+    );
 }
 
 /// Off, then searching with the satellites in view summed over the
@@ -112,7 +227,7 @@ fn the_receiver_goes_from_off_to_searching_to_a_fix() {
     let mut rx = Receiver::new();
     assert_eq!(rx.sky(0), Sky::Off);
     rx.power(true, 1_000);
-    assert!(feed(&mut rx, &searching(), 2_000).is_empty());
+    assert!(feed(&mut rx, &searching_in_view(), 2_000).is_empty());
     assert_eq!(rx.sky(2_000), Sky::Searching { in_view: 4 });
     assert!(rx
         .line_words(2_000)
@@ -141,7 +256,7 @@ fn the_receiver_goes_from_off_to_searching_to_a_fix() {
         .starts_with("state=fix sats=8 in_view=7 hdop=0.9 age_s=12"));
 
     // The sky lost: searching again, the last fix kept.
-    feed(&mut rx, &searching(), 20_000);
+    feed(&mut rx, &searching_in_view(), 20_000);
     assert!(matches!(rx.sky(20_000), Sky::Searching { .. }));
     assert_eq!(rx.last().map(|(l, _)| l), Some(fix));
 

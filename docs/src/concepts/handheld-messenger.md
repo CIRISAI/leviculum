@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:1085`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:1097`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1931,7 +1931,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2669`).
+both (`thinknode_m9.rs:2681`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2681`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2693`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,7 +2035,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:991`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1003`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2109,7 +2109,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2742`), and the fold runs behind the list
+(`thinknode_m9.rs:2754`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2435,7 +2435,7 @@ entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
 (the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
 could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
 heap at every step, as the forget's reopen and a taken code do
-(`leviculum-esp/src/bin/thinknode_m9.rs:1924`). The held bytes live in
+(`leviculum-esp/src/bin/thinknode_m9.rs:1936`). The held bytes live in
 2 KiB blocks, at most 35 s of the line (`RxHeld`,
 `leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
 the pool for 256 KiB in one piece, and 22 s was shorter than the
@@ -2461,7 +2461,7 @@ owed, the reboot `rebuilt`).
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside
 the take stage, so the walks read takes of 1 to 6 s. The dump is now
 timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
-`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2430`); `m9-walk.py`
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2442`); `m9-walk.py`
 takes `dump=` as the dump's turn and holds the rest of that turn to the
 bar.
 

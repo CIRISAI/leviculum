@@ -56,7 +56,8 @@
 //! [GNSS_INIT] step=<pair-...> <sent|tx-error|ack=ok|ack=timeout>
 //!                           AirohaInit::ag3352 on every power-up
 //! [GNSS] nmea=<sentence>    the first twelve sentences of every power-up
-//! [GNSS] state=<off|searching|fix> sats=<n> in_view=<n> hdop=<x.y|none> age_s=<n|none> sentences=<n> rejected=<n> overrun=<n> rx_err=<n> keep_lost=<n>
+//! [GNSS_INIT] ack cmd=<nnn> result=<n>  every `$PAIR001` the receiver sends (1604)
+//! [GNSS] state=<off|searching|fix> sats=<n> in_view=<n> hdop=<x.y|none> age_s=<n|none> sentences=<n> replies=<n> unread=<n> rejected=<n> overrun=<n> rx_err=<n> keep_lost=<n>
 //!                           with the banner and on every change of state
 //! [CENSUS] renderer held=<n> budget=220000 verdict=ok t=<ms>
 //! [CENSUS] screen=chats scene_held=... verdict=ok t=<ms>
@@ -605,6 +606,17 @@ impl GnssRun {
             self.lines.push(bytes, |line| {
                 if let Some(fix) = rx.line(line, now) {
                     to_ui(ToUi::Fix(fix));
+                }
+                // The answers to the init's commands (1604): the init does
+                // not wait for them, the line says which one the module
+                // took and with what result.
+                if line.starts_with(b"$PAIR001,") {
+                    if let Some(gnss::Nmea::Ack { command, result }) = gnss::parse(line) {
+                        log.line(
+                            "[GNSS_INIT] ",
+                            format_args!("ack cmd={command:03} result={result}"),
+                        );
+                    }
                 }
                 if *echo > 0 {
                     *echo -= 1;
