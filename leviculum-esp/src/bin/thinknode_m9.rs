@@ -1971,10 +1971,19 @@ fn main() -> ! {
     }
     // The UI core's census runs alone (1521b): what it counts and how
     // long it takes are its own.
+    // Core 0 reads nothing from the line meanwhile: what the host sends
+    // goes to the keep, and the keep into the held bytes every 10 ms
+    // (1597), which the loop reads first. Window 21's boot waited 3,374 ms
+    // here while the host sent 15 KB and lost 149 bytes to the full keep.
     let waited = uptime_ms();
+    let mut pumped = waited;
     while CENSUS_RUNNING.load(Ordering::Acquire)
         && uptime_ms().saturating_sub(waited) < CENSUS_WAIT_MS
     {
+        if uptime_ms().saturating_sub(pumped) >= 10 {
+            leviculum_esp::pump_rx();
+            pumped = uptime_ms();
+        }
         core::hint::spin_loop();
     }
     log.line(

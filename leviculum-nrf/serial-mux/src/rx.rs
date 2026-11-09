@@ -83,6 +83,25 @@ impl<const N: usize> RxKeep<N> {
     pub fn lost(&self) -> u32 {
         self.lost
     }
+
+    /// Move every kept byte, oldest first, to `take`, which takes what it
+    /// has room for of each chunk and says how many: the bytes it refused,
+    /// which are gone (1597). The M9's pump (`pump_rx`) spills the keep
+    /// into a larger buffer on the heap while its loop cannot read, so a
+    /// keep left unread through the boot's census wait (3.4 s, window
+    /// 21, `rx_lost=149` before the first key) never fills.
+    pub fn spill(&mut self, mut take: impl FnMut(&[u8]) -> usize) -> u32 {
+        let mut refused = 0u32;
+        let mut chunk = [0u8; 128];
+        loop {
+            let n = self.pop_into(&mut chunk);
+            if n == 0 {
+                return refused;
+            }
+            let took = take(&chunk[..n]).min(n);
+            refused = refused.saturating_add((n - took) as u32);
+        }
+    }
 }
 
 /// Where the host's bytes were lost on the board, as its `[UART]` line
@@ -348,5 +367,87 @@ mod tests {
         let (got, counts) = run(&frames, 5_000, Drain::Polled);
         assert_eq!(got.len(), 2, "{counts}");
         assert_eq!(counts.overrun, 0);
+    }
+
+    /// 1597, window 21's boot: the host sent 15,310 bytes between the
+    /// reset and the board's first `[UART]` line (`HOSTTX` in the proxy's
+    /// log, three 4095-byte writes at the reset and eight more), and core
+    /// 0 read nothing while it waited 3,374 ms for the UI core's census:
+    /// the interrupt filled the 8 KiB keep and `rx_lost=149`. The red half
+    /// is that boot with no reader; the green half pumps the keep into a
+    /// held buffer every 10 ms of the wait, as the firmware's census wait
+    /// now does (`pump_rx`, [`RxKeep::spill`]): nothing lost, every byte
+    /// read in the order sent.
+    #[test]
+    fn the_boots_census_wait_loses_nothing_when_pumped() {
+        // (ms after the interrupt is on, bytes): the window's HOSTTX lines.
+        let writes = [
+            (0u64, 4095usize),
+            (345, 4095),
+            (698, 4095),
+            (819, 1390),
+            (2709, 212),
+            (2748, 217),
+            (3409, 186),
+            (3559, 246),
+            (3638, 219),
+            (3823, 217),
+            (4196, 338),
+        ];
+        let mut arrivals: VecDeque<(u64, u8)> = VecDeque::new();
+        let mut t = 0u64;
+        let mut n = 0u32;
+        for (at, len) in writes {
+            t = t.max(at * 1000);
+            for _ in 0..len {
+                t += BYTE_US;
+                arrivals.push_back((t, (n % 251) as u8));
+                n += 1;
+            }
+        }
+        let sent: Vec<u8> = arrivals.iter().map(|(_, b)| *b).collect();
+        let loop_starts_us = 4_600_000;
+        for pumped in [false, true] {
+            let mut keep = RxKeep::<8192>::new();
+            let mut held: VecDeque<u8> = VecDeque::new();
+            let mut refused = 0u32;
+            let mut queue = arrivals.clone();
+            let mut now = 0u64;
+            while now < loop_starts_us {
+                // The interrupt keeps up with the line: each byte goes to
+                // the keep as it comes.
+                while let Some((_, byte)) = queue.pop_front_if(|(at, _)| *at <= now) {
+                    keep.push(&[byte]);
+                }
+                if pumped && now % 10_000 == 0 {
+                    refused += keep.spill(|bytes| {
+                        let room = (256 * 1024usize).saturating_sub(held.len());
+                        let took = bytes.len().min(room);
+                        held.extend(&bytes[..took]);
+                        took
+                    });
+                }
+                now += 100;
+            }
+            // The loop reads the held bytes first, then the keep.
+            let mut read: Vec<u8> = held.drain(..).collect();
+            let mut buf = [0u8; 256];
+            loop {
+                let n = keep.pop_into(&mut buf);
+                if n == 0 {
+                    break;
+                }
+                read.extend_from_slice(&buf[..n]);
+            }
+            let lost = keep.lost() + refused;
+            std::eprintln!("pumped={pumped} lost={lost} read={}", read.len());
+            match pumped {
+                false => assert!(lost > 0, "the control loses what the keep cannot hold"),
+                true => {
+                    assert_eq!(lost, 0, "a pumped keep lost bytes");
+                    assert_eq!(read, sent, "every byte, in the order sent");
+                }
+            }
+        }
     }
 }

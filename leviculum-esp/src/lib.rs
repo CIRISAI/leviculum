@@ -828,17 +828,13 @@ pub fn pump_rx() {
             return;
         }
         let mut held = RX_HELD.borrow_ref_mut(cs);
-        let mut buf = [0u8; 128];
-        loop {
-            let n = keep.pop_into(&mut buf);
-            if n == 0 {
-                break;
-            }
-            let take = n.min(RX_HELD_MAX.saturating_sub(held.len()));
-            held.extend(&buf[..take]);
-            if take < n {
-                RX_HELD_LOST.fetch_add((n - take) as u32, Ordering::Relaxed);
-            }
+        let refused = keep.spill(|bytes| {
+            let take = bytes.len().min(RX_HELD_MAX.saturating_sub(held.len()));
+            held.extend(&bytes[..take]);
+            take
+        });
+        if refused > 0 {
+            RX_HELD_LOST.fetch_add(refused, Ordering::Relaxed);
         }
     });
 }
