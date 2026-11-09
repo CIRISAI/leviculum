@@ -40,7 +40,7 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:503`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:506`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`loquax/Cargo.toml:284`, `loquax/Cargo.toml:288`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
@@ -216,7 +216,7 @@ messenger core holds the same types a board will.
 Lew, 2026-11-02: Loquax is the M9's UI. The board's facts are in one
 place on [The ThinkNode M9](thinknode-m9.md), "The board as the UI sees
 it"; the frontend renders the scene the other three targets already
-render (`Scene`, `loquax/src/ui/scene.rs:1002`), and this section records
+render (`Scene`, `loquax/src/ui/scene.rs:1007`), and this section records
 what was measured for the plan, the budgets, and the slices. The host
 numbers below are 64-bit figures from a counting allocator, upper bounds
 for the 32-bit board (the 1337 pattern); the spike code ran under
@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:1080`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:1183`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -303,7 +303,7 @@ measured 2026-10-26").
 **The rule that follows.** Model plus one scene plus renderer plus two
 frames is about 1.1 MB on the 64-bit host, so at most that on the
 board: the UI lives in PSRAM. The 64 KiB placeholder heap
-(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:349`) becomes a measured
+(`HEAP_SIZE`, `leviculum-esp/src/lib.rs:397`) becomes a measured
 two-region allocation — SRAM for the node, the radio and the flush
 path, PSRAM for the UI heap — sized in slice 1 by exactly this census
 run on the board, with the firmware asserting its budget the way the
@@ -424,7 +424,7 @@ positive control). It words the chats list scene in cells
 (`lines`, `loquax-m9/src/screen.rs:224`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
-mousefood (`draw`, `loquax-m9/src/render.rs:182`). Mousefood's own
+mousefood (`draw`, `loquax-m9/src/render.rs:199`). Mousefood's own
 `framebuffer` is off: the cells go straight into the caller's frame, and
 the crate's `framebuffer` feature turns it back on for the board's DMA
 measurement. What the slice settled on the host:
@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:555`).
+  (`narrow`, `loquax-m9/src/screen.rs:574`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:499`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:518`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -518,7 +518,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   screen of one pane shows the pane the keys are in. That builds the Wide
   scene and drops its chat: the list's peak then carries the chat's.
 - **The list's cursor is the reader's** (1546, `list_top`,
-  `loquax/src/ui.rs:2293`). The model keeps the selected peer and the line
+  `loquax/src/ui.rs:2537`). The model keeps the selected peer and the line
   it stands on; while it stays selected, a pull or an arrival that sorts
   rows in above it moves the window, not the cursor. A key moves the line
   by as many rows as the selection moved in the order. Before, the window
@@ -683,7 +683,7 @@ draws is the scene the terminal, the window and the phone already draw.
   ESP32-S3 (`xtensa-esp32s3-none-elf`), with a board file of its own
   (`leviculum-esp/src/boards/thinknode_m9.rs`) carrying the nets from
   [The ThinkNode M9](thinknode-m9.md) and the panel's MADCTL 0xB0. The
-  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:383`),
+  heap is the 8 MB PSRAM (`init_heap_at`, `leviculum-esp/src/lib.rs:432`),
   the stack the 312,440 B of internal RAM the linker leaves; the class
   allocator now counts what is live and its peak for the census. Nothing
   goes on the air: the LR1110's chip select is parked high.
@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:917`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:926`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1112,7 +1112,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
 - **Pixels** is the map core's filler painting the view straight into
   the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:732`); the
   whole screen adds the bar's and the legend's cells and the pins
-  (`Renderer::show`, `loquax-m9/src/render.rs:226`).
+  (`Renderer::show`, `loquax-m9/src/render.rs:260`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
   drawn at four by eight source pixels a cell, encoded into glyphs and
   drawn by ratatui through mousefood. The atlas has two of the
@@ -1174,11 +1174,11 @@ cells first, every row in the map's ground, then the map over them, the
 names, the pins and the words; ratatui draws only cells that changed,
 so the next map leaves the blank rows alone, and the renderer clears
 its cells when the screen leaves the map (`leave_map`,
-`loquax-m9/src/render.rs:320`), or the list would keep map pixels where
+`loquax-m9/src/render.rs:357`), or the list would keep map pixels where
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:6002`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:6371`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1187,7 +1187,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:1240`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:1362`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1295,7 +1295,7 @@ All targets:
   our pin on the map where it is newer than our last share; otherwise
   unchanged.
 - **Android:** the phone's own fix (`Intent::OwnFix`,
-  `loquax-android/src/session.rs:1512`) is our pin the same way;
+  `loquax-android/src/session.rs:1578`) is our pin the same way;
   otherwise unchanged.
 - **The home:** unchanged; it carries no region yet (above).
 
@@ -1307,7 +1307,7 @@ is not, because its renderer is still host-only. On the renderer it needs
 a branch in `lines` (`loquax-m9/src/screen.rs:224`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:711`), which
 the model already returns while the tab is in front (`rooms_scene`,
-`loquax/src/ui/scene.rs:1181`), and its tab in the tab bar the screen
+`loquax/src/ui/scene.rs:1161`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
 list (name, unread count) or the open room's one live line and its lines
 as `who text`, and one input line at the bottom on the chat's editor
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:960`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1099`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:691`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:798`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1918,7 +1918,7 @@ picture_ms=142`). The key carried the cells the names kept clear of the
 words, and the picture was the shorter one while the bottom row had
 words. Now the picture always takes the bottom row and its names keep
 clear of the pins only; the hint, the pin's card and the credit are
-drawn over the copy (`Renderer::show`, `loquax-m9/src/render.rs:226`;
+drawn over the copy (`Renderer::show`, `loquax-m9/src/render.rs:260`;
 `Kept`, `loquax-m9/src/map.rs:913`), so a word that goes uncovers the
 picture kept under it. A name under a word stays hidden while the word
 stands. `the_words_over_the_map_never_draw_its_picture_again`
@@ -1931,16 +1931,16 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2302`).
+both (`thinknode_m9.rs:2381`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
-(`CHANGED_WAIT_S`, `scripts/m9-walk.py:151`): T on the map flushes the
+(`CHANGED_WAIT_S`, `scripts/m9-walk.py:158`): T on the map flushes the
 hint's row first and says the zoom about 400 ms later. `key_ms` still
 measures the first flush after the key, and walk.md names its `rows=`.
 The house key opens the house page after its tap's 300 ms gap
 (`GAP_MS`, `loquax-m9/src/house.rs:43`), so its bar is that much longer
-(`HOUSE_GAP_MS`, `scripts/m9-walk.py:148`); `bench.walk` waits for
+(`HOUSE_GAP_MS`, `scripts/m9-walk.py:155`); `bench.walk` waits for
 `page=house` and leaves it with Back. An lnsd on the proxy's pty
 re-attaches by itself after a flash; a second one is refused with
 "shared-instance name already served" (`scripts/m9-walk.sh`).
@@ -1970,7 +1970,7 @@ stays in the ring-wide marks (`Index::take_mark`,
 `loquax/src/home/board/rows.rs:390`). A page reads the marks of its own
 sectors and of the unplaced ones from its oldest sector on, and hands on
 only those naming one of its messages (`Index::page`,
-`loquax/src/home/board/rows.rs:531`). The STATE record ends with a byte
+`loquax/src/home/board/rows.rs:564`). The STATE record ends with a byte
 saying the marks are filed this way (`State::placed`,
 `loquax/src/home/board/rows.rs:174`); a state an older image wrote has
 none, and that boot folds the ring once (`[STORE] restore=rebuilt`,
@@ -1979,7 +1979,7 @@ read: those of messages pulled before a resumed boot and not opened
 since.
 
 `a_chat_opens_with_its_own_marks_only`
-(`loquax-m9/tests/restore_counts.rs:1048`) keeps the archive with 1800
+(`loquax-m9/tests/restore_counts.rs:1058`) keeps the archive with 1800
 read marks of another chat and a deleted mark of the small chat's: after
 a resumed boot the small chat's page is its 5 messages and the one mark
 from 8 sectors, its deleted message stays deleted, and the bubbles are
@@ -1997,12 +1997,12 @@ plus decode under 100 ms for the long chat, window 16's to prove.
 
 **An invitation keeps its row.** A group the reader is invited to that
 no message reached has the invitation's listing, "Einladung", from when
-the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:2028`);
+the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:2265`);
 the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2314`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2393`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,7 +2035,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:823`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:832`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2043,18 +2043,18 @@ for everything before its end. `Store::open_after`
 (`loquax/src/home/board/store.rs:252`) reads only the frames after it,
 and the boot folds them into the model and the index as the live pull
 folded them, then writes the summary at the ring's end
-(`resume_tail`, `loquax-m9/src/home.rs:736`); `[STORE] index=summaries`
+(`resume_tail`, `loquax-m9/src/home.rs:801`); `[STORE] index=summaries`
 says `tail=<n>`. A state whose sector went round the ring, or an end the
 log does not reach, still rebuilds. On the host the fixture's 4000
 entries with a 360-entry tail resume in 22 ms decoding the 360, against
 4360 for the whole fold, and list what the whole fold lists
 (`a_reset_mid_pull_resumes_from_the_summary`,
-`loquax-m9/tests/restore_counts.rs:538`).
+`loquax-m9/tests/restore_counts.rs:548`).
 
 That test found a model bug on the way: a chat listed from its kept row
 counted only its loaded messages once a live one came in, 96 of 776
 unread. The unread beyond the received messages loaded now counts a row
-each (`Conversation::unread_rows`, `loquax/src/ui.rs:877`), on a live
+each (`Conversation::unread_rows`, `loquax/src/ui.rs:976`), on a live
 pull as on the tail boot.
 
 ### The pull starved both cores in the allocator (1569)
@@ -2081,7 +2081,7 @@ take 126 µs into 400 entries, 170 µs into 4000). The same fold under
 the firmware's own two choices (`leviculum-heap-lab/tests/pull.rs`,
 the lab routes the host's global allocator into either): llff 134 µs
 at 400, 1919 µs at 4000 — fourteenfold; tlsf 75 µs and 110 µs — flat.
-The firmware links tlsf now (`leviculum-esp/src/lib.rs:74`, constant
+The firmware links tlsf now (`leviculum-esp/src/lib.rs:75`, constant
 time both ways, same `critical-section` lock held O(1) instead of
 O(walk)). Not through `embedded_alloc::TlsfHeap` since 1574: that
 wrapper keeps rlsf's 4228 B control block in its `static`, in `.bss`,
@@ -2109,11 +2109,11 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2375`), and the fold runs behind the list
+(`thinknode_m9.rs:2454`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
-its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2091`, the
+its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2328`, the
 a80038c2 rule); the cursor moves because the folded page gives the
 chat its real activity and the list re-sorts under a selection that
 follows the chat. A preload, not an open: nothing to stop for 1562/1564.
@@ -2173,13 +2173,13 @@ equal them. The arrival goes into one conversation the list calls
 - **A release image** restores with `Arrivals::Dropped`. The rebuild
   and the resumed tail skip the bench's entries, and a summary's
   "Bench" row and name are not listed (`listed`,
-  `loquax-m9/src/home.rs:864`). A release image never shows "Bench".
+  `loquax-m9/src/home.rs:929`). A release image never shows "Bench".
 - **Read marks.** The board leaves the bench's message ids out of the
   marks it sends its home (`route`). It keeps the read on the board
   itself.
 - **`bench forget`** (`TYPE_BENCH_FORGET` 0x1D, bench image only)
   takes the following out of the ring (`home::forget`,
-  `loquax-m9/src/home.rs:1003`, over `Store::forget`,
+  `loquax-m9/src/home.rs:1068`, over `Store::forget`,
   `loquax/src/home/board/store.rs:286`):
   - the flagged entries;
   - 1540's unflagged entries, which have a zero signature and text
@@ -2214,7 +2214,7 @@ device=940b1536…` at 09:06). `scripts/m9-bench-home.sh` keeps a
 The board's `[HOME] client=yes` line names its home's address
 (`home=`). `m9-walk.py` refuses a walk that opens chats (Enter or
 `open`) before its first key unless that address is the bench home's
-(`refusal`, `scripts/m9-walk.py:845`). A board without a home, and a
+(`refusal`, `scripts/m9-walk.py:965`). A board without a home, and a
 walk without opens, run as before. Lew gets his own pairing back with
 `lnflash --home` or a code from his mailbox. The two never mix.
 
@@ -2293,12 +2293,12 @@ says its `[OPEN]` line too, with nothing read (`Open::held`,
 opens. `open longest` in `bench.walk` said "no rows" because
 `cursor_to` took a board behind its keys for the list's end: the key's
 flush came, its `[PAGE]` line four seconds later. It now waits for that
-line (`cursor_to`, `scripts/m9-walk.py:718`); the fixture's first rows
+line (`cursor_to`, `scripts/m9-walk.py:782`); the fixture's first rows
 hold the group and Anna (the sim's `--store real` list). The mark guard
 has its positive control, `scripts/m9-walks/marks.walk`: a real chat
 with an unread message (`m9-bench-home.sh send` right before) opened
 must say `HOME mark` in the bench home's own log, a Bench open must not
-(`expect [no] home`, `scripts/m9-walk.py:793`).
+(`expect [no] home`, `scripts/m9-walk.py:913`).
 
 ### The M9's own stack floor, measured (1582)
 
