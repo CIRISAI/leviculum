@@ -971,6 +971,11 @@ pub struct Chat {
     /// A group its admin deleted (1307 pass four): the line drawn where the
     /// compose bar was, "Lew ended the group"; nothing can be written.
     pub ended: Option<Text>,
+    /// Two peers of one name (1452, [`crate::names::Names::same_name`]):
+    /// the sentence the bar's title ends with, apart, for a screen too
+    /// narrow for both on one row; the M9 draws it on a row of its own
+    /// under the bar (1587). Not in the JSON: the phone reads the title.
+    pub same_name: Option<Text>,
     pub a11y: A11y,
 }
 
@@ -1664,8 +1669,9 @@ pub(crate) fn chat_in<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -
         false => Text::Raw(name.clone()),
     };
     // Two peers of one name (1452): the header says so after the name.
-    let title = match model.names.same_name(&peer) {
-        Some(sentence) => Text::Join(Vec::from([title, sentence])),
+    let same_name = model.names.same_name(&peer);
+    let title = match &same_name {
+        Some(sentence) => Text::Join(Vec::from([title, sentence.clone()])),
         None => title,
     };
     let bar = TopBar {
@@ -1738,6 +1744,7 @@ pub(crate) fn chat_in<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -
             .and_then(|_| super::group_scene::invite(model, &peer, false)),
         compose: compose(model, c),
         ended: super::group_scene::ended(model, &peer),
+        same_name,
         a11y: A11y::of(NodeId::Chat, Role::Chat, Text::Raw(name)),
     }
 }

@@ -246,8 +246,43 @@ pub fn lines_seen(
         return (sheet, window, seen);
     }
     let mut out = Vec::with_capacity(rows);
-    out.push(top_bar(&scene.top, look, cols));
-    let below = rows.saturating_sub(1 + usize::from(scene.tabs.is_some()));
+    // Two peers of one name (1587): 35 cells cut the bar's sentence to
+    // "Lew ·1e1e · Zwei Kontakte he…", so in a chat the bar says the name
+    // and the sentence takes a row of its own under it, whole; without a
+    // collision the chat keeps every row.
+    let same = match (&scene.list, &scene.chat) {
+        (None, Some(chat)) => chat.same_name.as_ref(),
+        _ => None,
+    };
+    let title = match (same, &scene.top.title) {
+        (Some(sentence), Text::Join(parts)) if parts.last() == Some(sentence) => {
+            match &parts[..parts.len() - 1] {
+                [only] => only.clone(),
+                rest => Text::Join(rest.to_vec()),
+            }
+        }
+        (_, title) => title.clone(),
+    };
+    out.push(top_bar(&scene.top, &title, look, cols));
+    if let Some(sentence) = same {
+        let words = cut(&sentence.resolve(look.lang), cols.saturating_sub(1));
+        out.push(line(
+            &[
+                (" ", RStyle::default()),
+                (
+                    &words,
+                    RStyle {
+                        italic: true,
+                        ..muted(look)
+                    },
+                ),
+            ],
+            cols,
+        ));
+    }
+    // The bar, and the sentence's row while there is one.
+    let head = out.len();
+    let below = rows.saturating_sub(head + usize::from(scene.tabs.is_some()));
     if let (None, Some(chat)) = (&scene.list, &scene.chat) {
         let (chat_lines, top, keys) = crate::chat::lines_at(chat, look, cols, below);
         out.extend(chat_lines);
@@ -279,8 +314,8 @@ pub fn lines_seen(
             }
         }
     }
-    out.truncate(1 + below);
-    while out.len() < 1 + below {
+    out.truncate(head + below);
+    while out.len() < head + below {
         out.push(line(&[], cols));
     }
     if let Some(tabs) = &scene.tabs {
@@ -303,8 +338,8 @@ pub fn lines_seen(
     (out, window, seen)
 }
 
-/// The top bar: the reader's avatar (or the chat's), the title.
-fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
+/// The top bar: the reader's avatar (or the chat's), `title`.
+fn top_bar(top: &TopBar, title: &Text, look: &Look, cols: usize) -> RLine {
     let chrome = painted(look.tokens.chrome);
     let avatar = match &top.lead {
         Lead::Me { avatar, .. } | Lead::Back { avatar, .. } => avatar,
@@ -312,7 +347,7 @@ fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
     let mut bar = RLine::default();
     push(&mut bar, " ", chrome);
     push_avatar(&mut bar, avatar);
-    let title = top.title.resolve(look.lang);
+    let title = title.resolve(look.lang);
     let room = cols.saturating_sub(AVATAR + 2);
     let tight = cols < NARROW_COLS;
     // The home's word at the right end, the title cut before it. Wide,
@@ -387,25 +422,9 @@ fn entry(row: &Row, look: &Look, cols: usize) -> [RLine; 2] {
             ..RStyle::default()
         },
     );
-    // Two peers of one name (1452): the sentence after the name, muted,
-    // where the time leaves room for all of it; a cut sentence is noise,
-    // and the chat's header says it whole.
-    let free = room.saturating_sub(fit_width(&name) + fit_width(&time) + 1);
-    let same = row
-        .same_name
-        .as_ref()
-        .map(|sentence| format!(" {}", sentence.resolve(look.lang)))
-        .filter(|same| fit_width(same) <= free)
-        .unwrap_or_default();
-    push(
-        &mut top,
-        &same,
-        RStyle {
-            italic: true,
-            ..muted(look)
-        },
-    );
-    let gap = room.saturating_sub(fit_width(&name) + fit_width(&same) + fit_width(&time));
+    // Two peers of one name (1452, 1587): the row keeps the name with its
+    // tail alone; the open chat says the sentence on its own row.
+    let gap = room.saturating_sub(fit_width(&name) + fit_width(&time));
     push(&mut top, &" ".repeat(gap), RStyle::default());
     push(&mut top, &time, muted(look));
 

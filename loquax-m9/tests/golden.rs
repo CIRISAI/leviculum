@@ -193,7 +193,8 @@ fn the_chats_list_is_the_golden_frame() {
 }
 
 /// 1452: two peers called Lew collide, so both carry their hash tail on
-/// the list, and the open one's header says "Zwei Kontakte heißen Lew";
+/// the list, the rows the name alone, and the open one says "Zwei
+/// Kontakte heißen Lew" on a row of its own under the bar (1587);
 /// Anna, whose name nobody shares, is her name alone, and nobody is hex.
 #[test]
 fn a_shared_name_is_the_golden_frame() {
@@ -225,9 +226,23 @@ fn a_shared_name_is_the_golden_frame() {
     model.focus = Pane::Conversations;
     press(&mut model, M9Key::Enter);
     assert_eq!(model.focus, Pane::Messages);
-    let chat = text_of(&model).join("\n");
-    assert!(chat.contains("Zwei Kontakte"), "{chat}");
+    // 1587: the bar says the name with its tail, the sentence its own row
+    // under it, whole, not cut at the bar's 35 cells.
+    let rows = text_of(&model);
+    let chat = rows.join("\n");
+    assert!(rows[0].contains("Lew ·1e1e"), "{chat}");
+    assert!(!rows[0].contains("Zwei"), "{chat}");
+    assert_eq!(rows[1].trim(), "Zwei Kontakte heißen Lew", "{chat}");
+    assert!(!chat.contains('…'), "{chat}");
     check("m9-same-name-chat.png", &shown(&model));
+    // The control: Anna's chat has no collision and no such row, its
+    // first row under the bar is the chat's own.
+    model.selected = 2;
+    model.focus = Pane::Conversations;
+    press(&mut model, M9Key::Enter);
+    let anna = text_of(&model);
+    assert!(anna[0].contains("Anna"), "{anna:#?}");
+    assert!(!anna.join("\n").contains("Kontakte"), "{anna:#?}");
 }
 
 /// 1532: the list and the open chat in the large size, the 10 x 20 of
