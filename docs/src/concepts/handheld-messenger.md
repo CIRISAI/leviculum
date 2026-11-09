@@ -2395,6 +2395,76 @@ and leave the rest to the UI core's stack until a window measures the
 two-pool heap's UI load; heap does not need it, the heap is PSRAM and
 has megabytes free.
 
+### The forget's reopen ran out of heap (1603)
+
+Window 22 (bench image of 51b80f57, 2026-11-09): twelve seconds into the
+rebuild after `bench forget`, core 0 panicked on `memory allocation of
+278528 bytes failed`. The block is 2048 x 136 B: the long chat's
+`Vec<Message>` doubling past its 1024th message (`Message` is 136 B on
+the image, the 1489 store's long chat has 1200). It failed because the
+reopen held a second whole model in the IO pool: the UI core's, every
+message of the ring after the boot's own rebuild, and the old client's
+shelf. Now the UI core is handed an empty model first and frees its own
+(`Handheld::bench_release`, `leviculum-esp/src/handheld.rs:980`), and the
+old client is dropped before the restore starts (`Handheld::bench_reopen`,
+`leviculum-esp/src/handheld.rs:964`); the sim's `bench forget` frees in
+the same order.
+
+Two blocks of the rebuild grew with the ring whatever the chats were,
+and both went: the batch's note scope held one peer per folded entry
+(8192 x 16 B), now each conversation once (`Batch::fold`,
+`loquax/src/ui.rs:3584`); and every received message left a toast that a
+board, which never ticks, never aged out, now at most `TOAST_KEEP`
+(`loquax/src/ui.rs:193`). The model after a rebuild holds about 470 KB
+less on the host. `a_rebuild_of_short_chats_asks_for_no_block_that_grows_with_the_ring`
+(`leviculum-heap-lab/tests/rebuild.rs:173`) rebuilds 4400 entries under
+the firmware's TLSF heap and holds the largest block to 64 KiB: red at
+163,840 B (the toasts), green at 51,712 B, the same as at 1100 entries.
+What remains large is the model's shape, which the live pull shares: a
+chat's messages (2048 x 136 B for the long chat,
+`a_rebuild_with_a_long_chat_asks_for_that_chat_alone`) and the
+conversations themselves (512 x 560 B on the image for 302). Holding
+those in pieces is a change of the model's storage on every target, not
+of the rebuild.
+
+The rebuild says its progress, `[STORE] rebuild chunk=<k>
+entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
+(`restore_chunked`, `loquax-m9/src/home.rs:713`).
+
+**The boot's rebuild pumps the line.** The boot's restore fed nothing
+(the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
+could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
+heap at every step, as the forget's reopen and a taken code do
+(`leviculum-esp/src/bin/thinknode_m9.rs:1924`). The held bytes live in
+2 KiB blocks, at most 35 s of the line (`RxHeld`,
+`leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
+the pool for 256 KiB in one piece, and 22 s was shorter than the
+rebuild. `a_rebuild_at_line_rate_loses_nothing_when_pumped_per_entry`
+(`leviculum-nrf/serial-mux/src/rx.rs:339`) runs the line at its full
+rate through 25.5 s: unpumped it loses, pumped per entry it keeps every
+byte in order.
+
+**A reset after a rebuild resumes.** After a rebuild the summary log was
+written one bounded write a quiet turn, a second apart, its state last,
+33 s on the board; the walks reset sooner, and every boot rebuilt again
+(`why=no-state`). The rebuild now writes the whole summary before it
+returns, in bounded writes with the caller's clock between them
+(`SETTLE_CALLS`, `loquax-m9/src/home.rs:465`), and the board says
+`[STORE] summary settled records= writes= erased= calls= left=`. A
+rebuild runs where nothing draws from the model yet (the boot, the
+forget's reopen, a code taken), so 1597's spacing, which was for the UI
+core, is not owed there. A reset during the rebuild itself still
+rebuilds. `a_reboot_right_after_a_rebuild_resumes_with_the_same_list`
+(`loquax-m9/tests/home.rs:420`) was red on both halves (the summary left
+owed, the reboot `rebuilt`).
+
+**A dump is its own stage.** Core 0 wrote a screen dump's lines inside
+the take stage, so the walks read takes of 1 to 6 s. The dump is now
+timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2430`); `m9-walk.py`
+takes `dump=` as the dump's turn and holds the rest of that turn to the
+bar.
+
 ### Tracks on the M9 (1385, not built)
 
 The tracks ([Loquax: tracks on the map](loquax-tracks.md)) are derived
