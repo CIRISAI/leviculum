@@ -47,6 +47,7 @@ use loquax::ui::recording::Verb;
 use loquax::ui::scene::{
     self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, RecordingBar, Row, Tab, TabId,
 };
+use loquax::ui::selection::{peer_key, position_line, preview_line, Part, RunKey};
 use loquax::ui::strings::{Arg, Lang, StrId, Text};
 use loquax::when::{list_time, WallTime};
 
@@ -101,6 +102,22 @@ pub const LINE: f32 = size::BODY * 1.3;
 pub fn soft<'a>(list: iced::widget::Scrollable<'a, Message>) -> Element<'a, Message> {
     leviculum_ui_iced::smooth::smooth(list, LINE).into()
 }
+
+/// [`soft`], and while `picking` (a selection's drag is on, 1475) the
+/// pointer at its top or bottom edge scrolls it.
+fn soft_picking<'a>(
+    list: iced::widget::Scrollable<'a, Message>,
+    picking: bool,
+) -> Element<'a, Message> {
+    leviculum_ui_iced::smooth::smooth(list, LINE)
+        .edge_scroll(picking)
+        .into()
+}
+
+/// The compose field's padding, top and left: where a middle click's
+/// point lands in its text (1475).
+pub const COMPOSE_PAD_Y: f32 = 6.0;
+pub const COMPOSE_PAD_X: f32 = 4.0;
 
 fn mark_icon(mark: Mark) -> Icon {
     Icon::Glyph {
@@ -947,11 +964,19 @@ impl App {
             );
         }
         let empty = (self.scene.list.as_ref()).is_none_or(|list| list.rows.is_empty());
+        let picked = self.picked_ranges();
         let rows = self.listed().into_iter().fold(column![], |rows, r| {
             // A right click opens the row's menu (1371), as a long press
             // does on the phone.
-            let item = mouse_area(list_row(r, self.seen.now, self.lang, t))
-                .on_right_press(Message::Intent(Intent::Menu(Some(r.id))));
+            let item = mouse_area(list_row(
+                r,
+                self.seen.now,
+                self.lang,
+                t,
+                &picked,
+                self.picking,
+            ))
+            .on_right_press(Message::Intent(Intent::Menu(Some(r.id))));
             let rows = rows.push(item);
             match self.menu == Some(r.id) {
                 true => rows.push(self.row_actions(r, t)),
@@ -967,7 +992,7 @@ impl App {
             )
             .padding(16)
             .into(),
-            false => soft(scrollable(rows).height(Length::Fill)),
+            false => soft_picking(scrollable(rows).height(Length::Fill), self.picking),
         };
         container(pane.push(body))
             .width(self.list_width())
@@ -1322,7 +1347,7 @@ impl App {
             list = self.group(list, open, group, width, &picked, t);
         }
         list = list.push(Space::new().height(size::GAP));
-        soft(
+        soft_picking(
             scrollable(list)
                 .anchor_bottom()
                 .height(Length::Fill)
@@ -1332,7 +1357,29 @@ impl App {
                     s.container.background = Some(Background::Color(colour(t.background)));
                     s
                 }),
+            self.picking,
         )
+    }
+
+    /// A line of the chat nobody wrote (a day, a group's own line) as it is
+    /// drawn, made selectable as the run `key` (1475).
+    fn quiet_line<'a>(
+        &self,
+        words: String,
+        key: RunKey,
+        picked: &HashMap<RunKey, Range<usize>>,
+        t: Colours,
+    ) -> Element<'a, Message> {
+        let ink = colour(t.text_secondary);
+        selectable(
+            text(words.clone()).size(size::DAY).color(ink),
+            words,
+            picked.get(&key).cloned(),
+            Color { a: 0.3, ..ink },
+            self.picking,
+            move |pick| Message::PickText(key, pick),
+        )
+        .into()
     }
 
     fn group<'a>(
@@ -1341,18 +1388,15 @@ impl App {
         open: &'a Chat,
         group: &'a Group,
         width: f32,
-        picked: &HashMap<u64, Range<usize>>,
+        picked: &HashMap<RunKey, Range<usize>>,
         t: Colours,
     ) -> iced::widget::Column<'a, Message> {
-        if let Some(day) = &group.day {
+        if let (Some(day), Some(first)) = (&group.day, group.bubbles.first()) {
+            let key = RunKey::new(first.bubble.key, Part::Day);
             list = list.push(
-                container(
-                    text(day.words.resolve(self.lang))
-                        .size(size::DAY)
-                        .color(colour(t.text_secondary)),
-                )
-                .center_x(Length::Fill)
-                .padding(iced::Padding::ZERO.top(16).bottom(8)),
+                container(self.quiet_line(day.words.resolve(self.lang), key, picked, t))
+                    .center_x(Length::Fill)
+                    .padding(iced::Padding::ZERO.top(16).bottom(8)),
             );
         }
         // A group's chat names the writer above a group of bubbles that
@@ -1371,14 +1415,11 @@ impl App {
             // A group's own line, "Anna joined." (1307 G2): centred, as
             // the day line, no one's bubble.
             if node.bubble.note {
+                let key = RunKey::new(node.bubble.key, Part::Note);
                 list = list.push(
-                    container(
-                        text(node.bubble.body.clone())
-                            .size(size::DAY)
-                            .color(colour(t.text_secondary)),
-                    )
-                    .center_x(Length::Fill)
-                    .padding(iced::Padding::ZERO.top(8).bottom(4)),
+                    container(self.quiet_line(node.bubble.body.clone(), key, picked, t))
+                        .center_x(Length::Fill)
+                        .padding(iced::Padding::ZERO.top(8).bottom(4)),
                 );
                 continue;
             }
@@ -1419,7 +1460,7 @@ impl App {
         open: &'a Chat,
         node: &'a BubbleNode,
         width: f32,
-        picked: &HashMap<u64, Range<usize>>,
+        picked: &HashMap<RunKey, Range<usize>>,
         t: Colours,
     ) -> Element<'a, Message> {
         let (bubble, place) = (&node.bubble, &node.place);
@@ -1440,7 +1481,16 @@ impl App {
             if let Some(who) = who {
                 said = said.push(text(who).size(13).color(meta));
             }
-            said = said.push(text(quote.text.clone()).size(14).color(meta));
+            // The quote selects (1475), its own run of the bubble.
+            let key = RunKey::new(bubble.key, Part::Quote);
+            said = said.push(selectable(
+                text(quote.text.clone()).size(14).color(meta),
+                quote.text.as_str(),
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..meta },
+                self.picking,
+                move |pick| Message::PickText(key, pick),
+            ));
             let stripe =
                 container(Space::new().width(3).height(Length::Fill)).style(move |_: &Theme| {
                     container::Style {
@@ -1502,7 +1552,7 @@ impl App {
         } else if let Some(words) = &node.text {
             // The words can be selected (1444): the selection under them
             // in the ink, faint, which shows on either bubble's ground.
-            let key = bubble.key;
+            let key = RunKey::body(bubble.key);
             inside = inside.push(selectable(
                 text(words.as_str()).size(size::BODY).color(ink),
                 words,
@@ -1512,23 +1562,7 @@ impl App {
                 move |pick| Message::PickText(key, pick),
             ));
         }
-        if let Some(fix) = &bubble.fix {
-            let mut words = loquax::telemetry::coordinates(&fix.location);
-            if let Some(accuracy) = loquax::telemetry::accuracy(&fix.location) {
-                words = format!("{words}  {accuracy}");
-            }
-            // The newest report says whether the position is alive
-            // (1209), in the scene's words; an older run its count.
-            match &node.live {
-                Some(live) => {
-                    words.push_str(" · ");
-                    words.push_str(&live.resolve(self.lang));
-                }
-                None => words.push_str(&loquax::telemetry::run_words(
-                    bubble.updates,
-                    bubble.since.as_ref(),
-                )),
-            }
+        if let (Some(fix), Some(words)) = (&bubble.fix, position_line(node, self.lang)) {
             let stale = self.seen.now.is_some_and(|now| {
                 fix.fix_time()
                     .saturating_add(loquax::telemetry::STALE_AFTER_SECS)
@@ -1538,8 +1572,20 @@ impl App {
                 true => meta,
                 false => ink,
             };
+            // A press opens the map; a drag or a double click selects
+            // the line (1475).
+            let key = RunKey::new(bubble.key, Part::Position);
+            let line = selectable(
+                text(words.clone()).size(size::BODY - 2.0).color(line_ink),
+                words,
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..line_ink },
+                self.picking,
+                move |pick| Message::PickText(key, pick),
+            )
+            .in_button();
             inside = inside.push(flat(
-                text(words).size(size::BODY - 2.0).color(line_ink),
+                line,
                 Message::Intent(Intent::ShowMap {
                     peer: Some(open.peer),
                 }),
@@ -1945,7 +1991,7 @@ impl App {
             ))
             .size(size::COMPOSE_TEXT)
             .height(Length::Shrink)
-            .padding([6, 4])
+            .padding(iced::Padding::from([COMPOSE_PAD_Y, COMPOSE_PAD_X]))
             .on_action(Message::Compose)
             .key_binding(move |press| {
                 let is_enter = matches!(
@@ -1965,7 +2011,10 @@ impl App {
                 selection: colour(t.selected_row),
             });
         // A middle click on the field pastes the PRIMARY selection (1444).
-        let editor = mouse_area(editor).on_middle_press(Message::PastePrimary);
+        // Where it clicked (1475): the pointer's place over the field.
+        let editor = mouse_area(editor)
+            .on_middle_press(Message::PastePrimary)
+            .on_move(Message::ComposePointer);
         let pill = container(row![face, editor, tail].align_y(Alignment::Center))
             .width(Length::Fill)
             .padding([0, 6])
@@ -2232,7 +2281,14 @@ impl App {
 
 /// One row of the list: a click is a hit on its node, which the scene
 /// turns into its opening ([`scene::Scene::action`]).
-fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> Element<'a, Message> {
+fn list_row<'a>(
+    r: &'a Row,
+    now: Option<WallTime>,
+    lang: Lang,
+    t: Colours,
+    picked: &HashMap<RunKey, Range<usize>>,
+    picking: bool,
+) -> Element<'a, Message> {
     let open = r.selected;
     let content = &r.row;
     let unread = content.unread > 0;
@@ -2280,23 +2336,10 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
     }
     let side = side.push(under);
     // A report's line is the scene's words after the pin, as the phone
-    // sets it; a text of ours is said as ours.
-    // A message typed and not sent stands in for it, in italics (1219).
-    let invited = r
-        .group
-        .as_ref()
-        .filter(|g| content.last.is_empty() || g.standing == loquax::ui::groups::Standing::Invited);
-    let last = match (&r.draft, &r.live, content.ours && content.kind == "text") {
-        (Some(draft), _, _) => draft.resolve(lang),
-        // A group's row says it is an invitation, or how many are in it
-        // while nothing was written yet (1307).
-        (None, None, _) if invited.is_some() => {
-            invited.map(|g| g.words.resolve(lang)).unwrap_or_default()
-        }
-        (None, Some(live), _) => format!("{} {}", chat::PIN, live.resolve(lang)),
-        (None, None, true) => format!("{}: {}", StrId::QuoteYou.text(lang), content.last),
-        (None, None, false) => content.last.clone(),
-    };
+    // sets it; a text of ours is said as ours; a message typed and not
+    // sent stands in for it, in italics (1219). The core words it, which
+    // is also what a selection of it copies (1475).
+    let last = preview_line(r, lang);
     let style = match r.draft {
         Some(_) => iced::font::Style::Italic,
         None => iced::font::Style::Normal,
@@ -2306,14 +2349,28 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
             .size(size::ROW_NAME)
             .color(colour(t.text))
             .wrapping(text::Wrapping::None),
-        text(last)
-            .size(size::ROW_LAST)
-            .color(colour(t.text_secondary))
-            .font(iced::Font {
-                style,
-                ..iced::Font::DEFAULT
-            })
-            .wrapping(text::Wrapping::None),
+        // The line selects (1475): a press opens the chat as before, a
+        // drag or a double click selects.
+        {
+            let key = RunKey::new(peer_key(&content.peer), Part::Preview);
+            let ink = colour(t.text_secondary);
+            selectable(
+                text(last.clone())
+                    .size(size::ROW_LAST)
+                    .color(ink)
+                    .font(iced::Font {
+                        style,
+                        ..iced::Font::DEFAULT
+                    })
+                    .wrapping(text::Wrapping::None),
+                last,
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..ink },
+                picking,
+                move |pick| Message::PickText(key, pick),
+            )
+            .in_button()
+        },
     ]
     // Two peers of one name (1452): a third line says so, quiet, whole;
     // beside the name it would be cut mid-word at the list's width.

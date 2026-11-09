@@ -654,12 +654,18 @@ pub enum Message {
     /// The Rooms tab said this (1379): the input's text, its Enter, a
     /// room chosen.
     Rooms(loquax::ui::rooms::RoomsEvent),
-    /// The left button on the words of the bubble of this message key
-    /// (1444): a press, a drag over them, the release.
-    PickText(u64, leviculum_ui_iced::select::Pick),
+    /// The left button on a text that selects (1444, 1475): a press, a
+    /// drag over it, the release.
+    PickText(
+        loquax::ui::selection::RunKey,
+        leviculum_ui_iced::select::Pick,
+    ),
     /// A middle click on the compose field (1444): paste the PRIMARY
-    /// selection.
+    /// selection where it clicked (1475).
     PastePrimary,
+    /// The pointer over the compose field, in the field (1475): where a
+    /// middle click pastes.
+    ComposePointer(iced::Point),
     /// What the PRIMARY selection held, for the compose field.
     PrimaryText(Option<String>),
 }
@@ -981,6 +987,13 @@ struct App {
     /// button that began it is still held.
     picked: Option<loquax::ui::selection::TextSelection>,
     picking: bool,
+    /// The release of a selection's drag on a text in a button (a list
+    /// row, a position line) came (1475): the button's open, which the
+    /// same release sends right after, is dropped. Reset by every view,
+    /// so it never outlives the event that set it.
+    drop_open: std::cell::Cell<bool>,
+    /// The pointer's last place over the compose field (1475).
+    compose_pointer: Option<iced::Point>,
     /// The test clipboard (1444): what went onto which buffer.
     #[cfg(test)]
     clips: Vec<(select::Buffer, String)>,
@@ -1101,6 +1114,8 @@ impl App {
             deleting: None,
             picked: None,
             picking: false,
+            drop_open: std::cell::Cell::new(false),
+            compose_pointer: None,
             #[cfg(test)]
             clips: Vec::new(),
             maps_usage: (0, 0),
@@ -1262,6 +1277,7 @@ impl App {
             | Message::RecOverLock(_) => self.rec_mouse(message),
             Message::PickText(key, pick) => return self.pick_text(key, pick),
             Message::PastePrimary => return self.paste_primary(),
+            Message::ComposePointer(at) => self.compose_pointer = Some(at),
             Message::PrimaryText(text) => self.primary_text(text),
             Message::Compose(action) => {
                 let edit = action.is_edit();
@@ -1883,6 +1899,10 @@ impl App {
                 .map(|(_, text)| iced::clipboard::write(text.clone())),
             _ => None,
         };
+        // The open a selection's drag on a button's text ended in (1475).
+        if self.drop_open.replace(false) && matches!(message, Message::Intent(_)) {
+            return copy.unwrap_or_else(Task::none);
+        }
         let start = Instant::now();
         let task = self.update_inner(message);
         self.browse_sync();
@@ -2602,6 +2622,8 @@ impl App {
     /// The window, and the frame meter's numbers over it while it
     /// measures (`--fps`, 1441).
     fn view(&self) -> Element<'_, Message> {
+        // The event that set it is over.
+        self.drop_open.set(false);
         let window = self.window_view();
         match leviculum_ui_iced::fps::enabled() {
             true => stack![window, leviculum_ui_iced::fps::overlay()].into(),
@@ -2653,6 +2675,26 @@ impl App {
     ) -> Element<'a, Message> {
         let t = self.tokens();
         let lang = self.lang;
+        // The address and the code select (1475), as runs of their own.
+        let picked = self.picked_ranges();
+        let selects = |words: String, part: loquax::ui::selection::Part, size: f32| {
+            let key = loquax::ui::selection::RunKey::new(0, part);
+            let ink = chat::colour(t.text);
+            leviculum_ui_iced::select::selectable(
+                text(words.clone())
+                    .size(size)
+                    .font(iced::Font::MONOSPACE)
+                    .align_x(iced::Alignment::Center)
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .color(ink),
+                words,
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..ink },
+                self.picking,
+                move |pick| Message::PickText(key, pick),
+            )
+        };
         let said = |words: &loquax::ui::strings::Text, size: f32, ink: u32| {
             text(words.resolve(lang))
                 .size(size)
@@ -2665,12 +2707,11 @@ impl App {
             chat::avatar_of(&profile.avatar, 64.0, t),
             said(&profile.name, 20.0, t.text),
             said(&profile.address_label, 13.0, t.text_secondary),
-            text(profile.fours.clone())
-                .size(13)
-                .font(iced::Font::MONOSPACE)
-                .align_x(iced::Alignment::Center)
-                .width(Length::Fill)
-                .color(chat::colour(t.text)),
+            selects(
+                profile.fours.clone(),
+                loquax::ui::selection::Part::Address,
+                13.0
+            ),
             said(&profile.mailbox, 14.0, t.text),
         ]
         .spacing(6)
@@ -2715,6 +2756,13 @@ impl App {
                     .height(QR_SIDE),
                     said(&profile.caption, 13.0, t.text_secondary),
                 ]
+                // The code the QR holds, as words to select and copy (1475).
+                .extend(
+                    profile
+                        .code
+                        .clone()
+                        .map(|code| selects(code, loquax::ui::selection::Part::Code, 11.0).into()),
+                )
                 .spacing(6)
                 .width(QR_SIDE),
             );
@@ -3496,6 +3544,7 @@ mod tests {
 
     use leviculum_ui_iced::select::Pick;
     use loquax::outbox::OutboxEvent;
+    use loquax::ui::selection::{Part, RunKey};
     use loquax::ui::update;
 
     pub(super) const ANNA: [u8; 16] = [0x3a; 16];
@@ -4360,7 +4409,7 @@ mod tests {
 
     /// The presses `n` clicks at `at` on the window's view made, as the
     /// bubble's key and the press.
-    fn presses(app: &App, at: Point, n: usize, w: u32, h: u32) -> Vec<(u64, Pick)> {
+    fn presses(app: &App, at: Point, n: usize, w: u32, h: u32) -> Vec<(RunKey, Pick)> {
         leviculum_ui_iced::headless::clicks(app.view(), at, n, w, h)
             .expect("a renderer")
             .into_iter()
@@ -4378,7 +4427,7 @@ mod tests {
     fn spot_of(app: &App, word: &str) -> Point {
         let (w, h) = (900, 560);
         let runs = app.text_runs();
-        let text_of = |key: u64| {
+        let text_of = |key: RunKey| {
             runs.iter()
                 .find(|r| r.key == key)
                 .map(|r| r.text.clone())
@@ -4479,7 +4528,9 @@ mod tests {
     #[test]
     fn a_drag_across_bubbles_copies_one_line_per_bubble() {
         let (mut app, _rx) = chat_window();
-        let runs = app.text_runs();
+        let runs: Vec<_> = (app.text_runs().into_iter())
+            .filter(|r| r.key.part == Part::Body)
+            .collect();
         let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(
             texts,
@@ -4509,11 +4560,12 @@ mod tests {
         assert_eq!(
             last,
             format!(
-                "{}: market tomorrow?\n{}: Good morning!\n{}: We meet",
+                "{}: market tomorrow?\nToday\n{}: Good morning!\n{}: We meet",
                 line(0),
                 line(1),
                 line(2)
-            )
+            ),
+            "the day line between selects too (1475), alone on its line"
         );
         assert_eq!(app.clips.len(), 2, "one write per change: {:?}", app.clips);
         // After the release a drag no longer moves it.
@@ -4532,7 +4584,10 @@ mod tests {
         // Ctrl+A: every bubble.
         let _ = app.update(chord(keyboard::Key::Character("a".into()), true));
         let (_, all) = app.clips.last().cloned().expect("a write");
-        assert_eq!(all.lines().count(), 4, "{all}");
+        let days = (app.text_runs().iter())
+            .filter(|r| r.key.part == Part::Day)
+            .count();
+        assert_eq!(all.lines().count(), 4 + days, "{all}");
         assert!(all.ends_with("Yes, see you there"), "{all}");
     }
 
@@ -4547,7 +4602,9 @@ mod tests {
         app.rescene();
         let plain = shoot(&app, w, h);
         map::tests::same_as("gui-chat-light.png", &plain, w, h);
-        let runs = app.text_runs();
+        let runs: Vec<_> = (app.text_runs().into_iter())
+            .filter(|r| r.key.part == Part::Body)
+            .collect();
         let _ = app.update(Message::PickText(
             runs[0].key,
             Pick::Press {
@@ -4561,6 +4618,380 @@ mod tests {
         let picked = shoot(&app, w, h);
         assert_ne!(picked, plain);
         map::tests::same_as("gui-chat-selected-light.png", &picked, w, h);
+    }
+
+    /// The same selection in the dark theme (1475): the highlight is the
+    /// bubble's ink, faint, and shows on the dark grounds too.
+    #[test]
+    fn a_selection_is_drawn_in_the_dark_theme_as_the_golden() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Intent(Intent::Theme));
+        assert!(app.dark());
+        app.rescene();
+        let plain = shoot(&app, w, h);
+        let runs: Vec<_> = (app.text_runs().into_iter())
+            .filter(|r| r.key.part == Part::Body)
+            .collect();
+        let _ = app.update(Message::PickText(
+            runs[0].key,
+            Pick::Press {
+                at: 22,
+                clicks: 1,
+                shift: false,
+            },
+        ));
+        let _ = app.update(Message::PickText(runs[1].key, Pick::Drag { at: 12 }));
+        let _ = app.update(Message::PickText(runs[0].key, Pick::Release));
+        let picked = shoot(&app, w, h);
+        assert_ne!(picked, plain, "the highlight shows on the dark grounds");
+        map::tests::same_as("gui-chat-selected-dark.png", &picked, w, h);
+    }
+
+    /// `chat_window` with more kinds of text (1475): Anna's last bubble
+    /// quotes her first, "Good morning!" carries a position, and a
+    /// group's own line stands after it. The scene is the model's,
+    /// changed where the model has no quick way to say it.
+    fn rich_window() -> (App, tokio::sync::mpsc::UnboundedReceiver<Want>) {
+        let (mut app, rx) = chat_window();
+        let chat = app.seen.scene.chat.as_mut().expect("Anna's chat");
+        let mut note = None;
+        for group in &mut chat.groups {
+            for node in &mut group.bubbles {
+                match node.text.as_deref() {
+                    Some("We meet at the fountain at ten, the stall with the apples.") => {
+                        node.bubble.quote = Some(loquax::ui::replies::Quoted {
+                            text: "Are you coming to the market tomorrow?".to_string(),
+                            ours: Some(false),
+                            to: [1; 32],
+                        });
+                    }
+                    Some("Good morning!") => {
+                        let location = leviculum_lxmf::telemetry::Location {
+                            latitude_e6: 52_520_000,
+                            longitude_e6: 13_405_000,
+                            altitude_e2: 0,
+                            speed_e2: 0,
+                            bearing_e2: 0,
+                            accuracy_e2: 500,
+                            last_update: 0,
+                        };
+                        node.bubble.fix = Some(loquax::telemetry::Fix {
+                            peer: ANNA,
+                            via: ANNA,
+                            message: None,
+                            received_at: None,
+                            location,
+                            telemetry: Vec::new(),
+                            source: loquax::telemetry::Source::Telemetry,
+                        });
+                        let mut line = node.clone();
+                        line.bubble.note = true;
+                        line.bubble.key = 990;
+                        line.bubble.body = "Bert joined.".to_string();
+                        note = Some(line);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let note = note.expect("Good morning");
+        let group = (chat.groups.iter_mut())
+            .find(|g| {
+                g.bubbles
+                    .iter()
+                    .any(|n| n.text.as_deref() == Some("Good morning!"))
+            })
+            .expect("its group");
+        let at = (group.bubbles.iter())
+            .position(|n| n.text.as_deref() == Some("Good morning!"))
+            .expect("it");
+        group.bubbles.insert(at + 1, note);
+        app.window = Size::new(900.0, 560.0);
+        app.rescene();
+        (app, rx)
+    }
+
+    /// Where on the window a double click lands on a text of `part`, and
+    /// the run and the byte it pressed: a few columns walked down, the
+    /// list's and the chat's left, middle and right (1475).
+    fn find_part(app: &App, part: Part, w: u32, h: u32) -> (Point, RunKey, usize) {
+        let list = chat::RAIL + 90.0;
+        let chat = chat::RAIL + chat::LIST_WIDTH;
+        let width = w as f32 - chat;
+        let columns = [
+            list,
+            chat + 30.0,
+            chat + 60.0,
+            chat + width / 2.0 - 10.0,
+            chat + width / 2.0,
+            chat + width - 120.0,
+            chat + width - 60.0,
+        ];
+        for x in columns {
+            for y in (40..h - 40).step_by(3) {
+                let at = Point::new(x, y as f32);
+                let hit =
+                    presses(app, at, 2, w, h)
+                        .into_iter()
+                        .find_map(|(key, pick)| match pick {
+                            Pick::Press {
+                                at: byte,
+                                clicks: 2,
+                                ..
+                            } if key.part == part => Some((key, byte)),
+                            _ => None,
+                        });
+                // On a word, not on the blank between two.
+                if let Some((key, byte)) = hit.filter(|(key, byte)| on_a_word(app, *key, *byte)) {
+                    return (at, key, byte);
+                }
+            }
+        }
+        panic!("no {part:?} on the window");
+    }
+
+    /// Whether byte `byte` of the run `key` is in a word.
+    fn on_a_word(app: &App, key: RunKey, byte: usize) -> bool {
+        (app.text_runs().iter().find(|r| r.key == key)).is_some_and(|run| {
+            !run.text[loquax::ui::selection::word_at(&run.text, byte)]
+                .trim()
+                .is_empty()
+        })
+    }
+
+    /// Every kind of text in the window selects on a double click and
+    /// copies (1475): the list's last line, the day line, the quote, the
+    /// words, the position line and a group's own line. The word goes onto
+    /// PRIMARY, Ctrl+C onto the clipboard, both read from the test
+    /// clipboard; what is copied is the run's word, as the core says.
+    #[test]
+    fn every_kind_of_window_text_selects_on_a_double_click_and_copies() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = rich_window();
+        let parts = [
+            Part::Preview,
+            Part::Day,
+            Part::Quote,
+            Part::Body,
+            Part::Position,
+            Part::Note,
+        ];
+        for part in parts {
+            app.picked = None;
+            app.clips.clear();
+            let (at, key, byte) = find_part(&app, part, w, h);
+            let runs = app.text_runs();
+            let run = runs.iter().find(|r| r.key == key).expect("its run");
+            let word = run.text[loquax::ui::selection::word_at(&run.text, byte)].to_string();
+            assert!(
+                !word.trim().is_empty(),
+                "{part:?}: {word:?} in {:?}",
+                run.text
+            );
+            for (key, pick) in presses(&app, at, 2, w, h) {
+                let _ = app.update(Message::PickText(key, pick));
+            }
+            assert_eq!(
+                app.clips.last(),
+                Some(&(select::Buffer::Primary, word.clone())),
+                "{part:?} at {at:?}"
+            );
+            let _ = app.update(chord(keyboard::Key::Character("c".into()), true));
+            assert_eq!(
+                app.clips.last(),
+                Some(&(select::Buffer::Clipboard, word.clone())),
+                "{part:?}"
+            );
+        }
+        // The texts are the scene's: the day, the quote, the line.
+        let runs = app.text_runs();
+        let of = |part: Part| -> Vec<String> {
+            (runs.iter())
+                .filter(|r| r.key.part == part)
+                .map(|r| r.text.clone())
+                .collect()
+        };
+        assert_eq!(
+            of(Part::Quote),
+            vec!["Are you coming to the market tomorrow?"]
+        );
+        assert_eq!(of(Part::Note), vec!["Bert joined."]);
+        assert!(
+            of(Part::Position)[0].starts_with("52.52"),
+            "{:?}",
+            of(Part::Position)
+        );
+        assert_eq!(
+            of(Part::Preview).len(),
+            2,
+            "both rows: {:?}",
+            of(Part::Preview)
+        );
+    }
+
+    /// A list row and a position line are buttons (1475): a plain click
+    /// opens as before and selects nothing; a drag along the line selects
+    /// and its release opens nothing, the button's open the release sent
+    /// dropped; and the drop does not outlive that release.
+    #[test]
+    fn a_click_on_a_row_opens_and_a_drag_on_its_line_selects() {
+        let (w, h) = (900, 560);
+        let (mut app, mut rx) = rich_window();
+        for part in [Part::Preview, Part::Position] {
+            let (at, _, _) = find_part(&app, part, w, h);
+            let _ = told(&mut rx);
+            // A click: the button's open, no selection.
+            let click =
+                leviculum_ui_iced::headless::clicks(app.view(), at, 1, w, h).expect("a renderer");
+            assert!(
+                !click.iter().any(|m| matches!(m, Message::PickText(..))),
+                "{part:?}"
+            );
+            let opens = click
+                .iter()
+                .filter(|m| matches!(m, Message::Intent(_)))
+                .count();
+            assert_eq!(opens, 1, "{part:?}: the click opens");
+            // A drag of 40 pixels along it.
+            let to = Point::new(at.x + 40.0, at.y);
+            let drag =
+                leviculum_ui_iced::headless::drag(app.view(), at, to, 8, w, h).expect("a renderer");
+            let picks = drag
+                .iter()
+                .filter(|m| matches!(m, Message::PickText(..)))
+                .count();
+            assert!(picks >= 3, "{part:?}: a press, a drag, the release");
+            app.clips.clear();
+            let mut opened = false;
+            for message in drag {
+                let intent = matches!(message, Message::Intent(_));
+                let before = app.screen;
+                let _ = app.update(message);
+                opened |= intent && app.screen != before;
+            }
+            assert!(!opened, "{part:?}: the drag's release opened");
+            let (others, _) = told_apart(&mut rx);
+            assert!(others.is_empty(), "{part:?}: {others:?}");
+            let (buffer, words) = app.clips.last().cloned().expect("a selection");
+            assert_eq!(buffer, select::Buffer::Primary);
+            assert!(!words.is_empty(), "{part:?}");
+            // The drop is gone with the view after it: a click opens.
+            let _ = app.view();
+            for message in click {
+                let _ = app.update(message);
+            }
+            let (others, _) = told_apart(&mut rx);
+            let mapped = app.screen == Screen::Map;
+            assert!(
+                !others.is_empty() || mapped,
+                "{part:?}: the click opened nothing"
+            );
+            // Back to the chat for the next part.
+            app.screen = Screen::Chats;
+            app.picked = None;
+        }
+    }
+
+    /// The address and the code in the profile select (1475): a double
+    /// click on the address takes a four, Ctrl+A takes both, and the
+    /// address is copied without the blanks between its fours.
+    #[test]
+    fn the_profiles_address_and_code_select_and_copy() {
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), None);
+        app.window = Size::new(w as f32, h as f32);
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key).expect("a code");
+        model.own_code = Some(loquax::ui::OwnCode::of(
+            code.clone(),
+            loquax::home::qr::verbatim_modules(&code).ok(),
+        ));
+        model.profile = profile_facts();
+        update(&mut model, UiEvent::Profile { open: true });
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let profile = app.scene.profile.clone().expect("the profile");
+        let runs = app.text_runs();
+        assert_eq!(
+            runs.iter().map(|r| r.key.part).collect::<Vec<_>>(),
+            vec![Part::Address, Part::Code],
+            "the profile's texts alone, nothing under it"
+        );
+        for part in [Part::Address, Part::Code] {
+            let (at, key, byte) = find_profile_part(&app, part, w, h);
+            let run = runs.iter().find(|r| r.key == key).expect("its run");
+            let word = run.text[loquax::ui::selection::word_at(&run.text, byte)].to_string();
+            app.clips.clear();
+            for (key, pick) in presses(&app, at, 2, w, h) {
+                let _ = app.update(Message::PickText(key, pick));
+            }
+            assert_eq!(
+                app.clips.last(),
+                Some(&(select::Buffer::Primary, word.clone())),
+                "{part:?}"
+            );
+        }
+        let _ = app.update(chord(keyboard::Key::Character("a".into()), true));
+        let _ = app.update(chord(keyboard::Key::Character("c".into()), true));
+        assert_eq!(
+            app.clips.last(),
+            Some(&(
+                select::Buffer::Clipboard,
+                format!("{}\n{code}", profile.fours.replace(' ', ""))
+            ))
+        );
+    }
+
+    /// [`find_part`] over the profile in the window's middle.
+    fn find_profile_part(app: &App, part: Part, w: u32, h: u32) -> (Point, RunKey, usize) {
+        for x in (100..w - 100).step_by(20) {
+            for y in (20..h - 20).step_by(3) {
+                let at = Point::new(x as f32, y as f32);
+                let hit =
+                    presses(app, at, 2, w, h)
+                        .into_iter()
+                        .find_map(|(key, pick)| match pick {
+                            Pick::Press {
+                                at: byte,
+                                clicks: 2,
+                                ..
+                            } if key.part == part => Some((key, byte)),
+                            _ => None,
+                        });
+                if let Some((key, byte)) = hit {
+                    return (at, key, byte);
+                }
+            }
+        }
+        panic!("no {part:?} in the profile");
+    }
+
+    /// A middle click on the compose field pastes the PRIMARY selection
+    /// where it clicked (1475): at the field's start the words go before
+    /// what was typed. The control: with no pointer known the paste goes
+    /// where the cursor was, after it.
+    #[test]
+    fn a_middle_click_pastes_where_it_clicked() {
+        let (mut app, _rx) = chat_window();
+        type_into(&mut app, "hello world");
+        let _ = app.update(Message::PrimaryText(Some("X".to_string())));
+        assert_eq!(app.compose.text().trim_end(), "hello worldX", "the control");
+        let (mut app, _rx) = chat_window();
+        type_into(&mut app, "hello world");
+        // The field laid out, as the window has it before any click.
+        let _ = shoot(&app, 900, 560);
+        let _ = app.update(Message::ComposePointer(Point::new(
+            chat::COMPOSE_PAD_X,
+            chat::COMPOSE_PAD_Y + 2.0,
+        )));
+        let _ = app.update(Message::PastePrimary);
+        let _ = app.update(Message::PrimaryText(Some("X".to_string())));
+        assert_eq!(app.compose.text().trim_end(), "Xhello world");
     }
 
     /// The window over Anna's chat with `chat_model`'s messages and 3000

@@ -1,4 +1,4 @@
-//! The window's text selection (1444): a double click on a bubble's words
+//! The window's text selection (1444, 1475): a double click on a text
 //! selects the word, a triple click its line, a press and a drag a range
 //! across bubbles in reading order, a Shift+click extends it, a plain
 //! click or Escape clears it, Ctrl+A selects the whole conversation.
@@ -6,7 +6,18 @@
 //! Wayland, through iced's own clipboard, `window_clipboard`'s primary),
 //! so a middle click elsewhere pastes it; Ctrl+C puts it on the
 //! clipboard. A middle click in the compose field pastes the PRIMARY
-//! selection there.
+//! selection where it clicked.
+//!
+//! What is selectable (1475): in the conversation the day lines, a
+//! group's own lines, a reply's quote, the words and the position line of
+//! every bubble; in the list each conversation's last line; in the
+//! profile the address and the code. A list row and a position line are
+//! buttons: a plain click opens (the chat, the map), a drag of more than
+//! [`leviculum_ui_iced::select::DRAG_PX`] or a double click selects, and
+//! the open that the release of such a drag would still send is dropped
+//! ([`App::drop_open`]). While a drag is on, the pointer at the list's or
+//! the chat's top or bottom edge scrolls it
+//! ([`leviculum_ui_iced::smooth::Smooth::edge_scroll`]).
 //!
 //! The rules (the word, the line, the order of the runs, the copied text)
 //! are the core's ([`loquax::ui::selection`]); the pointer's place in a
@@ -22,7 +33,10 @@ use iced::keyboard;
 use iced::widget::text_editor;
 use iced::Task;
 use leviculum_ui_iced::select::Pick;
-use loquax::ui::selection::{line_at, runs, word_at, Spot, TextRun, TextSelection};
+use loquax::ui::scene::LayoutClass;
+use loquax::ui::selection::{
+    line_at, list_runs, profile_runs, runs, word_at, Part, RunKey, Spot, TextRun, TextSelection,
+};
 
 use super::{App, Message, Screen};
 
@@ -36,17 +50,41 @@ pub enum Buffer {
 }
 
 impl App {
-    /// The open conversation's text runs, in reading order.
+    /// The texts on screen that select, in reading order: the profile's
+    /// while it is over the window; else on the chats the list's last
+    /// lines (where the list shows) and then the open conversation's.
     pub(super) fn text_runs(&self) -> Vec<TextRun> {
+        if let Some(profile) = &self.scene.profile {
+            return profile_runs(profile);
+        }
+        if self.screen != Screen::Chats {
+            return Vec::new();
+        }
+        let mut out = match (self.class(), &self.scene.chat) {
+            (LayoutClass::Compact, Some(_)) => Vec::new(),
+            _ => list_runs(self.listed(), self.lang),
+        };
+        if let Some(chat) = &self.scene.chat {
+            out.extend(runs(chat, self.lang));
+        }
+        out
+    }
+
+    /// What Ctrl+A selects: the profile's texts, the open conversation's,
+    /// or the list's when no conversation is open.
+    fn whole(&self) -> Vec<TextRun> {
+        if let Some(profile) = &self.scene.profile {
+            return profile_runs(profile);
+        }
         match &self.scene.chat {
             Some(chat) => runs(chat, self.lang),
-            None => Vec::new(),
+            None => list_runs(self.listed(), self.lang),
         }
     }
 
     /// The selected bytes of each run the selection touches, for the view:
     /// empty without a selection, at no cost to a long chat.
-    pub(super) fn picked_ranges(&self) -> HashMap<u64, Range<usize>> {
+    pub(super) fn picked_ranges(&self) -> HashMap<RunKey, Range<usize>> {
         let Some(picked) = self.picked else {
             return HashMap::new();
         };
@@ -81,8 +119,8 @@ impl App {
         }
     }
 
-    /// The left button on the words of the bubble `key`.
-    pub(super) fn pick_text(&mut self, key: u64, pick: Pick) -> Task<Message> {
+    /// The left button on the text `key`.
+    pub(super) fn pick_text(&mut self, key: RunKey, pick: Pick) -> Task<Message> {
         let runs = self.text_runs();
         let Some(run) = runs.iter().find(|r| r.key == key) else {
             return Task::none();
@@ -110,6 +148,11 @@ impl App {
             Pick::Drag { .. } => Task::none(),
             Pick::Release => {
                 self.picking = false;
+                // A drag or a double click on a text in a button: the
+                // button's open that its release sends next is dropped.
+                if matches!(key.part, Part::Preview | Part::Position) {
+                    self.drop_open.set(true);
+                }
                 Task::none()
             }
         }
@@ -125,7 +168,8 @@ impl App {
         let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
             return None;
         };
-        if self.screen != Screen::Chats || self.scene.chat.is_none() {
+        let open = self.scene.profile.is_some() || self.screen == Screen::Chats;
+        if !open {
             return None;
         }
         let runs = self.text_runs();
@@ -136,7 +180,7 @@ impl App {
                 Some(self.clip(Buffer::Clipboard, text))
             }
             keyboard::Key::Character("a") if modifiers.command() => {
-                self.picked = TextSelection::all(&runs);
+                self.picked = TextSelection::all(&self.whole());
                 Some(self.onto_primary(&runs))
             }
             keyboard::Key::Named(keyboard::key::Named::Escape) => {
@@ -148,9 +192,17 @@ impl App {
         }
     }
 
-    /// A middle click on the compose field: the PRIMARY selection is read
-    /// and pasted there.
-    pub(super) fn paste_primary(&self) -> Task<Message> {
+    /// A middle click on the compose field: the cursor goes where it
+    /// clicked (the pointer's last place over the field, less the field's
+    /// padding), and the PRIMARY selection is read and pasted there.
+    pub(super) fn paste_primary(&mut self) -> Task<Message> {
+        if let Some(at) = self.compose_pointer {
+            self.compose
+                .perform(text_editor::Action::Click(iced::Point::new(
+                    at.x - super::chat::COMPOSE_PAD_X,
+                    at.y - super::chat::COMPOSE_PAD_Y,
+                )));
+        }
         iced::clipboard::read_primary().map(Message::PrimaryText)
     }
 
