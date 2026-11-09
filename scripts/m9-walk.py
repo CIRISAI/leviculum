@@ -41,7 +41,11 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
                               <out>/dumps/<name>.png
     reboot                    EN pulse, wait for the UI, note restore_ms
     idle <s>                  watch the line <s> seconds: rx_lost must
-                              not grow
+                              not grow, and the last [UART] line's
+                              keys_rx= must equal the key frames sent
+                              since the boot (one fewer: a frame lost on
+                              the line) and keys_ui= be no less (fewer: a
+                              press no UI turn read; 1612)
     sleep <ms>                wait
     measure                   the key latencies and the [OPEN] lines so
                               far into walk.md
@@ -530,6 +534,13 @@ class Walk:
         self.restores = []
         self.boots = 0
         self.rx_lost = None
+        # 1612: the key frames sent since the last boot, and the board's
+        # two counts of them from its latest [UART] line: core 0's taken
+        # frames (keys_rx=) and the presses a UI turn read (keys_ui=).
+        self.keys_sent = 0
+        self.held = False
+        self.keys_rx = None
+        self.keys_ui = None
         self.loop_max = 0
         self.ui_drain_max = 0
         # 1575: a boot's own turns until its first [PAGE] line (the
@@ -621,7 +632,10 @@ class Walk:
             elif f.get("client") == "none":
                 self.home = "none"
         elif line.startswith("[UART] "):
-            self.rx_lost = int(fields(line).get("rx_lost", 0))
+            f = fields(line)
+            self.rx_lost = int(f.get("rx_lost", 0))
+            self.keys_rx = number(f, "keys_rx")
+            self.keys_ui = number(f, "keys_ui")
         elif line.startswith("[STORE] ") and "restore_ms=" in line:
             f = fields(line)
             self.restores.append((self.boots, f.get("restore", "?"), int(f["restore_ms"])))
@@ -651,6 +665,24 @@ class Walk:
     def fail(self, why):
         self.fails.append(why)
 
+    def check_keys(self):
+        """1612: every key frame sent since the boot taken by core 0
+        (`keys_rx=`), and every press core 0 took read by a UI turn
+        (`keys_ui=`), from the latest [UART] line. `keys_ui` may exceed
+        `keys_rx`: a hold repeats its press, and the controller answers a
+        stray code of its own now and then (`0xff` at a boot, window 23);
+        less is a press no UI turn handled."""
+        sent, rx, ui = self.keys_sent, self.keys_rx, self.keys_ui
+        if rx is None or ui is None:
+            return f"keys sent={sent} (no keys_rx=/keys_ui= on the line, an image before 1612)"
+        if rx != sent:
+            self.fail(f"keys: {sent} key frames sent since the boot, core 0 took {rx} (keys_rx=): "
+                      f"{sent - rx} lost on the line")
+        if ui < rx:
+            self.fail(f"keys: core 0 took {rx} key frames, UI turns read {ui} presses (keys_ui=): "
+                      f"{rx - ui} never reached a UI turn")
+        return f"keys sent={sent} keys_rx={rx} keys_ui={ui}"
+
     def row(self, step, extra=""):
         p = self.page
         self.md.append(
@@ -666,6 +698,7 @@ class Walk:
         self.rig.reset()
         self.page = {}
         self.boots += 1
+        self.keys_sent, self.held, self.keys_rx, self.keys_ui = 0, False, None, None
         # The UI up: a [PAGE] line, with or without the [WATCHDOG] line
         # before it (an image older than 1534 says none).
         self.booting = True
@@ -691,6 +724,8 @@ class Walk:
 
     def key(self, code, hold_ms=None):
         start = self.mark()
+        self.keys_sent += 1
+        self.held = self.held or bool(hold_ms)
         self.rig.send(key_frame(code, hold_ms))
         line, at = self.until(lambda l: l.startswith("KEY ") and f"code={code:#04x}" in l, KEY_WAIT_S, start)
         if not line:
@@ -1036,6 +1071,7 @@ class Walk:
                     self.fail(f"idle {args[0]} s: rx_lost grew {before} -> {self.rx_lost}")
                 if before is None or self.rx_lost is None:
                     extra += " (no [UART] line to compare)"
+                extra += "; " + self.check_keys()
             elif verb == "sleep":
                 self.pump(int(args[0]) / 1000)
             elif verb == "measure":
@@ -1119,7 +1155,7 @@ class FakeBoard(threading.Thread):
     def __init__(self, rig, slow_ms=0, grow_rx=False, refuse_owe=False, hang_on=None,
                  release=False, slow_turn=False, slow_drain=False, tops=(0, 5, 2), torn=False,
                  stuck_zoom=False, trail_ms=0, marks="guarded",
-                 home=None, torn_loop=False, dump_take_ms=20):
+                 home=None, torn_loop=False, dump_take_ms=20, lose_line=(), lose_ui=()):
         super().__init__(daemon=True)
         # 1603: the product's take in a dump's turn, beside its dump=.
         self.dump_take_ms = dump_take_ms
@@ -1147,6 +1183,13 @@ class FakeBoard(threading.Thread):
         self.cursor = 0
         self.rx_lost = 0
         self.boots = 0
+        # 1612: the key frames to lose: on the line (`lose_line`, never
+        # counted) or between the cores (`lose_ui`, counted in keys_rx and
+        # never a KEY line), each a set of 1-based frame numbers per boot.
+        self.lose_line, self.lose_ui = set(lose_line), set(lose_ui)
+        self.frames_in = 0
+        self.keys_rx = 0
+        self.keys_ui = 0
 
     def ms(self):
         return int((time.monotonic() - self.t0) * 1000)
@@ -1169,6 +1212,7 @@ class FakeBoard(threading.Thread):
                 self.boots += 1
                 self.cursor = 0
                 self.page = "chats"
+                self.frames_in = self.keys_rx = self.keys_ui = 0
                 restore = "whole" if self.boots == 1 else "resumed"
                 self.say("[PREV_RUN] reason=power record=none t=1",
                          f"[STORE] sectors=896 used=3 entries=40 restore={restore} restore_ms=640 t=900")
@@ -1190,7 +1234,8 @@ class FakeBoard(threading.Thread):
                     self.frame(bytes.fromhex(hexline))
             if self.grow_rx:
                 self.rx_lost += 1
-            self.say(f"[UART] rx_lost={self.rx_lost} overrun=0 t={self.ms()}")
+            self.say(f"[UART] rx_lost={self.rx_lost} overrun=0 keys_rx={self.keys_rx} "
+                     f"keys_ui={self.keys_ui} t={self.ms()}")
             time.sleep(0.05)
 
     def frame(self, data):
@@ -1205,6 +1250,13 @@ class FakeBoard(threading.Thread):
                 body.append(b)
         kind, payload = body[2], bytes(body[5:])
         if kind == TYPE_KEY_INJECT:
+            self.frames_in += 1
+            if self.frames_in in self.lose_line:
+                return
+            self.keys_rx += 1
+            if self.frames_in in self.lose_ui:
+                return
+            self.keys_ui += 1
             at = self.ms()
             code = payload[0]
             self.say(f"KBRAW {at} {code:02x}", f"KEY {at} code={code:#04x} name=x")
@@ -1446,6 +1498,27 @@ def selftest():
         if got == 0 or not any("rx_lost grew" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a growing rx_lost passed the idle step")
             rc = 1
+        # 1612: the idle step holds the board's key counts to the frames
+        # sent since the boot (the good walk passed it): a frame lost on
+        # the line, and one core 0 took that no UI turn read, fail by name.
+        with open(os.path.join(base, "good", "out", "walk.md")) as f:
+            if "keys sent=0 keys_rx=0 keys_ui=0" not in f.read():
+                print("[m9-walk] selftest FAIL: the idle step after the reboot did not say the key counts")
+                rc = 1
+        lost_walk = "key ring_down\nkey ring_down\nidle 0.4\n"
+        got, w, out = walk("keys", steps=lost_walk)
+        with open(os.path.join(out, "walk.md")) as f:
+            if got != 0 or "keys sent=2 keys_rx=2 keys_ui=2" not in f.read():
+                print("[m9-walk] selftest FAIL: two keys taken and read failed or went unsaid", w.fails)
+                rc = 1
+        got, w, _ = walk("loseline", steps=lost_walk, lose_line=(2,))
+        if got == 0 or not any("1 lost on the line" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a key frame lost on the line passed the idle step", w.fails)
+            rc = 1
+        got, w, _ = walk("loseui", steps=lost_walk, lose_ui=(2,))
+        if got == 0 or not any("1 never reached a UI turn" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a press no UI turn read passed the idle step", w.fails)
+            rc = 1
         # 1540: the bench steps pass on a good board and count its opens;
         # a refused owe and a hang on an open fail by name.
         got, w, out = walk("bench", steps=SELFTEST_HANG_WALK)
@@ -1644,7 +1717,7 @@ def selftest():
         if got == 0 or not any("expect zoom changed" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a zoom that never moved passed", w.fails)
             rc = 1
-    for name in ("bench.walk", "hang.walk", "forget.walk", "marks.walk"):
+    for name in ("bench.walk", "hang.walk", "forget.walk", "marks.walk", "chatkeys.walk", "arrivechat.walk"):
         shipped = os.path.join(os.path.dirname(os.path.abspath(__file__)), "m9-walks", name)
         try:
             with open(shipped) as f:
@@ -1688,6 +1761,7 @@ def selftest():
               "open longest picks the longest chat, on a board behind its keys too, and fails on a list "
               "of one-screen chats, a real chat's open says HOME mark at the home and a Bench open none, "
               "a torn dump is named TORN with its lost lines and still drawn, "
+              "a key frame lost on the line and a press no UI turn read fail the idle step, "
               "a zoom said behind the hint row's flush is waited for and one that never moves fails; "
               "a walk with opens is refused on another home, with no bench home and on an image that "
               "says none, before its first key, and runs without opens or without a home; "

@@ -25,6 +25,14 @@
 # The bars are 1533's except the key bar: Enter on a long chat took up to
 # 1.7 s in window 10 and the median key 170 ms, which is 1507's to fix and
 # the [OPEN] lines' to explain; this walk asks whether the board hangs.
+#
+# The closing `idle` holds the board's key counts to the walk (1612): the
+# last [UART] line's keys_rx= equals the key frames sent since the boot (a
+# frame lost on the line fails by name, as window 23's Back at block 21
+# was) and keys_ui= is no less (a press no UI turn read). After a lost
+# Back the next block's Enter lands in the open chat; since 1612 it opens
+# nothing the M9 does not draw, so the walk is back in step one block
+# later instead of standing on the chat to its end.
 allow key_ms 2000
 
 # open 1 of 50
