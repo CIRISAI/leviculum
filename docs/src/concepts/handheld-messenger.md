@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:1097`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:1102`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -952,9 +952,9 @@ returns with the action the scene's node offers
 (`every_group_key_runs_the_action_its_node_offers`). Its control: `m` and
 Enter on a peer's chat are not the group's.
 
-**The screens** (`sheet_lines`, `loquax-m9/src/group.rs:427`;
-`pick_lines`, `loquax-m9/src/group.rs:530`; `name_lines`,
-`loquax-m9/src/group.rs:588`), each the whole 53 x 24 grid. The sheet:
+**The screens** (`sheet_lines`, `loquax-m9/src/group.rs:472`;
+`pick_lines`, `loquax-m9/src/group.rs:575`; `name_lines`,
+`loquax-m9/src/group.rs:633`), each the whole 53 x 24 grid. The sheet:
 the group's name and how many are in it in the bar, a row a member with
 its standing ("admin", "joined", "left", "invited, delivering"), the
 reader as "You" in bold, the cursor's row behind the selection bar, then
@@ -1030,7 +1030,7 @@ board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 member's Join, Leave or the admin's Remove, which the model makes a state
 message to the group (`group_state`, `loquax/src/ui/groups.rs:1580`) and
 the home sends as any message (`/send`). `ask_of`
-(`loquax-m9/src/group.rs:318`) turns the model's effect into that verb,
+(`loquax-m9/src/group.rs:363`) turns the model's effect into that verb,
 with the board's fresh client id; a plain message is no group's ask.
 The harness test (`the_boards_group_keys_make_join_add_leave_and_delete_on_real_homes`,
 `loquax-android/tests/m9_client.rs:771`) runs it against two real homes
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1142`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1154`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:820`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:831`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1931,16 +1931,16 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2681`).
+both (`thinknode_m9.rs:2694`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
-(`CHANGED_WAIT_S`, `scripts/m9-walk.py:158`): T on the map flushes the
+(`CHANGED_WAIT_S`, `scripts/m9-walk.py:162`): T on the map flushes the
 hint's row first and says the zoom about 400 ms later. `key_ms` still
 measures the first flush after the key, and walk.md names its `rows=`.
 The house key opens the house page after its tap's 300 ms gap
 (`GAP_MS`, `loquax-m9/src/house.rs:43`), so its bar is that much longer
-(`HOUSE_GAP_MS`, `scripts/m9-walk.py:155`); `bench.walk` waits for
+(`HOUSE_GAP_MS`, `scripts/m9-walk.py:159`); `bench.walk` waits for
 `page=house` and leaves it with Back. An lnsd on the proxy's pty
 re-attaches by itself after a flash; a second one is refused with
 "shared-instance name already served" (`scripts/m9-walk.sh`).
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2693`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2706`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,7 +2035,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1003`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1008`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2109,7 +2109,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2754`), and the fold runs behind the list
+(`thinknode_m9.rs:2767`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2214,7 +2214,7 @@ device=940b1536…` at 09:06). `scripts/m9-bench-home.sh` keeps a
 The board's `[HOME] client=yes` line names its home's address
 (`home=`). `m9-walk.py` refuses a walk that opens chats (Enter or
 `open`) before its first key unless that address is the bench home's
-(`refusal`, `scripts/m9-walk.py:974`). A board without a home, and a
+(`refusal`, `scripts/m9-walk.py:1009`). A board without a home, and a
 walk without opens, run as before. Lew gets his own pairing back with
 `lnflash --home` or a code from his mailbox. The two never mix.
 
@@ -2293,12 +2293,12 @@ says its `[OPEN]` line too, with nothing read (`Open::held`,
 opens. `open longest` in `bench.walk` said "no rows" because
 `cursor_to` took a board behind its keys for the list's end: the key's
 flush came, its `[PAGE]` line four seconds later. It now waits for that
-line (`cursor_to`, `scripts/m9-walk.py:791`); the fixture's first rows
+line (`cursor_to`, `scripts/m9-walk.py:826`); the fixture's first rows
 hold the group and Anna (the sim's `--store real` list). The mark guard
 has its positive control, `scripts/m9-walks/marks.walk`: a real chat
 with an unread message (`m9-bench-home.sh send` right before) opened
 must say `HOME mark` in the bench home's own log, a Bench open must not
-(`expect [no] home`, `scripts/m9-walk.py:922`).
+(`expect [no] home`, `scripts/m9-walk.py:957`).
 
 ### The M9's own stack floor, measured (1582)
 
@@ -2435,7 +2435,7 @@ entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
 (the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
 could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
 heap at every step, as the forget's reopen and a taken code do
-(`leviculum-esp/src/bin/thinknode_m9.rs:1936`). The held bytes live in
+(`leviculum-esp/src/bin/thinknode_m9.rs:1941`). The held bytes live in
 2 KiB blocks, at most 35 s of the line (`RxHeld`,
 `leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
 the pool for 256 KiB in one piece, and 22 s was shorter than the
@@ -2461,9 +2461,48 @@ owed, the reboot `rebuilt`).
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside
 the take stage, so the walks read takes of 1 to 6 s. The dump is now
 timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
-`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2442`); `m9-walk.py`
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2447`); `m9-walk.py`
 takes `dump=` as the dump's turn and holds the rest of that turn to the
 bar.
+
+### The M9 holds no screen it does not draw (1612)
+
+Window 23 (bench image of 2a3c0c41, 2026-11-09) stood five minutes on a
+chat in the hang walk: 41 of 99 Enter and Back presses answered. The
+keys were never deaf. One Back frame was lost on the line before core 0
+took it (`keys_rx=` stayed at 41; why the frame went is the UART FIFO
+during an erase, 1613). The walker's next Enter then came inside the
+open chat, where the shared key table's Enter opens the message under
+the cursor (1076), its detail view (`loquax/src/ui.rs:5627`). The M9
+draws no detail view and its `[PAGE]` line called it `chat`, so the next
+Back closed what nobody saw, and every Enter and Back after it did the
+same: each one a `KEY` line the UI core wrote itself, no page change. The
+two window 23 probes that seemed to clear "Enter in a chat" and "an
+arrival in a chat" opened another chat with no message (`[OPEN]
+peer=f18f4927 messages=0`), where Enter has nothing to open. `:` on the
+M9's keyboard opened the palette the same way.
+
+Now every key the M9 handles ends with `close_unshown`
+(`loquax-m9/src/group.rs:322`): the message's detail, the profile, the
+settings, the help, the palette and the copy mode are closed again at
+once and said as `[UI] notice="unshown=<state> closed"`.
+`back_leaves_the_chat_after_an_enter_inside_it`
+(`loquax-m9/tests/unshown.rs:64`) was red on the detail,
+`no_key_leaves_a_screen_the_m9_does_not_draw`
+(`loquax-m9/tests/unshown.rs:85`) on the palette; the sim's replay of
+the walk's sequence left the chat on the second Back before, on the
+first after. Drawing a message's detail on the M9 is a screen of its own,
+not built.
+
+The board now counts both ends of a key: `keys_ui=` beside `keys_rx=`
+in the `[UART]` line (`leviculum-esp/src/lib.rs:755`), the presses a UI
+turn read into a `KEY` line, and a press that reaches no turn is a
+`KEY_DROP reason=queue_full|malformed|value` line. A walk's `idle` step
+holds them to the walk (`check_keys`, `scripts/m9-walk.py:668`): the
+frames sent since the boot against `keys_rx=`, and `keys_ui=` no less
+than `keys_rx=` (more is a hold's repeats or a stray code of the
+controller's). `scripts/m9-walks/chatkeys.walk` and `arrivechat.walk`
+are the probes again, opening "Bench" so each Enter stands on a message.
 
 ### Tracks on the M9 (1385, not built)
 
