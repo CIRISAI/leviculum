@@ -70,9 +70,13 @@ pub struct DatagramStats {
     /// Datagrams that did not decrypt or were too short to carry a sequence
     /// number. None of them was delivered.
     pub refused: u64,
-    /// Datagrams that decrypted but were already seen, or older than the
-    /// replay window. None of them was delivered.
+    /// Datagrams that decrypted but were already seen inside the replay
+    /// window. None of them was delivered.
     pub replayed: u64,
+    /// Datagrams that decrypted but arrived [`REPLAY_WINDOW`] or more behind
+    /// the newest: too late to tell from a replay, and too late to play.
+    /// None of them was delivered.
+    pub late: u64,
     /// Datagrams that decrypted but were not delivered because the host's
     /// event sink was down to the room it keeps for Channel messages.
     pub shed: u64,
@@ -90,14 +94,30 @@ pub struct ReplayWindow {
     seen: u64,
 }
 
+/// What the replay window made of a sequence number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowVerdict {
+    /// Not seen before and inside the window: deliver it.
+    Fresh,
+    /// Already seen inside the window.
+    Replayed,
+    /// [`REPLAY_WINDOW`] or more behind the newest.
+    Late,
+}
+
 impl ReplayWindow {
     /// Accept `sequence` and record it, or refuse it as a replay or as
     /// older than the window.
     pub fn accept(&mut self, sequence: u32) -> bool {
+        self.check(sequence) == WindowVerdict::Fresh
+    }
+
+    /// [`Self::accept`], saying why a refused sequence number was refused.
+    pub fn check(&mut self, sequence: u32) -> WindowVerdict {
         let Some(highest) = self.highest else {
             self.highest = Some(sequence);
             self.seen = 1;
-            return true;
+            return WindowVerdict::Fresh;
         };
         let ahead = sequence.wrapping_sub(highest) as i32;
         if ahead > 0 {
@@ -109,18 +129,18 @@ impl ReplayWindow {
             };
             self.seen |= 1;
             self.highest = Some(sequence);
-            return true;
+            return WindowVerdict::Fresh;
         }
         let behind = ahead.unsigned_abs();
         if behind >= REPLAY_WINDOW {
-            return false;
+            return WindowVerdict::Late;
         }
         let bit = 1u64 << behind;
         if self.seen & bit != 0 {
-            return false;
+            return WindowVerdict::Replayed;
         }
         self.seen |= bit;
-        true
+        WindowVerdict::Fresh
     }
 }
 
@@ -168,9 +188,9 @@ mod tests {
         assert!(w.accept(11), "late but inside the window");
         assert!(!w.accept(11), "a replay of the late one");
         assert!(w.accept(76));
-        assert!(!w.accept(76 - 64), "64 behind: outside the window");
+        assert_eq!(w.check(76 - 64), WindowVerdict::Late, "64 behind: outside");
         assert!(w.accept(76 - 63), "63 behind: inside");
-        assert!(!w.accept(76 - 63), "and only once");
+        assert_eq!(w.check(76 - 63), WindowVerdict::Replayed, "and only once");
         assert!(w.accept(1_000_000), "a jump clears the window");
         assert!(!w.accept(1_000_000 - 64));
     }

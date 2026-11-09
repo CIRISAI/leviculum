@@ -229,7 +229,7 @@ The replay is lnsd answering from its cache: a path request from a local
 client for a destination the path table holds is answered with the cached
 announce, sent to the requesting interface alone, and the handler returns
 without forwarding the request (`handle_path_request`,
-`leviculum-core/src/transport.rs:12306`, the local-client arm at
+`leviculum-core/src/transport.rs:12312`, the local-client arm at
 `:12157-12202`, the send at `:12195`; pinned by
 `test_path_request_from_local_client_returns_cached_announce`, `:30745`,
 which asserts no send to the network interface and no

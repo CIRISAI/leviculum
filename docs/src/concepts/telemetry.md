@@ -548,14 +548,14 @@ their index stamps (there is no re-index).
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch
   (`reference/Reticulum/RNS/Transport.py:1177-1182`, our equivalent
-  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:4935`)
+  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:4941`)
   applies to a packet that already exists, and building one required the
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.
 - **A path, or a request for one.** `send_to_destination`
-  (`leviculum-core/src/transport.rs:5046`) fails without a path entry.
+  (`leviculum-core/src/transport.rs:5052`) fails without a path entry.
   The primitive for obtaining one is `request_path_unthrottled`
-  (`leviculum-core/src/node/mod.rs:4034`), the application's request,
+  (`leviculum-core/src/node/mod.rs:4038`), the application's request,
   which always leaves; a node with the key but no path asks and waits
   rather than giving up.
 - **An out-of-band trust step at the receiver, in the operator's hands.**

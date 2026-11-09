@@ -584,6 +584,9 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// is kept in the channel's rx ring, proven, with no `MessageReceived`
     /// yet; it is delivered once the host has room (748).
     channel_delivery_budget: Option<usize>,
+    /// +ciris (leviculum#102): the event slots the host keeps for Channel
+    /// messages; a datagram arriving with no more room than this is shed.
+    datagram_sink_reserve: usize,
     /// Count of channel packets held for a full host sink since last log
     channel_backpressure_count: u64,
     /// Timestamp (ms) when the last host-backpressure log was emitted
@@ -769,6 +772,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             rx_ring_full_count: 0,
             rx_ring_full_last_log_ms: 0,
             channel_delivery_budget: None,
+            datagram_sink_reserve: datagram::DATAGRAM_SINK_RESERVE,
             channel_backpressure_count: 0,
             channel_backpressure_last_log_ms: 0,
             destinations: BTreeMap::new(),
@@ -13599,8 +13603,8 @@ mod timed;
 mod datagram;
 #[cfg(test)]
 mod mvr_link_datagram;
-pub use crate::link::datagram::{DatagramStats, ReplayWindow};
-pub use datagram::DATAGRAM_SINK_RESERVE;
+pub use crate::link::datagram::{DatagramStats, ReplayWindow, WindowVerdict};
+pub use datagram::{datagram_sink_reserve_for, DATAGRAM_SINK_RESERVE};
 pub use event::FrameExpiry;
 #[cfg(test)]
 mod mvr_relay_route;

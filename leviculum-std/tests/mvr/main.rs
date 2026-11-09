@@ -65,7 +65,7 @@ pub use harness::port_alloc;
 /// pushes one `String` into the buffer of EVERY capture handle any test has
 /// registered, "regardless of which test emitted it" (that module's own doc).
 /// So the code under test emitting `PKT_TX`
-/// (`leviculum-core/src/transport.rs:4871`) inside the window made THIS
+/// (`leviculum-core/src/transport.rs:4877`) inside the window made THIS
 /// thread pay another test's `Vec<String>` growth step: on 2026-09-25,
 /// `link_failure_recovery_silent_resume.rs:520` held the only handle in this
 /// binary, its buffer crossed 256 -> 512 entries during the calibration
