@@ -926,14 +926,33 @@ impl Handheld {
     /// After a forget (1562): the client made again from its record, the
     /// store restored from the flash (a rebuild, the summary being
     /// erased), and the model the UI core takes in place of its own.
+    ///
+    /// The old client goes before the rebuild starts (1603): its shelf,
+    /// index and drained pages stood beside the new model for the
+    /// rebuild's 25 s, and with the UI core's old model
+    /// ([`Handheld::bench_release`]) a second whole model's worth of the
+    /// IO pool was taken when the long chat's messages grew to 2048 of
+    /// 136 B (window 22: `memory allocation of 278528 bytes failed`).
     pub fn bench_reopen(
         &mut self,
         stores: &mut Stores<'_>,
         log: &mut UartLog<'_>,
         feed: &dyn Fn(),
     ) -> Option<UiModel<Field>> {
-        let client = self.client.take()?;
-        self.client(client.record, client.batch, stores, log, feed)
+        // Moved out and the rest dropped here, not at the end of the call.
+        let Client { record, batch, .. } = self.client.take()?;
+        self.client(record, batch, stores, log, feed)
+    }
+
+    /// The empty model the UI core takes before a reopen (1603), so the
+    /// one it shows, every message of the ring after a rebuild, is freed
+    /// before the reopen builds the next: two whole models do not fit the
+    /// IO pool beside the map and the renderer. `None` on a board that is
+    /// no device of a home.
+    pub fn bench_release(&self) -> Option<UiModel<Field>> {
+        self.client
+            .as_ref()
+            .map(|client| m9home::model(client.address))
     }
 
     /// `TYPE_BENCH_FORGET` (1562): the bench's arrivals out of the

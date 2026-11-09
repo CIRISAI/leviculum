@@ -2247,6 +2247,11 @@ fn main() -> ! {
                         leviculum_esp::pump_rx();
                     };
                     if node.bench_forget(&mut stores, &mut log, &feed) {
+                        // The UI core frees the model it shows before the
+                        // rebuild builds the next (1603): two did not fit.
+                        if let Some(empty) = node.bench_release() {
+                            to_ui(ToUi::Model(Box::new(empty)));
+                        }
                         if let Some(model) = node.bench_reopen(&mut stores, &mut log, &feed) {
                             to_ui(ToUi::Model(Box::new(model)));
                             to_ui(ToUi::Word(node.word()));

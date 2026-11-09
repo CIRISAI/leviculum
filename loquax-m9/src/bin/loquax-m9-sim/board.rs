@@ -668,6 +668,10 @@ impl Board {
                 done.summary_erased
             ),
         );
+        // The old shelf and model go before the reopen builds the next,
+        // as the bench image frees them (1603, `Handheld::bench_release`).
+        self.shelf = None;
+        *self.model = home::model(address);
         let mut outgoing = Outgoing::default();
         let (model, shelf) = open_store(
             &mut self.flash,
