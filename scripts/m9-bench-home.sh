@@ -163,7 +163,8 @@ join() {
 send() {
     local dir="$1" config="$2"; shift 2
     [ -f "$dir/address" ] || { echo "$TAG FAIL $dir is no bench home (setup first)"; exit 1; }
-    local args=(--to "$(cat "$dir/address")" --text "$*" --identity "$dir/sender-identity")
+    local args=(--to "$(cat "$dir/address")" --text "$*" --identity "$dir/sender-identity"
+                --address-out "$dir/sender-address")
     [ -n "$config" ] && args+=(--rnsconfig "$config")
     PYTHONPATH="$ROOT/reference/Reticulum:$ROOT/reference/LXMF" \
         python3 "$ROOT/scripts/m9-bench-send.py" "${args[@]}"

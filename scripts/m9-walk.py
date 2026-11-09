@@ -192,6 +192,11 @@ NAMES = {
 VERBS = ("key", "hold", "wait", "expect", "dump", "reboot", "idle", "sleep", "measure", "bench", "allow", "open",
          "row")
 OPEN_ROWS = 8
+# `open peer` (1594): the rows it opens at most looking for the peer, and
+# how long it waits for an open's [OPEN] line (said once the frame after
+# the page is flushed).
+PEER_ROWS = 24
+OPEN_LINE_WAIT_S = 5.0
 
 # The presses `cursor_to` makes at most (1591): the 1489 fixture's 302
 # rows and a margin, so row 0 is reached from the list's end.
@@ -230,7 +235,10 @@ def parse(steps):
             if verb == "row":
                 if len(args) != 1 or int(args[0]) < 0:
                     raise ValueError("row <n>, n 0 or more")
-            if verb == "open":
+            if verb == "open" and args[:1] == ["peer"]:
+                if len(args) != 2 or not (args[1] == "sender" or re.fullmatch(r"[0-9a-fA-F]{4,32}", args[1])):
+                    raise ValueError("open peer <4 to 32 hex>|sender")
+            elif verb == "open":
                 if args[:1] != ["longest"] or len(args) > 2 or (len(args) == 2 and not 0 < int(args[1]) <= 64):
                     raise ValueError("open longest [<rows>], rows 1 to 64")
         except (IndexError, ValueError) as e:
@@ -795,6 +803,60 @@ class Walk:
                 return False
         return False
 
+    def sender_address(self):
+        """The bench sender's LXMF address (1594): `sender-address` beside
+        the bench home's mailbox.log, written by `m9-bench-home.sh send`.
+        None when there is none."""
+        if not self.home_log:
+            return None
+        try:
+            with open(os.path.join(os.path.dirname(self.home_log), "sender-address")) as f:
+                word = (f.read().split() or [""])[0].lower()
+        except OSError:
+            return None
+        return word if re.fullmatch(r"[0-9a-f]{32}", word) else None
+
+    def open_peer(self, want):
+        """Open the chat of peer `want` (1594, marks.walk's control): the
+        list's rows from the top opened in turn until an open's [OPEN]
+        line names a peer whose hex starts as `want` does, that chat left
+        open. The control does not hang on the list's order (window 19:
+        a preloaded row rose over the sender's to row 0). `sender` is the
+        bench sender's address ([`sender_address`]). The rows opened on
+        the way are named in the step's line: an open marks its unread
+        read, so a walk that wants one open only puts the peer first."""
+        if want == "sender":
+            want = self.sender_address()
+            if want is None:
+                self.fail("open peer sender: no sender-address beside the bench home's log "
+                          "(scripts/m9-bench-home.sh send writes it)")
+                return "no sender address"
+        want = want.lower()
+        if not self.wait_page("chats", 5000):
+            self.fail(f"open peer {want}: not on the list ({self.page.get('name')})")
+            return "not on the list"
+        passed = []
+        for row in range(PEER_ROWS):
+            if not self.cursor_to(row):
+                break
+            start = self.mark()
+            self.key(NAMES["enter"])
+            if not self.wait_page("chat", 5000):
+                self.fail(f"open peer {want}: row {row} did not open")
+                return f"row {row} did not open"
+            got, _ = self.until(lambda l: l.startswith("[OPEN] "), OPEN_LINE_WAIT_S, start)
+            peer = fields(got).get("peer", "").lower() if got else ""
+            n = min(len(peer), len(want))
+            if n >= 4 and peer[:n] == want[:n]:
+                return f"row {row} peer={peer}" + (f" (opened first: {' '.join(passed)})" if passed else "")
+            passed.append(f"{row}:{peer or 'no-open-line'}")
+            self.key(NAMES["back"])
+            if not self.wait_page("chats", 5000):
+                self.fail(f"open peer {want}: no way back to the list from row {row}")
+                return f"no way back from row {row}"
+        self.fail(f"open peer {want}: none of the first {len(passed)} rows is its chat ({' '.join(passed)})")
+        return "not found"
+
     def open_longest(self, rows):
         """Open the list's first `rows` chats in turn and the one whose
         [PAGE] top is largest last: the held scrolls after it test
@@ -974,6 +1036,8 @@ class Walk:
             elif verb == "allow":
                 self.key_bar = int(args[1])
                 extra = f"key bar {self.key_bar} ms from here"
+            elif verb == "open" and args[0] == "peer":
+                extra = self.open_peer(args[1])
             elif verb == "open":
                 extra = self.open_longest(int(args[1]) if len(args) == 2 else OPEN_ROWS)
             elif verb == "row":
@@ -1187,10 +1251,13 @@ class FakeBoard(threading.Thread):
                              "[WATCHDOG] core0=mwdt0 core1=mwdt1 timeout_ms=5000 record=rtc-slow t=950")
                     self.page_line()
                     return
-                self.say("[OPEN] peer=0a0b0c0d entries=24 messages=23 marks=1 sectors=6 wait_ms=12.500 "
+                # Each row its own peer (1594, `open peer`): row 0's
+                # 0a0b0c0d, row 1's 0a0b0c0e, ...
+                peer = f"{0x0a0b0c0d + self.row:08x}"
+                self.say(f"[OPEN] peer={peer} entries=24 messages=23 marks=1 sectors=6 wait_ms=12.500 "
                          "page_read_ms=9.000 decode_ms=30.250 unpack_ms=10.000 alloc_ms=5.000 "
                          "fold_ms=40.000 scene_ms=20.000 draw_ms=35.000 flush_ms=14.000",
-                         "[OPEN_HEAP] peer=0a0b0c0d heap_free=8000000/7990000 heap_largest=7000000/6990000",
+                         f"[OPEN_HEAP] peer={peer} heap_free=8000000/7990000 heap_largest=7000000/6990000",
                          "[DISP] flush rows=24..239 ms=14.000 t=%d" % self.ms())
         elif kind == TYPE_BENCH_OWE:
             flags = payload[0] if payload else 0
@@ -1324,10 +1391,13 @@ SELFTEST_OTHER = "fedcba9876543210fedcba9876543210"
 def selftest():
     rc = 0
     with tempfile.TemporaryDirectory(dir=os.environ.get("M9_WALK_TMP")) as base:
-        def walk(name, steps=SELFTEST_WALK, bench_home=SELFTEST_HOME, **board):
+        def walk(name, steps=SELFTEST_WALK, bench_home=SELFTEST_HOME, sender=None, **board):
             rig = os.path.join(base, name)
             os.makedirs(rig)
             open(os.path.join(rig, "raw.bin"), "wb").close()
+            if sender:
+                with open(os.path.join(rig, "sender-address"), "w") as f:
+                    f.write(sender + "\n")
             fake = FakeBoard(rig, **board)
             fake.start()
             out = os.path.join(rig, "out")
@@ -1375,6 +1445,36 @@ def selftest():
         if got == 0 or not any("reason=wdt0" in f for f in w.fails):
             print("[m9-walk] selftest FAIL: a hang on an open passed the [PREV_RUN] bar", w.fails)
             rc = 1
+        # 1594: `open peer` opens the row whose [OPEN] line names the
+        # peer, past the rows before it; `sender` is the address beside
+        # the home's log; a peer no row has fails by name, and so does
+        # `sender` with no address written.
+        def said(out, words):
+            with open(os.path.join(out, "walk.md")) as f:
+                return words in f.read()
+        peer_walk = "open peer {}\nexpect page=chat\nkey back\nwait page=chats\n"
+        got, w, out = walk("peer", steps=peer_walk.format("0a0b0c0f"))
+        if got != 0 or not said(out, "row 2 peer=0a0b0c0f"):
+            print("[m9-walk] selftest FAIL: open peer did not open row 2's chat:", w.fails)
+            rc = 1
+        got, w, out = walk("sender", steps=peer_walk.format("sender"), sender="0a0b0c0e" + "1" * 24)
+        if got != 0 or not said(out, "row 1 peer=0a0b0c0e"):
+            print("[m9-walk] selftest FAIL: open peer sender did not open the sender's chat:", w.fails)
+            rc = 1
+        got, w, _ = walk("nopeer", steps=peer_walk.format("ffff"))
+        if got == 0 or not any("none of the first" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: a peer no row has passed open peer:", w.fails)
+            rc = 1
+        got, w, _ = walk("nosender", steps=peer_walk.format("sender"))
+        if got == 0 or not any("no sender-address" in f for f in w.fails):
+            print("[m9-walk] selftest FAIL: open peer sender without an address passed:", w.fails)
+            rc = 1
+        try:
+            parse(["open peer 0a0"])
+            print("[m9-walk] selftest FAIL: a three-hex peer parsed")
+            rc = 1
+        except ValueError:
+            pass
         # 1562: a walk with opens on a board joined to another home is
         # refused before its first key (the positive control: no KEY,
         # no open), so is one with no bench home known and one whose

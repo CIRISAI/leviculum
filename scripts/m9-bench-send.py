@@ -36,6 +36,8 @@ def main():
     ap.add_argument("--rnsconfig", default=None, help="the shared instance's config folder")
     ap.add_argument("--identity", default=None, help="the sender's identity file, made when missing")
     ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--address-out", default=None,
+                    help="write the sender's LXMF address here, 32 hex (1594: marks.walk's `open peer sender`)")
     a = ap.parse_args()
     to = bytes.fromhex(a.to)
     if len(to) != 16:
@@ -52,6 +54,9 @@ def main():
     storage = tempfile.mkdtemp(prefix="m9-bench-send-")
     router = LXMF.LXMRouter(identity=identity, storagepath=storage)
     source = router.register_delivery_identity(identity, display_name="Bench sender")
+    if a.address_out:
+        with open(a.address_out, "w") as f:
+            f.write(source.hash.hex() + "\n")
     router.announce(source.hash)
 
     t0 = time.monotonic()
