@@ -12,6 +12,15 @@
 //! maps the pointer to a place in the text and draws the range it is
 //! given. Loquax keeps it in its core (`loquax::ui::selection`).
 //!
+//! A text inside a button (a list row, a position line that opens the
+//! map) is made selectable with [`Selectable::in_button`] (1475): a plain
+//! press there is the button's, so the widget says nothing of it and
+//! lets it through; the press becomes a selection's only once the pointer
+//! moved more than [`DRAG_PX`] from where it went down (then the press is
+//! reported where it went down, and the drag from there), or when it is a
+//! double or a triple click or Shift was held. The program drops the
+//! button's own press that the release of such a drag still sends.
+//!
 //! The pointer is mapped with a second paragraph of the same text, cut
 //! into spans at the newlines and the selection's ends, laid out with the
 //! inner text's own font, size and bounds: its spans tell which line a
@@ -19,6 +28,7 @@
 //! where the selection's rectangles are. It is built only for a text
 //! that is selected or under the pointer, never for the others.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use iced::advanced::mouse::click::Kind as ClickKind;
@@ -41,13 +51,17 @@ pub enum Pick {
     Release,
 }
 
+/// How far, in logical pixels, the pointer moves from a plain press on a
+/// text in a button before the press is a selection's drag.
+pub const DRAG_PX: f32 = 4.0;
+
 /// `inner`, a text widget showing `content`, made selectable: `range`
 /// drawn in `highlight` under it, the button's [`Pick`]s through `on`.
 /// `dragging`: a press went down on some selectable text and the button
 /// is still held, so this one reports the pointer over it too.
 pub fn selectable<'a, M, Theme, Renderer>(
     inner: impl Into<Element<'a, M, Theme, Renderer>>,
-    content: &'a str,
+    content: impl Into<Cow<'a, str>>,
     range: Option<Range<usize>>,
     highlight: Color,
     dragging: bool,
@@ -55,21 +69,33 @@ pub fn selectable<'a, M, Theme, Renderer>(
 ) -> Selectable<'a, M, Theme, Renderer> {
     Selectable {
         inner: inner.into(),
-        content,
+        content: content.into(),
         range: range.filter(|r| r.start < r.end),
         highlight,
         dragging,
+        in_button: false,
         on: Box::new(on),
+    }
+}
+
+impl<M, Theme, Renderer> Selectable<'_, M, Theme, Renderer> {
+    /// The text is inside a button: a plain press is the button's, and
+    /// only a drag past [`DRAG_PX`], a double or triple click or a
+    /// Shift+click selects.
+    pub fn in_button(mut self) -> Self {
+        self.in_button = true;
+        self
     }
 }
 
 /// See [`selectable`].
 pub struct Selectable<'a, M, Theme, Renderer> {
     inner: Element<'a, M, Theme, Renderer>,
-    content: &'a str,
+    content: Cow<'a, str>,
     range: Option<Range<usize>>,
     highlight: Color,
     dragging: bool,
+    in_button: bool,
     on: Box<dyn Fn(Pick) -> M + 'a>,
 }
 
@@ -89,6 +115,9 @@ struct State<P> {
     pressed: bool,
     shift: bool,
     last_drag: Option<usize>,
+    /// In a button: a plain press not reported yet, where it went down
+    /// and the byte there; it is reported once it is a drag.
+    held: Option<(Point, usize)>,
 }
 
 impl<P> Default for State<P> {
@@ -99,6 +128,7 @@ impl<P> Default for State<P> {
             pressed: false,
             shift: false,
             last_drag: None,
+            held: None,
         }
     }
 }
@@ -166,12 +196,12 @@ where
             .cut
             .as_ref()
             .is_some_and(|c| {
-                c.content == self.content && c.range == self.range && c.bounds == bounds
+                c.content == *self.content && c.range == self.range && c.bounds == bounds
             });
         if fresh {
             return;
         }
-        let starts = span_starts(self.content, self.range.as_ref());
+        let starts = span_starts(&self.content, self.range.as_ref());
         let spans: Vec<Span<'_, (), Renderer::Font>> = starts
             .iter()
             .enumerate()
@@ -211,7 +241,7 @@ where
         let index = cut.paragraph.hit_test(point).map(|h| h.cursor());
         // On a glyph the span says the line.
         if let Some(span) = cut.paragraph.hit_span(point) {
-            return Some(offset_of(self.content, line_of(span), index.unwrap_or(0)));
+            return Some(offset_of(&self.content, line_of(span), index.unwrap_or(0)));
         }
         // Beside the glyphs, the span nearest in height.
         let mut best: Option<(f32, usize)> = None;
@@ -231,7 +261,7 @@ where
         }
         match best {
             Some((_, span)) => Some(offset_of(
-                self.content,
+                &self.content,
                 line_of(span),
                 index.unwrap_or(usize::MAX),
             )),
@@ -328,21 +358,69 @@ where
                         let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
                         let click = Click::new(p, mouse::Button::Left, state.last_click);
                         state.last_click = Some(click);
-                        state.pressed = true;
-                        state.last_drag = Some(at);
                         let clicks = match click.kind() {
                             ClickKind::Single => 1,
                             ClickKind::Double => 2,
                             ClickKind::Triple => 3,
                         };
                         let shift = state.shift;
-                        shell.publish((self.on)(Pick::Press { at, clicks, shift }));
-                        shell.capture_event();
-                        return;
+                        // A plain press on a text in a button is the
+                        // button's until it moves.
+                        if self.in_button && clicks == 1 && !shift {
+                            state.held = Some((p, at));
+                            state.pressed = true;
+                            state.last_drag = Some(at);
+                        } else {
+                            state.held = None;
+                            state.pressed = true;
+                            state.last_drag = Some(at);
+                            shell.publish((self.on)(Pick::Press { at, clicks, shift }));
+                            shell.capture_event();
+                            return;
+                        }
                     }
                 }
             }
-            Event::Mouse(mouse::Event::CursorMoved { .. }) if self.dragging => {
+            // A plain press in a button moved far enough: a selection's
+            // press where it went down, and the drag from there.
+            // (The cursor, not the event's position: inside a scrollable
+            // the cursor is the one moved by the scroll, as the press's.)
+            Event::Mouse(mouse::Event::CursorMoved { .. })
+                if tree
+                    .state
+                    .downcast_ref::<State<Renderer::Paragraph>>()
+                    .held
+                    .zip(cursor.position())
+                    .is_some_and(|((from, _), now)| from.distance(now) > DRAG_PX) =>
+            {
+                let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
+                if let Some((_, at)) = state.held.take() {
+                    shell.publish((self.on)(Pick::Press {
+                        at,
+                        clicks: 1,
+                        shift: false,
+                    }));
+                }
+                if let Some(p) = over {
+                    self.cut(tree);
+                    if let Some(at) = self.hit(tree, p - Vector::new(bounds.x, bounds.y)) {
+                        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
+                        if state.last_drag != Some(at) {
+                            state.last_drag = Some(at);
+                            shell.publish((self.on)(Pick::Drag { at }));
+                        }
+                    }
+                }
+            }
+            // The program's drag, or this text's own press still held
+            // (its first moves come before the program's next view says
+            // a drag is on).
+            Event::Mouse(mouse::Event::CursorMoved { .. })
+                if self.dragging || {
+                    let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
+                    state.pressed && state.held.is_none()
+                } =>
+            {
                 if let Some(p) = over {
                     self.cut(tree);
                     if let Some(at) = self.hit(tree, p - Vector::new(bounds.x, bounds.y)) {
@@ -363,7 +441,11 @@ where
                 if state.pressed {
                     state.pressed = false;
                     state.last_drag = None;
-                    shell.publish((self.on)(Pick::Release));
+                    // A press that stayed the button's: its click, not a
+                    // selection's release.
+                    if state.held.take().is_none() {
+                        shell.publish((self.on)(Pick::Release));
+                    }
                 }
             }
             _ => {}
@@ -587,5 +669,82 @@ mod tests {
         assert_eq!(offset_of(text, 1, 3), 6);
         assert_eq!(offset_of(text, 2, 5), 14);
         assert_eq!(offset_of(text, 9, 0), text.len());
+    }
+
+    /// What a text in a button tells, and the button's own press.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Said {
+        Pick(Pick),
+        Opened,
+    }
+
+    /// The words in a button that opens, as a list row's last line.
+    fn in_a_button() -> Element<'static, Said> {
+        column![crate::control::flat(
+            selectable(
+                text(WORDS).size(20),
+                WORDS,
+                None,
+                Color::from_rgba(0.0, 0.0, 1.0, 0.3),
+                false,
+                Said::Pick,
+            )
+            .in_button(),
+            Said::Opened,
+        )]
+        .into()
+    }
+
+    /// In a button (1475): a plain click is the button's alone, a move of
+    /// up to [`DRAG_PX`] still is, a drag past it is a selection's press
+    /// where the button went down and its drag, and a double click
+    /// selects. The release of a drag still reaches the button: the
+    /// program drops that open.
+    #[test]
+    fn in_a_button_a_click_opens_and_a_drag_or_a_double_click_selects() {
+        let at = Point::new(4.0, 15.0);
+        let said = headless::clicks(in_a_button(), at, 1, 240, 40).expect("a renderer");
+        assert_eq!(said, vec![Said::Opened]);
+        let still = Point::new(at.x + DRAG_PX - 1.0, at.y);
+        let said = headless::drag(in_a_button(), at, still, 2, 240, 40).expect("a renderer");
+        assert_eq!(said, vec![Said::Opened], "a shaking hand is a click");
+        let far = Point::new(at.x + 80.0, at.y);
+        let said = headless::drag(in_a_button(), at, far, 8, 240, 40).expect("a renderer");
+        assert!(
+            matches!(
+                said.first(),
+                Some(Said::Pick(Pick::Press {
+                    at: 0,
+                    clicks: 1,
+                    shift: false
+                }))
+            ),
+            "{said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|s| matches!(s, Said::Pick(Pick::Drag { at }) if *at > 3)),
+            "{said:?}"
+        );
+        let release = said.iter().position(|s| *s == Said::Pick(Pick::Release));
+        let opened = said.iter().position(|s| *s == Said::Opened);
+        assert!(
+            matches!((release, opened), (Some(r), Some(o)) if r < o),
+            "the release comes first, the button's open after it: {said:?}"
+        );
+        let said = headless::clicks(in_a_button(), at, 2, 240, 40).expect("a renderer");
+        assert_eq!(
+            said,
+            vec![
+                Said::Opened,
+                Said::Pick(Pick::Press {
+                    at: 0,
+                    clicks: 2,
+                    shift: false
+                }),
+                Said::Pick(Pick::Release),
+            ],
+            "the first click opens, the second selects the word"
+        );
     }
 }

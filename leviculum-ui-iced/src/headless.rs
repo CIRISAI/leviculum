@@ -701,10 +701,49 @@ pub fn click<M>(element: Element<'_, M>, at: Point, w: u32, h: u32) -> Option<Ve
 /// as quickly as a double or a triple click (1444): the pointer moves
 /// there, the button goes down and comes up `n` times. The messages the
 /// widgets published, in order; `None` without a renderer.
-pub fn clicks<M>(
+pub fn clicks<M>(element: Element<'_, M>, at: Point, n: usize, w: u32, h: u32) -> Option<Vec<M>> {
+    let presses = (0..n).flat_map(|_| {
+        [
+            (mouse::Event::ButtonPressed(mouse::Button::Left), at),
+            (mouse::Event::ButtonReleased(mouse::Button::Left), at),
+        ]
+    });
+    let steps: Vec<_> = std::iter::once((mouse::Event::CursorMoved { position: at }, at))
+        .chain(presses)
+        .collect();
+    gesture(element, &steps, w, h)
+}
+
+/// The left button pressed at `from`, the pointer moved to `to` in
+/// `steps` even steps with it held, and released there (1475): a drag on
+/// `element` laid out on `w` by `h`. The messages, in order.
+pub fn drag<M>(
+    element: Element<'_, M>,
+    from: Point,
+    to: Point,
+    steps: usize,
+    w: u32,
+    h: u32,
+) -> Option<Vec<M>> {
+    let mut script = vec![
+        (mouse::Event::CursorMoved { position: from }, from),
+        (mouse::Event::ButtonPressed(mouse::Button::Left), from),
+    ];
+    for n in 1..=steps.max(1) {
+        let f = n as f32 / steps.max(1) as f32;
+        let at = Point::new(from.x + (to.x - from.x) * f, from.y + (to.y - from.y) * f);
+        script.push((mouse::Event::CursorMoved { position: at }, at));
+    }
+    script.push((mouse::Event::ButtonReleased(mouse::Button::Left), to));
+    gesture(element, &script, w, h)
+}
+
+/// The mouse events of `script` on `element` laid out once on `w` by `h`,
+/// each with the pointer where it says (1475). The messages the widgets
+/// published, in order; `None` without a renderer.
+pub fn gesture<M>(
     mut element: Element<'_, M>,
-    at: Point,
-    n: usize,
+    script: &[(mouse::Event, Point)],
     w: u32,
     h: u32,
 ) -> Option<Vec<M>> {
@@ -717,21 +756,14 @@ pub fn clicks<M>(
         &layout::Limits::new(Size::ZERO, size),
     );
     let viewport = Rectangle::with_size(size);
-    let cursor = mouse::Cursor::Available(at);
     let mut messages = Vec::new();
-    let presses = (0..n).flat_map(|_| {
-        [
-            mouse::Event::ButtonPressed(mouse::Button::Left),
-            mouse::Event::ButtonReleased(mouse::Button::Left),
-        ]
-    });
-    for event in std::iter::once(mouse::Event::CursorMoved { position: at }).chain(presses) {
+    for (event, at) in script {
         let mut shell = Shell::new(&mut messages);
         element.as_widget_mut().update(
             &mut tree,
-            &Event::Mouse(event),
+            &Event::Mouse(*event),
             Layout::new(&node),
-            cursor,
+            mouse::Cursor::Available(*at),
             &renderer,
             &mut clipboard::Null,
             &mut shell,
