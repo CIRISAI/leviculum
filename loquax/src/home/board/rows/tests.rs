@@ -154,6 +154,51 @@ fn snapshots_keep_every_record_across_the_ring() {
     }
 }
 
+/// 1594, window 19: a busy log written only by bounded writes (a pull,
+/// no quiet moment) reached three quarters of its ring since the last
+/// snapshot and wrote the next one whole in one call. A bounded write
+/// now begins the snapshot when it is due and writes it a budget at a
+/// time: no call erases more than a budget's sectors, and the ring still
+/// keeps every quiet conversation's record.
+#[test]
+fn bounded_writes_write_a_due_snapshot_a_budget_at_a_time() {
+    let mut flash = MemFlash::new(64);
+    let (mut log, _) = RowLog::open(&mut flash, TAG).expect("open");
+    let mut index = Index::default();
+    // About seven sectors of quiet rows, written once.
+    let quiet_line = "q".repeat(400);
+    for peer in 1..=60u8 {
+        index.row(row(peer, &quiet_line));
+    }
+    while index.owes() {
+        log.write_within(&mut flash, &mut index, Some(&state(0)), Some(WRITE_BUDGET))
+            .expect("first");
+    }
+    let line = "x".repeat(400);
+    let mut most = 0;
+    for turn in 0..1200u64 {
+        index.row(row(200, &line));
+        index.kept.get_mut(&[200; 16]).expect("busy").entries = turn as u32;
+        index.owed.insert([200; 16]);
+        let done = log
+            .write_within(
+                &mut flash,
+                &mut index,
+                Some(&state(turn)),
+                Some(WRITE_BUDGET),
+            )
+            .expect("write");
+        most = most.max(done.erased);
+    }
+    assert!(most <= 3, "a bounded write erased {most} sectors");
+    let (_, replayed) = RowLog::open(&mut flash, TAG).expect("reopen");
+    let quiet = (1..=60u8)
+        .filter(|p| replayed.index.kept.contains_key(&[*p; 16]))
+        .count();
+    assert_eq!(quiet, 60, "every quiet conversation survives the ring");
+    assert_eq!(replayed.index.kept[&[200; 16]].entries, 1199);
+}
+
 /// The index files received entries by their source and sent ones by
 /// their destination, a mark into the marks, and counts the spans' every
 /// sector once.

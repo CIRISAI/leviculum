@@ -894,9 +894,21 @@ impl RowLog {
         if let Some(state) = state {
             self.state = Some(state.clone());
         }
+        // A snapshot due and none begun in a quiet moment (a pull keeps
+        // the board from every quiet moment): a bounded write begins one
+        // here (1594), and it and the bounded writes after it write the
+        // snapshot a budget at a time, as a quiet moment's would be.
+        // Window 19's board wrote it whole at three quarters instead, 645
+        // records in one call, 1.5 to 1.77 s of the I/O core and the UI
+        // core parked for most of it.
+        if budget.is_some() && self.snapping.is_none() && self.snapshot_due() {
+            self.begin_snapshot(index);
+        }
         // Three quarters of the log since the last snapshot and none
-        // made in a quiet moment: this write is one, before the ring
-        // comes round to it, whole.
+        // made: this write is one, before the ring comes round to it,
+        // whole; a bounded snapshot not done by then writes its rest at
+        // once. Only a write without a budget, or a snapshot that took a
+        // quarter of the log's ring to write, comes here.
         let late = self.since_snapshot() >= self.store.sectors() * 3 / 4;
         if late && self.snapping.is_none() {
             return self.snapshot(dev, index);
