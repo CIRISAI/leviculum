@@ -18,6 +18,8 @@
 //! this module's tests drives the same ring with the FIFO's timing and
 //! esp-hal's overflow rule, so the mechanism is pinned on the host.
 
+extern crate alloc;
+
 use core::fmt;
 
 /// The bytes the host sent that the board's loop has not read yet, at
@@ -104,6 +106,110 @@ impl<const N: usize> RxKeep<N> {
     }
 }
 
+/// The most an [`RxHeld`] keeps (1603): 35 s of the line at 115,200
+/// baud, past the 25 s of a boot that rebuilds the M9's ring of 4464
+/// entries (window 22) with room to spare. Until 1603 the firmware kept
+/// 256 KiB, 22 s, and only through the forget's reopen; the boot's
+/// rebuild pumped nothing and lost 7916, 3656 and 1440 bytes.
+pub const HELD_MAX: usize = 384 * 1024;
+
+/// One block of an [`RxHeld`]: the largest piece it asks the heap for.
+pub const HELD_BLOCK: usize = 2048;
+
+/// What the host sent while the board's loop is held in one long op, on
+/// the heap in [`HELD_BLOCK`] pieces, at most [`HELD_MAX`] bytes (1594,
+/// 1603): the M9's `pump_rx` spills its keep here between the steps of
+/// a restore or a forget, and the loop reads it first once it reads
+/// again. In pieces, never one buffer: a `VecDeque<u8>` doubles, and the
+/// 256 KiB it would reach is one block of the size whose failure
+/// panicked window 22's reopen. No locking, as [`RxKeep`].
+pub struct RxHeld {
+    blocks: alloc::collections::VecDeque<alloc::vec::Vec<u8>>,
+    /// Bytes of the front block already read.
+    head: usize,
+    len: usize,
+}
+
+impl Default for RxHeld {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RxHeld {
+    /// An empty buffer; `const` so it can be a static, and nothing on the
+    /// heap until a byte comes.
+    pub const fn new() -> Self {
+        Self {
+            blocks: alloc::collections::VecDeque::new(),
+            head: 0,
+            len: 0,
+        }
+    }
+
+    /// Keep what fits of `bytes` under [`HELD_MAX`], oldest first: how
+    /// many were taken; the rest are the caller's to count as lost.
+    pub fn push(&mut self, bytes: &[u8]) -> usize {
+        let take = bytes.len().min(HELD_MAX.saturating_sub(self.len));
+        let mut rest = &bytes[..take];
+        while !rest.is_empty() {
+            let room = match self.blocks.back() {
+                Some(block) => HELD_BLOCK - block.len(),
+                None => 0,
+            };
+            if room == 0 {
+                self.blocks
+                    .push_back(alloc::vec::Vec::with_capacity(HELD_BLOCK));
+                continue;
+            }
+            let n = room.min(rest.len());
+            if let Some(block) = self.blocks.back_mut() {
+                block.extend_from_slice(&rest[..n]);
+            }
+            rest = &rest[n..];
+        }
+        self.len += take;
+        take
+    }
+
+    /// Move the oldest held bytes into `out`: how many. A buffer read
+    /// empty gives its blocks back.
+    pub fn pop_into(&mut self, out: &mut [u8]) -> usize {
+        let mut n = 0;
+        while n < out.len() {
+            let Some(block) = self.blocks.front() else {
+                break;
+            };
+            let k = (block.len() - self.head).min(out.len() - n);
+            out[n..n + k].copy_from_slice(&block[self.head..self.head + k]);
+            n += k;
+            self.head += k;
+            if self.head == block.len() && (block.len() == HELD_BLOCK || self.blocks.len() > 1) {
+                self.blocks.pop_front();
+                self.head = 0;
+            } else if self.head == block.len() {
+                break;
+            }
+        }
+        self.len -= n;
+        if self.len == 0 {
+            self.blocks = alloc::collections::VecDeque::new();
+            self.head = 0;
+        }
+        n
+    }
+
+    /// Bytes held and not read.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// Where the host's bytes were lost on the board, as its `[UART]` line
 /// says them: `rx_lost` the keep was full, `overrun` the hardware FIFO
 /// overflowed before anything emptied it (each one up to the FIFO's
@@ -172,6 +278,110 @@ mod tests {
         assert_eq!(keep.pop_into(&mut out), 4);
         assert_eq!(&out[..4], &[3, 4, 5, 6]);
         assert!(keep.is_empty());
+    }
+
+    /// 1603: the held buffer keeps bytes in order across its blocks,
+    /// takes no more than [`HELD_MAX`], and gives its blocks back once
+    /// read empty.
+    #[test]
+    fn the_held_buffer_keeps_order_in_blocks_and_counts_its_cap() {
+        let mut held = RxHeld::new();
+        let sent: Vec<u8> = (0..(3 * HELD_BLOCK + 17))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        for chunk in sent.chunks(100) {
+            assert_eq!(held.push(chunk), chunk.len());
+        }
+        assert_eq!(held.len(), sent.len());
+        let mut read = Vec::new();
+        let mut buf = [0u8; 333];
+        loop {
+            let n = held.pop_into(&mut buf);
+            if n == 0 {
+                break;
+            }
+            read.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(read, sent);
+        assert!(held.is_empty() && held.blocks.capacity() == 0);
+        // Read and written in turns, the order holds too.
+        let mut read = Vec::new();
+        for chunk in sent.chunks(700) {
+            held.push(chunk);
+            let n = held.pop_into(&mut buf[..300]);
+            read.extend_from_slice(&buf[..n]);
+        }
+        loop {
+            let n = held.pop_into(&mut buf);
+            if n == 0 {
+                break;
+            }
+            read.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(read, sent);
+        let big = alloc::vec![7u8; HELD_MAX + 10];
+        assert_eq!(held.push(&big), HELD_MAX);
+        assert_eq!(held.push(&[1]), 0);
+        assert!(held.blocks.iter().all(|b| b.capacity() == HELD_BLOCK));
+    }
+
+    /// 1603, window 22: a boot that rebuilds the ring holds core 0's loop
+    /// for 25 s (`restore_ms=25490`), and the host sent through it: the
+    /// first `[UART]` line said `rx_lost=7916`, the boot's restore fed
+    /// nothing. Here the line runs at its full rate for the whole 25 s,
+    /// the worst the host can do. The red half reads nothing until the
+    /// loop starts, as that boot did; the green half pumps the keep into
+    /// the held buffer at each of the rebuild's entries (4.5 ms apart on
+    /// the board, `per_1000_ms step=4518`), as the boot's restore now
+    /// does through its clock: nothing lost, every byte in order, and no
+    /// block on the heap larger than [`HELD_BLOCK`].
+    #[test]
+    fn a_rebuild_at_line_rate_loses_nothing_when_pumped_per_entry() {
+        let rebuild_us = 25_500_000u64;
+        let sent: Vec<u8> = (0..rebuild_us / BYTE_US).map(|i| (i % 251) as u8).collect();
+        for pumped in [false, true] {
+            let mut keep = RxKeep::<8192>::new();
+            let mut held = RxHeld::new();
+            let mut refused = 0u32;
+            let mut next = 0usize;
+            let mut now = 0u64;
+            while now < rebuild_us {
+                // The interrupt keeps up with the line.
+                while next < sent.len() && (next as u64 + 1) * BYTE_US <= now {
+                    keep.push(&sent[next..next + 1]);
+                    next += 1;
+                }
+                if pumped && now % 4_500 == 0 {
+                    refused += keep.spill(|bytes| held.push(bytes));
+                }
+                now += 100;
+            }
+            let mut read = Vec::new();
+            let mut buf = [0u8; 256];
+            loop {
+                let n = held.pop_into(&mut buf);
+                if n == 0 {
+                    break;
+                }
+                read.extend_from_slice(&buf[..n]);
+            }
+            loop {
+                let n = keep.pop_into(&mut buf);
+                if n == 0 {
+                    break;
+                }
+                read.extend_from_slice(&buf[..n]);
+            }
+            let lost = keep.lost() + refused;
+            std::eprintln!("pumped={pumped} lost={lost} read={}", read.len());
+            match pumped {
+                false => assert!(lost > 0, "the control loses what the keep cannot hold"),
+                true => {
+                    assert_eq!(lost, 0, "a pumped rebuild lost bytes");
+                    assert_eq!(read, sent[..next], "every byte, in the order sent");
+                }
+            }
+        }
     }
 
     #[test]

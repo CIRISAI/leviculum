@@ -269,7 +269,8 @@ impl Handheld {
     /// a restore that folds the whole ring took 57 s to 100 s on the
     /// bench, one entry at a time, and core 0's watchdog resets the chip
     /// after 5 s unfed. The restore's clock calls it, several times per
-    /// entry; at boot, before the watchdog is armed, it does nothing.
+    /// entry; at boot, before the watchdog is armed, it pumps the line's
+    /// bytes to the heap (1603, `pump_rx`), as every caller's does.
     pub fn client(
         &mut self,
         mut record: ClientRecord,

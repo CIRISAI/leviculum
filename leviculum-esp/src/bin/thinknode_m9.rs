@@ -1911,8 +1911,14 @@ fn main() -> ! {
     // kept (1476), then every pull; a board that is none opens on the
     // pairing, and Back from there shows the fixture as before (1415).
     let restored = match stores.load_client() {
-        // No watchdog is armed yet: nothing to feed.
-        Ok(Some(record)) => node.client(record, batch, &mut stores, &mut log, &|| {}),
+        // No watchdog is armed yet, but the line runs: a rebuild holds
+        // this core for 25 s (window 22: `rx_lost=7916` in the first
+        // `[UART]` line), so the host's bytes are pumped to the heap at
+        // each step of the restore, as the forget's reopen pumps them
+        // (1603, `pump_rx`).
+        Ok(Some(record)) => node.client(record, batch, &mut stores, &mut log, &|| {
+            leviculum_esp::pump_rx()
+        }),
         Ok(None) => {
             log.line(
                 "[HOME] ",
@@ -2172,7 +2178,12 @@ fn main() -> ! {
                                 &mut stores,
                                 batch,
                                 &mut log,
-                                &|| wdt.feed(),
+                                // The restore may rebuild: the line's bytes
+                                // pumped meanwhile (1603).
+                                &|| {
+                                    wdt.feed();
+                                    leviculum_esp::pump_rx();
+                                },
                             ) {
                                 Ok(taken) => {
                                     if let Some(taken) = taken {
@@ -2430,7 +2441,8 @@ fn main() -> ! {
                 FromUi::Code(text) => {
                     stall::stage(Core::Io, Stage::Code);
                     match node.take_code(&text, &mut rng, &mut stores, batch, &mut log, &|| {
-                        wdt.feed()
+                        wdt.feed();
+                        leviculum_esp::pump_rx();
                     }) {
                         Ok(Some(taken)) => {
                             to_ui(ToUi::Model(Box::new(taken)));

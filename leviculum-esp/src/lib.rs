@@ -76,7 +76,7 @@ use esp_hal::{
 use pool_tlsf::PoolTlsf;
 
 use boards::BoardConfig;
-use leviculum_serial_mux::rx::{RxCounts, RxKeep};
+use leviculum_serial_mux::rx::{RxCounts, RxHeld, RxKeep};
 use leviculum_serial_mux::tx::{Kind, TxRing};
 
 /// The build identity this image carries, as ONE contiguous string
@@ -733,12 +733,11 @@ static RX_BYTES: Mutex<RefCell<RxKeep<RX_KEEP>>> = Mutex::new(RefCell::new(RxKee
 /// the heap, read before the keep by [`UartLog::read_ready`]. Window
 /// 19's `bench forget` held core 0's loop for 34 s (the forget and the
 /// ring's rebuild in one turn) and lost 10,684 host bytes to the full
-/// keep.
-static RX_HELD: Mutex<RefCell<alloc::collections::VecDeque<u8>>> =
-    Mutex::new(RefCell::new(alloc::collections::VecDeque::new()));
-/// The most [`RX_HELD`] keeps: 22 s of the line at 115,200 baud. Bytes
-/// past it are counted lost, as the keep counts its own.
-const RX_HELD_MAX: usize = 256 * 1024;
+/// keep. In 2 KiB blocks, at most 35 s of the line (1603,
+/// [`RxHeld`]): the boot's rebuild pumps here too, 25 s of it, and a
+/// doubling buffer would have asked the pool for 256 KiB in one piece.
+/// Bytes past it are counted lost, as the keep counts its own.
+static RX_HELD: Mutex<RefCell<RxHeld>> = Mutex::new(RefCell::new(RxHeld::new()));
 static RX_HELD_LOST: AtomicU32 = AtomicU32::new(0);
 /// FIFO overflows seen, and bytes the UART flagged.
 static RX_OVERRUNS: AtomicU32 = AtomicU32::new(0);
@@ -839,7 +838,8 @@ fn uart0_rx() {
 /// (1594): the FIFO and the interrupt's keep emptied into [`RX_HELD`],
 /// which the loop reads first once it reads again. For the callbacks a
 /// long op calls between its steps (the watchdog's feed of `bench
-/// forget` and the store's reopen); cheap when nothing came.
+/// forget` and the store's reopen, and the boot's restore, 1603); cheap
+/// when nothing came.
 pub fn pump_rx() {
     critical_section::with(|cs| {
         let mut keep = RX_BYTES.borrow_ref_mut(cs);
@@ -850,11 +850,7 @@ pub fn pump_rx() {
             return;
         }
         let mut held = RX_HELD.borrow_ref_mut(cs);
-        let refused = keep.spill(|bytes| {
-            let take = bytes.len().min(RX_HELD_MAX.saturating_sub(held.len()));
-            held.extend(&bytes[..take]);
-            take
-        });
+        let refused = keep.spill(|bytes| held.push(bytes));
         if refused > 0 {
             RX_HELD_LOST.fetch_add(refused, Ordering::Relaxed);
         }
@@ -1217,14 +1213,7 @@ impl<'d> UartLog<'d> {
             // before anything in the keep now.
             let mut held = RX_HELD.borrow_ref_mut(cs);
             if !held.is_empty() {
-                let n = buf.len().min(held.len());
-                for (slot, byte) in buf.iter_mut().zip(held.drain(..n)) {
-                    *slot = byte;
-                }
-                if held.is_empty() {
-                    *held = alloc::collections::VecDeque::new();
-                }
-                return n;
+                return held.pop_into(buf);
             }
             let mut keep = RX_BYTES.borrow_ref_mut(cs);
             if let Some(uart) = PORT.borrow_ref_mut(cs).as_mut() {
