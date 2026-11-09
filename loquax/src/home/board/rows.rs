@@ -814,6 +814,13 @@ pub struct RowLog {
 /// where it crosses into the next, about 90 ms of the UI core parked.
 pub const WRITE_BUDGET: usize = super::store::SECTOR;
 
+/// How many sectors short of the last whole snapshot's first a bounded
+/// snapshot may run before the rest goes at once (1595,
+/// [`RowLog::write_within`]): a bounded write crosses into two sectors at
+/// most and a quiet moment erases one ahead, so the old snapshot's
+/// sectors stand until the new one's SNAP record is written.
+const SNAP_MARGIN: u32 = 8;
+
 /// What the summary log held at boot.
 #[derive(Debug, Default)]
 pub struct Replayed {
@@ -906,10 +913,22 @@ impl RowLog {
         }
         // Three quarters of the log since the last snapshot and none
         // made: this write is one, before the ring comes round to it,
-        // whole; a bounded snapshot not done by then writes its rest at
-        // once. Only a write without a budget, or a snapshot that took a
-        // quarter of the log's ring to write, comes here.
-        let late = self.since_snapshot() >= self.store.sectors() * 3 / 4;
+        // whole. A bounded snapshot begun goes on a budget at a time
+        // until the ring is [`SNAP_MARGIN`] sectors short of the last
+        // whole snapshot's first sector (1595): the board's index is
+        // about 31 of its log's 128 sectors, so a snapshot begun at half
+        // the log and written beside a pull's own records crossed three
+        // quarters before its end, and the write that found it late wrote
+        // its rest at once (window 20: 243 to 473 records, up to 30
+        // erases, 1 to 1.7 s in one call). Only a write without a budget,
+        // or a snapshot that took the log's ring up to the margin, comes
+        // here.
+        let sectors = self.store.sectors();
+        let late_at = match (budget, self.snapping) {
+            (Some(_), Some(_)) => (sectors * 3 / 4).max(sectors.saturating_sub(SNAP_MARGIN)),
+            _ => sectors * 3 / 4,
+        };
+        let late = self.since_snapshot() >= late_at;
         if late && self.snapping.is_none() {
             return self.snapshot(dev, index);
         }

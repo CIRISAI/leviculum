@@ -199,6 +199,84 @@ fn bounded_writes_write_a_due_snapshot_a_budget_at_a_time() {
     assert_eq!(replayed.index.kept[&[200; 16]].entries, 1199);
 }
 
+/// 1595: the board's summary log (128 sectors, the last eighth of the
+/// 1024-sector partition) holding window 20's index, 473 records in about
+/// 31 sectors, written by the quiet turns' bounded writes while a pull
+/// re-owes rows. A snapshot begun at half the log must be written a
+/// budget at a time to its end: before, it was late at three quarters
+/// (64 + 31 sectors and the pull's own records crossed 96) and the
+/// write that found it late wrote its rest at once, 243 to 473 records,
+/// up to 31 writes and 30 erases in one call, the 1 to 1.7 s takes of
+/// window 20's hang.walk. No bounded call may write more than the budget
+/// and the sectors it crosses into, and every row survives the ring.
+#[test]
+fn a_snapshot_of_the_boards_index_is_written_a_budget_at_a_time() {
+    let mut flash = MemFlash::new(128);
+    let (mut log, _) = RowLog::open(&mut flash, TAG).expect("open");
+    let mut index = Index::default();
+    // Window 20's: 473 records of about 268 B, 31 sectors written whole.
+    let line = "r".repeat(140);
+    let peers = 473u32;
+    let peer = |n: u32| {
+        let mut p = [0u8; 16];
+        p[..4].copy_from_slice(&n.to_le_bytes());
+        p
+    };
+    for n in 0..peers {
+        let mut r = row(1, &line);
+        r.peer = peer(n);
+        index.row(r);
+    }
+    let first = log
+        .write(&mut flash, &mut index, Some(&state(0)))
+        .expect("first");
+    assert!(
+        (25..=36).contains(&first.writes),
+        "the whole index takes about window 20's 31 sectors, took {}",
+        first.writes
+    );
+    let mut most_erased = 0;
+    let mut most_entries = 0;
+    let mut snapshots = 0;
+    for turn in 0..4000u64 {
+        // A pull's page: ten rows said again.
+        for k in 0..10u64 {
+            let n = ((turn * 10 + k) % u64::from(peers)) as u32;
+            let mut r = row(1, &line);
+            r.peer = peer(n);
+            r.unread = turn as u32;
+            index.row(r);
+        }
+        let snapping = log.snapping();
+        let done = log
+            .write_within(
+                &mut flash,
+                &mut index,
+                Some(&state(turn)),
+                Some(WRITE_BUDGET),
+            )
+            .expect("write");
+        if snapping && !log.snapping() {
+            snapshots += 1;
+        }
+        most_erased = most_erased.max(done.erased);
+        most_entries = most_entries.max(done.entries);
+    }
+    assert!(
+        snapshots >= 3,
+        "the log came round to {snapshots} snapshots"
+    );
+    assert!(
+        most_erased <= 3 && most_entries <= 40,
+        "a bounded write wrote {most_entries} records and erased {most_erased} sectors"
+    );
+    let (_, replayed) = RowLog::open(&mut flash, TAG).expect("reopen");
+    let kept = (0..peers)
+        .filter(|n| replayed.index.kept.contains_key(&peer(*n)))
+        .count();
+    assert_eq!(kept, peers as usize, "every row survives the ring");
+}
+
 /// The index files received entries by their source and sent ones by
 /// their destination, a mark into the marks, and counts the spans' every
 /// sector once.
