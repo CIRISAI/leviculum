@@ -39,7 +39,10 @@ rustc takes on one. That build has no binary for a target with
 `required-features` (loquax's tui_snapshot), so each of those is built on its
 own with its features, from the list `scripts/check-standard-integ.py --gated`
 reads out of `cargo metadata` (1067: `--only tui_snapshot` used to exit 0
-having run nothing). An `--only` that matches no built binary is an error. The release binaries the mvr tests spawn are not built
+having run nothing). Those narrow builds run before the workspace one, which
+uplifts the program binaries last with the features of the whole graph, and
+a control checks a flag a test passes is in the binary before any shard runs
+(1590: a `history`-only loquax without `--photo` was left behind). An `--only` that matches no built binary is an error. The release binaries the mvr tests spawn are not built
 here; `just test-under-quota` builds them first (`build-integ-bins`).
 
 Doctests are not run: rustdoc compiles each one at test time, which under the
@@ -120,22 +123,70 @@ def gated_targets() -> list[tuple[str, str, str]]:
 def build() -> list[dict]:
     """Build every test binary, return one entry per executable."""
     bins = {}
-    invocations = [["--workspace"]] + [
+    # The workspace goes LAST (1590). Every build uplifts the package
+    # binaries a test reaches through `CARGO_BIN_EXE_` to the same path, so
+    # the build that runs last decides which features `target/<triple>/
+    # debug/loquax` has: a gated target built with `history` alone left a
+    # loquax without `--photo` there, and python_interop's photo test went
+    # red on every survey. The workspace build unifies the features of the
+    # whole graph, so its binaries are the superset every test asks for.
+    invocations = [
         ["--manifest-path", f"{member}/Cargo.toml", "--features", features, "--test", name]
         for member, name, features in gated_targets()
-    ]
+    ] + [["--workspace"]]
+    programs = {}
     for sel in invocations:
-        for b in build_one(sel):
+        tests, progs = build_one(sel)
+        for b in tests:
             bins[b["key"]] = b
+        programs.update(progs)
+    check_programs(list(bins.values()), programs)
     return list(bins.values())
 
 
-def build_one(sel: list[str]) -> list[dict]:
+# A test that asserts a program flag, the flag it asserts, and the program
+# that has to carry it. The control runs after the builds and before any
+# shard, so a binary overwritten by a narrower build is an error of the
+# survey, not a red test.
+PROGRAM_FLAGS = [
+    ("loquax/test/python_interop",
+     "a_photo_reaches_a_python_lxmf_receiver_as_the_image_field",
+     "loquax", ["send", "--help"], "--photo"),
+]
+
+
+def check_programs(bins: list[dict], programs: dict[str, str]) -> None:
+    by_key = {b["key"]: b for b in bins}
+    for key, test, program, argv, flag in PROGRAM_FLAGS:
+        b = by_key.get(key)
+        if b is None or test not in list_tests(b):
+            continue
+        exe = programs.get(program)
+        # Exit 2 like an unmatched --only: the recipe stops on 2, where it
+        # reads 1 as "the survey ran, something red" and goes on.
+        if exe is None:
+            print(f"test-under-quota: {key} carries {test}, but no build "
+                  f"produced the {program} binary it runs", file=sys.stderr)
+            sys.exit(2)
+        out = subprocess.run([exe, *argv], capture_output=True, text=True)
+        if flag not in out.stdout + out.stderr:
+            print(f"test-under-quota: {exe} {' '.join(argv)} lists no {flag}, "
+                  f"which {key} {test} passes it; a narrower build overwrote it",
+                  file=sys.stderr)
+            sys.exit(2)
+        print(f"test-under-quota: control: {exe} {' '.join(argv)} lists {flag}",
+              flush=True)
+
+
+def build_one(sel: list[str]) -> tuple[list[dict], dict[str, str]]:
+    """The test binaries one cargo invocation built, and the program binaries
+    (name to uplifted path) it left where `CARGO_BIN_EXE_` points."""
     cmd = ["cargo", "test", *sel, "--no-run", "--message-format=json"]
     out = subprocess.run(cmd, cwd=REPO, stdout=subprocess.PIPE, text=True)
     if out.returncode != 0:
         sys.exit(f"test-under-quota: {' '.join(cmd)} exited {out.returncode}")
     bins = []
+    programs = {}
     for line in out.stdout.splitlines():
         try:
             msg = json.loads(line)
@@ -144,6 +195,8 @@ def build_one(sel: list[str]) -> list[dict]:
         if msg.get("reason") != "compiler-artifact" or not msg.get("executable"):
             continue
         if not msg["profile"]["test"]:
+            if "bin" in msg["target"]["kind"]:
+                programs[msg["target"]["name"]] = msg["executable"]
             continue
         pkg_dir = str(Path(msg["manifest_path"]).parent)
         bins.append(
@@ -154,7 +207,7 @@ def build_one(sel: list[str]) -> list[dict]:
                 "pkg_name": msg["package_id"].split("#")[-1].split("@")[0].split("/")[-1],
             }
         )
-    return bins
+    return bins, programs
 
 
 def list_tests(b: dict) -> list[str]:
