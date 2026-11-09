@@ -967,6 +967,7 @@ fn gui_args(args: &Args) -> GuiArgs {
             config: tui.config.clone(),
             timeout: tui.timeout,
             sync_interval: tui.sync_interval.clone(),
+            no_start: tui.no_start,
             exit_after_first_frame: false,
             fps: false,
         }
@@ -980,6 +981,7 @@ fn gui_args(args: &Args) -> GuiArgs {
             config: None,
             timeout: DEFAULT_TIMEOUT_SECS,
             sync_interval: None,
+            no_start: false,
             exit_after_first_frame: false,
             fps: false,
         }
