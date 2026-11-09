@@ -13878,7 +13878,8 @@ mod timed;
 mod datagram;
 #[cfg(test)]
 mod mvr_link_datagram;
-pub use crate::link::datagram::DatagramStats;
+pub use crate::link::datagram::{DatagramStats, ReplayWindow};
+pub use datagram::DATAGRAM_SINK_RESERVE;
 pub use event::FrameExpiry;
 #[cfg(test)]
 mod mvr_relay_route;

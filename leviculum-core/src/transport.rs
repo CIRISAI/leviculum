@@ -874,6 +874,8 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 // Hashed before the IFAC wrap, so the tag is the `ph` this
                 // frame's `PKT_TX` named (T-0013).
                 let tag = frame_tag(&data);
+                let is_datagram =
+                    wire_context(&data) == Some(crate::packet::PacketContext::Datagram);
                 let send_data = match ifac_configs.get(&iface.0) {
                     Some(cfg) => match cfg.apply_ifac(&data) {
                         Ok(wrapped) => wrapped,
@@ -896,7 +898,10 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 iface_obj.tag_next_frame(tag);
                 if let Err(e) = iface_obj.try_send_to_peer(&send_data, peer.as_ref(), true) {
                     errors.push((iface, e));
-                    if matches!(e, crate::traits::InterfaceError::BufferFull) {
+                    if matches!(e, crate::traits::InterfaceError::BufferFull) && is_datagram {
+                        // +ciris (leviculum#102): shed, never retried.
+                        drops.push((iface, DropReason::DatagramShed));
+                    } else if matches!(e, crate::traits::InterfaceError::BufferFull) {
                         retries.push(SendRetry {
                             iface_idx: iface.0,
                             data: send_data,
@@ -2002,6 +2007,8 @@ pub struct TransportStats {
     // the five above are; the rate is bounded by advertisements, lower still.
     pub(crate) drops_resource_full: u32,
     pub(crate) drops_resource_compressed: u32,
+    // +ciris (leviculum#102): datagrams shed at a full interface.
+    pub(crate) drops_datagram_shed: u64,
     // NOT a drop counter and deliberately outside `packets_dropped`: link
     // requests for a local client's destination that arrived while the path
     // table held nothing for it, and were handed to the connected clients
@@ -2255,6 +2262,11 @@ pub enum DropReason {
     /// (`reference/Reticulum/RNS/Resource.py:248`), which a board can only
     /// refuse.
     ResourceCompressed,
+    /// +ciris (leviculum#102): an unordered link datagram the interface had
+    /// no room for. Never queued for retry: a datagram is worth its moment
+    /// only, and a retry queue it filled would evict Channel frames, proofs
+    /// and keepalives behind it.
+    DatagramShed,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -2309,6 +2321,22 @@ fn wire_dst(data: &[u8]) -> &[u8] {
     data.get(start..start + TRUNCATED_HASHBYTES).unwrap_or(&[])
 }
 
+/// The context byte of raw outbound bytes (+ciris, leviculum#102): behind
+/// the destination hash, which sits behind the transport id on a
+/// header-type-2 frame. `None` when the bytes are too short.
+fn wire_context(data: &[u8]) -> Option<crate::packet::PacketContext> {
+    let header_2 = data
+        .first()
+        .is_some_and(|f| f & crate::packet::FLAG_HEADER_TYPE_MASK != 0);
+    let at = if header_2 {
+        2 + 2 * TRUNCATED_HASHBYTES
+    } else {
+        2 + TRUNCATED_HASHBYTES
+    };
+    data.get(at)
+        .map(|b| crate::packet::PacketContext::from_byte(*b))
+}
+
 /// Take the `ph` correlator prefix from a full (32-byte) or truncated
 /// (16-byte) packet hash.
 fn ph8(hash: &[u8]) -> [u8; PKT_PH_BYTES] {
@@ -2351,11 +2379,12 @@ impl DropReason {
             DropReason::ChannelDecryptFail => "channel-decrypt-fail",
             DropReason::ResourceFull => "resource-full",
             DropReason::ResourceCompressed => "resource-compressed",
+            DropReason::DatagramShed => "datagram-shed",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 29] = [
+    pub const ALL: [DropReason; 30] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -2385,6 +2414,7 @@ impl DropReason {
         DropReason::ChannelDecryptFail,
         DropReason::ResourceFull,
         DropReason::ResourceCompressed,
+        DropReason::DatagramShed,
     ];
 }
 
@@ -2596,6 +2626,12 @@ impl TransportStats {
         u64::from(self.drops_resource_compressed)
     }
 
+    /// +ciris (leviculum#102): unordered link datagrams an interface had no
+    /// room for, dropped instead of queued for retry.
+    pub fn drops_datagram_shed(&self) -> u64 {
+        self.drops_datagram_shed
+    }
+
     /// Link requests for a local client's destination that arrived with an
     /// empty path table and were handed to the connected clients instead of
     /// dying as overheard/no-path (#374). Not a drop; not part of
@@ -2655,6 +2691,7 @@ impl TransportStats {
             + self.drops_channel_decrypt_fail()
             + self.drops_resource_full()
             + self.drops_resource_compressed()
+            + self.drops_datagram_shed()
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -2708,6 +2745,9 @@ impl TransportStats {
             }
             DropReason::ResourceCompressed => {
                 self.drops_resource_compressed = self.drops_resource_compressed.saturating_add(1)
+            }
+            DropReason::DatagramShed => {
+                self.drops_datagram_shed = self.drops_datagram_shed.saturating_add(1)
             }
         }
         debug_assert_eq!(
@@ -5466,6 +5506,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 channel_decrypt_fail = self.stats.drops_channel_decrypt_fail,
                 resource_full = self.stats.drops_resource_full,
                 resource_compressed = self.stats.drops_resource_compressed,
+                datagram_shed = self.stats.drops_datagram_shed,
                 total = self.stats.packets_dropped,
                 // Outside `total` on purpose: a redirect is a delivery, not
                 // a drop (#374); it rides this line because the operators

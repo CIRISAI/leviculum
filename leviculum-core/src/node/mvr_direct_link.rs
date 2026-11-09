@@ -2399,3 +2399,43 @@ fn a_derived_link_after_an_upgrade_runs_at_the_direct_mtu() {
         DIRECT_LINK_MTU
     );
 }
+
+/// leviculum#102 review: a datagram captured on the relay before an upgrade
+/// and replayed there afterwards (once the packet-hash dedup has forgotten
+/// it, which this harness's `NoStorage` models from the start) is refused by
+/// the replay window. Without the window it would decrypt, count as the peer
+/// speaking over the relay, and pull the link off its direct path.
+#[test]
+fn a_replayed_relay_datagram_does_not_pull_the_link_back() {
+    let mut pair = Pair::new();
+    // A datagram over the relay, captured on the way.
+    let (_, out) = pair.a.send_unordered(&pair.link, b"before").unwrap();
+    let captured = packets(&out);
+    let _ = deliver(&mut pair.b, pair.b_mesh, captured.clone());
+
+    let (session, _) = to_punch(&mut pair);
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    punch_both(&mut pair, &session, a_direct, b_direct);
+    assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
+    pair.advance(crate::node::FALLBACK_GRACE_MS + 1_000);
+    assert_eq!(pair.b.direct_link_interface(&pair.link), Some(b_direct));
+
+    // The peer keeps talking on the direct path.
+    let (_, out) = pair.a.send_unordered(&pair.link, b"after").unwrap();
+    let _ = deliver(&mut pair.b, b_direct, packets(&out));
+
+    let (_, events) = deliver(&mut pair.b, pair.b_mesh, captured);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkDatagramReceived { .. })),
+        "the replay is not delivered"
+    );
+    assert_eq!(
+        pair.b.direct_link_interface(&pair.link),
+        Some(b_direct),
+        "the link stays on its direct path"
+    );
+    assert_eq!(pair.b.link_datagram_stats(&pair.link).unwrap().replayed, 1);
+}
