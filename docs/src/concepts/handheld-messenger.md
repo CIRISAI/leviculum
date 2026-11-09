@@ -2372,14 +2372,28 @@ The lever for more is one frame: `Handheld::client` holds 32 KB of
 locals across the join.
 
 **The UI core.** Nothing on the board read its stack before 1582; its
-floor, 184,000 B, is the host census's ceilings added up (64-bit, debug
-build). The UI core now paints its stack after its census and core 0
-says `ui_stack_free=` on every `[UART]` line (`unset` before the paint).
-The next bench window measures it under the same loads, and the floor
-becomes that depth plus 16 KiB; until then it stays 184,000 B, and the
-static chain (62,288 B) and the board census's own lines (scene stack
-at most 22,723 B, draw stack at most 10,403 B below the probe) say it
-will come down by more than half.
+floor was 184,000 B, the host census's ceilings added up (64-bit, debug
+build). The UI core paints its stack after its census and core 0 says
+`ui_stack_free=` on every `[UART]` line (`unset` before the paint).
+Window 19 (1594, bench image of fbe1e3f6, 2026-11-09) measured it under
+the pull, the bench, hang, forget and marks walks: the least untouched
+was 138,784 B, in `marks-try1` with a Bench chat opened on a fresh
+arrival, so 49,120 B used under the 512 B guard, and the floor is that
+plus 16 KiB, 65,504 B (`scripts/build-m9-image.sh`). The static chain
+of `ui_main` (62,288 B) lies inside it.
+
+| image | ui stack | old need | need now | headroom now |
+|---|---:|---:|---:|---:|
+| bench (fbe1e3f6) | 188,416 | 184,000 | 65,504 | 122,912 |
+
+The stack array is not moved yet. The 122,912 B above the floor are
+internal DRAM, the memory core 0's stack is made of (30,848 B free at
+a join in the same window). The recommendation: give core 0's stack
+about 64 KiB of it, which takes its join margin from 30 KB to about
+95 KB, past the deepest static chain (88,624 B) that no walk drove yet,
+and leave the rest to the UI core's stack until a window measures the
+two-pool heap's UI load; heap does not need it, the heap is PSRAM and
+has megabytes free.
 
 ### Tracks on the M9 (1385, not built)
 

@@ -43,12 +43,22 @@
 # the bench, hang and marks walks with their frame dumps and the map
 # stayed at or under 66,716 B.
 #
-# The UI core's floor is still the open chat's census ceilings of
-# loquax-m9/src/census.rs added up on the host (64-bit, debug), 184,000 B,
-# not a measure of this board: until 1582 nothing read the UI core's
-# stack. Its `[UART] ui_stack_free=` (1582) is the measure; the next
-# bench window turns it into a floor by the same rule. The static chain
-# of ui_main in 2f5caa4a is 62,288 B (the boot census's walk).
+# The UI core's floor is measured the same way since 1594 (it was the
+# open chat's census ceilings of loquax-m9/src/census.rs added up on the
+# 64-bit host, 184,000 B, until a board's `[UART] ui_stack_free=`, 1582,
+# read it): the 188,416 B stack less its 512 B guard less the least
+# untouched, plus the 16,384 B reserve. 188,416 - 512 - 138,784 + 16,384
+# = 65,504 B. Provenance: ThinkNode M9 on the rig, bench image of
+# fbe1e3f6 (thinknode_m9-bench.bin sha256 7ced64f8..., ELF e9639d85...),
+# window 19, 2026-11-09 02:11:54 CET: the `marks-try1` walk, a Bench chat
+# opened with a fresh arrival after a `bench arrive` fold, took
+# `ui_stack_free=` to 138,784 (49,120 B used under the guard), the least
+# of every walk of the window (pull, bench, hang, forget, marks).
+# Log: rig-run/m9/2026-11-09a/marks-try1/board.log. The static chain of
+# ui_main in 2f5caa4a is 62,288 B (the boot census's walk), inside it.
+# The stack array stays at 188,416 B for now: the 122,912 B above the
+# floor are internal DRAM, and where they go (core 0's stack, which sits
+# at 30,848 B free at a join, or the heap) is a decision of its own.
 #
 # Red when the image does not build, when fewer than 8 KiB of the partition
 # are free (the nRF floor, for the nRF reason), when the stack is below the
@@ -104,7 +114,8 @@ ESP="$ROOT/leviculum-esp"
 TAG="[m9-image]"
 CANON=/mnt/leviculum
 FLOOR=8192
-UI_STACK_NEED=184000
+# 49,120 B measured + 16,384 B reserve (the rule and provenance above).
+UI_STACK_NEED=65504
 # 78,592 B measured + 16,384 B reserve (the rule and provenance above).
 IO_STACK_NEED=94976
 
@@ -124,7 +135,7 @@ verdict() {
         rc=1
     fi
     if [ "$ui_stack" -lt "$UI_STACK_NEED" ]; then
-        echo "$TAG FAIL $ui_stack B of UI stack, below the $UI_STACK_NEED B the open chat's census allows."
+        echo "$TAG FAIL $ui_stack B of UI stack, below the $UI_STACK_NEED B this board's measured UI peak and its reserve need."
         rc=1
     fi
     return "$rc"
@@ -145,7 +156,7 @@ selftest() {
     verdict 927520 16384000 112000 188416 >/dev/null || { echo "$TAG selftest FAIL: a roomy image was refused"; rc=1; }
     verdict 16380000 16384000 112000 188416 >/dev/null && { echo "$TAG selftest FAIL: 4000 B free passed"; rc=1; }
     verdict 927520 16384000 90000 188416 >/dev/null && { echo "$TAG selftest FAIL: a 90 kB core 0 stack passed"; rc=1; }
-    verdict 927520 16384000 112000 100000 >/dev/null && { echo "$TAG selftest FAIL: a 100 kB UI stack passed"; rc=1; }
+    verdict 927520 16384000 112000 60000 >/dev/null && { echo "$TAG selftest FAIL: a 60 kB UI stack passed"; rc=1; }
     [ "$rc" -eq 0 ] && echo "$TAG selftest ok: the size line reads, every floor refuses"
     return "$rc"
 }

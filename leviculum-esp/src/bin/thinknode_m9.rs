@@ -540,8 +540,10 @@ impl UiLog {
 }
 
 /// The UI core's stack: the open chat's census ceilings, scene and draw
-/// added up (`census::CHAT`, the 184,000 B the build script holds the
-/// one stack to before 1493), rounded up to whole KiB.
+/// added up (`census::CHAT`, the 184,000 B the build script held the
+/// one stack to before 1493), rounded up to whole KiB. The build
+/// script's floor is the board's measured peak plus 16 KiB since 1594
+/// (65,504 B); the array is not shrunk to it yet.
 const UI_STACK: usize = 184 * 1024;
 const _: () = assert!(UI_STACK >= 184_000);
 
