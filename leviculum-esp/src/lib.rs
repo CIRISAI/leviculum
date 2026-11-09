@@ -37,6 +37,7 @@
 extern crate alloc;
 
 pub mod boards;
+pub mod corepark;
 pub mod flash;
 pub mod gnss_uart;
 pub mod handheld;
@@ -760,22 +761,22 @@ static KEYS_UI: AtomicU32 = AtomicU32::new(0);
 /// no counter saw.
 static RX_TAKEN: AtomicU32 = AtomicU32::new(0);
 
-/// One key frame taken from the host ([`KEYS_RX`]).
+/// One key frame taken from the host (`KEYS_RX`).
 pub fn count_key_rx() {
     KEYS_RX.fetch_add(1, Ordering::Relaxed);
 }
 
-/// One press the UI core read into a `KEY` line ([`KEYS_UI`]).
+/// One press the UI core read into a `KEY` line (`KEYS_UI`).
 pub fn count_key_ui() {
     KEYS_UI.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Empty the receive FIFO into the keep now (1595): before a flash op,
-/// which holds this core's interrupts off for as long as it takes (an
-/// erase 45 to 57 ms in window 20) while the FIFO holds 128 bytes, 11 ms
-/// of the line. The op then starts with the whole FIFO free, not with
-/// up to the interrupt's threshold of it taken already. A board whose
-/// log is not the UART's does nothing.
+/// so the parked spin's window starts with an empty FIFO and the bytes
+/// it takes sort strictly after the keep's (1613, [`corepark`]). Until
+/// 1613 this was the only cover the op's masked window had, and the
+/// line's bytes past the FIFO's 128 were dropped. A board whose log is
+/// not the UART's does nothing.
 pub fn drain_rx_fifo() {
     critical_section::with(|cs| {
         if let Some(uart) = PORT.borrow_ref_mut(cs).as_mut() {
@@ -845,8 +846,21 @@ fn uart0_rx() {
     stall::isr(stall::Isr::None);
 }
 
+/// Keep what the host sent while a flash op had this core's interrupts
+/// off (1613): the parked spin's ring, pushed into the keep by
+/// [`corepark::hold`] before the UART interrupt resumes, so these bytes
+/// sort between the pre-op sweep's and whatever the FIFO holds next.
+/// Counted into `rx_bytes=` like every taken byte.
+pub(crate) fn absorb_parked(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    RX_TAKEN.fetch_add(bytes.len() as u32, Ordering::Relaxed);
+    critical_section::with(|cs| RX_BYTES.borrow_ref_mut(cs).push(bytes));
+}
+
 /// Keep what the host sent while the loop is held in one long op
-/// (1594): the FIFO and the interrupt's keep emptied into [`RX_HELD`],
+/// (1594): the FIFO and the interrupt's keep emptied into `RX_HELD`,
 /// which the loop reads first once it reads again. For the callbacks a
 /// long op calls between its steps (the watchdog's feed of `bench
 /// forget` and the store's reopen, and the boot's restore, 1603); cheap
@@ -966,10 +980,13 @@ impl<'d> UartLog<'d> {
         self.ui_stack_free = Some(bytes);
     }
 
-    /// Host bytes lost because the board's keep was full.
+    /// Host bytes lost because the board's keep was full, and the ones
+    /// a full park ring counted during a flash op (1613), which only an
+    /// op far past the 57 ms bound could produce.
     pub fn rx_lost(&self) -> u32 {
         critical_section::with(|cs| RX_BYTES.borrow_ref(cs).lost())
             .saturating_add(RX_HELD_LOST.load(Ordering::Relaxed))
+            .saturating_add(crate::corepark::host_ring_lost())
     }
 
     /// The loop's HDLC reader dropped a frame (empty or oversized).

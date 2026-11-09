@@ -27,64 +27,146 @@ use loquax::home::record::{slots, ClientRecord, RecordError};
 
 use crate::stall::{self, Core, Lock};
 
-/// Run a flash write or erase, `f`, inside the cross-core critical
-/// section, named in the stall record (1534).
+/// Run a flash write or erase, `f`, with the UI core parked and this
+/// core's interrupts off, named in the stall record (1534).
 ///
-/// esp-storage's AutoPark stalls the other core wherever it is
-/// (`esp-storage-0.10.0/src/common.rs`, `pre_write`, then `post_write`
-/// unparks). The UI core takes the one cross-core critical section for
-/// every queue push and every key drain (its allocations have their own
-/// pool and lock since 1594, `pools.rs`), so it is often parked holding
-/// that spinlock. The
-/// ROM call itself runs with core 0's interrupts off (esp-storage's own
-/// lock), but they are on again between the op and the unpark, and the
-/// keyboard's 10 ms tick, pending after any erase (about 45 ms), runs
-/// there: its `critical_section::with` spins for a lock the parked core
-/// holds, with interrupts off, and both cores are dead (the M9's hang of
-/// 2026-11-07, UART silent until a hand reset). Holding the section
-/// across the whole op closes both halves: the UI core cannot be parked
-/// inside it (core 0 owns it), and no interrupt runs on core 0 until the
-/// UI core is unparked. Core 0's interrupts were already off for the op
-/// itself, so the latency added is the park and unpark around it.
+/// The op runs with core 0's interrupts off (esp-storage's own lock,
+/// which [`parked`] extends over the whole hold) and the cache off,
+/// which the UI core executes through, so the UI core must not run from
+/// flash while the op does. Until 1613 that was esp-storage's AutoPark
+/// — a hardware clock stall — under the cross-core critical section,
+/// held across the whole op so the UI core could not be stalled holding
+/// it (the M9's hang of 2026-11-07: the keyboard's 10 ms tick spinning
+/// for a section the stalled core held). Since 1613 the UI core parks
+/// itself instead ([`crate::corepark`]): a software interrupt puts it
+/// into an internal-RAM spin that polls the receive FIFOs into rings
+/// for the op's whole masked window, so the bytes the window used to
+/// drop past the 128-byte FIFO (1 to 2 of 100 injected key frames,
+/// windows 22 and 23) are kept. The cooperative park also removes the
+/// hang's shape without holding the section across the op — the park
+/// interrupt cannot land inside a held section, so the UI core is never
+/// parked holding it; only the fallback stall (an unarmed or wedged UI
+/// core) still takes the section around the op, for 1534's reason.
 ///
 /// Since 1507 the op also waits for the panel's DMA out of PSRAM to end
 /// and holds the next one off ([`crate::mspi`]): the bus that DMA reads is
 /// the one the op takes.
-fn parked<R>(f: impl FnOnce() -> R) -> R {
-    // The op below holds this core's interrupts off (1595): the UART's
-    // receive interrupt waits for its end, an erase up to 57 ms against
-    // the FIFO's 11 ms, so the FIFO goes into it empty.
+fn parked<R>(op: park::Op, f: impl FnOnce() -> R) -> R {
+    // The hold below keeps this core's interrupts off (1595): the
+    // UART's receive interrupt stops popping, the parked spin takes
+    // over, and the sweep here makes the spin's bytes sort strictly
+    // after the keep's.
     crate::drain_rx_fifo();
     // The GNSS receiver's too (1477).
     crate::gnss_uart::drain();
     crate::mspi::flash(|| {
         stall::locked(Core::Io, Lock::Flash, || {
             let t0 = crate::uptime_us();
-            let r = critical_section::with(|_| f());
-            park::note(crate::uptime_us().saturating_sub(t0));
+            let (r, _ack_wait) = crate::corepark::hold(f);
+            park::note(op, crate::uptime_us().saturating_sub(t0));
             r
         })
     })
 }
 
-/// What the flash ops cost the UI core (1569): each op holds the
-/// cross-core critical section and parks the other core (AutoPark), so
-/// the time inside `parked`'s section is the longest the UI core can
-/// have been held per op. Cumulative counters; a reader takes deltas
-/// (`[IDLE]` prints them per window), and the longest single park is
-/// taken, not read, so each window says its own.
+/// What the flash ops cost the UI core (1569): each op parks the other
+/// core (cooperatively since 1613, [`crate::corepark`]), so the time
+/// inside `parked`'s hold is the longest the UI core can have been held
+/// per op. Cumulative counters; a reader takes deltas (`[IDLE]` prints
+/// them per window), and the longest single park is taken, not read, so
+/// each window says its own. The bench image also keeps the last ops
+/// one by one (`park::take_records`, 1613), the `[FLASH] op= ms=`
+/// lines a window's masked-length distribution is read from.
 pub mod park {
     use core::sync::atomic::{AtomicU32, Ordering};
+
+    /// What an op is, for the per-kind distribution (1613): an erase's
+    /// masked window is the sector's 35 to 57 ms, a write's is per
+    /// 512-byte chunk and well under a millisecond.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Op {
+        Erase,
+        Write,
+    }
+
+    impl Op {
+        pub fn name(self) -> &'static str {
+            match self {
+                Op::Erase => "erase",
+                Op::Write => "write",
+            }
+        }
+    }
 
     static TOTAL_US: AtomicU32 = AtomicU32::new(0);
     static OPS: AtomicU32 = AtomicU32::new(0);
     static MAX_US: AtomicU32 = AtomicU32::new(0);
 
-    pub(super) fn note(us: u64) {
+    pub(super) fn note(op: Op, us: u64) {
         let us = u32::try_from(us).unwrap_or(u32::MAX);
         TOTAL_US.fetch_add(us, Ordering::Relaxed);
         OPS.fetch_add(1, Ordering::Relaxed);
         MAX_US.fetch_max(us, Ordering::Relaxed);
+        #[cfg(m9_bench)]
+        records::keep(op, us);
+        #[cfg(not(m9_bench))]
+        let _ = op;
+    }
+
+    /// The bench image's per-op records (1613): a ring of the last ops,
+    /// written by the op's core and read by the same core's loop, which
+    /// says each as a `[FLASH] op=<kind> ms=<n>.<frac> at=<ms>` line.
+    /// One writer and one reader on one core: plain indices.
+    #[cfg(m9_bench)]
+    mod records {
+        use super::Op;
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        const KEEP: usize = 32;
+        static AT_MS: [AtomicU32; KEEP] = [const { AtomicU32::new(0) }; KEEP];
+        static US: [AtomicU32; KEEP] = [const { AtomicU32::new(0) }; KEEP];
+        static KIND: [AtomicU32; KEEP] = [const { AtomicU32::new(0) }; KEEP];
+        static WRITE: AtomicU32 = AtomicU32::new(0);
+        static READ: AtomicU32 = AtomicU32::new(0);
+
+        pub(super) fn keep(op: Op, us: u32) {
+            let w = WRITE.load(Ordering::Relaxed);
+            let slot = (w as usize) % KEEP;
+            AT_MS[slot].store(crate::uptime_ms() as u32, Ordering::Relaxed);
+            US[slot].store(us, Ordering::Relaxed);
+            KIND[slot].store(op as u32, Ordering::Relaxed);
+            WRITE.store(w.wrapping_add(1), Ordering::Relaxed);
+        }
+
+        pub(super) fn take(mut say: impl FnMut(Op, u32, u32)) {
+            let w = WRITE.load(Ordering::Relaxed);
+            let mut r = READ.load(Ordering::Relaxed);
+            // Overrun: the oldest still-held records are the truth.
+            if w.wrapping_sub(r) > KEEP as u32 {
+                r = w.wrapping_sub(KEEP as u32);
+            }
+            while r != w {
+                let slot = (r as usize) % KEEP;
+                let op = match KIND[slot].load(Ordering::Relaxed) {
+                    0 => Op::Erase,
+                    _ => Op::Write,
+                };
+                say(
+                    op,
+                    US[slot].load(Ordering::Relaxed),
+                    AT_MS[slot].load(Ordering::Relaxed),
+                );
+                r = r.wrapping_add(1);
+            }
+            READ.store(r, Ordering::Relaxed);
+        }
+    }
+
+    /// Say every op since the last call: `(op, us, at_ms)`, oldest
+    /// first. The bench image's loop turns this into `[FLASH]` lines.
+    #[cfg(m9_bench)]
+    pub fn take_records(say: impl FnMut(Op, u32, u32)) {
+        records::take(say);
     }
 
     /// Microseconds inside flash ops and the ops, since boot, wrapping.
@@ -217,11 +299,17 @@ impl<'d> Stores<'d> {
     /// Open the flash and find both stores in its partition table.
     pub fn open(flash: FLASH<'d>) -> Self {
         // The UI runs on the second core since 1493: every write and
-        // erase parks it for the op (esp-storage's AutoPark), since the
-        // flash routines run with the cache the core executes from off.
-        // Never while it holds the critical section (1534): every write
-        // and erase goes through `parked`.
-        let mut flash = FlashStorage::new(flash).multicore_auto_park();
+        // erase parks it for the op, since the flash routines run with
+        // the cache the core executes from off. The parking is this
+        // crate's since 1613 (`corepark`: the cooperative spin that
+        // polls the FIFOs, or its hardware-stall fallback), so
+        // esp-storage must not stall the core a second time — AutoPark
+        // would freeze the polling spin where it stands.
+        // SAFETY (multicore_ignore's contract): every write and erase
+        // goes through `parked`, whose hold guarantees the other core
+        // is not started, spinning in internal RAM, or hardware-stalled
+        // for the op's whole window.
+        let mut flash = unsafe { FlashStorage::new(flash).multicore_ignore() };
         let mut table = Aligned([0u8; PARTITION_TABLE_MAX_LEN]);
         let (identity, client, client_b, messages, regions) =
             match partitions::read_partition_table(&mut flash, &mut table.0) {
@@ -366,8 +454,9 @@ impl<'d> Stores<'d> {
     fn write(&mut self, slot: Slot, buf: &[u8]) -> Result<(), StoreError> {
         let offset = slot.0.map_err(StoreError::NoRegion)?;
         let flash = &mut self.flash;
-        parked(|| flash.erase(offset, offset + SECTOR)).map_err(StoreError::Flash)?;
-        parked(|| flash.write_nor(offset, buf)).map_err(StoreError::Flash)
+        parked(park::Op::Erase, || flash.erase(offset, offset + SECTOR))
+            .map_err(StoreError::Flash)?;
+        parked(park::Op::Write, || flash.write_nor(offset, buf)).map_err(StoreError::Flash)
     }
 
     /// The node's identity, when one was saved.
@@ -482,7 +571,10 @@ impl Sectors for Messages<'_, '_> {
         for chunk in data.chunks(BOUNCE) {
             bounce.0[..chunk.len()].copy_from_slice(chunk);
             let flash = &mut *self.flash;
-            parked(|| flash.write_nor(at, &bounce.0[..chunk.len()])).map_err(StoreError::Flash)?;
+            parked(park::Op::Write, || {
+                flash.write_nor(at, &bounce.0[..chunk.len()])
+            })
+            .map_err(StoreError::Flash)?;
             at += chunk.len() as u32;
         }
         Ok(())
@@ -491,6 +583,6 @@ impl Sectors for Messages<'_, '_> {
     fn erase(&mut self, sector: u32) -> Result<(), StoreError> {
         let from = self.at(sector, 0, STORE_SECTOR)?;
         let flash = &mut *self.flash;
-        parked(|| flash.erase(from, from + SECTOR)).map_err(StoreError::Flash)
+        parked(park::Op::Erase, || flash.erase(from, from + SECTOR)).map_err(StoreError::Flash)
     }
 }

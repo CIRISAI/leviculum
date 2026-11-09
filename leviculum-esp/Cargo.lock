@@ -1261,6 +1261,7 @@ dependencies = [
  "esp-hal",
  "esp-storage",
  "esp-sync",
+ "esp32s3",
  "leviculum-core",
  "leviculum-gnss-init",
  "leviculum-log-line",

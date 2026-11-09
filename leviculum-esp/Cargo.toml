@@ -56,6 +56,11 @@ leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }
 # The lock the UART's receive interrupt and the loop share its keep under
 # (1440); esp-hal provides the implementation. The version esp-hal uses.
 critical-section = "1.2"
+# Raw register access for the parked spin (1613, `src/corepark.rs`): the
+# UART FIFOs it polls while the cache is off and the park interrupt's
+# latch. esp-hal's own register_block() stays crate-private, and the spin
+# must not call into driver code anyway. The version esp-hal pins.
+esp32s3 = "0.36.0"
 # The per-core heap pools' lock (1594, `src/pools.rs`): interrupts off on
 # this core without the cross-core critical section. The version esp-hal
 # uses.

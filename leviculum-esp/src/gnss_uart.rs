@@ -81,6 +81,18 @@ fn uart1_rx() {
     });
 }
 
+/// Keep what the receiver sent while a flash op had core 0's interrupts
+/// off (1613): the parked spin's ring, pushed here by
+/// `corepark::hold` before this FIFO's interrupt resumes, so the
+/// sentence stream stays in order. Until 1613 a burst under an erase
+/// lost its tail to the FIFO.
+pub(crate) fn absorb_parked(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    critical_section::with(|cs| BYTES.borrow_ref_mut(cs).push(bytes));
+}
+
 /// Empty the FIFO now: before a flash op, as the log's is.
 pub fn drain() {
     critical_section::with(|cs| {
@@ -113,12 +125,13 @@ pub fn write(frame: &[u8]) -> bool {
     })
 }
 
-/// FIFO overruns, flagged bytes, and bytes the full keep dropped.
+/// FIFO overruns, flagged bytes, and bytes the full keep dropped — the
+/// last with what a full park ring counted during a flash op (1613).
 pub fn losses() -> (u32, u32, u32) {
     let lost = critical_section::with(|cs| BYTES.borrow_ref(cs).lost());
     (
         OVERRUNS.load(Ordering::Relaxed),
         ERRORS.load(Ordering::Relaxed),
-        lost,
+        lost.saturating_add(crate::corepark::gnss_ring_lost()),
     )
 }

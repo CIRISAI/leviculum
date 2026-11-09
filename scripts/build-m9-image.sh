@@ -276,6 +276,42 @@ echo "$TAG image $OUT/$NAME.bin ($(stat -c %s "$OUT/$NAME.bin") B), elf $OUT/thi
 echo "M9_IMAGE_SHA kind=$KIND sha256=$(sha256sum "$OUT/$NAME.bin" | cut -d' ' -f1)"
 rc=0
 verdict "$used" "$partition" "${stack:-0}" "${ui_stack:-0}" || rc=1
+# The park spin (1613, leviculum-esp/src/corepark.rs) runs while a flash
+# op has the cache off: the handler must lie whole in .rwtext (internal
+# RAM, literals included -- the linker script keeps them beside the
+# code), and its body must hold no call and no indirect jump, either of
+# which could reach flash, which the op makes unreadable. This is the
+# completeness proof the IRAM options of 1613 were asked to name: the
+# set is one function, and the linked ELF shows it.
+# shellcheck disable=SC1091
+park_line="$(source "$HOME/export-esp.sh" >/dev/null && xtensa-esp32s3-elf-nm -S "$OUT/thinknode_m9" \
+    | grep -m1 __esp_hal_internal_park_ipi)"
+if [ -z "$park_line" ]; then
+    echo "$TAG FAIL no park_ipi symbol in the ELF; the park spin (corepark.rs) is gone or renamed"
+    rc=1
+else
+    park_addr=$((16#$(echo "$park_line" | awk '{print $1}')))
+    park_size=$((16#$(echo "$park_line" | awk '{print $2}')))
+    # shellcheck disable=SC1091
+    read -r rw_addr rw_size < <(source "$HOME/export-esp.sh" >/dev/null &&
+        xtensa-esp32s3-elf-readelf -SW "$OUT/thinknode_m9" |
+        awk '{ for (i = 1; i <= NF; i++) if ($i == ".rwtext") {
+            print strtonum("0x" $(i + 2)), strtonum("0x" $(i + 4)); exit } }')
+    if [ -z "${rw_addr:-}" ] || [ "$park_addr" -lt "$rw_addr" ] ||
+        [ $((park_addr + park_size)) -gt $((rw_addr + rw_size)) ]; then
+        echo "$TAG FAIL park_ipi at $(printf 0x%x "$park_addr")+$park_size is not inside .rwtext ($(printf 0x%x "${rw_addr:-0}")+${rw_size:-0}); the spin would run from flash with the cache off"
+        rc=1
+    fi
+    # shellcheck disable=SC1091
+    park_calls="$(source "$HOME/export-esp.sh" >/dev/null &&
+        xtensa-esp32s3-elf-objdump -d --start-address="$park_addr" \
+            --stop-address=$((park_addr + park_size)) "$OUT/thinknode_m9" |
+        grep -cE '\b(call(x)?(0|4|8|12)|jx)\b')"
+    if [ "$park_calls" -ne 0 ]; then
+        echo "$TAG FAIL the park spin holds $park_calls call/jx instruction(s); everything it runs must inline into the one .rwtext function"
+        rc=1
+    fi
+fi
 # The cheap half of check-m9-reproducible.sh, on every build: the shipped
 # image names no path of this host (the remap above, order 1458).
 for p in "$ROOT/" "$HOME/" "$CANON/"; do

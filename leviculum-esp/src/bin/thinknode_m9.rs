@@ -131,7 +131,8 @@
 //!                           the line took (1507), tx_drop_kind the same
 //!                           by what they were (1553); dump stays 0, a
 //!                           dump's line is never dropped for another
-//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> park_ms=<n> park_max_ms=<n> park_ops=<n> t=<ms>  (1569; the bench image adds alloc_ms0=<n> alloc_ms1=<n>, each core's time inside the allocator, and since 1594 wait_ms0=<n> wait_ms1=<n> allocs0=<n> allocs1=<n>, the spin for a pool's lock and the calls)
+//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> park_ms=<n> park_max_ms=<n> park_ops=<n> park_coop=<n> park_fallback=<n> park_late=<n> t=<ms>  (1569; park_coop/park_fallback/park_late since 1613, the window's cooperative parks against hardware-stall fallbacks, `leviculum_esp::corepark`; the bench image adds alloc_ms0=<n> alloc_ms1=<n>, each core's time inside the allocator, and since 1594 wait_ms0=<n> wait_ms1=<n> allocs0=<n> allocs1=<n>, the spin for a pool's lock and the calls)
+//! [FLASH] op=<erase|write> ms=<n> at=<ms>  (1613, bench image only: one line per flash op, the masked window's length and when it ran; the erase distribution window 24 reads)
 //!                           every five seconds (1507, `leviculum_esp::idle`):
 //!                           the share of the window each core waited for
 //!                           its next interrupt (WAITI) instead of spinning;
@@ -1972,6 +1973,8 @@ fn main() -> ! {
     // says goes through the queue to this core's UART writer. The guard
     // must live as long as the image: dropping it parks the core.
     let mut cpu = CpuControl::new(p.CPU_CTRL);
+    // The park interrupt's latch (1613), bound over there by `ui_main`.
+    let park_intr = p.FROM_CPU_INTR2;
     // SAFETY: the one place this static is taken, before the core starts.
     let ui_stack = unsafe { &mut *addr_of_mut!(APP_CORE_STACK) };
     let started = cpu.start_app_core(ui_stack, move || {
@@ -1986,6 +1989,7 @@ fn main() -> ! {
                 io,
                 te: lcd_te,
                 tick: ui_timer,
+                park: esp_hal::interrupt::software::SoftwareInterrupt::new(park_intr),
                 regions: area_regions,
             },
         )
@@ -2043,6 +2047,9 @@ fn main() -> ! {
     let _ = leviculum_esp::idle::waited_us();
     // The flash ops' park account as of the last window (1569).
     let mut park_since = leviculum_esp::flash::park::so_far();
+    // The park protocol's account as of the last window (1613):
+    // cooperative holds, hardware-stall fallbacks, late done-waits.
+    let mut coop_since = leviculum_esp::corepark::stats();
     // Each core's allocator cycles as of the last window (1569): the
     // starve's instrument, in the bench image whose clock it is.
     #[cfg(m9_bench)]
@@ -2074,6 +2081,16 @@ fn main() -> ! {
         wdt.feed();
         stall::turned(Core::Io);
         stall::stage(Core::Io, Stage::Host);
+        // The masked windows one by one (1613): the distribution the
+        // bench reads erase lengths from, beside the overruns they
+        // used to cause.
+        #[cfg(m9_bench)]
+        leviculum_esp::flash::park::take_records(|op, us, at| {
+            log.text(
+                "[FLASH] ",
+                &alloc::format!("op={} ms={}.{:03} at={at}", op.name(), us / 1000, us % 1000),
+            );
+        });
         let now = uptime_ms();
         let mut turn = Turn::default();
         if now >= next_banner {
@@ -2099,6 +2116,14 @@ fn main() -> ! {
             let park_ops = park_now.1.wrapping_sub(park_since.1);
             park_since = park_now;
             let park_max = leviculum_esp::flash::park::take_max_us();
+            // The park protocol this window (1613): every op should be
+            // a cooperative hold; a fallback is an unarmed or deaf UI
+            // core, counted where the window's reader looks.
+            let coop_now = leviculum_esp::corepark::stats();
+            let park_coop = coop_now.0.wrapping_sub(coop_since.0);
+            let park_fallback = coop_now.1.wrapping_sub(coop_since.1);
+            let park_late = coop_now.2.wrapping_sub(coop_since.2);
+            coop_since = coop_now;
             // Each core's time inside the allocator this window (1569),
             // the starve's instrument: cycles at 240 MHz, as
             // milliseconds of the window.
@@ -2119,7 +2144,7 @@ fn main() -> ! {
             log.text(
                 "[IDLE] ",
                 &alloc::format!(
-                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops} alloc_ms0={} alloc_ms1={} wait_ms0={} wait_ms1={} allocs0={} allocs1={}",
+                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops} park_coop={park_coop} park_fallback={park_fallback} park_late={park_late} alloc_ms0={} alloc_ms1={} wait_ms0={} wait_ms1={} allocs0={} allocs1={}",
                     u64::from(io) * 100 / window_us,
                     u64::from(ui) * 100 / window_us,
                     window_us / 1000,
@@ -2139,7 +2164,7 @@ fn main() -> ! {
             log.line(
                 "[IDLE] ",
                 format_args!(
-                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops}",
+                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops} park_coop={park_coop} park_fallback={park_fallback} park_late={park_late}",
                     u64::from(io) * 100 / window_us,
                     u64::from(ui) * 100 / window_us,
                     window_us / 1000,
@@ -2570,6 +2595,10 @@ struct UiWakes {
     io: Io<'static>,
     te: m9::LcdTe<'static>,
     tick: esp_hal::timer::timg::Timer<'static>,
+    /// The park interrupt (1613, `leviculum_esp::corepark`): bound on
+    /// this core, so a flash op can ask it to spin in internal RAM and
+    /// poll the FIFOs instead of being hardware-stalled deaf.
+    park: esp_hal::interrupt::software::SoftwareInterrupt<'static, 2>,
     /// Not a wake: the map regions core 0 read from the flash's area
     /// (1477), handed over with the rest of what the UI core starts with.
     regions: Vec<&'static [u8]>,
@@ -2596,8 +2625,13 @@ fn ui_main(
         mut io,
         te: te_pin,
         tick,
+        park,
         regions: area_regions,
     } = wakes;
+    // First: from here every flash op parks this core cooperatively
+    // (1613) — it polls the FIFOs from internal RAM instead of going
+    // deaf under the hardware stall.
+    leviculum_esp::corepark::arm(park);
     io.set_interrupt_handler(te_edge);
     let mut te_line = Input::new(te_pin, InputConfig::default());
     critical_section::with(|cs| {
