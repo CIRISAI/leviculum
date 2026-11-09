@@ -660,8 +660,14 @@ fn python_files(message: &serde_json::Value) -> Vec<u8> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_reaches_a_python_lxmf_receiver_as_the_attachments_field() {
     use leviculum_lxmf::msgpack;
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("1221-file");
-    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    // Its own directory, not a fixed name: two copies of this binary run side
+    // by side under the quota survey and raced on one (1590).
+    std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).expect("the target tmpdir");
+    let scratch = tempfile::Builder::new()
+        .prefix("1221-file-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("a scratch dir");
+    let dir = scratch.path();
     let name = "Protokoll Grüße.pdf";
     let path = dir.join(name);
     let data: Vec<u8> = (0..300_000u32)
@@ -725,5 +731,4 @@ async fn a_file_reaches_a_python_lxmf_receiver_as_the_attachments_field() {
     );
 
     mesh.daemon.stop().await.expect("stop the Rust daemon");
-    let _ = std::fs::remove_dir_all(&dir);
 }
