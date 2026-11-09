@@ -185,6 +185,13 @@ mod late;
 /// seconds.
 pub const TOAST_TICKS: u64 = 12;
 
+/// The most toasts a model keeps (1603): only the newest is drawn
+/// ([`UiModel::current_toast`]), and a shell that never ticks (the M9
+/// sends no [`UiEvent::Tick`]) never ages one out, so every received
+/// message left its toast in the model: a rebuild of 4464 entries kept
+/// 4464 toasts and their texts, a reallocation of 4096 at a time.
+pub const TOAST_KEEP: usize = 8;
+
 /// Shell ticks in a second, for the leg's elapsed time on a row.
 const TICKS_PER_SECOND: u64 = 4;
 
@@ -1155,8 +1162,12 @@ pub struct UiModel<B> {
     pub compose: B,
     /// Where keys go.
     pub focus: Pane,
-    /// Notes floated over the content, newest last.
+    /// Notes floated over the content, newest last, at most
+    /// [`TOAST_KEEP`] of them.
     pub toasts: Vec<Toast>,
+    /// How many toasts were said (1603): what the redraw marks hash, as
+    /// a toast said at [`TOAST_KEEP`] leaves the count where it was.
+    toasts_said: u64,
     /// The palette, when open.
     pub palette: Option<Palette<B>>,
     /// Whether the help overlay is up.
@@ -1549,6 +1560,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             compose: B::default(),
             focus: Pane::Conversations,
             toasts: Vec::new(),
+            toasts_said: 0,
             palette: None,
             help: false,
             help_scroll: 0,
@@ -1879,6 +1891,11 @@ impl<B> UiModel<B> {
     }
 
     fn toast(&mut self, kind: ToastKind, text: String) {
+        if self.toasts.len() >= TOAST_KEEP {
+            let over = self.toasts.len() + 1 - TOAST_KEEP;
+            self.toasts.drain(..over);
+        }
+        self.toasts_said = self.toasts_said.wrapping_add(1);
         self.toasts.push(Toast {
             kind,
             text,
@@ -2163,6 +2180,7 @@ impl<B> UiModel<B> {
     fn clock_marks(&self) -> u64 {
         let mut hash = Fnv::new();
         hash.word(self.toasts.len() as u64);
+        hash.word(self.toasts_said);
         hash.word(u64::from(self.current_toast().is_some()));
         hash.word(u64::from(self.confirm.is_some()));
         hash.word(u64::from(self.fetching));
@@ -3559,7 +3577,15 @@ impl<'a, B: InputBuffer + Default> Batch<'a, B> {
             self.model.ops.reset();
         }
         match named_by(&event) {
-            Some(Some(peer)) if self.scoped => self.model.note_scope.push(peer),
+            // Each conversation once (1603): a set, sorted at the note;
+            // one per event grew with the batch, 4464 peers in a ring's
+            // rebuild, a reallocation of 8192 of them.
+            Some(Some(peer)) if self.scoped => {
+                let scope = &mut self.model.note_scope;
+                if scope.last() != Some(&peer) && !scope.contains(&peer) {
+                    scope.push(peer);
+                }
+            }
             Some(_) => {}
             None => self.scoped = false,
         }
@@ -7749,6 +7775,7 @@ fn view_stamp<B: InputBuffer>(model: &UiModel<B>) -> u64 {
     hash.word(u64::from(model.search.is_some()));
     hash.word(u64::from(model.map.is_some()));
     hash.word(model.toasts.len() as u64);
+    hash.word(model.toasts_said);
     hash.word(model.lang as u64);
     hash.word(u64::from(model.debug_overlay));
     hash.word(u64::from(model.enhanced));
@@ -8398,6 +8425,30 @@ pub(crate) mod tests {
         assert_eq!(model.focus, Pane::Compose);
         typed(model, body);
         update(model, key(KeyCode::Enter))
+    }
+
+    /// 1603: a model that is never ticked (the M9's) keeps
+    /// [`TOAST_KEEP`] toasts, not one per message ever received, and a
+    /// toast said at the cap still changes what the redraw marks hash.
+    #[test]
+    fn a_model_never_ticked_keeps_a_few_toasts_and_shows_the_newest() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        for n in 0..TOAST_KEEP {
+            model.toast(ToastKind::Info, format!("toast {n}"));
+        }
+        let (view, clock) = (view_stamp(&model), model.clock_marks());
+        model.toast(ToastKind::Info, String::from("the newest"));
+        for n in 0..1000 {
+            model.toast(ToastKind::Info, format!("more {n}"));
+        }
+        model.toast(ToastKind::Info, String::from("the last"));
+        assert_eq!(model.toasts.len(), TOAST_KEEP);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("the last")
+        );
+        assert_ne!(view_stamp(&model), view, "a toast at the cap is drawn");
+        assert_ne!(model.clock_marks(), clock, "a toast at the cap is marked");
     }
 
     #[test]
