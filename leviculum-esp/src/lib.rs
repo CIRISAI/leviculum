@@ -663,6 +663,19 @@ pub struct UartLog<'d> {
     lossy: bool,
     /// Frames the board's HDLC reader dropped, as the loop reports them.
     deframe_drop: u32,
+    /// Frames the loop read whole and still took nothing from (1597,
+    /// window 21: two key frames the walker sent moved no counter on the
+    /// board): an envelope too short or of the wrong length (refused as
+    /// malformed), an envelope of a type this image does not take
+    /// (refused as unknown), and a frame that is no envelope and too short
+    /// to be a Reticulum packet (handed to the node, which drops it). A
+    /// key frame that lost or gained a byte on the line lands in one of
+    /// them.
+    env_bad: u32,
+    env_refused: u32,
+    runt: u32,
+    /// The losses of the three above the last `[UART]` line said.
+    frames_said: [u32; 3],
     /// The longest the loop went between two reads since the last
     /// `[UART]` line, and when it last read.
     gap_max_ms: u64,
@@ -736,6 +749,12 @@ static RX_ERRORS: AtomicU32 = AtomicU32::new(0);
 /// count, without the proxy's log.
 static KEYS_RX: AtomicU32 = AtomicU32::new(0);
 
+/// Host bytes the UART handed over since boot, wrapping (1597, the
+/// `[UART]` line's `rx_bytes=`): the proxy's log sums what it sent, so a
+/// window whose sums differ by more than the counted losses lost bytes
+/// no counter saw.
+static RX_TAKEN: AtomicU32 = AtomicU32::new(0);
+
 /// One key frame taken from the host ([`KEYS_RX`]).
 pub fn count_key_rx() {
     KEYS_RX.fetch_add(1, Ordering::Relaxed);
@@ -764,7 +783,10 @@ fn pull_rx(rx: &mut UartRx<'static, Blocking>, keep: &mut RxKeep<RX_KEEP>) {
     for _ in 0..4 {
         match rx.read_buffered(&mut buf) {
             Ok(0) => return,
-            Ok(n) => keep.push(&buf[..n]),
+            Ok(n) => {
+                RX_TAKEN.fetch_add(n as u32, Ordering::Relaxed);
+                keep.push(&buf[..n]);
+            }
             Err(RxError::FifoOverflowed) => {
                 RX_OVERRUNS.fetch_add(1, Ordering::Relaxed);
             }
@@ -876,6 +898,10 @@ impl<'d> UartLog<'d> {
             tx,
             lossy: false,
             deframe_drop: 0,
+            env_bad: 0,
+            env_refused: 0,
+            runt: 0,
+            frames_said: [0; 3],
             gap_max_ms: 0,
             last_read_ms: None,
             said: None,
@@ -944,6 +970,24 @@ impl<'d> UartLog<'d> {
         self.deframe_drop = self.deframe_drop.saturating_add(1);
     }
 
+    /// A whole frame read as an envelope the loop refused as malformed
+    /// (1597, `env_bad=`).
+    pub fn envelope_bad(&mut self) {
+        self.env_bad = self.env_bad.saturating_add(1);
+    }
+
+    /// A whole envelope of a type this image does not take (1597,
+    /// `env_refused=`).
+    pub fn envelope_refused(&mut self) {
+        self.env_refused = self.env_refused.saturating_add(1);
+    }
+
+    /// A whole frame that is no envelope and shorter than a Reticulum
+    /// packet's header (1597, `runt=`).
+    pub fn runt(&mut self) {
+        self.runt = self.runt.saturating_add(1);
+    }
+
     /// Every loss on the receive side so far, and the loop's longest gap
     /// since the last `[UART]` line.
     pub fn rx_counts(&self) -> RxCounts {
@@ -963,13 +1007,16 @@ impl<'d> UartLog<'d> {
         let counts = self.rx_counts();
         let (tx_drop, tx_drop_bytes) = self.tx_dropped();
         let [drop_line, drop_frame, drop_dump] = self.tx_dropped_kinds();
-        let changed =
-            self.said.is_none_or(|said| counts.losses_differ(&said)) || tx_drop != self.tx_said;
+        let frames = [self.env_bad, self.env_refused, self.runt];
+        let changed = self.said.is_none_or(|said| counts.losses_differ(&said))
+            || tx_drop != self.tx_said
+            || frames != self.frames_said;
         if !(always || changed) {
             return;
         }
         self.said = Some(counts);
         self.tx_said = tx_drop;
+        self.frames_said = frames;
         self.gap_max_ms = 0;
         // Before the first measure (1521c) the field is there and says so,
         // so every `[UART]` line has the same keys. Through `text` (1553):
@@ -984,9 +1031,12 @@ impl<'d> UartLog<'d> {
             None => alloc::string::String::new(),
         };
         let keys = KEYS_RX.load(Ordering::Relaxed);
+        let rx_bytes = RX_TAKEN.load(Ordering::Relaxed);
+        let [env_bad, env_refused, runt] = frames;
         let body = alloc::format!(
             "{counts} stack_free={free}{ui} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes} \
-             tx_drop_kind=line:{drop_line},frame:{drop_frame},dump:{drop_dump} keys_rx={keys}"
+             tx_drop_kind=line:{drop_line},frame:{drop_frame},dump:{drop_dump} keys_rx={keys} \
+             rx_bytes={rx_bytes} env_bad={env_bad} env_refused={env_refused} runt={runt}"
         );
         self.text("[UART] ", &body);
     }

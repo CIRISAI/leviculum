@@ -110,7 +110,11 @@
 //!                           after the draw, when the page or its cursor
 //!                           moved (1533, `loquax_m9::page`): what a bench
 //!                           walk asserts without a dump
-//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> ui_stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> keys_rx=<n> t=<ms>
+//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> ui_stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> keys_rx=<n> rx_bytes=<n> env_bad=<n> env_refused=<n> runt=<n> t=<ms>
+//!                           (1597: rx_bytes the host bytes the UART handed
+//!                           over since boot, to set against the proxy's
+//!                           sent sums; env_bad, env_refused and runt the
+//!                           whole frames read and taken by nothing)
 //!                           on every loss and every five seconds (1440);
 //!                           stack_free is core 0's stack never touched
 //!                           since the boot's census, above the guard (1521b),
@@ -2141,6 +2145,11 @@ fn main() -> ! {
                 Err(EnvelopeError::NotEnvelope)
             ) {
                 // Not the control envelope: a Reticulum packet for the node.
+                // One shorter than a packet's header is counted (1597): a
+                // key frame cut on the line ends here.
+                if data.len() < RNS_HEADER_MIN {
+                    log.runt();
+                }
                 stall::stage(Core::Io, Stage::Packet);
                 node.packet(&data, uptime_ms(), &mut stores, &mut log);
                 wdt.feed();
@@ -3339,11 +3348,16 @@ fn fault_lines(words: &str, cols: usize, rows: usize) -> Vec<leviculum_ui::style
 /// everything else envelope-shaped is refused by name (`TYPE_HOME_CODE`
 /// and `TYPE_FRAME_DUMP` are the loop's). Frames that are not the
 /// envelope are the node's and never come here.
+/// The shortest Reticulum packet: flags, hops, a destination hash and the
+/// context byte (1597, `runt=`).
+const RNS_HEADER_MIN: usize = 2 + 16 + 1;
+
 fn control(data: &[u8], log: &mut UartLog<'_>) {
     let frame = match envelope::decode_frame(data) {
         Ok(frame) => frame,
         Err(EnvelopeError::NotEnvelope) => return,
         Err(EnvelopeError::Malformed { frame_type }) => {
+            log.envelope_bad();
             log.frame(&envelope::encode_refusal(
                 frame_type,
                 envelope::REFUSE_MALFORMED,
@@ -3377,6 +3391,10 @@ fn control(data: &[u8], log: &mut UartLog<'_>) {
                 envelope::TYPE_CAPABILITIES => envelope::REFUSE_MALFORMED,
                 _ => envelope::REFUSE_UNKNOWN_TYPE,
             };
+            match reason {
+                envelope::REFUSE_MALFORMED => log.envelope_bad(),
+                _ => log.envelope_refused(),
+            }
             log.frame(&envelope::encode_refusal(other, reason));
         }
     }
