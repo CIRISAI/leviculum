@@ -29,12 +29,26 @@ use tokio::signal::unix::{signal, SignalKind};
 
 /// Measured live heap, under the default-off `heap-accounting` feature
 /// (550): the same counting shim lnsd installs (`leviculum-cli/src/lnsd.rs`),
-/// for the same reason. It only counts and forwards to `System`, so the
-/// node runs the allocator it would run without it.
-#[cfg(feature = "heap-accounting")]
+/// for the same reason. It only counts and forwards to the allocator below
+/// it, so the node runs the allocator it would run without it.
+#[cfg(all(feature = "heap-accounting", not(feature = "alloc-mimalloc")))]
 #[global_allocator]
 static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
     leviculum_std::heap_accounting::CountingAllocator;
+
+/// mimalloc instead of the libc allocator, under the default
+/// `alloc-mimalloc` feature (1592), as lnsd since 766: on miauhaus the
+/// lnpnd on musl's mallocng grew about 70 MB an hour in anonymous mappings
+/// no table owned, the retention lnsd showed there before it moved.
+/// Counted, in the same shim, when `heap-accounting` is on too.
+#[cfg(all(feature = "heap-accounting", feature = "alloc-mimalloc"))]
+#[global_allocator]
+static ALLOC: leviculum_std::heap_accounting::CountingOver<mimalloc::MiMalloc> =
+    leviculum_std::heap_accounting::CountingOver(mimalloc::MiMalloc);
+
+#[cfg(all(not(feature = "heap-accounting"), feature = "alloc-mimalloc"))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// `--version`: the crate version, the build id, `+heapacct` in an
 /// instrumented build and the commit in parentheses, composed by build.rs the
@@ -633,6 +647,13 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         );
         leviculum_std::heap_accounting::configure_sampler_from_env();
     }
+    // Both ways, as lnsd's, so a field node's log names its allocator
+    // whichever build it runs; build-deb.sh reads the mimalloc line off the
+    // binary, so each arm is a whole literal.
+    #[cfg(feature = "alloc-mimalloc")]
+    tracing::info!("Allocator: mimalloc");
+    #[cfg(not(feature = "alloc-mimalloc"))]
+    tracing::info!("Allocator: system (libc)");
 
     let data_dir = args
         .data_dir
@@ -888,7 +909,11 @@ fn census_dump(node: &leviculum_std::ReticulumNode) -> String {
     let mut dump = leviculum_std::reticulum::compose_diagnostic_dump(node.diagnostic_dump());
     #[cfg(feature = "heap-accounting")]
     dump.push_str(&leviculum_std::heap_accounting::measured_live_line(
-        "system",
+        if cfg!(feature = "alloc-mimalloc") {
+            "mimalloc"
+        } else {
+            "system"
+        },
     ));
     dump
 }

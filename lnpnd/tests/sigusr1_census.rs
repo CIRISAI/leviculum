@@ -298,6 +298,7 @@ async fn sigusr1_prints_the_census_with_live_n_a() {
         !text.contains("=== Measured live: ") && !text.contains("=== Heap sample: "),
         "a plain build has nothing measured to print; it said:\n{text}"
     );
+    assert_allocator_line(&text);
 }
 
 #[cfg(feature = "heap-accounting")]
@@ -319,7 +320,12 @@ async fn sigusr1_prints_measured_live_bytes_and_the_sampler() {
         .lines()
         .find(|l| l.starts_with("=== Measured live: "))
         .unwrap_or_default();
-    assert!(measured.contains("allocator system"), "{measured}");
+    let allocator = if cfg!(feature = "alloc-mimalloc") {
+        "allocator mimalloc"
+    } else {
+        "allocator system"
+    };
+    assert!(measured.contains(allocator), "{measured}");
     let measured_bytes = measured["=== Measured live: ".len()..]
         .split_whitespace()
         .next()
@@ -331,6 +337,21 @@ async fn sigusr1_prints_measured_live_bytes_and_the_sampler() {
     assert!(
         text.contains("Heap accounting: on"),
         "the startup line names the build; it said:\n{text}"
+    );
+    assert_allocator_line(&text);
+}
+
+/// The startup line names the allocator the build installed (1592), the
+/// line build-deb.sh reads off the binary's bytes.
+fn assert_allocator_line(text: &str) {
+    let want = if cfg!(feature = "alloc-mimalloc") {
+        "Allocator: mimalloc"
+    } else {
+        "Allocator: system (libc)"
+    };
+    assert!(
+        text.contains(want),
+        "the startup line names the allocator ({want}); it said:\n{text}"
     );
 }
 
@@ -346,6 +367,22 @@ fn version_names_the_heap_accounting_feature() {
     assert_eq!(
         version.contains("+heapacct"),
         cfg!(feature = "heap-accounting"),
+        "{version}"
+    );
+}
+
+/// `--version` tells a mimalloc build from a libc one (1592), as lnsd's does.
+#[test]
+fn version_names_the_allocator() {
+    let out = Command::new(env!("CARGO_BIN_EXE_lnpnd"))
+        .arg("--version")
+        .output()
+        .expect("lnpnd --version runs");
+    assert!(out.status.success());
+    let version = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        version.contains("+mimalloc"),
+        cfg!(feature = "alloc-mimalloc"),
         "{version}"
     );
 }

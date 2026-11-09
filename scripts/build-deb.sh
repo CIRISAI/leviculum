@@ -25,10 +25,12 @@
 #   scripts/build-deb.sh armhf
 #   LEVICULUM_ALLOC=system scripts/build-deb.sh amd64
 #
-# lnsd runs on mimalloc, leviculum-cli's default feature (#437, 766).
-# LEVICULUM_ALLOC=system builds the leviculum and leviculum-heapacct packages'
-# lnsd on the libc allocator instead (`--no-default-features`), for a node that
-# has to be compared against the old build; anything else is refused.
+# lnsd runs on mimalloc, leviculum-cli's default feature (#437, 766), and
+# lnpnd too, lnpnd's default feature (1592). LEVICULUM_ALLOC=system builds
+# both daemons, in their plain and heapacct packages, on the libc allocator
+# instead (`--no-default-features`, lnpnd keeping its interface families),
+# for a node that has to be compared against the old build; anything else is
+# refused.
 #
 # Expects scripts/deb-stamp.sh to have run. The versions are read from
 # its stamp files rather than derived here, so an amd64 + arm64 pair
@@ -129,8 +131,14 @@ done
 }
 LEVICULUM_ALLOC="${LEVICULUM_ALLOC:-mimalloc}"
 case "$LEVICULUM_ALLOC" in
-mimalloc) alloc_args=() ;;
-system) alloc_args=(--no-default-features) ;;
+mimalloc)
+    alloc_args=()
+    lnpnd_alloc_args=()
+    ;;
+system)
+    alloc_args=(--no-default-features)
+    lnpnd_alloc_args=(--no-default-features --features "ble serial i2p")
+    ;;
 *)
     echo "error: LEVICULUM_ALLOC=${LEVICULUM_ALLOC}; want mimalloc or system" >&2
     exit 2
@@ -138,7 +146,7 @@ system) alloc_args=(--no-default-features) ;;
 esac
 LEVICULUM_BUILD_ID="$(cat .build-id)"
 export LEVICULUM_BUILD_ID
-echo "[build-deb] ${ARCH} (${TRIPLE}) build-id=${LEVICULUM_BUILD_ID} lnsd allocator=${LEVICULUM_ALLOC}"
+echo "[build-deb] ${ARCH} (${TRIPLE}) build-id=${LEVICULUM_BUILD_ID} lnsd and lnpnd allocator=${LEVICULUM_ALLOC}"
 
 # Render docs/src/man/*.1.md to roff under target/man/, which the three
 # .deb manifests install from. The Markdown is the single source: the
@@ -185,14 +193,15 @@ if [ -n "$DESKTOP_TRIPLE" ]; then
 fi
 
 # The allocator is read off the bytes, like the heap-accounting marker below:
-# an arm64 binary cannot be run here. lnsd logs `Allocator: mimalloc` at
-# startup only when it was built on mimalloc, so a package that would ship
-# lnsd on the wrong allocator fails here instead of on a field node a day
-# later, as resident memory nobody can account for.
+# an arm64 binary cannot be run here. lnsd and lnpnd log `Allocator: mimalloc`
+# at startup only when they were built on mimalloc, so a package that would
+# ship either daemon on the wrong allocator fails here instead of on a field
+# node a day later, as resident memory nobody can account for.
 mimalloc_marker='Allocator: mimalloc'
 release_dir="$TARGET/$TRIPLE/release"
 if [ "$LEVICULUM_ALLOC" = system ]; then
     "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd --no-default-features
+    "${build_cmd[@]}" --release --target "$TRIPLE" -p lnpnd --bin lnpnd "${lnpnd_alloc_args[@]}"
 fi
 require_allocator() {
     local bin="$release_dir/$1"
@@ -207,6 +216,7 @@ require_allocator() {
     fi
 }
 require_allocator lnsd
+require_allocator lnpnd
 
 # One --deb-version per package: the three are versioned independently,
 # so a single shared version string would be wrong for at least two of
@@ -309,12 +319,13 @@ debs+=("$TARGET/debian/leviculum-heapacct_${heapacct_version}_${ARCH}.deb")
 # own package, a variant of lnpnd's, because the daemon ships with its own
 # unit and service user; lnpnd's build carries the same startup line.
 env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p lnpnd --bin lnpnd \
-    --features heap-accounting
+    "${lnpnd_alloc_args[@]}" --features heap-accounting
 require_symtab lnpnd
 grep -qaF "$heapacct_marker" "$release_dir/lnpnd" || {
     echo "error: lnpnd built with --features heap-accounting does not carry the feature" >&2
     exit 1
 }
+require_allocator lnpnd
 lnpnd_heapacct_version="$(cat .deb-version-lnpnd)+heapacct"
 cargo deb -p lnpnd --variant heapacct --target "$TRIPLE" --no-build --no-strip \
     --deb-version "$lnpnd_heapacct_version"
@@ -331,6 +342,7 @@ if grep -qaF "$heapacct_marker" "$release_dir/lnpnd"; then
     echo "error: the plain lnpnd was not restored after the heap-accounting build" >&2
     exit 1
 fi
+require_allocator lnpnd
 
 # The things cargo-deb gets wrong or cannot produce: native changelog
 # name, md5sums, empty Depends. Idempotent, in place.
