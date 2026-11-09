@@ -596,8 +596,8 @@ on a redeploy. So the list ships only what answered.
 
 **The measurement**, 2026-11-09 from the coder host, with
 `loquax/examples/rrc_hubs_probe.rs`: a node of its own dialled the
-shipped entry servers (`leviculum.network:4242` and the Sauerland
-testnet, `38.242.217.238:4242`), listened for `rrc.hub` announces in
+shipped entry servers (leviculum.network, port 4242, and the
+Sauerland testnet, 38.242.217.238, port 4242), listened for `rrc.hub` announces in
 three windows of 560 s (06:41 to 07:09 CET, plus a 60 s smoke run
 before and the 120 s before the opening round), then opened each hub
 with Loquax's own hub link (`loquax::rooms_link`: path, link, Identify,

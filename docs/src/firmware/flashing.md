@@ -98,13 +98,13 @@ waits when a board needs the manual double-tap. Radio settings can be
 given at flash time with `--radio-preset` (`eu868`, `us915`, `au915`) or
 the individual `--radio-freq`, `--radio-bw`, `--radio-sf`, `--radio-cr`
 and `--radio-txpower` flags; `--no-radio` leaves the board's stored
-configuration alone. (`lnflash/src/main.rs:49-503`. The board keeps what
+configuration alone. (`lnflash/src/main.rs:54-508`. The board keeps what
 it is given across resets and across the next flash, so this is part of
 the flash rather than a later configuration step.)
 
 The bundle is looked for in this order: `--bundle PATH`, then
 `$LNFLASH_BUNDLE`, then the directory holding the binary, then
-`/usr/share/lnflash`. (`lnflash/src/main.rs:49-52`)
+`/usr/share/lnflash`. (`lnflash/src/main.rs:54-57`)
 
 The full user-facing text ships inside the bundle as its `README`
 (`lnflash/payload/README-bundle.md`), including what the alarming but
