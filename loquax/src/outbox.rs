@@ -371,9 +371,12 @@ pub enum OutboxEvent {
     /// `status` is the `/lev/status` version its announce says it answers
     /// (`{"lev": {"status": 1}}` under `PN_META_CUSTOM`, lnpnd); none for a
     /// stock node, which a sender never asks (1395).
+    /// `name` is the name it announces under `PN_META_NAME`, unsanitised:
+    /// what the screen says the relay by (1587).
     NodeAnnounced {
         destination: [u8; 16],
         status: Option<u64>,
+        name: Option<String>,
     },
     /// A propagation node proved the upload of the queued message
     /// `message_id`, which it stores under `transient_id`: what a sender

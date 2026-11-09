@@ -318,6 +318,10 @@ leviculum_ui::catalogue! {
     GroupRemove = "group_remove", "Remove", "Entfernen";
     GroupAdd = "group_add", "Add members", "Mitglieder hinzufügen";
     GroupAddConfirm = "group_add_confirm", "Add", "Hinzufügen";
+    // The header's relay, by the name it announces, never its hash (1587,
+    // feedback_no_hashes_on_screen).
+    RelayNamed = "relay_named", "relay %1$s", "Relais %1$s";
+    RelayUnnamed = "relay_unnamed", "a relay", "ein Relais";
     GroupRemoveAsk = "group_remove_ask", "Remove %1$s from %2$s?", "%1$s aus %2$s entfernen?";
     GroupYes = "group_yes", "Yes", "Ja";
     GroupNo = "group_no", "No", "Nein";

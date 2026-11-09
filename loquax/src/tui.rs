@@ -4414,11 +4414,7 @@ mod tests {
             let mailbox = of(&|t| *t == Target::Mailbox);
             // With no trust word for an unnamed peer (1279) the header has
             // room for the node and how at both sizes.
-            assert_eq!(
-                under(&shot, &mailbox),
-                "propagation node 9c9c9c9c adopted",
-                "{width}: {shot}"
-            );
+            assert_eq!(under(&shot, &mailbox), "a relay adopted", "{width}: {shot}");
             let badge = of(&|t| matches!(t, Target::Badge(_)));
             assert_eq!(under(&shot, &badge), "[1]", "{width}: {shot}");
             let marks = of(&|t| matches!(t, Target::Block { mark: true, .. }));

@@ -1920,14 +1920,16 @@ impl Engine {
         }
         if let NodeEvent::AnnounceReceived { announce, .. } = event {
             if is_propagation_node(announce.name_hash()) {
+                let decoded = leviculum_lxmf::propagation::PropagationNodeAnnounce::decode(
+                    announce.app_data(),
+                )
+                .ok();
                 self.emit(OutboxEvent::NodeAnnounced {
                     destination: *announce.destination_hash().as_bytes(),
-                    status: leviculum_lxmf::propagation::PropagationNodeAnnounce::decode(
-                        announce.app_data(),
-                    )
-                    .ok()
-                    .as_ref()
-                    .and_then(leviculum_lxmf::lev_status::announced_version),
+                    status: decoded
+                        .as_ref()
+                        .and_then(leviculum_lxmf::lev_status::announced_version),
+                    name: decoded.as_ref().and_then(|d| d.name()),
                 });
             }
         }

@@ -236,6 +236,8 @@
     <string name="group_remove">Entfernen</string>
     <string name="group_add">Mitglieder hinzufügen</string>
     <string name="group_add_confirm">Hinzufügen</string>
+    <string name="relay_named">Relais %1$s</string>
+    <string name="relay_unnamed">ein Relais</string>
     <string name="group_remove_ask">%1$s aus %2$s entfernen?</string>
     <string name="group_yes">Ja</string>
     <string name="group_no">Nein</string>

@@ -1090,12 +1090,16 @@ impl Conversation {
 }
 
 /// The mailbox as the header says it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MailboxShown {
     /// The selected node, once a run or the stored record named one.
     pub node: Option<[u8; 16]>,
     /// Named with `--pn`, not adopted.
     pub by_user: bool,
+    /// The name the selected node announced (`PN_META_NAME`), sanitised:
+    /// the header says the relay by it, "a relay" without one (1587). Only
+    /// the selected node's is kept, so it is learnt at its next announce.
+    pub name: Option<String>,
     /// When this session's last fetch finished.
     pub synced: Option<WallTime>,
 }
@@ -3911,6 +3915,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::MailboxChosen { node, by_user } => {
+            // Another node's name is not this one's.
+            if model.mailbox.node != Some(node) {
+                model.mailbox.name = None;
+            }
             model.mailbox.node = Some(node);
             model.mailbox.by_user = by_user;
             Vec::new()
@@ -5945,9 +5953,13 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
         OutboxEvent::NodeAnnounced {
             destination,
             status,
+            name,
         } => {
             model.pn_asker.announced(destination, status);
             if model.mailbox.node == Some(destination) {
+                // What the header says it by (1587); an announce without a
+                // name unnames it.
+                model.mailbox.name = name.as_deref().and_then(crate::names::sanitise);
                 return schedule(model, SyncEvent::Announce);
             }
         }
@@ -7243,7 +7255,7 @@ fn fetch_shown<B>(model: &UiModel<B>) -> bool {
 /// takes the first that fits. The word is long, so the narrower forms say
 /// `pn` (1153: "mailbox" now means the user's Loquax Mailbox).
 fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
-    let Some(node) = model.mailbox.node else {
+    if model.mailbox.node.is_none() {
         // Without a relay nothing is said until a send needs one (1279, walk
         // finding 21): "no propagation node" in every chat was the default
         // state worded as a fault.
@@ -7251,8 +7263,18 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
             true => vec!["no relay".to_string()],
             false => Vec::new(),
         };
-    };
-    let node = to_hex(&node[..4]);
+    }
+    // The relay by its announced name, else "a relay": never its hash on
+    // the screen (1587, the names rule of 1452); the hash is the CLI's and
+    // the log's `propagation node:` line.
+    let node = match &model.mailbox.name {
+        Some(name) => strings::Text::Key(
+            strings::StrId::RelayNamed,
+            Vec::from([strings::Arg::Str(name.clone())]),
+        ),
+        None => strings::Text::key(strings::StrId::RelayUnnamed),
+    }
+    .resolve(model.lang);
     let how = if model.mailbox.by_user {
         "chosen"
     } else {
@@ -7268,20 +7290,19 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
     let mut words = Vec::new();
     match (&sync, &next) {
         (Some(sync), Some(next)) => {
-            words.push(format!("propagation node {node} {how} · {sync} · {next}"));
+            words.push(format!("{node} {how} · {sync} · {next}"));
             words.push(format!("propagation node · {sync} · {next}"));
             words.push(format!("pn · {sync} · {next}"));
             words.push(format!("pn · {next}"));
         }
         (Some(only), None) | (None, Some(only)) => {
-            words.push(format!("propagation node {node} {how} · {only}"));
+            words.push(format!("{node} {how} · {only}"));
             words.push(format!("propagation node · {only}"));
             words.push(format!("pn · {only}"));
         }
-        (None, None) => words.push(format!("propagation node {node} {how}")),
+        (None, None) => words.push(format!("{node} {how}")),
     }
-    words.push(format!("propagation node {node}"));
-    words.push(format!("pn {node}"));
+    words.push(node);
     words.push("pn".to_string());
     words
 }
@@ -8733,6 +8754,7 @@ pub(crate) mod tests {
             OutboxEvent::NodeAnnounced {
                 destination: PN,
                 status: Some(1),
+                name: None,
             },
         );
         // A round that failed found the node silent: nothing asked.
@@ -11780,16 +11802,13 @@ pub(crate) mod tests {
                 by_user: false,
             },
         );
-        assert_eq!(
-            view(&model).messages_title_right,
-            "propagation node 9c9c9c9c adopted"
-        );
+        assert_eq!(view(&model).messages_title_right, "a relay adopted");
         clock(&mut model, 26, 14, 3);
         update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
         update(&mut model, UiEvent::FetchDone(Ok(0)));
         assert_eq!(
             view(&model).messages_title_right,
-            "propagation node · synced 14:03"
+            "a relay adopted · synced 14:03"
         );
         update(
             &mut model,
@@ -11803,10 +11822,60 @@ pub(crate) mod tests {
         assert_eq!(wide.messages_title_right, "");
         assert_eq!(
             text(&wide.messages[0]).trim(),
-            "propagation node 9c9c9c9c adopted · synced 14:03"
+            "a relay adopted · synced 14:03"
         );
         assert!(text(&wide.messages[1]).trim().chars().all(|c| c == '─'));
         assert_eq!(wide.compose_title, "to Unknown");
+    }
+
+    /// The header says the relay by the name its announce carries, "a
+    /// relay" without one, in the reader's language; its hash never (1587).
+    /// Another node's announce names nothing, a choice of another node
+    /// forgets the name, and an announce without a name unnames it.
+    #[test]
+    fn the_header_says_the_relay_by_its_name_never_its_hash() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let chosen = |model: &mut UiModel<Field>, node: [u8; 16]| {
+            update(
+                model,
+                UiEvent::MailboxChosen {
+                    node,
+                    by_user: false,
+                },
+            );
+        };
+        let announced = |model: &mut UiModel<Field>, node: [u8; 16], name: Option<&str>| {
+            engine_says(
+                model,
+                OutboxEvent::NodeAnnounced {
+                    destination: node,
+                    status: None,
+                    name: name.map(str::to_string),
+                },
+            );
+        };
+        let right = |model: &UiModel<Field>| view(model).messages_title_right;
+        chosen(&mut model, [0x9c; 16]);
+        assert_eq!(right(&model), "a relay adopted");
+        announced(&mut model, [0x42; 16], Some("Elsewhere"));
+        assert_eq!(right(&model), "a relay adopted", "another node's name");
+        announced(&mut model, [0x9c; 16], Some("Bern\u{7}"));
+        assert_eq!(right(&model), "relay Bern adopted", "sanitised");
+        assert!(!right(&model).contains("9c9c"));
+        model.lang = strings::Lang::De;
+        assert_eq!(right(&model), "Relais Bern adopted");
+        model.lang = strings::Lang::En;
+        chosen(&mut model, [0x9c; 16]);
+        assert_eq!(right(&model), "relay Bern adopted", "the same node");
+        chosen(&mut model, [0x77; 16]);
+        assert_eq!(right(&model), "a relay adopted", "another node");
+        model.lang = strings::Lang::De;
+        assert_eq!(right(&model), "ein Relais adopted");
+        model.lang = strings::Lang::En;
+        announced(&mut model, [0x77; 16], Some("Zug"));
+        assert_eq!(right(&model), "relay Zug adopted");
+        announced(&mut model, [0x77; 16], None);
+        assert_eq!(right(&model), "a relay adopted", "unnamed");
     }
 
     fn engine_says(model: &mut UiModel<Field>, event: OutboxEvent) -> Vec<UiEffect> {
@@ -11839,7 +11908,7 @@ pub(crate) mod tests {
         assert_eq!(model.fetch_reason, Some(Reason::Start));
         assert_eq!(
             view(&model).messages_title_right,
-            "propagation node · fetching"
+            "a relay adopted · fetching"
         );
         update(&mut model, UiEvent::Elapsed(1_000));
         assert!(
@@ -11868,7 +11937,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             text(&view(&model).messages[0]).trim(),
-            "propagation node 9c9c9c9c adopted · synced 14:05 · next 14:20"
+            "a relay adopted · synced 14:05 · next 14:20"
         );
         assert!(update(&mut model, UiEvent::Elapsed(899_999)).is_empty());
         let effects = update(&mut model, UiEvent::Elapsed(900_000));
@@ -11912,11 +11981,13 @@ pub(crate) mod tests {
         let other = OutboxEvent::NodeAnnounced {
             destination: [0x42; 16],
             status: None,
+            name: None,
         };
         assert!(engine_says(&mut model, other).is_empty());
         let ours = OutboxEvent::NodeAnnounced {
             destination: [0x9c; 16],
             status: None,
+            name: None,
         };
         assert_eq!(engine_says(&mut model, ours), [UiEffect::Fetch]);
         assert_eq!(model.fetch_reason, Some(Reason::Announce));
@@ -15123,11 +15194,7 @@ pub(crate) mod tests {
         let wide = cells(&model, |t| *t == hit::Target::Position);
         assert_eq!(wide.len(), shown.position_len, "{wide:?}");
         let mailbox = cells(&model, |t| *t == hit::Target::Mailbox);
-        assert_eq!(
-            mailbox.len(),
-            "propagation node 9c9c9c9c adopted".len(),
-            "{mailbox:?}"
-        );
+        assert_eq!(mailbox.len(), "a relay adopted".len(), "{mailbox:?}");
         let effects = press(&mut model, wide[wide.len() - 1]);
         assert!(effects.is_empty(), "no fetch: {effects:?}");
         assert_eq!(model.map.expect("open").centre, latest);

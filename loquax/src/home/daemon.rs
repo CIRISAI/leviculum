@@ -827,7 +827,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::Refused { detail } => {
                             tracing::info!("HOME outbox refused: {detail}");
                         }
-                        OutboxEvent::NodeAnnounced { destination, status } => {
+                        OutboxEvent::NodeAnnounced { destination, status, .. } => {
                             // Whether it answers `/lev/status` (1409).
                             asker.announced(destination, status);
                             if Some(destination) == selected_pn {

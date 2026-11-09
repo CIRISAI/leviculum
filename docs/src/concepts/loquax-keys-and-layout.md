@@ -490,7 +490,7 @@ text. Here it is in cells.
 
 ```text
 ┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
-│ / tripod▏                        ││ direct, 2 hops · heard 14:05    propagation node 9c31e0a2 adopted · synced 14:03 │
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05                   relay Bern adopted · synced 14:03 │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  2 ││                                                                                  │
 │  Alice ·4f2a               14:06 ││                                                                                  │
@@ -608,7 +608,7 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
 - **The list's title is our own address** (`Loquax afbda7b3`), as before,
   not `Chats`.
 - **The header's second row at 120 columns has the propagation node half only**
-  (`propagation node 9c31e0a2 adopted · synced 14:03`, right-aligned, with the rule
+  (`relay Bern adopted · synced 14:03`, the relay by the name it announces, `a relay` without one, never its hash (1587), right-aligned, with the rule
   under it). How the peer is reached and when it was last heard need the
   path table read for the screen, which nothing does yet. At 80 columns
   the propagation node's state is words, the longest form that fits, never the `⌂`
@@ -1055,7 +1055,7 @@ palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
 
 ```text
 ┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
-│ / tripod▏                        ││ direct, 2 hops · heard 14:05    propagation node 9c31e0a2 adopted · synced 14:03 │
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05                   relay Bern adopted · synced 14:03 │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  2 ││                                                                                  │
 │  Alice ·4f2a               14:06 ││                                                                                  │
