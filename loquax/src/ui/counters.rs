@@ -57,6 +57,9 @@ pub struct Counters {
     /// is waste, and under the board's first-fit heap the copies' drop
     /// cost the M9 a minute of its restore.
     pub copied: u32,
+    /// Conversations a read mark looked into for an id (1600): the ones
+    /// the id index named, where before every conversation was asked.
+    pub probed: u32,
 }
 
 impl Add for Counters {
@@ -75,6 +78,7 @@ impl Add for Counters {
             commits: self.commits + other.commits,
             walked: self.walked + other.walked,
             copied: self.copied + other.copied,
+            probed: self.probed + other.probed,
         }
     }
 }
@@ -86,7 +90,7 @@ impl fmt::Display for Counters {
         write!(
             f,
             "scenes={} scene_nodes={} rows_built={} bubbles_built={} rows_laid={} \
-             sorts={} sorted={} store_rows_read={} commits={} walked={} copied={}",
+             sorts={} sorted={} store_rows_read={} commits={} walked={} copied={} probed={}",
             self.scenes,
             self.scene_nodes,
             self.rows_built,
@@ -97,7 +101,8 @@ impl fmt::Display for Counters {
             self.store_rows_read,
             self.commits,
             self.walked,
-            self.copied
+            self.copied,
+            self.probed
         )
     }
 }
@@ -116,10 +121,11 @@ pub enum Op {
     Commits,
     Walked,
     Copied,
+    Probed,
 }
 
 #[cfg(any(debug_assertions, feature = "counters"))]
-const SLOTS: usize = 11;
+const SLOTS: usize = 12;
 
 /// The counters' cells, one set in the model and one in the store.
 /// Atomics, so the store's commit hook (a `'static` closure) and a
@@ -191,6 +197,7 @@ impl Ops {
             commits: at(Op::Commits),
             walked: at(Op::Walked),
             copied: at(Op::Copied),
+            probed: at(Op::Probed),
         }
     }
 }

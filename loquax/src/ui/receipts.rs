@@ -268,10 +268,9 @@ impl<B> UiModel<B> {
         let peer = conversation.peer;
         let mut unknown = Vec::new();
         for id in &receipt.ids {
-            let Some(message) = conversation
+            let Some(mut message) = conversation
                 .messages
-                .iter_mut()
-                .find(|m| m.outbound && m.id == Some(*id))
+                .find_mut(|m| m.outbound && m.id == Some(*id))
             else {
                 unknown.push(*id);
                 continue;
@@ -300,25 +299,26 @@ impl<B> UiModel<B> {
         let mut touched = Vec::new();
         for (c, conversation) in self.conversations.iter_mut().enumerate() {
             let peer = conversation.peer;
-            for (m, message) in conversation.messages.iter_mut().enumerate() {
+            let owed = &mut self.reading.owed;
+            conversation.messages.for_each_indexed_mut(|m, message| {
                 let Some(id) = message.id else {
-                    continue;
+                    return;
                 };
                 if message.outbound || !ids.contains(&id) {
-                    continue;
+                    return;
                 }
-                if let Some(owed) = self.reading.owed.get_mut(&peer) {
-                    owed.ids.retain(|owed| *owed != id);
-                    if owed.ids.is_empty() {
-                        self.reading.owed.remove(&peer);
+                if let Some(kept) = owed.get_mut(&peer) {
+                    kept.ids.retain(|owed| *owed != id);
+                    if kept.ids.is_empty() {
+                        owed.remove(&peer);
                     }
                 }
                 if message.ledger.iter().any(|entry| entry.what == SEEN) {
-                    continue;
+                    return;
                 }
                 message.note(now, SEEN);
                 touched.push((c, m));
-            }
+            });
         }
         for (c, m) in touched {
             self.touch(c, m);
@@ -481,11 +481,12 @@ impl<B> UiModel<B> {
         let mut touched = Vec::new();
         for key in &seen {
             self.reading.since.remove(key);
-            if let Some((m, message)) = conversation
+            let at = conversation
                 .messages
-                .iter_mut()
-                .enumerate()
-                .find(|(_, m)| m.activity == *key)
+                .iter()
+                .position(|m| m.activity == *key);
+            if let Some((m, mut message)) =
+                at.and_then(|m| Some((m, conversation.messages.get_mut(m)?)))
             {
                 message.note(Some(wall), SEEN);
                 ids.extend(message.id);

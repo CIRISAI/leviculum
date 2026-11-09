@@ -232,10 +232,9 @@ impl<B> UiModel<B> {
         let Some(conversation) = self.conversations.iter_mut().find(|c| c.peer == source) else {
             return Vec::new();
         };
-        let Some(message) = conversation
+        let Some(mut message) = conversation
             .messages
-            .iter_mut()
-            .find(|m| !m.outbound && m.id == Some(message_id))
+            .find_mut(|m| !m.outbound && m.id == Some(message_id))
         else {
             return Vec::new();
         };
@@ -468,10 +467,9 @@ impl<B> UiModel<B> {
         let Some(conversation) = self.conversations.iter_mut().find(|c| c.peer == *peer) else {
             return false;
         };
-        let Some(message) = conversation
+        let Some(mut message) = conversation
             .messages
-            .iter_mut()
-            .find(|m| m.outbound && m.id == Some(*id))
+            .find_mut(|m| m.outbound && m.id == Some(*id))
         else {
             return false;
         };

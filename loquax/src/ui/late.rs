@@ -367,7 +367,7 @@ fn a_restored_page_is_in_its_writers_order_and_pages_on_from_its_lowest_key() {
     update(&mut model, received(ANNA, 1, D0 + 12 * H, "twelve"));
     update(&mut model, received(ANNA, 2, D0 + 9 * H, "nine, late"));
     let c = 0;
-    let mut stored = model.conversations[c].messages.clone();
+    let mut stored = model.conversations[c].messages.to_vec();
     stored.sort_by_key(|m| m.activity);
     assert_eq!(stored[0].body, "twelve", "the store's order is arrival");
     let lowest = stored[0].activity;

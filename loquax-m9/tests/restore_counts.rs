@@ -172,6 +172,7 @@ fn since(before: Counters, model: &loquax::ui::UiModel<loquax_m9::field::Field>)
         commits: now.commits - before.commits,
         walked: now.walked - before.walked,
         copied: now.copied - before.copied,
+        probed: now.probed - before.probed,
     }
 }
 

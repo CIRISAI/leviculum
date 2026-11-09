@@ -759,7 +759,7 @@ impl<B> UiModel<B> {
         let now = self.now;
         let at = now.map_or(0, |n| u32::try_from(n.unix_secs).unwrap_or(0));
         let next = status_rung(status, at);
-        let Some(message) = self.message_mut(c, m) else {
+        let Some(mut message) = self.message_mut(c, m) else {
             return;
         };
         message.note(now, &status_line(status));
@@ -2441,7 +2441,7 @@ mod tests {
                 pinned: false,
                 flags: Default::default(),
                 unread: 0,
-                messages: c.messages.clone(),
+                messages: c.messages.to_vec(),
                 earlier: 0,
                 draft: Default::default(),
                 group: None,

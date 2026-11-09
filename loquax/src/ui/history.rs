@@ -277,7 +277,7 @@ impl<B> UiModel<B> {
         let group = self.groups.contains_key(&stored.peer);
         let conversation = &mut self.conversations[index];
         conversation.listing = stored.listing;
-        conversation.messages = stored.messages;
+        conversation.messages.set(stored.messages);
         // The store's arrival order, in its writers' (1505); a group's is
         // its home's acceptance, the order every member sees.
         if !group {
@@ -290,14 +290,15 @@ impl<B> UiModel<B> {
         conversation.draft = stored.draft;
         conversation.new_rule = conversation.rule_from_unread();
         conversation.activity = conversation.list_activity();
-        for message in &mut conversation.messages {
+        let changed = &mut self.changed;
+        conversation.messages.for_each_mut(|message| {
             if cut_off(message) {
                 message.delivery = Some(DeliveryState::Queued);
                 message.note(now, RESTARTED);
-                self.changed.insert((stored.peer, message.activity));
+                changed.insert((stored.peer, message.activity));
             }
             message.leg = None;
-        }
+        });
         // The summary and the change stamp start fresh over what was
         // restored (1490): the first fold after a start bumps nothing
         // and re-writes no row the store just handed out.
@@ -694,7 +695,7 @@ impl<B> UiModel<B> {
         };
         let conversation = &mut self.conversations[c];
         conversation.earlier = earlier;
-        conversation.messages.splice(0..0, older);
+        conversation.messages.prepend(older);
         if let Some(rule) = conversation.new_rule.as_mut() {
             rule.at += n;
         }
@@ -739,14 +740,15 @@ impl<B> UiModel<B> {
             let now = self.now;
             let conversation = &mut self.conversations[c];
             let peer = conversation.peer;
-            for message in &mut conversation.messages {
+            let changed = &mut self.changed;
+            conversation.messages.for_each_mut(|message| {
                 if cut_off(message) {
                     message.delivery = Some(DeliveryState::Queued);
                     message.note(now, RESTARTED);
-                    self.changed.insert((peer, message.activity));
+                    changed.insert((peer, message.activity));
                 }
                 message.leg = None;
-            }
+            });
             let conversation = &mut self.conversations[c];
             conversation.new_rule = conversation.rule_from_unread();
             if open {
@@ -1021,16 +1023,44 @@ impl<B> UiModel<B> {
     /// message up to it in its conversation is read, as opening the
     /// conversation there read them.
     pub(super) fn read_through(&mut self, id: &[u8; 32]) {
+        self.read_marks(core::slice::from_ref(id));
+    }
+
+    /// Another device of the home read through each of `ids`, in turn
+    /// ([`UiModel::read_through`]): the id index brought up once, each id
+    /// then one lookup (1600). Before, each id asked every conversation
+    /// whether it held it, 302 of them on the M9 at 38 ms a mark.
+    pub(super) fn read_marks(&mut self, ids: &[[u8; 32]]) {
+        self.ids.reconcile(&mut self.conversations);
+        for id in ids {
+            self.read_through_indexed(id);
+        }
+    }
+
+    /// The model's id index, for a test to hold against a rebuild.
+    #[cfg(test)]
+    pub(super) fn id_index(&mut self) -> &super::id_index::IdIndex {
+        self.ids.reconcile(&mut self.conversations);
+        &self.ids
+    }
+
+    /// [`UiModel::read_through`] with the id index up to the messages:
+    /// what changes here is a count and the kept ids, never a message, so
+    /// the index stays up for the next id of the same mark. The index
+    /// names the conversations; each is checked against its own messages,
+    /// so the answer is the walk's, first conversation first.
+    fn read_through_indexed(&mut self, id: &[u8; 32]) {
         let ops = &self.ops;
-        let Some(conversation) = self.conversations.iter_mut().find_map(|c| {
-            // By the summary's index (1463): a read mark per entry of a
-            // pull walked every message of every conversation.
-            let found = c
-                .with_id(id, ops)
-                .into_iter()
-                .any(|m| !c.messages[m].outbound);
-            found.then_some(c)
-        }) else {
+        let conversations = &mut self.conversations;
+        let found = self.ids.holding(id).find(|&c| {
+            ops.add(super::counters::Op::Probed, 1);
+            conversations.get_mut(c).is_some_and(|c| {
+                c.with_id(id, ops)
+                    .into_iter()
+                    .any(|m| !c.messages[m].outbound)
+            })
+        });
+        let Some(conversation) = found.and_then(|c| self.conversations.get_mut(c)) else {
             // The screen does not hold the message (1490, the lazy
             // start): the store applies the mark to its own rows, and
             // the page that loads it here replays it.
@@ -1069,11 +1099,14 @@ impl<B> UiModel<B> {
     /// A read mark through `id` on a conversation none of whose messages
     /// is loaded (1521): its kept unread ids say how many came after.
     fn read_through_unloaded(&mut self, id: &[u8; 32]) {
-        let Some(conversation) = self
-            .conversations
-            .iter_mut()
-            .find(|c| c.messages.is_empty() && c.unread_ids.contains(id))
-        else {
+        let (ops, conversations) = (&self.ops, &self.conversations);
+        let found = self.ids.keeping(id).find(|&c| {
+            ops.add(super::counters::Op::Probed, 1);
+            conversations
+                .get(c)
+                .is_some_and(|c| c.messages.is_empty() && c.unread_ids.contains(id))
+        });
+        let Some(conversation) = found.and_then(|c| self.conversations.get_mut(c)) else {
             return;
         };
         let at = conversation
@@ -1086,7 +1119,7 @@ impl<B> UiModel<B> {
             return;
         }
         conversation.unread = after;
-        conversation.unread_ids.drain(..=at);
+        conversation.unread_ids.drop_through(at);
         if let Some(listing) = conversation.listing.as_mut() {
             listing.unread_rows = listing.unread_rows.min(after as u32);
         }

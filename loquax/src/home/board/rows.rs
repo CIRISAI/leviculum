@@ -812,17 +812,17 @@ pub fn messages_timed<B: InputBuffer + Default>(
             continue;
         };
         let mut k = 0;
-        for message in &mut conversation.messages {
+        conversation.messages.for_each_mut(|message| {
             if message.activity > SCRATCH {
                 message.activity = key(entry.seq, k);
                 k += 1;
             }
-        }
+        });
     }
     let messages = core::mem::take(&mut scratch.conversations)
         .into_iter()
         .find(|c| c.peer == peer)
-        .map(|c| c.messages)
+        .map(|c| c.messages.into_vec())
         .unwrap_or_default();
     (messages, unpack)
 }

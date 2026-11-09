@@ -145,6 +145,7 @@ pub mod groups;
 pub mod history;
 pub mod hit;
 pub mod hubs;
+pub mod id_index;
 pub mod info;
 pub mod intent;
 pub mod inventory;
@@ -646,8 +647,9 @@ fn delivery_word(state: Option<DeliveryState>) -> u64 {
 pub struct Conversation {
     /// Their LXMF address.
     pub peer: [u8; 16],
-    /// Oldest first.
-    pub messages: Vec<Message>,
+    /// Oldest first, changed only through [`id_index::Messages`]'s
+    /// methods so the model's id index hears of every id (1600).
+    pub messages: id_index::Messages,
     /// Received messages not yet looked at: the list's badge.
     pub unread: usize,
     /// The `new` rule: set by the first message that arrives unread, kept
@@ -684,7 +686,7 @@ pub struct Conversation {
     /// The newest unread received ids while none of the messages is
     /// loaded (1521, [`listing::Row::unread_ids`]): a read mark naming
     /// one clears the badge here, as the store applies it to its rows.
-    pub unread_ids: Vec<[u8; 32]>,
+    pub unread_ids: id_index::KeptIds,
     /// Bumped by [`update`] when anything a screen draws of this
     /// conversation changed (1490): what every cache keyed by this
     /// conversation asks before it reuses.
@@ -740,7 +742,7 @@ impl Conversation {
     fn new(peer: [u8; 16]) -> Self {
         Self {
             peer,
-            messages: Vec::new(),
+            messages: id_index::Messages::new(),
             unread: 0,
             new_rule: None,
             activity: 0,
@@ -752,7 +754,7 @@ impl Conversation {
             draft: history::Draft::default(),
             summary: summary::Summary::default(),
             listing: None,
-            unread_ids: Vec::new(),
+            unread_ids: id_index::KeptIds::default(),
             revision: Rev::default(),
             stamp: Rev::default(),
         }
@@ -885,11 +887,7 @@ impl Conversation {
         for (new, &old) in order.iter().enumerate() {
             new_of[old] = new;
         }
-        let mut old: Vec<Option<Message>> = core::mem::take(&mut self.messages)
-            .into_iter()
-            .map(Some)
-            .collect();
-        self.messages = order.iter().filter_map(|&i| old[i].take()).collect();
+        self.messages.reorder(&order);
         self.summary.forget();
         Some(new_of)
     }
@@ -1301,6 +1299,9 @@ pub struct UiModel<B> {
     /// store applied them; the page that brings their conversation
     /// replays them here ([`history::READ_PENDING_MOST`]).
     read_pending: Vec<[u8; 32]>,
+    /// Which conversation holds each message id (1600): what a read
+    /// mark asks instead of every conversation in turn.
+    ids: id_index::IdIndex,
     /// Deletions for the store, in the order they were made.
     forgotten: Vec<StoreWrite>,
     /// Whether this device is a client of a home node: what the reader
@@ -1596,6 +1597,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             bumped: Vec::new(),
             page_asked: None,
             read_pending: Vec::new(),
+            ids: id_index::IdIndex::default(),
             forgotten: Vec::new(),
             home_client: false,
             history: false,
@@ -1928,7 +1930,7 @@ impl<B> UiModel<B> {
         // A chat opened before its page loaded (1546, a board's two
         // cores): the row's kept ids name its unread, and its badge goes
         // with the count. Before, the count went to 0 with no mark.
-        let kept = core::mem::take(&mut conversation.unread_ids);
+        let kept = conversation.unread_ids.take();
         if let Some(listing) = conversation.listing.as_mut() {
             listing.unread_rows = 0;
         }
@@ -2335,7 +2337,7 @@ impl<B> UiModel<B> {
         // the newest `unread` of them.
         let mut ids: Vec<[u8; 32]> = match conversation.earlier {
             0 => Vec::new(),
-            _ => conversation.unread_ids.clone(),
+            _ => conversation.unread_ids.to_vec(),
         };
         ids.extend(
             conversation
@@ -2386,7 +2388,7 @@ impl<B> UiModel<B> {
             });
             if let Some(conversation) = self.conversations.iter_mut().find(|c| c.peer == peer) {
                 conversation.activity = row.activity;
-                conversation.unread_ids = row.unread_ids;
+                conversation.unread_ids.set(row.unread_ids);
                 self.activity = self.activity.max(row.activity);
             }
         }
@@ -3987,7 +3989,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::SendLeg(leg) => {
             let (tick, now) = (model.tick, model.now);
             if let Some(&(c, m)) = model.sending.front() {
-                if let Some(message) = model.message_mut(c, m) {
+                if let Some(mut message) = model.message_mut(c, m) {
                     message.leg = Some((leg, tick));
                     message.last_leg = Some(leg);
                     message.note(now, &format!("trying {}", leg_words(leg)));
@@ -5933,7 +5935,9 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
     model.clear_draft(to);
     let activity = model.bump();
     model.conversations[model.selected].activity = activity;
-    model.conversations[model.selected].messages[index].activity = activity;
+    if let Some(mut message) = model.conversations[model.selected].messages.get_mut(index) {
+        message.activity = activity;
+    }
     model.touch(model.selected, index);
     // Signal's rule: what you send is where the view goes.
     model.message_cursor = index;
@@ -6012,7 +6016,7 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
         OutboxEvent::Queued { message_id } => {
             let now = model.now;
             if let Some(&(c, m)) = model.sending.front() {
-                if let Some(message) = model.message_mut(c, m) {
+                if let Some(mut message) = model.message_mut(c, m) {
                     // Named already by its pulled sent entry (`home_sent`),
                     // which is further along than queued.
                     if message.id == Some(message_id) {
@@ -6066,11 +6070,7 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
             return model.home_peer_state(destination, state)
         }
         OutboxEvent::HomeMarked { mark } => match mark.flag {
-            crate::home::wire::MarkFlag::Read => {
-                for id in &mark.ids {
-                    model.read_through(id);
-                }
-            }
+            crate::home::wire::MarkFlag::Read => model.read_marks(&mark.ids),
             crate::home::wire::MarkFlag::Deleted => {
                 for id in &mark.ids {
                     model.forget_by_id(id);
@@ -6318,12 +6318,13 @@ fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 1
         return;
     };
     let peer = conversation.peer;
-    for message in &mut conversation.messages {
+    let changed = &mut model.changed;
+    conversation.messages.for_each_mut(|message| {
         if message.outbound
             || message.id != Some(message_id)
             || message.signature != Signature::Unverified
         {
-            continue;
+            return;
         }
         let (signature, line) = match valid {
             true => (
@@ -6337,8 +6338,8 @@ fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 1
         };
         message.signature = signature;
         message.note(now, line);
-        model.changed.insert((peer, message.activity));
-    }
+        changed.insert((peer, message.activity));
+    });
     if !valid {
         let from = model.names.label(&source, model.lang);
         model.toast(
@@ -6728,7 +6729,11 @@ impl<B> UiModel<B> {
 impl<B> UiModel<B> {
     /// Message `message` of conversation `conversation`, to change: the
     /// store will learn of it.
-    fn message_mut(&mut self, conversation: usize, message: usize) -> Option<&mut Message> {
+    fn message_mut(
+        &mut self,
+        conversation: usize,
+        message: usize,
+    ) -> Option<id_index::MessageMut<'_>> {
         self.touch(conversation, message);
         self.conversations
             .get_mut(conversation)?
@@ -6756,7 +6761,9 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
         };
         // By the summary's index, not a walk over every message (1463).
         for m in conversation.with_id(&id, ops) {
-            let message = &mut conversation.messages[m];
+            let Some(mut message) = conversation.messages.get_mut(m) else {
+                continue;
+            };
             if !message.outbound {
                 continue;
             }
@@ -6810,12 +6817,14 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
 fn home_stalled<B>(model: &mut UiModel<B>, id: [u8; 32]) {
     let now = model.now;
     for conversation in &mut model.conversations {
-        for message in &mut conversation.messages {
+        let peer = conversation.peer;
+        let changed = &mut model.changed;
+        conversation.messages.for_each_mut(|message| {
             if message.outbound && message.id == Some(id) {
                 message.note(now, STALLED_NOTE);
-                model.changed.insert((conversation.peer, message.activity));
+                changed.insert((peer, message.activity));
             }
-        }
+        });
     }
 }
 
@@ -6870,7 +6879,9 @@ fn home_sent<B: InputBuffer>(
     for conversation in &mut model.conversations {
         // The messages that carry the id, by the summary's index (1463).
         for m in conversation.with_id(&message_id, &model.ops) {
-            let message = &mut conversation.messages[m];
+            let Some(mut message) = conversation.messages.get_mut(m) else {
+                continue;
+            };
             if !message.outbound || message.id != Some(message_id) {
                 continue;
             }
@@ -6902,7 +6913,7 @@ fn home_sent<B: InputBuffer>(
                 message.outbound && message.id.is_none() && message.body.as_bytes() == body
             });
         if running {
-            if let Some(message) = model.message_mut(c, m) {
+            if let Some(mut message) = model.message_mut(c, m) {
                 message.id = Some(message_id);
                 message.delivery = Some(DeliveryState::Sent);
                 message.note(now, "taken by the mailbox");
@@ -6961,7 +6972,7 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
             }
         };
     }
-    if let Some(message) = model.message_mut(c, m) {
+    if let Some(mut message) = model.message_mut(c, m) {
         message.leg = None;
     }
     let Err(detail) = result else {
@@ -6976,7 +6987,7 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
         .collect();
     let text = format!("not sent: {}", reasons.join("; "));
     let now = model.now;
-    if let Some(message) = model.message_mut(c, m) {
+    if let Some(mut message) = model.message_mut(c, m) {
         message.delivery = Some(DeliveryState::Failed);
         message.note(now, &text);
     }
@@ -6994,7 +7005,7 @@ fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> 
         return Vec::new();
     }
     let now = model.now;
-    if let Some(message) = model.message_mut(c, m) {
+    if let Some(mut message) = model.message_mut(c, m) {
         message.leg = None;
         message.unproven = true;
         message.note(now, "sent over a link, no delivery proof yet");
@@ -10473,6 +10484,176 @@ pub(crate) mod tests {
         assert!(model.take_marks().is_empty());
     }
 
+    /// 1600: the model's id index, after a pull's worth of arrivals,
+    /// sends named by the home, a deleted message, a deleted
+    /// conversation, kept rows and read marks, is what a rebuild reads
+    /// off the conversations; and it got there by its journals, not by
+    /// reading everything anew, except where a conversation went.
+    #[test]
+    fn the_id_index_is_a_rebuild_of_the_conversations_after_a_pull_with_marks() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let peers: Vec<[u8; 16]> = (0..40u8).map(|p| [p + 1; 16]).collect();
+        let id = |p: u8, n: u8| {
+            let mut id = [p; 32];
+            id[31] = n;
+            id
+        };
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        let exact = |model: &mut UiModel<Field>| {
+            let mut copy = model.conversations.clone();
+            let rebuilt = id_index::IdIndex::rebuild(&mut copy);
+            *model.id_index() == rebuilt
+        };
+        for n in 0..5u8 {
+            for (p, &peer) in peers.iter().enumerate() {
+                engine(&mut model, received_from(peer, id(p as u8 + 1, n), "hi"));
+            }
+            assert!(exact(&mut model), "after round {n}");
+        }
+        // Sends the home names as it takes them: an id appears in place.
+        for (p, &peer) in peers.iter().enumerate().take(10) {
+            engine(
+                &mut model,
+                OutboxEvent::HomeSent {
+                    message_id: id(p as u8 + 1, 200),
+                    destination: peer,
+                    sent_at: 0,
+                    body: b"back".to_vec(),
+                    fields: Vec::new(),
+                },
+            );
+        }
+        // A send from here, named in place when the router takes it.
+        let _ = update(&mut model, UiEvent::Open { peer: peers[0] });
+        say(&mut model, "named later");
+        engine(
+            &mut model,
+            OutboxEvent::Queued {
+                message_id: id(1, 201),
+            },
+        );
+        assert!(exact(&mut model));
+        assert!(model.id_index().holding(&id(1, 201)).next().is_some());
+        // Read marks, the store's way: 64 ids at a time.
+        let all: Vec<[u8; 32]> = (0..5u8)
+            .flat_map(|n| (1..=40u8).map(move |p| id(p, n)))
+            .collect();
+        for chunk in all.chunks(64) {
+            engine(
+                &mut model,
+                OutboxEvent::HomeMarked {
+                    mark: Mark {
+                        flag: MarkFlag::Read,
+                        ids: chunk.to_vec(),
+                    },
+                },
+            );
+        }
+        assert!(model.conversations.iter().all(|c| c.unread == 0));
+        // Another device deleted a message.
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Deleted,
+                    ids: vec![id(3, 0)],
+                },
+            },
+        );
+        assert!(exact(&mut model));
+        assert!(model.id_index().holding(&id(3, 0)).next().is_none());
+        assert_eq!(model.id_index().rebuilds(), 0, "the journals carried it");
+        // A conversation deleted: everything after it moved up a place.
+        update(
+            &mut model,
+            UiEvent::DeleteConversation {
+                peer: peers[5],
+                everywhere: false,
+            },
+        );
+        assert!(exact(&mut model));
+        assert!(model.id_index().holding(&id(6, 1)).next().is_none());
+        assert_eq!(model.id_index().rebuilds(), 1, "a place moved: read anew");
+        let at = model.conversations.iter().position(|c| c.peer == peers[7]);
+        assert_eq!(
+            model.id_index().holding(&id(8, 1)).collect::<Vec<_>>(),
+            at.into_iter().collect::<Vec<_>>()
+        );
+        // A kept row, none of its messages loaded (1521).
+        let row_peer = [0x99; 16];
+        let kept: Vec<[u8; 32]> = (1..=3u8).map(|n| id(0x99, n)).collect();
+        model.restore_rows(
+            vec![(
+                listing::Row {
+                    peer: row_peer,
+                    unread: 3,
+                    activity: 9,
+                    unread_ids: kept.clone(),
+                    listing: listing::Listing::default(),
+                },
+                500,
+            )],
+            Vec::new(),
+        );
+        assert!(exact(&mut model));
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Read,
+                    ids: vec![kept[1]],
+                },
+            },
+        );
+        let row = model.conversations.iter().find(|c| c.peer == row_peer);
+        assert_eq!(row.map(|c| c.unread), Some(1));
+        assert!(exact(&mut model));
+        assert!(model.id_index().keeping(&kept[0]).next().is_none());
+        assert_eq!(model.id_index().rebuilds(), 1);
+    }
+
+    /// 1600: a read mark asks the id index, not every conversation in
+    /// turn. 64 ids no conversation holds look into none and walk no
+    /// message; 64 that one holds each look into that one.
+    #[test]
+    fn a_read_mark_looks_only_into_the_conversations_that_hold_its_ids() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        let id = |p: u8, n: u8| {
+            let mut id = [p; 32];
+            id[31] = n;
+            id
+        };
+        for n in 0..64u8 {
+            for p in 1..=50u8 {
+                engine(&mut model, received_from([p; 16], id(p, n), "hi"));
+            }
+        }
+        let mark = |ids: Vec<[u8; 32]>| OutboxEvent::HomeMarked {
+            mark: Mark {
+                flag: MarkFlag::Read,
+                ids,
+            },
+        };
+        let unknown: Vec<[u8; 32]> = (0..64u8).map(|n| id(0xee, n)).collect();
+        let _ = update(&mut model, UiEvent::Engine(mark(unknown)));
+        let counted = model.counters().expect("this build counts");
+        assert_eq!((counted.probed, counted.walked), (0, 0), "{counted}");
+        let known: Vec<[u8; 32]> = (0..64u8).map(|n| id(7, n)).collect();
+        let _ = update(&mut model, UiEvent::Engine(mark(known)));
+        let counted = model.counters().expect("this build counts");
+        assert_eq!((counted.probed, counted.walked), (64, 0), "{counted}");
+        let seventh = model.conversations.iter().find(|c| c.peer == [7; 16]);
+        assert_eq!(seventh.map(|c| c.unread), Some(0));
+        assert!(model
+            .conversations
+            .iter()
+            .filter(|c| c.peer != [7; 16] && c.peer != PEER)
+            .all(|c| c.unread == 64));
+    }
+
     /// Another device deleted a message: off the screen and out of the
     /// store, by its id, whether this device shows it or not.
     #[test]
@@ -11013,9 +11194,9 @@ pub(crate) mod tests {
             DeliveryState::Read { at: 1_800_000_000 },
             DeliveryState::Failed,
         ];
-        for (message, state) in model.conversations[0].messages.iter_mut().zip(states) {
-            message.delivery = Some(state);
-        }
+        model.conversations[0]
+            .messages
+            .for_each_indexed_mut(|m, message| message.delivery = Some(states[m]));
         model.sending.clear();
         let column = |model: &UiModel<Field>| -> Vec<String> {
             view(model)
@@ -15552,12 +15733,9 @@ pub(crate) mod tests {
         let facts = model.contact_facts(&PEER);
         assert_eq!(facts.last_received, model.now);
         assert_eq!(facts.last_sent.map(|(_, words)| words), Some("queued"));
-        let sent = model.conversations[0]
-            .messages
-            .iter_mut()
-            .rfind(|m| m.outbound)
-            .expect("sent");
-        sent.delivery = Some(DeliveryState::InMailbox);
+        let messages = &mut model.conversations[0].messages;
+        let last_sent = messages.iter().rposition(|m| m.outbound).expect("sent");
+        messages.get_mut(last_sent).expect("sent").delivery = Some(DeliveryState::InMailbox);
         assert_eq!(
             model.contact_facts(&PEER).last_sent.map(|(_, words)| words),
             Some("left at a propagation node")

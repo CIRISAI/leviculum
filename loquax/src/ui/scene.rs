@@ -3030,9 +3030,9 @@ mod tests {
             .map(|i| (true, t + 600 * i as i64))
             .collect();
         let mut model = model_with(&bodies);
-        for (message, state) in model.conversations[0].messages.iter_mut().zip(states) {
-            message.delivery = Some(state);
-        }
+        model.conversations[0]
+            .messages
+            .for_each_indexed_mut(|m, message| message.delivery = Some(states[m]));
         model.selected = 0;
         let peer = [0x42; 16];
         let scene = model.scene(LayoutClass::Compact);
@@ -3125,7 +3125,11 @@ mod tests {
         let t = 1_793_350_800;
         let mut model = model_with(&[(true, t), (true, t + 600)]);
         let peer = [0x42; 16];
-        model.conversations[0].messages[0].delivery = Some(DeliveryState::Failed);
+        model.conversations[0]
+            .messages
+            .get_mut(0)
+            .expect("message")
+            .delivery = Some(DeliveryState::Failed);
         let delivered = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 2 });
         assert!(delivered.is_empty(), "a delivered one is not sent again");
         let effects = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 1 });
@@ -3264,14 +3268,16 @@ mod tests {
         let t = 1_793_350_800;
         let mut model = model_with(&[(true, t), (true, t + 60), (true, t + 120), (true, t + 180)]);
         let messages = &mut model.conversations[0].messages;
-        messages[0].body = String::new();
-        messages[0].fields = photo_fields("jpg", alloc::vec![7; 312_400]);
-        messages[1].body = " \n".into();
-        messages[1].fields = file_fields("report.pdf", alloc::vec![7; 1_400]);
-        messages[2].body = String::new();
-        messages[2].fields = voice_fields(AM_OPUS_OGG, alloc::vec![7; 900]);
-        messages[3].body = "the view".into();
-        messages[3].fields = photo_fields("jpg", alloc::vec![7; 1_000]);
+        messages.get_mut(0).expect("message").body = String::new();
+        messages.get_mut(0).expect("message").fields = photo_fields("jpg", alloc::vec![7; 312_400]);
+        messages.get_mut(1).expect("message").body = " \n".into();
+        messages.get_mut(1).expect("message").fields =
+            file_fields("report.pdf", alloc::vec![7; 1_400]);
+        messages.get_mut(2).expect("message").body = String::new();
+        messages.get_mut(2).expect("message").fields =
+            voice_fields(AM_OPUS_OGG, alloc::vec![7; 900]);
+        messages.get_mut(3).expect("message").body = "the view".into();
+        messages.get_mut(3).expect("message").fields = photo_fields("jpg", alloc::vec![7; 1_000]);
         model.selected = 0;
         let scene = model.scene(LayoutClass::Compact);
         let groups = &scene.chat.as_ref().expect("the chat").groups;
@@ -3306,8 +3312,16 @@ mod tests {
         let t = 1_793_350_800;
         let mut model = model_with(&[(false, t), (false, t + 60)]);
         let peer = [0x42; 16];
-        model.conversations[0].messages[1].body = String::new();
-        model.conversations[0].messages[1].fields = photo_fields("jpg", alloc::vec![7; 312_400]);
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .body = String::new();
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .fields = photo_fields("jpg", alloc::vec![7; 312_400]);
         model.selected = 0;
         let scene = model.scene(LayoutClass::Compact);
         assert!(scene
@@ -3392,9 +3406,16 @@ mod tests {
         let t = 1_793_350_800;
         let mut model = model_with(&[(false, t), (false, t + 60)]);
         let peer = [0x42; 16];
-        model.conversations[0].messages[1].body = String::new();
-        model.conversations[0].messages[1].fields =
-            file_fields("report.pdf", alloc::vec![7; 312_400]);
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .body = String::new();
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .fields = file_fields("report.pdf", alloc::vec![7; 312_400]);
         model.selected = 0;
         let scene = model.scene(LayoutClass::Compact);
         assert!(scene
@@ -3518,11 +3539,21 @@ mod tests {
         let peer = [0x42; 16];
         // Two seconds of Codec2 2400 as Sideband sends it, and 700C, which
         // this build does not play.
-        model.conversations[0].messages[1].body = String::new();
-        model.conversations[0].messages[1].fields =
-            voice_fields(AM_CODEC2_2400, alloc::vec![0; 600]);
-        model.conversations[0].messages[2].fields =
-            voice_fields(AM_CODEC2_700C, alloc::vec![0; 200]);
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .body = String::new();
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .fields = voice_fields(AM_CODEC2_2400, alloc::vec![0; 600]);
+        model.conversations[0]
+            .messages
+            .get_mut(2)
+            .expect("message")
+            .fields = voice_fields(AM_CODEC2_700C, alloc::vec![0; 200]);
         model.selected = 0;
         let scene = model.scene(LayoutClass::Compact);
         assert!(scene
@@ -3651,7 +3682,11 @@ mod tests {
         let peer = [0x42; 16];
         model.selected = 0;
         // Out of the way of the key the model gives the one it sends.
-        model.conversations[0].messages[0].activity = 1_000;
+        model.conversations[0]
+            .messages
+            .get_mut(0)
+            .expect("message")
+            .activity = 1_000;
         let feed = |model: &mut UiModel<Line>, input| {
             super::super::update(model, UiEvent::Record { peer, input })
         };
