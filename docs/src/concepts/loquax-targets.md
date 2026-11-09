@@ -87,7 +87,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 32 | Rename | `ContactActivity.java:528` | row menu, its field (1371) | `loquax/src/ui.rs:3795` |
 | 33 | Forget a conversation | `ContactActivity.java:411` | row menu, asked once (1371) | `loquax/src/ui.rs:3765` |
 | 34 | Add a contact by code, typed or pasted | `AddContact.java:92` | `loquax/src/gui.rs:1109` | `loquax/src/ui.rs:3926` |
-| 35 | A contact code from a QR | `loquax-android/src/lib.rs:328` (the scanner screen's decoder) | `loquax/src/gui.rs:1499`, `loquax/src/gui/chat.rs:469`, `loquax/src/scan.rs:39` (1341) | `loquax/src/ui.rs:3870` (palette `code in a picture`, a typed path), `loquax/src/shell.rs:405` (1371) |
+| 35 | A contact code from a QR | `loquax-android/src/lib.rs:336` (the scanner screen's decoder) | `loquax/src/gui.rs:1499`, `loquax/src/gui/chat.rs:469`, `loquax/src/scan.rs:39` (1341) | `loquax/src/ui.rs:3870` (palette `code in a picture`, a typed path), `loquax/src/shell.rs:405` (1371) |
 | 36 | My code | `ProfileActivity.java:289` | `loquax/src/gui.rs:1273`, `loquax/src/gui.rs:2478` (settings row, QR) (1371) | `loquax/src/ui.rs:3926` |
 | 37 | Home setup | `WelcomeActivity.java:528` | CLI (`loquax/src/main.rs:195`) | CLI (`loquax/src/main.rs:193`) |
 | 38 | Link a device | `ProfileActivity.java:392` | CLI (`loquax/src/main.rs:209`, `loquax/src/main.rs:225`) | CLI (`loquax/src/main.rs:207`, `loquax/src/main.rs:223`) |

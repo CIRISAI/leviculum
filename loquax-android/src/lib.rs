@@ -230,6 +230,14 @@ pub fn simulate_engine_death() -> bool {
     }
 }
 
+/// The engine's events the running session's pump folded under its lock
+/// so far, 0 without one: a command waits behind the step it makes over
+/// the command (1610). For the facade test.
+#[doc(hidden)]
+pub fn folded() -> u64 {
+    current().map_or(0, |session| session.folded())
+}
+
 /// Stop the session, if one runs.
 pub fn stop() {
     let session = SESSION

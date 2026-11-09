@@ -2215,9 +2215,11 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
 /// `Engine.run` would; the UI thread asks the conversation list every
 /// 16 ms, as `ConversationsActivity.ask` does once per frame (1464: the
 /// Pixel spent 83.6 % of 44 s in that query, 79 to 100 ms a call while
-/// the pull ran). The list's longest block must stay under [`UI_BAR`], a
-/// few frames, so no tap is lost; the engine's under [`ENGINE_BAR`]. The
-/// history must arrive whole.
+/// the pull ran). The list's work must stay under [`UI_BAR`], a few
+/// frames, so no tap is lost; the engine's under [`ENGINE_BAR`]; and
+/// neither may wait while the pump folds more than [`FOLDS_BAR`] events.
+/// Measured as cost, not wall time, so a slow runner does not fail it
+/// ([`Block`], 1610). The history must arrive whole.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
     let _facade = facade_turn().await;
@@ -2259,6 +2261,9 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
 
         // The engine's thread with onResume's commands, every 50 ms, and
         // the UI thread with the list, once a frame, while the pull runs.
+        // Each block is kept as what it cost, not how long it took: the
+        // probe thread's own CPU and the engine's events the pump folded
+        // meanwhile ([`Block`]).
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let probing = std::sync::Arc::clone(&done);
         let probe = std::thread::spawn(move || {
@@ -2266,10 +2271,10 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
             let front = schema::encode(&Request::Front { front: true });
             let mut blocks = Vec::new();
             while !probing.load(std::sync::atomic::Ordering::Relaxed) {
-                let began = std::time::Instant::now();
-                let _ = loquax_android::command(&close);
-                let _ = loquax_android::command(&front);
-                blocks.push(began.elapsed());
+                blocks.push(Block::of(|| {
+                    let _ = loquax_android::command(&close);
+                    let _ = loquax_android::command(&front);
+                }));
                 std::thread::sleep(Duration::from_millis(50));
             }
             blocks
@@ -2280,10 +2285,10 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
             let mut blocks = Vec::new();
             let mut rows = 0;
             while !looking.load(std::sync::atomic::Ordering::Relaxed) {
-                let began = std::time::Instant::now();
+                let mut answer = Vec::new();
+                blocks.push(Block::of(|| answer = loquax_android::query(&list)));
                 let answer: schema::Conversations =
-                    rmp_serde::from_slice(&loquax_android::query(&list)).expect("the list");
-                blocks.push(began.elapsed());
+                    rmp_serde::from_slice(&answer).expect("the list");
                 rows = rows.max(answer.conversations.len());
                 std::thread::sleep(Duration::from_millis(16));
             }
@@ -2332,33 +2337,45 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
         done.store(true, std::sync::atomic::Ordering::Relaxed);
         let blocks = probe.join().expect("the probe");
         let (looks, rows) = look.join().expect("the list's probe");
-        let longest = blocks.iter().max().copied().unwrap_or_default();
-        let longest_look = looks.iter().max().copied().unwrap_or_default();
-        let slow_looks = looks.iter().filter(|block| **block >= FRAME).count();
+        let engine = Block::worst(&blocks);
+        let ui = Block::worst(&looks);
         eprintln!(
-            "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms; \
-             list probes={} longest={} ms over a frame={} rows={rows}",
+            "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms cpu={} ms \
+             folds={}; list probes={} longest={} ms cpu={} ms folds={} rows={rows}",
             took.as_millis(),
             blocks.len(),
-            longest.as_millis(),
+            engine.wall.as_millis(),
+            engine.cpu.as_millis(),
+            engine.folds,
             looks.len(),
-            longest_look.as_millis(),
-            slow_looks,
+            ui.wall.as_millis(),
+            ui.cpu.as_millis(),
+            ui.folds,
         );
         loquax_android::stop();
         assert!(whole, "the history not whole in {BIG_PULL_SECS} s");
         assert!(
-            longest_look < UI_BAR,
-            "the list's query blocked the UI thread {} ms during the first pull (bar {} ms)",
-            longest_look.as_millis(),
+            ui.cpu < UI_BAR,
+            "the list's query worked {} ms on the UI thread during the first pull (bar {} ms)",
+            ui.cpu.as_millis(),
             UI_BAR.as_millis()
         );
         assert!(
-            longest < ENGINE_BAR,
-            "onResume's commands blocked the engine's thread {} ms during the first pull \
+            ui.folds <= FOLDS_BAR,
+            "the list's query waited while the pump folded {} events (bar {FOLDS_BAR})",
+            ui.folds
+        );
+        assert!(
+            engine.cpu < ENGINE_BAR,
+            "onResume's commands worked {} ms on the engine's thread during the first pull \
              (bar {} ms)",
-            longest.as_millis(),
+            engine.cpu.as_millis(),
             ENGINE_BAR.as_millis()
+        );
+        assert!(
+            engine.folds <= FOLDS_BAR,
+            "onResume's commands waited while the pump folded {} events (bar {FOLDS_BAR})",
+            engine.folds
         );
     })
     .await
@@ -2370,21 +2387,83 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
 const BIG_CONVERSATIONS: usize = 100;
 /// Its archive cap: room for all of it.
 const BIG_CAP: u64 = 64 << 20;
-/// How long its first pull may take on the host.
-const BIG_PULL_SECS: u64 = 240;
-/// The longest block we accept (1464): 100 ms, a few frames. 1446's 1 s
-/// kept Android's 5 s input limit away, but the Pixel still froze 35 s
-/// in blocks of 80 to 100 ms, one per event, and lost taps.
+/// How long its first pull may take: a liveness bound, nothing measures
+/// it. The pull took 16 to 24 s on the coder host, 65 to 76 s under a
+/// quarter of a CPU and 187 to 199 s under 15 % (1610).
+const BIG_PULL_SECS: u64 = 600;
+/// The list query's work on the UI thread (1464): 100 ms, a few frames.
+/// 1446's 1 s kept Android's 5 s input limit away, but the Pixel still
+/// froze 35 s in blocks of 80 to 100 ms, one per event, and lost taps.
+/// The query reads the scene the pump keeps; on the host it costs 1 to
+/// 11 ms of CPU under any quota.
 const UI_BAR: Duration = Duration::from_millis(100);
-/// The engine thread's longest block for onResume's two commands (1464):
-/// each makes a store commit of its own and waits for at most the one
-/// event the pump is folding, another commit; on the host's disk a commit
-/// takes 10 to 35 ms with fsync spikes past 50 ms, so the two together
-/// measured 64 to 110 ms. Not the screen's wait since 1446, and below the
-/// 156 to 287 ms they took when the pump held the lock for whole slices.
+/// The engine thread's work for onResume's two commands (1464): each makes
+/// a store commit of its own and the scene of the lists. 13 to 33 ms of
+/// CPU on the host, unconstrained and under 25 % and 15 % of a CPU alike.
 const ENGINE_BAR: Duration = Duration::from_millis(250);
-/// One frame at 60 Hz: the list's blocks longer than this are counted.
-const FRAME: Duration = Duration::from_millis(16);
+/// The engine's events the pump may fold while a block waits (1464, 1610):
+/// it ends its turn after the event in hand once a caller waits, so a
+/// probe of two commands waits behind 0 to 4 on the host, 6 at most under
+/// 15 % of a CPU, where the waiting thread can miss the 5 ms the pump lets
+/// go between turns and each turn folds one. A pump that ignores the
+/// waiting caller folds its whole 50 ms slice: 25 to 65 events a probe on
+/// the host, 2353 at the most; one that holds the lock for the whole
+/// backlog (1446) folds thousands.
+const FOLDS_BAR: u64 = 16;
+
+/// What one probe's call cost (1610). The forge runner is shared and slow:
+/// pipeline 617 saw onResume's commands take 438 ms there, 255 to 350 ms
+/// under a quarter of a CPU here and up to 1151 ms under 15 %, while the
+/// same calls cost the same 13 to 33 ms of CPU and waited behind the same
+/// 0 to 4 folded events as on an idle host. The rest is the host's queue,
+/// which no change to the app shortens, so the bars hold the cost: the
+/// calling thread's own CPU time, and how many events the pump folded
+/// while the call ran, which counts a wait on the session's lock in the
+/// pump's own unit, whatever a fold takes on the host. The wall time is
+/// kept for the log.
+#[derive(Clone, Copy, Debug, Default)]
+struct Block {
+    wall: Duration,
+    cpu: Duration,
+    folds: u64,
+}
+
+impl Block {
+    /// Run `call` on this thread and say what it cost.
+    fn of(call: impl FnOnce()) -> Self {
+        let cpu = thread_cpu();
+        let folds = loquax_android::folded();
+        let began = std::time::Instant::now();
+        call();
+        Self {
+            wall: began.elapsed(),
+            cpu: thread_cpu().saturating_sub(cpu),
+            folds: loquax_android::folded().saturating_sub(folds),
+        }
+    }
+
+    /// The worst of `blocks`, each measure on its own.
+    fn worst(blocks: &[Block]) -> Self {
+        blocks.iter().fold(Self::default(), |w, b| Self {
+            wall: w.wall.max(b.wall),
+            cpu: w.cpu.max(b.cpu),
+            folds: w.folds.max(b.folds),
+        })
+    }
+}
+
+/// The calling thread's CPU time so far: the first field of its
+/// `schedstat`, nanoseconds on the CPU.
+fn thread_cpu() -> Duration {
+    let stat =
+        std::fs::read_to_string("/proc/thread-self/schedstat").expect("this thread's schedstat");
+    let ns = stat
+        .split_whitespace()
+        .next()
+        .and_then(|ns| ns.parse().ok())
+        .expect("its CPU time");
+    Duration::from_nanos(ns)
+}
 
 /// The mailbox on the phone (1152): the first start that chooses it needs no
 /// code and no server, the phone's node dials its entry server (here a stock

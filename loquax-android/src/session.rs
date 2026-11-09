@@ -215,6 +215,10 @@ struct Inner {
     /// How many callers of [`Session::lock`] wait for the lock now: the
     /// pump ends its turn after the event it is folding (1464).
     waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// The engine's events the pump folded under the lock so far: what a
+    /// caller of [`Session::lock`] waited behind is the count's step over
+    /// its wait (1610).
+    folded: Arc<std::sync::atomic::AtomicU64>,
     /// The list screens as of the pump's last change (1464), which the UI
     /// thread reads while the pump holds the lock.
     scene: Arc<Mutex<Scene>>,
@@ -354,6 +358,8 @@ pub struct Session {
     inner: Arc<Mutex<Inner>>,
     /// [`Inner::waiting`].
     waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// [`Inner::folded`].
+    folded: Arc<std::sync::atomic::AtomicU64>,
     /// [`Inner::scene`].
     scene: Arc<Mutex<Scene>>,
     /// Wakes the pump when a request may have started work (1176).
@@ -628,6 +634,7 @@ impl Session {
             Arc::clone(&wake),
         ));
         let waiting = Arc::clone(&inner.waiting);
+        let folded = Arc::clone(&inner.folded);
         let scene = Arc::clone(&inner.scene);
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
@@ -655,6 +662,7 @@ impl Session {
         let session = Self {
             inner,
             waiting,
+            folded,
             scene,
             wake,
             events: Mutex::new(events_rx),
@@ -1156,6 +1164,14 @@ impl Session {
     #[doc(hidden)]
     pub fn simulate_engine_death(&self) {
         self.lock().attached.outbox.sever();
+    }
+
+    /// The engine's events the pump folded under the lock so far: a
+    /// command's step of it is what it waited behind (1610). For the
+    /// facade test.
+    #[doc(hidden)]
+    pub fn folded(&self) -> u64 {
+        self.folded.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// How many contact keys the home node took. For the facade test.
@@ -2068,6 +2084,7 @@ impl Inner {
             dirty: true,
             backlog: false,
             waiting: Arc::default(),
+            folded: Arc::default(),
             scene: Arc::default(),
             counts: 0,
             gone: false,
@@ -2222,7 +2239,13 @@ impl Inner {
         loop {
             let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
             match slicing.next(&mut self.fanout, &mut self.attached.outbox, waited) {
-                Ok(Some(events)) => self.fold(events),
+                Ok(Some(events)) => {
+                    self.folded.fetch_add(
+                        u64::try_from(events.len()).unwrap_or(u64::MAX),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    self.fold(events);
+                }
                 Ok(None) => break,
                 Err(gone) => {
                     self.gone = true;
