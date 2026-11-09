@@ -68,6 +68,9 @@ libc = { workspace = true }
 # Scratch mount point for the bootloader drive, and bundle fixtures in tests.
 tempfile = "3"
 clap = { version = "4", features = ["derive"] }
+# The M9's map area (1477): the directory format the board reads, and the
+# region check every file passes before it is written.
+leviculum-map = { path = "../leviculum-map" }
 
 [dev-dependencies]
 tempfile = "3"

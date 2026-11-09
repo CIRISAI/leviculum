@@ -3401,6 +3401,7 @@ version = "0.10.0-dev.8"
 dependencies = [
  "clap",
  "leviculum-core",
+ "leviculum-map",
  "libc",
  "serde",
  "sha2",
