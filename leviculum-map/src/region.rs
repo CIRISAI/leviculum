@@ -774,6 +774,27 @@ impl<S: Storage> Region<S> {
         Ok(None)
     }
 
+    /// Whether a tile of the box `b` at zoom `z` has arrived (1527): what
+    /// the first-tile measurement reads, the next frame over `b` draws it.
+    /// The box must not cross the date line.
+    pub fn arrived_in(&self, b: &Bounds, z: u8) -> Result<bool, RegionError> {
+        use crate::mercator::{x_of_lon, y_of_lat};
+        if !self.zooms().contains(&z) {
+            return Ok(false);
+        }
+        let s = 32 - u32::from(z);
+        let col = |lon| (u64::from(x_of_lon(lon)) >> s) as u32;
+        let row = |lat| (u64::from(y_of_lat(lat)) >> s) as u32;
+        for x in col(b.west)..=col(b.east) {
+            for y in row(b.north)..=row(b.south) {
+                if let Slot::Here(_) = self.find_slot(TileId { z, x, y })? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// How many of the index's slots hold their tile, and how many there
     /// are: what a frontend shows of a file still arriving. A whole file
     /// counts every slot; it reads every slot, so it is for a log or a
