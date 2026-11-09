@@ -2345,7 +2345,8 @@ fn ui_main(
     // The map beside it (slice seven): the region read in place from the
     // image, the painter's storage on the heap.
     let before = leviculum_esp::heap_live();
-    let Ok(mut map) = Map::new(map::FIXTURE) else {
+    // Since 1477 the world overview under it, read in place as well.
+    let Ok(mut map) = Map::board(map::FIXTURE, &[]) else {
         log.line(
             "[DISP] ",
             alloc::string::String::from("state=down reason=region"),

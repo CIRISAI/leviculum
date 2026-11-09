@@ -82,6 +82,16 @@ pub const BOTTOM: u16 = (GRID_ROWS - 1) as u16;
 /// in the file and in `leviculum-map/fixtures/README.md`.
 pub const FIXTURE: &[u8] = include_bytes!("../../leviculum-map/fixtures/firenze.lmr");
 
+/// The world on the board (1477): the map core's own cut of the whole
+/// world, zooms 0 to 3, coasts, land, the major roads and the cities'
+/// names (no country borders: the cut's profile has no class for them),
+/// 755,245 B, read in place from the image's flash like
+/// [`FIXTURE`]. Drawn wherever no detailed region lies under the view, up
+/// to [`leviculum_map::viewport::MAX_OVERZOOM`] past its deepest zoom, so
+/// any view at any place shows a map. How it was cut:
+/// `leviculum-map/fixtures/README.md`, "The world overview".
+pub const WORLD: &[u8] = include_bytes!("../../leviculum-map/data/world-overview.lmr");
+
 /// How far past a region's deepest zoom the M9 zooms in: two steps, where
 /// the lines are still the region's and a street is a hand wide.
 pub const OVERZOOM: u8 = 2;
@@ -98,24 +108,37 @@ pub fn style() -> Style {
 /// atlas, the region's zooms and two steps past its deepest. No ways of
 /// drawing to cycle through: the M9 has one.
 pub fn setup(header: &Header) -> MapSetup {
+    setup_of(core::slice::from_ref(header))
+}
+
+/// [`setup`] for every region the board carries (1477): the zooms from
+/// the shallowest region's to two steps past the deepest's.
+pub fn setup_of(headers: &[Header]) -> MapSetup {
+    let low = headers.iter().map(|h| h.min_zoom).min().unwrap_or(0);
+    let high = headers.iter().map(|h| h.max_zoom).max().unwrap_or(0);
     MapSetup {
         cell_px: CELL_PX,
-        zooms: (header.min_zoom, header.max_zoom.saturating_add(OVERZOOM)),
-        regions: vec![*header],
+        zooms: (low, high.saturating_add(OVERZOOM)),
+        regions: headers.to_vec(),
         drawings: Vec::new(),
         drawing: 0,
     }
 }
 
-/// Tell `model` the board's map: the region the image carries
-/// ([`FIXTURE`]) and the picture's cells. The fixture's model and a home's
-/// (1476) both, so a home's map is the same picture under the same keys.
+/// Tell `model` the board's map: the regions the image carries
+/// ([`FIXTURE`] and the [`WORLD`]) and the picture's cells. The fixture's
+/// model and a home's (1476) both, so a home's map is the same picture
+/// under the same keys.
 pub fn ready<B>(model: &mut UiModel<B>)
 where
     B: InputBuffer + Default,
 {
-    if let Ok(region) = Region::from_bytes(FIXTURE) {
-        loquax::ui::update(model, loquax::ui::UiEvent::MapSetup(setup(region.header())));
+    let headers: Vec<Header> = [FIXTURE, WORLD]
+        .iter()
+        .filter_map(|bytes| Region::from_bytes(bytes).ok().map(|r| *r.header()))
+        .collect();
+    if !headers.is_empty() {
+        loquax::ui::update(model, loquax::ui::UiEvent::MapSetup(setup_of(&headers)));
     }
     model.map_picture = Some(PICTURE);
 }
@@ -257,6 +280,10 @@ pub struct Overlay {
     pub hint: Option<StrId>,
     /// The credit in the picture's corner.
     pub credit: bool,
+    /// What the receiver says of the sky (1477), in the top left corner:
+    /// "Suche Satelliten… 4", then the fix's age. The board's loop sets
+    /// it; [`Chrome::overlay`] leaves it off.
+    pub sky: crate::gnss::Sky,
 }
 
 /// How long a page of the key hint stands, in milliseconds (1531: three
@@ -325,6 +352,7 @@ impl Chrome {
         Overlay {
             hint,
             credit: self.credit_until.is_some_and(|until| now_ms < until),
+            sky: crate::gnss::Sky::Off,
         }
     }
 }
@@ -673,6 +701,61 @@ where
     Ok(())
 }
 
+/// The cells the overview's words take ([`notes`]): its second row and
+/// its last, whole, for the label pass to keep clear of.
+pub fn overview_rows() -> [(u16, u16, u16); 2] {
+    [
+        (0, 1, PICTURE.width),
+        (0, PICTURE.height - 1, PICTURE.width),
+    ]
+}
+
+/// The words over a picture drawn from the world overview (1477): "Nur
+/// Übersicht" in the picture's second row, where "Keine Karte für diese
+/// Gegend" stood, and how a region gets onto the board in its last; and
+/// the receiver's `sky` words in the top left corner. On the bar's
+/// colours, as the other words over the picture.
+pub fn notes<D>(
+    overview: bool,
+    sky: Option<&str>,
+    look: &Look,
+    font: &MonoFont<'_>,
+    panel: &mut D,
+) -> Result<(), MapError>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let chrome = look.tokens.chrome;
+    let style = MonoTextStyleBuilder::new()
+        .font(font)
+        .text_color(rgb565(chrome.fg))
+        .background_color(rgb565_or(chrome.bg, Rgb565::BLACK))
+        .build();
+    let cols = usize::from(PICTURE.width);
+    let mut text = |col: usize, row: u16, words: &str| {
+        let at = Point::new(
+            i32::try_from(col).unwrap_or(0) * i32::from(CELL_PX.0),
+            i32::from(row * CELL_PX.1),
+        );
+        Text::with_baseline(&crate::screen::narrow(words), at, style, Baseline::Top)
+            .draw(panel)
+            .map(|_| ())
+            .map_err(|_| MapError::Draw)
+    };
+    if overview {
+        let [(_, first, _), (_, last, _)] = overview_rows();
+        for (id, row) in [(StrId::MapOverview, first), (StrId::MapRegionHow, last)] {
+            let words = format!(" {} ", Words::key(id).resolve(look.lang));
+            let words = cut(&words, cols);
+            text(cols.saturating_sub(fit_width(&words)) / 2, row, &words)?;
+        }
+    }
+    if let Some(sky) = sky {
+        text(0, 0, &cut(&format!(" {sky} "), cols))?;
+    }
+    Ok(())
+}
+
 /// Why the map was not drawn.
 #[derive(Debug)]
 pub enum MapError {
@@ -862,14 +945,31 @@ fn ui_ink(c: Rgb565) -> UiInk {
     UiInk::Rgb(c.r(), c.g(), c.b())
 }
 
-/// The map the board shows: its region, read in place, and the painter's
+/// The map the board shows: its regions, read in place, and the painter's
 /// storage. Made once, beside the renderer.
 pub struct Map<'r> {
+    /// The first detailed region: the fixture.
     pub region: Region<&'r [u8]>,
+    /// The other detailed regions: those written into the flash's region
+    /// area (1477, `lnflash --region`).
+    pub more: Vec<Region<&'r [u8]>>,
+    /// The world overview ([`WORLD`]), where the board carries it.
+    pub world: Option<Region<&'r [u8]>>,
     pub painter: Painter,
     /// The picture and its names as last drawn, once the board keeps
     /// them ([`Map::keep_pictures`], 1507); `None` draws every time.
     pub kept: Option<Kept>,
+}
+
+/// Which of the board's regions a view draws ([`Map::choose`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drawn {
+    /// A detailed region: [`Map::region`] (0) or one of [`Map::more`].
+    Detail(usize),
+    /// The world overview: no detailed region here.
+    Overview,
+    /// Nothing: the view is past every region's zooms.
+    Bare,
 }
 
 impl<'r> Map<'r> {
@@ -877,9 +977,69 @@ impl<'r> Map<'r> {
     pub fn new(bytes: &'r [u8]) -> Result<Self, MapError> {
         Ok(Self {
             region: Region::from_bytes(bytes).map_err(MapError::Region)?,
+            more: Vec::new(),
+            world: None,
             painter: Painter::new(),
             kept: None,
         })
+    }
+
+    /// The board's map (1477): the detailed region `bytes`, the regions
+    /// of `more` that read (a region area's, each its own bytes), and the
+    /// [`WORLD`] under them.
+    pub fn board(bytes: &'r [u8], more: &[&'r [u8]]) -> Result<Self, MapError> {
+        let mut map = Self::new(bytes)?;
+        map.more = more
+            .iter()
+            .filter_map(|b| Region::from_bytes(b).ok())
+            .collect();
+        map.world = Region::from_bytes(WORLD).ok();
+        Ok(map)
+    }
+
+    /// Every region's header, the detailed ones first: what the model's
+    /// map setup holds.
+    pub fn headers(&self) -> Vec<Header> {
+        core::iter::once(&self.region)
+            .chain(self.more.iter())
+            .chain(self.world.iter())
+            .map(|r| *r.header())
+            .collect()
+    }
+
+    /// The region `view` draws (1477): the detailed region under it whose
+    /// zooms reach the view's, the deepest first; else the world while
+    /// its zooms reach (two past its deepest and the map core's overzoom
+    /// beyond); else a detailed region under the view at any zoom, as the
+    /// board drew before it carried the world; else nothing.
+    pub fn choose(&self, view: &Viewport) -> Drawn {
+        let details = core::iter::once(&self.region).chain(self.more.iter());
+        let under: Vec<(usize, &Region<&'r [u8]>)> = details
+            .enumerate()
+            .filter(|(_, r)| covers(r.header(), view))
+            .collect();
+        let useful = under
+            .iter()
+            .filter(|(_, r)| leviculum_map::choice::useful_zooms(r.header()).contains(&view.zoom()))
+            .max_by_key(|(i, r)| (r.header().max_zoom, core::cmp::Reverse(*i)));
+        if let Some((i, _)) = useful {
+            return Drawn::Detail(*i);
+        }
+        let world = self.world.as_ref().is_some_and(|w| {
+            leviculum_map::choice::useful_zooms(w.header()).contains(&view.zoom())
+        });
+        if world {
+            return Drawn::Overview;
+        }
+        match under.first() {
+            Some((i, _)) => Drawn::Detail(*i),
+            None => Drawn::Bare,
+        }
+    }
+
+    /// The region `drawn` names.
+    pub fn of(&self, drawn: Drawn) -> Option<&Region<&'r [u8]>> {
+        region_of(&self.region, &self.more, self.world.as_ref(), drawn)
     }
 
     /// Keep the picture between draws from here on (1507): a page switch
@@ -896,6 +1056,29 @@ impl<'r> Map<'r> {
     /// The credit the region carries, which the top bar shows.
     pub fn credit(&self) -> String {
         String::from(self.region.attribution())
+    }
+
+    /// The credit of the region `drawn`; empty for none.
+    pub fn credit_of(&self, drawn: Drawn) -> String {
+        self.of(drawn)
+            .map(|r| String::from(r.attribution()))
+            .unwrap_or_default()
+    }
+}
+
+/// The region `drawn` names among a [`Map`]'s fields: for a caller that
+/// holds the painter and the kept picture mutably at the same time.
+pub fn region_of<'a, 'r>(
+    first: &'a Region<&'r [u8]>,
+    more: &'a [Region<&'r [u8]>],
+    world: Option<&'a Region<&'r [u8]>>,
+    drawn: Drawn,
+) -> Option<&'a Region<&'r [u8]>> {
+    match drawn {
+        Drawn::Detail(0) => Some(first),
+        Drawn::Detail(i) => more.get(i - 1),
+        Drawn::Overview => world,
+        Drawn::Bare => None,
     }
 }
 
@@ -1100,7 +1283,8 @@ mod words_1531 {
             at(&chrome, 1_000, true),
             Overlay {
                 hint: Some(StrId::MapKeys),
-                credit: true
+                credit: true,
+                sky: crate::gnss::Sky::Off,
             }
         );
         assert!(at(&chrome, 5_999, true).credit);

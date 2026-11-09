@@ -41,6 +41,8 @@
 //! - [`map`]: the model's map drawn in pixels under the bar, its pins and
 //!   legend in the atlas, and the keys the M9 has none for (slice seven,
 //!   1375).
+//! - [`gnss`]: the board's own position from its AG3352, the map's sky
+//!   words and when the receiver is powered (1477).
 //! - [`splash`]: the logo from power-on until the UI's first frame, and
 //!   the order that lights the backlight only over a written panel (1485).
 //! - [`read`]: what the reader saw, said to the model as its viewport,
@@ -61,6 +63,7 @@ pub mod field;
 pub mod fixture;
 pub mod font;
 pub mod frame;
+pub mod gnss;
 pub mod group;
 pub mod home;
 pub mod house;

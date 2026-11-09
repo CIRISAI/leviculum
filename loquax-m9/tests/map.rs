@@ -339,13 +339,16 @@ fn an_unchanged_redraw_flushes_nothing() {
     assert!(renderer.panel().take_dirty().is_some(), "the zoom");
 }
 
-/// 1476, the grey map of Lew's photo: a home's board opens the map where
-/// its own fix is, far from the region the image carries. The picture is
-/// not plain grey: it says "Keine Karte für diese Gegend" above the own
-/// pin and how a region gets onto the board in its last row, no row has a
-/// credit for data it does not show, and nothing of the map is drawn.
-/// Pinned as a golden. The control: the fixture's own view over Florence
-/// draws the region and says none of it.
+/// 1476, the grey map of Lew's photo, and 1477: a home's board opens the
+/// map where its own fix is, far from the detailed region the image
+/// carries. The picture is the world overview there (1477 §3): drawn, not
+/// grey, with "Nur Übersicht" over it and how a region gets onto the
+/// board. Past the overview's zooms the picture says "Keine Karte für
+/// diese Gegend" above the own pin and how a region gets onto the board in
+/// its last row, no row has a credit for data it does not show, and
+/// nothing of the map is drawn. Both pinned as goldens. The control: the
+/// fixture's own view over Florence draws the detailed region and says
+/// none of it.
 #[test]
 fn the_map_says_so_where_no_region_lies_under_the_view() {
     use leviculum_lxmf::telemetry::Location;
@@ -361,9 +364,37 @@ fn the_map_says_so_where_no_region_lies_under_the_view() {
     let mut row = 0;
     group::press(&mut model, &mut row, &event(M9Key::Char('M')));
     assert!(map::shown(&model), "M opens the home's map");
+    let board = Map::board(FIXTURE, &[]).expect("regions");
     let (view, _) = map::view(&model).expect("map");
-    let region = Map::new(FIXTURE).expect("region");
-    assert!(!map::covers(region.region.header(), &view));
+    assert_eq!(
+        board.choose(&view),
+        map::Drawn::Overview,
+        "z{}",
+        view.zoom()
+    );
+
+    let top = (PICTURE.y * CELL_PX.1) as u32;
+    let bottom = (PICTURE.bottom() * CELL_PX.1) as u32;
+    let inks_of = |frame: &Frame| {
+        let mut inks = std::collections::BTreeSet::new();
+        for y in top..bottom.min(HEIGHT) {
+            for x in 0..WIDTH {
+                inks.insert(frame.pixel(x, y));
+            }
+        }
+        inks.len()
+    };
+    let overview = drawn_on_board(&model);
+    support::check("m9-map-overview.png", &overview);
+    assert!(inks_of(&overview) > 8, "the world is drawn");
+
+    // Past the overview's zooms: no region at all.
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 14;
+    }
+    let (view, _) = map::view(&model).expect("map");
+    assert_eq!(board.choose(&view), map::Drawn::Bare);
+    assert!(!map::covers(board.region.header(), &view));
 
     let look = Look::of(&model);
     let lines = map::lines(&look, true, COLS, GRID);
@@ -389,37 +420,76 @@ fn the_map_says_so_where_no_region_lies_under_the_view() {
         assert_eq!(line.chars().count(), COLS, "{line:?}");
     }
 
-    let frame = drawn(&model);
+    let frame = drawn_on_board(&model);
     support::check("m9-map-no-region.png", &frame);
     // The picture's rows hold the ground and the words' two inks only: no
     // map was drawn.
-    let top = (PICTURE.y * CELL_PX.1) as u32;
-    let bottom = (PICTURE.bottom() * CELL_PX.1) as u32;
-    let mut inks = std::collections::BTreeSet::new();
-    for y in top..bottom.min(HEIGHT) {
-        for x in 0..WIDTH {
-            inks.insert(frame.pixel(x, y));
-        }
-    }
-    assert!(inks.len() <= 8, "{} inks in a picture of words", inks.len());
+    assert!(
+        inks_of(&frame) <= 8,
+        "{} inks in a picture of words",
+        inks_of(&frame)
+    );
 
     // The control: the fixture's view over Florence draws the region.
     let florence = Screen::Map.model();
     let (view, _) = map::view(&florence).expect("map");
-    assert!(map::covers(region.region.header(), &view));
+    assert_eq!(board.choose(&view), map::Drawn::Detail(0));
     let text: Vec<String> = map::lines(&Look::of(&florence), false, COLS, GRID)
         .iter()
         .map(|l| l.cells.iter().map(|c| c.ch).collect())
         .collect();
     assert!(text.iter().all(|l| !l.contains(&none)));
-    let mut inks = std::collections::BTreeSet::new();
-    let frame = drawn(&florence);
-    for y in top..bottom.min(HEIGHT) {
-        for x in 0..WIDTH {
-            inks.insert(frame.pixel(x, y));
-        }
+    assert!(inks_of(&drawn(&florence)) > 8, "the region's picture");
+}
+
+/// 1477 §3: the world is on the board. A z2 view over Europe draws the
+/// world overview, coasts and land in the map's inks, with the overview's
+/// words; pinned as a golden. The control: at the same place at z2 with
+/// the fixture alone, as the board drew before 1477, the picture is the
+/// ground and nothing else.
+#[test]
+fn the_world_overview_draws_europe_at_z2() {
+    let mut model = Screen::Map.model();
+    if let Some(state) = model.map.as_mut() {
+        state.zoom = 2;
+        state.selected = None;
+        state.centre = leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(
+            50_000_000, 10_000_000,
+        ));
     }
-    assert!(inks.len() > 8, "the region's picture: {} inks", inks.len());
+    let board = Map::board(FIXTURE, &[]).expect("regions");
+    let (view, _) = map::view(&model).expect("map");
+    assert_eq!(board.choose(&view), map::Drawn::Overview);
+    let frame = drawn_on_board(&model);
+    support::check("m9-map-world-z2.png", &frame);
+    let colours = |frame: &Frame| {
+        let mut inks = std::collections::BTreeSet::new();
+        for y in 0..HEIGHT_PICTURE {
+            for x in 0..WIDTH {
+                inks.insert(frame.pixel(x, y));
+            }
+        }
+        inks.len()
+    };
+    assert!(colours(&frame) > 8, "{} inks", colours(&frame));
+    assert!(
+        colours(&drawn(&model)) <= 8,
+        "control: no world, no picture"
+    );
+}
+
+/// The picture's pixel rows.
+const HEIGHT_PICTURE: u32 = (PICTURE.height as u32) * (CELL_PX.1 as u32);
+
+/// What `model` shows on the board's map: the fixture and the world.
+fn drawn_on_board(model: &UiModel<Field>) -> Frame {
+    let mut frame = Frame::new();
+    let mut map = Map::board(FIXTURE, &[]).expect("regions");
+    Renderer::new(&mut frame)
+        .expect("renderer")
+        .show(model, &Look::of(model), &mut map)
+        .expect("draw");
+    frame
 }
 
 /// What `model` shows under `overlay`, drawn by a fresh renderer.
@@ -541,6 +611,7 @@ fn the_hint_the_credit_and_the_card_have_their_goldens() {
     let keys = map::Overlay {
         hint: Some(loquax::ui::strings::StrId::MapKeys),
         credit: false,
+        ..map::Overlay::default()
     };
     let open = map::Overlay {
         credit: true,

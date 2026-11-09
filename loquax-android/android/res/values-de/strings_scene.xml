@@ -100,6 +100,9 @@
     <string name="radar_note_on">Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s</string>
     <string name="map_no_region">Keine Karte für diese Gegend</string>
     <string name="map_region_how">Karten lädt lnflash per USB</string>
+    <string name="map_overview">Nur Übersicht</string>
+    <string name="map_sky_searching">Suche Satelliten… %1$d</string>
+    <string name="map_sky_fix">Fix vor %1$s</string>
     <string name="no_messages_yet">Noch keine Nachrichten</string>
     <string name="app_name_title">Loquax</string>
     <string name="map_empty">Noch niemand teilt eine Position mit dir</string>

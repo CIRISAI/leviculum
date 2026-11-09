@@ -269,11 +269,14 @@ where
             self.split.scene_us = self.now().saturating_sub(t0);
             return self.draw(&scene, look);
         };
-        let attribution = map.credit();
+        // The region the view draws (1477): a detailed one, else the
+        // world overview, else none.
+        let drawn = map.choose(&view);
+        let attribution = map.credit_of(drawn);
         let font = self.font(Size::Large);
         // No region under the view (1476): the cells say so, no picture,
         // and no credit, as nobody's data is shown.
-        let bare = !map::covers(map.region.header(), &view);
+        let bare = drawn == map::Drawn::Bare;
         let credit = (!bare).then(|| map::short_credit(&attribution));
         let bottom = map::bottom(model, &look.map, credit, look.lang);
         // The picture always takes the bottom row (1554): the hint and the
@@ -297,19 +300,33 @@ where
         // the corner credit) are overlays (1554): drawn over the picture
         // after it, never part of its key, so a word that goes uncovers
         // the picture kept under it.
-        let taken = map::pin_cells(&pins);
-        match (&mut map.kept, bare) {
-            (_, true) => {}
+        let mut taken = map::pin_cells(&pins);
+        // The overview's two rows of words (1477) keep names off them.
+        if drawn == map::Drawn::Overview {
+            taken.extend(map::overview_rows());
+        }
+        // The fields apart: the region is read while the painter and the
+        // kept picture are written.
+        let map::Map {
+            region: first,
+            more,
+            world,
+            painter,
+            kept,
+        } = map;
+        let region = map::region_of(first, more, world.as_ref(), drawn);
+        match (kept, region) {
+            (_, None) => {}
             // The kept picture (1507, 1554): drawn when the view or the
             // pins moved, copied back every time.
-            (Some(kept), false) => {
+            (Some(kept), Some(region)) => {
                 if kept.holds(&painted, &taken) {
                     kept.copied = kept.copied.saturating_add(1);
                     stats.kept = true;
                     stats.names = self.names_kept;
                 } else {
                     let (found, picture_us, names_us) = kept
-                        .draw(&mut map.painter, &map.region, &painted, &taken, &font, &now)
+                        .draw(painter, region, &painted, &taken, &font, &now)
                         .map_err(|_| DrawError)?;
                     stats.picture_us = picture_us;
                     stats.names_us = names_us;
@@ -317,14 +334,14 @@ where
                 }
                 kept.copy_to(panel).map_err(|_| DrawError)?;
             }
-            (None, false) => {
+            (None, Some(region)) => {
                 let t0 = now();
-                map.painter
-                    .picture(&map.region, &painted, panel)
+                painter
+                    .picture(region, &painted, panel)
                     .map_err(|_| DrawError)?;
                 let t1 = now();
                 let rows = (painted.size().1 / u32::from(map::CELL_PX.1)) as u16;
-                let (names, found) = map::names(&map.region, &painted, rows, &taken);
+                let (names, found) = map::names(region, &painted, rows, &taken);
                 map::draw_names(&names, &font, panel).map_err(|_| DrawError)?;
                 let t2 = now();
                 stats.picture_us = t1.saturating_sub(t0);
@@ -334,6 +351,15 @@ where
         }
         map::pins(&pins, look, &font, panel).map_err(|_| DrawError)?;
         map::words(bottom.as_deref(), corner, look, &font, panel).map_err(|_| DrawError)?;
+        let sky = crate::gnss::sky_words(look.map.sky, look.lang);
+        map::notes(
+            drawn == map::Drawn::Overview,
+            sky.as_deref(),
+            look,
+            &font,
+            panel,
+        )
+        .map_err(|_| DrawError)?;
         self.names_kept = stats.names;
         self.map_stats = Some(stats);
         self.map_drawn = true;

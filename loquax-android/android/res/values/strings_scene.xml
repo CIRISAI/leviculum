@@ -100,6 +100,9 @@
     <string name="radar_note_on">No map loaded for this area · Rings %1$s around %2$s</string>
     <string name="map_no_region">No map for this area</string>
     <string name="map_region_how">lnflash loads maps over USB</string>
+    <string name="map_overview">Overview only</string>
+    <string name="map_sky_searching">Searching satellites… %1$d</string>
+    <string name="map_sky_fix">Fix %1$s ago</string>
     <string name="no_messages_yet">No messages yet</string>
     <string name="app_name_title">Loquax</string>
     <string name="map_empty">Nobody shares a position with you yet</string>

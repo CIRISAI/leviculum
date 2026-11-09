@@ -165,6 +165,7 @@ impl Look {
             map: crate::map::Overlay {
                 hint: None,
                 credit: false,
+                sky: crate::gnss::Sky::Off,
             },
         }
     }

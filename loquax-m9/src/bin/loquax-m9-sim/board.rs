@@ -298,8 +298,8 @@ impl Board {
         let mut renderer =
             Renderer::new(frame).map_err(|_| String::from("the renderer did not start"))?;
         renderer.set_clock(uptime_us);
-        let map =
-            Map::new(map::FIXTURE).map_err(|_| String::from("the map region did not read"))?;
+        let map = Map::board(map::FIXTURE, &[])
+            .map_err(|_| String::from("the map region did not read"))?;
         let mut seed = [0u8; 32];
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -552,7 +552,7 @@ impl Board {
             None if self.overview.open => self.overview.lines(&look, cols, rows),
             None if map::shown(&self.model) => {
                 let bare = map::view(&self.model)
-                    .is_none_or(|(view, _)| !map::covers(self.map.region.header(), &view));
+                    .is_none_or(|(view, _)| self.map.choose(&view) == map::Drawn::Bare);
                 map::lines(&look, bare, COLS, ROWS)
             }
             None => screen::lines(&screen::scene(&self.model), &look, cols, rows),

@@ -151,6 +151,9 @@ leviculum_ui::catalogue! {
     // 1447 §5 instead of plain grey, and how a region gets onto the board.
     MapNoRegion = "map_no_region", "No map for this area", "Keine Karte für diese Gegend";
     MapRegionHow = "map_region_how", "lnflash loads maps over USB", "Karten lädt lnflash per USB";
+    MapOverview = "map_overview", "Overview only", "Nur Übersicht";
+    MapSkySearching = "map_sky_searching", "Searching satellites… %1$d", "Suche Satelliten… %1$d";
+    MapSkyFix = "map_sky_fix", "Fix %1$s ago", "Fix vor %1$s";
     // An empty conversation in the terminal (1447, walk 1 finding 22).
     NoMessagesYet = "no_messages_yet", "No messages yet", "Noch keine Nachrichten";
     // The terminal's title without a name of our own (1447).
