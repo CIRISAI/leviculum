@@ -103,6 +103,19 @@ pub const UART_BAUD: u32 = 115_200;
 /// as the UI sees it").
 pub const PSRAM_BYTES: usize = 8 << 20;
 
+/// The UI core's own heap pool at the top of the PSRAM (1594), out of
+/// [`PSRAM_BYTES`]; core 0 keeps the rest. 2 MiB: the plan's UI budget is
+/// 1.1 MB on the 64-bit host (`handheld-messenger.md`, "Memory budgets,
+/// measured"), and window 19 (2026-11-09, bench image of fbe1e3f6,
+/// `bench/board.log`) measured the whole board at 1.36 MB in use at its
+/// busiest (`[OPEN_HEAP] heap_free=7027384` of 8,388,608), the UI core's
+/// censused share (renderer 62,096, map 218,048, the kept picture
+/// 153,600, a draw's peak 82,487) about 0.5 MB of it. So the pool holds
+/// the UI core's plan twice and the whole board's use as well; a request
+/// it cannot serve falls back to core 0's pool (`pools.rs`), costing a
+/// shared lock, never a failure.
+pub const UI_HEAP_BYTES: usize = 2 << 20;
+
 /// Short tag in the identity lines.
 pub const LOG_PREFIX: &str = "M9";
 /// Board name in the identity lines.

@@ -86,6 +86,12 @@ pub mod pool_tlsf;
 
 use pool_tlsf::PoolTlsf;
 
+// The firmware's per-core pools (1594), the one source: the routing of
+// allocations to the asking core's pool and of frees to the owner's,
+// tested with threads in `tests/pools.rs`.
+#[path = "../../leviculum-esp/src/pools.rs"]
+pub mod pools;
+
 /// The heaps hold raw pointers into their (static, 'static) regions;
 /// moving the guard between threads moves only the handle.
 struct Held<T>(T);

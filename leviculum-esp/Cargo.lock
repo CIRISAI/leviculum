@@ -1260,6 +1260,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-storage",
+ "esp-sync",
  "leviculum-core",
  "leviculum-log-line",
  "leviculum-serial-mux",

@@ -56,6 +56,10 @@ leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }
 # The lock the UART's receive interrupt and the loop share its keep under
 # (1440); esp-hal provides the implementation. The version esp-hal uses.
 critical-section = "1.2"
+# The per-core heap pools' lock (1594, `src/pools.rs`): interrupts off on
+# this core without the cross-core critical section. The version esp-hal
+# uses.
+esp-sync = { version = "0.3.0", features = ["esp32s3"] }
 # `CryptoRngCore`, named in the node's type; esp-hal's `Trng` implements it
 # through `unstable`. The version the core resolves to.
 rand_core = { version = "0.6", default-features = false }

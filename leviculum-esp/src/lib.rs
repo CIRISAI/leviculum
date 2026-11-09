@@ -42,6 +42,7 @@ pub mod handheld;
 pub mod idle;
 pub mod mspi;
 pub mod pool_tlsf;
+pub mod pools;
 pub mod serial_iface;
 pub mod stall;
 pub mod sx1262;
@@ -107,69 +108,86 @@ pub const FW_BUILD_STAMP: &str = concat!(
 // Heap
 // ---------------------------------------------------------------------
 
-/// rlsf behind the cross-core critical section, its control block in the
-/// region it manages ([`PoolTlsf`]): the `static` holds two pointers and
-/// a flag, not the 4228 B of bitmaps and list heads.
-struct Heap {
-    inner: Mutex<RefCell<Option<PoolTlsf>>>,
+/// The lock of one pool ([`pools::PoolLock`], 1594): interrupts off on
+/// this core and a spin on an atomic, so it excludes the other core and
+/// this core's interrupts and nothing else. Not the cross-core critical
+/// section: a core waits here only for the other core's one TLSF step in
+/// the same pool, never for core 0's flash ops, queue pushes or the UART
+/// interrupt. The bench image counts the spin ([`alloc_clock::waited`]).
+///
+/// AutoPark may stall the UI core while it holds its pool's lock: core 0
+/// parks it only inside `flash::parked`, whose op allocates nothing, so
+/// nothing waits for the lock until the UI core runs again.
+pub(crate) struct IrqSpin {
+    held: core::sync::atomic::AtomicBool,
 }
 
-impl Heap {
-    const fn empty() -> Self {
+impl IrqSpin {
+    const fn new() -> Self {
         Self {
-            inner: Mutex::new(RefCell::new(None)),
+            held: core::sync::atomic::AtomicBool::new(false),
         }
     }
+}
 
-    /// Place the heap in the `size` bytes at `start`. False when a heap
-    /// is already placed or the region cannot hold the control block and
-    /// a pool; the heap then stays as it was.
-    ///
-    /// # Safety
-    ///
-    /// [`PoolTlsf::place`]'s: the region is mapped, writable, and used by
-    /// nothing else for as long as the image runs.
-    unsafe fn init(&self, start: usize, size: usize) -> bool {
-        critical_section::with(|cs| {
-            let mut inner = self.inner.borrow_ref_mut(cs);
-            if inner.is_some() {
-                return false;
+impl pools::PoolLock for IrqSpin {
+    fn with<R>(&self, f: impl FnOnce() -> R) -> R {
+        use esp_sync::raw::{RawLock, SingleCoreInterruptLock};
+        #[cfg(m9_bench)]
+        let t0 = alloc_clock::now();
+        let token = loop {
+            // SAFETY: exited below on this core, the one token in flight.
+            let token = unsafe { SingleCoreInterruptLock.enter() };
+            if self
+                .held
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                break token;
             }
-            // SAFETY: the caller's contract.
-            *inner = unsafe { PoolTlsf::place(start, size) };
-            inner.is_some()
-        })
-    }
-
-    fn free(&self) -> usize {
-        critical_section::with(|cs| self.inner.borrow_ref(cs).as_ref().map_or(0, PoolTlsf::free))
+            // SAFETY: the token `enter` just gave, on this core.
+            unsafe { SingleCoreInterruptLock.exit(token) };
+            core::hint::spin_loop();
+        };
+        #[cfg(m9_bench)]
+        alloc_clock::waited(t0);
+        let out = f();
+        self.held.store(false, Ordering::Release);
+        // SAFETY: the token this call's `enter` gave, on this core.
+        unsafe { SingleCoreInterruptLock.exit(token) };
+        out
     }
 }
 
-// SAFETY: blocks come from rlsf under the lock, and go back to it with
-// the alignment they were asked with; before `init` nothing is handed out.
+/// The pools: 0 core 0's and every core's fallback, 1 the UI core's
+/// once a board places it ([`init_core_heap_at`]).
+type Heap = pools::Pools<IrqSpin, 2>;
+
+/// The core that runs this, as the pool index: the processor id is a
+/// special register read, not a lock.
+fn this_core() -> usize {
+    match esp_hal::system::Cpu::current() {
+        esp_hal::system::Cpu::ProCpu => 0,
+        _ => 1,
+    }
+}
+
+// SAFETY: blocks come from the pool of the asking core (or a fallback),
+// under that pool's lock, and go back to the pool whose region holds
+// them, with the alignment they were asked with; before a pool is placed
+// nothing is handed out of it.
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        critical_section::with(|cs| {
-            self.inner
-                .borrow_ref_mut(cs)
-                .as_mut()
-                .and_then(|tlsf| tlsf.allocate(layout))
-                .map_or(core::ptr::null_mut(), core::ptr::NonNull::as_ptr)
-        })
+        self.allocate(this_core(), layout)
+            .map_or(core::ptr::null_mut(), |(ptr, _)| ptr.as_ptr())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let Some(ptr) = core::ptr::NonNull::new(ptr) else {
-            return;
-        };
-        critical_section::with(|cs| {
-            if let Some(tlsf) = self.inner.borrow_ref_mut(cs).as_mut() {
-                // SAFETY: the caller's contract: `ptr` came from `alloc`
-                // with this layout, so from this heap.
-                unsafe { tlsf.deallocate(ptr, layout.align()) };
-            }
-        });
+        if let Some(ptr) = core::ptr::NonNull::new(ptr) {
+            // SAFETY: the caller's contract: `ptr` came from `alloc` with
+            // this layout, so from one of the pools.
+            unsafe { self.deallocate(ptr, layout.align()) };
+        }
     }
 }
 
@@ -248,6 +266,25 @@ pub mod alloc_clock {
     static CALLS: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
     static BYTES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 
+    /// Cycles each core spun for a pool's lock (1594): the part of
+    /// [`cycles`] the other core's step in the same pool cost, apart from
+    /// this core's own TLSF work.
+    static WAITED: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+    pub(crate) fn waited(t0: u32) {
+        WAITED[core()].fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
+    }
+
+    /// The cycles this core spun for a pool's lock so far.
+    pub fn wait_cycles() -> u32 {
+        WAITED[core()].load(Ordering::Relaxed)
+    }
+
+    /// The cycles `core` (0 or 1) spun for a pool's lock so far.
+    pub fn wait_cycles_of(core: usize) -> u32 {
+        WAITED[core.min(1)].load(Ordering::Relaxed)
+    }
+
     pub(crate) fn spent(t0: u32) {
         SPENT[core()].fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
     }
@@ -261,6 +298,11 @@ pub mod alloc_clock {
     /// The calls into the allocator this core made so far.
     pub fn calls() -> u32 {
         CALLS[core()].load(Ordering::Relaxed)
+    }
+
+    /// The calls `core` (0 or 1) made into the allocator so far (1594).
+    pub fn calls_of(core: usize) -> u32 {
+        CALLS[core.min(1)].load(Ordering::Relaxed)
     }
 
     /// The bytes the allocator handed this core so far.
@@ -280,28 +322,31 @@ pub mod alloc_clock {
     }
 }
 
-/// The largest block the allocator hands out now, found by halving
-/// between nothing and [`heap_free`] (1556, the M9 bench's `[OPEN]`
-/// line): about 23 tries, each a walk of the free list, the block taken
-/// and given back at once and never counted. A fragmented heap shows a
-/// largest block far below its free bytes.
+/// The largest block the calling core's pool hands out now, found by
+/// halving between nothing and that pool's free bytes (1556, the M9
+/// bench's `[OPEN]` line; per pool since 1594): about 23 tries, each a
+/// walk of the free list, the block taken and given back at once and
+/// never counted. A fragmented pool shows a largest block far below its
+/// free bytes.
 #[cfg(m9_bench)]
 pub fn heap_largest() -> usize {
-    let (mut fits, mut fails) = (0usize, heap_free() + 1);
+    let Some(pool) = HEAP.heap.pool(this_core()).filter(|pool| pool.placed()) else {
+        return 0;
+    };
+    let (mut fits, mut fails) = (0usize, pool.free() + 1);
     while fails - fits > 64 {
         let size = fits + (fails - fits) / 2;
         let Ok(layout) = Layout::from_size_align(size, 4) else {
             break;
         };
-        // SAFETY: a layout of non-zero size; a block handed out is given
-        // back at once with the same layout.
-        let ptr = unsafe { HEAP.heap.alloc(layout) };
-        if ptr.is_null() {
-            fails = size;
-        } else {
-            // SAFETY: as above.
-            unsafe { HEAP.heap.dealloc(ptr, layout) };
-            fits = size;
+        match pool.allocate(layout) {
+            None => fails = size,
+            Some(ptr) => {
+                // SAFETY: the block this pool just handed out, with its
+                // layout's alignment, given back at once.
+                unsafe { pool.deallocate(ptr, layout.align()) };
+                fits = size;
+            }
         }
     }
     fits
@@ -309,7 +354,10 @@ pub fn heap_largest() -> usize {
 
 #[global_allocator]
 static HEAP: CountedHeap = CountedHeap {
-    heap: Heap::empty(),
+    heap: Heap::new([
+        pools::Pool::new(IrqSpin::new()),
+        pools::Pool::new(IrqSpin::new()),
+    ]),
     live: AtomicUsize::new(0),
     peak: AtomicUsize::new(0),
 };
@@ -329,7 +377,7 @@ pub fn heap_reset_peak() {
     HEAP.peak.store(heap_live(), Ordering::Relaxed);
 }
 
-/// Bytes the allocator still has.
+/// Bytes the allocator still has, all pools.
 pub fn heap_free() -> usize {
     HEAP.heap.free()
 }
@@ -362,13 +410,14 @@ fn init_heap() {
     // would fail loudly in the allocation error handler.
     let _placed = unsafe {
         let heap_start = core::ptr::addr_of!(HEAP_MEM) as usize;
-        HEAP.heap.init(heap_start, HEAP_SIZE)
+        HEAP.heap.place(0, heap_start, HEAP_SIZE)
     };
 }
 
 /// Give the allocator `size` bytes at `start` instead of the [`HEAP_SIZE`]
-/// array: a board whose heap lives elsewhere, the M9's UI in PSRAM (order
+/// array: a board whose heap lives elsewhere, the M9's in PSRAM (order
 /// 1361), calls this after [`init_soc`] and before anything allocates.
+/// The pool is core 0's, and every core's while it has none of its own.
 ///
 /// # Safety
 ///
@@ -382,7 +431,29 @@ fn init_heap() {
 #[must_use]
 pub unsafe fn init_heap_at(start: usize, size: usize) -> bool {
     // SAFETY: the caller's contract.
-    unsafe { HEAP.heap.init(start, size) }
+    unsafe { HEAP.heap.place(0, start, size) }
+}
+
+/// Give core 1 a pool of its own, the `size` bytes at `start` (1594): its
+/// allocations are served there, under a lock core 0 takes only to free
+/// a block of it, so they never wait for core 0's flash ops or its own
+/// allocations. Until this is called, and whenever this pool is full,
+/// core 1 allocates from core 0's pool as before.
+///
+/// # Safety
+///
+/// Called once, before core 1 starts; the region is mapped, writable,
+/// disjoint from every other pool's, and used by nothing else for as long
+/// as the image runs.
+#[must_use]
+pub unsafe fn init_core_heap_at(core: usize, start: usize, size: usize) -> bool {
+    // SAFETY: the caller's contract.
+    core == 1 && unsafe { HEAP.heap.place(1, start, size) }
+}
+
+/// The free bytes of `core`'s own pool (1594); 0 for a pool not placed.
+pub fn heap_free_of(core: usize) -> usize {
+    HEAP.heap.pool(core).map_or(0, pools::Pool::free)
 }
 
 // ---------------------------------------------------------------------

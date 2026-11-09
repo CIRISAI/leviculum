@@ -40,7 +40,7 @@
 //! ```text
 //! [FW_BUILD] git_sha=<sha> dirty=<b> version=<v> t=<ms>
 //! [BOARD] id=M9 name=Elecrow ThinkNode M9 heap=<psram bytes> t=<ms>
-//! [HEAP] region=psram start=<addr> bytes=<n> t=<ms>
+//! [HEAP] region=psram start=<addr> bytes=<n> io_pool=<n> ui_pool=<n> ui_placed=<0|1> t=<ms>  (1594: core 0's pool and the UI core's own)
 //! [STACK] bytes=<n> t=<ms>
 //! [FLASH] identity=<offset|none/why> client=<offset|none/why> messages=<offset|none/why> t=<ms>  (1414, 1476)
 //! [IDENTITY] identity=<hash> probe=none lxmf=none source=<flash|generated> stored=<yes|no> t=<ms>
@@ -117,7 +117,7 @@
 //!                           the line took (1507), tx_drop_kind the same
 //!                           by what they were (1553); dump stays 0, a
 //!                           dump's line is never dropped for another
-//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> park_ms=<n> park_max_ms=<n> park_ops=<n> t=<ms>  (1569; the bench image adds alloc_ms0=<n> alloc_ms1=<n>, each core's time inside the allocator)
+//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> park_ms=<n> park_max_ms=<n> park_ops=<n> t=<ms>  (1569; the bench image adds alloc_ms0=<n> alloc_ms1=<n>, each core's time inside the allocator, and since 1594 wait_ms0=<n> wait_ms1=<n> allocs0=<n> allocs1=<n>, the spin for a pool's lock and the calls)
 //!                           every five seconds (1507, `leviculum_esp::idle`):
 //!                           the share of the window each core waited for
 //!                           its next interrupt (WAITI) instead of spinning;
@@ -179,7 +179,7 @@
 //! [KB] answer=mixed t=<ms>  after one whose bytes disagree
 //! [KB] queue_lost=<n> read_failed=<n>   when either count moved (1463)
 //! [LOOP] turn_ms=<n> stage=<host|node|take|draw|keys> host=.. node=.. take=.. draw=.. keys=.. entries=<n>
-//! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n> rows_us=.. layout_us=.. blit_us=.. flush_us=..  (1569, the UI core's slow turn: msgs the queue held, entries folded; 1591, the turn's draw split: the scene's rows, their layout into cells, the changed cells into the frame, the wait for the last flush)
+//! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n> rows_us=.. layout_us=.. blit_us=.. flush_us=.. [rows_allocs=.. rows_alloc_us=.. rows_wait_us=.. draw_allocs=.. draw_alloc_us=.. draw_wait_us=.. in the bench image, 1594]  (1569, the UI core's slow turn: msgs the queue held, entries folded; 1591, the turn's draw split: the scene's rows, their layout into cells, the changed cells into the frame, the wait for the last flush)
 //!                           a turn of the loop longer than 100 ms (1463)
 //! [FOLD] entries=<n> turns=<n> wall_us=<n> unpack_us=<n> step_us=<n> finish_us=<n> route_us=<n> alloc_us=<n> allocs=<n> alloc_bytes=<n> per_entry_us wall=<n> unpack=<n> step=<n> alloc=<n>  (1575, the bench image: a pulled page's fold on the UI core, said when its last entry is folded, summed over the turns it took)
 //! ```
@@ -1160,6 +1160,12 @@ struct DrawSpent {
     layout: u64,
     blit: u64,
     flush: u64,
+    /// The allocator's share of the scene's rows and of the whole draw
+    /// (1594): the bench image's measure of the UI core's heap.
+    #[cfg(m9_bench)]
+    rows_alloc: bench::AllocSpent,
+    #[cfg(m9_bench)]
+    draw_alloc: bench::AllocSpent,
 }
 
 /// Draw what `model` shows, the M9's cursor over a group's rows on `row`,
@@ -1205,11 +1211,18 @@ fn redraw(
     };
     // The bench times the scene and the draw apart (1540).
     #[cfg(m9_bench)]
+    let mark = bench::AllocMark::now();
+    #[cfg(m9_bench)]
     let drawn = match &shown.pairing {
         Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
         None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
         None => bench::show(renderer, model, &look, map),
     };
+    #[cfg(m9_bench)]
+    {
+        spent.draw_alloc = mark.spent();
+        spent.rows_alloc = bench::take_scene_allocs();
+    }
     let split = renderer.take_split();
     spent.rows = split.scene_us;
     spent.layout = split.layout_us;
@@ -1302,6 +1315,21 @@ fn flushed(
     Some(sent.us)
 }
 
+/// Both cores' allocator counters (1569, 1594): cycles inside, cycles
+/// spun for a pool's lock, calls; each wraps, a window takes differences.
+#[cfg(m9_bench)]
+fn alloc_window() -> [u32; 6] {
+    use leviculum_esp::alloc_clock as clock;
+    [
+        clock::cycles_of(0),
+        clock::cycles_of(1),
+        clock::wait_cycles_of(0),
+        clock::wait_cycles_of(1),
+        clock::calls_of(0),
+        clock::calls_of(1),
+    ]
+}
+
 #[main]
 fn main() -> ! {
     let p = leviculum_esp::init_soc();
@@ -1341,18 +1369,30 @@ fn main() -> ! {
         );
         halt_with_banner(&mut log, bytes);
     }
+    // Core 0's pool below, the UI core's own at the top (1594): a UI
+    // allocation never waits for core 0's flash ops or its allocations.
+    let ui_heap = m9::UI_HEAP_BYTES.min(bytes / 4);
+    let io_heap = bytes - ui_heap;
     // SAFETY: once, before any allocation; the driver mapped `bytes` at
     // `start` and nothing else in this image touches PSRAM.
-    if !unsafe { leviculum_esp::init_heap_at(start as usize, bytes) } {
+    if !unsafe { leviculum_esp::init_heap_at(start as usize, io_heap) } {
         log.line(
             "[HEAP] ",
             format_args!("region=psram bytes={bytes} state=down reason=placement-refused"),
         );
         halt_with_banner(&mut log, bytes);
     }
+    // SAFETY: once, before core 1 starts; the tail past core 0's pool is
+    // mapped and nobody else's.
+    let ui_placed =
+        unsafe { leviculum_esp::init_core_heap_at(1, start as usize + io_heap, ui_heap) };
     log.line(
         "[HEAP] ",
-        format_args!("region=psram start={start:p} bytes={bytes}"),
+        format_args!(
+            "region=psram start={start:p} bytes={bytes} io_pool={io_heap} ui_pool={} ui_placed={}",
+            ui_heap,
+            u8::from(ui_placed)
+        ),
     );
     // The line's send ring on the heap, now that there is one (1507).
     log.start_ring();
@@ -1726,10 +1766,7 @@ fn main() -> ! {
     // Each core's allocator cycles as of the last window (1569): the
     // starve's instrument, in the bench image whose clock it is.
     #[cfg(m9_bench)]
-    let mut alloc_since = [
-        leviculum_esp::alloc_clock::cycles_of(0),
-        leviculum_esp::alloc_clock::cycles_of(1),
-    ];
+    let mut alloc_since = alloc_window();
     // The bench's keys (1533), only in an image built for it.
     #[cfg(m9_bench)]
     let mut inject = loquax_m9::kbraw::Inject::new();
@@ -1783,24 +1820,24 @@ fn main() -> ! {
             // Each core's time inside the allocator this window (1569),
             // the starve's instrument: cycles at 240 MHz, as
             // milliseconds of the window.
+            // Since 1594 also the spin for a pool's lock (the part of
+            // the time the other core cost) and the calls per core.
             #[cfg(m9_bench)]
-            let alloc_ms = {
-                let now = [
-                    leviculum_esp::alloc_clock::cycles_of(0),
-                    leviculum_esp::alloc_clock::cycles_of(1),
-                ];
-                let ms = [
-                    now[0].wrapping_sub(alloc_since[0]) / 240_000,
-                    now[1].wrapping_sub(alloc_since[1]) / 240_000,
-                ];
-                alloc_since = now;
-                ms
+            let (alloc_ms, wait_ms, calls) = {
+                let now = alloc_window();
+                let since = core::mem::replace(&mut alloc_since, now);
+                let d = |i: usize| now[i].wrapping_sub(since[i]);
+                (
+                    [d(0) / 240_000, d(1) / 240_000],
+                    [d(2) / 240_000, d(3) / 240_000],
+                    [d(4), d(5)],
+                )
             };
             #[cfg(m9_bench)]
-            log.line(
+            log.text(
                 "[IDLE] ",
-                format_args!(
-                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops} alloc_ms0={} alloc_ms1={}",
+                &alloc::format!(
+                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops} alloc_ms0={} alloc_ms1={} wait_ms0={} wait_ms1={} allocs0={} allocs1={}",
                     u64::from(io) * 100 / window_us,
                     u64::from(ui) * 100 / window_us,
                     window_us / 1000,
@@ -1809,7 +1846,11 @@ fn main() -> ! {
                     park_max / 1000,
                     park_max % 1000,
                     alloc_ms[0],
-                    alloc_ms[1]
+                    alloc_ms[1],
+                    wait_ms[0],
+                    wait_ms[1],
+                    calls[0],
+                    calls[1]
                 ),
             );
             #[cfg(not(m9_bench))]
@@ -2892,10 +2933,22 @@ fn ui_main(
                 .iter()
                 .max_by_key(|(_, us)| *us)
                 .map_or("none", |(name, _)| name);
+            // The allocator's share of the rows and of the draw (1594),
+            // in the bench image whose counters these are.
+            #[cfg(m9_bench)]
+            let heap = {
+                let (r, d) = (draw_spent.rows_alloc, draw_spent.draw_alloc);
+                alloc::format!(
+                    " rows_allocs={} rows_alloc_us={} rows_wait_us={} draw_allocs={} draw_alloc_us={} draw_wait_us={}",
+                    r.calls, r.us, r.wait_us, d.calls, d.us, d.wait_us
+                )
+            };
+            #[cfg(not(m9_bench))]
+            let heap = "";
             log.line(
                 "[LOOP] ",
                 alloc::format!(
-                    "core=ui turn_ms={} stage={slowest} drain={} keys={} send={} draw={} msgs={turn_msgs} folded={turn_entries} turn={ui_turns} rows_us={} layout_us={} blit_us={} flush_us={}",
+                    "core=ui turn_ms={} stage={slowest} drain={} keys={} send={} draw={} msgs={turn_msgs} folded={turn_entries} turn={ui_turns} rows_us={} layout_us={} blit_us={} flush_us={}{heap}",
                     t_end.saturating_sub(t_turn) / 1000,
                     spent[0].1 / 1000,
                     spent[1].1 / 1000,
@@ -3277,14 +3330,72 @@ mod bench {
             DRAW_US.store(t0.elapsed().as_micros() as u32, Ordering::Relaxed);
             return drawn;
         }
+        let mark = AllocMark::now();
         let t0 = Instant::now();
         let scene = screen::scene(model);
         let t1 = Instant::now();
+        let rows = mark.spent();
+        SCENE_ALLOCS.store(rows.calls, Ordering::Relaxed);
+        SCENE_ALLOC_US.store(rows.us, Ordering::Relaxed);
+        SCENE_WAIT_US.store(rows.wait_us, Ordering::Relaxed);
         renderer.scene_took((t1 - t0).as_micros());
         let drawn = renderer.draw(&scene, look);
         SCENE_US.store((t1 - t0).as_micros() as u32, Ordering::Relaxed);
         DRAW_US.store(t1.elapsed().as_micros() as u32, Ordering::Relaxed);
         drawn
+    }
+
+    /// The allocator's counters of this core at a moment (1594): calls,
+    /// cycles inside, cycles spun for a pool's lock.
+    #[derive(Clone, Copy)]
+    pub struct AllocMark {
+        calls: u32,
+        cycles: u32,
+        wait: u32,
+    }
+
+    /// What the allocator cost between a mark and now (1594): calls and
+    /// microseconds inside, of which spun for a pool's lock.
+    #[derive(Clone, Copy, Default)]
+    pub struct AllocSpent {
+        pub calls: u32,
+        pub us: u32,
+        pub wait_us: u32,
+    }
+
+    impl AllocMark {
+        pub fn now() -> Self {
+            use leviculum_esp::alloc_clock as clock;
+            Self {
+                calls: clock::calls(),
+                cycles: clock::cycles(),
+                wait: clock::wait_cycles(),
+            }
+        }
+
+        pub fn spent(self) -> AllocSpent {
+            let now = Self::now();
+            AllocSpent {
+                calls: now.calls.wrapping_sub(self.calls),
+                us: now.cycles.wrapping_sub(self.cycles) / 240,
+                wait_us: now.wait.wrapping_sub(self.wait) / 240,
+            }
+        }
+    }
+
+    /// The allocator's share of the last scene built (1594, the rows of
+    /// the UI core's slow-turn line): calls, us inside, us spun.
+    static SCENE_ALLOCS: AtomicU32 = AtomicU32::new(0);
+    static SCENE_ALLOC_US: AtomicU32 = AtomicU32::new(0);
+    static SCENE_WAIT_US: AtomicU32 = AtomicU32::new(0);
+
+    /// The last scene's [`AllocSpent`], once; zero after a map draw.
+    pub fn take_scene_allocs() -> AllocSpent {
+        AllocSpent {
+            calls: SCENE_ALLOCS.swap(0, Ordering::Relaxed),
+            us: SCENE_ALLOC_US.swap(0, Ordering::Relaxed),
+            wait_us: SCENE_WAIT_US.swap(0, Ordering::Relaxed),
+        }
     }
 
     /// An opened chat's page on its way (1540): asked when, folded how
