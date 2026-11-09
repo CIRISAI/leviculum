@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leviculum_core::direct_link::wire::{self, PunchKind, SessionId};
+use leviculum_core::direct_link::DIRECT_LINK_MTU;
 use leviculum_core::transport::InterfaceId;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -129,9 +130,15 @@ pub(crate) fn spawn_direct_udp_interface(
         info: InterfaceInfo {
             id,
             name,
-            // Signals no MTU, like UDPInterface (Codeberg #357). The link
-            // moved onto this interface keeps the MTU it negotiated.
-            hw_mtu: None,
+            // Signals `DIRECT_LINK_MTU` (+ciris, leviculum#104). Unlike a
+            // UDPInterface (Codeberg #357, which signals none because the
+            // reference's does not) this one only exists between two nodes
+            // that ran the DirectLink upgrade, so its far end is a leviculum
+            // or rns-rs node lowering every link that moves here to the same
+            // value. Signalling none held a link BORN here (a derived one-hop
+            // address, never announced) at the base 500 on a path that
+            // carries 1400; a link that moves here is lowered to it as before.
+            hw_mtu: Some(DIRECT_LINK_MTU),
             is_local_client: false,
             bitrate: None,
             announce_cap_bitrate: None,

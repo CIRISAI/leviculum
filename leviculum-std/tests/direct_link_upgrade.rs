@@ -212,6 +212,113 @@ async fn a_relayed_link_upgrades_and_outlives_its_relay() {
     upgrade_and_drop_relay(t, a, b, link_id, handle, hash).await;
 }
 
+/// leviculum#104: once the path is punched, a link to a destination A never
+/// announced (a derived one-hop address, as CIRISEdge's A/V legs dial) runs
+/// at the punched interface's MTU, not the base 500. Before, the direct
+/// interface signalled no MTU and the request, having no path, offered the
+/// base: both ends settled on 500, a Channel MDU of 425.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_born_on_the_punched_path_runs_at_its_mtu() {
+    use leviculum_core::constants::CHANNEL_ENVELOPE_HEADER_SIZE;
+    use leviculum_core::direct_link::DIRECT_LINK_MTU;
+
+    let (t, mut a, mut b, link_id, _handle, hash) = linked_through_relay(accepter(), None).await;
+    upgrade(&mut a, &mut b, &link_id, &hash).await;
+
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let signing_key: [u8; 32] = identity.public_key_bytes()[32..64].try_into().unwrap();
+    let mut derived = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "directlink",
+        &["derived"],
+    )
+    .expect("destination");
+    derived.set_accepts_links(true);
+    let derived_hash = *derived.hash();
+    a.node.register_destination(derived);
+    assert_eq!(b.node.hops_to(&derived_hash), None, "never announced");
+
+    let born = b
+        .node
+        .connect(&derived_hash, &signing_key)
+        .await
+        .expect("connect");
+    let born_id = *born.link_id();
+    b.node
+        .await_link_established(&born_id)
+        .await
+        .expect("the derived address answers over the punched path");
+    let a_id = next_event(
+        &mut a.rx,
+        Duration::from_secs(8),
+        |ev| matches!(ev, NodeEvent::LinkEstablished { link_id, .. } if *link_id == born_id),
+    )
+    .await;
+    assert!(a_id.is_some(), "A's end of the new link");
+
+    let mdu = b.node.link_mdu(&born_id).expect("B's link");
+    eprintln!(
+        "born link: B mtu={:?} A mtu={:?} link_mdu={mdu} channel_mdu={}",
+        b.node.link_negotiated_mtu(&born_id),
+        a.node.link_negotiated_mtu(&born_id),
+        mdu - CHANNEL_ENVELOPE_HEADER_SIZE
+    );
+    assert_eq!(b.node.link_negotiated_mtu(&born_id), Some(DIRECT_LINK_MTU));
+    assert_eq!(a.node.link_negotiated_mtu(&born_id), Some(DIRECT_LINK_MTU));
+    assert_eq!(mdu - CHANNEL_ENVELOPE_HEADER_SIZE, 1321);
+
+    // And a payload past the base MDU crosses it.
+    let big = vec![0xA5u8; 1200];
+    born.try_send(&big).await.expect("send a 1200-byte message");
+    assert!(
+        next_event(&mut a.rx, Duration::from_secs(8), |ev| matches!(
+            ev,
+            NodeEvent::MessageReceived { data, .. } if data.len() == 1200
+        ))
+        .await
+        .is_some(),
+        "the 1200-byte message arrives"
+    );
+    if let Some(mut t) = t {
+        t.node.stop().await.expect("stop relay");
+    }
+}
+
+/// Propose the upgrade from B and wait until both ends report it and A is
+/// one hop from B over the punched path.
+async fn upgrade(
+    a: &mut TestNode,
+    b: &mut TestNode,
+    link_id: &leviculum_core::LinkId,
+    hash: &leviculum_core::DestinationHash,
+) {
+    b.node.propose_direct_link(link_id).await.expect("propose");
+    for (side, proposed) in [(&mut *b, true), (&mut *a, false)] {
+        let up = next_event(&mut side.rx, Duration::from_secs(20), |ev| {
+            matches!(
+                ev,
+                NodeEvent::DirectLinkEstablished { .. } | NodeEvent::DirectLinkFailed { .. }
+            )
+        })
+        .await;
+        assert!(
+            matches!(up, Some(NodeEvent::DirectLinkEstablished { proposed: p, .. }) if p == proposed),
+            "upgrade (proposed={proposed}): {up:?}"
+        );
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while b.node.hops_to(hash) != Some(1) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        b.node.hops_to(hash),
+        Some(1),
+        "one hop over the punched path"
+    );
+}
+
 /// Interop: the same upgrade with rns-rs (lelloman/rns-rs) as the relay and
 /// the facilitator. Start its `rnsd` with `enable_transport = Yes`,
 /// `probe_port = <P>` and a `TCPServerInterface` on 127.0.0.1:<T>, then run

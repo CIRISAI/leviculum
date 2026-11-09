@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [Unreleased] — CIRIS fork
+
+### Fixed
+
+- A link born on a punched direct path to a destination that is never
+  announced now runs at the path's MTU, not the base 500 (leviculum#104).
+  CIRISEdge's A/V legs dial derived one-hop addresses like this and sat at a
+  Channel MDU of 425; they now get 1321. Two causes, both fixed. The direct
+  UDP interface signalled no MTU, so a responder hearing a request on it
+  clamped to 500; it now signals `DIRECT_LINK_MTU` (1400). Its far end is
+  always a node that ran the DirectLink upgrade, so the Python-only reason a
+  UDPInterface signals none (Codeberg #357) does not apply. And a request with
+  no path, which goes out on every interface, signalled the base MTU as the
+  reference does (`Link.py:310-314`); it now signals the smallest MTU any
+  interface on the node signals, an unsignalled interface counting as 500. No
+  interface is offered more than it signals, each responder still clamps to
+  its receiving interface, and a node with a UDP, BLE or other unsignalled
+  interface offers 500 as before. A link to an announced destination is
+  unchanged.
+
 ## [0.34.0+ciris.1] — CIRIS fork
 
 ### Added
