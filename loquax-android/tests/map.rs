@@ -29,6 +29,13 @@ use loquax_android::schema::{self, MapRegions, MapRequest, MapShown, MapThemeCho
 #[path = "../../loquax/tests/support/ugly_store.rs"]
 mod ugly_store;
 
+#[path = "../../loquax/tests/support/first_tile.rs"]
+mod first_tile;
+use first_tile::{
+    arrived, first_tile_archive, first_tile_blob, region_files, start_region, FIRST_TILE_AT,
+    FIRST_TILE_RATE,
+};
+
 /// The Florence view of the window's golden of the names: z16, 480 x 320.
 const LAT: f64 = 43.7752;
 const LON: f64 = 11.2660;
@@ -2269,7 +2276,8 @@ fn the_walks_frankfurt_shows_the_building_fill_at_z16_and_not_at_z15() {
 /// The walk of 1292: a phone's map driven as `MapView` drives it, the
 /// renderer's clock held, a frame every [`FRAME_MS`] while a finger or a
 /// coast moves it; at rest a frame again while one is `pending`, every
-/// 1.5 s while one says `loading`, and the prefetch while one says
+/// quarter second while one says `filling` or `loading_here` (1527),
+/// every 1.5 s while one says `loading`, and the prefetch while one says
 /// `prefetching` and none `loading`.
 struct Walk {
     home: tempfile::TempDir,
@@ -2403,6 +2411,11 @@ impl Walk {
         let mut last = self.frame(0, 0, 0, false);
         while self.t_ms < until {
             if last.pending {
+                last = self.frame(0, 0, 0, false);
+            } else if last.filling || last.loading_here {
+                // Four times a second while a region arrives or a load
+                // runs for the screen (1291, 1527).
+                self.t_ms += 250;
                 last = self.frame(0, 0, 0, false);
             } else if last.loading {
                 self.t_ms += 1500;
@@ -2571,5 +2584,318 @@ fn a_region_fills_the_frame_in_while_it_downloads() {
     assert!(
         near[0] < near[near.len() - 1],
         "the region came nearer: {near:?}"
+    );
+}
+
+/// The first-tile walk of 1527: the Grunewald, a synthetic archive of it
+/// ([`leviculum_mapcut::pmtiles::padded`]: a real z15 tile in every slot,
+/// each padded with [`FIRST_TILE_PAD`] bytes of its own, so a box's
+/// bytes grow with its tiles) served at [`FIRST_TILE_RATE`] bytes a
+/// second, so a load's size shows in its time. The phone's map is driven
+/// on the real clock as `MapView` drives it: a frame every [`FRAME_MS`]
+/// while the view moves; at rest a frame at once while one is `pending`,
+/// a quarter second after one that says `filling` or `loading_here`
+/// (1527), 1.5 s after one that says `loading`.
+struct FirstTile {
+    home: tempfile::TempDir,
+    _serve: leviculum_mapcut::serve::Serve,
+    ask: MapRequest,
+    start: std::time::Instant,
+    fingers_milli: i32,
+    last: Option<(MapShown, u64)>,
+    /// When the screen was first more than a tenth uncovered.
+    uncovered_ms: Option<u64>,
+    /// When a frame first said a region loads for the screen.
+    loading_ms: Option<u64>,
+    /// When a tile of the screen at the zoom viewed was first on disk.
+    on_disk_ms: Option<u64>,
+    /// The first frame drawn with that tile there: `first_tile_ms`.
+    first_tile_ms: Option<u64>,
+    /// The start region's header: what "uncovered" is measured against,
+    /// the same for every stack under test.
+    start_region: leviculum_map::region::Header,
+    /// When a region over more than two zooms (a cell, not the screen's
+    /// own box) first appeared, whether its load started before the screen
+    /// was uncovered (the cells ahead of a pan, 1292) or after.
+    cell_ms: Option<u64>,
+}
+
+impl FirstTile {
+    /// The walk at its start: a region cut at full speed holds the
+    /// start's screen at z13 to z15 (named by hand, so it is no cache),
+    /// then the link is throttled and the first frame drawn.
+    fn new() -> Self {
+        use leviculum_mapcut::serve::Serve;
+        use std::time::{Duration, Instant};
+        let serve = Serve::start(vec![("p.pmtiles".into(), first_tile_archive())]).expect("serve");
+        let home = home();
+        let maps = home.path().join("maps");
+        std::fs::remove_file(maps.join("firenze.lmr")).expect("only the Grunewald");
+        std::fs::write(
+            home.path().join(loquax::config::CONFIG_FILE),
+            format!("map_source = \"{}\"\n", serve.url("p.pmtiles")),
+        )
+        .expect("config");
+        let at = project(LatLon::from_degrees(FIRST_TILE_AT.0, FIRST_TILE_AT.1));
+        let start_region = start_region(&maps, &serve.url("p.pmtiles"), at, (W, H));
+        serve.throttle(FIRST_TILE_RATE, Duration::from_millis(20));
+        let ask = MapRequest {
+            x: Some(at.x),
+            y: Some(at.y),
+            ..request(home.path(), false)
+        };
+        let mut walk = Self {
+            home,
+            _serve: serve,
+            ask,
+            start: Instant::now(),
+            fingers_milli: 16_000,
+            last: None,
+            uncovered_ms: None,
+            loading_ms: None,
+            on_disk_ms: None,
+            first_tile_ms: None,
+            start_region,
+            cell_ms: None,
+        };
+        let first = walk.frame(0, 0, 0, false);
+        assert!(!first.loading_here, "the start is held: {first:?}");
+        walk
+    }
+
+    fn maps(&self) -> PathBuf {
+        self.home.path().join("maps")
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
+    }
+
+    /// The screen of the last frame.
+    fn view(&self) -> Option<Viewport> {
+        let (shown, _) = self.last.as_ref()?;
+        Some(Viewport::new(
+            World {
+                x: shown.x,
+                y: shown.y,
+            },
+            shown.zoom,
+            W,
+            H,
+        ))
+    }
+
+    /// What the disk says now: whether the screen leaves the start region,
+    /// a tile of the screen at the zoom viewed in a region loaded since,
+    /// and a cell.
+    fn look(&mut self, at_ms: u64) {
+        let Some(view) = self.view() else { return };
+        if self.uncovered_ms.is_none()
+            && loquax::ui::viewload::uncovered(&view, &[self.start_region]) > 0.10
+        {
+            self.uncovered_ms = Some(at_ms);
+        }
+        let start = ["start.lmr".to_string()];
+        if self.on_disk_ms.is_none() && arrived(&self.maps(), &start, &view, view.zoom().min(15)) {
+            self.on_disk_ms = Some(at_ms);
+        }
+        if self.cell_ms.is_none() {
+            let cell = region_files(&self.maps())
+                .iter()
+                .any(|(name, z, _)| z.1 - z.0 >= 2 && name != "start.lmr");
+            if cell {
+                self.cell_ms = Some(at_ms);
+            }
+        }
+    }
+
+    /// One frame now, panned by `(dx, dy)` and the fingers zoomed by
+    /// `zoom_by_milli` since the last.
+    fn frame(&mut self, dx: i32, dy: i32, zoom_by_milli: i32, moving: bool) -> MapShown {
+        let dir = self.home.path().to_path_buf();
+        let t = self.now_ms();
+        self.look(t);
+        let drawn_with_tile = self.on_disk_ms.is_some();
+        self.fingers_milli += zoom_by_milli;
+        let drawn = self.ask.zoom_milli.unwrap_or(16_000) as i32;
+        loquax_android::map::tune_clock(&dir, Some(t));
+        let ask = MapRequest {
+            pan_x: dx,
+            pan_y: dy,
+            zoom_by_milli: self.fingers_milli - drawn,
+            about_x: (W / 2) as i32,
+            about_y: (H / 2) as i32,
+            moving,
+            ..self.ask.clone()
+        };
+        let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        self.ask.x = Some(shown.x);
+        self.ask.y = Some(shown.y);
+        self.ask.zoom = None;
+        self.ask.zoom_milli = Some(shown.zoom_milli);
+        if drawn_with_tile && self.first_tile_ms.is_none() {
+            self.first_tile_ms = Some(t);
+        }
+        if self.loading_ms.is_none() && shown.loading_here && self.uncovered_ms.is_some() {
+            self.loading_ms = Some(t);
+        }
+        self.last = Some((shown.clone(), t));
+        self.look(t);
+        shown
+    }
+
+    /// A frame of a gesture, then the rest of its frame interval.
+    fn moving(&mut self, dx: i32, dy: i32, zoom_by_milli: i32) {
+        let next = self.now_ms() + FRAME_MS;
+        self.frame(dx, dy, zoom_by_milli, true);
+        self.until(next);
+    }
+
+    fn until(&self, ms: u64) {
+        let now = self.now_ms();
+        if ms > now {
+            std::thread::sleep(std::time::Duration::from_millis(ms - now));
+        }
+    }
+
+    /// At rest as `MapView`'s frame thread is, until a frame drew the
+    /// screen's tile and `more` is done, at most `limit_ms`.
+    fn rest(&mut self, limit_ms: u64, more: impl Fn(&Self) -> bool) {
+        let until = self.now_ms() + limit_ms;
+        self.frame(0, 0, 0, false);
+        while self.now_ms() < until && (self.first_tile_ms.is_none() || more(self)) {
+            let t = self.now_ms();
+            self.look(t);
+            let (last, at) = self.last.clone().expect("a frame");
+            let due = if last.pending {
+                true
+            } else if last.filling || last.loading_here {
+                t >= at + 250
+            } else if last.loading {
+                t >= at + 1500
+            } else {
+                // Idle: the next frame is the next gesture's.
+                false
+            };
+            if due {
+                self.frame(0, 0, 0, false);
+            } else {
+                self.until(t + FRAME_MS);
+            }
+        }
+    }
+
+    fn row(&self, name: &str) -> String {
+        let after = |t: Option<u64>| match (self.uncovered_ms, t) {
+            (Some(u), Some(t)) => format!("{}", t as i64 - u as i64),
+            _ => "never".to_string(),
+        };
+        format!(
+            "| {name} | {} | {} | {} | {} | {} |",
+            self.uncovered_ms
+                .map_or("never".to_string(), |u| u.to_string()),
+            after(self.loading_ms),
+            after(self.on_disk_ms),
+            after(self.first_tile_ms),
+            after(self.cell_ms),
+        )
+    }
+}
+
+/// The screen at its zoom loads first (1527), measured on the phone's
+/// facade: for the four gestures of 1292, from the frame that first
+/// leaves a tenth of the screen uncovered, when the screen's load started
+/// (its chip), when a tile of the screen at the zoom viewed was on disk,
+/// the first frame drawn with it (`first_tile_ms`), and when a cell's
+/// first byte showed; each from the uncovered frame, so a load the pan's
+/// ahead started before it (1292) can be negative. "Uncovered" is
+/// measured against the start region alone, the same for both stacks.
+/// The bar: a tile of the screen draws, and before the first byte of a
+/// cell that started after the screen was uncovered. Then the sizes of
+/// the screen's own box and of the cell.
+#[test]
+fn the_screen_at_its_zoom_draws_first_on_the_phone() {
+    let mut rows = Vec::new();
+    let mut late = Vec::new();
+    let blob = first_tile_blob();
+    let mut check = |walk: &FirstTile, name: &str| {
+        rows.push(walk.row(name));
+        // The archive's bytes of each load: its tiles, each a blob of the
+        // tile and its pad.
+        for (file, zooms, _) in region_files(&walk.maps()) {
+            if file == "start.lmr" {
+                continue;
+            }
+            let opened = std::fs::File::open(walk.maps().join(&file)).expect("open");
+            let tiles = leviculum_map::region::Region::open(opened)
+                .expect("region")
+                .header()
+                .tiles;
+            eprintln!(
+                "{name}: load z{}-{}: {tiles} tiles, {} archive bytes",
+                zooms.0,
+                zooms.1,
+                u64::from(tiles) * blob
+            );
+        }
+        // A cell whose load started after the screen was uncovered shows
+        // its first byte after the screen's tile; one the pan's ahead
+        // started before (1292) is the prefetch's and may come first.
+        let new_cell = walk
+            .cell_ms
+            .filter(|&c| walk.uncovered_ms.is_some_and(|u| c > u));
+        match (walk.on_disk_ms, new_cell) {
+            (Some(t), Some(c)) if t <= c => {}
+            (Some(_), None) => {}
+            other => late.push(format!("{name}: screen tile, new cell {other:?}")),
+        }
+    };
+    // A pan of a screen and a half east in 576 ms, then at rest until the
+    // loads for the screen are done: the sizes.
+    let mut walk = FirstTile::new();
+    for _ in 0..36 {
+        walk.moving(20, 0, 0);
+    }
+    walk.rest(30_000, |w| {
+        w.last.as_ref().is_some_and(|l| l.0.loading_here)
+    });
+    check(&walk, "pan, then rest");
+    // The same pan, then on slowly for two seconds, never at rest.
+    let mut walk = FirstTile::new();
+    for _ in 0..36 {
+        walk.moving(20, 0, 0);
+    }
+    for _ in 0..125 {
+        walk.moving(2, 0, 0);
+    }
+    walk.rest(15_000, |w| w.cell_ms.is_none());
+    check(&walk, "pan, on slowly");
+    // A short drag east, the finger lifts, the map coasts on (1209).
+    let mut walk = FirstTile::new();
+    for _ in 0..8 {
+        walk.moving(30, 0, 0);
+    }
+    let mut v = 40.0f64;
+    while v >= 1.0 {
+        walk.moving(v.round() as i32, 0, 0);
+        v *= 0.96;
+    }
+    walk.rest(15_000, |w| w.cell_ms.is_none());
+    check(&walk, "fling, coasting");
+    // Two steps out about the screen's middle in eight frames.
+    let mut walk = FirstTile::new();
+    for _ in 0..8 {
+        walk.moving(0, 0, -250);
+    }
+    walk.rest(15_000, |w| w.cell_ms.is_none());
+    check(&walk, "zoom out two steps");
+    eprintln!("| gesture | uncovered at ms | loading after ms | on disk after ms | first_tile_ms | cell after ms |");
+    eprintln!("|---|---|---|---|---|---|");
+    for row in &rows {
+        eprintln!("{row}");
+    }
+    assert!(
+        late.is_empty(),
+        "the screen's tile after a cell's byte, or never: {late:?}"
     );
 }
