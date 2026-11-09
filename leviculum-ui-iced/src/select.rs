@@ -51,6 +51,15 @@ pub enum Pick {
     Release,
 }
 
+/// Where an unselected line's highlight quad lies: outside every clip, so
+/// it draws nothing and a change of it damages nothing.
+const NOWHERE: Rectangle = Rectangle {
+    x: -1.0e6,
+    y: -1.0e6,
+    width: 0.0,
+    height: 0.0,
+};
+
 /// How far, in logical pixels, the pointer moves from a plain press on a
 /// text in a button before the press is a selection's drag.
 pub const DRAG_PX: f32 = 4.0;
@@ -180,6 +189,22 @@ where
                 .state
                 .downcast_ref::<text::paragraph::Plain<Renderer::Paragraph>>()
         })
+    }
+
+    /// The height of a line of the text, as its layout set it.
+    fn line_height(&self, tree: &Tree) -> Option<f32> {
+        let text = self.plain(tree)?.as_text();
+        Some(text.line_height.to_absolute(text.size).0).filter(|h| *h > 0.0)
+    }
+
+    /// How many visual lines the text was laid out in: one at least.
+    fn lines(&self, tree: &Tree) -> usize {
+        match (self.plain(tree), self.line_height(tree)) {
+            (Some(plain), Some(line)) => {
+                ((plain.min_bounds().height / line).round() as usize).max(1)
+            }
+            _ => 1,
+        }
     }
 
     /// The second paragraph for the text and the range as they are now,
@@ -492,32 +517,53 @@ where
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
+        // One quad a visual line, selected or not (1475): iced's damage
+        // compares a layer's quads by their place in the list, so a quad
+        // that came or went with the selection moved every quad after it
+        // and damaged the window from there down. With a count that is
+        // the text's own, a drag damages the lines whose highlight
+        // changed and nothing else. An unselected line's quad lies far
+        // outside any clip: it draws nothing and damages nothing.
+        let origin = layout.bounds().position();
+        let mut rows: Vec<Option<Rectangle>> = vec![None; self.lines(tree)];
         if let Some(range) = &self.range {
             let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
-            if let Some(cut) = state
-                .cut
-                .as_ref()
-                .filter(|c| c.range.as_ref() == Some(range))
-            {
-                let origin = layout.bounds().position();
+            if let (Some(cut), Some(line)) = (
+                state
+                    .cut
+                    .as_ref()
+                    .filter(|c| c.range.as_ref() == Some(range)),
+                self.line_height(tree),
+            ) {
                 for (span, &start) in cut.starts.iter().enumerate() {
                     if start < range.start || start >= range.end {
                         continue;
                     }
                     for r in cut.paragraph.span_bounds(span) {
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds: Rectangle::new(
-                                    Point::new(origin.x + r.x, origin.y + r.y),
-                                    r.size(),
-                                ),
-                                ..renderer::Quad::default()
-                            },
-                            self.highlight,
-                        );
+                        let n = ((r.y + r.height / 2.0) / line).floor().max(0.0) as usize;
+                        if n >= rows.len() {
+                            rows.resize(n + 1, None);
+                        }
+                        rows[n] = Some(rows[n].map_or(r, |had| had.union(&r)));
                     }
                 }
             }
+        }
+        for row in rows {
+            let (bounds, colour) = match row {
+                Some(r) => (
+                    Rectangle::new(Point::new(origin.x + r.x, origin.y + r.y), r.size()),
+                    self.highlight,
+                ),
+                None => (NOWHERE, Color::TRANSPARENT),
+            };
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds,
+                    ..renderer::Quad::default()
+                },
+                colour,
+            );
         }
         self.inner.as_widget().draw(
             &tree.children[0],
@@ -745,6 +791,90 @@ mod tests {
                 Said::Pick(Pick::Release),
             ],
             "the first click opens, the second selects the word"
+        );
+    }
+
+    /// Twelve selectable lines, each on its own ground, `picked` the
+    /// selected bytes of each.
+    fn lines_with(picked: &[Option<Range<usize>>]) -> Element<'static, Pick> {
+        let rows = (0..12).fold(column![], |rows, n| {
+            let words: &'static str = "a line of words";
+            rows.push(
+                iced::widget::container(selectable(
+                    text(words).size(16),
+                    words,
+                    picked.get(n).cloned().flatten(),
+                    Color::from_rgba(0.0, 0.0, 1.0, 0.3),
+                    false,
+                    |p| p,
+                ))
+                .style(|_: &Theme| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgb(0.9, 0.9, 0.8))),
+                    ..iced::widget::container::Style::default()
+                })
+                .height(30),
+            )
+        });
+        rows.into()
+    }
+
+    /// A drag that moves the selection's head damages the lines whose
+    /// highlight changed and nothing under them (1475): the selection grows
+    /// from the fourth line into the fifth, and every damaged rectangle
+    /// lies above the sixth. Before, the fifth line's new quad moved every
+    /// ground quad after it in the layer's list, and the damage ran to the
+    /// window's foot.
+    #[test]
+    fn a_growing_selection_damages_only_the_lines_it_changed() {
+        use crate::headless::{software, Surface};
+        use iced::advanced::renderer::Renderer as _;
+        let (w, h) = (240u32, 360u32);
+        let mut renderer = software(iced::Font::DEFAULT).expect("a renderer");
+        let mut surface = Surface::new(w, h).expect("a surface");
+        let size = Size::new(w as f32, h as f32);
+        // One tree across the frames, as the window keeps it: its texts'
+        // paragraphs stay the same, so only what changed is damaged.
+        let mut tree: Option<Tree> = None;
+        let mut frame = |picked: &[Option<Range<usize>>]| {
+            let mut view = lines_with(picked);
+            let tree = match &mut tree {
+                Some(tree) => {
+                    tree.diff(&view);
+                    tree
+                }
+                None => tree.insert(Tree::new(&view)),
+            };
+            let node = view.as_widget_mut().layout(
+                tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            renderer.reset(Rectangle::with_size(size));
+            view.as_widget().draw(
+                tree,
+                &mut renderer,
+                &Theme::Light,
+                &renderer::Style {
+                    text_color: Color::BLACK,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &Rectangle::with_size(size),
+            );
+            surface.present(&mut renderer, Color::WHITE);
+            surface.rects().to_vec()
+        };
+        let mut picked = vec![None; 12];
+        picked[3] = Some(2..6);
+        frame(&picked);
+        picked[3] = Some(2..15);
+        picked[4] = Some(0..4);
+        let damage = frame(&picked);
+        assert!(!damage.is_empty(), "the highlight changed");
+        let foot = damage.iter().map(|r| r.y + r.height).fold(0.0, f32::max);
+        assert!(
+            foot <= 5.0 * 30.0 + 2.0,
+            "the damage reaches {foot}, past the fifth line: {damage:?}"
         );
     }
 }
