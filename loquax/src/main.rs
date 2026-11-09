@@ -953,6 +953,7 @@ fn gui_args(args: &Args) -> GuiArgs {
             sync_interval: tui.sync_interval.clone(),
             exit_after_first_frame: false,
             fps: false,
+            no_start: tui.no_start,
         }
     }
     #[cfg(not(feature = "tui"))]
@@ -966,6 +967,7 @@ fn gui_args(args: &Args) -> GuiArgs {
             sync_interval: None,
             exit_after_first_frame: false,
             fps: false,
+            no_start: false,
         }
     }
 }
