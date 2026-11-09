@@ -351,7 +351,7 @@ mod tests {
                     keep.push(&sent[next..next + 1]);
                     next += 1;
                 }
-                if pumped && now % 4_500 == 0 {
+                if pumped && now.is_multiple_of(4_500) {
                     refused += keep.spill(|bytes| held.push(bytes));
                 }
                 now += 100;
@@ -629,7 +629,7 @@ mod tests {
                 while let Some((_, byte)) = queue.pop_front_if(|(at, _)| *at <= now) {
                     keep.push(&[byte]);
                 }
-                if pumped && now % 10_000 == 0 {
+                if pumped && now.is_multiple_of(10_000) {
                     refused += keep.spill(|bytes| {
                         let room = (256 * 1024usize).saturating_sub(held.len());
                         let took = bytes.len().min(room);
