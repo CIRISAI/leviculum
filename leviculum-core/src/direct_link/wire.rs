@@ -721,7 +721,8 @@ const MTU_PROBE_SEQ_TAG: u32 = 0xFFFE_0000;
 /// sequence number, zero-padded to `size`. The peer answers with an ordinary
 /// [`PunchKind::Ack`] echoing that sequence number. A peer that predates
 /// probes does not recognise the frame (its length is not
-/// [`PUNCH_FRAME_LEN`]) and never acks, which reads as "too large".
+/// [`PUNCH_FRAME_LEN`]), hands it to transport, which drops it as a
+/// malformed packet, and never acks, which reads as "too large".
 pub fn mtu_probe_frame(session: &SessionId, token: &[u8; 32], size: u32) -> alloc::vec::Vec<u8> {
     let size = (size as usize).max(PUNCH_FRAME_LEN);
     let mut out = alloc::vec![0u8; size];

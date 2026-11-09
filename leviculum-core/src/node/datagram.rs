@@ -13,11 +13,26 @@ use crate::transport::DropReason;
 use super::link_management::LinkRx;
 use super::{send, NodeCore, NodeEvent};
 
-/// The data-plane event slots a host keeps for Channel messages: below this
-/// much room ([`NodeCore::set_channel_delivery_budget`]) an arriving
-/// datagram is shed, not delivered. A quarter of leviculum-std's default
-/// data-plane capacity (128).
+/// The default number of data-plane event slots a host keeps for Channel
+/// messages: with no more room than this
+/// ([`NodeCore::set_channel_delivery_budget`]) an arriving datagram is shed,
+/// not delivered. A quarter of leviculum-std's default data-plane capacity
+/// (128); a host with another capacity sets its own with
+/// [`NodeCore::set_datagram_sink_reserve`].
 pub const DATAGRAM_SINK_RESERVE: usize = 32;
+
+/// The reserve for a host sink of `capacity` event slots: a quarter of it,
+/// at least one, and always less than the whole, so datagrams still flow
+/// on a small sink (a sink of one keeps nothing back).
+pub const fn datagram_sink_reserve_for(capacity: usize) -> usize {
+    let quarter = capacity / 4;
+    let reserve = if quarter == 0 { 1 } else { quarter };
+    if reserve >= capacity {
+        capacity.saturating_sub(1)
+    } else {
+        reserve
+    }
+}
 
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Send `data` on a link as one unordered, unreliable datagram (live
@@ -83,6 +98,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok((sequence, self.process_events_and_actions()))
     }
 
+    /// Set the event slots the host keeps for Channel messages (+ciris,
+    /// leviculum#102); see [`datagram_sink_reserve_for`].
+    pub fn set_datagram_sink_reserve(&mut self, reserve: usize) {
+        self.datagram_sink_reserve = reserve;
+    }
+
     /// The largest payload [`send_unordered`](Self::send_unordered) takes on
     /// `link_id`: the link MDU less the sequence number. `None` when there is
     /// no such link.
@@ -133,19 +154,28 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
         // A replay is authentic ciphertext; the window stops it before it
         // counts as liveness or as the peer speaking on this interface.
-        if !link.datagrams_mut().window.accept(sequence) {
-            link.datagrams_mut().stats.replayed += 1;
-            crate::tracing::debug!(
-                link = %HexShort(link_id.as_bytes()),
-                sequence,
-                "Datagram replayed or older than the window, dropped"
-            );
-            return;
+        match link.datagrams_mut().window.check(sequence) {
+            datagram::WindowVerdict::Fresh => {}
+            verdict => {
+                let stats = &mut link.datagrams_mut().stats;
+                if verdict == datagram::WindowVerdict::Replayed {
+                    stats.replayed += 1;
+                } else {
+                    stats.late += 1;
+                }
+                crate::tracing::debug!(
+                    link = %HexShort(link_id.as_bytes()),
+                    sequence,
+                    ?verdict,
+                    "Datagram replayed or older than the window, dropped"
+                );
+                return;
+            }
         }
         // Liveness only once it is known to be from the peer, and fresh.
         link.record_inbound(now_ms);
         self.direct_link_authenticated(&link_id, now_ms);
-        // Keep the host's last `DATAGRAM_SINK_RESERVE` event slots for the
+        // Keep the host's last `datagram_sink_reserve` event slots for the
         // Channel: a datagram flood must never hold its delivery budget at 0
         // (leviculum#102 review). The Channel's own messages decrement the
         // same budget as they are delivered.
@@ -153,7 +183,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             return;
         };
         if let Some(budget) = &mut self.channel_delivery_budget {
-            if *budget <= DATAGRAM_SINK_RESERVE {
+            if *budget <= self.datagram_sink_reserve {
                 link.datagrams_mut().stats.shed += 1;
                 return;
             }

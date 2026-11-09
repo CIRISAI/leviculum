@@ -897,11 +897,17 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                 // names, every other interface ignores it.
                 iface_obj.tag_next_frame(tag);
                 if let Err(e) = iface_obj.try_send_to_peer(&send_data, peer.as_ref(), true) {
-                    errors.push((iface, e));
                     if matches!(e, crate::traits::InterfaceError::BufferFull) && is_datagram {
-                        // +ciris (leviculum#102): shed, never retried.
+                        // +ciris (leviculum#102): shed, never retried, and
+                        // not an interface error either: a driver feeds
+                        // `errors` to its per-peer circuit breaker, and a
+                        // breaker opened by a datagram flood would shed the
+                        // link's Channel frames, keepalives and requests.
                         drops.push((iface, DropReason::DatagramShed));
-                    } else if matches!(e, crate::traits::InterfaceError::BufferFull) {
+                        continue;
+                    }
+                    errors.push((iface, e));
+                    if matches!(e, crate::traits::InterfaceError::BufferFull) {
                         retries.push(SendRetry {
                             iface_idx: iface.0,
                             data: send_data,

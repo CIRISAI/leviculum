@@ -351,3 +351,42 @@ fn a_full_interface_sheds_datagrams_and_retries_the_channel() {
     pair.sender.record_dispatch_drops(&result);
     assert_eq!(pair.sender.transport.stats().drops_datagram_shed(), 1);
 }
+
+/// leviculum#102 review: one 64 or more behind the newest is `late`, not
+/// `replayed`; a true repeat inside the window is `replayed`.
+#[test]
+fn too_old_is_late_and_a_repeat_is_replayed() {
+    let mut pair = linked_pair();
+    let sent: Vec<Vec<u8>> = (0..70u8).map(|i| send(&mut pair, &[i; 8]).1).collect();
+    assert_eq!(deliver(&mut pair, &sent[69]).0.len(), 1);
+    assert!(deliver(&mut pair, &sent[0]).0.is_empty(), "69 behind");
+    pair.receiver.transport.storage_mut().clear_packet_hashes();
+    assert!(deliver(&mut pair, &sent[69]).0.is_empty(), "a repeat");
+    let stats = pair.receiver.link_datagram_stats(&pair.link_id).unwrap();
+    assert_eq!((stats.received, stats.late, stats.replayed), (1, 1, 1));
+}
+
+/// leviculum#102 review: the sink reserve scales with the host's capacity,
+/// so a small sink still passes datagrams.
+#[test]
+fn the_sink_reserve_is_a_quarter_of_the_capacity() {
+    use crate::node::datagram_sink_reserve_for;
+    assert_eq!(datagram_sink_reserve_for(128), 32);
+    assert_eq!(datagram_sink_reserve_for(32), 8);
+    assert_eq!(datagram_sink_reserve_for(4), 1);
+    assert_eq!(datagram_sink_reserve_for(2), 1);
+    assert_eq!(datagram_sink_reserve_for(1), 0);
+
+    // A sink of 32 with its reserve of 8: datagrams flow until 8 are left.
+    let mut pair = linked_pair();
+    pair.receiver
+        .set_datagram_sink_reserve(datagram_sink_reserve_for(32));
+    pair.receiver.set_channel_delivery_budget(Some(32));
+    let delivered: usize = (0..30u8)
+        .map(|i| send(&mut pair, &[i; 8]).1)
+        .collect::<Vec<_>>()
+        .iter()
+        .map(|raw| deliver(&mut pair, raw).0.len())
+        .sum();
+    assert_eq!(delivered, 24);
+}
