@@ -109,7 +109,15 @@ pub fn counting() -> bool {
 /// does not name fails; a green one it names fails too, so the step that
 /// fixed it takes it out of [`KNOWN_REDS`] in the same commit.
 pub fn bar(name: &str, ok: bool, what: &str) {
-    let known = KNOWN_REDS.contains(&name);
+    judged(KNOWN_REDS, name, ok, what);
+}
+
+/// [`bar`] against the register `known_reds`: the register's own test
+/// judges with one it holds a name in, which [`KNOWN_REDS`] need not
+/// (1600: empty since 970e4f04, and the test that read its first entry
+/// panicked on the index).
+pub fn judged(known_reds: &[&str], name: &str, ok: bool, what: &str) {
+    let known = known_reds.contains(&name);
     match (ok, known) {
         (true, false) => println!("BAR {name} green: {what}"),
         (false, true) => println!("BAR {name} KNOWN RED: {what}"),

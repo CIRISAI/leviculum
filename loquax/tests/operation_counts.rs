@@ -477,11 +477,14 @@ fn terminal_idle(model: &mut UiModel<Line>, gated: bool) -> (u64, Counters) {
 /// as a green one it names does.
 #[test]
 fn the_register_judges_both_ways() {
-    bar("a bar nobody registered", true, "green");
-    bar(real_store::KNOWN_REDS[0], false, "still red");
-    let unknown_red = std::panic::catch_unwind(|| bar("a bar nobody registered", false, "red"));
+    // A register of its own (1600): the real one may be empty.
+    const REGISTER: &[&str] = &["a registered bar"];
+    let judged = |name, ok, what| real_store::judged(REGISTER, name, ok, what);
+    judged("a bar nobody registered", true, "green");
+    judged(REGISTER[0], false, "still red");
+    let unknown_red = std::panic::catch_unwind(|| judged("a bar nobody registered", false, "red"));
     assert!(unknown_red.is_err(), "an unregistered red passed");
-    let known_green = std::panic::catch_unwind(|| bar(real_store::KNOWN_REDS[0], true, "green"));
+    let known_green = std::panic::catch_unwind(|| judged(REGISTER[0], true, "green"));
     assert!(
         known_green.is_err(),
         "a registered bar went green unnoticed"
