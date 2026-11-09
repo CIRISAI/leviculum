@@ -686,31 +686,6 @@ fn the_benchs_gestures_move_the_window() {
     }
 }
 
-/// A scroll drawn as a shift of the frame on the window (1468) is the
-/// scroll drawn as the damage says, frame for frame, up to the partial
-/// pixels of anti-aliased edges: the chat's wheel, touchpad and scrollbar
-/// gestures run with a twin surface that never shifts, and in no frame
-/// does a channel differ by more than [`EDGE`], nor more than
-/// [`EDGE_PIXELS`] pixels by more than one step. tiny-skia does not draw
-/// an edge's partial pixel to the same byte when a clip cuts the shape
-/// (its mask rounds the coverage a second time) as when it is drawn
-/// whole, nor a curve or a stroke at two heights (the rounding of its
-/// path's points); a strip redrawn after a shift cuts the bubbles it
-/// crosses, and the moved rows keep the edges where the last frame drew
-/// them. Measured over three runs of every case: all but one pixel a
-/// frame within one step, that one within 10 (the real-shaped chat's
-/// scrollbar at 1527x2099). A shift by a wrong row, the control, moves
-/// thousands of pixels by up to 228. And frames were shifted, else the
-/// comparison held nothing. At the small size in every build; the
-/// real-shaped chat and Lew's tall window where the build is optimised
-/// (its first view is slow unoptimised, as above).
-///
-/// The gestures run on [`paced`]'s clock, not the wall's (1472): a frame
-/// can only be a shift when the chat moved less than its pane since the
-/// last one, and on the wall's clock an unoptimised build under load
-/// drew the wheel's 40 notches in 2 frames, 20 notches past a 560-pixel
-/// pane, so nothing shifted and the control failed on the machine's
-/// speed, not on the renderer.
 /// How far a channel of an anti-aliased edge's pixel may lie from the
 /// twin's: a quarter of full coverage, one of the four rows tiny-skia
 /// samples a pixel's row in.
@@ -754,6 +729,31 @@ impl<P: Program> Program for Watched<'_, P> {
     }
 }
 
+/// A scroll drawn as a shift of the frame on the window (1468) is the
+/// scroll drawn as the damage says, frame for frame, up to the partial
+/// pixels of anti-aliased edges: the chat's wheel, touchpad and scrollbar
+/// gestures run with a twin surface that never shifts, and in no frame
+/// does a channel differ by more than [`EDGE`], nor more than
+/// [`EDGE_PIXELS`] pixels by more than one step. tiny-skia does not draw
+/// an edge's partial pixel to the same byte when a clip cuts the shape
+/// (its mask rounds the coverage a second time) as when it is drawn
+/// whole, nor a curve or a stroke at two heights (the rounding of its
+/// path's points); a strip redrawn after a shift cuts the bubbles it
+/// crosses, and the moved rows keep the edges where the last frame drew
+/// them. Measured over three runs of every case: all but one pixel a
+/// frame within one step, that one within 10 (the real-shaped chat's
+/// scrollbar at 1527x2099). A shift by a wrong row, the control, moves
+/// thousands of pixels by up to 228. And frames were shifted, else the
+/// comparison held nothing. At the small size in every build; the
+/// real-shaped chat and Lew's tall window where the build is optimised
+/// (its first view is slow unoptimised, as above).
+///
+/// The gestures run on [`paced`]'s clock, not the wall's (1472): a frame
+/// can only be a shift when the chat moved less than its pane since the
+/// last one, and on the wall's clock an unoptimised build under load
+/// drew the wheel's 40 notches in 2 frames, 20 notches past a 560-pixel
+/// pane, so nothing shifted and the control failed on the machine's
+/// speed, not on the renderer.
 #[test]
 fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
     let optimised = !cfg!(debug_assertions);
