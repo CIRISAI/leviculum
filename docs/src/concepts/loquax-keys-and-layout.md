@@ -161,7 +161,7 @@ for the terminal and the M9:
 | `Ctrl-d` / `Ctrl-u` | half a screen, the same selection rule |
 | `g` / `G`, `Home` / `End` | the first message at the top, the newest at the bottom |
 
-`Enter` and the message's keys (`v`, `y`, `d`, `e`) act on the selected
+`Enter` and the message's keys (`I`, `y`, `d`, `e`) act on the selected
 message as before. A held key repeats where its source repeats: the
 terminal's own key repeat, and on the M9 the keyboard controller's code
 answered again on the 10 ms poll, which the driver takes as a press each
@@ -188,8 +188,9 @@ stays a row an entry.
 | Action | vi | Emacs | mail, chat | mouse | where |
 |---|---|---|---|---|---|
 | open the message: one with a position (a report, or a text with telemetry) the map at its fix, any other its detail view | `Enter` | | `Enter` (mutt display, Signal default action) | click a report or a text with a position; click a delivery mark for the detail | M |
-| the message's detail view and ledger, any message | `v` | | palette `details` (Signal `Ctrl-D`, vi's half page here) | click its delivery mark | M |
+| the message's detail view and ledger, any message | `I` (`v` until 1475) | | palette `details` (Signal `Ctrl-D`, vi's half page here; WhatsApp's Info) | click its delivery mark | M |
 | copy the message's text | `y` | `Alt-w` | | drag selects, release copies (OSC 52) | M |
+| the copy mode: a cursor on the text that selects as it moves (1475) | `v` | `Ctrl-Space` (the mark) | `Shift` with an arrow | drag | M |
 | follow a link in the body | `f`, then its label | | | click the link, as in `lnomad` | M |
 | delete from this device | `d`, then confirm | | `d` (mutt; aerc asks first) | | M, from the history slice on |
 | react: a quick emoji by its digit, or typed text and `Enter` (1104) | `e` | | palette `react` (the long press in Signal and Columba) | | M |
@@ -1339,10 +1340,49 @@ sees. Where it differs from the table:
   middle click elsewhere pastes it), `Ctrl-C` puts it on the clipboard.
   Within one bubble the copy is its words; across bubbles one line each,
   `Name, 14:05: text`. A middle click on the compose field pastes the
-  PRIMARY selection at its cursor; the field keeps its own selection,
+  PRIMARY selection where it clicked (at its cursor until 1475); the field keeps its own selection,
   `Ctrl-C` and `Ctrl-V`. The rules are the core's
   (`loquax/src/ui/selection.rs`), the pointer's place in a text the
   shared widget's (`leviculum-ui-iced/src/select.rs`).
+- **Every text in the window selects** (1475), not only the bubbles'
+  words: the day lines, a group's own lines ("Anna joined."), a reply's
+  quote, a bubble's position line, each conversation's last line in the
+  list, and in the profile the address and the code (shown under the QR
+  as text for it). Each is a run of its own in the core, in reading
+  order, so a drag runs through all of them. Across runs the copy is one
+  line a bubble, `Name, 14:05: ` and the bubble's quote (`> `), words and
+  position line joined by ` · `; a day line or a group's line stands
+  alone on its line; the address is copied without the blanks between its
+  fours. The window has no detail view to select in: the Info is the
+  phone's.
+- **A list row and a position line are buttons** (1475): a plain click
+  opens the chat or the map as before; the pointer moved more than 4
+  pixels with the button held, or a double click, selects instead. The
+  open that the release of such a drag still sends is dropped within that
+  one event; a double click opens with its first click and selects with
+  its second, as two clicks are.
+- **The pane scrolls at its edge** (1475): while a drag selects, the
+  pointer within 32 pixels of the chat's or the list's top or bottom edge,
+  or past it, scrolls that way on every frame, faster the deeper it is,
+  and the selection follows into what scrolls in.
+- **A middle click pastes where it clicks** (1475): the compose field's
+  cursor goes to the click, then the PRIMARY selection is pasted there.
+- **The terminal's copy mode** (1475, `loquax/src/ui/copy_mode.rs`): `v`
+  (vi's visual mode), `Ctrl-Space` (the Emacs mark) or a `Shift`+arrow in
+  the messages puts a cursor on the selected message's first character
+  and selects from there to wherever it goes: the arrows, `h` `j` `k`
+  `l`, `w` `b`, `0` `$` (`Home` `End`), and the Emacs `Ctrl-f` `Ctrl-b`
+  `Ctrl-n` `Ctrl-p` `Ctrl-a` `Ctrl-e` `Alt-f` `Alt-b`. `y`, `Alt-w` or
+  `Enter` copy it through OSC 52 and leave; `Esc`, `Ctrl-g`, `q` or `v`
+  leave without a copy; a click leaves too. The selection is the core's,
+  the same as the window's: a cursor cell is a place in its message's
+  text, the copy one line a message with its writer and time across
+  messages. It is drawn as a drag's, in inverse video. A terminal that
+  does not take OSC 52 copies nothing; the copy mode cannot change that.
+  The details moved from `v` to `I` for it.
+- **The phone stays as it is** (1475): WhatsApp offers no selection
+  inside a bubble either; a long press with Copy copies the message whole,
+  and that is the phone's model.
 - **A key script** says `click`, `wheel` and `drag` at cells counted from
   1, and writes each copy's OSC 52 sequence into its frames
   (`loquax/tests/fixtures/tui_mouse.frames`).

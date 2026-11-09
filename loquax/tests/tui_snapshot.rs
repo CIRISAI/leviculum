@@ -1825,7 +1825,7 @@ until received 3 60
 tick 12
 frame folded
 key enter
-key v
+key I
 frame detail
 key esc
 key q

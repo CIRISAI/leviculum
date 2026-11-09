@@ -2325,6 +2325,141 @@ mod tests {
         same_text("tui-late-message.txt", &screen);
     }
 
+    /// The screen and under it the cells drawn otherwise than with no
+    /// selection (`#`), the copy mode's selection, which reverses them.
+    fn screen_with_selection(model: &Model) -> String {
+        let draw = |model: &Model| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+            let view = ui::view(model);
+            terminal
+                .draw(|frame| draw_screen(frame, model, &view, None))
+                .expect("draw")
+                .buffer
+                .clone()
+        };
+        let with = draw(model);
+        let mut plain = model.clone();
+        plain.selection = None;
+        let without = draw(&plain);
+        let mut out = frame_text(&with);
+        out.push_str("--- selected\n");
+        for y in 0..with.area.height {
+            let row: String = (0..with.area.width)
+                .map(|x| match (with.cell((x, y)), without.cell((x, y))) {
+                    (Some(a), Some(b)) if a.modifier != b.modifier => '#',
+                    _ => ' ',
+                })
+                .collect();
+            out.push_str(row.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// 1475, the terminal's copy mode on the late message's fixture: `g`
+    /// to Anna's first message, `v` puts the cursor on its "G", `l` three
+    /// times selects "Gute", drawn reversed (the golden: the screen and the
+    /// cells the selection reverses); `y` copies it through OSC 52 and
+    /// leaves. `w` goes by words, `j` to the next text row: from "Nacht"
+    /// down into "Kommst" is one line a message, writer and time. `Esc`
+    /// leaves without a copy, and the Emacs mark with `Ctrl-f` and `Alt-w`
+    /// copies as `v` and `y` do; a Shift+arrow enters and moves at once.
+    #[test]
+    fn the_copy_mode_selects_with_the_keys_and_copies_through_osc52() {
+        let mut model = Model::new(&[]);
+        model.address = Some([0x30; 16]);
+        late_message::late_message(&mut model, 1_799_971_200, 3600);
+        model.focus = loquax::ui::Pane::Messages;
+        let press = |model: &mut Model, code: KeyCode, mods: KeyModifiers| {
+            update(model, UiEvent::Key(KeyEvent::new(code, mods)))
+        };
+        let plain = KeyModifiers::NONE;
+        press(&mut model, KeyCode::Char('g'), plain);
+        press(&mut model, KeyCode::Char('v'), plain);
+        assert!(model.copy_mode.is_some(), "v is the copy mode");
+        assert_eq!(model.detail, None, "and no longer the details");
+        for _ in 0..3 {
+            press(&mut model, KeyCode::Char('l'), plain);
+        }
+        model.toasts.clear();
+        same_text("tui-copy-mode.txt", &screen_with_selection(&model));
+        let copied = |effects: Vec<ui::UiEffect>| -> Vec<String> {
+            effects
+                .into_iter()
+                .filter_map(|e| match e {
+                    ui::UiEffect::Copy(text) => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let effects = press(&mut model, KeyCode::Char('y'), plain);
+        assert_eq!(copied(effects), vec!["Gute".to_string()]);
+        assert!(model.copy_mode.is_none() && model.selection.is_none());
+
+        // By words, then a row down into the next message.
+        press(&mut model, KeyCode::Char('v'), plain);
+        press(&mut model, KeyCode::Char('w'), plain);
+        let from = model.copy_mode.expect("on").cursor;
+        // A new anchor where the cursor is: leave and enter again there
+        // is vi's way; here the anchor stays at "G" and the selection
+        // runs from it.
+        assert_eq!(from.1, model.copy_mode.expect("on").anchor.1 + 5);
+        press(&mut model, KeyCode::Char('j'), plain);
+        press(&mut model, KeyCode::Char('$'), plain);
+        let effects = press(&mut model, KeyCode::Char('y'), plain);
+        let text = copied(effects).pop().expect("a copy");
+        assert!(text.starts_with("Anna, 21:30: Gute Nacht\n"), "{text:?}");
+        assert!(text.contains(": Kommst du morgen mit?"), "{text:?}");
+
+        // Esc leaves, nothing copied.
+        press(&mut model, KeyCode::Char('v'), plain);
+        press(&mut model, KeyCode::Char('l'), plain);
+        let effects = press(&mut model, KeyCode::Esc, plain);
+        assert!(copied(effects).is_empty());
+        assert!(model.copy_mode.is_none() && model.selection.is_none());
+
+        // The Emacs mark.
+        press(&mut model, KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert!(model.copy_mode.is_some(), "Ctrl-Space sets the mark");
+        for _ in 0..3 {
+            press(&mut model, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        }
+        let effects = press(&mut model, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert_eq!(copied(effects), vec!["Gute".to_string()]);
+
+        // Shift+Right enters and moves at once.
+        press(&mut model, KeyCode::Right, KeyModifiers::SHIFT);
+        let effects = press(&mut model, KeyCode::Char('y'), plain);
+        assert_eq!(copied(effects), vec!["Gu".to_string()]);
+    }
+
+    /// The copy mode's drawn cells are the characters the core selection
+    /// copies (1475): within one message, the drag's text of the drawn
+    /// cells is the core's text, for every end the cursor reaches in it.
+    #[test]
+    fn the_copy_modes_drawn_cells_are_what_it_copies() {
+        let mut model = Model::new(&[]);
+        model.address = Some([0x30; 16]);
+        late_message::late_message(&mut model, 1_799_971_200, 3600);
+        model.focus = loquax::ui::Pane::Messages;
+        let press = |model: &mut Model, code: KeyCode| {
+            update(model, UiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+        };
+        press(&mut model, KeyCode::Char('g'));
+        press(&mut model, KeyCode::Char('v'));
+        for _ in 0..9 {
+            press(&mut model, KeyCode::Char('l'));
+            let laid = ui::copy_mode::laid(&model);
+            let runs = ui::copy_mode::runs(&model, &laid);
+            let mode = model.copy_mode.expect("on");
+            let core = ui::copy_mode::selection(&runs, &laid, &mode)
+                .expect("a selection")
+                .text(&runs.runs);
+            let drawn = ui::hit::selected_text(&laid, &model.selection.expect("drawn"));
+            assert_eq!(core, drawn);
+        }
+    }
+
     mod group_ticks {
         include!("../tests/support/group_ticks.rs");
     }

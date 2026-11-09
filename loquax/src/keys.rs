@@ -33,8 +33,9 @@
 //! test over it (1093).
 //!
 //! `Enter` on a message opens it (1076): a position report opens the map at
-//! its fix, any other message its detail view, which `v` opens for every
-//! message. `L` in the two command panes and `Alt-l` from every pane put the
+//! its fix, any other message its detail view, which `I` opens for every
+//! message (`v` until 1475, which made `v` the copy mode,
+//! [`crate::ui::copy_mode`]). `L` in the two command panes and `Alt-l` from every pane put the
 //! open conversation's peer on the map.
 //!
 //! A voice message (1276, `docs/src/concepts/loquax-voice-recording.md`):
@@ -122,6 +123,9 @@ pub enum Action {
     QuitHint,
     /// Copy the drag's selection, or the message under the cursor.
     Copy,
+    /// The copy mode on (1475): a cursor on the text that selects as it
+    /// moves.
+    CopyMode,
     /// Open the selected result of the search.
     OpenResult,
     /// The next match (`true`) or the previous one: a result row in the
@@ -276,10 +280,29 @@ pub const ROWS: &[Row<Action>] = {
         Row::new(
             "the message's details",
             MESSAGES_GROUP,
-            &[&[key(Char('v'), Mods::Plain, run(C::Details), MESSAGES)]],
+            &[&[key(Char('I'), Mods::Plain, run(C::Details), MESSAGES)]],
         )
         .palette("details")
-        .note("Ctrl-D in Signal: here v"),
+        .note("Ctrl-D in Signal, Info in WhatsApp: here I (v is the copy mode)"),
+        // The copy mode (1475): vi's visual `v`, the Emacs mark, and a
+        // Shift+arrow, which moves the new cursor at once.
+        Row::new(
+            "select text with a cursor: the copy mode",
+            MESSAGES_GROUP,
+            &[
+                &[key(Char('v'), Mods::Plain, CopyMode, MESSAGES)],
+                &[key(Char(' '), CTRL, CopyMode, MESSAGES)],
+                // Quiet: the help's key column would grow for all rows;
+                // the keys page names them.
+                &[
+                    key(Left, SHIFT, CopyMode, MESSAGES).quiet(),
+                    key(Right, SHIFT, CopyMode, MESSAGES).quiet(),
+                    key(Up, SHIFT, CopyMode, MESSAGES).quiet(),
+                    key(Down, SHIFT, CopyMode, MESSAGES).quiet(),
+                ],
+            ],
+        )
+        .note("then move, y or Alt-w copies, Esc leaves"),
         Row::new(
             "copy the message's text, or what a drag selected",
             MESSAGES_GROUP,

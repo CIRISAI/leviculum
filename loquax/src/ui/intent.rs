@@ -517,6 +517,9 @@ impl Intent {
             keys::Action::Palette => Intent::Palette,
             keys::Action::QuitHint => Intent::QuitHint,
             keys::Action::Copy => Intent::Copy,
+            // The copy mode is the terminal's cursor on the text (1475); a
+            // target that selects with the pointer copies the message.
+            keys::Action::CopyMode => Intent::Copy,
             keys::Action::OpenResult => Intent::OpenResult,
             keys::Action::Match(next) => Intent::Match(next),
             keys::Action::CloseSearch => Intent::CloseSearch,

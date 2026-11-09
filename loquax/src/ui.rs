@@ -138,6 +138,7 @@ pub mod by_hand;
 pub mod chat;
 pub mod compose;
 pub mod contacts;
+pub mod copy_mode;
 pub mod counters;
 pub mod files;
 pub mod group_scene;
@@ -1245,6 +1246,8 @@ pub struct UiModel<B> {
     pub footer_hover: Option<usize>,
     /// What a drag over the conversation selected.
     pub selection: Option<Selection>,
+    /// The copy mode's cursor and anchor while it is on (1475).
+    pub copy_mode: Option<copy_mode::CopyMode>,
     /// The button press a drag or a release belongs to.
     pub press: Option<Press>,
     /// The colour tier the screen is drawn in: monochrome until the shell
@@ -1578,6 +1581,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             mouse: true,
             footer_hover: None,
             selection: None,
+            copy_mode: None,
             press: None,
             tier: Tier::Mono,
             theme: Theme::Dark,
@@ -4217,6 +4221,10 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
         }
         return overlay_key(model, key);
     }
+    // The copy mode takes every key while it is on (1475).
+    if model.copy_mode.is_some() {
+        return copy_mode::key(model, key);
+    }
     let pane = model.focus;
     // A selection lasts until the next key: the copy row copies it.
     let selection = model.selection.take();
@@ -4434,6 +4442,17 @@ fn act<B: InputBuffer + Default>(
         Action::Palette => model.palette = Some(Palette::default()),
         Action::QuitHint => return quit_hint(model),
         Action::Copy => return copy(model, None),
+        Action::CopyMode => {
+            let effects = copy_mode::enter(model);
+            // A Shift+arrow moves the cursor it put down at once.
+            return match key.modifiers.contains(KeyModifiers::SHIFT) && model.copy_mode.is_some() {
+                true => {
+                    let plain = KeyEvent::new(key.code, KeyModifiers::NONE);
+                    copy_mode::key(model, plain)
+                }
+                false => effects,
+            };
+        }
         Action::OpenResult => return open_result(model),
         Action::Match(forward) => match model.focus {
             Pane::Messages => step_match(model, forward),
@@ -4871,6 +4890,12 @@ fn copy<B: InputBuffer>(model: &mut UiModel<B>, selection: Option<Selection>) ->
             .map(|m| m.body.clone())
             .unwrap_or_default(),
     };
+    copy_text(model, text)
+}
+
+/// `text` onto the clipboard (OSC 52 in the terminal), the toast saying
+/// how much; nothing for an empty one.
+fn copy_text<B>(model: &mut UiModel<B>, text: String) -> Vec<UiEffect> {
     if text.is_empty() {
         model.toast(ToastKind::Info, "nothing to copy".to_string());
         return Vec::new();
@@ -4893,7 +4918,11 @@ fn on_mouse<B: InputBuffer + Default>(model: &mut UiModel<B>, mouse: MouseEvent)
             model.footer_hover = hit::footer_slot_at(model, col, row);
             Vec::new()
         }
-        MouseEventKind::Down(MouseButton::Left) => click(model, col, row),
+        MouseEventKind::Down(MouseButton::Left) => {
+            // A click ends the copy mode (1475); the mouse selects its own.
+            copy_mode::leave(model);
+            click(model, col, row)
+        }
         MouseEventKind::Drag(MouseButton::Left) => {
             drag(model, col, row);
             Vec::new()
@@ -15172,10 +15201,10 @@ pub(crate) mod tests {
         assert_eq!(model.detail, Some((0, 0)));
         assert!(model.map.is_none());
         update(&mut model, key(KeyCode::Esc));
-        // `v` opens a report's detail view, with its sensor rows.
+        // `I` opens a report's detail view, with its sensor rows.
         update(&mut model, key(KeyCode::Down));
         assert_eq!(model.message_cursor, 1);
-        update(&mut model, key(KeyCode::Char('v')));
+        update(&mut model, key(KeyCode::Char('I')));
         assert_eq!(model.detail, Some((0, 1)));
         assert!(model.map.is_none());
         let detail = detail_view(&model, 0, 1).expect("a detail view");
@@ -15216,7 +15245,7 @@ pub(crate) mod tests {
         assert!(view(&model).map.is_some(), "the frame draws the map");
         update(&mut model, key(KeyCode::Esc));
         assert!(model.map.is_none());
-        update(&mut model, key(KeyCode::Char('v')));
+        update(&mut model, key(KeyCode::Char('I')));
         assert_eq!(model.detail, Some((0, 0)));
         update(&mut model, key(KeyCode::Esc));
         let line = cell_of(&model, "◎ position 43.77310", 3);
