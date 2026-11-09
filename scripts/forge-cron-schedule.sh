@@ -18,8 +18,8 @@
 #
 # The Woodpecker API takes a Woodpecker personal token (ci.codeberg.org, User
 # settings -> Personal access token), not the Codeberg one. It is read from
-# $WOODPECKER_TOKEN or from ${XDG_CONFIG_HOME:-$HOME/.config}/woodpecker-token
-# and never printed.
+# $WOODPECKER_TOKEN, which wins, or from the file both hosts keep it in,
+# ${XDG_CONFIG_HOME:-$HOME/.config}/woodpecker/token, and never printed.
 set -euo pipefail
 
 SERVER="${WOODPECKER_SERVER:-https://ci.codeberg.org}"
@@ -42,7 +42,7 @@ command -v jq >/dev/null || die "jq is missing"
 
 token="${WOODPECKER_TOKEN:-}"
 if [ -z "$token" ]; then
-    f="${XDG_CONFIG_HOME:-$HOME/.config}/woodpecker-token"
+    f="${XDG_CONFIG_HOME:-$HOME/.config}/woodpecker/token"
     [ -r "$f" ] || die "no token: set WOODPECKER_TOKEN or create $f"
     token="$(tr -d '[:space:]' <"$f")"
 fi
