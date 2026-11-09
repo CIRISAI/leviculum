@@ -111,6 +111,9 @@ pub const CLIENT_LABEL: &str = "loquax_client";
 pub const CLIENT_B_LABEL: &str = "loquax_client_b";
 /// The partition the message store lives in (1476).
 pub const MESSAGES_LABEL: &str = "messages";
+/// The partition the map regions `lnflash --region` wrote live in (1477),
+/// a `leviculum_map::area`.
+pub const REGIONS_LABEL: &str = "regions";
 
 /// `data`, the partition type every store is.
 const TYPE_DATA: u8 = 0x01;
@@ -157,6 +160,14 @@ impl core::fmt::Display for Slot {
     }
 }
 
+/// The map regions the area held (1477): those read, by name, and those
+/// whose bytes did not match the directory.
+#[derive(Default)]
+pub struct Regions {
+    pub loaded: alloc::vec::Vec<(alloc::string::String, &'static [u8])>,
+    pub damaged: alloc::vec::Vec<alloc::string::String>,
+}
+
 /// Why a store did not read or write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreError {
@@ -166,6 +177,8 @@ pub enum StoreError {
     Flash(FlashStorageError),
     /// The bytes there are not a record.
     Record(RecordError),
+    /// The map regions' directory is not one (1477).
+    Area(leviculum_map::area::AreaError),
 }
 
 impl core::fmt::Display for StoreError {
@@ -174,6 +187,7 @@ impl core::fmt::Display for StoreError {
             StoreError::NoRegion(reason) => write!(f, "no-region/{reason}"),
             StoreError::Flash(error) => write!(f, "flash/{error:?}"),
             StoreError::Record(error) => write!(f, "record/{error:?}"),
+            StoreError::Area(error) => write!(f, "area/{error}"),
         }
     }
 }
@@ -195,6 +209,8 @@ pub struct Stores<'d> {
     client_b: Slot,
     /// The message store's region: its offset and how many sectors.
     messages: Result<(u32, u32), NoRegion>,
+    /// The map regions' area (1477): its offset and how many sectors.
+    regions: Result<(u32, u32), NoRegion>,
 }
 
 impl<'d> Stores<'d> {
@@ -207,9 +223,10 @@ impl<'d> Stores<'d> {
         // and erase goes through `parked`.
         let mut flash = FlashStorage::new(flash).multicore_auto_park();
         let mut table = Aligned([0u8; PARTITION_TABLE_MAX_LEN]);
-        let (identity, client, client_b, messages) =
+        let (identity, client, client_b, messages, regions) =
             match partitions::read_partition_table(&mut flash, &mut table.0) {
                 Err(_) => (
+                    Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
                     Err(NoRegion::NoTable),
@@ -220,12 +237,14 @@ impl<'d> Stores<'d> {
                     let mut client = Err(NoRegion::NoEntry);
                     let mut client_b = Err(NoRegion::NoEntry);
                     let mut messages = Err(NoRegion::NoEntry);
+                    let mut regions = Err(NoRegion::NoEntry);
                     for entry in table.iter() {
                         let found = match entry.label_as_str() {
                             IDENTITY_LABEL => &mut identity,
                             CLIENT_LABEL => &mut client,
                             CLIENT_B_LABEL => &mut client_b,
                             MESSAGES_LABEL => &mut messages,
+                            REGIONS_LABEL => &mut regions,
                             _ => continue,
                         };
                         *found = if entry.raw_type() != TYPE_DATA {
@@ -243,6 +262,7 @@ impl<'d> Stores<'d> {
                         client.map(|(offset, _)| offset),
                         client_b.map(|(offset, _)| offset),
                         messages,
+                        regions,
                     )
                 }
             };
@@ -252,7 +272,59 @@ impl<'d> Stores<'d> {
             client: Slot(client),
             client_b: Slot(client_b),
             messages,
+            regions,
         }
+    }
+
+    /// Where the map regions' area lives (1477).
+    pub fn regions_slot(&self) -> Slot {
+        Slot(self.regions.map(|(offset, _)| offset))
+    }
+
+    /// The map regions the area holds (1477), each read whole into the
+    /// heap (PSRAM) and kept for the image's life: the map reads them in
+    /// place from there, as it reads the fixture from the image. A region
+    /// whose bytes do not match the directory's sum is left out and
+    /// named in `damaged`.
+    pub fn load_regions(&mut self) -> Result<Regions, StoreError> {
+        let (offset, count) = self.regions.map_err(StoreError::NoRegion)?;
+        let capacity = (count * SECTOR) as usize;
+        let mut head = alloc::vec![0u8; leviculum_map::area::SECTOR];
+        self.read_raw(offset, &mut head)?;
+        let entries = match leviculum_map::area::directory(&head, capacity) {
+            Ok(entries) => entries,
+            Err(leviculum_map::area::AreaError::Empty) => alloc::vec::Vec::new(),
+            Err(error) => return Err(StoreError::Area(error)),
+        };
+        let mut out = Regions::default();
+        for entry in entries {
+            let mut bytes = alloc::vec![0u8; (entry.len as usize + 3) & !3];
+            self.read_raw(offset + entry.offset, &mut bytes)?;
+            bytes.truncate(entry.len as usize);
+            match leviculum_map::area::check(&entry, &bytes) {
+                Ok(()) => {
+                    let kept: &'static [u8] = alloc::boxed::Box::leak(bytes.into_boxed_slice());
+                    out.loaded.push((entry.name, kept));
+                }
+                Err(_) => out.damaged.push(entry.name),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read `buf` (a multiple of four) from `at` through the bounce
+    /// buffer.
+    fn read_raw(&mut self, mut at: u32, buf: &mut [u8]) -> Result<(), StoreError> {
+        let mut bounce = Aligned([0u8; BOUNCE]);
+        for chunk in buf.chunks_mut(BOUNCE) {
+            let words = (chunk.len() + 3) & !3;
+            self.flash
+                .read_nor(at, &mut bounce.0[..words])
+                .map_err(StoreError::Flash)?;
+            chunk.copy_from_slice(&bounce.0[..chunk.len()]);
+            at += chunk.len() as u32;
+        }
+        Ok(())
     }
 
     /// Where the identity lives.

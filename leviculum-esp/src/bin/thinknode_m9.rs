@@ -43,12 +43,21 @@
 //! [HEAP] region=psram start=<addr> bytes=<n> io_pool=<n> ui_pool=<n> ui_placed=<0|1> t=<ms>  (1594: core 0's pool and the UI core's own)
 //! [STACK] bytes=<n> t=<ms>
 //! [FLASH] identity=<offset|none/why> client=<offset|none/why> messages=<offset|none/why> t=<ms>  (1414, 1476)
+//! [MAP] regions=firenze:image,world:image[,<name>:area:<bytes>|,<name>:damaged][ area=<error>] area=<offset|none/why> world_bytes=<n> t=<ms>  (1477; again with the banner)
 //! [IDENTITY] identity=<hash> probe=none lxmf=none source=<flash|generated> stored=<yes|no> t=<ms>
 //! [CENSUS] node held=<n> box=<n> links=8 max_answer=262144 t=<ms>
 //! [NODE] state=up iface=serial hw_mtu=564 serial_mux=1 t=<ms>
 //! [DISP] ST7789 320x240 madctl=0xb0 spi_mhz=40 state=up t=<ms>
 //! [DISP] splash rows=0..239 ms=<ms> backlight=on t=<ms>   (1485; or splash=failed err=..., backlight=off)
 //! [KB] addr=0x6d found=yes ... protocol=codes reg=0x01 len=8 poll_ms=10 t=<ms>
+//! [GNSS] module=ag3352 uart=uart1 baud=115200 tx=gpio3 rx=gpio2 en=gpio11 en_active=<high|low> kb_addr=<0x6c|0x6d> state=off up=<0|1> t=<ms>  (1477)
+//! [GNSS] power=<on|off> reason=<map-or-share|refresh|done> cadence_s=<300|3600>
+//!                           the receiver powered or cut (`loquax_m9::gnss::Duty`)
+//! [GNSS_INIT] step=<pair-...> <sent|tx-error|ack=ok|ack=timeout>
+//!                           AirohaInit::ag3352 on every power-up
+//! [GNSS] nmea=<sentence>    the first twelve sentences of every power-up
+//! [GNSS] state=<off|searching|fix> sats=<n> in_view=<n> hdop=<x.y|none> age_s=<n|none> sentences=<n> rejected=<n> overrun=<n> rx_err=<n> keep_lost=<n>
+//!                           with the banner and on every change of state
 //! [CENSUS] renderer held=<n> budget=220000 verdict=ok t=<ms>
 //! [CENSUS] screen=chats scene_held=... verdict=ok t=<ms>
 //! [CENSUS] screen=chat scene_held=... verdict=ok t=<ms>
@@ -1571,6 +1580,34 @@ fn main() -> ! {
             stores.messages_slot()
         ),
     );
+    // The map regions `lnflash --region` wrote (1477), read into the heap
+    // before the UI core starts; the map reads them in place from there.
+    let (area_regions, regions_said) = match stores.load_regions() {
+        Ok(found) => {
+            let mut said = alloc::string::String::from("firenze:image,world:image");
+            for (name, bytes) in &found.loaded {
+                said.push_str(&alloc::format!(",{name}:area:{}", bytes.len()));
+            }
+            for name in &found.damaged {
+                said.push_str(&alloc::format!(",{name}:damaged"));
+            }
+            let bytes: Vec<&'static [u8]> = found.loaded.iter().map(|(_, b)| *b).collect();
+            (bytes, said)
+        }
+        Err(error) => (
+            Vec::new(),
+            alloc::format!("firenze:image,world:image area={error}"),
+        ),
+    };
+    log.line(
+        "[MAP] ",
+        format_args!(
+            "regions={regions_said} area={} world_bytes={}",
+            stores.regions_slot(),
+            map::WORLD.len()
+        ),
+    );
+
     // The true random source: the SoC's RNG with the ADC's noise. Kept for
     // the life of the image; `Trng` refuses to exist without it.
     let _entropy = TrngSource::new(p.RNG, p.ADC1);
@@ -1918,6 +1955,7 @@ fn main() -> ! {
                 io,
                 te: lcd_te,
                 tick: ui_timer,
+                regions: area_regions,
             },
         )
     });
@@ -2003,6 +2041,7 @@ fn main() -> ! {
             if now < BANNER_WINDOW_MS {
                 log.identify(m9::LOG_PREFIX, m9::BOARD_NAME, bytes);
                 gnss_run.say(now, &mut log);
+                log.line("[MAP] ", format_args!("regions={regions_said}"));
                 #[cfg(m9_bench)]
                 log.line("[BENCH] ", format_args!("inject=on"));
             }
@@ -2462,6 +2501,9 @@ struct UiWakes {
     io: Io<'static>,
     te: m9::LcdTe<'static>,
     tick: esp_hal::timer::timg::Timer<'static>,
+    /// Not a wake: the map regions core 0 read from the flash's area
+    /// (1477), handed over with the rest of what the UI core starts with.
+    regions: Vec<&'static [u8]>,
 }
 
 /// The UI core (1493): the model, the scene, the renderer, the panel.
@@ -2485,6 +2527,7 @@ fn ui_main(
         mut io,
         te: te_pin,
         tick,
+        regions: area_regions,
     } = wakes;
     io.set_interrupt_handler(te_edge);
     let mut te_line = Input::new(te_pin, InputConfig::default());
@@ -2539,7 +2582,7 @@ fn ui_main(
     // image, the painter's storage on the heap.
     let before = leviculum_esp::heap_live();
     // Since 1477 the world overview under it, read in place as well.
-    let Ok(mut map) = Map::board(map::FIXTURE, &[]) else {
+    let Ok(mut map) = Map::board(map::FIXTURE, &area_regions) else {
         log.line(
             "[DISP] ",
             alloc::string::String::from("state=down reason=region"),
@@ -2549,6 +2592,13 @@ fn ui_main(
         }
     };
     let map_held = leviculum_esp::heap_live() - before;
+    // The model's map knows every region the board draws (1477): the
+    // area's beside the image's, again whenever the model is replaced.
+    let regions = map::setup_of(&map.headers());
+    let set_regions = |model: &mut UiModel<Field>| {
+        loquax::ui::update(model, loquax::ui::UiEvent::MapSetup(regions.clone()));
+    };
+    set_regions(&mut model);
     log.line(
         "[CENSUS] ",
         alloc::format!(
@@ -2845,6 +2895,7 @@ fn ui_main(
             match message {
                 ToUi::Model(taken) => {
                     model = taken;
+                    set_regions(&mut model);
                     row = 0;
                     shown.pairing = None;
                     // The size the reader chose before the code, set on
@@ -2927,6 +2978,7 @@ fn ui_main(
                     if let Some(walked) = screen.and_then(Screen::of) {
                         let (walk_model, walk_row) = walked.walk();
                         *model = walk_model;
+                        set_regions(&mut model);
                         row = walk_row;
                         shown.pairing = None;
                         redraw(

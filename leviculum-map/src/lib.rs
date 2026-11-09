@@ -24,6 +24,8 @@
 //!   terminal map, for every terminal frontend.
 //! - [`choice`]: which installed region a view draws, and the zooms a
 //!   frontend offers.
+//! - [`area`]: the regions a board carries in a flash partition of their
+//!   own, and the directory that names them (1477).
 //! - [`style`]: the colour tables, `leviculum-mapfill`'s own.
 //!
 //! `no_std` with `alloc`; the feature `std` adds only a [`Storage`] for a
@@ -35,6 +37,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod area;
 pub mod buildings;
 pub mod cells;
 pub mod choice;
