@@ -2814,22 +2814,22 @@ public class ChatActivity extends Activity implements Events.Listener {
             invitationShown = true;
             GroupDialogs.invitation(this, peer, invited, Core.str(answer, "invite_trust"), again);
         }
-        // A page that came above (1496) keeps the bubble the reader looks at
-        // where it was; anything else is the list's own transcript mode.
+        // Rows that came above the bubble the reader looks at keep it where
+        // it was: a page above (1496), a late message spliced in at its
+        // writer's time (1505). Anything else is the list's own transcript
+        // mode.
         int at = list.getFirstVisiblePosition();
         View atChild = list.getChildAt(0);
         Long anchor = at >= 0 && at < rows.size() && atChild != null
                 ? Long.valueOf(Core.num(rows.get(at), "key")) : null;
         int anchorTop = atChild == null ? 0 : atChild.getTop();
-        Long oldFirst = rows.isEmpty() ? null : Long.valueOf(Core.num(rows.get(0), "key"));
         rows.clear();
         rows.addAll(Core.list(answer, "messages"));
         int keep = -1;
-        if (anchor != null && oldFirst != null && !rows.isEmpty()
-                && !oldFirst.equals(Core.num(rows.get(0), "key"))) {
+        if (anchor != null) {
             for (int i = 0; i < rows.size(); i++) {
                 if (anchor.equals(Core.num(rows.get(i), "key"))) {
-                    keep = i;
+                    keep = i == at ? -1 : i;
                     break;
                 }
             }
