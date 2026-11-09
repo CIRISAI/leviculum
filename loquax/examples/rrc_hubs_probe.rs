@@ -13,13 +13,18 @@
 //! One line a hub on stdout, stable keys, for `just rrc-hubs-check`:
 //!
 //! ```text
-//! HUB hash=<32 hex> listed=<name|-> announce=<yes|no> hops=<n|-> welcome=<yes|no|why> name=<hub's|-> notice=<first line|->
+//! HUB hash=<32 hex> listed=<name|-> announce=<yes|earlier|no> hops=<n|-> welcome=<yes|no|why> name=<WELCOME's|-> announced=<announce's|-> rooms=<a,b|-> notice=<first line|->
 //! ```
 //!
 //! and a `HEARD` line for each `rrc.hub` announce, with its app data's
 //! hub name. `--open no` listens only, `--open listed` opens the list's
-//! hubs alone. Each hub's notices go whole to
-//! stderr as `NOTICE hash=<hex> <line>`, where a hub names its rooms.
+//! hubs alone, `--open heard` (1599) every hub heard alone, closest first.
+//! `--seed <file>` adds the hubs an earlier window heard (1577's
+//! `heard-union.txt` lines, `announce=earlier`), and `--parallel <n>`
+//! opens that many at once, each over a hub link of its own, so a long
+//! list fits in one command. Each hub's notices go whole to
+//! stderr as `NOTICE hash=<hex> <line>`, where a hub names its rooms;
+//! `rooms=` is what they named (`/join <room>`, `#room`).
 
 use std::collections::BTreeMap;
 use std::net::ToSocketAddrs;
@@ -44,8 +49,14 @@ struct Args {
     listen: Duration,
     hubs: Option<String>,
     /// `yes`: the list and every hub heard; `listed`: the list alone;
-    /// `no`: listen only.
+    /// `heard`: every hub heard (and seeded) alone; `no`: listen only.
     open: String,
+    /// How many hubs are opened at once.
+    parallel: usize,
+    /// Hubs heard in an earlier window: `<hash> <name|-> <windows> <hops>...`
+    /// lines, as 1577's `heard-union.txt`; each counts as heard, with the
+    /// hops of its first hearing, unless this window hears it itself.
+    seed: Option<String>,
 }
 
 fn args() -> Result<Args, String> {
@@ -53,6 +64,8 @@ fn args() -> Result<Args, String> {
     let mut listen = Duration::from_secs(1800);
     let mut hubs = None;
     let mut open = "yes".to_string();
+    let mut parallel = 1;
+    let mut seed = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let value = it.next().ok_or(format!("{arg} needs a value"))?;
@@ -63,6 +76,8 @@ fn args() -> Result<Args, String> {
             }
             "--hubs" => hubs = Some(value),
             "--open" => open = value,
+            "--parallel" => parallel = value.parse().map_err(|_| "--parallel <n>")?,
+            "--seed" => seed = Some(value),
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
@@ -77,6 +92,8 @@ fn args() -> Result<Args, String> {
         listen,
         hubs,
         open,
+        parallel,
+        seed,
     })
 }
 
@@ -139,6 +156,52 @@ fn announced_name(app_data: &[u8]) -> Option<String> {
 struct Heard {
     name: Option<String>,
     hops: Option<u8>,
+    /// Heard in this window, not only seeded from an earlier one.
+    now: bool,
+}
+
+/// An earlier window's hubs: `<hash> <name|-> <windows> <hops>...`.
+fn seeded(text: &str) -> Vec<([u8; 16], Heard)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let hash = hex16(words.next()?)?;
+            let name = words
+                .next()
+                .filter(|n| *n != "-")
+                .map(|n| n.replace('_', " "));
+            let _windows = words.next();
+            let hops = words.next().and_then(|h| h.parse().ok());
+            Some((
+                hash,
+                Heard {
+                    name,
+                    hops,
+                    now: false,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The rooms a hub's notices name: the word after a `/join`, and every
+/// `#word`, each once, in the order said.
+fn rooms_named(notices: &str) -> Vec<String> {
+    let mut rooms: Vec<String> = Vec::new();
+    let mut after_join = false;
+    for word in notices.split_whitespace() {
+        let clean =
+            word.trim_matches(|c: char| !(c.is_alphanumeric() || c == '#' || c == '-' || c == '_'));
+        let room = (after_join || (clean.len() > 1 && clean.starts_with('#'))).then_some(clean);
+        after_join = word == "/join";
+        if let Some(room) = room.filter(|r| !r.is_empty() && *r != "#") {
+            let room = room.to_string();
+            if !rooms.contains(&room) {
+                rooms.push(room);
+            }
+        }
+    }
+    rooms
 }
 
 fn main() {
@@ -212,6 +275,7 @@ async fn run(args: Args) -> Result<(), String> {
             let entry = heard.entry(dest).or_default();
             entry.name = name.or(entry.name.take());
             entry.hops = hops.or(entry.hops);
+            entry.now = true;
             if first {
                 println!(
                     "HEARD hash={} name={} hops={}",
@@ -222,33 +286,83 @@ async fn run(args: Args) -> Result<(), String> {
             }
         }
     }
-    if args.open == "no" {
-        return Ok(());
+    if let Some(path) = &args.seed {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        for (dest, earlier) in seeded(&text) {
+            heard.entry(dest).or_insert(earlier);
+        }
     }
-    for dest in heard.keys().filter(|_| args.open == "yes") {
-        if !wanted.iter().any(|(h, _)| h == dest) {
-            wanted.push((*dest, String::new()));
+    match args.open.as_str() {
+        "no" => return Ok(()),
+        "heard" => wanted.clear(),
+        "yes" | "listed" => {}
+        other => return Err(format!("--open yes|listed|heard|no, not {other}")),
+    }
+    if args.open != "listed" {
+        // Closest first: hops at first hearing, unknown hops last.
+        let mut order: Vec<(&[u8; 16], &Heard)> = heard.iter().collect();
+        order.sort_by_key(|(_, h)| h.hops.unwrap_or(u8::MAX));
+        for (dest, _) in order {
+            if !wanted.iter().any(|(h, _)| h == dest) {
+                wanted.push((*dest, String::new()));
+            }
         }
     }
 
-    // Open each hub with Loquax's own link, one at a time.
-    let (lend_tx, lends) = mpsc::unbounded_channel();
-    let (forward, forwarded) = mpsc::unbounded_channel();
-    let (_end, ended) = tokio::sync::oneshot::channel();
-    lend_tx
-        .send(Lent {
-            node: Arc::downgrade(&node),
-            events: forwarded,
-            ended,
-        })
-        .map_err(|_| "the lend")?;
+    // Open each hub with Loquax's own link, `--parallel` at a time: every
+    // worker holds a hub link of its own over the one node, and each sees
+    // every event (a link's events carry its id, so each takes its own).
+    let workers = args.parallel.clamp(1, 32);
+    let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+        wanted,
+    )));
+    let mut feeds = Vec::new();
+    let mut handles = Vec::new();
+    let heard = Arc::new(heard);
+    for _ in 0..workers {
+        let (feed, forwarded) = mpsc::unbounded_channel();
+        feeds.push(feed);
+        handles.push(tokio::spawn(worker(
+            Arc::clone(&node),
+            forwarded,
+            Arc::clone(&queue),
+            Arc::clone(&heard),
+        )));
+    }
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
-            if forward.send(event).is_err() {
+            feeds.retain(|feed| feed.send(event.clone()).is_ok());
+            if feeds.is_empty() {
                 return;
             }
         }
     });
+    for handle in handles {
+        handle.await.map_err(|e| e.to_string())??;
+    }
+    Ok(())
+}
+
+/// The hubs still to open, with the list's name for each.
+type Queue = std::sync::Mutex<std::collections::VecDeque<([u8; 16], String)>>;
+
+/// One worker: a hub link of its own, opening hubs off the shared queue
+/// until it is empty, one `HUB` line each.
+async fn worker(
+    node: Arc<leviculum_std::driver::ReticulumNode>,
+    events: mpsc::UnboundedReceiver<NodeEvent>,
+    queue: Arc<Queue>,
+    heard: Arc<BTreeMap<[u8; 16], Heard>>,
+) -> Result<(), String> {
+    let (lend_tx, lends) = mpsc::unbounded_channel();
+    let (_end, ended) = tokio::sync::oneshot::channel();
+    lend_tx
+        .send(Lent {
+            node: Arc::downgrade(&node),
+            events,
+            ended,
+        })
+        .map_err(|_| "the lend")?;
     let mut linking = rooms_link::start(
         &tokio::runtime::Handle::current(),
         Options {
@@ -258,11 +372,15 @@ async fn run(args: Args) -> Result<(), String> {
         },
         Arc::new(Notify::new()),
     );
-    for (dest, listed_name) in wanted {
+    loop {
+        let next = queue.lock().map_err(|_| "the queue")?.pop_front();
+        let Some((dest, listed_name)) = next else {
+            return Ok(());
+        };
         let _ = linking.asks.send(Ask::Open { hub: dest });
         let mut welcome = "no".to_string();
         let mut name = None;
-        let mut notice = None;
+        let mut notices = String::new();
         let open_deadline = tokio::time::Instant::now() + OPEN_BUDGET;
         let mut notice_deadline = None;
         loop {
@@ -281,7 +399,8 @@ async fn run(args: Args) -> Result<(), String> {
                     for line in text.lines() {
                         eprintln!("NOTICE hash={} {line}", hex::encode(dest));
                     }
-                    notice.get_or_insert(text);
+                    notices.push_str(&text);
+                    notices.push('\n');
                 }
                 Some(Told::Down(down)) => {
                     if welcome != "yes" {
@@ -304,16 +423,22 @@ async fn run(args: Args) -> Result<(), String> {
             .or_else(|| node.hops_to(&hash))
             .map_or("-".to_string(), |h| h.to_string());
         let listed_name = (!listed_name.is_empty()).then_some(listed_name);
+        let rooms = rooms_named(&notices).join(",");
         println!(
-            "HUB hash={} listed={} announce={} hops={} welcome={} name={} notice={}",
+            "HUB hash={} listed={} announce={} hops={} welcome={} name={} announced={} rooms={} notice={}",
             hex::encode(dest),
             word(listed_name.as_deref()),
-            if seen.is_some() { "yes" } else { "no" },
+            match seen {
+                Some(h) if h.now => "yes",
+                Some(_) => "earlier",
+                None => "no",
+            },
             hops,
             welcome,
-            word(name.as_deref().or(seen.and_then(|h| h.name.as_deref()))),
-            word(notice.as_deref().and_then(|n| n.lines().next())),
+            word(name.as_deref()),
+            word(seen.and_then(|h| h.name.as_deref())),
+            word(Some(&rooms)),
+            word(notices.lines().next()),
         );
     }
-    Ok(())
 }
