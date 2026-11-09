@@ -2614,7 +2614,7 @@ fn assert_daemon_stats_parity(on_lnsd: &Value, on_rnsd: &Value) {
     // `tx_unaccounted` is additive on exactly the same terms: it counts the
     // frames an RNode modem was handed and never accounted for on its own
     // airtime ledger, a packet-loss condition no reference key names. It is
-    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:459-488) and
+    // emitted unconditionally next to `tx_queue_drops` (handlers.rs:459-505) and
     // so appears on this TCP interface too, reading 0 — the honest value for
     // a medium that keeps no such ledger. Reference tolerance re-measured on
     // the pinned vendor tree for this key: rnstatus reads interface fields

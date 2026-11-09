@@ -156,19 +156,21 @@ counted without comments and tests: 286 lines of SAM client (`sam.rs`),
 them. It reads the SAM socket directly instead of proxying through a
 second local TCP socket, which changes no byte on the I2P stream. Same
 HDLC, same `HW_MTU` (`I2P_HW_MTU`,
-`leviculum-std/src/interfaces/i2p/mod.rs:55`), same 10 s keepalive and
+`leviculum-std/src/interfaces/i2p/mod.rs:61`), same 10 s keepalive and
 110 s read timeout (`I2P_KEEPALIVE`,
-`leviculum-std/src/interfaces/i2p/mod.rs:70`; `I2P_READ_TIMEOUT`,
-`leviculum-std/src/interfaces/i2p/mod.rs:81`), same 15 s reconnect
+`leviculum-std/src/interfaces/i2p/mod.rs:76`; `I2P_READ_TIMEOUT`,
+`leviculum-std/src/interfaces/i2p/mod.rs:87`), same 20 s stale mark
+(`I2P_STALE_AFTER`, `leviculum-std/src/interfaces/i2p/mod.rs:99`, since
+1588), same 15 s reconnect
 (`I2P_DEFAULT_RECONNECT_WAIT`,
-`leviculum-std/src/interfaces/i2p/mod.rs:58`), same session nick shape,
+`leviculum-std/src/interfaces/i2p/mod.rs:64`), same session nick shape,
 same `I2P_SAM_ADDRESS` variable
-(`leviculum-std/src/driver/interface_build/i2p.rs:24`), and on top a
+(`leviculum-std/src/driver/interface_build/i2p.rs:29`), and on top a
 120 s bound on every SAM command the reference does not have
 (`SAM_COMMAND_TIMEOUT`, `leviculum-std/src/interfaces/i2p/sam.rs:73`).
 
 The differences, each measured on the bed below. The first two are closed
-since 1576:
+since 1576, the third and fourth since 1588:
 
 1. **Signature type, closed.** lnsd asked for `DESTINATION=TRANSIENT`
    without `SIGNATURE_TYPE`, and i2pd 2.56 answers that with a DSA-SHA1
@@ -185,7 +187,7 @@ since 1576:
    the file, so an rnsd user who switched to lnsd on the same config
    directory got a new address. Since 1576 the key file is named as the
    reference names it, old format first (`resolve_keyfile`,
-   `leviculum-std/src/interfaces/i2p/mod.rs:709`), and an existing
+   `leviculum-std/src/interfaces/i2p/mod.rs:802`), and an existing
    `i2p_iface_<index>.i2p` is renamed to the new name once, logged, so no
    lnsd user loses an address either. Measured on the bed: a DSA key left
    as `i2p_iface_0.i2p` was adopted (`I2P key adopted: .../i2p_iface_0.i2p
@@ -194,15 +196,42 @@ since 1576:
    started next on the same directory published that b32 in `rnstatus`;
    the other way round, the key rnsd wrote (`37afcf9e...d659.i2p`, type 7)
    was the one lnsd served.
-3. **Status surface.** lnsd registers no parent `I2PInterface[...]` row
-   and emits none of the three I2P fields (the client renderer says so:
-   `leviculum-cli/src/lnstatus_render.rs:921`). Measured with Python's
-   `rnstatus` against lnsd, the rows are `i2p_0/<b32>.b32.i2p` and
-   `i2p_0_to_<b32>.b32.i2p`, the rate reads 10 Mbps, and the operator's
-   own b32 appears nowhere: it is only in lnsd's log.
-4. **Discovery.** A `discoverable` I2P interface is skipped with "is not
-   discoverable" (`descriptor_from_config`,
-   `leviculum-std/src/discovery.rs:64`); rnsd publishes the b32.
+3. **Status surface, closed.** lnsd registered no parent
+   `I2PInterface[...]` row and emitted none of the three I2P fields;
+   Python's `rnstatus` against lnsd showed `i2p_0/<b32>.b32.i2p` and
+   `i2p_0_to_<b32>.b32.i2p` at 10 Mbps, and the operator's own b32 only in
+   lnsd's log. Since 1588 an I2P section is a parent row in the reporting
+   inventory (`add_i2p_parent` in `leviculum-std/src/interfaces/inventory.rs`)
+   with `i2p_connectable`, `i2p_b32` and the count of the connections it
+   accepted; its configured peers are `I2PInterfacePeer[<section> to <peer>]`
+   and add nothing to that count or its bytes (`parent_count = False`), its
+   accepted ones are `I2PInterfacePeer[Connected peer on <section>]` and take
+   the section's mode as the reference's do
+   (`reference/Reticulum/RNS/Interfaces/I2PInterface.py:992`); every peer
+   carries `tunnelstate`, and every row the 256 kbit/s guess. A stored key
+   names the b32 before any session exists, a fresh one once its first
+   `SESSION CREATE` returns. The tunnel state is the reference's: active
+   while bytes arrive, stale after more than 20 s without one, logged as
+   `I2P_TUNNEL_STALE` and `I2P_TUNNEL_ACTIVE`; the teardown still waits for
+   the 110 s read timeout, so nothing on the wire changed. Measured on the
+   bed below (`just i2p-live`, stage `rows`): rnstatus against lnsd and
+   against rnsd print the same I2P rows, tunnel state aside, and lnstatus
+   prints what rnstatus prints against lnsd.
+4. **Discovery, closed.** A `discoverable` I2P interface was skipped with
+   "is not discoverable" (`descriptor_from_config`,
+   `leviculum-std/src/discovery.rs:64`). Since 1588 a connectable one
+   publishes its b32, bare as the reference sends it, as `reachable_on`.
+   The announce **waits for the endpoint**: its job is not due until the b32
+   is known and the payload stamped off the event loop, because an I2P
+   announce without `reachable_on` is one the reference's receivers refuse
+   (`unpacked[REACHABLE_ON]`, `reference/Reticulum/RNS/Discovery.py:297`,
+   raises) and the next one would be an announce interval (6 h by default)
+   later. With a stored key the b32 is there at start and the first
+   announce carries it; with a fresh key the first announce goes out at the
+   first job tick after the session. A section that is not connectable
+   publishes none, as in the reference. Measured on the bed: rnsd with
+   `discover_interfaces = yes` stored lnsd's I2P interface with its b32 as
+   the address.
 5. **Endpoint key timing.** rnsd writes its key before any session (by
    `DEST GENERATE`); lnsd writes it when the first `SESSION CREATE`
    returns, which on the bed was 9 to 24 s after start. Harmless on its
@@ -379,6 +408,27 @@ file, so its log needs `PYTHONUNBUFFERED=1`.
   probe after the thaw answered 9.7 s later. rnsd as C answered the first
   probe 0.5 s after the thaw; its log was buffered, so how it got there
   is not observed.
+- **Stale mark (1588).** S=lnsd on router 2 frozen for 45 s with an lnsd
+  and an rnsd client on router 1: lnsd's `I2P_TUNNEL_STALE` came 11.9 s
+  into the freeze with `idle_ms=20998` (the last keepalive had arrived 9 s
+  before it), its `Tunnel Unresponsive` in rnstatus the same second, no
+  teardown before the thaw, and `I2P_TUNNEL_ACTIVE` 1.0 s after it. In a
+  first run rnsd's client turned `Tunnel Unresponsive` in the same second
+  as lnsd's (17.3 s in); in the second it already read so at the freeze,
+  as 1589 saw (its state lags its link).
+- **Restarted server (1588, from 1589's 420 s observation).** S stopped
+  and started again on its key, with a client of each stack that had
+  carried a probe before (old), and one of each started with the restart
+  on another router (fresh): 0 of 4 reached S in 240 s, with rnsd as S and
+  with lnsd as S. A fresh client that never knew the old tunnels fails as
+  the old one does, so this is no reconnect gap in either client. With
+  lnsd as S and i2pd at `loglevel=info`, S's router logged `Local
+  destination <S>.b32.i2p exists` at the restart and from then on `Can't
+  publish LeasetSet because destination is not ready` with `Publish
+  confirmation was not received` every 1.8 s (132 times in 4 min): i2pd
+  2.56 hands the new session the destination the closed one left behind
+  and never publishes its LeaseSet. The rnsd-as-S run was at
+  `loglevel=warn` and logged no such line, so its mechanism is not shown.
 
 ## The cells
 
@@ -403,7 +453,9 @@ Unhappy:
 - `i2p_sam_refuses` — deterministic, so an mvr against the existing
   mock SAM (`leviculum-std/src/interfaces/i2p/tests.rs`), not a periculum
   cell: `I2P_ERROR`, `DUPLICATED_ID`, `INVALID_KEY` and a HELLO
-  `NOVERSION` each lead to a retry, none to a dead interface.
+  `NOVERSION` each lead to a retry, none to a dead interface. Since 1588:
+  the `i2p_sam_refuses_*` tests in
+  `leviculum-std/src/interfaces/i2p/tests.rs`.
 - `i2p_peer_unreachable` — `peers =` an unpublished b32: `INVALID_KEY`,
   retried, the daemon's other interfaces unaffected.
 - `i2p_tunnel_stale` — freeze S's router past the 110 s read timeout,
@@ -417,8 +469,8 @@ Unhappy:
 | 1 | Private bed as a script (`scripts/i2p-privnet.sh`), and `just i2p-live` on it instead of the public network (**done, 1576**) | 2 | — |
 | 2 | (**done, 1576**) Ed25519: `SIGNATURE_TYPE=7` on every TRANSIENT session; an existing DSA key is kept, so no address changes; mock-SAM test on the command, live check on the stored key's type | 1 | — |
 | 3 | (**done, 1576**) Key file named as the reference names it (section name and transport identity, old-format fallback), and an existing `i2p_iface_<n>.i2p` adopted once so no lnsd user loses an address | 2 | — |
-| 4 | Status surface: a parent `I2PInterface[<name>]` row with `i2p_b32`, `i2p_connectable` and its client count; peer rows named as the reference names them; `tunnelstate` from the read clock (20 s stale); bitrate 256 kbit/s | 4 | 3 |
-| 5 | Discovery: a connectable I2P interface publishes its b32 as `reachable_on` once known (runtime value, not config) | 2 | 3 |
+| 4 | (**done, 1588**) Status surface: a parent `I2PInterface[<name>]` row with `i2p_b32`, `i2p_connectable` and its client count; peer rows named as the reference names them; `tunnelstate` from the read clock (20 s stale); bitrate 256 kbit/s | 4 | 3 |
+| 5 | (**done, 1588**) Discovery: a connectable I2P interface publishes its b32 as `reachable_on` once known (runtime value, not config) | 2 | 3 |
 | 6 | periculum cells above, with i2pd in the cell image or host-run on the bed | 6 | 1, 2, 3, 4 |
 | 7 | (**done, 1576**) `i2p` Cargo feature, default on, if the minimal build wants the code out (gates no dependency) | 1 | — |
 | 8 | (**done, 1576**) Root-cause the 6/10 run: `i2p_peer_link` S=lnsd C=rnsd 20×, beds kept, i2pd at `loglevel=info`; found the bed's shared address, 200/200 without it | 2 | 1 |

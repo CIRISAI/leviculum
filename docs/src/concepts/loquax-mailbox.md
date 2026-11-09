@@ -249,7 +249,7 @@ Limits, measured and reasoned:
   number or pre-sorts the propagation node candidates.
 - A client attached over a non-loopback shared-instance TCP port counts as
   this device, because the daemon names it `LocalInterface[...]` too
-  (`leviculum-std/src/interfaces/inventory.rs:102-107`). This is rare: the
+  (`leviculum-std/src/interfaces/inventory.rs:106-111`). This is rare: the
   reference binds the shared-instance port to loopback
   (`LocalInterface.py:408`).
 

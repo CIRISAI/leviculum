@@ -504,7 +504,7 @@ The shipped rendezvous list is a bootstrap, not an architecture (Lew,
   (`get_interface_announce_data`, `reference/Reticulum/RNS/Discovery.py:96-186`),
   every node keeps the registry, and ours is byte compatible with
   Python's (`list_discovered_interfaces`,
-  `leviculum-std/src/discovery.rs:449`). Autoconnect with a ceiling is
+  `leviculum-std/src/discovery.rs:461`). Autoconnect with a ceiling is
   the zero-config design ([zero config](zero-config.md), "The server
   list"), and it takes only transport nodes as Python does
   (`leviculum-std/src/autoconnect.rs:379`). Loquax reads that registry

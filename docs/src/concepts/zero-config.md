@@ -62,17 +62,17 @@ transport off, a shared instance named `default`, log level 4,
 - Every interface section carries an origin, `configured` or `default`
   (`InterfaceOrigin`, `leviculum-std/src/config.rs:693`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
-  builds any (`leviculum-std/src/driver/mod.rs:2348`), and once
+  builds any (`leviculum-std/src/driver/mod.rs:2479`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:229`).
 - `interface_stats` serves the origin as the `origin` key
-  (`leviculum-std/src/rpc/handlers.rs:674`), and `lnstatus` prints it,
+  (`leviculum-std/src/rpc/handlers.rs:691`), and `lnstatus` prints it,
   behind `--origin`, as an `Origin` line under `Status`. Without the flag
   the render is rnstatus's, which the drop-in parity tests pin
   (`leviculum-std/tests/rnsd_interop/status_parity_tests.rs`); rnsd serves
   no such key, so against rnsd the flag adds nothing. A row named after a section takes that
   section's origin; a row no section names (the shared instance, an
   AutoInterface's peers) takes the origin all sections share
-  (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:266`), and
+  (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:493`), and
   where no section is left, as on a start without a file under
   `LEVICULUM_NO_AUTO=1`, the origin of the configuration itself:
   `default` without a file, `configured` with one.

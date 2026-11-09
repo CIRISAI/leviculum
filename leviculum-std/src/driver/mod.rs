@@ -1181,14 +1181,142 @@ struct BootstrapIface {
 /// [`build_announce_app_data`](leviculum_core::discovery::build_announce_app_data))
 /// so the announcer arm never runs a proof-of-work stamp on the event loop.
 struct DiscoveryAnnounceJob {
-    /// Ready-to-announce `flags + msgpack(info) + stamp` payload.
-    app_data: Vec<u8>,
+    /// The `flags + msgpack(info) + stamp` payload, or the slot it arrives in.
+    payload: JobPayload,
     /// Minimum spacing between this interface's announces.
     interval: Duration,
     /// When this interface last self-advertised; `None` until the first emit.
     last_announce: Option<tokio::time::Instant>,
     /// Interface name, for the announce log line.
     label: String,
+}
+
+/// A self-advertise job's payload.
+///
+/// A connectable I2P interface publishes its b32 as `reachable_on`
+/// (Discovery.py:143), and a node without a stored key learns that address
+/// only from its first `SESSION CREATE`, seconds to minutes after start, or
+/// never while no router answers. Its job therefore waits: it is not due
+/// until a task that watches the endpoint has stamped the payload with the
+/// address, off the event loop. It does not announce without the address,
+/// because an I2P announce without `reachable_on` is one the reference's
+/// receivers refuse (`unpacked[REACHABLE_ON]`, Discovery.py:297, raises), and
+/// the next chance would be one announce interval (6 h by default) later.
+enum JobPayload {
+    /// Stamped and ready to announce.
+    Ready(Vec<u8>),
+    /// Filled once the interface knows the value it publishes.
+    Awaiting(Arc<std::sync::OnceLock<Vec<u8>>>),
+}
+
+impl DiscoveryAnnounceJob {
+    /// The payload, once there is one.
+    fn ready_app_data(&mut self) -> Option<&[u8]> {
+        if let JobPayload::Awaiting(slot) = &self.payload {
+            if let Some(data) = slot.get() {
+                self.payload = JobPayload::Ready(data.clone());
+            }
+        }
+        match &self.payload {
+            JobPayload::Ready(data) => Some(data),
+            JobPayload::Awaiting(_) => None,
+        }
+    }
+}
+
+/// Stamp one discovery announce payload, encrypted for the network identity
+/// when the interface asks for it. `None` when the descriptor lacks a field
+/// its type needs, or encryption was asked for without a network identity.
+fn stamp_discovery_app_data(
+    desc: &leviculum_core::discovery::InterfaceDescriptor,
+    transport_id: &[u8; TRUNCATED_HASHBYTES],
+    transport_enabled: bool,
+    encrypt: bool,
+    network_identity: Option<&leviculum_core::Identity>,
+) -> Option<Vec<u8>> {
+    let mut rng = rand_core::OsRng;
+    if encrypt {
+        match network_identity {
+            Some(id) => leviculum_core::discovery::build_announce_app_data_encrypted(
+                desc,
+                transport_id,
+                transport_enabled,
+                id,
+                &mut rng,
+            ),
+            None => {
+                tracing::error!(
+                    "discovery: interface {:?} requests discovery_encrypt but no \
+                     network_identity is configured, skipping",
+                    desc.name
+                );
+                None
+            }
+        }
+    } else {
+        leviculum_core::discovery::build_announce_app_data(
+            desc,
+            transport_id,
+            transport_enabled,
+            &mut rng,
+        )
+    }
+}
+
+/// Stamp a connectable I2P interface's discovery payload once its endpoint
+/// knows its b32, off the event loop, into the slot the job reads (see
+/// `JobPayload`). The b32 goes out bare, without `.b32.i2p`, as the reference
+/// sends `interface.b32` (Discovery.py:143-144).
+fn spawn_i2p_discovery_stamp(
+    endpoint: Arc<crate::interfaces::inventory::I2pEndpoint>,
+    mut desc: leviculum_core::discovery::InterfaceDescriptor,
+    transport_id: [u8; TRUNCATED_HASHBYTES],
+    transport_enabled: bool,
+    encrypt: bool,
+    network_identity: Option<Arc<leviculum_core::Identity>>,
+    label: String,
+) -> Arc<std::sync::OnceLock<Vec<u8>>> {
+    let slot = Arc::new(std::sync::OnceLock::new());
+    let fill = Arc::clone(&slot);
+    let mut b32_rx = endpoint.watch_b32();
+    tokio::spawn(async move {
+        let b32 = match b32_rx.wait_for(Option::is_some).await {
+            Ok(b32) => b32.clone(),
+            Err(_) => return,
+        };
+        let Some(b32) = b32 else { return };
+        tracing::info!(
+            "discovery: I2P interface \"{}\" reachable on {}.b32.i2p, its discovery announce carries it",
+            label,
+            b32
+        );
+        desc.reachable_on = Some(b32);
+        let stamped = tokio::task::spawn_blocking(move || {
+            stamp_discovery_app_data(
+                &desc,
+                &transport_id,
+                transport_enabled,
+                encrypt,
+                network_identity.as_deref(),
+            )
+        })
+        .await;
+        match stamped {
+            Ok(Some(app_data)) => {
+                let _ = fill.set(app_data);
+            }
+            Ok(None) => tracing::warn!(
+                "discovery: could not build announce data for I2P interface \"{}\", skipping",
+                label
+            ),
+            Err(e) => tracing::warn!(
+                "discovery: stamping the announce for I2P interface \"{}\" failed: {}",
+                label,
+                e
+            ),
+        }
+    });
+    slot
 }
 
 /// Producer-side discovery wiring (Codeberg #107): the registered discovery
@@ -1827,50 +1955,53 @@ impl ReticulumNode {
             (dest_hash, transport_id, transport_enabled)
         };
 
-        let mut rng = rand_core::OsRng;
         let mut jobs = Vec::new();
         for (cfg, desc) in discoverable {
             let interval =
                 Duration::from_secs(crate::discovery::resolve_announce_interval_secs(cfg));
-            let app_data = if cfg.discovery_encrypt {
-                match &network_identity {
-                    Some(id) => leviculum_core::discovery::build_announce_app_data_encrypted(
-                        &desc,
-                        &transport_id,
-                        transport_enabled,
-                        id,
-                        &mut rng,
-                    ),
-                    None => {
-                        tracing::error!(
-                            "discovery: interface {:?} requests discovery_encrypt but no \
-                             network_identity is configured, skipping",
-                            desc.name
-                        );
-                        None
-                    }
-                }
-            } else {
-                leviculum_core::discovery::build_announce_app_data(
-                    &desc,
-                    &transport_id,
-                    transport_enabled,
-                    &mut rng,
-                )
-            };
-            let Some(app_data) = app_data else {
-                tracing::warn!(
-                    "discovery: could not build announce data for {} interface, skipping",
-                    desc.interface_type
-                );
-                continue;
-            };
             let label = desc
                 .name
                 .clone()
                 .unwrap_or_else(|| desc.interface_type.clone());
+            let payload = if crate::discovery::publishes_runtime_address(cfg) {
+                let Some(endpoint) = self
+                    .inventory
+                    .lock_recover()
+                    .i2p_endpoint_of_section(&cfg.name)
+                else {
+                    tracing::warn!(
+                        "discovery: I2P interface {} has no endpoint to read its address from, skipping",
+                        cfg.name
+                    );
+                    continue;
+                };
+                JobPayload::Awaiting(spawn_i2p_discovery_stamp(
+                    endpoint,
+                    desc,
+                    transport_id,
+                    transport_enabled,
+                    cfg.discovery_encrypt,
+                    network_identity.clone(),
+                    label.clone(),
+                ))
+            } else {
+                let Some(app_data) = stamp_discovery_app_data(
+                    &desc,
+                    &transport_id,
+                    transport_enabled,
+                    cfg.discovery_encrypt,
+                    network_identity.as_deref(),
+                ) else {
+                    tracing::warn!(
+                        "discovery: could not build announce data for {} interface, skipping",
+                        desc.interface_type
+                    );
+                    continue;
+                };
+                JobPayload::Ready(app_data)
+            };
             jobs.push(DiscoveryAnnounceJob {
-                app_data,
+                payload,
                 interval,
                 last_announce: None,
                 label,
@@ -5683,12 +5814,15 @@ async fn run_event_loop(
             } => {
                 if let Some(wiring) = discovery_announce.as_mut() {
                     let now = tokio::time::Instant::now();
-                    // Due = never announced, or spacing elapsed. Pick the most
-                    // overdue (largest time since last announce), like Python's
-                    // `sort(key=now-last, reverse=True)[0]`.
+                    // Due = has a payload, and never announced or spacing
+                    // elapsed. Pick the most overdue (largest time since last
+                    // announce), like Python's `sort(key=now-last,
+                    // reverse=True)[0]`. A job still waiting for its payload
+                    // is not due (see `JobPayload`).
                     let selected = wiring
                         .jobs
                         .iter_mut()
+                        .filter_map(|j| j.ready_app_data().is_some().then_some(j))
                         .filter(|j| match j.last_announce {
                             None => true,
                             Some(last) => now.duration_since(last) >= j.interval,
@@ -5700,7 +5834,7 @@ async fn run_event_loop(
 
                     if let Some(job) = selected {
                         job.last_announce = Some(now);
-                        let app_data = job.app_data.clone();
+                        let app_data = job.ready_app_data().map(<[u8]>::to_vec).unwrap_or_default();
                         let label = job.label.clone();
                         let output = {
                             let mut core = inner.lock_recover();
@@ -6914,6 +7048,106 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The descriptor of a connectable I2P section, at the lowest stamp cost
+    /// so the test stamps in milliseconds.
+    fn i2p_discovery_desc() -> leviculum_core::discovery::InterfaceDescriptor {
+        leviculum_core::discovery::InterfaceDescriptor {
+            interface_type: "I2PInterface".into(),
+            name: Some("I2P".into()),
+            stamp_value: Some(1),
+            ..Default::default()
+        }
+    }
+
+    /// Wait (bounded) for a job to hold a payload, and decode it.
+    async fn i2p_job_reachable_on(job: &mut DiscoveryAnnounceJob) -> Option<String> {
+        let start = tokio::time::Instant::now();
+        while job.ready_app_data().is_none() && start.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let app_data = job.ready_app_data()?.to_vec();
+        let di = leviculum_core::discovery::parse_announce_app_data(&app_data, &[7u8; 16], 1)
+            .expect("the payload decodes");
+        assert_eq!(di.interface_type, "I2PInterface");
+        di.reachable_on
+    }
+
+    fn i2p_job(endpoint: &Arc<crate::interfaces::inventory::I2pEndpoint>) -> DiscoveryAnnounceJob {
+        DiscoveryAnnounceJob {
+            payload: JobPayload::Awaiting(spawn_i2p_discovery_stamp(
+                Arc::clone(endpoint),
+                i2p_discovery_desc(),
+                [7u8; 16],
+                true,
+                false,
+                None,
+                "I2P".into(),
+            )),
+            interval: Duration::from_secs(3600),
+            last_announce: None,
+            label: "I2P".into(),
+        }
+    }
+
+    /// Order one: the endpoint knows its b32 before the announcer looks (a
+    /// stored key). The first payload carries it as `reachable_on`, bare, as
+    /// the reference sends `interface.b32` (Discovery.py:143-144).
+    #[tokio::test]
+    async fn an_i2p_announce_carries_a_b32_known_at_start() {
+        let endpoint = Arc::new(crate::interfaces::inventory::I2pEndpoint::new(true));
+        endpoint.set_b32("p377jcvi6whf5keegjjbtv6mrpruhlyp56lebraya4hv7dvbbkqq");
+        let mut job = i2p_job(&endpoint);
+        assert_eq!(
+            i2p_job_reachable_on(&mut job).await.as_deref(),
+            Some("p377jcvi6whf5keegjjbtv6mrpruhlyp56lebraya4hv7dvbbkqq")
+        );
+    }
+
+    /// Order two: the announcer looks before the endpoint knows its b32 (a
+    /// fresh key, which comes with the first SESSION CREATE). The job has no
+    /// payload and is not due, so no announce without the address goes out;
+    /// once the b32 arrives the payload carries it.
+    #[tokio::test]
+    async fn an_i2p_announce_waits_for_a_b32_learned_later() {
+        let endpoint = Arc::new(crate::interfaces::inventory::I2pEndpoint::new(true));
+        let mut job = i2p_job(&endpoint);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            job.ready_app_data().is_none(),
+            "no payload, so no announce, while the address is unknown"
+        );
+        endpoint.set_b32("iryr3x4k4sgz6tnhraseru5edf5a4byikgajg44sow4w5xlaj34q");
+        assert_eq!(
+            i2p_job_reachable_on(&mut job).await.as_deref(),
+            Some("iryr3x4k4sgz6tnhraseru5edf5a4byikgajg44sow4w5xlaj34q")
+        );
+    }
+
+    /// Only a connectable I2P section waits for a runtime address; one that
+    /// is not connectable publishes none, as in the reference, and every
+    /// other type is stamped at start.
+    #[test]
+    fn only_a_connectable_i2p_section_publishes_a_runtime_address() {
+        let mut cfg = crate::config::InterfaceConfig {
+            name: "I2P".into(),
+            interface_type: "I2PInterface".into(),
+            discoverable: true,
+            connectable: Some(true),
+            ..Default::default()
+        };
+        assert!(crate::discovery::publishes_runtime_address(&cfg));
+        let desc = crate::discovery::descriptor_from_config(&cfg).expect("I2P is discoverable");
+        assert_eq!(
+            desc.reachable_on, None,
+            "filled at runtime, not from config"
+        );
+        cfg.connectable = Some(false);
+        assert!(!crate::discovery::publishes_runtime_address(&cfg));
+        assert!(crate::discovery::descriptor_from_config(&cfg).is_some());
+        cfg.interface_type = "TCPServerInterface".into();
+        assert!(!crate::discovery::publishes_runtime_address(&cfg));
+    }
 
     /// A configured TCP client now carries the reference display name, but
     /// its tunnel hash still derives from the internal `tcp_client_<idx>`:

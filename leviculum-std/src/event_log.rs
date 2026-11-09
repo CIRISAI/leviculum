@@ -789,6 +789,20 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "TCP_TOTAL_CAPPED",
         required_keys: &["iface", "source", "held"],
     },
+    // An I2P peer's tunnel read nothing for longer than the stale threshold
+    // (20 s, the reference's `I2P_PROBE_AFTER*2`, I2PInterface.py:681): the
+    // mark rnstatus shows as `Tunnel Unresponsive`. `idle_ms` is the silence
+    // when it was noticed. The teardown still waits for the 110 s read
+    // timeout, so this is the early sign, not an action (1588).
+    EventSchema {
+        name: "I2P_TUNNEL_STALE",
+        required_keys: &["iface", "idle_ms"],
+    },
+    // The same tunnel read a byte again; `stale_ms` is how long it was stale.
+    EventSchema {
+        name: "I2P_TUNNEL_ACTIVE",
+        required_keys: &["iface", "stale_ms"],
+    },
     // A connection that delivered no valid frame was closed: `reason` is
     // `timeout` (the silent timeout in force) or `evicted` (room for a
     // newcomer at the total cap). One line per 10 s; `suppressed` counts the
@@ -1850,7 +1864,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4971`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:5102`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

@@ -918,8 +918,9 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
     }
 
     // noise_floor / cpu / mem / battery / airtime / channel_load / switch_id /
-    // endpoint / via / tunnelstate / i2p_b32: lnsd never emits these, but honour
-    // them if a stats source ever does (rnstatus.py:475-540).
+    // endpoint / via / tunnelstate / i2p_b32 (rnstatus.py:475-540). lnsd emits
+    // tunnelstate and i2p_b32 for its I2P rows since 1588; the rest only a
+    // reference stats source does.
     render_optional_hw_fields(out, ifstat);
 
     // ifac access line (rnstatus.py:535-537).
