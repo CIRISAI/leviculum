@@ -44,6 +44,7 @@ use loquax::send::{run_send_auto, AutoError, Leg, SendError, SendOptions};
 use loquax::store::Store;
 use loquax::ui::history::StoreRead;
 use loquax::ui::map::{MapSetup, MapWant};
+use loquax::ui::viewload::{ViewLoads, ViewWants};
 use loquax::ui::{update, MapLoad, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 use loquax::{display_name, identity};
@@ -255,6 +256,11 @@ pub(crate) struct Shell {
     pub(crate) maps: Maps,
     /// The autoload: regions the model asks for, one load at a time.
     loader: Loader,
+    /// The terminal's map pane's scheduler (1527, [`ViewLoads`]): every
+    /// frame of the open map is shown to it, and the screen at its zoom
+    /// loads first. `None` in the window, whose map keeps its own view and
+    /// sends the scheduler's decision ([`Shell::map_schedule`]).
+    pub(crate) map_drive: Option<ViewLoads>,
     /// The origin of the monotonic clock the mailbox schedule runs on.
     origin: tokio::time::Instant,
     /// On a client of a home node: the watching link's task, its word on
@@ -858,6 +864,7 @@ impl Shell {
         }
         let steps = self.loader.poll(self.elapsed_ms());
         self.map_steps(steps);
+        self.drive_map();
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
         self.listen();
         let browsed = self.browsing.told(&self.model);
@@ -1062,6 +1069,41 @@ impl Shell {
         self.map_steps(steps);
     }
 
+    /// The scheduler's decision for the screen (1527, 1292): the window's
+    /// map sends it, the terminal's pane makes it in [`Shell::drive_map`].
+    pub(crate) fn map_schedule(&mut self, wants: ViewWants) {
+        if !wants.here.is_empty() {
+            tracing::info!(
+                "MAPLOAD view share={:.2} here={} ahead={}",
+                wants.share,
+                wants.here.len(),
+                wants.ahead.len()
+            );
+        }
+        let steps = self
+            .loader
+            .schedule(wants.here, wants.ahead, self.elapsed_ms());
+        self.map_steps(steps);
+    }
+
+    /// The terminal's open map shown to the scheduler (1527): every pump
+    /// decides for the view the pane draws, a decision every
+    /// [`loquax::ui::viewload::DECIDE_MS`] while a drag moves it.
+    fn drive_map(&mut self) {
+        let Some(loads) = self.map_drive.as_mut() else {
+            return;
+        };
+        let Some(state) = self.model.map.as_ref().filter(|_| self.model.map_autoload) else {
+            return;
+        };
+        let view = loquax::ui::map::viewport(state, self.model.map_area(), &self.model.map_setup);
+        let moving = self.model.map_dragging();
+        let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Some(wants) = loads.decide(&view, &self.model.map_setup.regions, now, moving, None) {
+            self.map_schedule(wants);
+        }
+    }
+
     /// The regions on disk, told to the model's map setup.
     fn regions_changed(&mut self) {
         let regions = self.maps.headers();
@@ -1126,6 +1168,12 @@ impl Shell {
                     tracing::info!("MAPLOAD skipped box={} why={why}", box_words(&want));
                 }
             }
+        }
+        // Whether a load runs or waits for the screen (1527): the
+        // window's chip and the terminal's title say so.
+        let here = self.loader.loading_here();
+        if here != self.model.map_here {
+            self.apply(UiEvent::MapLoad(MapLoad::Here(here)));
         }
     }
 
@@ -1860,6 +1908,7 @@ pub(crate) async fn start(
         outputs: Vec::new(),
         maps,
         loader,
+        map_drive: Some(ViewLoads::new()),
         origin: tokio::time::Instant::now(),
         watch,
         watching: false,

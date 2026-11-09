@@ -1390,6 +1390,9 @@ pub struct UiModel<B> {
     pub map_theme: Option<ThemeFlag>,
     /// The word the map's title carries while a region loads.
     pub map_loading: Option<String>,
+    /// A load runs or waits for what is on screen (1527): the title says
+    /// [`MAP_LOADING_HERE`], the window's chip too.
+    pub map_here: bool,
     /// The glyph test pattern is over the map (`g`, 1093).
     pub map_glyph_test: bool,
     /// The tick until which the map's title names the way it is drawn,
@@ -1637,6 +1640,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             map_autoload: false,
             map_theme: None,
             map_loading: None,
+            map_here: false,
             map_glyph_test: false,
             map_named_until: None,
             map_wants: Vec::new(),
@@ -3345,6 +3349,9 @@ pub enum MapLoad {
         want: map::MapWant,
         toast: Option<String>,
     },
+    /// Whether a load runs or waits for what is on screen (1527, the
+    /// loader's `loading_here`): "Loading the map of this area".
+    Here(bool),
 }
 
 /// What the shell is asked to do.
@@ -4591,7 +4598,7 @@ fn map_load<B: InputBuffer>(model: &mut UiModel<B>, load: MapLoad) {
             let area = model.map_area();
             let setup = model.map_setup.clone();
             if let Some(state) = model.map.as_mut() {
-                if want.reason == map::LoadReason::View || state.centre != want.centre {
+                if want.reason != map::LoadReason::Place || state.centre != want.centre {
                     return;
                 }
                 let (centre, zoom) = map::fit_at(want.centre, area, &setup);
@@ -4605,6 +4612,7 @@ fn map_load<B: InputBuffer>(model: &mut UiModel<B>, load: MapLoad) {
                 model.toast(ToastKind::Error, line);
             }
         }
+        MapLoad::Here(here) => model.map_here = here,
     }
 }
 
@@ -7228,6 +7236,13 @@ pub const MAP_NAMED_TICKS: u64 = 8;
 /// The map title's word while a region loads.
 pub const MAP_LOADING: &str = "loading map";
 
+/// The map title's words while a region loads for what is on screen
+/// (1527), the phone chip's "Loading the map of this area".
+pub const MAP_LOADING_HERE: &str = "loading the map of this area";
+
+/// The window's chip for the same (1527), the phone's words.
+pub const MAP_LOADING_HERE_WORDS: &str = "Loading the map of this area";
+
 /// The toast for `load map area` over an area loaded already.
 pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
 
@@ -8013,12 +8028,18 @@ fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
                 strings::StrId::NearbyEnterAdds.text(strings::Lang::En)
             )
         });
+    // The screen's own load says so in words (1527), as the phone's chip
+    // does.
+    let loading_word = match model.map_here {
+        true => Some(MAP_LOADING_HERE.to_string()),
+        false => model.map_loading.clone(),
+    };
     let (messages_title, messages_title_right) = match &map {
         Some(shown) => (
             format!("{MAP_TITLE}{card}"),
             // No zoom number and no count on screen (1447, walk 1 finding
             // 22): the debug overlay alone shows them.
-            match (&model.map_loading, model.debug_overlay) {
+            match (&loading_word, model.debug_overlay) {
                 (Some(word), true) => format!(
                     "{named}z{} · {} in view · {word}",
                     shown.viewport.zoom(),
@@ -15369,6 +15390,23 @@ pub(crate) mod tests {
             max_zoom: want.zooms.1,
             ..florence()
         }
+    }
+
+    /// The terminal says in words when a load runs for what is on
+    /// screen (1527), over the older "loading map", and goes back to it
+    /// once the screen's load is done while another still runs.
+    #[test]
+    fn the_terminal_says_the_map_of_this_area_loads() {
+        let mut model = frankfurt(true);
+        let effects = update(&mut model, key(KeyCode::Enter));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        update(&mut model, UiEvent::MapLoad(MapLoad::Started(want.clone())));
+        update(&mut model, UiEvent::MapLoad(MapLoad::Here(true)));
+        assert_eq!(view(&model).messages_title_right, MAP_LOADING_HERE);
+        update(&mut model, UiEvent::MapLoad(MapLoad::Here(false)));
+        assert_eq!(view(&model).messages_title_right, MAP_LOADING);
     }
 
     /// Going to a place no region holds asks for its region once (1089):

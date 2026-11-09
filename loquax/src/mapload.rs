@@ -12,6 +12,12 @@
 //!   [`MAX_AWAY`] of them. A load whose area left the screen cannot be
 //!   paused (the cut reads the archive in one call), so a load for the
 //!   screen starts beside it, two at most.
+//! - The screen's own box at its zoom (1527, [`LoadReason::Screen`]) goes
+//!   before the cells under the screen and starts beside any load but
+//!   another for the screen; a cell for the screen waits until it landed,
+//!   so the screen's tiles draw before a byte of the cell arrives. A
+//!   screen's box the view left is dropped while it waits: the cells
+//!   hold its area.
 //! - A box that failed backs off, 30 s doubling to an hour, so a source that
 //!   is down is not asked again on every key. A box that found no internet
 //!   does not: the next view asks again, and "offline" holds only until a
@@ -48,7 +54,7 @@ use leviculum_mapcut::load::{cut_planned, plan, Loaded, TooLarge, Want};
 use leviculum_mapcut::pmtiles::Archive;
 
 use crate::picture::{is_auto, Maps, AUTO_PREFIX};
-use crate::ui::map::MapWant;
+use crate::ui::map::{LoadReason, MapWant};
 
 /// The most archive bytes one load fetches: the deepest zoom is lowered
 /// until the box's tiles come under it. A dense 12 km city box was 20 MB
@@ -156,6 +162,8 @@ pub struct Landed {
 pub enum Rank {
     /// Asked for by hand: a place, the pins, "load this area".
     Asked,
+    /// The screen itself at its zoom (1527).
+    Screen,
     /// Under the screen.
     Here,
     /// Next to the screen.
@@ -313,7 +321,7 @@ impl Loader {
         let place = |b: &Bounds| {
             here.iter()
                 .position(|w| w.bounds == *b)
-                .map(|i| (Rank::Here, i))
+                .map(|i| (Self::rank_here(&here[i]), i))
                 .or_else(|| {
                     ahead
                         .iter()
@@ -328,9 +336,12 @@ impl Loader {
         }
         let mut keyed: Vec<((Rank, usize), Queued)> = Vec::new();
         for (n, mut queued) in std::mem::take(&mut self.queue).into_iter().enumerate() {
-            let key = match queued.rank {
-                Rank::Asked => (Rank::Asked, n),
-                _ => place(&queued.want.bounds).unwrap_or((Rank::Away, n)),
+            let key = match (queued.rank, place(&queued.want.bounds)) {
+                (Rank::Asked, _) => (Rank::Asked, n),
+                (_, Some(key)) => key,
+                // A screen's box the view left: the cells hold its area.
+                (_, None) if queued.want.reason == LoadReason::Screen => continue,
+                (_, None) => (Rank::Away, n),
             };
             queued.rank = key.0;
             keyed.push((key, queued));
@@ -338,14 +349,10 @@ impl Loader {
         for (i, want) in here.into_iter().enumerate() {
             if self.refuse(&want, now_ms).is_none()
                 && !keyed.iter().any(|k| k.1.want.bounds == want.bounds)
+                && !self.brought(&want)
             {
-                keyed.push((
-                    (Rank::Here, i),
-                    Queued {
-                        want,
-                        rank: Rank::Here,
-                    },
-                ));
+                let rank = Self::rank_here(&want);
+                keyed.push(((rank, i), Queued { want, rank }));
             }
         }
         for (i, want) in ahead.into_iter().enumerate() {
@@ -374,6 +381,27 @@ impl Loader {
             .map(|k| k.1)
             .collect();
         self.start_next()
+    }
+
+    /// Whether `want`, the screen's own box (1527), is what a load
+    /// running already brings: its box and zooms inside that load's. Two
+    /// loads of the same tiles share the link and both arrive later.
+    fn brought(&self, want: &MapWant) -> bool {
+        want.reason == LoadReason::Screen
+            && self.running.iter().any(|r| {
+                r.want.bounds.holds(&want.bounds)
+                    && r.want.zooms.0 <= want.zooms.0
+                    && r.want.zooms.1 >= want.zooms.1
+            })
+    }
+
+    /// The rank of `want` in the scheduler's `here`: the screen's own box
+    /// first (1527), the cells after it.
+    fn rank_here(want: &MapWant) -> Rank {
+        match want.reason {
+            LoadReason::Screen => Rank::Screen,
+            _ => Rank::Here,
+        }
     }
 
     /// What finished since the last call, and the next loads started.
@@ -460,15 +488,18 @@ impl Loader {
         });
     }
 
-    /// Start the queue's first boxes: one when nothing runs, and one for
-    /// the screen beside loads for areas the view left.
+    /// Start the queue's first boxes: one when nothing runs, one for the
+    /// screen beside loads for areas the view left, and the screen's own
+    /// box (1527) beside any load but another for the screen itself.
     fn start_next(&mut self) -> Vec<Step> {
         let mut steps = Vec::new();
         while let Some(first) = self.queue.first() {
-            let free = self.running.is_empty()
-                || self.running.len() < MAX_RUNNING
-                    && first.rank.on_screen()
-                    && !self.running.iter().any(|r| r.rank.on_screen());
+            let beside = match first.rank {
+                Rank::Screen => !self.running.iter().any(|r| r.rank <= Rank::Screen),
+                rank if rank.on_screen() => !self.running.iter().any(|r| r.rank.on_screen()),
+                _ => false,
+            };
+            let free = self.running.is_empty() || self.running.len() < MAX_RUNNING && beside;
             if !free {
                 break;
             }
@@ -841,6 +872,14 @@ mod tests {
         want(112_615_000 + n * 1000)
     }
 
+    /// The `n`th box as the screen's own load (1527).
+    fn screen(n: i32) -> MapWant {
+        MapWant {
+            reason: LoadReason::Screen,
+            ..nth(n)
+        }
+    }
+
     /// The queue as the numbers of [`nth`]'s boxes.
     fn order(loader: &Loader) -> Vec<(i32, Rank, bool)> {
         loader
@@ -882,6 +921,84 @@ mod tests {
             ]
         );
         assert!(loader.loading_here());
+        // The screen's own box (1527) goes before the cells under it; the
+        // view moves, the old screen box is dropped, not kept as left.
+        let (s, t) = (screen(6), screen(7));
+        loader.schedule(vec![s.clone(), nth(4), nth(3)], Vec::new(), 500);
+        assert_eq!(
+            order(&loader),
+            [
+                (1, Rank::Asked, true),
+                (6, Rank::Screen, false),
+                (4, Rank::Here, false),
+                (3, Rank::Here, false),
+                (2, Rank::Away, false)
+            ]
+        );
+        loader.schedule(vec![t, nth(3)], Vec::new(), 750);
+        assert_eq!(
+            order(&loader),
+            [
+                (1, Rank::Asked, true),
+                (7, Rank::Screen, false),
+                (3, Rank::Here, false),
+                (4, Rank::Away, false),
+                (2, Rank::Away, false)
+            ],
+            "the screen box the view left is gone: {s:?}"
+        );
+    }
+
+    /// The screen's own box loads first and alone (1527): the cell under
+    /// the screen waits until it landed, so no byte of the cell comes
+    /// before the screen's tiles; a screen's box starts beside a cell for
+    /// the screen that runs already, never beside another screen box.
+    #[test]
+    fn the_screens_own_box_loads_before_the_cell_around_it() {
+        let (_source, source) = stalling();
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut loader = Loader::new(Maps::new(Some(dir.path().to_path_buf())), source, 1 << 30);
+        let (s, a, n) = (screen(1), nth(2), nth(5));
+        let steps = loader.schedule(vec![s.clone(), a.clone()], vec![n.clone()], 0);
+        assert_eq!(steps, [Step::Started(s.clone())], "the screen alone");
+        assert_eq!(
+            order(&loader),
+            [
+                (1, Rank::Screen, true),
+                (2, Rank::Here, false),
+                (5, Rank::Ahead, false)
+            ]
+        );
+        assert!(loader.loading_here());
+        // A cell for the screen runs (the screen's box landed meanwhile,
+        // here: was never asked); a new screen box starts beside it.
+        let (_source, source) = stalling();
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut loader = Loader::new(Maps::new(Some(dir.path().to_path_buf())), source, 1 << 30);
+        assert_eq!(
+            loader.schedule(vec![a.clone()], Vec::new(), 0),
+            [Step::Started(a.clone())]
+        );
+        let t = screen(3);
+        assert_eq!(
+            loader.schedule(vec![t.clone(), a.clone()], Vec::new(), 250),
+            [Step::Started(t.clone())],
+            "beside the cell"
+        );
+        // A second screen box waits for the first, which the view left:
+        // it runs on as left, the new one waits for a free slot.
+        let u = screen(4);
+        assert!(loader
+            .schedule(vec![u.clone(), a.clone()], Vec::new(), 500)
+            .is_empty());
+        assert_eq!(
+            order(&loader),
+            [
+                (2, Rank::Here, true),
+                (3, Rank::Away, true),
+                (4, Rank::Screen, false)
+            ]
+        );
     }
 
     /// A load whose area the view left runs on, as the cut cannot pause;
@@ -916,6 +1033,14 @@ mod tests {
         loader.schedule(Vec::new(), Vec::new(), 1000);
         let queued = order(&loader).iter().filter(|o| !o.2).count();
         assert_eq!(queued, MAX_AWAY);
+        // The screen's own box (1527) goes before every queued box, and
+        // waits only for a free slot: both run, for areas left.
+        let s = screen(40);
+        assert!(loader
+            .schedule(vec![s.clone()], Vec::new(), 1250)
+            .is_empty());
+        assert_eq!(order(&loader)[2], (40, Rank::Screen, false));
+        assert!(loader.loading_here());
     }
 
     /// "Offline" is a state, not a latch (1292): a load that found no

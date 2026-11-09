@@ -72,11 +72,13 @@ impl Default for MapSetup {
 }
 
 /// Why a region is loaded (1089): the reader went to a place, or asked for
-/// the visible area.
+/// the visible area; or the scheduler asked for the screen itself at its
+/// zoom, which loads before anything else (1527, [`super::viewload`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadReason {
     Place,
     View,
+    Screen,
 }
 
 impl LoadReason {
@@ -85,6 +87,7 @@ impl LoadReason {
         match self {
             Self::Place => "place",
             Self::View => "view",
+            Self::Screen => "screen",
         }
     }
 }

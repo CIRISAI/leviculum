@@ -31,7 +31,8 @@
 //!
 //! The map's autoload (1089) runs in the shell: the window decides what to
 //! ask with the model's own rules ([`want_pins`] when the pins first arrive,
-//! [`want_view`] on `d`) and sends it over; the shell's [`Seen`] carries the
+//! [`want_view`] on `d`, and every frame the core's scheduler,
+//! [`ViewLoads`], 1527: the screen at its zoom first) and sends it over; the shell's [`Seen`] carries the
 //! loading word and the maps directory's epoch, and a new epoch reads the
 //! regions again and paints the view anew.
 
@@ -40,6 +41,10 @@ mod bench;
 pub mod chat;
 #[cfg(test)]
 mod counts;
+/// The first-tile measurement's archive and disk (1527), the phone's too.
+#[cfg(test)]
+#[path = "../tests/support/first_tile.rs"]
+mod first_tile;
 #[cfg(test)]
 mod idle;
 pub mod map;
@@ -78,7 +83,8 @@ use loquax::ui::intent::{Intent, Messages, Target};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
 use loquax::ui::scene::{LayoutClass, NodeId, Scene, TabId};
 use loquax::ui::strings::{Lang, StrId};
-use loquax::ui::{Pane, UiEvent, MAP_LOADED_ALREADY};
+use loquax::ui::viewload::{ViewLoads, ViewWants};
+use loquax::ui::{Pane, UiEvent, MAP_LOADED_ALREADY, MAP_LOADING_HERE_WORDS};
 use loquax::when::WallTime;
 
 use crate::desktop;
@@ -204,7 +210,11 @@ impl Seen {
             tracks: model.track_input(),
             track_window: model.track_window,
             notice: model.toasts.last().map(|t| t.text.clone()),
-            loading: model.map_loading.clone(),
+            // The screen's own load in the phone chip's words (1527).
+            loading: match model.map_here {
+                true => Some(MAP_LOADING_HERE_WORDS.to_string()),
+                false => model.map_loading.clone(),
+            },
             maps,
             autoload: model.map_autoload,
             style: Style::SCREEN.in_theme(map_theme(model.map_theme, None)),
@@ -283,6 +293,8 @@ impl Driving {
 #[derive(Clone, Debug)]
 pub enum Want {
     Map(MapWant),
+    /// The core scheduler's decision for the map's frame (1527).
+    MapView(ViewWants),
     Ui(UiEvent),
     /// A gesture or a button of the recording (1276), timed by the shell
     /// on the clock the model's recording counts by.
@@ -325,6 +337,8 @@ pub async fn run(options: ShellOptions) -> ExitCode {
     // The Browse tab's pictures (1369): lnomad's window code holds them in
     // the shell, which the window draws them from.
     shell.browsing.pictures = Some(Arc::default());
+    // The window's map runs the scheduler itself (1527), on its own view.
+    shell.map_drive = None;
     let frames = Frames::new(shell.maps.clone());
     let (seen_tx, seen_rx) = unbounded();
     let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -429,6 +443,7 @@ async fn drive(
             _ = &mut leave => break,
             Some(want) = asks.recv() => match want {
                 Want::Map(want) => shell.map_ask(want),
+                Want::MapView(wants) => shell.map_schedule(wants),
                 Want::Ui(event) => shell.apply(event),
                 Want::Record { peer, input } => shell.record(peer, input),
                 Want::Attach { peer, path, photo } => shell.attach(peer, &path, photo),
@@ -907,6 +922,9 @@ struct App {
     /// The tracks last derived, and at what.
     track_cache: std::cell::RefCell<Option<(TrackKey, Vec<loquax::ui::tracks::Track>)>>,
     asks: Option<Asks>,
+    /// The core's scheduler over the map's frames (1527): the screen at its
+    /// zoom loads first.
+    loads: ViewLoads,
     /// The view the last fit chose: a region landing under it fits again.
     fitted_at: Option<(World, u32)>,
     frames: Arc<Mutex<Frames>>,
@@ -1092,6 +1110,7 @@ impl App {
             focused: true,
             prefetching: false,
             motion: Motion::default(),
+            loads: ViewLoads::new(),
             origin: Instant::now(),
             screen: Screen::Chats,
             window: Size::new(WINDOW.0, WINDOW.1),
@@ -2249,10 +2268,34 @@ impl App {
         true
     }
 
+    /// The map's view shown to the core's scheduler at every frame asked
+    /// (1527): what it decides goes to the shell's loader, the screen at
+    /// its zoom first. The platform only downloads what the core ranked.
+    fn drive_loads(&mut self) {
+        if !self.seen.autoload || self.screen != Screen::Map || self.size.is_none() {
+            return;
+        }
+        let Some(asks) = &self.asks else {
+            return;
+        };
+        let view = self.view.at_zoom(self.view.tile_zoom());
+        let now = self.now_ms();
+        let heading = self.motion.heading(now);
+        let moving = self.moving();
+        if let Some(wants) = self
+            .loads
+            .decide(&view, &self.setup.regions, now, moving, heading)
+        {
+            let _ = asks.send(Want::MapView(wants));
+        }
+    }
+
     /// The worker's next job, when it is free: the frame the view asks
     /// for unless it is on screen and owes nothing, else a prefetch batch
     /// while the frame on screen rests and the window has the focus.
     fn next_job(&mut self) -> Option<Job> {
+        // Every frame the view is shown to the scheduler, busy or not.
+        self.drive_loads();
         if self.busy || self.screen != Screen::Map {
             return None;
         }
@@ -3487,6 +3530,362 @@ mod tests {
         let control = draw(&Mutex::new(ground), moved.order.clone());
         let differ = overlap(&rgba(&control));
         assert!(differ > 1000, "without names: {differ} pixels differ");
+    }
+
+    /// The scheduler's decisions the window sent the shell.
+    fn decisions(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Want>) -> Vec<ViewWants> {
+        let mut out = Vec::new();
+        while let Ok(want) = rx.try_recv() {
+            if let Want::MapView(wants) = want {
+                out.push(wants);
+            }
+        }
+        out
+    }
+
+    /// A pan into the empty asks the loader (1527): the window shows its
+    /// map's frames to the core's scheduler as the phone does, and a drag
+    /// four screens east of the Florence region sends the shell the
+    /// screen's own box at its zoom first, holding the screen, then the
+    /// cells. The control: with the autoload off the same drag sends
+    /// nothing.
+    #[test]
+    fn a_pan_into_the_empty_asks_the_loader() {
+        for autoload in [true, false] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = window_over_florence(Vec::new(), 16 * MILLI);
+            app.asks = Some(tx);
+            app.seen.autoload = autoload;
+            run(&mut app);
+            // The start is the fixture's edge: an eighth of it uncovered.
+            let held = decisions(&mut rx);
+            assert_eq!(held.len(), usize::from(autoload), "{held:?}");
+            app.apply(Message::Pointer(Pointer::Down(Point::new(400.0, 150.0))));
+            for x in (0..40).rev() {
+                app.apply(Message::Pointer(Pointer::Move(Point::new(
+                    x as f32 * 10.0,
+                    150.0,
+                ))));
+            }
+            for _ in 0..4 {
+                app.apply(Message::Pointer(Pointer::Up));
+                app.apply(Message::Pointer(Pointer::Down(Point::new(400.0, 150.0))));
+                app.apply(Message::Pointer(Pointer::Move(Point::new(0.0, 150.0))));
+            }
+            app.apply(Message::Pointer(Pointer::Up));
+            run(&mut app);
+            let sent = decisions(&mut rx);
+            if !autoload {
+                assert!(held.is_empty() && sent.is_empty(), "{sent:?}");
+                continue;
+            }
+            let last = sent.last().expect("a decision at rest");
+            assert_eq!(last.share, 1.0, "in the empty");
+            let first = &last.here[0];
+            assert_eq!(
+                first.reason,
+                loquax::ui::map::LoadReason::Screen,
+                "{last:?}"
+            );
+            assert_eq!(first.zooms, (14, 15));
+            let screen = app.view.at_zoom(app.view.tile_zoom()).bounds();
+            assert!(first.bounds.holds(&screen), "{:?} {screen:?}", first.bounds);
+            assert!(last.here[1..]
+                .iter()
+                .all(|w| w.reason == loquax::ui::map::LoadReason::View));
+        }
+    }
+
+    use super::first_tile;
+
+    /// The window's first-tile walk (1527): the map at Lew's phone size
+    /// (1527 x 2099, a density of one) over the start region of
+    /// [`first_tile::start_region`], the synthetic Grunewald archive
+    /// served throttled, the shell's map half (the loader) run here. The
+    /// window draws no frame: what it would draw is read from the disk,
+    /// the next frame over the screen draws a tile that is there.
+    struct WindowWalk {
+        _serve: leviculum_mapcut::serve::Serve,
+        _dir: tempfile::TempDir,
+        app: App,
+        rx: tokio::sync::mpsc::UnboundedReceiver<Want>,
+        loader: loquax::mapload::Loader,
+        maps: loquax::picture::Maps,
+        start: Instant,
+        start_region: leviculum_map::region::Header,
+        uncovered_ms: Option<u64>,
+        loading_ms: Option<u64>,
+        on_disk_ms: Option<u64>,
+        cell_ms: Option<u64>,
+    }
+
+    const WALK_SIZE: (u32, u32) = (1527, 2099);
+
+    impl WindowWalk {
+        fn new() -> Self {
+            use leviculum_mapcut::serve::Serve;
+            let serve = Serve::start(vec![("p.pmtiles".into(), first_tile::first_tile_archive())])
+                .expect("serve");
+            let dir = tempfile::tempdir().expect("home");
+            let path = dir.path().join("maps");
+            std::fs::create_dir_all(&path).expect("maps");
+            let at = project(LatLon::from_degrees(
+                first_tile::FIRST_TILE_AT.0,
+                first_tile::FIRST_TILE_AT.1,
+            ));
+            let url = serve.url("p.pmtiles");
+            let start_region = first_tile::start_region(&path, &url, at, WALK_SIZE);
+            serve.throttle(first_tile::FIRST_TILE_RATE, Duration::from_millis(20));
+            let maps = loquax::picture::Maps::new(Some(path));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(Frames::new(maps.clone()), Some(tx));
+            app.screen = Screen::Map;
+            let (w, h) = WALK_SIZE;
+            app.apply(Message::MapSize(Size::new(w as f32, h as f32)));
+            let mut seen = app.seen.clone();
+            seen.autoload = true;
+            seen.maps = maps.epoch();
+            app.apply(Message::Seen(Box::new(seen)));
+            app.view = ExactView::new(at, 16 * MILLI, w, h);
+            app.hold();
+            // The walk's view is the reader's: a region landing fits
+            // nothing again.
+            app.fitted = true;
+            // No frame is drawn: the walk reads the disk.
+            app.busy = true;
+            let loader = loquax::mapload::Loader::new(
+                maps.clone(),
+                loquax::mapload::Source::Url(url),
+                1 << 30,
+            );
+            let mut walk = Self {
+                _serve: serve,
+                _dir: dir,
+                app,
+                rx,
+                loader,
+                maps,
+                start: Instant::now(),
+                start_region,
+                uncovered_ms: None,
+                loading_ms: None,
+                on_disk_ms: None,
+                cell_ms: None,
+            };
+            walk.step();
+            assert!(!walk.loader.loading_here(), "the start is held");
+            walk
+        }
+
+        fn now_ms(&self) -> u64 {
+            self.start.elapsed().as_millis() as u64
+        }
+
+        /// One frame interval: the window asks its frame (and shows the
+        /// view to the scheduler), the shell's half takes what it sent and
+        /// polls the loads, a region landed is seen, the disk is read.
+        fn step(&mut self) {
+            let t = self.now_ms();
+            self.app.tick(Instant::now());
+            self.app.next_job();
+            while let Ok(want) = self.rx.try_recv() {
+                match want {
+                    Want::MapView(w) => {
+                        self.loader.schedule(w.here, w.ahead, t);
+                    }
+                    Want::Map(w) => {
+                        self.loader.ask(w, t);
+                    }
+                    _ => {}
+                }
+            }
+            let steps = self.loader.poll(t);
+            if steps
+                .iter()
+                .any(|s| matches!(s, loquax::mapload::Step::Done { .. }))
+            {
+                let mut seen = self.app.seen.clone();
+                seen.maps = self.maps.epoch();
+                self.app.apply(Message::Seen(Box::new(seen)));
+            }
+            self.look(t);
+            let next = t + 16;
+            let now = self.now_ms();
+            if next > now {
+                std::thread::sleep(Duration::from_millis(next - now));
+            }
+        }
+
+        fn look(&mut self, t: u64) {
+            let view = self.app.view.at_zoom(self.app.view.tile_zoom());
+            let maps = self.maps.dir().expect("dir").to_path_buf();
+            if self.uncovered_ms.is_none()
+                && loquax::ui::viewload::uncovered(&view, &[self.start_region]) > 0.10
+            {
+                self.uncovered_ms = Some(t);
+            }
+            if self.uncovered_ms.is_some()
+                && self.loading_ms.is_none()
+                && self.loader.loading_here()
+            {
+                self.loading_ms = Some(t);
+            }
+            let start = ["start.lmr".to_string()];
+            if self.on_disk_ms.is_none()
+                && first_tile::arrived(&maps, &start, &view, view.zoom().min(15))
+            {
+                self.on_disk_ms = Some(t);
+            }
+            if self.cell_ms.is_none()
+                && first_tile::region_files(&maps)
+                    .iter()
+                    .any(|(name, z, _)| z.1 - z.0 >= 2 && name != "start.lmr")
+            {
+                self.cell_ms = Some(t);
+            }
+        }
+
+        /// A drag from `from` by `dx` a frame for `frames` frames, the
+        /// pointer held down.
+        fn drag(&mut self, from: f32, dx: f32, frames: u32) {
+            let y = WALK_SIZE.1 as f32 / 2.0;
+            self.app
+                .apply(Message::Pointer(Pointer::Down(Point::new(from, y))));
+            for k in 1..=frames {
+                self.app.apply(Message::Pointer(Pointer::Move(Point::new(
+                    from + dx * k as f32,
+                    y,
+                ))));
+                self.step();
+            }
+        }
+
+        /// The pointer still down at `at`, moved on by `dx` a frame.
+        fn drag_on(&mut self, at: f32, dx: f32, frames: u32) {
+            let y = WALK_SIZE.1 as f32 / 2.0;
+            for k in 1..=frames {
+                self.app.apply(Message::Pointer(Pointer::Move(Point::new(
+                    at + dx * k as f32,
+                    y,
+                ))));
+                self.step();
+            }
+        }
+
+        fn release(&mut self) {
+            self.app.apply(Message::Pointer(Pointer::Up));
+        }
+
+        /// At rest until a tile of the screen is there and, when asked
+        /// for, a cell, at most `limit_ms`.
+        fn rest(&mut self, limit_ms: u64, cell: bool) {
+            let until = self.now_ms() + limit_ms;
+            while self.now_ms() < until
+                && (self.on_disk_ms.is_none() || cell && self.cell_ms.is_none())
+            {
+                self.step();
+            }
+        }
+
+        fn row(&self, name: &str) -> String {
+            let after = |t: Option<u64>| match (self.uncovered_ms, t) {
+                (Some(u), Some(t)) => format!("{}", t as i64 - u as i64),
+                _ => "never".to_string(),
+            };
+            format!(
+                "| {name} | {} | {} | {} | {} |",
+                self.uncovered_ms
+                    .map_or("never".to_string(), |u| u.to_string()),
+                after(self.loading_ms),
+                after(self.on_disk_ms),
+                after(self.cell_ms),
+            )
+        }
+    }
+
+    /// The screen at its zoom loads first in the window too (1527): the
+    /// gestures of the phone's walk the window has (no coast on a desk;
+    /// a drag released at speed stops), from the frame that first leaves a
+    /// tenth of the screen uncovered by the start region: when a load for
+    /// the screen was said, when a tile of the screen at the zoom viewed
+    /// was on disk (`first_tile_ms`: the next frame draws it), and when a
+    /// cell's first byte showed. The bar: a tile of the screen arrives,
+    /// and before the first byte of a cell that started after the screen
+    /// was uncovered.
+    #[test]
+    fn the_screen_at_its_zoom_draws_first_in_the_window() {
+        let mut rows = Vec::new();
+        let mut late = Vec::new();
+        let blob = first_tile::first_tile_blob();
+        let mut check = |walk: &WindowWalk, name: &str| {
+            rows.push(walk.row(name));
+            // The archive's bytes of each load: its tiles, each a blob of
+            // the tile and its pad.
+            let maps = walk.maps.dir().expect("dir").to_path_buf();
+            for (file, zooms, _) in first_tile::region_files(&maps) {
+                if file == "start.lmr" {
+                    continue;
+                }
+                let opened = std::fs::File::open(maps.join(&file)).expect("open");
+                let tiles = leviculum_map::region::Region::open(opened)
+                    .expect("region")
+                    .header()
+                    .tiles;
+                eprintln!(
+                    "{name}: load z{}-{}: {tiles} tiles, {} archive bytes",
+                    zooms.0,
+                    zooms.1,
+                    u64::from(tiles) * blob
+                );
+            }
+            let new_cell = walk
+                .cell_ms
+                .filter(|&c| walk.uncovered_ms.is_some_and(|u| c > u));
+            match (walk.on_disk_ms, new_cell) {
+                (Some(t), Some(c)) if t <= c => {}
+                (Some(_), None) => {}
+                other => late.push(format!("{name}: screen tile, new cell {other:?}")),
+            }
+        };
+        let w = WALK_SIZE.0 as f32;
+        // A drag of a screen and a half east (the view goes east, the
+        // pointer west) in 36 frames, then at rest.
+        let mut walk = WindowWalk::new();
+        walk.drag(w - 50.0, -(w * 1.5) / 36.0, 36);
+        walk.release();
+        walk.rest(15_000, true);
+        check(&walk, "pan, then rest");
+        // The same drag, then on slowly for two seconds, held.
+        let mut walk = WindowWalk::new();
+        walk.drag(w - 50.0, -(w * 1.5) / 36.0, 36);
+        let at = w - 50.0 - w * 1.5;
+        walk.drag_on(at, -2.0, 125);
+        walk.release();
+        walk.rest(15_000, true);
+        check(&walk, "pan, on slowly");
+        // Two notches of the wheel out about the middle in eight frames.
+        let mut walk = WindowWalk::new();
+        let middle = Point::new(w / 2.0, WALK_SIZE.1 as f32 / 2.0);
+        for _ in 0..8 {
+            walk.app
+                .apply(Message::Pointer(Pointer::Wheel(middle, -250)));
+            walk.step();
+        }
+        for _ in 0..30 {
+            walk.step();
+        }
+        walk.app.apply(Message::WheelRest);
+        walk.rest(15_000, true);
+        check(&walk, "zoom out two steps");
+        eprintln!("| gesture | uncovered at ms | loading after ms | first_tile_ms (on disk) | cell after ms |");
+        eprintln!("|---|---|---|---|---|");
+        for row in &rows {
+            eprintln!("{row}");
+        }
+        assert!(
+            late.is_empty(),
+            "the screen's tile after a cell's byte, or never: {late:?}"
+        );
     }
 
     /// A fractional wheel zoom stays where it ends (1144): a touchpad's
