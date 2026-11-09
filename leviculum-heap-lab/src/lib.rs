@@ -51,6 +51,13 @@ const MODE_TLSF: u8 = 2;
 static MODE: AtomicU8 = AtomicU8::new(MODE_SYSTEM);
 /// Lab allocations the mode's heap refused, served by the system.
 static SPILLED: AtomicUsize = AtomicUsize::new(0);
+/// The largest single block a lab heap served since [`reset_counts`]
+/// (1603): the size a board's pool must find in one piece.
+static LARGEST: AtomicUsize = AtomicUsize::new(0);
+/// Bytes the lab heaps hold now, as the layouts asked them, and the most
+/// they held since [`reset_counts`].
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
 
 // The regions, `static` so their addresses bound the free-routing.
 // `u64` words for alignment the allocators need not then make up.
@@ -160,7 +167,12 @@ unsafe impl GlobalAlloc for Router {
             _ => None,
         };
         match (served, MODE.load(Ordering::Relaxed)) {
-            (Some(ptr), _) => ptr,
+            (Some(ptr), _) => {
+                LARGEST.fetch_max(layout.size(), Ordering::Relaxed);
+                let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+                PEAK.fetch_max(live, Ordering::Relaxed);
+                ptr
+            }
             (None, MODE_SYSTEM) => {
                 // SAFETY: the caller's contract, passed through.
                 unsafe { System.alloc(layout) }
@@ -174,6 +186,9 @@ unsafe impl GlobalAlloc for Router {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if LLFF_MEM.holds(ptr) || TLSF_MEM.holds(ptr) {
+            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
         if LLFF_MEM.holds(ptr) {
             if let Some(ptr) = NonNull::new(ptr) {
                 // SAFETY: the block came from this heap (its region
@@ -220,4 +235,26 @@ pub fn with<R>(which: Which, f: impl FnOnce() -> R) -> R {
 /// only one while this stayed where it began.
 pub fn spilled() -> usize {
     SPILLED.load(Ordering::Relaxed)
+}
+
+/// The largest single block a lab heap served since [`reset_counts`]
+/// (1603).
+pub fn largest() -> usize {
+    LARGEST.load(Ordering::Relaxed)
+}
+
+/// The bytes the lab heaps hold now, as their layouts asked them.
+pub fn live() -> usize {
+    LIVE.load(Ordering::Relaxed)
+}
+
+/// The most the lab heaps held at once since [`reset_counts`].
+pub fn peak() -> usize {
+    PEAK.load(Ordering::Relaxed)
+}
+
+/// Start [`largest`] afresh, and [`peak`] from what is held now.
+pub fn reset_counts() {
+    LARGEST.store(0, Ordering::Relaxed);
+    PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
 }

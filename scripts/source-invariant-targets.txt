@@ -123,6 +123,7 @@ skip  leviculum-ffi   port_race                  # binds sockets to race two por
 skip  leviculum-heap-lab placement             # TLSF control-block placement on a host region; subject is the allocator code
 skip  leviculum-heap-lab pull                  # the M9 pull workload timed under two heaps; subject is the code, and a third of a second
 skip  leviculum-heap-lab pools                 # the per-core pools' routing with threads; subject is the allocator code
+skip  leviculum-heap-lab rebuild               # the M9 rebuild's largest heap block under TLSF; subject is the code, and over a second
 skip  leviculum-lxmf  announce_name_airtime      # airtime arithmetic; subject is the code
 skip  leviculum-lxmf  control_vectors            # vector corpus; subject is the codec
 skip  leviculum-lxmf  delivery_promise           # delivery state machine; subject is the code
