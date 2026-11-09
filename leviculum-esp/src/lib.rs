@@ -714,6 +714,18 @@ type Ring = TxRing<TX_RING, TX_RECORDS>;
 static TX_BYTES: Mutex<RefCell<Option<alloc::boxed::Box<Ring>>>> = Mutex::new(RefCell::new(None));
 /// What the host sent and the loop has not read.
 static RX_BYTES: Mutex<RefCell<RxKeep<RX_KEEP>>> = Mutex::new(RefCell::new(RxKeep::new()));
+/// What the host sent while the loop was held in one long op (1594,
+/// [`pump_rx`]): moved out of [`RX_BYTES`] before its 8 KiB fill, on
+/// the heap, read before the keep by [`UartLog::read_ready`]. Window
+/// 19's `bench forget` held core 0's loop for 34 s (the forget and the
+/// ring's rebuild in one turn) and lost 10,684 host bytes to the full
+/// keep.
+static RX_HELD: Mutex<RefCell<alloc::collections::VecDeque<u8>>> =
+    Mutex::new(RefCell::new(alloc::collections::VecDeque::new()));
+/// The most [`RX_HELD`] keeps: 22 s of the line at 115,200 baud. Bytes
+/// past it are counted lost, as the keep counts its own.
+const RX_HELD_MAX: usize = 256 * 1024;
+static RX_HELD_LOST: AtomicU32 = AtomicU32::new(0);
 /// FIFO overflows seen, and bytes the UART flagged.
 static RX_OVERRUNS: AtomicU32 = AtomicU32::new(0);
 static RX_ERRORS: AtomicU32 = AtomicU32::new(0);
@@ -774,6 +786,36 @@ fn uart0_rx() {
         }
     });
     stall::isr(stall::Isr::None);
+}
+
+/// Keep what the host sent while the loop is held in one long op
+/// (1594): the FIFO and the interrupt's keep emptied into [`RX_HELD`],
+/// which the loop reads first once it reads again. For the callbacks a
+/// long op calls between its steps (the watchdog's feed of `bench
+/// forget` and the store's reopen); cheap when nothing came.
+pub fn pump_rx() {
+    critical_section::with(|cs| {
+        let mut keep = RX_BYTES.borrow_ref_mut(cs);
+        if let Some(uart) = PORT.borrow_ref_mut(cs).as_mut() {
+            pull_rx(uart.split_mut().0, &mut keep);
+        }
+        if keep.is_empty() {
+            return;
+        }
+        let mut held = RX_HELD.borrow_ref_mut(cs);
+        let mut buf = [0u8; 128];
+        loop {
+            let n = keep.pop_into(&mut buf);
+            if n == 0 {
+                break;
+            }
+            let take = n.min(RX_HELD_MAX.saturating_sub(held.len()));
+            held.extend(&buf[..take]);
+            if take < n {
+                RX_HELD_LOST.fetch_add((n - take) as u32, Ordering::Relaxed);
+            }
+        }
+    });
 }
 
 /// The config the log's UART runs with at `baud`: the FIFO-full
@@ -873,6 +915,7 @@ impl<'d> UartLog<'d> {
     /// Host bytes lost because the board's keep was full.
     pub fn rx_lost(&self) -> u32 {
         critical_section::with(|cs| RX_BYTES.borrow_ref(cs).lost())
+            .saturating_add(RX_HELD_LOST.load(Ordering::Relaxed))
     }
 
     /// The loop's HDLC reader dropped a frame (empty or oversized).
@@ -1098,6 +1141,19 @@ impl<'d> UartLog<'d> {
         }
         self.last_read_ms = Some(now);
         critical_section::with(|cs| {
+            // What a long op held first (1594, [`pump_rx`]): it came
+            // before anything in the keep now.
+            let mut held = RX_HELD.borrow_ref_mut(cs);
+            if !held.is_empty() {
+                let n = buf.len().min(held.len());
+                for (slot, byte) in buf.iter_mut().zip(held.drain(..n)) {
+                    *slot = byte;
+                }
+                if held.is_empty() {
+                    *held = alloc::collections::VecDeque::new();
+                }
+                return n;
+            }
             let mut keep = RX_BYTES.borrow_ref_mut(cs);
             if let Some(uart) = PORT.borrow_ref_mut(cs).as_mut() {
                 pull_rx(uart.split_mut().0, &mut keep);

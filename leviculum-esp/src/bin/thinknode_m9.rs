@@ -1979,10 +1979,15 @@ fn main() -> ! {
                         continue;
                     }
                     log.frame(&envelope::encode_ack(envelope::TYPE_BENCH_FORGET));
-                    if node.bench_forget(&mut stores, &mut log, &|| wdt.feed()) {
-                        if let Some(model) =
-                            node.bench_reopen(&mut stores, &mut log, &|| wdt.feed())
-                        {
+                    // The forget and the reopen's rebuild hold this turn
+                    // for seconds (window 19: 34 s): the host's bytes are
+                    // kept on the heap meanwhile (1594), not lost.
+                    let feed = || {
+                        wdt.feed();
+                        leviculum_esp::pump_rx();
+                    };
+                    if node.bench_forget(&mut stores, &mut log, &feed) {
+                        if let Some(model) = node.bench_reopen(&mut stores, &mut log, &feed) {
                             to_ui(ToUi::Model(Box::new(model)));
                             to_ui(ToUi::Word(node.word()));
                         }
