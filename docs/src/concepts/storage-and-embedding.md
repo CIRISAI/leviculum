@@ -53,7 +53,7 @@ page before changing the trait surface.
 
 The same `NodeCore` is parameterised over its `Storage`
 implementation, so embedding is a matter of choosing a backend
-(`leviculum-core/src/node/mod.rs:555`,
+(`leviculum-core/src/node/mod.rs:557`,
 `NodeCore<R: CryptoRngCore, C: Clock, S: Storage>`):
 
 | Backend | Where | Behaviour |

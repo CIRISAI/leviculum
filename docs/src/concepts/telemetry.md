@@ -555,7 +555,7 @@ their index stamps (there is no re-index).
 - **A path, or a request for one.** `send_to_destination`
   (`leviculum-core/src/transport.rs:5001`) fails without a path entry.
   The primitive for obtaining one is `request_path_unthrottled`
-  (`leviculum-core/src/node/mod.rs:4032`), the application's request,
+  (`leviculum-core/src/node/mod.rs:4034`), the application's request,
   which always leaves; a node with the key but no path asks and waits
   rather than giving up.
 - **An out-of-band trust step at the receiver, in the operator's hands.**

@@ -84,7 +84,7 @@ announce that arrives sooner than the target after the last one passed
 counts a violation, one that arrives later forgives one, and a sixth
 outstanding violation blocks rebroadcast until the last passed announce
 plus the target (`Transport.py:1853-1865`, ours `update_announce_rate`,
-`leviculum-core/src/transport.rs:14495-14527`). Worked through for the
+`leviculum-core/src/transport.rs:14523-14555`). Worked through for the
 300 s moving cadence: the first six announces, over 25 minutes, are
 rebroadcast by each transit node; after that about one in thirteen is,
 one every 65 minutes. The tracker's own neighbours hear every announce;

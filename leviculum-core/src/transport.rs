@@ -10788,6 +10788,34 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_hw_mtus.get(&path.interface_index).copied()
     }
 
+    /// The HW_MTU a link request sent on every interface can signal (+ciris,
+    /// leviculum#104): the smallest value any registered interface signals,
+    /// with an interface that signals none counting as the base protocol MTU.
+    /// `None` when no interface is registered.
+    ///
+    /// A request for a destination with no path goes out on all interfaces
+    /// ([`Self::send_on_all_interfaces`]), and the reference then signals the
+    /// base MTU whatever those interfaces carry (`Link.py:310-314`), so a link
+    /// to a destination that is never announced, such as a derived one-hop
+    /// address, was held at 500 even on a carrier signalling more. The
+    /// smallest per-interface value keeps the invariant every per-hop clamp
+    /// in the reference keeps: no interface the request crosses is offered
+    /// more than it signals. Each responder still clamps to its own
+    /// receiving interface ([`crate::link::Link::new_incoming`]), and an
+    /// unsignalled interface anywhere on the node keeps the old 500.
+    pub(crate) fn broadcast_hw_mtu(&self) -> Option<u32> {
+        let unsignalled = self
+            .interface_names
+            .keys()
+            .filter(|id| !self.interface_hw_mtus.contains_key(id))
+            .map(|_| MTU as u32);
+        self.interface_hw_mtus
+            .values()
+            .copied()
+            .chain(unsignalled)
+            .min()
+    }
+
     /// Get the bitrate (bps) of the next-hop interface for a destination.
     /// Returns `None` if no path exists or the interface reports no bitrate.
     /// Matches Python `Transport.next_hop_interface_bitrate()`.

@@ -346,6 +346,27 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.connect_routed(dest_hash, dest_signing_key, first_hop_timeout_ms, None)
     }
 
+    /// The HW_MTU a link request to `dest_hash` signals: the interface `via`
+    /// names, else the learned path's next-hop interface, else (+ciris,
+    /// leviculum#104) the smallest any interface signals, since a request
+    /// with no path goes out on all of them. The last case is what a link to
+    /// a destination that is never announced, such as a derived one-hop
+    /// address, runs on: the reference signals the base MTU there whatever
+    /// the interfaces carry (`Link.py:310-314`).
+    fn link_request_hw_mtu(
+        &self,
+        dest_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+        via: Option<&crate::relay_routes::LinkVia>,
+    ) -> Option<u32> {
+        match via {
+            Some(v) => self.transport.interface_hw_mtu(v.interface_index),
+            None if self.transport.path(dest_hash).is_some() => {
+                self.transport.next_hop_interface_hw_mtu(dest_hash)
+            }
+            None => self.transport.broadcast_hw_mtu(),
+        }
+    }
+
     /// [`Self::connect_with_first_hop_timeout`], through `via` when it is
     /// set (+ciris, leviculum#91): the request names `via.relay` as its next
     /// hop and goes out on `via.interface_index` only, on every attempt.
@@ -378,12 +399,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
 
         // Look up HW_MTU for next-hop interface (for link MTU negotiation)
-        let hw_mtu = match &via {
-            Some(v) => self.transport.interface_hw_mtu(v.interface_index),
-            None => self
-                .transport
-                .next_hop_interface_hw_mtu(dest_hash.as_bytes()),
-        };
+        let hw_mtu = self.link_request_hw_mtu(dest_hash.as_bytes(), via.as_ref());
 
         // Create new outgoing link
         let mut link = Link::new_outgoing(dest_hash, &mut self.rng);
@@ -4292,10 +4308,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         } else {
                             (None, 1)
                         };
-                        let hw_mtu = match &via {
-                            Some(v) => self.transport.interface_hw_mtu(v.interface_index),
-                            None => self.transport.next_hop_interface_hw_mtu(&dest_hash_bytes),
-                        };
+                        let hw_mtu = self.link_request_hw_mtu(&dest_hash_bytes, via.as_ref());
                         link.regenerate_ephemeral_keys(&mut self.rng);
                         // Codeberg #129: fresh timeout jitter per retry so
                         // concurrent initiators keep de-syncing instead of
