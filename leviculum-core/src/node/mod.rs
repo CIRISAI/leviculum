@@ -139,6 +139,8 @@ mod mvr_link_mtu_asymmetry;
 #[cfg(test)]
 mod mvr_link_mtu_floor;
 #[cfg(test)]
+mod mvr_link_mtu_unannounced;
+#[cfg(test)]
 mod mvr_link_proof_rebalance_next_hop;
 #[cfg(test)]
 mod mvr_link_rekey_alias;

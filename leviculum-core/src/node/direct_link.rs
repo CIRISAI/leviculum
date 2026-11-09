@@ -1750,6 +1750,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             || d.committing.get(link_id).map(|c| c.1) == Some(iface)
     }
 
+    /// The direct interfaces a DirectLink upgrade has attached a link to
+    /// (+ciris, leviculum#104): point to point, each to one peer that runs
+    /// the upgrade.
+    pub(super) fn direct_link_interfaces(&self) -> Vec<usize> {
+        self.direct_links.attached.keys().copied().collect()
+    }
+
     /// A link packet from interface `iface` is about to be processed.
     pub(super) fn direct_link_rx_begin(&mut self, iface: usize) {
         self.direct_links.rx_iface = Some(iface);

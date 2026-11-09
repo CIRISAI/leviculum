@@ -358,6 +358,12 @@ pub(crate) async fn punch(
                 let Ok((len, src)) = result else { continue };
                 let src = canonical(src);
                 let frame = &buf[..len];
+                // +ciris (leviculum#104): the peer may already be probing the
+                // path's MTU; answer, and never keep a probe as data.
+                if wire::is_mtu_probe(frame) {
+                    answer_mtu_probe(socket, frame, src, session, token).await;
+                    continue;
+                }
                 match wire::parse_punch_frame(frame, session, token) {
                     Some((PunchKind::Punch, their_seq)) => {
                         let ack = wire::punch_frame(PunchKind::Ack, session, token, their_seq);
@@ -393,6 +399,107 @@ pub(crate) async fn punch(
                 }
             }
         }
+    }
+}
+
+/// +ciris (leviculum#104): how long a path-MTU probe sends, and how long it
+/// keeps answering the peer's own probes. The peer starts probing within a
+/// punch interval or two of this end (both finish punching on each other's
+/// acks), so a window this much longer than the sending phase covers it.
+const MTU_PROBE_SEND: Duration = Duration::from_millis(400);
+const MTU_PROBE_WINDOW: Duration = Duration::from_millis(600);
+const MTU_PROBE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// +ciris (leviculum#104): find the largest of [`wire::MTU_PROBE_STEPS`] the
+/// punched path to `peer` carries, by sending padded probes of each size
+/// (acked through the punch frames' sequence numbers) for
+/// [`MTU_PROBE_SEND`]. `None` when none was acked: a path that drops
+/// datagrams near 1400 (WireGuard, IPsec, some APNs, 464XLAT) while the
+/// small punch frames pass, or a peer that predates probes. The interface
+/// then signals no MTU and links born on it hold the base 500.
+///
+/// Answers the peer's probes and punches throughout, and keeps ordinary
+/// datagrams the peer sends meanwhile in `early`, as [`punch`] does.
+pub(crate) async fn probe_path_mtu(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    session: &SessionId,
+    token: &[u8; 32],
+    early: &mut Vec<Vec<u8>>,
+) -> Option<u32> {
+    let start = tokio::time::Instant::now();
+    let largest = wire::MTU_PROBE_STEPS[0];
+    let mut acked: Option<u32> = None;
+    let mut tick = tokio::time::interval(MTU_PROBE_INTERVAL);
+    let mut buf = vec![0u8; 65_535];
+    let send_to = on_socket(socket, peer);
+    let mut early_bytes: usize = early.iter().map(Vec::len).sum();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(start + MTU_PROBE_WINDOW) => return acked,
+            _ = tick.tick() => {
+                if start.elapsed() < MTU_PROBE_SEND && acked != Some(largest) {
+                    for size in wire::MTU_PROBE_STEPS {
+                        if acked.is_some_and(|a| a >= size) {
+                            continue;
+                        }
+                        let probe = wire::mtu_probe_frame(session, token, size);
+                        let _ = socket.send_to(&probe, send_to).await;
+                    }
+                }
+            }
+            result = socket.recv_from(&mut buf) => {
+                let Ok((len, src)) = result else { continue };
+                let src = canonical(src);
+                if src != peer {
+                    continue;
+                }
+                let frame = &buf[..len];
+                if wire::is_mtu_probe(frame) {
+                    answer_mtu_probe(socket, frame, src, session, token).await;
+                    continue;
+                }
+                match wire::parse_punch_frame(frame, session, token) {
+                    Some((PunchKind::Ack, seq)) => {
+                        if let Some(size) = wire::mtu_probe_acked_size(seq) {
+                            if wire::MTU_PROBE_STEPS.contains(&size) {
+                                acked = acked.max(Some(size));
+                            }
+                        }
+                    }
+                    Some((PunchKind::Punch, seq)) => {
+                        let ack = wire::punch_frame(PunchKind::Ack, session, token, seq);
+                        let _ = socket.send_to(&ack, on_socket(socket, src)).await;
+                    }
+                    None => {
+                        if wire::punch_frame_kind(frame).is_none()
+                            && !frame.is_empty()
+                            && frame.len() <= EARLY_DATAGRAM_MAX
+                            && early.len() < EARLY_MAX
+                            && early_bytes + frame.len() <= EARLY_MAX_BYTES
+                        {
+                            early_bytes += frame.len();
+                            early.push(frame.to_vec());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// +ciris (leviculum#104): ack the peer's path-MTU probe if it is this
+/// session's and arrived whole.
+pub(crate) async fn answer_mtu_probe(
+    socket: &UdpSocket,
+    frame: &[u8],
+    src: SocketAddr,
+    session: &SessionId,
+    token: &[u8; 32],
+) {
+    if let Some(seq) = wire::parse_mtu_probe(frame, session, token) {
+        let ack = wire::punch_frame(PunchKind::Ack, session, token, seq);
+        let _ = socket.send_to(&ack, on_socket(socket, src)).await;
     }
 }
 
@@ -552,6 +659,9 @@ pub(crate) enum Outcome {
         peer: Option<SocketAddr>,
         /// Datagrams the peer sent before this end finished punching.
         early: Vec<Vec<u8>>,
+        /// +ciris (leviculum#104): the largest probe step the path carried,
+        /// which the interface signals; `None` signals no MTU (base 500).
+        mtu: Option<u32>,
     },
 }
 
@@ -683,6 +793,7 @@ impl DirectLinkRuntime {
                 session,
                 peer: None,
                 early: Vec::new(),
+                mtu: None,
             });
             return;
         };
@@ -707,15 +818,20 @@ impl DirectLinkRuntime {
                 Some(p) => tracing::info!("direct link: punch through to {}", p.peer),
                 None => tracing::info!("direct link: punch toward {peer} failed"),
             }
-            let (peer, early) = match seen {
-                Some(p) => (Some(p.peer), p.early),
-                None => (None, Vec::new()),
+            let (peer, early, mtu) = match seen {
+                Some(mut p) => {
+                    let mtu = probe_path_mtu(&socket, p.peer, &session, &token, &mut p.early).await;
+                    tracing::info!("direct link: path to {} carries {mtu:?}", p.peer);
+                    (Some(p.peer), p.early, mtu)
+                }
+                None => (None, Vec::new(), None),
             };
             let _ = outcomes
                 .send(Outcome::Punched {
                     session,
                     peer,
                     early,
+                    mtu,
                 })
                 .await;
         });
@@ -746,6 +862,7 @@ impl DirectLinkRuntime {
         session: SessionId,
         peer: SocketAddr,
         early: Vec<Vec<u8>>,
+        hw_mtu: Option<u32>,
         id: InterfaceId,
     ) -> Option<InterfaceHandle> {
         self.tasks.remove(&session);
@@ -757,7 +874,7 @@ impl DirectLinkRuntime {
             self.timing
         };
         let (handle, task) =
-            spawn_direct_udp_interface(id, socket, peer, session, token, early, timing);
+            spawn_direct_udp_interface(id, socket, peer, session, token, early, timing, hw_mtu);
         self.registering.insert(id, session);
         self.interfaces.insert(id.0, task);
         Some(handle)
@@ -856,6 +973,49 @@ mod tests {
             (ra.map(|p| p.peer), rb.map(|p| p.peer)),
             (Some(b_addr), Some(a_addr))
         );
+    }
+
+    /// +ciris (leviculum#104): a peer that answers probes as a direct
+    /// interface does, behind a path that drops every datagram over
+    /// `path_mtu` bytes on the way to it.
+    async fn probe_through(path_mtu: usize) -> Option<u32> {
+        let a = loopback().await;
+        let b = std::sync::Arc::new(loopback().await);
+        let (a_addr, b_addr) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+        let session = [5u8; 16];
+        let token = [6u8; 32];
+        let peer = std::sync::Arc::clone(&b);
+        let answering = tokio::spawn(async move {
+            let mut buf = vec![0u8; 65_535];
+            loop {
+                let Ok((len, src)) = peer.recv_from(&mut buf).await else {
+                    return;
+                };
+                if len > path_mtu {
+                    continue; // the path drops it
+                }
+                answer_mtu_probe(&peer, &buf[..len], src, &session, &token).await;
+            }
+        });
+        let mut early = Vec::new();
+        let found = probe_path_mtu(&a, b_addr, &session, &token, &mut early).await;
+        answering.abort();
+        let _ = a_addr;
+        found
+    }
+
+    /// +ciris (leviculum#104): the interface signals the largest probe step
+    /// the path carries, never more: a path that drops datagrams over N
+    /// bytes gets the largest step at or under N, and one that carries
+    /// neither step gets no MTU (base 500).
+    #[tokio::test]
+    async fn the_path_mtu_is_the_largest_step_acked() {
+        assert_eq!(probe_through(65_535).await, Some(1400));
+        assert_eq!(probe_through(1400).await, Some(1400));
+        assert_eq!(probe_through(1399).await, Some(1280));
+        assert_eq!(probe_through(1300).await, Some(1280));
+        assert_eq!(probe_through(1279).await, None);
+        assert_eq!(probe_through(100).await, None);
     }
 
     /// +ciris: two peers behind one NAT that does not hairpin. Each side's

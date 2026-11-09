@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use leviculum_core::direct_link::wire::{self, PunchKind, SessionId};
+use leviculum_core::direct_link::DIRECT_LINK_MTU;
 use leviculum_core::transport::InterfaceId;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -92,6 +93,7 @@ impl Default for DirectUdpTiming {
 /// Returns the handle for the event loop and an abort handle for the I/O
 /// task; aborting it drops the incoming channel, which the loop reads as the
 /// interface disconnecting.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_direct_udp_interface(
     id: InterfaceId,
     socket: Arc<UdpSocket>,
@@ -100,6 +102,7 @@ pub(crate) fn spawn_direct_udp_interface(
     token: [u8; 32],
     early: Vec<Vec<u8>>,
     timing: DirectUdpTiming,
+    hw_mtu: Option<u32>,
 ) -> (InterfaceHandle, tokio::task::AbortHandle) {
     let name = format!(
         "DirectPeer/{}",
@@ -129,9 +132,17 @@ pub(crate) fn spawn_direct_udp_interface(
         info: InterfaceInfo {
             id,
             name,
-            // Signals no MTU, like UDPInterface (Codeberg #357). The link
-            // moved onto this interface keeps the MTU it negotiated.
-            hw_mtu: None,
+            // Signals what the path-MTU probe found (+ciris, leviculum#104):
+            // `DIRECT_LINK_MTU` or a smaller step, or nothing (base 500)
+            // when no padded probe was acked. Unlike a UDPInterface
+            // (Codeberg #357, which signals none because the reference's
+            // does not) this one only exists between two nodes that ran the
+            // DirectLink upgrade, so its far end is never a Python node.
+            // Signalling none held a link BORN here (a derived one-hop
+            // address, never announced) at 500 on a path that carries 1400;
+            // a link that moves here is lowered to `DIRECT_LINK_MTU` as
+            // before, by both ends.
+            hw_mtu: hw_mtu.map(|m| m.min(DIRECT_LINK_MTU)),
             is_local_client: false,
             bitrate: None,
             announce_cap_bitrate: None,
@@ -210,6 +221,15 @@ async fn direct_io_task(
                     continue;
                 }
                 let frame = &buf[..len];
+                // +ciris (leviculum#104): the peer probing the path's MTU.
+                if wire::is_mtu_probe(frame) {
+                    if let Some(seq) = wire::parse_mtu_probe(frame, &session, &token) {
+                        last_heard = Instant::now();
+                        let ack = wire::punch_frame(PunchKind::Ack, &session, &token, seq);
+                        let _ = socket.send_to(&ack, send_to).await;
+                    }
+                    continue;
+                }
                 if wire::punch_frame_kind(frame).is_some() {
                     // Only a frame carrying this session's token is the peer
                     // speaking; a stale or forged one must not keep a dead

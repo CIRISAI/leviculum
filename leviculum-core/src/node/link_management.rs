@@ -346,6 +346,35 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.connect_routed(dest_hash, dest_signing_key, first_hop_timeout_ms, None)
     }
 
+    /// Send a link request with no path on every interface (+ciris,
+    /// leviculum#104): one broadcast, plus a copy at its own MTU on each
+    /// direct interface a DirectLink upgrade attached
+    /// (`Transport::send_link_request_on_all_interfaces`).
+    fn send_link_request_broadcast(&mut self, packet: &[u8]) {
+        let direct: Vec<(usize, u32)> = self
+            .direct_link_interfaces()
+            .into_iter()
+            .filter_map(|i| self.transport.interface_hw_mtu(i).map(|m| (i, m)))
+            .collect();
+        self.transport
+            .send_link_request_on_all_interfaces(packet, &direct);
+    }
+
+    /// The HW_MTU a link request to `dest_hash` signals: the interface `via`
+    /// names, else the learned path's next-hop interface. A request with no
+    /// path also goes out at its own MTU on each direct interface (+ciris,
+    /// leviculum#104, [`Self::send_link_request_broadcast`]).
+    fn link_request_hw_mtu(
+        &self,
+        dest_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
+        via: Option<&crate::relay_routes::LinkVia>,
+    ) -> Option<u32> {
+        match via {
+            Some(v) => self.transport.interface_hw_mtu(v.interface_index),
+            None => self.transport.next_hop_interface_hw_mtu(dest_hash),
+        }
+    }
+
     /// [`Self::connect_with_first_hop_timeout`], through `via` when it is
     /// set (+ciris, leviculum#91): the request names `via.relay` as its next
     /// hop and goes out on `via.interface_index` only, on every attempt.
@@ -378,12 +407,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let now_ms = self.transport.clock().now_ms();
 
         // Look up HW_MTU for next-hop interface (for link MTU negotiation)
-        let hw_mtu = match &via {
-            Some(v) => self.transport.interface_hw_mtu(v.interface_index),
-            None => self
-                .transport
-                .next_hop_interface_hw_mtu(dest_hash.as_bytes()),
-        };
+        let hw_mtu = self.link_request_hw_mtu(dest_hash.as_bytes(), via.as_ref());
 
         // Create new outgoing link
         let mut link = Link::new_outgoing(dest_hash, &mut self.rng);
@@ -490,7 +514,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .send_to_destination(dest_hash.as_bytes(), &packet)
                 .is_ok();
             if !routed {
-                self.transport.send_on_all_interfaces(&packet);
+                self.send_link_request_broadcast(&packet);
             }
             routed
         };
@@ -1228,7 +1252,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if let Some(link) = self.links.get(&link_id) {
             // Link-request retry scenario: if the link is still in PendingIncoming,
             // the original proof was likely lost. Re-send the cached proof.
-            if matches!(link.phase(), LinkPhase::PendingIncoming { .. }) {
+            // +ciris (leviculum#104): only for a repeat on the interface the
+            // link is attached to. A copy on another interface is a sibling
+            // of a no-path request sent once per interface
+            // (`Transport::send_link_request_on_all_interfaces`): the first
+            // copy made the link and was proved, and this one is not a
+            // retry, so it gets no second proof.
+            if matches!(link.phase(), LinkPhase::PendingIncoming { .. })
+                && link.attached_interface() == Some(interface_index)
+            {
                 if let Some(proof) = link.cached_proof() {
                     let proof = proof.to_vec();
                     if let Some(iface_idx) = link.attached_interface() {
@@ -4292,10 +4324,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         } else {
                             (None, 1)
                         };
-                        let hw_mtu = match &via {
-                            Some(v) => self.transport.interface_hw_mtu(v.interface_index),
-                            None => self.transport.next_hop_interface_hw_mtu(&dest_hash_bytes),
-                        };
+                        let hw_mtu = self.link_request_hw_mtu(&dest_hash_bytes, via.as_ref());
                         link.regenerate_ephemeral_keys(&mut self.rng);
                         // Codeberg #129: fresh timeout jitter per retry so
                         // concurrent initiators keep de-syncing instead of
@@ -4362,7 +4391,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 .send_to_destination(&dest_hash_bytes, &packet)
                                 .is_ok();
                             if !routed {
-                                self.transport.send_on_all_interfaces(&packet);
+                                self.send_link_request_broadcast(&packet);
                             }
                             routed
                         };

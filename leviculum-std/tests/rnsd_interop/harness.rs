@@ -1485,6 +1485,19 @@ impl TestDaemon {
         Ok(links)
     }
 
+    /// +ciris (leviculum#104): how many Link objects the daemon's
+    /// destination holds. Python builds one per link request it validates,
+    /// without looking the link id up.
+    pub async fn get_destination_link_count(&self, dest_hash: &str) -> Result<usize, HarnessError> {
+        let result = self
+            .query(
+                "get_destination_link_count",
+                serde_json::json!({ "dest_hash": dest_hash }),
+            )
+            .await?;
+        Ok(result.as_u64().unwrap_or(0) as usize)
+    }
+
     /// Get packets received over links from the daemon.
     pub async fn get_received_packets(&self) -> Result<Vec<ReceivedPacket>, HarnessError> {
         let result = self

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 never collide with upstream's own version line. Downstream (CIRISEdge) pins the
 git tag, not the version string. -->
 
+## [Unreleased]
+
+### Fixed
+
+- A link born on a punched direct path to a destination that is never
+  announced now runs at the path's MTU, not the base 500 (leviculum#104).
+  CIRISEdge's A/V legs dial derived one-hop addresses like this and sat at a
+  Channel MDU of 425; on a path that carries 1400 they now get 1321.
+  - The direct UDP interface probes the punched path after the punch with
+    padded frames of 1400 and 1280 bytes, acked through the punch frames'
+    sequence numbers, and signals the largest step acked, or no MTU (base
+    500) when neither is: a tunnel, IPsec, an APN or 464XLAT that drops
+    near-1400 datagrams while small punch frames pass no longer blackholes
+    the link. A peer that predates the probe never acks one, so it gets 500
+    as before. A link that MOVES onto the interface is still lowered to
+    1400 by both ends, unchanged.
+  - A link request with no path is still one broadcast at the base MTU on
+    every shared medium, exactly as before, plus one copy at its own MTU on
+    each direct interface a DirectLink upgrade attached, which the broadcast
+    leaves out. Signalling is not part of the link id, so the copy is the
+    same request. Copies on shared media are avoided on purpose: a Python
+    responder's dedup keys on the full packet hash (`Transport.py:1376`)
+    and `Destination.incoming_link_request` never looks the link id up
+    (`Destination.py:420-424`), so it would build one link per copy.
+  - A leviculum responder hearing a request twice on two interfaces makes
+    one link and proves once (the first copy wins); a repeat on the link's
+    own interface still gets the cached proof. A relay that already
+    forwarded a request drops a copy heard on another interface instead of
+    overwriting its link entry, and still forwards a same-interface repeat.
+
 ## [0.34.0+ciris.1] — CIRIS fork
 
 ### Added
