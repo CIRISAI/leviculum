@@ -1,0 +1,24 @@
+Explore
+┌● Last seen first─────────────────────────────────────────────────────────────┐
+│▏Search a name, or paste an address                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌  ────────────────────────────────────────────────────────────────────────────┐
+│Pages                                                                         │
+│ Bookmarks                                                                    │
+│▌* Relay Süd ·7c7c  seen 2 days ago · 1 hop                                   │
+│ Today                                                                        │
+│   Marcel's node ·5a5a  seen 10 min ago · 2 hops                              │
+│                                                                              │
+│Public rooms                                                                  │
+│ RNS Moscow  3 hops away                                                      │
+│ Cascadia  3 hops away                                                        │
+│ Chatsurfer  3 hops away                                                      │
+│ CTRS  3 hops away                                                            │
+│ Minuteman  3 hops away                                                       │
+│ RMAP.WORLD Hub  3 hops away                                                  │
+│ Save Europe  3 hops away                                                     │
+│ SoCal Public  3 hops away                                                    │
+│ UTN Oregon  3 hops away                                                      │
+│ HADARC  4 hops away                                                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats
