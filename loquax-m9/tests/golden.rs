@@ -1122,14 +1122,18 @@ fn a_late_message_is_the_golden_frame() {
 }
 
 /// 1595, window 20's hang.walk: a Back lost in a FIFO overrun left the
-/// board in the chat, and every later Back "changed nothing". It did
-/// what Back does: in a chat, Enter opens the message's detail view, and
-/// Back leaves what it is in, the detail first, the chat with the next.
-/// One Back short, the walk's Enter and Back pairs opened and closed the
-/// detail from then on, the page `chat` throughout. The M9's rule (UI
-/// decisions 2026-11-07) holds: each Back leaves one level.
+/// board in the chat, and every later Back "changed nothing". In a chat
+/// the shared key table's Enter opens the message's detail view, and Back
+/// leaves what it is in, the detail first. 1595 pinned that as one level
+/// a Back leaves; but the M9 draws no detail view (the scene has none, and
+/// its `[PAGE]` line said `chat`), so the level was one nobody saw, and
+/// window 23 stood five minutes on it. Since 1612 the M9 closes a state it
+/// does not draw at once (`group::close_unshown`, `tests/unshown.rs`):
+/// Enter in the chat leaves the chat on the screen as it was, and one
+/// Back leaves it. The M9's rule (UI decisions 2026-11-07) holds over
+/// what the screen shows: each Back leaves one level of it.
 #[test]
-fn back_leaves_the_detail_then_the_chat() {
+fn back_leaves_the_chat_after_an_enter_in_it() {
     let home = tempfile::tempdir().expect("home");
     let mut model = on_the_list(home.path());
     let mut row = 0;
@@ -1142,19 +1146,15 @@ fn back_leaves_the_detail_then_the_chat() {
     );
     assert!(model.detail.is_none());
     loquax_m9::group::press(&mut model, &mut row, &event(M9Key::Enter));
-    assert!(model.detail.is_some(), "Enter in the chat opens the detail");
-    assert_eq!(place(&model), loquax_m9::group::Place::Chat);
-    loquax_m9::group::press(&mut model, &mut row, &event(M9Key::Back));
-    assert!(model.detail.is_none(), "Back leaves the detail");
-    assert_eq!(
-        place(&model),
-        loquax_m9::group::Place::Chat,
-        "and stays in the chat"
+    assert!(
+        model.detail.is_none(),
+        "Enter in the chat leaves no detail the M9 does not draw"
     );
+    assert_eq!(place(&model), loquax_m9::group::Place::Chat);
     loquax_m9::group::press(&mut model, &mut row, &event(M9Key::Back));
     assert_eq!(
         place(&model),
         loquax_m9::group::Place::List,
-        "the next Back leaves the chat"
+        "one Back leaves the chat"
     );
 }
