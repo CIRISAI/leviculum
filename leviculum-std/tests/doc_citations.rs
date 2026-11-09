@@ -159,6 +159,10 @@ const EXTERNAL_PREFIXES: &[&str] = &[
     // A crates.io dependency, cited by the nRF gate scripts. Its source is
     // under `~/.cargo`, never in this tree, so it can only be counted.
     "nrf-softdevice/",
+    // The Adafruit nRF52 bootloader the boards carry (1601, OTA stage 1):
+    // cited from a clone of github.com/adafruit/Adafruit_nRF52_Bootloader at
+    // tag 0.9.0 (a73fe207), which no host keeps beside this tree.
+    "Adafruit_nRF52_Bootloader/",
 ];
 
 /// The vendored references. A citation into one of these that is not

@@ -1,6 +1,10 @@
 # OTA stage 2: the image itself over the mesh
 
-**Status: concept, not scheduled. Conditional on hardware two of our
+**Status: design record, struck from the register 2026-11-09 (Lew); the
+PN store moved to internal flash since, so the QSPI region conflict it
+discusses is moot.**
+
+**Original status: concept, not scheduled. Conditional on hardware two of our
 three boards do not have.**
 
 [OTA stage 1](ota-stage-1-ble-dfu.md) moves the *decision* over the mesh
