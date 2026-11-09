@@ -22,11 +22,13 @@ git tag, not the version string. -->
   always a node that ran the DirectLink upgrade, so the Python-only reason a
   UDPInterface signals none (Codeberg #357) does not apply. And a request with
   no path, which goes out on every interface, signalled the base MTU as the
-  reference does (`Link.py:310-314`); it now signals the smallest MTU any
-  interface on the node signals, an unsignalled interface counting as 500. No
-  interface is offered more than it signals, each responder still clamps to
-  its receiving interface, and a node with a UDP, BLE or other unsignalled
-  interface offers 500 as before. A link to an announced destination is
+  reference does (`Link.py:310-314`); it now goes out as one copy per
+  interface, each signalling what its interface signals: its own MTU on a
+  signalled interface, the base on every other. Signalling is not part of
+  the link id, so the copies are one request, rewritten per hop as a
+  reference relay rewrites it. A plain UDP, BLE or other unsignalled
+  interface on the same node no longer pulls the punched path down to 500,
+  and is itself still offered 500. A link to an announced destination is
   unchanged.
 
 ## [0.34.0+ciris.1] — CIRIS fork

@@ -81,14 +81,30 @@ async fn transport_node(tcp_port: u16, facilitator_port: u16) -> TestNode {
 }
 
 async fn leaf(tcp_port: u16, settings: DirectLinkSettings) -> TestNode {
+    leaf_with(tcp_port, settings, false).await
+}
+
+/// [`leaf`], with a plain UDPInterface beside its TCP one when `udp` is set:
+/// an interface that signals no MTU (Codeberg #357), forwarding to a port
+/// nobody listens on.
+async fn leaf_with(tcp_port: u16, settings: DirectLinkSettings, udp: bool) -> TestNode {
     let addr: SocketAddr = format!("127.0.0.1:{tcp_port}").parse().unwrap();
-    start(
-        ReticulumNodeBuilder::new()
-            .enable_transport(false)
-            .add_tcp_client(addr)
-            .direct_link(settings),
-    )
-    .await
+    let mut builder = ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .add_tcp_client(addr)
+        .direct_link(settings);
+    if udp {
+        builder = builder.add_interface_config(leviculum_std::config::InterfaceConfig {
+            name: "Plain UDP".to_string(),
+            interface_type: "UDPInterface".to_string(),
+            listen_ip: Some("127.0.0.1".to_string()),
+            listen_port: Some(next_port()),
+            forward_ip: Some("127.0.0.1".to_string()),
+            forward_port: Some(next_port()),
+            ..Default::default()
+        });
+    }
+    start(builder).await
 }
 
 fn proposer(facilitator_port: u16) -> DirectLinkSettings {
@@ -141,6 +157,23 @@ async fn linked_through_relay(
     leviculum_std::driver::LinkHandle,
     leviculum_core::DestinationHash,
 ) {
+    linked_through_relay_with(a_settings, external, false).await
+}
+
+/// [`linked_through_relay`], with B carrying a plain UDP interface too when
+/// `b_udp` is set.
+async fn linked_through_relay_with(
+    a_settings: DirectLinkSettings,
+    external: Option<(u16, u16)>,
+    b_udp: bool,
+) -> (
+    Option<TestNode>,
+    TestNode,
+    TestNode,
+    leviculum_core::LinkId,
+    leviculum_std::driver::LinkHandle,
+    leviculum_core::DestinationHash,
+) {
     let (t, tcp_port, facilitator_port) = match external {
         Some((tcp_port, facilitator_port)) => (None, tcp_port, facilitator_port),
         None => {
@@ -154,7 +187,7 @@ async fn linked_through_relay(
         }
     };
     let mut a = leaf(tcp_port, a_settings).await;
-    let mut b = leaf(tcp_port, proposer(facilitator_port)).await;
+    let mut b = leaf_with(tcp_port, proposer(facilitator_port), b_udp).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
     let identity = Identity::generate(&mut rand_core::OsRng);
@@ -214,15 +247,19 @@ async fn a_relayed_link_upgrades_and_outlives_its_relay() {
 
 /// leviculum#104: once the path is punched, a link to a destination A never
 /// announced (a derived one-hop address, as CIRISEdge's A/V legs dial) runs
-/// at the punched interface's MTU, not the base 500. Before, the direct
-/// interface signalled no MTU and the request, having no path, offered the
-/// base: both ends settled on 500, a Channel MDU of 425.
+/// at the punched interface's MTU, not the base 500, even with a plain UDP
+/// interface on the dialling node. Before, the direct interface signalled no
+/// MTU and the request, having no path, offered the base: both ends settled
+/// on 500, a Channel MDU of 425.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_link_born_on_the_punched_path_runs_at_its_mtu() {
     use leviculum_core::constants::CHANNEL_ENVELOPE_HEADER_SIZE;
     use leviculum_core::direct_link::DIRECT_LINK_MTU;
 
-    let (t, mut a, mut b, link_id, _handle, hash) = linked_through_relay(accepter(), None).await;
+    // B also runs a plain UDP interface, which signals no MTU: it must not
+    // pull the punched leg down to the base.
+    let (t, mut a, mut b, link_id, _handle, hash) =
+        linked_through_relay_with(accepter(), None, true).await;
     upgrade(&mut a, &mut b, &link_id, &hash).await;
 
     let identity = Identity::generate(&mut rand_core::OsRng);

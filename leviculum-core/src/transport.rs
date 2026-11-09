@@ -10788,32 +10788,43 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         self.interface_hw_mtus.get(&path.interface_index).copied()
     }
 
-    /// The HW_MTU a link request sent on every interface can signal (+ciris,
-    /// leviculum#104): the smallest value any registered interface signals,
-    /// with an interface that signals none counting as the base protocol MTU.
-    /// `None` when no interface is registered.
+    /// Send a link request that has no path on every interface (+ciris,
+    /// leviculum#104), each copy signalling what ITS interface signals.
     ///
-    /// A request for a destination with no path goes out on all interfaces
-    /// ([`Self::send_on_all_interfaces`]), and the reference then signals the
-    /// base MTU whatever those interfaces carry (`Link.py:310-314`), so a link
-    /// to a destination that is never announced, such as a derived one-hop
-    /// address, was held at 500 even on a carrier signalling more. The
-    /// smallest per-interface value keeps the invariant every per-hop clamp
-    /// in the reference keeps: no interface the request crosses is offered
-    /// more than it signals. Each responder still clamps to its own
-    /// receiving interface ([`crate::link::Link::new_incoming`]), and an
-    /// unsignalled interface anywhere on the node keeps the old 500.
-    pub(crate) fn broadcast_hw_mtu(&self) -> Option<u32> {
-        let unsignalled = self
-            .interface_names
-            .keys()
-            .filter(|id| !self.interface_hw_mtus.contains_key(id))
-            .map(|_| MTU as u32);
-        self.interface_hw_mtus
-            .values()
-            .copied()
-            .chain(unsignalled)
-            .min()
+    /// The reference signals the base MTU whenever the request has no path
+    /// (`Link.py:310-314`), so a link to a destination that is never
+    /// announced, such as a derived one-hop address on a punched path, was
+    /// held at 500 on a carrier signalling 1400. Signalling is not part of
+    /// the link id (`Link::calculate_link_id`), so the copies are one
+    /// request, and rewriting it per hop is what a reference relay does
+    /// (`Transport.py:1585-1612`, [`Self::clamp_link_request_mtu`]). Every
+    /// interface that signals an MTU gets a copy at that MTU; every other
+    /// interface, the driver's included, gets one broadcast at the base MTU,
+    /// which is what such an interface signals under Codeberg #357. No
+    /// interface is offered more than it signals, and each responder still
+    /// clamps to its receiving interface.
+    pub(crate) fn send_link_request_on_all_interfaces(&mut self, packet: &[u8]) {
+        let signalled: Vec<(usize, u32)> = self
+            .interface_hw_mtus
+            .iter()
+            .map(|(id, mtu)| (*id, *mtu))
+            .collect();
+        for &(id, mtu) in &signalled {
+            let copy = resignal_link_request(packet, mtu);
+            self.storage.add_packet_hash(packet_hash(&copy));
+            let _ = self.send_on_interface(id, &copy);
+        }
+        let base = resignal_link_request(packet, MTU as u32);
+        let cache_hash = packet_hash(&base);
+        self.storage.add_packet_hash(cache_hash);
+        self.stats.packets_sent += 1;
+        self.push_broadcast(
+            base,
+            None,
+            None,
+            signalled.iter().map(|(id, _)| InterfaceId(*id)).collect(),
+            Some(ph8(&cache_hash)),
+        );
     }
 
     /// Get the bitrate (bps) of the next-hop interface for a destination.
@@ -37502,4 +37513,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     pub fn relay_routes_mut(&mut self) -> &mut crate::relay_routes::RelayRoutes {
         &mut self.relay_routes
     }
+}
+
+/// `packet`, a link request, with its signalled MTU replaced by `mtu` and
+/// its mode kept (+ciris, leviculum#104). A request without signalling is
+/// returned unchanged.
+fn resignal_link_request(packet: &[u8], mtu: u32) -> Vec<u8> {
+    use crate::link::{decode_signaling_bytes, encode_signaling_bytes, SIGNALING_SIZE};
+    let mut out = packet.to_vec();
+    let Some(at) = out.len().checked_sub(SIGNALING_SIZE) else {
+        return out;
+    };
+    let carries_signalling = Packet::unpack(packet).is_ok_and(|p| {
+        p.data.as_slice().len() == crate::link::LINK_REQUEST_BASE_SIZE + SIGNALING_SIZE
+    });
+    if !carries_signalling {
+        return out;
+    }
+    let Ok(old) = <[u8; SIGNALING_SIZE]>::try_from(&out[at..]) else {
+        return out;
+    };
+    let (_, mode) = decode_signaling_bytes(&old);
+    out[at..].copy_from_slice(&encode_signaling_bytes(mtu, mode));
+    out
 }

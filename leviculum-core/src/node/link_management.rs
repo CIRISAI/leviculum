@@ -347,12 +347,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// The HW_MTU a link request to `dest_hash` signals: the interface `via`
-    /// names, else the learned path's next-hop interface, else (+ciris,
-    /// leviculum#104) the smallest any interface signals, since a request
-    /// with no path goes out on all of them. The last case is what a link to
-    /// a destination that is never announced, such as a derived one-hop
-    /// address, runs on: the reference signals the base MTU there whatever
-    /// the interfaces carry (`Link.py:310-314`).
+    /// names, else the learned path's next-hop interface. A request with no
+    /// path is re-signalled per interface as it goes out (+ciris,
+    /// leviculum#104, `Transport::send_link_request_on_all_interfaces`).
     fn link_request_hw_mtu(
         &self,
         dest_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
@@ -360,10 +357,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) -> Option<u32> {
         match via {
             Some(v) => self.transport.interface_hw_mtu(v.interface_index),
-            None if self.transport.path(dest_hash).is_some() => {
-                self.transport.next_hop_interface_hw_mtu(dest_hash)
-            }
-            None => self.transport.broadcast_hw_mtu(),
+            None => self.transport.next_hop_interface_hw_mtu(dest_hash),
         }
     }
 
@@ -506,7 +500,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .send_to_destination(dest_hash.as_bytes(), &packet)
                 .is_ok();
             if !routed {
-                self.transport.send_on_all_interfaces(&packet);
+                self.transport.send_link_request_on_all_interfaces(&packet);
             }
             routed
         };
@@ -4375,7 +4369,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 .send_to_destination(&dest_hash_bytes, &packet)
                                 .is_ok();
                             if !routed {
-                                self.transport.send_on_all_interfaces(&packet);
+                                self.transport.send_link_request_on_all_interfaces(&packet);
                             }
                             routed
                         };
