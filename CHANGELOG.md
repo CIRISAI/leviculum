@@ -14,17 +14,31 @@ git tag, not the version string. -->
 ### Added
 
 - Unordered, unreliable link datagrams for live media (leviculum#102).
-  `NodeCore::send_unordered` / `LinkHandle::send_unordered` send one
-  link-encrypted packet with the new context `PacketContext::Datagram`
-  (`0xF0`, unassigned in the reference), carrying a per-link `u32` sequence
-  number ahead of the payload. No window, receipt, proof or retransmit: the
-  peer gets `NodeEvent::LinkDatagramReceived { link_id, sequence, data }`
-  as each one decrypts, in arrival order, and does its own loss accounting
-  and jitter buffering. The interface gate still applies (`PacingDelay`),
-  and the payload limit is `link_datagram_mdu` (link MDU less 4). Counters
-  are in `link_datagram_stats`. A peer without #102 drops the packet at its
-  unknown-context gate, so use it only toward a peer known to speak it;
-  `try_send_timed` stays the fallback.
+  `NodeCore::send_unordered`, `LinkHandle::send_unordered` and the
+  never-waiting `LinkHandle::try_send_unordered` send one link-encrypted
+  packet with the new context `PacketContext::Datagram` (`0xF0`, unassigned
+  in the reference), carrying a per-link `u32` sequence number ahead of the
+  payload. No window, receipt, proof or retransmit: the peer gets
+  `NodeEvent::LinkDatagramReceived { link_id, sequence, data }` as each one
+  decrypts, in arrival order, and does its own loss accounting and jitter
+  buffering. The payload limit is `link_datagram_mdu` (link MDU less 4) and
+  counters are in `link_datagram_stats`.
+  - The interface gate still applies (`PacingDelay`). A datagram an
+    interface has no room for is shed and counted
+    (`DropReason::DatagramShed`), never queued for retry, so a flood cannot
+    evict Channel frames, proofs or keepalives from the retry queue.
+  - The receiver keeps a 64-wide sliding replay window on `sequence`
+    (`ReplayWindow`, RFC 4303 style, serial arithmetic across the wrap); a
+    replayed or too-old datagram is dropped before it is delivered, counts
+    as liveness or reaches the direct-link fallback logic.
+  - The receiver keeps the host's last `DATAGRAM_SINK_RESERVE` (32) event
+    slots for the Channel: below that much room an arriving datagram is
+    shed and counted, so a flood never holds the Channel's delivery budget
+    at 0.
+  - A peer without #102 drops the packet at its unknown-context gate (an
+    older leviculum, counted) or silently (Python, which still refreshes the
+    link's inbound clock); the sender sees nothing. Use it only toward a
+    peer known to speak it; `try_send_timed` stays the fallback.
 
 ### Fixed
 

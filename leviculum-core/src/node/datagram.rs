@@ -13,6 +13,12 @@ use crate::transport::DropReason;
 use super::link_management::LinkRx;
 use super::{send, NodeCore, NodeEvent};
 
+/// The data-plane event slots a host keeps for Channel messages: below this
+/// much room ([`NodeCore::set_channel_delivery_budget`]) an arriving
+/// datagram is shed, not delivered. A quarter of leviculum-std's default
+/// data-plane capacity (128).
+pub const DATAGRAM_SINK_RESERVE: usize = 32;
+
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Send `data` on a link as one unordered, unreliable datagram (live
     /// media), returning the sequence number it carries.
@@ -125,12 +131,37 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.drop_link_packet(packet, rx, DropReason::LinkDecryptFail);
             return;
         };
-        // Liveness only once it is known to be from the peer.
+        // A replay is authentic ciphertext; the window stops it before it
+        // counts as liveness or as the peer speaking on this interface.
+        if !link.datagrams_mut().window.accept(sequence) {
+            link.datagrams_mut().stats.replayed += 1;
+            crate::tracing::debug!(
+                link = %HexShort(link_id.as_bytes()),
+                sequence,
+                "Datagram replayed or older than the window, dropped"
+            );
+            return;
+        }
+        // Liveness only once it is known to be from the peer, and fresh.
         link.record_inbound(now_ms);
+        self.direct_link_authenticated(&link_id, now_ms);
+        // Keep the host's last `DATAGRAM_SINK_RESERVE` event slots for the
+        // Channel: a datagram flood must never hold its delivery budget at 0
+        // (leviculum#102 review). The Channel's own messages decrement the
+        // same budget as they are delivered.
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return;
+        };
+        if let Some(budget) = &mut self.channel_delivery_budget {
+            if *budget <= DATAGRAM_SINK_RESERVE {
+                link.datagrams_mut().stats.shed += 1;
+                return;
+            }
+            *budget -= 1;
+        }
         let stats = &mut link.datagrams_mut().stats;
         stats.received += 1;
         stats.received_bytes += data.len() as u64;
-        self.direct_link_authenticated(&link_id, now_ms);
         self.events.push(NodeEvent::LinkDatagramReceived {
             link_id,
             sequence,

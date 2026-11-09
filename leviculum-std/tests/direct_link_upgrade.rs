@@ -335,10 +335,14 @@ async fn datagrams_cross_the_punched_path_with_their_sequence() {
     assert_eq!(mdu, b.node.link_mdu(&link_id).unwrap() - 4);
     const N: u32 = 20;
     for i in 0..N {
-        let seq = handle
-            .send_unordered(&vec![i as u8; mdu])
-            .await
-            .expect("send a datagram");
+        // Half through the waiting send, half through the one that never
+        // waits: one sequence either way.
+        let seq = if i % 2 == 0 {
+            handle.send_unordered(&vec![i as u8; mdu]).await
+        } else {
+            handle.try_send_unordered(&vec![i as u8; mdu])
+        }
+        .expect("send a datagram");
         assert_eq!(seq, i, "sequence numbers count from zero");
     }
     let mut seen = Vec::new();

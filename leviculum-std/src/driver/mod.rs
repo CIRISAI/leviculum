@@ -7023,6 +7023,25 @@ fn dispatch_output(
         output.actions,
         ifac_configs,
     );
+    // +ciris (leviculum#102): a datagram a full interface refused is shed,
+    // not queued for retry; count it where the node's drops are counted.
+    if result
+        .drops
+        .iter()
+        .any(|(_, r)| *r == leviculum_core::transport::DropReason::DatagramShed)
+    {
+        let shed = leviculum_core::transport::DispatchResult {
+            retries: Vec::new(),
+            errors: Vec::new(),
+            drops: result
+                .drops
+                .iter()
+                .filter(|(_, r)| *r == leviculum_core::transport::DropReason::DatagramShed)
+                .copied()
+                .collect(),
+        };
+        inner.lock_recover().record_dispatch_drops(&shed);
+    }
 
     // Log dispatch errors.
     //

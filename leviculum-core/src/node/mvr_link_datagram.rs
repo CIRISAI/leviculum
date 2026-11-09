@@ -24,13 +24,14 @@ use crate::destination::{Destination, DestinationType, Direction, ProofStrategy}
 use crate::identity::Identity;
 use crate::link::datagram::{DatagramStats, DATAGRAM_HEADER_LEN};
 use crate::link::LinkId;
+use crate::memory_storage::MemoryStorage;
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent, SendError};
 use crate::packet::{Packet, PacketContext};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
-use crate::traits::NoStorage;
 use crate::transport::{Action, InterfaceId, TickOutput};
 
-type Node = NodeCore<OsRng, MockClock, NoStorage>;
+/// Real storage, so the transport's packet-hash dedup runs as in the field.
+type Node = NodeCore<OsRng, MockClock, MemoryStorage>;
 
 fn add_iface(node: &mut Node, name: &'static str) -> usize {
     let idx = node
@@ -64,7 +65,11 @@ struct Pair {
 fn linked_pair() -> Pair {
     let identity = Identity::generate(&mut OsRng);
     let signing_key = identity.ed25519_verifying().to_bytes();
-    let mut receiver = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+    let mut receiver = NodeCoreBuilder::new().build(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        MemoryStorage::with_defaults(),
+    );
     let mut dest = Destination::new(
         Some(identity),
         Direction::In,
@@ -79,7 +84,11 @@ fn linked_pair() -> Pair {
     receiver.register_destination(dest);
     let r_iface = add_iface(&mut receiver, "R");
 
-    let mut sender = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+    let mut sender = NodeCoreBuilder::new().build(
+        OsRng,
+        MockClock::new(TEST_TIME_MS),
+        MemoryStorage::with_defaults(),
+    );
     let s_iface = add_iface(&mut sender, "S");
 
     let (link_id, _, out) = sender.connect(dest_hash, &signing_key).unwrap();
@@ -232,4 +241,113 @@ fn a_tampered_datagram_is_refused() {
             .refused,
         1
     );
+}
+
+/// leviculum#102 review: a replay is refused even after the packet-hash
+/// dedup has forgotten it, and refused before it counts as liveness.
+#[test]
+fn a_replay_after_the_dedup_forgets_it_is_refused_by_the_window() {
+    let mut pair = linked_pair();
+    let (seq, raw) = send(&mut pair, b"frame");
+    assert_eq!(
+        deliver(&mut pair, &raw).0,
+        std::vec![(seq, b"frame".to_vec())]
+    );
+
+    // The dedup catches the immediate repeat.
+    assert!(deliver(&mut pair, &raw).0.is_empty());
+    let stats = pair.receiver.link_datagram_stats(&pair.link_id).unwrap();
+    assert_eq!(
+        (stats.received, stats.replayed),
+        (1, 0),
+        "dedup, not the window"
+    );
+
+    // Once the cache has turned over, only the window stands.
+    pair.receiver.transport.storage_mut().clear_packet_hashes();
+    let before = pair.receiver.link(&pair.link_id).unwrap().last_inbound_ms();
+    pair.receiver.transport.clock().advance(1_000);
+    let (got, back) = deliver(&mut pair, &raw);
+    assert!(got.is_empty(), "a replay is not delivered");
+    assert_eq!(back, 0);
+    assert_eq!(
+        pair.receiver.link(&pair.link_id).unwrap().last_inbound_ms(),
+        before,
+        "a replay is no evidence the peer is alive"
+    );
+    let stats = pair.receiver.link_datagram_stats(&pair.link_id).unwrap();
+    assert_eq!((stats.received, stats.replayed), (1, 1));
+}
+
+/// leviculum#102 review: a datagram flood never takes the host's last
+/// event slots from the Channel. Datagrams beyond the reserve are shed and
+/// counted; the Channel message that follows is delivered, not held.
+#[test]
+fn a_datagram_flood_leaves_the_channel_its_room() {
+    use crate::node::DATAGRAM_SINK_RESERVE;
+    let mut pair = linked_pair();
+    pair.receiver
+        .set_channel_delivery_budget(Some(DATAGRAM_SINK_RESERVE + 2));
+    let flood: Vec<Vec<u8>> = (0..10u8).map(|i| send(&mut pair, &[i; 50]).1).collect();
+    let mut delivered = 0;
+    for raw in &flood {
+        delivered += deliver(&mut pair, raw).0.len();
+    }
+    assert_eq!(delivered, 2, "datagrams stop at the reserve");
+    assert_eq!(
+        pair.receiver
+            .link_datagram_stats(&pair.link_id)
+            .unwrap()
+            .shed,
+        8
+    );
+
+    let out = pair.sender.send_on_link(&pair.link_id, b"control").unwrap();
+    let mut got_message = false;
+    for raw in packets(&out) {
+        let o = pair.receiver.handle_packet(InterfaceId(pair.r_iface), &raw);
+        got_message |= o.events.iter().any(|e| {
+            matches!(e, NodeEvent::MessageReceived { data, .. } if data.as_slice() == b"control")
+        });
+    }
+    assert!(got_message, "the Channel message is delivered at once");
+}
+
+/// leviculum#102 review: at a full interface a datagram is shed and
+/// counted, never queued for retry; a Channel frame refused the same way
+/// is still handed back for retry.
+#[test]
+fn a_full_interface_sheds_datagrams_and_retries_the_channel() {
+    use crate::transport::{dispatch_actions, DropReason};
+    let mut pair = linked_pair();
+    let (_, datagram) = send(&mut pair, b"frame");
+    let channel = packets(&pair.sender.send_on_link(&pair.link_id, b"control").unwrap())
+        .pop()
+        .unwrap();
+    let mut full = MockInterface::new("full", pair.s_iface as u8);
+    full.reject_sends = true;
+    let mut ifaces: Vec<&mut dyn crate::traits::Interface> = std::vec![&mut full];
+    let iface = InterfaceId(pair.s_iface);
+    let result = dispatch_actions(
+        &mut ifaces,
+        std::vec![
+            Action::SendPacket {
+                iface,
+                data: datagram,
+                peer: None,
+            },
+            Action::SendPacket {
+                iface,
+                data: channel.clone(),
+                peer: None,
+            },
+        ],
+        &std::collections::BTreeMap::new(),
+    );
+    assert_eq!(result.drops, std::vec![(iface, DropReason::DatagramShed)]);
+    assert_eq!(result.retries.len(), 1, "only the Channel frame is retried");
+    assert_eq!(result.retries[0].data, channel);
+
+    pair.sender.record_dispatch_drops(&result);
+    assert_eq!(pair.sender.transport.stats().drops_datagram_shed(), 1);
 }
