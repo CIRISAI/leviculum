@@ -61,7 +61,7 @@ use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
 use loquax::mapframe::{frame_size, hold, Ask, DrawnName, Framed, Frames, PlaceCost};
-use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
+use loquax::mapload::{Loader, Source, Step, StepKind, CACHE_DEFAULT_MB};
 use loquax::picture::{map_theme, Maps};
 use loquax::screenmap;
 use loquax::tiles::Stats;
@@ -123,6 +123,23 @@ pub struct Renderer {
     fitted_at: Option<(World, u32)>,
     /// Whether a fit with pins asked for their places already.
     pins_asked: bool,
+    /// The loader's last steps, oldest first, at most [`LOAD_EVENTS`]
+    /// ([`load_events`], 1616).
+    load_events: Vec<LoadEvent>,
+}
+
+/// The most loader steps a renderer keeps for [`load_events`].
+pub const LOAD_EVENTS: usize = 256;
+
+/// One step of the loader, on the renderer's clock (the one
+/// [`tune_clock`] holds) and in the order the loader took them (1616):
+/// what a test reads the order of the loads from, so it asserts that order
+/// and not which load's bytes a starved host wrote to disk first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadEvent {
+    pub at_ms: u64,
+    pub step: StepKind,
+    pub want: MapWant,
 }
 
 impl Renderer {
@@ -145,6 +162,7 @@ impl Renderer {
             held_ms: None,
             fitted_at: None,
             pins_asked: false,
+            load_events: Vec::new(),
         }
     }
 
@@ -169,7 +187,18 @@ impl Renderer {
     /// landed.
     fn steps(&mut self, steps: Vec<Step>, notice: &mut Option<String>) -> bool {
         let mut landed = false;
+        let now = self.now_ms();
         for step in steps {
+            if step.kind() != StepKind::Skipped {
+                if self.load_events.len() >= LOAD_EVENTS {
+                    self.load_events.remove(0);
+                }
+                self.load_events.push(LoadEvent {
+                    at_ms: now,
+                    step: step.kind(),
+                    want: step.want().clone(),
+                });
+            }
             match step {
                 Step::Done {
                     want,
@@ -1007,6 +1036,18 @@ pub fn tune_tiles(dir: &Path, n: Option<usize>, clear: bool) {
             r.frames.clear_tiles();
         }
     }
+}
+
+/// The loader steps of the renderer over `dir`, oldest first, when one
+/// runs ([`LoadEvent`], 1616).
+pub fn load_events(dir: &Path) -> Option<Vec<LoadEvent>> {
+    let renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    renderers
+        .iter()
+        .find(|r| r.dir == dir)
+        .map(|r| r.load_events.clone())
 }
 
 /// Hold the clock of the renderer over `dir` at `now_ms`, or with `None`

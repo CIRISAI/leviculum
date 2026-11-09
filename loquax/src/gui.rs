@@ -3678,6 +3678,9 @@ mod tests {
         loading_ms: Option<u64>,
         on_disk_ms: Option<u64>,
         cell_ms: Option<u64>,
+        /// The loader's steps on the walk's clock (1616): the order the
+        /// bar is read from.
+        steps: Vec<first_tile::Stepped>,
     }
 
     const WALK_SIZE: (u32, u32) = (1527, 2099);
@@ -3732,6 +3735,7 @@ mod tests {
                 loading_ms: None,
                 on_disk_ms: None,
                 cell_ms: None,
+                steps: Vec::new(),
             };
             walk.step();
             assert!(!walk.loader.loading_here(), "the start is held");
@@ -3749,19 +3753,27 @@ mod tests {
             let t = self.now_ms();
             self.app.tick(Instant::now());
             self.app.next_job();
+            let mut steps = Vec::new();
             while let Ok(want) = self.rx.try_recv() {
                 match want {
                     Want::MapView(w) => {
-                        self.loader.schedule(w.here, w.ahead, t);
+                        steps.extend(self.loader.schedule(w.here, w.ahead, t));
                     }
                     Want::Map(w) => {
-                        self.loader.ask(w, t);
+                        steps.extend(self.loader.ask(w, t));
                     }
                     _ => {}
                 }
             }
-            let steps = self.loader.poll(t);
-            if steps
+            let polled = self.loader.poll(t);
+            self.steps.extend(
+                steps
+                    .iter()
+                    .chain(&polled)
+                    .filter(|s| s.kind() != loquax::mapload::StepKind::Skipped)
+                    .map(|s| (t, s.kind(), s.want().clone())),
+            );
+            if polled
                 .iter()
                 .any(|s| matches!(s, loquax::mapload::Step::Done { .. }))
             {
@@ -3870,9 +3882,12 @@ mod tests {
     /// tenth of the screen uncovered by the start region: when a load for
     /// the screen was said, when a tile of the screen at the zoom viewed
     /// was on disk (`first_tile_ms`: the next frame draws it), and when a
-    /// cell's first byte showed. The bar: a tile of the screen arrives,
-    /// and before the first byte of a cell that started after the screen
-    /// was uncovered.
+    /// cell's first byte showed. The bar is the loader's order (1616,
+    /// [`first_tile::out_of_order`]): a tile of the screen arrives, and a
+    /// cell started after the uncovered frame starts only once no box of
+    /// the screen runs and every one asked since landed. The disk times
+    /// are reported, not asserted: a starved host writes the file of a
+    /// cell the pan's ahead started before the uncovered frame after it.
     #[test]
     fn the_screen_at_its_zoom_draws_first_in_the_window() {
         let mut rows = Vec::new();
@@ -3899,14 +3914,19 @@ mod tests {
                     u64::from(tiles) * blob
                 );
             }
-            let new_cell = walk
-                .cell_ms
-                .filter(|&c| walk.uncovered_ms.is_some_and(|u| c > u));
-            match (walk.on_disk_ms, new_cell) {
-                (Some(t), Some(c)) if t <= c => {}
-                (Some(_), None) => {}
-                other => late.push(format!("{name}: screen tile, new cell {other:?}")),
+            let Some(u) = walk.uncovered_ms else {
+                late.push(format!("{name}: the screen was never uncovered"));
+                return;
+            };
+            first_tile::print_steps(name, &walk.steps, u);
+            if walk.on_disk_ms.is_none() {
+                late.push(format!("{name}: no tile of the screen at its zoom arrived"));
             }
+            late.extend(
+                first_tile::out_of_order(&walk.steps, u)
+                    .into_iter()
+                    .map(|why| format!("{name}: {why}")),
+            );
         };
         let w = WALK_SIZE.0 as f32;
         // A drag of a screen and a half east (the view goes east, the
@@ -3945,7 +3965,7 @@ mod tests {
         }
         assert!(
             late.is_empty(),
-            "the screen's tile after a cell's byte, or never: {late:?}"
+            "a cell before the screen's box, or no tile of the screen: {late:?}"
         );
     }
 

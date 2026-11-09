@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use leviculum_map::mercator::World;
 use leviculum_map::region::{Header, Region};
 use leviculum_map::viewport::Viewport;
-use loquax::mapload::{Loader, Source, Step};
+use loquax::mapload::{Loader, Source, Step, StepKind};
 use loquax::picture::Maps;
+use loquax::ui::map::{LoadReason, MapWant};
 
 /// The synthetic archive's box: about 14 by 16 km around the Grunewald,
 /// so a pan of a screen and a half of a phone's 1527 pixels east, or two
@@ -139,4 +140,63 @@ pub fn start_region(maps: &Path, url: &str, at: World, size: (u32, u32)) -> Head
     *Region::open(std::fs::File::open(maps.join("start.lmr")).expect("open"))
         .expect("the start region")
         .header()
+}
+
+/// A loader step as the walks keep it (1616): when on the walk's clock,
+/// what it did, which box.
+pub type Stepped = (u64, StepKind, MapWant);
+
+/// Print the walk `name`'s loader steps, each from the uncovered frame at
+/// `uncovered_ms`.
+pub fn print_steps(name: &str, steps: &[Stepped], uncovered_ms: u64) {
+    for (at, kind, want) in steps {
+        eprintln!(
+            "{name}: step {:>6} ms {kind:?} {} z{}-{}",
+            *at as i64 - uncovered_ms as i64,
+            want.reason.word(),
+            want.zooms.0,
+            want.zooms.1
+        );
+    }
+}
+
+/// Why the loader's `steps` break the screen-first order of 1527, from
+/// the uncovered frame at `uncovered_ms` (1616): each cell started after
+/// it before the screen's box asked last had landed. A box of the screen
+/// the view left runs on (a load cannot stop) and a cell may start beside
+/// it once the box of the view now has landed; a cell started at the
+/// uncovered frame or before is the pan's ahead (1292) and may come first.
+/// Read from the loader's order, not from the disk: a cell started before
+/// the uncovered frame writes its file after it on a host a parallel build
+/// starves (1613).
+pub fn out_of_order(steps: &[Stepped], uncovered_ms: u64) -> Vec<String> {
+    // The screen's box asked last, and whether it has landed.
+    let mut last: Option<(&MapWant, bool)> = None;
+    let mut wrong = Vec::new();
+    for (at, kind, want) in steps {
+        let screen = want.reason == LoadReason::Screen;
+        match (kind, screen) {
+            (StepKind::Started, true) => last = Some((want, false)),
+            (StepKind::Done | StepKind::Failed, true) => {
+                if let Some((asked, ended)) = &mut last {
+                    *ended |= *asked == want;
+                }
+            }
+            (StepKind::Started, false) if *at > uncovered_ms => {
+                if let Some((asked, false)) = last {
+                    wrong.push(format!(
+                        "a cell z{}-{} started {} ms after the uncovered frame \
+                         while the screen's box z{}-{} had not landed",
+                        want.zooms.0,
+                        want.zooms.1,
+                        at - uncovered_ms,
+                        asked.zooms.0,
+                        asked.zooms.1
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    wrong
 }

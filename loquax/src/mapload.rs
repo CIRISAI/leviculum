@@ -146,6 +146,38 @@ pub enum Step {
     },
 }
 
+/// What a [`Step`] did, without its detail: what a frontend keeps of
+/// the loader's steps for a test to read their order by (1616).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepKind {
+    Started,
+    Done,
+    Failed,
+    Skipped,
+}
+
+impl Step {
+    /// What the step did.
+    pub fn kind(&self) -> StepKind {
+        match self {
+            Self::Started(_) => StepKind::Started,
+            Self::Done { .. } => StepKind::Done,
+            Self::Failed { .. } => StepKind::Failed,
+            Self::Skipped { .. } => StepKind::Skipped,
+        }
+    }
+
+    /// The box the step is about.
+    pub fn want(&self) -> &MapWant {
+        match self {
+            Self::Started(want)
+            | Self::Done { want, .. }
+            | Self::Failed { want, .. }
+            | Self::Skipped { want, .. } => want,
+        }
+    }
+}
+
 /// A region that landed.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Landed {

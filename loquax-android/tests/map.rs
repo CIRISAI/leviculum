@@ -2810,13 +2810,21 @@ impl FirstTile {
 /// first byte showed; each from the uncovered frame, so a load the pan's
 /// ahead started before it (1292) can be negative. "Uncovered" is
 /// measured against the start region alone, the same for both stacks.
-/// The bar: a tile of the screen draws, and before the first byte of a
-/// cell that started after the screen was uncovered. Then the sizes of
-/// the screen's own box and of the cell.
+/// The bar is the loader's order, read from its steps on the renderer's
+/// clock ([`loquax_android::map::load_events`], 1616): a tile of the
+/// screen at its zoom arrives, and a cell started after the uncovered
+/// frame starts only once no box of the screen runs and every one asked
+/// since that frame has landed, so not a byte of it is on the link before
+/// the screen's box is whole. The times on disk and of the first frame
+/// drawn with the tile are reported, not asserted: on a host a parallel
+/// build starves, a cell the pan's ahead started 80 ms BEFORE the
+/// uncovered frame wrote its file after it, and the screen's tile, which
+/// that cell brings, drew later than that file appeared (1613). Then the
+/// sizes of the screen's own box and of the cell.
 #[test]
 fn the_screen_at_its_zoom_draws_first_on_the_phone() {
     let mut rows = Vec::new();
-    let mut late = Vec::new();
+    let mut late: Vec<String> = Vec::new();
     let blob = first_tile_blob();
     let mut check = |walk: &FirstTile, name: &str| {
         rows.push(walk.row(name));
@@ -2838,17 +2846,26 @@ fn the_screen_at_its_zoom_draws_first_on_the_phone() {
                 u64::from(tiles) * blob
             );
         }
-        // A cell whose load started after the screen was uncovered shows
-        // its first byte after the screen's tile; one the pan's ahead
-        // started before (1292) is the prefetch's and may come first.
-        let new_cell = walk
-            .cell_ms
-            .filter(|&c| walk.uncovered_ms.is_some_and(|u| c > u));
-        match (walk.on_disk_ms, new_cell) {
-            (Some(t), Some(c)) if t <= c => {}
-            (Some(_), None) => {}
-            other => late.push(format!("{name}: screen tile, new cell {other:?}")),
+        // The loader's steps, from the uncovered frame (1616): the order
+        // the bar is read from.
+        let steps: Vec<first_tile::Stepped> = loquax_android::map::load_events(walk.home.path())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| (e.at_ms, e.step, e.want))
+            .collect();
+        let Some(u) = walk.uncovered_ms else {
+            late.push(format!("{name}: the screen was never uncovered"));
+            return;
+        };
+        first_tile::print_steps(name, &steps, u);
+        if walk.on_disk_ms.is_none() {
+            late.push(format!("{name}: no tile of the screen at its zoom arrived"));
         }
+        late.extend(
+            first_tile::out_of_order(&steps, u)
+                .into_iter()
+                .map(|why| format!("{name}: {why}")),
+        );
     };
     // A pan of a screen and a half east in 576 ms, then at rest until the
     // loads for the screen are done: the sizes.
@@ -2896,6 +2913,6 @@ fn the_screen_at_its_zoom_draws_first_on_the_phone() {
     }
     assert!(
         late.is_empty(),
-        "the screen's tile after a cell's byte, or never: {late:?}"
+        "a cell before the screen's box, or no tile of the screen: {late:?}"
     );
 }
