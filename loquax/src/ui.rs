@@ -175,6 +175,9 @@ pub mod viewload;
 pub mod voice;
 pub mod zoom;
 
+#[cfg(test)]
+mod late;
+
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
 /// seconds.
 pub const TOAST_TICKS: u64 = 12;
@@ -832,10 +835,91 @@ impl Conversation {
             .unwrap_or_else(|| chat::latest_appearance(&self.messages))
     }
 
-    /// Note one more unread message, the newest.
-    fn mark_new(&mut self) {
-        let at = self.messages.len().saturating_sub(1);
+    /// Note one more unread message, the one at `at` (1505: a late one
+    /// sits at its writer's time, not at the end). The rule stays where
+    /// the reader left off: above the first unread by arrival, so a
+    /// later arrival written earlier sits above it, read or not.
+    fn mark_new(&mut self, at: usize) {
         self.new_rule.get_or_insert(NewRule { at, count: 0 }).count += 1;
+    }
+
+    /// Where a message written at `written` (unix seconds) goes in the
+    /// body (1505): after every message written no later, so the body
+    /// runs in its writers' order and a tie keeps the arrival order. One
+    /// without a time goes last, and one already there without a time
+    /// is taken as written no later. Walks back over the newer messages
+    /// only: an arrival in order costs one comparison.
+    pub fn written_place(&self, written: Option<i64>) -> usize {
+        let mut place = self.messages.len();
+        let Some(written) = written else {
+            return place;
+        };
+        while place > 0 {
+            match self.messages[place - 1].at {
+                Some(at) if at.unix_secs > written => place -= 1,
+                _ => break,
+            }
+        }
+        place
+    }
+
+    /// Put the messages in their writers' order, a tie and a message
+    /// without a time (it keeps the place of the one before it) in the
+    /// order they are in (1505): a page the store hands out comes in
+    /// arrival order. Each old index's new one, or `None` when they were
+    /// in order already.
+    fn sort_written(&mut self) -> Option<Vec<usize>> {
+        let mut last = i64::MIN;
+        let keys: Vec<i64> = self
+            .messages
+            .iter()
+            .map(|m| {
+                if let Some(at) = m.at {
+                    last = at.unix_secs;
+                }
+                last
+            })
+            .collect();
+        if keys.windows(2).all(|w| w[0] <= w[1]) {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..keys.len()).collect();
+        order.sort_by_key(|&i| keys[i]);
+        let mut new_of = alloc::vec![0; keys.len()];
+        for (new, &old) in order.iter().enumerate() {
+            new_of[old] = new;
+        }
+        let mut old: Vec<Option<Message>> = core::mem::take(&mut self.messages)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.messages = order.iter().filter_map(|&i| old[i].take()).collect();
+        self.summary.forget();
+        Some(new_of)
+    }
+
+    /// The lowest store key the screen holds (1505): where the store's
+    /// next page ends. The body's first message is the earliest written,
+    /// which a late arrival makes another than the earliest taken.
+    pub(crate) fn oldest_key(&self) -> Option<u64> {
+        self.messages.iter().map(|m| m.activity).min()
+    }
+
+    /// The received messages that have a row of their own, newest
+    /// arrival first (1505): the unread are the newest by arrival, which
+    /// the body's writers' order may scatter.
+    fn received_by_arrival(&self, aside: bool) -> Vec<usize> {
+        // From the end, so a tie (a model built by hand) keeps the body's
+        // order, newest last.
+        let mut received: Vec<usize> = (0..self.messages.len())
+            .rev()
+            .filter(|&i| {
+                let m = &self.messages[i];
+                !m.outbound && (aside || !m.is_aside())
+            })
+            .collect();
+        received.sort_by_key(|&i| core::cmp::Reverse(self.messages[i].activity));
+        received
     }
 
     /// The message after `index` that has a row of its own: reactions are
@@ -916,32 +1000,32 @@ impl Conversation {
     /// The unread messages that ask for attention, oldest first: the raw
     /// [`Conversation::unread`] newest received, less the reports.
     fn unread_messages(&self) -> Vec<usize> {
-        let mut left = self.unread;
-        let mut shown = Vec::new();
-        for (i, message) in self.messages.iter().enumerate().rev() {
-            if left == 0 {
-                break;
-            }
-            if message.outbound || message.is_aside() {
-                continue;
-            }
-            left -= 1;
-            if !message.is_report() {
-                shown.push(i);
-            }
+        if self.unread == 0 {
+            return Vec::new();
         }
-        shown.reverse();
+        let mut shown: Vec<usize> = self
+            .received_by_arrival(false)
+            .into_iter()
+            .take(self.unread)
+            .filter(|&i| !self.messages[i].is_report())
+            .collect();
+        shown.sort_unstable();
         shown
     }
 
     /// The `new` rule the raw unread count gives, as a restart sets it:
-    /// above the first unread message that is no report (1209).
+    /// above the first unread message that is no report (1209), the
+    /// first by arrival, where a running screen put it (1505).
     pub(crate) fn rule_from_unread(&self) -> Option<NewRule> {
         let shown = self.unread_messages();
-        shown.first().map(|&at| NewRule {
-            at,
-            count: shown.len(),
-        })
+        shown
+            .iter()
+            .copied()
+            .min_by_key(|&i| self.messages[i].activity)
+            .map(|at| NewRule {
+                at,
+                count: shown.len(),
+            })
     }
 
     /// Whether the peer's position is alive (1209), from the reports the
@@ -1137,6 +1221,12 @@ pub struct UiModel<B> {
     /// The conversation's first row on screen when the reader scrolled up;
     /// `None` keeps the newest at the bottom.
     pub scroll_top: Option<usize>,
+    /// The message on the first row on screen and how far into its block
+    /// the row is, while a fold splices a late bubble above it (1505):
+    /// the fold's end puts the view's top back on it
+    /// ([`UiModel::keep_top`]), after the `new` rule and anything else the
+    /// fold added above.
+    kept_top: Option<(u64, isize)>,
     /// The same for a target that lays only a window of the chat (the M9,
     /// 1529): the view's first row by the message it is in, so a window
     /// that moves keeps the line. `None` keeps the newest at the bottom.
@@ -1466,6 +1556,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             now: None,
             screen: (80, 24),
             scroll_top: None,
+            kept_top: None,
             chat_anchor: None,
             detail: None,
             own_code: None,
@@ -1833,13 +1924,13 @@ impl<B> UiModel<B> {
         if !self.home_client {
             return;
         }
+        // The newest by arrival (1505), where the body's writers' order
+        // may have put a late one anywhere.
         let mut ids: Vec<[u8; 32]> = conversation
-            .messages
-            .iter()
-            .rev()
-            .filter(|message| !message.outbound)
+            .received_by_arrival(true)
+            .into_iter()
             .take(unread)
-            .filter_map(|message| message.id)
+            .filter_map(|m| conversation.messages[m].id)
             .collect();
         // Newest first, the unloaded ones behind the loaded.
         if ids.len() < unread {
@@ -3295,6 +3386,7 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     let marks = clock.then(|| model.clock_marks());
     let mut effects = step(model, event);
     let noted = model.note_changes();
+    model.keep_top();
     if !clock || noted || !effects.is_empty() || marks != Some(model.clock_marks()) {
         model.revision = model.revision.wrapping_add(1);
     }
@@ -3383,6 +3475,7 @@ impl<'a, B: InputBuffer + Default> Batch<'a, B> {
             return;
         }
         self.model.note_changes();
+        self.model.keep_top();
         self.model.revision = self.model.revision.wrapping_add(1);
         self.model.ask_page(&mut self.effects);
     }
@@ -5695,7 +5788,7 @@ fn gives_up(state: DeliveryState) -> bool {
     matches!(state, DeliveryState::Rejected | DeliveryState::Failed)
 }
 
-fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
+fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
     match event {
         OutboxEvent::Ready { address } => {
             model.address = Some(address);
@@ -5882,33 +5975,38 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let at = model.now;
             let shown = written_time(at, sent_at, lev.as_ref());
             let activity = model.bump();
-            let conversation = &mut model.conversations[index];
-            let first = conversation.messages.is_empty();
-            conversation.messages.push(Message {
-                outbound: false,
-                size: body.len(),
-                body: String::from_utf8_lossy(&body).into_owned(),
-                id: Some(message_id),
-                delivery: None,
-                signature: match verified {
-                    true => Signature::Verified,
-                    false => Signature::Unverified,
-                },
-                leg: None,
-                unproven: false,
-                at: shown,
-                ledger: vec![LedgerEntry::new(
-                    at,
-                    match verified {
-                        true => "received, signature verified",
-                        false => "received, signature NOT verified",
+            let first = model.conversations[index].messages.is_empty();
+            // At its writer's time (1505): a late one, written before what
+            // already shows, goes above it, not under the newest.
+            let placed = model.place(
+                index,
+                Message {
+                    outbound: false,
+                    size: body.len(),
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                    id: Some(message_id),
+                    delivery: None,
+                    signature: match verified {
+                        true => Signature::Verified,
+                        false => Signature::Unverified,
                     },
-                )],
-                last_leg: None,
-                activity,
-                fields,
-            });
-            let report = conversation.messages.last().is_some_and(Message::is_report);
+                    leg: None,
+                    unproven: false,
+                    at: shown,
+                    ledger: vec![LedgerEntry::new(
+                        at,
+                        match verified {
+                            true => "received, signature verified",
+                            false => "received, signature NOT verified",
+                        },
+                    )],
+                    last_leg: None,
+                    activity,
+                    fields,
+                },
+            );
+            let conversation = &mut model.conversations[index];
+            let report = conversation.messages[placed].is_report();
             // A position report is a state, not a message (1209): it moves
             // the conversation nowhere in the list, unless it is the first
             // the conversation has.
@@ -5916,13 +6014,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 conversation.activity = activity;
             }
             let peer = conversation.peer;
-            let reaction = conversation
-                .messages
-                .last()
+            let reaction = Some(&conversation.messages[placed])
                 .filter(|m| m.is_reaction())
                 .and_then(Message::reaction);
             model.changed.insert((peer, activity));
-            let mut effects = take_telemetry(model, index, message_id);
+            let mut effects = take_telemetry(model, index, placed, message_id);
             effects.extend(model.take_lev(source, lev.as_ref()));
             // A group's state (1307) is kept and stored, and asks for no
             // attention: no unread, no toast, no cursor. A group the
@@ -5985,7 +6081,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 model.changed_peers.insert(peer);
                 let conversation = &mut model.conversations[index];
                 conversation.unread += 1;
-                conversation.mark_new();
+                conversation.mark_new(placed);
                 if open && follow {
                     model.message_cursor = conversation.messages.len() - 1;
                 }
@@ -5996,7 +6092,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             } else {
                 // One reading earlier messages keeps the view, and the rule
                 // says where the new ones begin.
-                model.conversations[index].mark_new();
+                model.conversations[index].mark_new(placed);
             }
             if raise {
                 let from = model.names.label(&source, model.lang);
@@ -6058,11 +6154,16 @@ fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 1
 /// received: each position into the peer's latest where it is newer, and
 /// into the store; each blob that did not decode named in `tui.log`, the
 /// bytes kept with the message.
-fn take_telemetry<B>(model: &mut UiModel<B>, index: usize, message_id: [u8; 32]) -> Vec<UiEffect> {
+fn take_telemetry<B>(
+    model: &mut UiModel<B>,
+    index: usize,
+    placed: usize,
+    message_id: [u8; 32],
+) -> Vec<UiEffect> {
     let Some(conversation) = model.conversations.get(index) else {
         return Vec::new();
     };
-    let Some(message) = conversation.messages.last() else {
+    let Some(message) = conversation.messages.get(placed) else {
         return Vec::new();
     };
     if !telemetry::has_telemetry(&message.fields) {
@@ -6552,7 +6653,7 @@ fn written_time(
     })
 }
 
-fn home_sent<B>(
+fn home_sent<B: InputBuffer>(
     model: &mut UiModel<B>,
     message_id: [u8; 32],
     destination: [u8; 16],
@@ -6630,10 +6731,10 @@ fn home_sent<B>(
     message.note(now, "sent from another device, taken by the mailbox");
     message.activity = activity;
     message.fields = fields;
-    let conversation = &mut model.conversations[index];
-    conversation.activity = activity;
-    conversation.messages.push(message);
-    let peer = conversation.peer;
+    model.conversations[index].activity = activity;
+    // At the time the other device sent it (1505), among what shows.
+    model.place(index, message);
+    let peer = model.conversations[index].peer;
     model.changed.insert((peer, activity));
     if index == model.selected && model.scroll_top.is_none() {
         model.message_cursor = model.conversations[index].messages.len() - 1;

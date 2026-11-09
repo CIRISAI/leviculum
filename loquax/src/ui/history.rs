@@ -274,9 +274,15 @@ impl<B> UiModel<B> {
         }
         let now = self.now;
         let index = self.conversation(stored.peer);
+        let group = self.groups.contains_key(&stored.peer);
         let conversation = &mut self.conversations[index];
         conversation.listing = stored.listing;
         conversation.messages = stored.messages;
+        // The store's arrival order, in its writers' (1505); a group's is
+        // its home's acceptance, the order every member sees.
+        if !group {
+            let _ = conversation.sort_written();
+        }
         conversation.pinned = stored.pinned;
         conversation.flags = stored.flags;
         conversation.earlier = stored.earlier;
@@ -337,7 +343,8 @@ impl<B> UiModel<B> {
                 conversation.activity = conversation.activity.max(conversation.list_activity());
                 continue;
             };
-            let (older, more) = below(stored.peer, first.activity)?;
+            let first = conversation.oldest_key().unwrap_or(first.activity);
+            let (older, more) = below(stored.peer, first)?;
             match earlier {
                 0 => self.prepend(stored.peer, older, more),
                 _ => self.conversations[c].earlier = older.len() + more,
@@ -511,6 +518,162 @@ impl<B> UiModel<B> {
         }
     }
 
+    /// Put `message` into conversation `c` where its writer's time puts
+    /// it (1505), and answer where; a group's copy goes last, its home's
+    /// acceptance order being the group's. An arrival in order is pushed; a late
+    /// one (written 09:00, taken from the mailbox at 14:00) is spliced in
+    /// above the newer ones, and every index into the conversation moves
+    /// with the messages it names: the `new` rule, the notes, the sends,
+    /// the detail view, the cursor. A reader scrolled up in the terminal
+    /// keeps the rows on screen where they were when it lands above
+    /// them; the window's list holds its distance from the bottom and the
+    /// M9 its anchor by key, which keep them without help.
+    pub(crate) fn place(&mut self, c: usize, message: Message) -> usize
+    where
+        B: InputBuffer,
+    {
+        let Some(conversation) = self.conversations.get(c) else {
+            return 0;
+        };
+        // A group's body runs in its home's acceptance order, the order
+        // every member sees (`crate::home::group`), which is the order its
+        // copies come in: a copy shows its writer's time, but goes last.
+        let group = self.groups.contains_key(&conversation.peer)
+            || leviculum_lxmf::lev::Lev::from_fields(&message.fields)
+                .is_some_and(|lev| lev.group_copy.is_some());
+        let conversation = &mut self.conversations[c];
+        let at = match group {
+            true => conversation.messages.len(),
+            false => conversation.written_place(message.at.map(|at| at.unix_secs)),
+        };
+        if at == conversation.messages.len() {
+            conversation.messages.push(message);
+            return at;
+        }
+        let open = c == self.selected;
+        // The message on the first row on screen, when the bubble lands
+        // above it: the fold's end puts the row back on it.
+        if let (true, Some(top), None) = (open, self.scroll_top, self.kept_top) {
+            let laid = self.laid();
+            let first = laid
+                .spans
+                .iter()
+                .position(|s| s.start < s.end && s.end > top);
+            if let Some(first) = first.filter(|&first| at <= first) {
+                let block = laid.spans[first].block.0;
+                self.kept_top = conversation_key(&self.conversations[c], first)
+                    .map(|key| (key, top as isize - block as isize));
+            }
+        }
+        let conversation = &mut self.conversations[c];
+        conversation.messages.insert(at, message);
+        conversation.summary.forget();
+        self.shift_from(c, at);
+        if open {
+            if self.message_cursor >= at {
+                self.message_cursor += 1;
+            }
+            self.selection = None;
+            self.press = None;
+        }
+        at
+    }
+
+    /// Put the view's first row back on the message it was on before a
+    /// late bubble went in above it (1505, [`Self::place`]): the rows on
+    /// screen stay where they were, whatever the fold added above them.
+    pub(super) fn keep_top(&mut self)
+    where
+        B: InputBuffer,
+    {
+        let Some((key, offset)) = self.kept_top.take() else {
+            return;
+        };
+        let Some(c) = self.conversations.get(self.selected) else {
+            return;
+        };
+        if self.scroll_top.is_none() {
+            return;
+        }
+        let Some(m) = c.messages.iter().position(|m| m.activity == key) else {
+            return;
+        };
+        let laid = self.laid();
+        let Some(span) = laid.spans.get(m) else {
+            return;
+        };
+        let top = (span.block.0 as isize + offset).max(0) as usize;
+        self.scroll_top = Some(top);
+    }
+
+    /// One message went in at `at` of conversation `c`: what named the
+    /// messages from there on names them one further (1505). The cursor is
+    /// the caller's, which knows whether the reader follows.
+    fn shift_from(&mut self, c: usize, at: usize) {
+        let conversation = &mut self.conversations[c];
+        if let Some(rule) = conversation.new_rule.as_mut() {
+            if rule.at >= at {
+                rule.at += 1;
+            }
+        }
+        for note in &mut conversation.notes {
+            if note.before >= at {
+                note.before += 1;
+            }
+        }
+        for (sc, sm) in self.sending.iter_mut() {
+            if *sc == c && *sm >= at {
+                *sm += 1;
+            }
+        }
+        if let Some((dc, dm)) = self.detail.as_mut() {
+            if *dc == c && *dm >= at {
+                *dm += 1;
+            }
+        }
+    }
+
+    /// Put conversation `c` in its writers' order (1505), a page the store
+    /// handed out in arrival order, and move what names its messages with
+    /// them. Nothing moves when it was in order.
+    fn sort_written(&mut self, c: usize) {
+        let group = self
+            .conversations
+            .get(c)
+            .is_some_and(|conversation| self.groups.contains_key(&conversation.peer));
+        if group {
+            return;
+        }
+        let Some(new_of) = self
+            .conversations
+            .get_mut(c)
+            .and_then(Conversation::sort_written)
+        else {
+            return;
+        };
+        let moved = |i: usize| new_of.get(i).copied().unwrap_or(i);
+        let conversation = &mut self.conversations[c];
+        if let Some(rule) = conversation.new_rule.as_mut() {
+            rule.at = moved(rule.at);
+        }
+        for note in &mut conversation.notes {
+            note.before = moved(note.before);
+        }
+        for (sc, sm) in self.sending.iter_mut() {
+            if *sc == c {
+                *sm = moved(*sm);
+            }
+        }
+        if let Some((dc, dm)) = self.detail.as_mut() {
+            if *dc == c {
+                *dm = moved(*dm);
+            }
+        }
+        if c == self.selected {
+            self.message_cursor = moved(self.message_cursor);
+        }
+    }
+
     /// Put `older` above what `peer`'s conversation shows, with `earlier`
     /// still in the store before them. Every index into the conversation
     /// moves with it, and a reader scrolled up keeps the rows they were
@@ -562,6 +725,12 @@ impl<B> UiModel<B> {
                 }
             }
         }
+        if open && !first_fill {
+            self.message_cursor += n;
+        }
+        // In its writers' order (1505): a page comes in arrival order, and
+        // one the late arrivals below it were written among.
+        self.sort_written(c);
         if first_fill {
             // The page a restart deferred (1490): the conversation lands
             // as a restore lands it, its rule where the unread begin
@@ -590,7 +759,6 @@ impl<B> UiModel<B> {
             return;
         }
         if open {
-            self.message_cursor += n;
             self.selection = None;
             self.press = None;
             let grown = self.laid().rows.len().saturating_sub(rows_before);
@@ -648,7 +816,7 @@ impl<B> UiModel<B> {
             })],
             (_, Some(first)) if at_top => vec![UiEffect::Store(StoreRead::Earlier {
                 peer: conversation.peer,
-                before: first.activity,
+                before: conversation.oldest_key().unwrap_or(first.activity),
                 through: None,
             })],
             _ => Vec::new(),
@@ -671,7 +839,7 @@ impl<B> UiModel<B> {
             Some(first) if keys.contains(&first.activity) => {
                 vec![UiEffect::Store(StoreRead::Earlier {
                     peer,
-                    before: first.activity,
+                    before: conversation.oldest_key().unwrap_or(first.activity),
                     through: None,
                 })]
             }
@@ -875,12 +1043,19 @@ impl<B> UiModel<B> {
             }
             return;
         };
+        // Received after it by arrival (1505): the body's writers' order
+        // may put a late one above it, and the mark read it too.
+        let through = conversation
+            .messages
+            .iter()
+            .filter(|m| m.id == Some(*id))
+            .map(|m| m.activity)
+            .max()
+            .unwrap_or(0);
         let after = conversation
             .messages
             .iter()
-            .rev()
-            .take_while(|m| m.id != Some(*id))
-            .filter(|m| !m.outbound)
+            .filter(|m| !m.outbound && m.activity > through)
             .count();
         if conversation.unread > after {
             conversation.unread = after;
@@ -1086,7 +1261,7 @@ impl<B> UiModel<B> {
         self.conversations
             .iter()
             .filter(|c| c.earlier > 0)
-            .filter_map(|c| c.messages.first().map(|m| (c.peer, m.activity)))
+            .filter_map(|c| c.oldest_key().map(|key| (c.peer, key)))
             .collect()
     }
 
@@ -1096,14 +1271,19 @@ impl<B> UiModel<B> {
         let Some(c) = self.conversations.iter().position(|c| c.peer == hit.peer) else {
             return Vec::new();
         };
-        let Some(first) = self.conversations[c].messages.first() else {
+        let Some(first) = self.conversations[c].oldest_key() else {
             return Vec::new();
         };
         self.reveal_pending = Some((hit.peer, hit.key));
         vec![UiEffect::Store(StoreRead::Earlier {
             peer: hit.peer,
-            before: first.activity,
+            before: first,
             through: Some(hit.key),
         })]
     }
+}
+
+/// The store key of message `m` of `conversation`.
+fn conversation_key(conversation: &Conversation, m: usize) -> Option<u64> {
+    conversation.messages.get(m).map(|message| message.activity)
 }

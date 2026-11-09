@@ -76,10 +76,12 @@ pub struct Summary {
     moves: Option<i64>,
     any: Option<i64>,
     /// One per received message that has a row of its own (no reaction,
-    /// no group state), oldest first: how many of them up to this one are
-    /// no position report. The unread rows of an unread count `n` are the
-    /// last entry less the one `n` before it.
-    received: Vec<u32>,
+    /// no group state), oldest arrival first (1505: the body runs in its
+    /// writers' order, the unread are the newest by arrival): its key and
+    /// how many of them up to this one are no position report. The unread
+    /// rows of an unread count `n` are the last entry less the one `n`
+    /// before it.
+    received: Vec<(u64, u32)>,
     /// The newest received icon appearance, foreground and background.
     appearance: Option<(String, String)>,
     /// The indices of the newest position reports with a fix, oldest
@@ -135,6 +137,7 @@ impl Summary {
         if from == messages.len() && self.seen.is_some() {
             return false;
         }
+        let mut disorder = false;
         for (index, message) in messages.iter().enumerate().skip(from) {
             if message.is_report() && super::message_fix(peer, message).is_some() {
                 if self.reports.len() > super::liveness::CADENCE_GAPS {
@@ -148,8 +151,14 @@ impl Summary {
                 self.moves = self.moves.max(at);
             }
             if !message.outbound && !message.is_aside() {
-                let before = self.received.last().copied().unwrap_or(0);
-                self.received.push(before + u32::from(!message.is_report()));
+                match self.received.last() {
+                    Some(&(key, _)) if key > message.activity => disorder = true,
+                    last => {
+                        let before = last.map_or(0, |&(_, n)| n);
+                        self.received
+                            .push((message.activity, before + u32::from(!message.is_report())));
+                    }
+                }
             }
             if let Some(id) = message.id {
                 self.ids.entry(id).or_default().push(index);
@@ -159,6 +168,9 @@ impl Summary {
                     self.appearance = Some(found);
                 }
             }
+        }
+        if disorder {
+            self.received = by_arrival(messages);
         }
         self.seen = Some(Seen::of(messages));
         true
@@ -197,9 +209,9 @@ impl Summary {
         if !self.fresh(messages) {
             return None;
         }
-        let total = self.received.last().copied().unwrap_or(0);
+        let total = self.received.last().map_or(0, |&(_, n)| n);
         let before = match self.received.len().checked_sub(unread + 1) {
-            Some(i) => self.received[i],
+            Some(i) => self.received[i].1,
             None => 0,
         };
         Some((total - before) as usize)
@@ -223,6 +235,26 @@ impl Summary {
     pub fn appearance(&self, messages: &[Message]) -> Option<Option<(String, String)>> {
         self.fresh(messages).then(|| self.appearance.clone())
     }
+}
+
+/// The received messages with a row of their own, oldest arrival first,
+/// each with how many up to it are no position report: a body whose
+/// writers' order is not its arrival order (1505), counted anew.
+fn by_arrival(messages: &[Message]) -> Vec<(u64, u32)> {
+    let mut received: Vec<(u64, bool)> = messages
+        .iter()
+        .filter(|m| !m.outbound && !m.is_aside())
+        .map(|m| (m.activity, !m.is_report()))
+        .collect();
+    received.sort_by_key(|&(key, _)| key);
+    let mut count = 0;
+    received
+        .into_iter()
+        .map(|(key, text)| {
+            count += u32::from(text);
+            (key, count)
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -121,6 +121,74 @@ fn a_message_in_a_closed_chat_builds_nothing_of_the_open_one() {
     );
 }
 
+/// A late message in the open long chat (1505): written half a year
+/// back, handed on by the mailbox now, it is spliced in at its writer's
+/// time, the conversation's revision moves once, and the one scene built
+/// for it builds the list's window and the chat's, not the 1200 bubbles.
+/// The summary's ids are read again without a walk counted.
+#[test]
+fn a_late_message_in_the_open_chat_is_one_splice_and_one_build() {
+    if !real_store::counting() {
+        return;
+    }
+    let mut model: UiModel<Line> = real_store::model();
+    update(
+        &mut model,
+        UiEvent::Open {
+            peer: real_store::peer(ANNA),
+        },
+    );
+    let _ = model.scene(LayoutClass::Wide);
+    let c = model.selected;
+    let len = model.conversations[c].messages.len();
+    let revision = model.conversations[c].revision();
+    let half = &model.conversations[c].messages[len / 2];
+    let sent_at = half.at.expect("a time").unix_secs;
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at,
+            message_id: [0xd5; 32],
+            source: real_store::peer(ANNA),
+            title: Vec::new(),
+            body: b"late from the mailbox".to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        }),
+    );
+    let _ = model.scene(LayoutClass::Wide);
+    let counts = counted(&model);
+    println!("COUNTS core.late_message {counts}");
+    let conversation = &model.conversations[c];
+    let at = conversation
+        .messages
+        .iter()
+        .position(|m| m.body == "late from the mailbox")
+        .expect("placed");
+    assert!(
+        at <= len / 2 + 1 && at + 1 < conversation.messages.len(),
+        "at its writer's time, not at the end: {at} of {}",
+        conversation.messages.len()
+    );
+    assert_eq!(conversation.revision(), revision + 1, "one revision");
+    bar(
+        "core.a_late_message_is_one_splice_and_one_build",
+        counts.scenes == 1
+            && counts.bubbles_built <= 2 * BUBBLES_ON_SCREEN
+            && counts.rows_built <= 2 * LIST_ON_SCREEN
+            && counts.walked == 0,
+        &format!(
+            "scenes {} (bar 1), bubbles_built {} (bar {}), rows_built {} (bar {}), walked {} (bar 0)",
+            counts.scenes,
+            counts.bubbles_built,
+            2 * BUBBLES_ON_SCREEN,
+            counts.rows_built,
+            2 * LIST_ON_SCREEN,
+            counts.walked
+        ),
+    );
+}
+
 /// Five seconds of the window's loop left alone build nothing (1491):
 /// the clock's events fold, the gate asks the model's revision, and the
 /// scene is built only when it moved. The control is the rule before
