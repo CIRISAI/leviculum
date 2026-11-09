@@ -400,18 +400,107 @@ pub fn rows<B>(model: &UiModel<B>, target: Target, section: Section) -> Vec<Page
                 note(StrId::PropagationNode),
                 note(StrId::PropagationNodeText),
             ]);
-            rows.extend(hub_rows(model));
+            rows.extend(hub_rows(model, target));
             rows.push(verb(StrId::Help, None, '?', Intent::Help));
             rows
         }
     }
 }
 
-/// The public rooms' hub (1577), in Advanced on every target: the line
-/// that says which, each shipped hub by its name with a mark on the one
-/// in force (keys `1` on), none (`0`), another to paste (`a`), and what
-/// a hub learns. Never a hash.
-pub fn hub_rows<B>(model: &UiModel<B>) -> Vec<PageRow> {
+/// How many hubs a page of the hub rows holds (1599): the closest ten,
+/// then "More…".
+pub const HUB_PAGE: usize = 10;
+
+/// A hub the settings offer (1599): heard, shipped, or both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offered {
+    pub hash: [u8; 16],
+    /// Its name; `None` for a nameless announce ("Unnamed hub").
+    pub name: Option<alloc::string::String>,
+    pub hops: Option<u8>,
+    /// On the shipped list.
+    pub shipped: bool,
+    /// Heard announcing.
+    pub heard: bool,
+    /// `Some(false)`: it gave no answer when last opened.
+    pub answered: Option<bool>,
+}
+
+/// The hubs in the order the settings offer them (1599): the heard ones
+/// by last seen, the closer first on a tie, a shipped one among them
+/// marked as such; then the shipped ones not heard, closest first, as the
+/// shipped file is ordered.
+pub fn offered_hubs(rooms: &super::rooms::Rooms) -> Vec<Offered> {
+    let shipped = super::hubs::shipped();
+    let mut out: Vec<Offered> = rooms
+        .heard
+        .hubs()
+        .iter()
+        .map(|h| {
+            let listed = shipped.iter().find(|s| s.hash == h.hash);
+            Offered {
+                hash: h.hash,
+                name: listed.map(|s| s.name.clone()).or_else(|| h.name.clone()),
+                hops: h.hops,
+                shipped: listed.is_some(),
+                heard: true,
+                answered: h.answered,
+            }
+        })
+        .collect();
+    for hub in shipped {
+        if out.iter().any(|o| o.hash == hub.hash) {
+            continue;
+        }
+        out.push(Offered {
+            name: Some(hub.name).filter(|n| !n.is_empty()),
+            hash: hub.hash,
+            hops: hub.hops,
+            shipped: true,
+            heard: false,
+            answered: None,
+        });
+    }
+    out
+}
+
+/// What a hub's row says beside its name: how far, "suggested" for a
+/// shipped one that was heard, "no answer", and the mark on the one in
+/// force.
+fn offered_value(hub: &Offered, chosen: bool) -> Option<Text> {
+    let mut parts = Vec::new();
+    match hub.hops {
+        Some(1) => parts.push(Text::key(StrId::RoomsHubHop)),
+        Some(hops) => parts.push(Text::Key(
+            StrId::RoomsHubHops,
+            Vec::from([leviculum_ui::strings::Arg::Int(i64::from(hops))]),
+        )),
+        None => {}
+    }
+    if hub.shipped && hub.heard {
+        parts.push(Text::key(StrId::RoomsHubSuggested));
+    }
+    if hub.answered == Some(false) {
+        parts.push(Text::key(StrId::RoomsHubNoAnswer));
+    }
+    if chosen {
+        parts.push(Text::Raw(alloc::string::String::from("\u{2713}")));
+    }
+    match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        _ => Some(Text::Join(parts)),
+    }
+}
+
+/// The public rooms' hub (1577, 1599), in Advanced on every target: the
+/// line that says which, the hubs [`offered_hubs`] lists by name with a
+/// mark on the one in force, ten a page (keys `1` to `9` and `0`), "More…"
+/// (`m`) while there are more, none (`n`), another to paste (`a`), and what
+/// a hub learns. Never a hash. The terminal turns the pages with "More…";
+/// the window and the phone show every hub in their scroll once it was
+/// chosen.
+pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
     use super::rooms::HubPick;
     let chosen = model.rooms.hub;
     let mark = |on: bool| on.then(|| Text::Raw(alloc::string::String::from("\u{2713}")));
@@ -421,21 +510,51 @@ pub fn hub_rows<B>(model: &UiModel<B>) -> Vec<PageRow> {
         key: None,
         action: None,
     }]);
-    let shipped = super::hubs::shipped();
-    let own = chosen.is_some_and(|hub| !shipped.iter().any(|h| h.hash == hub));
-    for (i, hub) in shipped.into_iter().enumerate() {
-        let key = char::from_digit(u32::try_from(i + 1).unwrap_or(0), 10);
+    let offered = offered_hubs(&model.rooms);
+    let known = |hub: [u8; 16]| offered.iter().any(|o| o.hash == hub);
+    let own = chosen.is_some_and(|hub| !known(hub));
+    let pages = offered.len().div_ceil(HUB_PAGE).max(1);
+    let page = model.rooms.hub_page % pages;
+    let shown: &[Offered] = match (target, page) {
+        (Target::Terminal, _) => {
+            let start = page * HUB_PAGE;
+            &offered[start..offered.len().min(start + HUB_PAGE)]
+        }
+        (_, 0) => &offered[..offered.len().min(HUB_PAGE)],
+        _ => &offered[..],
+    };
+    for (i, hub) in shown.iter().enumerate() {
+        let key = match i {
+            0..=8 => char::from_digit(u32::try_from(i + 1).unwrap_or(0), 10),
+            9 => Some('0'),
+            _ => None,
+        };
         rows.push(PageRow {
-            label: Text::Raw(hub.name),
-            value: mark(chosen == Some(hub.hash)),
+            label: match &hub.name {
+                Some(name) => Text::Raw(name.clone()),
+                None => Text::key(StrId::RoomsHubUnnamed),
+            },
+            value: offered_value(hub, chosen == Some(hub.hash)),
             key,
             action: Some(Action::of(Intent::RoomsHub(HubPick::Hub(hub.hash)))),
+        });
+    }
+    let more = match target {
+        Target::Terminal => pages > 1,
+        _ => page == 0 && pages > 1,
+    };
+    if more {
+        rows.push(PageRow {
+            label: Text::key(StrId::RoomsHubMore),
+            value: None,
+            key: Some('m'),
+            action: Some(Action::of(Intent::RoomsHub(HubPick::More))),
         });
     }
     rows.push(PageRow {
         label: Text::key(StrId::RoomsHubNone),
         value: mark(chosen.is_none()),
-        key: Some('0'),
+        key: Some('n'),
         action: Some(Action::of(Intent::RoomsHub(HubPick::None))),
     });
     rows.push(PageRow {
@@ -452,6 +571,109 @@ pub fn hub_rows<B>(model: &UiModel<B>) -> Vec<PageRow> {
 mod tests {
     use super::*;
     use crate::ui::strings::Lang;
+
+    /// 1599: the hub rows offer the heard hubs by last seen, a shipped one
+    /// among them marked "suggested", a nameless one as "Unnamed hub", one
+    /// that did not answer marked so and kept; then the shipped ones not
+    /// heard. Ten a page with "More…": the terminal turns the pages, the
+    /// window shows all from the second. No hash on screen.
+    #[test]
+    fn the_hub_rows_offer_heard_hubs_first_ten_a_page() {
+        use crate::ui::hubs::HeardHub;
+        use crate::ui::rooms::{Down, RoomsEvent};
+        let mut model = UiModel::<crate::ui::tests::Field>::new(&[]);
+        let labels = |rows: &[PageRow]| -> Vec<String> {
+            rows.iter().map(|r| r.label.resolve(Lang::En)).collect()
+        };
+        // A fresh install: the shipped list, closest first, ten and more.
+        let rows = hub_rows(&model, Target::Terminal);
+        let shipped = crate::ui::hubs::shipped();
+        assert_eq!(labels(&rows)[1], shipped[0].name);
+        let keys: Vec<Option<char>> = rows.iter().map(|r| r.key).collect();
+        assert_eq!(
+            keys[1..=10],
+            [
+                Some('1'),
+                Some('2'),
+                Some('3'),
+                Some('4'),
+                Some('5'),
+                Some('6'),
+                Some('7'),
+                Some('8'),
+                Some('9'),
+                Some('0')
+            ]
+        );
+        assert_eq!(labels(&rows)[11], "More…");
+        assert_eq!(labels(&rows)[12], "None");
+        let hadarc = shipped.iter().find(|h| h.name == "HADARC").map(|h| h.hash);
+        let hadarc = hadarc.expect("shipped");
+        let heard = |hash: [u8; 16], name: Option<&str>, hops: u8, at: i64| HeardHub {
+            hash,
+            name: name.map(Into::into),
+            hops: Some(hops),
+            first: at,
+            last: at,
+            answered: None,
+        };
+        model
+            .rooms
+            .heard
+            .hear(heard([0xa1; 16], Some("Villa"), 4, 300));
+        model.rooms.heard.hear(heard([0xa2; 16], None, 2, 300));
+        model
+            .rooms
+            .heard
+            .hear(heard(hadarc, Some("HADARC rrc"), 4, 200));
+        model.rooms.hub = Some([0xa1; 16]);
+        crate::ui::rooms::fold(&mut model, RoomsEvent::Down(Down::NoAnswer));
+        let rows = hub_rows(&model, Target::Terminal);
+        let said: Vec<String> = rows
+            .iter()
+            .map(|r| match &r.value {
+                Some(value) => {
+                    alloc::format!("{}: {}", r.label.resolve(Lang::En), value.resolve(Lang::En))
+                }
+                None => r.label.resolve(Lang::En),
+            })
+            .collect();
+        assert_eq!(said[0], "Public rooms: hub: Villa");
+        assert_eq!(
+            said[1], "Unnamed hub: 2 hops away",
+            "a tie: the closer first"
+        );
+        assert_eq!(said[2], "Villa: 4 hops away · no answer · \u{2713}");
+        assert_eq!(said[3], "HADARC: 4 hops away · suggested");
+        assert_eq!(said[4], shipped[0].name.clone() + ": 3 hops away");
+        assert!(
+            said.iter()
+                .all(|s| !s.contains("a1a1") && !s.contains("rrc")),
+            "{said:?}"
+        );
+        // The pages: 70 hubs make seven; More turns them, then wraps.
+        let all = offered_hubs(&model.rooms);
+        assert_eq!(all.len(), shipped.len() + 2, "HADARC once");
+        crate::ui::rooms::more(&mut model);
+        let second = hub_rows(&model, Target::Terminal);
+        assert_eq!(
+            labels(&second)[1],
+            all[HUB_PAGE].name.clone().unwrap_or_default()
+        );
+        assert_eq!(second.iter().filter(|r| matches!(&r.action, Some(a) if matches!(a.intent, Intent::RoomsHub(crate::ui::rooms::HubPick::Hub(_))))).count(), HUB_PAGE);
+        // The window shows every hub from the second page on, and no More.
+        let window = hub_rows(&model, Target::Window);
+        let hubs_shown = window
+            .iter()
+            .filter(|r| matches!(&r.action, Some(a) if matches!(a.intent, Intent::RoomsHub(crate::ui::rooms::HubPick::Hub(_)))))
+            .count();
+        assert_eq!(hubs_shown, all.len());
+        assert!(!labels(&window).contains(&"More…".to_string()));
+        for _ in 1..all.len().div_ceil(HUB_PAGE) {
+            crate::ui::rooms::more(&mut model);
+        }
+        assert_eq!(model.rooms.hub_page, 0, "after the last page, the first");
+    }
 
     /// The order is the phone's, every section has its row in the table,
     /// and its key reads back.

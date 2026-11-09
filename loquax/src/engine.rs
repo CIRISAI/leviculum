@@ -763,6 +763,7 @@ impl Engine {
                 | Command::HomeStalled { .. }
                 | Command::HomePnStatus { .. }
                 | Command::HomeName { .. }
+                | Command::HomeHub { .. }
                 | Command::HomePetname { .. }
                 | Command::HomePeerState { .. } => {}
             }
@@ -1000,6 +1001,7 @@ impl Engine {
                 Command::HomeStalled { message_id } => {
                     self.emit(OutboxEvent::HomeStalled { message_id });
                 }
+                Command::HomeHub { hub } => self.emit(OutboxEvent::HubAnnounced { hub }),
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),
@@ -1891,6 +1893,23 @@ impl Engine {
                 }
             }
         }
+        // A hub announcing (1599): every device lists the hubs its own node
+        // hears, and a home keeps them for its devices.
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if crate::ui::hubs::is_hub(announce.name_hash()) {
+                let at = i64::try_from(core.emission_secs()).unwrap_or(i64::MAX);
+                self.emit(OutboxEvent::HubAnnounced {
+                    hub: crate::ui::hubs::HeardHub {
+                        hash: *announce.destination_hash().as_bytes(),
+                        name: crate::ui::hubs::announced_name(announce.app_data()),
+                        hops: core.hops_to(announce.destination_hash()),
+                        first: at,
+                        last: at,
+                        answered: None,
+                    },
+                });
+            }
+        }
         if matches!(self.state, State::Client(_)) {
             return out;
         }
@@ -2371,6 +2390,60 @@ mod tests {
             hear(&mut engine, &mut core, &again),
             [false],
             "the member announced"
+        );
+    }
+
+    /// 1599: a hub's `rrc.hub` announce reaches the seam as a heard hub,
+    /// named by its app data without the protocol's word, with its hops;
+    /// the control: the same node's announce of another aspect is no hub.
+    #[test]
+    fn a_hub_announce_reaches_the_seam_as_a_heard_hub() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let hubs = |events: &[OutboxEvent]| -> Vec<crate::ui::hubs::HeardHub> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::HubAnnounced { hub } => Some(hub.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let salon = leviculum_std::generate_identity();
+        let app_data = leviculum_rrc::Value::Map(vec![(
+            leviculum_rrc::Value::Text("hub".into()),
+            leviculum_rrc::Value::Text("Le_Salon_FR RRC".into()),
+        )])
+        .encode();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&salon, "rrc", &["hub"], &app_data),
+        );
+        let heard = hubs(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        assert_eq!(heard[0].name.as_deref(), Some("Le Salon FR"));
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        assert_eq!(heard[0].first, heard[0].last);
+        let other = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&other, "rrc", &["room"], &app_data),
+        );
+        assert!(
+            hubs(&events).is_empty(),
+            "another aspect is no hub: {events:?}"
         );
     }
 

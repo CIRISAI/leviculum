@@ -2596,10 +2596,11 @@ mod tests {
         assert_eq!(model.settings, None, "closed");
     }
 
-    /// 1577: Advanced holds the public rooms' hub (the golden): the
-    /// shipped hubs by name, `1` chooses the first and the line says it,
-    /// `a` asks for another's address in the palette, which `Enter` takes,
-    /// and `0` chooses none. No hash on screen.
+    /// 1577, 1599: Advanced holds the public rooms' hub (the golden): the
+    /// closest ten hubs by name and how far (keys `1` to `9` and `0`),
+    /// "More…" (`m`) turning to the next ten, `1` chooses the first and the
+    /// line says it, `a` asks for another's address in the palette, which
+    /// `Enter` takes, and `n` chooses none. No hash on screen.
     #[test]
     fn advanced_chooses_the_public_rooms_hub_by_key_and_by_address() {
         use loquax::ui::settings::Section;
@@ -2613,21 +2614,36 @@ mod tests {
         let shown = whole_screen(&model);
         assert!(shown.contains("Public rooms: hub: None"), "{shown}");
         same_text("tui-settings-advanced.txt", &shown);
-        let community = loquax::ui::hubs::shipped()[0].hash;
+        let shipped = loquax::ui::hubs::shipped();
+        // More: the next ten, and back.
+        update(&mut model, key('m'));
+        let second = whole_screen(&model);
+        assert!(
+            second.contains(&format!("1  {}", shipped[10].name)),
+            "{second}"
+        );
+        assert!(!second.contains(&shipped[0].name), "{second}");
+        for _ in 1..shipped.len().div_ceil(loquax::ui::settings::HUB_PAGE) {
+            update(&mut model, key('m'));
+        }
+        let first = shipped[0].hash;
         assert_eq!(
             update(&mut model, key('1')),
             [UiEffect::RememberHash {
                 key: "rooms_hub",
-                hash: Some(community)
+                hash: Some(first)
             }]
         );
         assert!(model.rooms.enabled, "the Rooms tab is there");
         let shown = whole_screen(&model);
         assert!(
-            shown.contains("Public rooms: hub: RNS Community"),
+            shown.contains(&format!("Public rooms: hub: {}", shipped[0].name)),
             "{shown}"
         );
-        assert!(shown.contains("1  RNS Community: \u{2713}"), "{shown}");
+        assert!(
+            shown.contains(&format!("1  {}: 3 hops away · \u{2713}", shipped[0].name)),
+            "{shown}"
+        );
         update(&mut model, key('a'));
         assert!(model.palette.is_some(), "the palette asks");
         let asked = whole_screen(&model);
@@ -2645,7 +2661,7 @@ mod tests {
         let shown = whole_screen(&model);
         assert!(shown.contains("Public rooms: hub: Your own hub"), "{shown}");
         assert!(!shown.contains("0707070707"), "no hash on screen\n{shown}");
-        update(&mut model, key('0'));
+        update(&mut model, key('n'));
         assert!(!model.rooms.enabled, "none: no tab");
     }
 

@@ -687,6 +687,7 @@ impl Intent {
             Intent::RoomsHub(super::rooms::HubPick::None) => StrId::RoomsHubNone,
             Intent::RoomsHub(super::rooms::HubPick::Hub(_)) => StrId::RoomsHub,
             Intent::RoomsHub(super::rooms::HubPick::Paste) => StrId::RoomsHubPaste,
+            Intent::RoomsHub(super::rooms::HubPick::More) => StrId::RoomsHubMore,
         }
     }
 }

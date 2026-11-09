@@ -788,6 +788,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::PnUnavailable { detail } => {
                             tracing::info!("HOME no propagation node: {detail}");
                         }
+                        OutboxEvent::HubAnnounced { hub } => {
+                            // For every device of the home (1599); it wakes nobody.
+                            archive_hub(&mut store, &hub, archive_cap_bytes);
+                        }
                         OutboxEvent::Announced { destination, name, path_response } => {
                             if let Some(name) = name.filter(|_| destination != address) {
                                 heard_name(
@@ -1710,6 +1714,26 @@ fn heard_name(
 fn related(store: &mut Store, relations: &mut Relations, peer: [u8; 16], cap: u64) -> Option<u64> {
     let name = relations.relate(peer)?;
     archive_name(store, peer, &name, cap)
+}
+
+/// Keep a hub the home heard announcing in the archive (1599), for the
+/// devices of the home: its sequence, when the entry says something new.
+fn archive_hub(store: &mut Store, hub: &crate::ui::hubs::HeardHub, cap: u64) -> Option<u64> {
+    match store.archive_hub(hub, cap) {
+        Ok(Some(seq)) => {
+            tracing::info!(
+                "HOME hub archived hub={} hops={} seq={seq}",
+                crate::address::to_hex(&hub.hash),
+                hub.hops.map_or(-1, i32::from)
+            );
+            Some(seq)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!("HOME archive: {error}");
+            None
+        }
+    }
 }
 
 /// Keep a name a peer announced in the archive, for the clients that hear

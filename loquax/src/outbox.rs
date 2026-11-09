@@ -168,6 +168,10 @@ pub enum Command {
     HomePnStatus {
         answers: Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>,
     },
+    /// On a client: a hub the home heard announcing (1599,
+    /// [`crate::home::KIND_HUB`]); reported as [`OutboxEvent::HubAnnounced`],
+    /// as a hub the client heard itself would be.
+    HomeHub { hub: crate::ui::hubs::HeardHub },
     /// On a client: a name the home node heard a peer announce, pulled from
     /// the archive; reported as [`OutboxEvent::Announced`], as an announce
     /// the client heard itself would be.
@@ -400,6 +404,12 @@ pub enum OutboxEvent {
         location: leviculum_lxmf::telemetry::Location,
         name: Option<String>,
     },
+    /// A hub announced its `rrc.hub` destination (1599,
+    /// [`crate::ui::hubs`]): heard by this node, timed and with the hops of
+    /// the hearing, or pulled from the home ([`Command::HomeHub`]). The
+    /// screen lists it among the hubs ([`crate::ui::rooms::RoomsEvent::Heard`]);
+    /// a home keeps it for its devices.
+    HubAnnounced { hub: crate::ui::hubs::HeardHub },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.
     SyncLinked,

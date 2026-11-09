@@ -69,8 +69,11 @@ pub enum RoomAsk {
 pub enum HubPick {
     /// No public rooms.
     None,
-    /// This hub, one of [`super::hubs::shipped`].
+    /// This hub: one heard, or one of [`super::hubs::shipped`].
     Hub([u8; 16]),
+    /// "More…" (1599): the next page of hubs in the terminal; the window
+    /// and the phone show them all in their scroll.
+    More,
     /// "Another hub: paste its address": the terminal asks for it in the
     /// palette, the window has its field; the phone sends the text
     /// itself ([`HubChoice::Address`]).
@@ -196,6 +199,12 @@ pub struct Rooms {
     /// that their name is visible to everyone in a room (1577): the
     /// config's `rooms_told`.
     pub told: Option<[u8; 16]>,
+    /// The hubs heard announcing (1599), from this device's node and from
+    /// its home: what the settings offer first.
+    pub heard: super::hubs::Heard,
+    /// The page of hubs the settings show (1599): the first
+    /// [`super::settings::HUB_PAGE`] hubs on 0, "More…" turns it.
+    pub hub_page: usize,
 }
 
 impl Default for Rooms {
@@ -212,6 +221,8 @@ impl Default for Rooms {
             people: false,
             input: String::new(),
             told: None,
+            heard: super::hubs::Heard::default(),
+            hub_page: 0,
         }
     }
 }
@@ -307,6 +318,11 @@ pub enum RoomsEvent {
     Leave,
     /// The settings chose the public rooms' hub (1577).
     Hub(HubChoice),
+    /// A hub was heard announcing (1599): by this device's node, or by its
+    /// home, which remembers it for every device.
+    Heard(super::hubs::HeardHub),
+    /// "More…" under the hubs in the settings (1599, [`more`]).
+    More,
 }
 
 /// A tab chosen: the Rooms come to the front, any other sends them back.
@@ -417,10 +433,22 @@ pub fn hub_label(rooms: &Rooms) -> Text {
     if let Some(shipped) = super::hubs::named(&hub) {
         return Text::Raw(shipped.name);
     }
+    if let Some(name) = rooms.heard.get(&hub).and_then(|h| h.name.clone()) {
+        return Text::Raw(name);
+    }
     match &rooms.hub_name {
         Some(name) if !name.trim().is_empty() => Text::Raw(name.clone()),
         _ => Text::key(StrId::RoomsHubOwn),
     }
+}
+
+/// "More…" under the hubs (1599): the next page, back to the first after
+/// the last; a window and a phone show them all from the second on
+/// ([`super::settings::hub_rows`]).
+pub fn more<B>(model: &mut UiModel<B>) {
+    let hubs = super::settings::offered_hubs(&model.rooms).len();
+    let pages = hubs.div_ceil(super::settings::HUB_PAGE).max(1);
+    model.rooms.hub_page = (model.rooms.hub_page + 1) % pages;
 }
 
 /// The palette's `rooms` and the terminal's `R`: the tab where the host
@@ -445,6 +473,9 @@ pub(super) fn fold<B: InputBuffer + Default>(
         RoomsEvent::Linking => rooms.state = HubState::Linking,
         RoomsEvent::Welcomed { name, body_limit } => {
             rooms.state = HubState::Ready;
+            if let Some(hub) = rooms.hub {
+                rooms.heard.answered(&hub, true);
+            }
             rooms.hub_name = name;
             rooms.body_limit = body_limit;
             // A link that came back joins again what it was in.
@@ -536,6 +567,10 @@ pub(super) fn fold<B: InputBuffer + Default>(
         }
         RoomsEvent::Down(why) => {
             rooms.state = HubState::Down(why);
+            // A hub heard but not answering stays listed, marked (1599).
+            if let (Some(hub), Down::NoAnswer | Down::NoPath) = (rooms.hub, why) {
+                rooms.heard.answered(&hub, false);
+            }
             let text = down(why).resolve(model.lang);
             if why != Down::Left {
                 model.toast(ToastKind::Error, text);
@@ -558,6 +593,10 @@ pub(super) fn fold<B: InputBuffer + Default>(
             return ask(model, RoomAsk::Part { room });
         }
         RoomsEvent::Hub(choice) => return choose(model, choice),
+        RoomsEvent::Heard(hub) => {
+            rooms.heard.hear(hub);
+        }
+        RoomsEvent::More => more(model),
     }
     Vec::new()
 }
@@ -1053,7 +1092,11 @@ mod tests {
     /// away and the key out.
     #[test]
     fn a_hub_chosen_shows_the_tab_and_the_first_link_says_the_name_is_seen() {
-        let community = crate::ui::hubs::shipped()[0].hash;
+        let community = crate::ui::hubs::shipped()
+            .into_iter()
+            .find(|h| h.name == "RNS Community")
+            .map(|h| h.hash)
+            .expect("shipped");
         let mut model = UiModel::<Buffer>::new(&[]);
         assert!(!model.rooms.enabled);
         let effects = rooms(&mut model, RoomsEvent::Hub(HubChoice::Hub(community)));

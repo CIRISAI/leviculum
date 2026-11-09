@@ -6125,6 +6125,9 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
             location,
             name,
         } => model.mesh_position(identity, location, name.as_deref(), 0),
+        OutboxEvent::HubAnnounced { hub } => {
+            model.rooms.heard.hear(hub);
+        }
         // Our own announce, echoed back, names nobody.
         OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
         OutboxEvent::Announced {
@@ -7646,6 +7649,10 @@ fn settings_key<B: InputBuffer + Default>(
         }
         intent::Intent::RoomsHub(rooms::HubPick::None) => {
             return Some(rooms::choose(model, rooms::HubChoice::None));
+        }
+        intent::Intent::RoomsHub(rooms::HubPick::More) => {
+            rooms::more(model);
+            return Some(Vec::new());
         }
         intent::Intent::Profile => PaletteCommand::MyCode,
         intent::Intent::Theme => PaletteCommand::Theme,

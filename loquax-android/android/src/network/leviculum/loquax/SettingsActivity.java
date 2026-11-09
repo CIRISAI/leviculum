@@ -965,7 +965,10 @@ public class SettingsActivity extends Activity implements Events.Listener {
         for (Map<String, Object> hub : Core.list(answer, "hubs")) {
             final String set = Core.str(hub, "set");
             String mark = Core.bool(hub, "chosen") ? "\u2713  " : "     ";
-            TextView line = text(mark + Core.str(hub, "name"), 16, R.color.text);
+            // 1599: how far the hub is and its marks, under its name.
+            String detail = Core.str(hub, "detail");
+            TextView line = text(mark + Core.str(hub, "name")
+                    + (detail.isEmpty() ? "" : "\n     " + detail), 16, R.color.text);
             line.setPadding(dp(16), dp(12), dp(16), dp(12));
             line.setTag("rooms_hub_" + set);
             line.setBackgroundResource(android.R.drawable.list_selector_background);

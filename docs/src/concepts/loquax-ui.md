@@ -630,8 +630,9 @@ RMAP.WORLD RRC Hub, Chatsurfer-RRC, CascadiaRRC, Minuteman RRC,
 Save Europe, Colorado Mesh, meshage.me Chat Hub, viennahub, Le Salon FR,
 EuskalReticulum, Montreal, Whatcom County Mesh Chat and four without a
 name. The smoke run opened the three it had heard: Gothenburg and villa
-answered a WELCOME, Hollywood Chat did not. None ships: a hub joins the list with a source that
-publishes it, as the seven did. The full list with hashes and hops is
+answered a WELCOME, Hollywood Chat did not. None shipped under 1577's
+rule (a hub joins the list with a source that publishes it, as the seven
+did); 1599 changed the rule, below. The full list with hashes and hops is
 the probe's output (`HEARD` lines), which `just rrc-hubs-check` writes
 to `target/tmp/rrc-hubs/probe.txt`.
 
@@ -645,9 +646,10 @@ list is what the settings offer.
 
 **The settings row**, in Advanced on the phone, the window and the
 terminal, from one function (`settings::hub_rows`): "Public rooms: hub"
-with the hub in force by its name, each shipped hub by its name with a
-mark on the one in force (keys `1` to `5` on the terminal), "None"
-(`0`), "Another hub: paste its address" (`a`, the terminal's palette
+with the hub in force by its name, each hub by its name with a mark on
+the one in force (since 1599 the hubs heard first, ten a page, keys `1`
+to `9` and `0` on the terminal, below), "None" (`n` since 1599), "Another
+hub: paste its address" (`a`, the terminal's palette
 asks; the window has a field; the phone an `EditText`, through
 `Query::RoomsHub`), and "Your name is visible to everyone in the room."
 A pasted hub is named by the name its welcome gave, else "Your own
@@ -667,6 +669,172 @@ Goldens: `loquax/tests/golden/tui-settings-advanced.txt`,
 `gui-settings-advanced-light.png`, and the room's row in
 `tui-rooms-room.txt`, `gui-rooms-room.png` and the phone's
 `loquax-android/tests/golden/rooms-room.json`.
+
+### Built 2026-11-09, hubs discovered from their announces
+
+Lew decided on 2026-11-09 (morning, 1599): well-reachable hubs ship even
+without a published source. **A hub ships when the measurement reached
+it and it answered a WELCOME; the source says where it was found, a
+publication or "heard on the mesh 2026-11-09". Nothing ships
+unmeasured.** And users discover hubs themselves: **hubs are discovered
+from their announces; the shipped list seeds a fresh install** that has
+heard nothing yet.
+
+The protocol has one discovery mechanism, the one 1577 measured with:
+every hub announces its `rrc.hub` destination with its name in the
+announce's app data, and every node of the mesh hears it. There is no
+registry and no room list inside a hub; a hub's rooms are what its
+welcome and notices name and what people join.
+
+**The measurement**, 2026-11-09 from the coder host, CET. The probe
+gained `--open heard` (every hub heard, closest first), `--seed` (the
+hubs an earlier window heard, 1577's `heard-union.txt`) and `--parallel`
+(that many hubs opened at once, each over a hub link of its own on the
+one node, so 81 hubs fit one command). Try 1 at 12:08: a 90 s listen
+plus the 79 hubs of 1577's windows, 24 at once, 81 hubs opened, 48
+WELCOMEs. Try 2 at 12:11: the 33 silent ones, 11 at once, 13 more. Try
+3 at 12:14: the 20 still silent, four at once, 5 more (ShadowLink among
+them). The two of 1577's five not heard (RNS Moscow, Radio Oxford) were
+opened from the list at 12:13 and answered; MichMesh and
+Amber again did not. The rooms are what the hub's notices named
+(`/join <room>`, `#room`); most hubs name none.
+
+| hub | destination | hops at first hearing | WELCOME (try 1/2/3) | rooms its notices named | shipped |
+|---|---|---|---|---|---|
+| Cascadia | `fcf451c9…` | 3 | yes/–/– | – | yes |
+| Chatsurfer | `0de5818c…` | 3 | yes/–/– | – | yes |
+| CTRS | `741da322…` | 3 | yes/–/– | – | yes |
+| Minuteman | `68dda18a…` | 3 | yes/–/– | #lobby | yes |
+| RMAP.WORLD Hub | `6ffeb457…` | 3 | yes/–/– | #test | yes |
+| Save Europe | `ceadff8d…` | 3 | yes/–/– | – | yes |
+| SoCal Public | `4f07b6e3…` | 3 | yes/–/– | – | yes |
+| UTN Oregon | `472c760a…` | 3 | yes/–/– | – | yes |
+| (unnamed) | `dd9313ae…` | 4 | yes/–/– | – | yes |
+| Chicago Offline | `215f9cc1…` | 4 | yes/–/– | – | yes |
+| Cornwall UK | `fd043546…` | 4 | no/yes/– | – | yes |
+| Defunct Hub | `a3369c93…` | 4 | no/yes/– | – | yes |
+| Gothenburg SE (Swe) | `54f16391…` | 4 | yes/–/– | #lobby | yes |
+| HADARC | `e7fd7f9e…` | 4 | yes/–/– | – | yes |
+| meshage.me Chat Hub | `0d4c8a03…` | 4 | yes/–/– | – | yes |
+| Pi4 | `247a5627…` | 4 | yes/–/– | – | yes |
+| Reticulum Community VIE | `bb750bf4…` | 4 | yes/–/– | – | yes |
+| villa | `c930a4f1…` | 4 | no/yes/– | #villa | yes |
+| (unnamed) | `32d9b180…` | 5 | yes/–/– | – | yes |
+| Cyberdelia Chat Hub | `a1831cc6…` | 5 | yes/–/– | – | yes |
+| Estonia | `1b9a8757…` | 5 | yes/–/– | – | yes |
+| Hub 42 | `53e3ae1c…` | 5 | yes/–/– | – | yes |
+| Meshchat neXt | `ef933cd2…` | 5 | yes/–/– | – | yes |
+| MeshChatX | `59ef1330…` | 5 | yes/–/– | – | yes |
+| RCC-Hub Rottbitze | `38ca57f1…` | 5 | yes/–/– | – | yes |
+| RNS Community | `28c7c1a6…` | 5 | yes/–/– | general | yes |
+| RootAccessChatHub | `e78ba2ad…` | 5 | yes/–/– | – | yes |
+| Whatcom County Mesh Chat | `4e66bb79…` | 5 | yes/–/– | – | yes |
+| NastyCanuck rrc | `e48e8764…` | 5 | no/no/no | – | no |
+| Woddy+x MAIN | `56898b13…` | 5 | no/no/no | – | no |
+| Юрьев польский | `f4ee2aaf…` | 5 | no/no/no | – | no |
+| (unnamed) | `6e018521…` | 6 | yes/–/– | – | yes |
+| FOXDPI | `0921dbd3…` | 6 | yes/–/– | – | yes |
+| library-socialism | `56690ed8…` | 6 | yes/–/– | – | yes |
+| Lipetsk Region | `d027d787…` | 6 | no/no/yes | – | yes |
+| Secret Society of Questionable Decisions | `d16092e7…` | 6 | yes/–/– | – | yes |
+| ShadowLink | `c3fd7454…` | 6 | no/no/yes | – | yes |
+| ValleiRug.nl Hub | `6f4fdb14…` | 6 | no/yes/– | – | yes |
+| (unnamed) | `be3af5a9…` | 7 | no/yes/– | – | yes |
+| Fenian Central | `d60db458…` | 7 | no/yes/– | – | yes |
+| Hispagatos HQ | `8d83c900…` | 7 | yes/–/– | – | yes |
+| SnakePitTest | `268f377e…` | 7 | no/no/yes | – | yes |
+| SPB RNS | `ead77c9b…` | 7 | yes/–/– | – | yes |
+| 3moelf | `7cfc227e…` | 8 | no/yes/– | – | yes |
+| Batumi hub | `dc5118c5…` | 8 | yes/–/– | – | yes |
+| Hollywood Chat | `bf7469d2…` | 8 | yes/–/– | – | yes |
+| jonto-hub | `194d9357…` | 8 | yes/–/– | – | yes |
+| mtenk-rns relay | `dc6b1e5b…` | 8 | no/yes/– | – | yes |
+| The Chili Line | `b7c5db39…` | 8 | yes/–/– | – | yes |
+| ValleyMesh Hub | `df572983…` | 8 | yes/–/– | #lobby | yes |
+| Montreal | `ea6d2b2e…` | 8 | no/no/no | – | no |
+| Le Salon FR | `ba7065c8…` | 9 | yes/–/– | #general, #radio | yes |
+| Rettui Hub | `7e1e788b…` | 9 | no/no/yes | – | yes |
+| LINUXIM GROUP RELAY CHAT | `808b5663…` | 9 | no/no/no | – | no |
+| Colorado Mesh | `d765e919…` | 10 | yes/–/– | – | yes |
+| NovasRedes Hub 1 | `060a6187…` | 10 | yes/–/– | – | yes |
+| nl1ctm | `e1fc264c…` | 10 | no/no/no | – | no |
+| NM-RNS Chat Relay | `e55699b4…` | 11 | yes/–/– | – | yes |
+| Три топора | `dd74d7d0…` | 11 | no/no/yes | #tri-topora | yes |
+| RandomTestHub | `91375df7…` | 11 | no/no/no | – | no |
+| MBUG HUB | `a394106e…` | 12 | yes/–/– | – | yes |
+| Permanet Chat | `082f8e42…` | 12 | no/yes/– | lobby | yes |
+| Casual Collapse Club | `5cb5c054…` | 14 | yes/–/– | – | yes |
+| VLADIMIR | `ba5744bf…` | 14 | yes/–/– | – | yes |
+| EuskalReticulum | `14d0b712…` | 16 | yes/–/– | – | yes |
+| Banana Boat | `7a37b0aa…` | 18 | yes/–/– | – | yes |
+| Berenklauw | `4663fa0e…` | 20 | no/yes/– | – | yes |
+| meshpi | `5866cdf2…` | 20 | no/yes/– | – | yes |
+| Lanaudiere | `fca7fe6d…` | 23 | yes/–/– | – | yes |
+| PalouseMesh | `d3f50137…` | 26 | no/yes/– | – | yes |
+| viennahub | `f5f4d4a5…` | 30 | yes/–/– | – | yes |
+| RedRiotRRC | `eac2f4a5…` | 31 | no/no/no | – | no |
+| rrc | `8c550ac0…` | 33 | no/no/no | – | no |
+| AlcoholicsAnonymousChat | `b56058ce…` | 35 | no/yes/– | – | yes |
+| QAF - Home Hub | `516bfb29…` | 35 | yes/–/– | – | yes |
+| Ratspeak hub | `d8e5e175…` | 35 | no/no/no | – | no |
+| Testing in SLC | `0f3c3b50…` | 37 | no/no/no | – | no |
+| MasCasa | `54ca8c9a…` | 49 | no/no/no | – | no |
+| Test Chat Hub | `1db4b767…` | 53 | no/no/no | – | no |
+| Sutemos hub | `0fa194ae…` | 62 | no/no/no | – | no |
+| Hub b11c289d | `2b95df64…` | 72 | no/no/no | – | no |
+
+**68 hubs ship**: the 66 heard ones that answered on one of the three
+tries and RNS Moscow and Radio Oxford, ordered by hops at first hearing
+(the two never heard by their path's hops), each with `hops`. The five
+of 1577 keep their names and sources; the others say "heard on the mesh
+2026-11-09". Names are cleaned of the protocol's word as 1577 did
+(`ui::hubs::shown_name`: "HADARC_rrc" is HADARC, "CascadiaRRC" Cascadia,
+"[SPB_RNS]_Relay_Chat_Service" "[SPB RNS] Service", which the list
+shortens by hand to "SPB RNS", and "RRC42" became "Hub 42" by hand); four hubs announce no name and welcome as "hub", and ship
+with an empty name, which the settings call "Unnamed hub". The fifteen
+that never answered neither ship nor are recorded: the check opens only
+the list. "Defunct Hub" and "SnakePitTest" answered, and ship by the rule.
+
+**A first try is not a verdict.** 33 of 81 hubs were silent on the first
+try and 18 of them answered a second or third, ShadowLink (shipped since
+1577) among them. Whether the 24 links at once or the internet's paths
+cost the first tries is not measured; `just rrc-hubs-check` therefore
+opens the list twelve at once and every silent hub once more, four at
+once, before a shipped hub that did not answer is a finding. Over the 68
+on 2026-11-09 at 12:18: 66 answered at once, two on the retry, exit 0.
+Its positive control (a list with a made-up hash as a shipped hub and
+RNS Community as an unreached one, `just rrc-hubs-check 5
+<list>`) reported both findings and exited 1.
+
+**Discovery.** The engine turns every `rrc.hub` announce its node hears
+into a heard hub (`OutboxEvent::HubAnnounced`: the hub, its name from
+the app data, cleaned, its hops, the time), on every device and on the
+home. The screen keeps them in `ui::hubs::Heard`: one entry a hub, its
+first hearing kept, the newest name and hops taken, last seen first and
+the closer first on a tie, at most 256 (`HEARD_BOUND`; the mesh had 79
+in half an hour), the one heard longest ago going first. The home keeps
+them for its devices as archive entries of kind `KIND_HUB` (14): a
+hub's newest only, appended when the hub is new, its name or hops
+changed, or an hour passed since the kept hearing
+(`HUB_REFRESH_SECS`), bounded the same; like a name it wakes nobody and
+rides with the next pull, and a device that pulls it lists the hub as
+one it heard itself. A hub opened that did not answer stays listed,
+marked "no answer"; nothing is removed for that.
+
+**The settings row** shows one list (`settings::offered_hubs`): the
+heard hubs by last seen, a shipped one among them marked "suggested",
+then the shipped ones not heard, closest first; each with how far it is
+("4 hops away", "1 hop away"), a nameless one as "Unnamed hub". Ten a
+page, then "More…": the terminal turns to the next ten (`m`, keys `1` to
+`9` and `0` for the ten, `n` for none), the window and the phone show
+every hub in their page's scroll. No hash on screen.
+
+**Not built in this pass, owed:** the Browse tab's "Hubs in your mesh"
+under its rooms section (the tab as 1578 sketched it is not in this
+tree), and a device without a home keeps its heard hubs in memory only:
+a restart forgets them until they are heard again. The home's list
+survives a restart in its archive, and a new device gets it on its
+first pull.
 
 ### The intent inventory
 

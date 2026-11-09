@@ -224,7 +224,7 @@ impl Seen {
                 _ => None,
             },
             copied: browsing.copied.clone(),
-            hubs: loquax::ui::settings::hub_rows(model),
+            hubs: loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Window),
         }
     }
 
@@ -1500,6 +1500,11 @@ impl App {
                     HubPick::None => HubChoice::None,
                     HubPick::Paste => {
                         return iced::widget::operation::focus(chat::HUB_FIELD);
+                    }
+                    // "More…" (1599): every hub, in the page's scroll.
+                    HubPick::More => {
+                        self.tell(UiEvent::Rooms(RoomsEvent::More));
+                        return Task::none();
                     }
                 };
                 self.tell(UiEvent::Rooms(RoomsEvent::Hub(choice)));
@@ -3639,7 +3644,7 @@ mod tests {
             photo: None,
             browse: None,
             copied: None,
-            hubs: loquax::ui::settings::hub_rows(model),
+            hubs: loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Window),
         }
     }
 
@@ -6060,10 +6065,11 @@ mod tests {
         assert_eq!(app.scene.top.id, NodeId::TopBar);
     }
 
-    /// 1577: Advanced holds the public rooms' hub (the golden): the
-    /// shipped hubs by name with the mark on none, a press on one tells the
-    /// model, the model's answer moves the mark, and the field's address
-    /// goes to the model as typed. No hash on the page.
+    /// 1577, 1599: Advanced holds the public rooms' hub (the golden): the
+    /// closest ten hubs by name and how far, "More…", the mark on none; a
+    /// press on one tells the model, the model's answer moves the mark,
+    /// "More…" tells the model, and the field's address goes to the model
+    /// as typed. No hash on the page.
     #[test]
     fn advanced_chooses_the_public_rooms_hub() {
         use loquax::ui::rooms::{HubChoice, HubPick, RoomsEvent};
@@ -6074,8 +6080,11 @@ mod tests {
         let _ = app.update(Message::Settings);
         let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Advanced))));
         assert_eq!(app.settings_at, Some(Section::Advanced));
-        assert_eq!(app.seen.hubs.len(), 9, "{:?}", app.seen.hubs);
+        // The line, ten hubs, More, none, paste, the note.
+        assert_eq!(app.seen.hubs.len(), 15, "{:?}", app.seen.hubs);
         map::tests::same_as("gui-settings-advanced-light.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::RoomsHub(HubPick::More)));
+        assert_eq!(told(&mut rx), [UiEvent::Rooms(RoomsEvent::More)]);
         let community = loquax::ui::hubs::shipped()[0].hash;
         let _ = app.update(Message::Intent(Intent::RoomsHub(HubPick::Hub(community))));
         assert_eq!(
@@ -6088,11 +6097,20 @@ mod tests {
             UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Hub(community))),
         );
         let _ = app.update(Message::Seen(Box::new(seen_of(&model))));
-        let chosen: Vec<bool> = app.seen.hubs.iter().map(|r| r.value.is_some()).collect();
+        let chosen: Vec<bool> = app
+            .seen
+            .hubs
+            .iter()
+            .map(|r| {
+                r.value
+                    .as_ref()
+                    .is_some_and(|v| v.resolve(app.lang).ends_with('\u{2713}'))
+            })
+            .collect();
         assert_eq!(
             chosen[..3],
-            [true, true, false],
-            "the line, then RNS Community"
+            [false, true, false],
+            "the line names it, the mark is on the first hub"
         );
         let _ = app.update(Message::HubTyped(
             " 07070707070707070707070707070707 ".into(),

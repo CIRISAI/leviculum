@@ -1973,6 +1973,118 @@ impl Store {
         self.archive_newest_of(crate::home::KIND_PETNAME, peer, packed, at, cap_bytes)
     }
 
+    /// Append a hub entry ([`crate::home::KIND_HUB`], 1599) for a hub the
+    /// home heard announcing, when it says something new: a hub not kept
+    /// yet, or with another name or hops, or heard
+    /// [`crate::home::HUB_REFRESH_SECS`] after its kept hearing. Its first
+    /// hearing stays the kept one. Only a hub's newest entry is kept, and
+    /// past [`crate::ui::hubs::HEARD_BOUND`] hubs the one heard longest ago
+    /// goes. `None` when nothing was appended.
+    pub fn archive_hub(
+        &mut self,
+        hub: &crate::ui::hubs::HeardHub,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let kind = i64::from(crate::home::KIND_HUB);
+        let prefix = crate::home::wire::name_entry_prefix(&hub.hash);
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let newest: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 ORDER BY seq DESC LIMIT 1",
+                params![&identity[..], kind, prefix_len, &prefix[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        let kept = newest
+            .as_deref()
+            .and_then(|packed| crate::home::wire::read_hub_entry(packed).ok());
+        let mut entry = hub.clone();
+        if let Some(kept) = &kept {
+            let same = kept.name == hub.name.clone().or(kept.name.clone())
+                && kept.hops == hub.hops.or(kept.hops);
+            if same && hub.last < kept.last.saturating_add(crate::home::HUB_REFRESH_SECS) {
+                return Ok(None);
+            }
+            entry.first = kept.first.min(hub.first);
+            entry.name = hub.name.clone().or(kept.name.clone());
+            entry.hops = hub.hops.or(kept.hops);
+        }
+        let packed = crate::home::wire::hub_entry(&entry);
+        let mut keyed = packed.clone();
+        keyed.extend_from_slice(&entry.last.to_be_bytes());
+        let id = leviculum_core::crypto::sha256(&keyed);
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_HUB,
+            &id,
+            &packed,
+            entry.last,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        if let Some(seq) = seq {
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
+                 AND substr(packed, 1, ?4) = ?5",
+                params![
+                    &identity[..],
+                    kind,
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    prefix_len,
+                    &prefix[..]
+                ],
+            )
+            .map_err(|e| failed(&path, e))?;
+            // The bound: the hubs heard longest ago go.
+            let bound = i64::try_from(crate::ui::hubs::HEARD_BOUND).unwrap_or(i64::MAX);
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq IN \
+                 (SELECT seq FROM archive WHERE identity = ?1 AND kind = ?2 \
+                  ORDER BY at DESC, seq DESC LIMIT -1 OFFSET ?3)",
+                params![&identity[..], kind, bound],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
+    /// The hubs the archive keeps ([`crate::home::KIND_HUB`]), last heard
+    /// first.
+    pub fn archived_hubs(&self) -> Result<Vec<crate::ui::hubs::HeardHub>, StoreError> {
+        let path = self.path.clone();
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 ORDER BY at DESC, seq DESC",
+            )
+            .map_err(|e| failed(&path, e))?;
+        let rows = statement
+            .query_map(
+                params![&self.identity[..], i64::from(crate::home::KIND_HUB)],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|e| failed(&path, e))?;
+        let mut hubs = Vec::new();
+        for packed in rows {
+            let packed = packed.map_err(|e| failed(&path, e))?;
+            if let Ok(hub) = crate::home::wire::read_hub_entry(&packed) {
+                hubs.push(hub);
+            }
+        }
+        Ok(hubs)
+    }
+
     /// Whether the archive holds a petname entry for `peer`, a cleared one
     /// too: the reader said their word on that peer's name (1159).
     pub fn archive_holds_petname(&self, peer: &[u8; 16]) -> Result<bool, StoreError> {
@@ -4069,6 +4181,82 @@ mod tests {
         // Nor is a row under another of our addresses.
         let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
         assert!(!other.holds_received(&id).expect("ask"));
+    }
+
+    /// 1599: the home remembers the hubs it hears for its devices: one
+    /// entry a hub, the newest, its first hearing kept; a hearing within
+    /// the hour that says nothing new appends nothing; past the bound the
+    /// hub heard longest ago goes. The control: a name entry is no hub.
+    #[test]
+    fn the_home_remembers_hubs_newest_once_and_bounded() {
+        use crate::ui::hubs::{HeardHub, HEARD_BOUND};
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let hub = |hash: [u8; 16], name: Option<&str>, hops: u8, at: i64| HeardHub {
+            hash,
+            name: name.map(Into::into),
+            hops: Some(hops),
+            first: at,
+            last: at,
+            answered: None,
+        };
+        let first = store
+            .archive_hub(&hub([1; 16], Some("Le Salon FR"), 9, 1000), u64::MAX)
+            .expect("append");
+        assert!(first.is_some(), "a new hub is news");
+        assert_eq!(
+            store
+                .archive_hub(&hub([1; 16], Some("Le Salon FR"), 9, 1600), u64::MAX)
+                .expect("ask"),
+            None,
+            "heard again within the hour, nothing new"
+        );
+        assert_eq!(
+            store
+                .archive_hub(&hub([1; 16], None, 9, 1700), u64::MAX)
+                .expect("ask"),
+            None,
+            "a hearing without a name keeps the name"
+        );
+        let moved = store
+            .archive_hub(&hub([1; 16], None, 7, 1800), u64::MAX)
+            .expect("append");
+        assert!(moved > first, "other hops are news");
+        let later = store
+            .archive_hub(&hub([1; 16], None, 7, 1800 + 3600), u64::MAX)
+            .expect("append");
+        assert!(later > moved, "an hour on, the last hearing is news");
+        store
+            .archive_name(ALICE, "Alice", 10, u64::MAX)
+            .expect("name");
+        let hubs = store.archived_hubs().expect("hubs");
+        assert_eq!(hubs.len(), 1, "one entry a hub, and a name is no hub");
+        assert_eq!(
+            (
+                hubs[0].name.as_deref(),
+                hubs[0].hops,
+                hubs[0].first,
+                hubs[0].last
+            ),
+            (Some("Le Salon FR"), Some(7), 1000, 5400)
+        );
+        let page = store.archive_since(0, usize::MAX).expect("page");
+        let kinds: Vec<u8> = page.entries.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [crate::home::KIND_HUB, crate::home::KIND_NAME]);
+        // The bound: the hub heard longest ago goes.
+        for i in 0..HEARD_BOUND {
+            let mut hash = [2; 16];
+            hash[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            store
+                .archive_hub(&hub(hash, None, 3, 10_000 + i as i64), u64::MAX)
+                .expect("append");
+        }
+        let hubs = store.archived_hubs().expect("hubs");
+        assert_eq!(hubs.len(), HEARD_BOUND);
+        assert!(
+            hubs.iter().all(|h| h.hash != [1; 16]),
+            "Le Salon FR, heard longest ago, went"
+        );
     }
 
     #[test]

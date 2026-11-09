@@ -1883,7 +1883,10 @@ impl Session {
             schema::Query::RoomsHub { set } => {
                 let mut inner = self.lock();
                 let mut error = String::new();
-                if let Some(set) = set {
+                if set.as_deref().map(str::trim) == Some("more") {
+                    // "More…" (1599): every hub in the page's scroll.
+                    inner.apply(UiEvent::Rooms(loquax::ui::rooms::RoomsEvent::More));
+                } else if let Some(set) = set {
                     let choice = match set.trim() {
                         "" | "none" => Some(loquax::ui::rooms::HubChoice::None),
                         text => match loquax::address::parse(text) {
@@ -4778,19 +4781,36 @@ pub fn rooms_hub_choice<B>(
         error,
         ..schema::RoomsHubChoice::default()
     };
-    for row in loquax::ui::settings::hub_rows(model) {
+    for row in loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Phone) {
         let label = row.label.resolve(lang);
         let value = row.value.as_ref().map(|v| v.resolve(lang));
         match row.action.map(|a| a.intent) {
-            Some(Intent::RoomsHub(HubPick::Hub(hub))) => choice.hubs.push(schema::RoomsHubRow {
+            Some(Intent::RoomsHub(HubPick::Hub(hub))) => {
+                // The core marks the hub in force with a check at the
+                // value's end; Java draws its own.
+                let value = value.unwrap_or_default();
+                let detail = value
+                    .trim_end_matches('\u{2713}')
+                    .trim_end_matches(loquax::ui::strings::JOIN)
+                    .trim();
+                choice.hubs.push(schema::RoomsHubRow {
+                    name: label,
+                    chosen: value.ends_with('\u{2713}'),
+                    set: hub.iter().map(|b| format!("{b:02x}")).collect(),
+                    detail: detail.to_string(),
+                })
+            }
+            Some(Intent::RoomsHub(HubPick::More)) => choice.hubs.push(schema::RoomsHubRow {
                 name: label,
-                chosen: value.is_some(),
-                set: hub.iter().map(|b| format!("{b:02x}")).collect(),
+                chosen: false,
+                set: "more".to_string(),
+                detail: String::new(),
             }),
             Some(Intent::RoomsHub(HubPick::None)) => choice.hubs.push(schema::RoomsHubRow {
                 name: label,
                 chosen: value.is_some(),
                 set: "none".to_string(),
+                detail: String::new(),
             }),
             Some(Intent::RoomsHub(HubPick::Paste)) => {
                 choice.paste = label;
@@ -4869,21 +4889,21 @@ mod tests {
         assert!(choice.ok);
         assert_eq!(choice.title, "Öffentliche Räume: Hub");
         assert_eq!(choice.current, "Keiner");
+        // 1599: the closest ten of the shipped list, "More…", then none.
         let names: Vec<&str> = choice.hubs.iter().map(|h| h.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "RNS Community",
-                "ShadowLink",
-                "HADARC",
-                "RNS Moscow",
-                "Radio Oxford",
-                "Keiner"
-            ]
-        );
-        assert_eq!(choice.hubs[0].set, "28c7c1a68c735693aa8e6b8193ed44b2");
-        assert_eq!(choice.hubs[5].set, "none");
-        assert!(choice.hubs[5].chosen && !choice.hubs[0].chosen);
+        assert_eq!(names.len(), 12, "{names:?}");
+        assert_eq!(names[0], "RNS Moscow");
+        assert_eq!((names[10], names[11]), ("Mehr…", "Keiner"));
+        assert_eq!(choice.hubs[0].set, "42a97b1b07147b898f78a610dfbba587");
+        assert_eq!(choice.hubs[0].detail, "3 Hops entfernt");
+        assert_eq!(choice.hubs[10].set, "more");
+        assert_eq!(choice.hubs[11].set, "none");
+        assert!(choice.hubs[11].chosen && !choice.hubs[0].chosen);
+        // "More…": the list scrolls through every hub, and no More.
+        update(&mut model, UiEvent::Rooms(RoomsEvent::More));
+        let all = rooms_hub_choice(&model, Lang::De, String::new());
+        assert_eq!(all.hubs.len(), loquax::ui::hubs::shipped().len() + 1);
+        assert!(all.hubs.iter().all(|h| h.set != "more"));
         assert_eq!(choice.paste, "Anderer Hub: Adresse einfügen");
         assert_eq!(choice.note, "Dein Name ist im Raum für alle sichtbar.");
         assert!(choice.own.is_empty());

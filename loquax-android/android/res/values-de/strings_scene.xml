@@ -40,6 +40,12 @@
     <string name="rooms_hub_bad">Das ist keine Adresse eines Hubs.</string>
     <string name="rooms_hub_chosen">Öffentliche Räume auf %1$s.</string>
     <string name="rooms_hub_off">Keine öffentlichen Räume.</string>
+    <string name="rooms_hub_unnamed">Hub ohne Namen</string>
+    <string name="rooms_hub_hop">1 Hop entfernt</string>
+    <string name="rooms_hub_hops">%1$d Hops entfernt</string>
+    <string name="rooms_hub_suggested">empfohlen</string>
+    <string name="rooms_hub_no_answer">keine Antwort</string>
+    <string name="rooms_hub_more">Mehr…</string>
     <string name="rooms_name_visible">Dein Name ist im Raum für alle sichtbar.</string>
     <string name="settings">Einstellungen</string>
     <string name="settings_profile">Profil</string>

@@ -257,6 +257,19 @@ pub const KIND_GROUP: u8 = 12;
 /// and `evicted`. A client from before it skips it as a kind it cannot
 /// show.
 pub const KIND_PN_STATUS: u8 = 13;
+/// A hub the home heard announcing (1599, `crate::ui::hubs`): its bytes
+/// are [`wire::hub_entry`], the hub's address, name, hops and first and
+/// last hearing. Only a hub's newest is kept, at most
+/// [`crate::ui::hubs::HEARD_BOUND`] hubs, the one heard longest ago going
+/// first, and a hub heard again is appended again only when its name or
+/// hops changed or [`HUB_REFRESH_SECS`] passed. Like a name it wakes
+/// nobody. A client from before it skips it as a kind it cannot show.
+pub const KIND_HUB: u8 = 14;
+
+/// How long a hub heard again goes before its entry is appended again with
+/// the later hearing (1599): a hub announces about every few minutes, and
+/// a device needs its last seen to the hour, not each announce.
+pub const HUB_REFRESH_SECS: i64 = 3600;
 
 /// The word `loquax mailbox archive` prints for an entry kind (1305); a
 /// kind this program does not know is its number.
@@ -276,6 +289,7 @@ pub fn kind_word(kind: u8) -> alloc::borrow::Cow<'static, str> {
         KIND_STALLED => "stalled",
         KIND_GROUP => "group",
         KIND_PN_STATUS => "pn-status",
+        KIND_HUB => "hub",
         other => return alloc::borrow::Cow::Owned(alloc::format!("{other}")),
     })
 }

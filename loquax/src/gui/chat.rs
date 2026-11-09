@@ -486,10 +486,11 @@ impl App {
         }
     }
 
-    /// The public rooms' hub (1577), the core's lines: which hub, each
-    /// shipped one and none with a mark on the one in force, a press
-    /// choosing it, the field for another's address, and what a hub
-    /// learns.
+    /// The public rooms' hub (1577, 1599), the core's lines: which hub,
+    /// the hubs heard and shipped with how far each is and a mark on the
+    /// one in force, a press choosing it, "More…" for every hub in the
+    /// page's scroll, none, the field for another's address, and what a
+    /// hub learns.
     fn hub_rows(&self, t: Colours) -> Element<'_, Message> {
         use loquax::ui::intent::Intent;
         use loquax::ui::rooms::HubPick;
@@ -523,13 +524,31 @@ impl App {
                         .align_y(Alignment::Center),
                     );
                 }
-                Some(intent) => {
-                    let mark = if value.is_some() { "●" } else { "○" };
+                Some(Intent::RoomsHub(HubPick::More)) => {
                     rows = rows.push(link(
-                        &format!("{mark} {label}"),
-                        Message::Intent(intent.clone()),
+                        &label,
+                        Message::Intent(Intent::RoomsHub(HubPick::More)),
                         t,
                     ));
+                }
+                Some(intent) => {
+                    // The core marks the hub in force with a check at the
+                    // value's end; the window says it with a filled dot.
+                    let value = value.unwrap_or_default();
+                    let said = value
+                        .trim_end_matches('\u{2713}')
+                        .trim_end_matches(loquax::ui::strings::JOIN)
+                        .trim();
+                    let mark = if value.ends_with('\u{2713}') {
+                        "●"
+                    } else {
+                        "○"
+                    };
+                    let words = match said {
+                        "" => format!("{mark} {label}"),
+                        said => format!("{mark} {label} · {said}"),
+                    };
+                    rows = rows.push(link(&words, Message::Intent(intent.clone()), t));
                 }
                 None if value.is_some() => {
                     let words = format!("{label}: {}", value.unwrap_or_default());

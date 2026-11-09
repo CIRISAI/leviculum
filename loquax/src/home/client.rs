@@ -948,6 +948,14 @@ async fn take_in(
             }
             continue;
         }
+        if entry.kind == super::KIND_HUB {
+            // A hub the home heard (1599): every device lists it.
+            match wire::read_hub_entry(&entry.packed) {
+                Ok(hub) => outbox.submit(Command::HomeHub { hub }).map_err(gone)?,
+                Err(_) => tracing::warn!("HOME pull: entry {} is no hub", entry.seq),
+            }
+            continue;
+        }
         if entry.kind == super::KIND_IMPORTED {
             pull.imported.push(entry.packed.clone());
             continue;
@@ -1286,6 +1294,37 @@ mod tests {
                 },
                 Command::Fence { token: 9 },
             ]
+        );
+    }
+
+    /// 1599: a hub the home heard reaches the engine as the hub, its name
+    /// cleaned again; a broken hub entry is skipped, and neither is a
+    /// message or a state change.
+    #[tokio::test]
+    async fn a_hub_entry_reaches_the_engine_as_the_hub() {
+        let hub = crate::ui::hubs::HeardHub {
+            hash: [8; 16],
+            name: Some("Villa".into()),
+            hops: Some(4),
+            first: 100,
+            last: 200,
+            answered: None,
+        };
+        let mut said = hub.clone();
+        said.name = Some("Villa_RRC".into());
+        let pulled = Pulled {
+            entries: vec![
+                entry(3, super::super::KIND_HUB, wire::hub_entry(&said)),
+                entry(4, super::super::KIND_HUB, vec![0x90]),
+            ],
+            first: 1,
+        };
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 4 }]);
+        let pull = take_in(&mut outbox, 2, pulled).await.expect("pull");
+        assert_eq!((pull.messages(), pull.states()), (0, 0));
+        assert_eq!(
+            *outbox.commands.borrow(),
+            [Command::HomeHub { hub }, Command::Fence { token: 4 }]
         );
     }
 

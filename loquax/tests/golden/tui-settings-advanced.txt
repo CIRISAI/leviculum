@@ -1,24 +1,24 @@
-┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
-│No conversations yet:   ││                                                    │
-│:new conversation starts││                                                    │
-│o┌ Advanced ────────────────────────────────────────────────────────────────┐ │
-│c│Relay                                                                     │ │
-│ │While your mailbox is offline, mail for you waits at a relay in the       │ │
-│ │network, which Loquax chooses by itself.                                  │ │
-│ │Public rooms: hub: None                                                   │ │
-│ │1  RNS Community                                                          │ │
-│ │2  ShadowLink                                                             │ │
-│ │3  HADARC                                                                 │ │
-│ │4  RNS Moscow                                                             │ │
-│ │5  Radio Oxford                                                           │ │
-│ │0  None: ✓                                                                │ │
+┌●┌ Advanced ────────────────────────────────────────────────────────────────┐─┐
+│N│Relay                                                                     │ │
+│:│While your mailbox is offline, mail for you waits at a relay in the       │ │
+│o│network, which Loquax chooses by itself.                                  │ │
+│c│Public rooms: hub: None                                                   │ │
+│ │1  RNS Moscow: 3 hops away                                                │ │
+│ │2  Cascadia: 3 hops away                                                  │ │
+│ │3  Chatsurfer: 3 hops away                                                │ │
+│ │4  CTRS: 3 hops away                                                      │ │
+│ │5  Minuteman: 3 hops away                                                 │ │
+│ │6  RMAP.WORLD Hub: 3 hops away                                            │ │
+│ │7  Save Europe: 3 hops away                                               │ │
+│ │8  SoCal Public: 3 hops away                                              │ │
+│ │9  UTN Oregon: 3 hops away                                                │ │
+│ │0  HADARC: 4 hops away                                                    │ │
+│ │m  More…                                                                  │ │
+│ │n  None: ✓                                                                │ │
 │ │a  Another hub: paste its address                                         │ │
 │ │Your name is visible to everyone in the room.                             │ │
 │ │?  Help                                                                   │ │
-│ │                                                                          │ │
+│ │                                                                          │ ┤
 │ │a row's key runs it · q back                                              │ │
-│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
-│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
-│                        ││                                                    │
-└────────────── / search ┘└────────────────────────────────────────────────────┘
+└─└────────────────────────────────────────────────────────────── Esc closes ┘─┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

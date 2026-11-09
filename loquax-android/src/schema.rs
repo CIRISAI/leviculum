@@ -1150,12 +1150,17 @@ pub struct RoomsHubChoice {
 }
 
 /// A line of [`RoomsHubChoice::hubs`]: its name, whether it is in force,
-/// and the word Java sends back as `set` to choose it.
+/// and the word Java sends back as `set` to choose it: a hub's address,
+/// `none`, or `more` for "More…" (1599), which shows every hub in the
+/// page's scroll. `detail` is how far the hub is and its marks
+/// ("4 hops away · suggested"), empty for none.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomsHubRow {
     pub name: String,
     pub chosen: bool,
     pub set: String,
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// What [`Query::Shared`] answers: the positions we sent, newest first, at

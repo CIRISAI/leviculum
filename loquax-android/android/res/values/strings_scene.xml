@@ -40,6 +40,12 @@
     <string name="rooms_hub_bad">That is no hub\'s address.</string>
     <string name="rooms_hub_chosen">Public rooms on %1$s.</string>
     <string name="rooms_hub_off">No public rooms.</string>
+    <string name="rooms_hub_unnamed">Unnamed hub</string>
+    <string name="rooms_hub_hop">1 hop away</string>
+    <string name="rooms_hub_hops">%1$d hops away</string>
+    <string name="rooms_hub_suggested">suggested</string>
+    <string name="rooms_hub_no_answer">no answer</string>
+    <string name="rooms_hub_more">More…</string>
     <string name="rooms_name_visible">Your name is visible to everyone in the room.</string>
     <string name="settings">Settings</string>
     <string name="settings_profile">Profile</string>

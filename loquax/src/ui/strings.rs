@@ -81,6 +81,13 @@ leviculum_ui::catalogue! {
     RoomsHubBad = "rooms_hub_bad", "That is no hub's address.", "Das ist keine Adresse eines Hubs.";
     RoomsHubChosen = "rooms_hub_chosen", "Public rooms on %1$s.", "Öffentliche Räume auf %1$s.";
     RoomsHubOff = "rooms_hub_off", "No public rooms.", "Keine öffentlichen Räume.";
+    // 1599: hubs heard on the mesh, offered closest and newest first.
+    RoomsHubUnnamed = "rooms_hub_unnamed", "Unnamed hub", "Hub ohne Namen";
+    RoomsHubHop = "rooms_hub_hop", "1 hop away", "1 Hop entfernt";
+    RoomsHubHops = "rooms_hub_hops", "%1$d hops away", "%1$d Hops entfernt";
+    RoomsHubSuggested = "rooms_hub_suggested", "suggested", "empfohlen";
+    RoomsHubNoAnswer = "rooms_hub_no_answer", "no answer", "keine Antwort";
+    RoomsHubMore = "rooms_hub_more", "More…", "Mehr…";
     RoomsNameVisible = "rooms_name_visible", "Your name is visible to everyone in the room.", "Dein Name ist im Raum für alle sichtbar.";
     Settings = "settings", "Settings", "Einstellungen";
     // 1450 (walk 1, finding 21): the settings' nine sections, one list on
