@@ -214,6 +214,7 @@ impl<B> UiModel<B> {
         contact.petname = petname.clone();
         let effects = self.set_contact(contact);
         if self.home_client {
+            self.owed_petnames.insert(peer, petname.clone());
             self.petnames.push((peer, petname));
         }
         let label = self.names.label(&peer);
@@ -229,13 +230,22 @@ impl<B> UiModel<B> {
 impl<B> UiModel<B> {
     /// A petname one of the home's devices set, pulled (1139): taken as
     /// the reader's word here and written to the contacts file, never
-    /// handed back. A name that sanitises to nothing clears it.
+    /// handed back. A name that sanitises to nothing clears it. While this
+    /// device's own rename of the peer has not come back from the home, a
+    /// different pulled name is the home's older word and is left (1614);
+    /// one the home refused keeps the reader's word for the session.
     pub(super) fn home_petname(
         &mut self,
         peer: [u8; 16],
         petname: Option<String>,
     ) -> Vec<UiEffect> {
         let petname = petname.as_deref().and_then(names::sanitise);
+        if let Some(owed) = self.owed_petnames.get(&peer) {
+            if *owed != petname {
+                return Vec::new();
+            }
+            self.owed_petnames.remove(&peer);
+        }
         let mut contact = self.names.contacts.of(&peer);
         if contact.petname == petname {
             return Vec::new();

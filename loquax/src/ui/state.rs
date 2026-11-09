@@ -132,14 +132,22 @@ impl<B> UiModel<B> {
         }
         let effects = self.apply_peer_state(peer, state);
         if self.home_client {
+            self.owed_peer_states.insert(peer, state);
             self.peer_states.push((peer, state));
         }
         effects
     }
 
     /// A peer state one of the home's devices set, pulled: taken here,
-    /// never handed back.
+    /// never handed back. Left while this device's own newer one has not
+    /// come back from the home, as a petname is (1614).
     pub(super) fn home_peer_state(&mut self, peer: [u8; 16], state: PeerState) -> Vec<UiEffect> {
+        if let Some(owed) = self.owed_peer_states.get(&peer) {
+            if *owed != state {
+                return Vec::new();
+            }
+            self.owed_peer_states.remove(&peer);
+        }
         if self.peer_state(&peer) == state {
             return Vec::new();
         }

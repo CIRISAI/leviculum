@@ -828,6 +828,14 @@ pub struct UiModel<B> {
     /// Peer states for the home node, in the order they were set
     /// ([`UiModel::take_peer_states`]).
     peer_states: Vec<([u8; 16], crate::home::wire::PeerState)>,
+    /// This device's petnames the home has not echoed back yet (1614): a
+    /// pulled petname for one of these peers is the home's older word,
+    /// pulled before ours reached it, and is not taken; the echo of ours
+    /// settles it. So the name shown does not depend on whether a pull or
+    /// the hand-off arrives first.
+    owed_petnames: BTreeMap<[u8; 16], Option<String>>,
+    /// The same for peer states (1614).
+    owed_peer_states: BTreeMap<[u8; 16], crate::home::wire::PeerState>,
     /// A pull a send or a wake asked for while one was running, with its
     /// reason: started when that one ends, since it may have begun before
     /// the home node had the message.
@@ -1008,6 +1016,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             marks: Vec::new(),
             petnames: Vec::new(),
             peer_states: Vec::new(),
+            owed_petnames: BTreeMap::new(),
+            owed_peer_states: BTreeMap::new(),
             pull_owed: None,
             confirm: None,
             reveal_pending: None,
@@ -13073,6 +13083,20 @@ pub(crate) mod tests {
                 )
             ]
         );
+        // The home's echo of the last one first (1614): until then a pulled
+        // state is the home's older word.
+        let blocked = crate::home::wire::PeerState {
+            blocked: true,
+            ..unpinned
+        };
+        assert!(update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::HomePeerState {
+                destination: PEER,
+                state: blocked,
+            }),
+        )
+        .is_empty());
         let pulled = crate::home::wire::PeerState {
             pinned: true,
             archived: true,
@@ -13149,6 +13173,8 @@ pub(crate) mod tests {
                 petname: petname.map(str::to_string),
             })
         };
+        // The home's echo of the clear first (1614): nothing to change.
+        assert!(update(&mut model, pulled(None)).is_empty());
         let effects = update(&mut model, pulled(Some("Mutti \u{202e}")));
         assert_eq!(
             effects,
@@ -13163,6 +13189,100 @@ pub(crate) mod tests {
         assert!(update(&mut model, pulled(Some("Mutti"))).is_empty());
         update(&mut model, pulled(None));
         assert_eq!(model.names.label(&PEER), "Alice ·abab");
+    }
+
+    /// 1614: the home's word on a peer that a pull brings while this
+    /// device's own newer word is still on its way there is the older one,
+    /// and the label does not depend on which arrives first. The phone set
+    /// "Mum", the home took it, the phone cleared it, and the pull ran
+    /// before the clear reached the home: the row stays the address book's
+    /// name. The home's echo of the clear settles it, and a later name from
+    /// another device is taken again.
+    #[test]
+    fn a_pull_older_than_the_readers_own_rename_does_not_bring_it_back() {
+        let labels = |pull_first: bool| -> Vec<String> {
+            let mut model = UiModel::<Field>::new(&[PEER]);
+            model.home_client = true;
+            model.names.link(PEER, "Alice Schmidt", "0r1-ALICE");
+            update(
+                &mut model,
+                UiEvent::Rename {
+                    peer: PEER,
+                    name: "Mum".into(),
+                },
+            );
+            let pulled = |petname: Option<&str>| {
+                UiEvent::Engine(OutboxEvent::HomePetname {
+                    destination: PEER,
+                    petname: petname.map(str::to_string),
+                })
+            };
+            let mut seen = Vec::new();
+            if pull_first {
+                // The home's echo of "Mum", pulled before the clear.
+                update(&mut model, pulled(Some("Mum")));
+            }
+            update(
+                &mut model,
+                UiEvent::Rename {
+                    peer: PEER,
+                    name: String::new(),
+                },
+            );
+            assert_eq!(
+                model.take_petnames(),
+                [(PEER, Some("Mum".to_string())), (PEER, None)]
+            );
+            seen.push(model.names.label(&PEER));
+            // The pull that ran before the clear reached the home.
+            update(&mut model, pulled(Some("Mum")));
+            seen.push(model.names.label(&PEER));
+            // The clear's echo, then another device's name.
+            update(&mut model, pulled(None));
+            seen.push(model.names.label(&PEER));
+            update(&mut model, pulled(Some("Mutti")));
+            seen.push(model.names.label(&PEER));
+            assert!(model.take_petnames().is_empty(), "never handed back");
+            seen
+        };
+        let expected = [
+            "Alice Schmidt ·abab",
+            "Alice Schmidt ·abab",
+            "Alice Schmidt ·abab",
+            "Mutti ·abab",
+        ];
+        assert_eq!(labels(false), expected);
+        assert_eq!(labels(true), expected);
+    }
+
+    /// 1614: as a petname, a peer state the reader set is not undone by a
+    /// pull of the home's older one; its echo settles it.
+    #[test]
+    fn a_pull_older_than_the_readers_own_peer_state_does_not_bring_it_back() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        receive(&mut model, PEER, 1, "hi");
+        model.home_client = true;
+        let muted = crate::home::wire::PeerState {
+            muted_until: Some(i64::MAX),
+            ..crate::home::wire::PeerState::default()
+        };
+        let pulled = |state| {
+            UiEvent::Engine(OutboxEvent::HomePeerState {
+                destination: PEER,
+                state,
+            })
+        };
+        palette(&mut model, "pin");
+        let pinned = model.peer_state(&PEER);
+        assert!(pinned.pinned);
+        // The home's older word: muted, not pinned.
+        update(&mut model, pulled(muted));
+        assert_eq!(model.peer_state(&PEER), pinned, "the reader's newer word");
+        // The echo, then another device's word.
+        update(&mut model, pulled(pinned));
+        update(&mut model, pulled(muted));
+        assert_eq!(model.peer_state(&PEER), muted);
+        assert_eq!(model.take_peer_states(), [(PEER, pinned)]);
     }
 
     /// `rename` asks in the palette, holding the petname to edit: `Enter`
