@@ -6,7 +6,7 @@
 # runs.
 #
 # Expects, for both musl triples under target/<triple>/release/:
-#   lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath, lnomad, lblogd, lnpnd, loquax
+#   lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath, lnmgmt, lnomad, lblogd, lnpnd, loquax
 # and one .deb per package and arch under target/debian/:
 #   leviculum_*_{amd64,arm64}.deb
 #   lnomad_*_{amd64,arm64}.deb
@@ -223,8 +223,8 @@ for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
     }
 done
 
-pack_bin_tarball leviculum amd64 x86_64-unknown-linux-musl README.md lnsd lnstest lncp lnstatus lnprobe lnpath
-pack_bin_tarball leviculum arm64 aarch64-unknown-linux-musl README.md lnsd lnstest lncp lnstatus lnprobe lnpath
+pack_bin_tarball leviculum amd64 x86_64-unknown-linux-musl README.md lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt
+pack_bin_tarball leviculum arm64 aarch64-unknown-linux-musl README.md lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt
 pack_bin_tarball lnomad amd64 x86_64-unknown-linux-musl lnomad/README.md lnomad
 pack_bin_tarball lnomad arm64 aarch64-unknown-linux-musl lnomad/README.md lnomad
 pack_bin_tarball lblogd amd64 x86_64-unknown-linux-musl lblogd/README.md lblogd

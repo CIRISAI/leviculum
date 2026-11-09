@@ -19,10 +19,9 @@ use std::time::Duration;
 
 use clap::Parser;
 
+use leviculum_cli::remote_mgmt;
 use leviculum_std::config::Config;
-use leviculum_std::driver::ReticulumNodeBuilder;
 use leviculum_std::remote_status;
-use leviculum_std::Identity;
 
 mod lnstatus_render;
 use lnstatus_render::StatusOptions;
@@ -495,7 +494,7 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
     };
 
     // -R is a 16-byte (32 hex char) transport identity hash.
-    let identity_hash = match parse_identity_hash(remote_hex) {
+    let identity_hash = match remote_mgmt::parse_identity_hash(remote_hex) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("{e}");
@@ -503,18 +502,10 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
         }
     };
 
-    // Load the management identity from its RNS identity file (64 raw private
-    // key bytes), matching `RNS.Identity.from_file`.
-    let identity = match std::fs::read(identity_path)
-        .map_err(|e| e.to_string())
-        .and_then(|b| Identity::from_private_key_bytes(&b).map_err(|e| e.to_string()))
-    {
+    let identity = match remote_mgmt::load_management_identity(identity_path) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!(
-                "Could not load management identity from {}: {e}",
-                identity_path.display()
-            );
+            eprintln!("{e}");
             std::process::exit(20);
         }
     };
@@ -525,32 +516,18 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
             .unwrap_or(DEFAULT_REMOTE_TIMEOUT_SECS),
     );
 
-    // Connect to the shared instance for transport (no local authkey needed;
+    // Attach to the shared instance for transport (no local authkey needed;
     // this uses the shared-instance IPC socket, like `lncp`).
-    let mut node = match ReticulumNodeBuilder::new()
-        .enable_transport(false)
-        .connect_to_shared_instance(instance_name)
-        // The daemon's storage directory, which the config may place off the
-        // config directory (Codeberg #241).
-        .storage_path(daemon_rpc::resolve_storage_path(config_dir, config))
-        .build_sync()
+    let (mut node, mut events) = match remote_mgmt::attach_to_shared_instance(
+        instance_name,
+        daemon_rpc::resolve_storage_path(config_dir, config),
+    )
+    .await
     {
-        Ok(n) => n,
+        Ok(attached) => attached,
         Err(e) => {
             eprintln!("No shared RNS instance available to get status from");
             eprintln!("({e})");
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = node.start().await {
-        eprintln!("No shared RNS instance available to get status from");
-        eprintln!("({e})");
-        std::process::exit(1);
-    }
-    let mut events = match node.take_event_receiver() {
-        Some(rx) => rx,
-        None => {
-            eprintln!("Internal error: event receiver unavailable");
             std::process::exit(1);
         }
     };
@@ -600,24 +577,6 @@ async fn run_remote(args: &Args, config_dir: &Path, config: Option<&Config>, ins
         }
         tokio::time::sleep(Duration::from_secs_f64(args.monitor_interval.max(0.2))).await;
     }
-}
-
-/// Parse a 32-hex-char transport identity hash into 16 bytes.
-fn parse_identity_hash(hex: &str) -> Result<[u8; 16], String> {
-    if hex.len() != 32 {
-        return Err(format!(
-            "Destination length is invalid, must be 32 hexadecimal characters (16 bytes), got {}.",
-            hex.len()
-        ));
-    }
-    let mut out = [0u8; 16];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let s =
-            std::str::from_utf8(chunk).map_err(|_| "Invalid destination entered.".to_string())?;
-        out[i] =
-            u8::from_str_radix(s, 16).map_err(|_| "Invalid destination entered.".to_string())?;
-    }
-    Ok(out)
 }
 
 /// `-m/--monitor`: clear the screen and re-render on each interval. The redraw
@@ -747,15 +706,6 @@ mod cli_tests {
             parse(&["--instance-name", "foo"]).instance_name.as_deref(),
             Some("foo")
         );
-    }
-
-    #[test]
-    fn identity_hash_parsing() {
-        let h = super::parse_identity_hash("000102030405060708090a0b0c0d0e0f").unwrap();
-        assert_eq!(h, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-        // Wrong length and non-hex are rejected.
-        assert!(super::parse_identity_hash("abcd").is_err());
-        assert!(super::parse_identity_hash(&"z".repeat(32)).is_err());
     }
 
     // Codeberg #174: --tables is additive. It is off unless asked for, it

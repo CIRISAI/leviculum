@@ -147,7 +147,7 @@ GRAPHS = [
         feature_args=["--features", ",".join(HOST_FEATURES)],
         blurb=(
             "Linked into lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath,\n"
-            "lnomad, lblogd, lnpnd, loquax and lnflash. Built for\n"
+            "lnmgmt, lnomad, lblogd, lnpnd, loquax and lnflash. Built for\n"
             "x86_64-unknown-linux-musl and aarch64-unknown-linux-musl."
         ),
     ),

@@ -30,7 +30,7 @@ PART 1 — host binaries
 ========================================================================
 
 Linked into lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath,
-lnomad, lblogd, lnpnd, loquax and lnflash. Built for
+lnmgmt, lnomad, lblogd, lnpnd, loquax and lnflash. Built for
 x86_64-unknown-linux-musl and aarch64-unknown-linux-musl.
 
 532 third-party crates, by licence:

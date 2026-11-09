@@ -125,7 +125,7 @@ esac
 # version files read below; its last entry, lnflash, is packaged from the
 # firmware bundle by scripts/build-lnflash-deb.sh instead.
 CRATES=(leviculum-cli lnomad lblogd lnpnd loquax)
-BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd loquax)
+BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt lnomad lblogd lnpnd loquax)
 # loquax's terminal frontend is off by default (loquax/Cargo.toml); the package
 # is what a person installs, so plain `loquax` opens the messenger. The musl
 # loquax is armhf's package and every architecture's static tarball

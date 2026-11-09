@@ -2,8 +2,8 @@
 
 **Status: stage 1 active since 2026-11-09 (Lew).** Most of what it
 needs on the board was built for Codeberg #235, and the board's `/dfu`
-verb since; what is left is one sender, one package per board and the
-cells that prove them (the last two sections).
+verb and its sender `lnmgmt dfu` since; what is left is one package per
+board and the cells that prove them (the last two sections).
 
 Every firmware update this project has ever shipped ended with a hand on
 the board: a cable, or a needle in a pinhole
@@ -303,6 +303,7 @@ Lew has the Debug Probe connected to the RAK before step 3.
 | What a `/dfu` event means, and the typed reply: one msgpack fixint, `0` accepted, `1` not listed, `2` no identity | `dfu_command`, `leviculum-core/src/node/remote_dfu.rs:131`; `DfuVerdict`, `leviculum-core/src/node/remote_dfu.rs:61` |
 | The exit order: reply handed over, waited for until every carrier's queue reports it gone (bounded by 20 s, above the LoRa queue's 18 s stale-drop age), then `0xA8`, then reset | `exit_to_dfu`, `leviculum-core/src/node/remote_dfu.rs:280`, behind `DfuExit` (`leviculum-core/src/node/remote_dfu.rs:254`); the magic at `leviculum-core/src/node/remote_dfu.rs:42`, the bound at `leviculum-core/src/node/remote_dfu.rs:51`; the board's side in `leviculum-nrf/src/remote_dfu.rs:131` (hand-over) and `leviculum-nrf/src/remote_dfu.rs:136` (LoRa settled through the reply, serial queue empty, BLE census empty) |
 | Both lines on the debug port, before the reply | `MGMT_DFU accepted=yes from=<identity> reason=accepted` and `MGMT_DFU accepted=no from=<identity\|none> reason=not-listed\|no-identity`, the body in `leviculum-nrf/log-line/src/lib.rs:195`; host side the `MGMT_DFU` trace event ([Structured event logs](../structured-event-logs.md)) |
+| The sender, `lnmgmt dfu -R <transport hash> -i <identity> [-w <secs>]`: the verdict in words (`accepted: the board resets into BLE DFU now`, `refused: not listed`, `refused: no identity`), exit 0 only on accepted, a timeout said as one | the binary, `leviculum-cli/src/lnmgmt.rs:111` (words) and `leviculum-cli/src/lnmgmt.rs:120` (timeouts and failures); the library call the `lnflash` GUI can reuse, `send_dfu`, `leviculum-std/src/remote_dfu.rs:51`, on the flow `lnstatus -R` runs, extracted as `request_on_management`, `leviculum-std/src/remote_status.rs:232`; manual page `lnmgmt(1)`, shipped in the `leviculum` package |
 | A boot counter that survives the trip | `record_at_boot`, `leviculum-nrf/src/boot_count.rs:76`, Codeberg #380 |
 | A legacy DFU package and the init-packet constants the bootloader checks | for the T1000-E only, `scripts/t1000e-dfu-package.sh`; the constants checked are `ADAFRUIT_DEVICE_TYPE` (`Adafruit_nRF52_Bootloader/src/dfu_init.c:84`) and the SoftDevice id (`Adafruit_nRF52_Bootloader/src/dfu_init.c:178`) |
 
@@ -337,15 +338,21 @@ carrier matters to the board ([Interface isolation](interface-isolation.md));
 the wait reads all three carriers' queues rather than the one the reply
 went out on, so the core keeps the routing decision.
 
-**The sender.** A new Leviculum client beside `lnstatus` in
-`leviculum-cli` (working name `lnmgmt dfu -R <transport hash> -i
-<identity>`), not `lnflash --dfu`:
+**The sender is built** (table above): `lnmgmt dfu`, a Leviculum client
+beside `lnstatus` in `leviculum-cli`, not `lnflash --dfu`. Its `-R` is the
+board's transport identity hash, the value `lnstatus -R` takes. What the
+host tests hold (`leviculum-std/tests/remote_dfu_sender.rs`): a host node
+standing in for a board, built with `remote_dfu` and an allow-list and
+running the core's own `dfu_command` and `send_dfu_reply` from a core
+processor, answers a listed identity with accepted and an unlisted one
+with not-listed, and the sender reads both wire replies; on the same
+scenario a node without the verb (as `lnsd`) leaves the sender with a
+timeout and decides nothing. The CLI's own tests hold the arguments, the
+words and the exit statuses. Why a separate binary:
 
 * it is a Reticulum client and needs everything `lnstatus -R` already
   does: a shared instance, a link to `rnstransport.remote.management`,
-  identifying with the management identity, one request
-  (`fetch_remote_status`, `leviculum-std/src/remote_status.rs:187`; the
-  `-R` and `-i` flags, `leviculum-cli/src/lnstatus.rs:145`). `lnflash`
+  identifying with the management identity, one request. `lnflash`
   has none of that, and it is a USB tool that is a single static binary
   calling syscalls rather than daemons; giving it a Reticulum client
   spends that property for one verb;

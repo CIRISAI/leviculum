@@ -349,7 +349,7 @@ check_package() {
 echo "verify-deb-packaging: arch=${ARCH}"
 echo
 
-check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath
+check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt
 # No stock config (#471, 1510): lnsd writes its first-start file itself, and
 # a shipped one would be "a configuration present", which keeps the
 # automatic layer's servers, BLE and serial off on every package install.
