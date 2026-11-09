@@ -103,6 +103,10 @@ fn a_message_in_a_closed_chat_builds_nothing_of_the_open_one() {
             peer: real_store::peer(ANNA),
         },
     );
+    // The frame the open drew, as every shell draws one: since 1591 the
+    // chat's window is built by the first scene read after a note, and
+    // without this frame the message's count paid for the open's.
+    let _ = model.scene(LayoutClass::Wide);
     update(
         &mut model,
         received(real_store::peer(12), 1, "Bist du heute Abend da?"),
