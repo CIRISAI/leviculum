@@ -1505,6 +1505,14 @@ tree-clean-selftest:
 # not-in-guards: no-atomic64-gate -- a cargo check on a third triple, which it
 #   installs itself
 # not-in-guards: check-all-targets -- compiles every target in the workspace
+# not-in-guards: deb-features-check -- cargo check of every package's feature
+#   set on its release triple (1593): 9.5 s after `touch
+#   leviculum-core/src/lib.rs`, 3 min 35 s cold (measured 2026-11-09), and
+#   two release feature sets of its own (clause b). RUN IT BY HAND INSTEAD
+#   whenever a pass touches a `cfg(feature` boundary, a CLI args struct or a
+#   `Cargo.toml` feature list: `just deb-features-check`. 1570 added
+#   `GuiArgs::no_start` and loquax under `tui gui` on the gnu triple stayed
+#   uncompilable from 902bc129 to cbbd870d with every coder gate green.
 # not-in-guards: citation-guard -- a cargo test target (clause c), and over the
 #   ten besides: 18.65 s for the bare-anchor test alone and 20.0 s for the
 #   recipe (measured 2026-09-27; the other thirteen tests in the binary run
@@ -1590,7 +1598,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets deb-features-check citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2011,6 +2019,20 @@ build-deb-arm64: (_require-cargo-deb) _deb-stamp
 [doc('Build the armhf (armv7) musl-static .debs via cargo-zigbuild')]
 build-deb-armhf: (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh armhf
+
+# 1593: every package this host's nightly would build, compiled with exactly
+# the target triple and feature set scripts/build-deb.sh builds it with, by
+# that script's own `--check` mode, so the two cannot drift: `cargo check
+# --release`, nothing linked, nothing packaged, no stamps. loquax under `tui
+# gui` on the gnu triple did not compile on master from 902bc129 to cbbd870d
+# (1570 added `GuiArgs::no_start` and not the two initialisers in `gui_args`)
+# and no coder gate saw it: `loquax-gui` checks `gui` alone and `loquax-tui`
+# `tui` alone. In `fast`, not in `guards` (see the ledger there). RUN IT BY
+# HAND INSTEAD whenever a pass touches a `cfg(feature` boundary, a CLI args
+# struct or a `Cargo.toml` feature list.
+[doc('cargo check every .deb feature set on its triple (host arch)')]
+deb-features-check:
+    bash scripts/build-deb.sh --check
 
 # The heap-accounting variants of the leviculum package (#437) and of the
 # lnpnd package (550), for one architecture. Both build-deb-* recipes produce them
