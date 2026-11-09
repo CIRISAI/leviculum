@@ -154,6 +154,10 @@
 //!                           store's restore lines again (a rebuild) and
 //! [BENCH] forget=reopened   the UI core given the model rebuilt from the ring
 //! [BENCH] forget=<refused reason=no-home|no-store|failed error=..>
+//! [PAGE_MOVED] peer=<8 hex> paged=<8 hex> place=<a>-><b> last_written=..->.. moved=..->.. touched=..->.. activity=..->.. above=<8 hex> above_written=..
+//!                           bench image only (1595): a page's fold moved
+//!                           the cursor's row with no key; its order key's
+//!                           parts before and after, and the row above it
 //! [OPEN] peer=<8 hex> entries=<n> messages=<n> marks=<n> sectors=<n> wait_ms=.. page_read_ms=.. decode_ms=.. unpack_ms=.. alloc_ms=.. fold_ms=.. scene_ms=.. draw_ms=.. flush_ms=..
 //!                           bench image only (1540): where an opened
 //!                           chat's page went, from the load asked to the
@@ -2674,8 +2678,15 @@ fn ui_main(
                     #[cfg(not(m9_bench))]
                     let effects = home::page_in(&mut model, peer, &entries, earlier, &address);
                     #[cfg(m9_bench)]
+                    let placed = bench::Placed::of(&model);
+                    #[cfg(m9_bench)]
                     let effects = open.page_in(&mut model, peer, &entries, earlier, &address);
                     route_out(&mut model, effects, &mut ids, &mut log, &mut wants, false);
+                    // A page that moved the cursor's row says by how much
+                    // and why (1595): window 20's preloaded row went to
+                    // the top with no key, which no host test made.
+                    #[cfg(m9_bench)]
+                    placed.say_moved(&model, peer, &mut log);
                     // The page is on the chat now, whatever it asked.
                     dirty = true;
                 }
@@ -3359,6 +3370,79 @@ mod bench {
         SCENE_US.store((t1 - t0).as_micros() as u32, Ordering::Relaxed);
         DRAW_US.store(t1.elapsed().as_micros() as u32, Ordering::Relaxed);
         drawn
+    }
+
+    /// The selected row's place in the list and its order key (1595),
+    /// before a page's fold: [`Placed::say_moved`] names a page that
+    /// moved it.
+    pub struct Placed {
+        peer: Option<[u8; 16]>,
+        place: Option<usize>,
+        key: (Option<i64>, Option<i64>, Option<i64>, u64),
+        above: Option<([u8; 16], Option<i64>)>,
+    }
+
+    impl Placed {
+        fn key_of(c: &loquax::ui::Conversation) -> (Option<i64>, Option<i64>, Option<i64>, u64) {
+            (
+                c.last_written(),
+                c.listing.as_ref().and_then(|l| l.moved),
+                c.touched,
+                c.activity,
+            )
+        }
+
+        pub fn of(model: &UiModel<Field>) -> Self {
+            let order = model.order();
+            let place = order.iter().position(|&i| i == model.selected);
+            let c = model.conversations.get(model.selected);
+            let above = place
+                .and_then(|p| p.checked_sub(1))
+                .map(|p| &model.conversations[order[p]])
+                .map(|a| (a.peer, a.last_written()));
+            Self {
+                peer: c.map(|c| c.peer),
+                place,
+                key: c.map_or((None, None, None, 0), Self::key_of),
+                above,
+            }
+        }
+
+        /// A `[PAGE_MOVED]` line when the page of `paged` moved the
+        /// selected row: its place before and after, its key's parts
+        /// before and after (last written, the kept row's time, touched,
+        /// activity), and the row it stood under.
+        pub fn say_moved(&self, model: &UiModel<Field>, paged: [u8; 16], log: &mut UiLog) {
+            let now = Self::of(model);
+            if now.peer != self.peer || now.place == self.place {
+                return;
+            }
+            let hex = |p: Option<[u8; 16]>| {
+                p.map_or(alloc::string::String::from("-"), |p| {
+                    alloc::format!("{:02x}{:02x}{:02x}{:02x}", p[0], p[1], p[2], p[3])
+                })
+            };
+            log.line(
+                "[PAGE_MOVED] ",
+                alloc::format!(
+                    "peer={} paged={} place={:?}->{:?} last_written={:?}->{:?} moved={:?}->{:?} touched={:?}->{:?} activity={}->{} above={} above_written={:?}",
+                    hex(self.peer),
+                    hex(Some(paged)),
+                    self.place,
+                    now.place,
+                    self.key.0,
+                    now.key.0,
+                    self.key.1,
+                    now.key.1,
+                    self.key.2,
+                    now.key.2,
+                    self.key.3,
+                    now.key.3,
+                    hex(self.above.map(|a| a.0)),
+                    self.above.and_then(|a| a.1),
+                ),
+            );
+        }
     }
 
     /// The allocator's counters of this core at a moment (1594): calls,

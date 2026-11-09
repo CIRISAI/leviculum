@@ -1311,6 +1311,136 @@ fn preloaded_rows_keep_their_places(archive: &Archive) {
     assert!(read >= 6, "each row reached preloads its page: {read}");
 }
 
+/// 1595, window 20 (`bench/board.log` 857 to 865): the ring down put
+/// the cursor on row 1, whose page preloaded (9 entries: 5 messages, 4
+/// marks) and folded with no key, and 220 ms later the same row stood at
+/// the top with the cursor on it; `cursor_to(1)` gave up and `open
+/// longest` opened one chat of four. The page of a chat its reader read
+/// on another device carries read marks recorded after its messages. A
+/// pull of messages and then their marks, a resumed boot, the cursor
+/// moved down the list row by row, each row's page with its marks folded
+/// as the board folds it: no row moves, the cursor moves one row a press.
+#[test]
+fn a_preloaded_page_with_marks_keeps_its_row() {
+    use loquax::home::wire::{mark_request, Mark, MarkFlag};
+    let archive = Archive::new();
+    let messages = archive.entries();
+    let recorded_last = 1_762_000_000 + MESSAGES as i64;
+    // Each friend's chat read on another device a while after the pull's
+    // last message: a read mark per received message of the chat's
+    // newest four, recorded then.
+    let mut marks = Vec::new();
+    let mut seq = MESSAGES;
+    for friend in 0..CONVERSATIONS {
+        let ids: Vec<[u8; 32]> = messages
+            .iter()
+            .filter(|e| friend_of(e.seq) == friend && e.kind == KIND_RECEIVED)
+            .filter_map(|e| board::rows::entry_id(e, &archive.address))
+            .collect();
+        for id in ids.iter().rev().take(4) {
+            seq += 1;
+            marks.push(Entry {
+                seq,
+                kind: loquax::home::KIND_MARK,
+                at: recorded_last + 600 + seq as i64,
+                packed: mark_request(&Mark {
+                    flag: MarkFlag::Read,
+                    ids: vec![*id],
+                }),
+            });
+        }
+    }
+    // The board's clock during the pull two minutes behind the home's,
+    // which recorded the newest messages and the marks: the board takes
+    // its day from the home once and counts on from its own uptime.
+    let pulled = loquax::when::WallTime {
+        unix_secs: recorded_last - 120,
+        offset_secs: 0,
+    };
+    let mut flash = MemFlash::new(2048);
+    let mut boot = home::restore(&mut flash, archive.address).expect("empty boot");
+    boot.model.now = Some(pulled);
+    let mut ids = || [0u8; 16];
+    let all: Vec<Entry> = messages.into_iter().chain(marks).collect();
+    for page in all.chunks(72) {
+        home::keep(&mut boot.shelf, &mut flash, page, &archive.address).expect("keep");
+        let (_, effects) = home::take(&mut boot.model, page, &archive.address);
+        let routed = home::route(&mut boot.model, effects, &mut ids);
+        boot.shelf.said(routed.rows, routed.gone);
+        boot.shelf.flush(&mut flash, Vec::new).expect("flush");
+    }
+    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    assert!(
+        matches!(boot.how, home::How::Resumed { .. }),
+        "{:?}",
+        boot.how
+    );
+    boot.model.now = Some(loquax::when::WallTime {
+        unix_secs: pulled.unix_secs + 7200,
+        ..pulled
+    });
+    let peers = |model: &loquax::ui::UiModel<loquax_m9::field::Field>| -> Vec<[u8; 16]> {
+        model
+            .order()
+            .into_iter()
+            .map(|i| model.conversations[i].peer)
+            .collect()
+    };
+    // The bench's arrival, as window 20's walk made it before the boot:
+    // "Bench" a second over the newest chat, at the list's top.
+    let arrival = loquax_m9::bench::arrival(&boot.model);
+    let cursor_seq = boot.shelf.cursor();
+    let bench = loquax_m9::bench::entries(archive.address, arrival, 1, cursor_seq);
+    home::keep(&mut boot.shelf, &mut flash, &bench, &archive.address).expect("keep");
+    let (_, effects) = home::take(&mut boot.model, &bench, &archive.address);
+    let routed = home::route(&mut boot.model, effects, &mut ids);
+    boot.shelf.said(routed.rows, routed.gone);
+    boot.shelf.flush(&mut flash, Vec::new).expect("flush");
+    let mut boot = home::restore_shown(
+        &mut flash,
+        archive.address,
+        &|| 0,
+        loquax_m9::bench::Arrivals::Shown,
+    )
+    .expect("resume again");
+    boot.model.now = Some(loquax::when::WallTime {
+        unix_secs: pulled.unix_secs + 7200,
+        ..pulled
+    });
+    assert_eq!(
+        boot.model.conversations[boot.model.order()[0]].peer,
+        loquax_m9::bench::BENCH_PEER,
+        "Bench leads the list"
+    );
+    // Window 20's keys: Enter opens Bench (row 0), Back, the ring down.
+    let mut row = 0;
+    boot.model.selected = boot.model.order()[0];
+    press_and_preload(&mut boot, &mut flash, &archive.address, &mut row, 0x0d);
+    press_and_preload(&mut boot, &mut flash, &archive.address, &mut row, 0x86);
+    assert_eq!(cursor(&boot.model), 0, "back on Bench");
+    let before = peers(&boot.model);
+    let start = cursor(&boot.model);
+    let mut read = 0;
+    for press in 1..=12 {
+        read += press_and_preload(&mut boot, &mut flash, &archive.address, &mut row, 0xb6);
+        let now = peers(&boot.model);
+        if now != before {
+            let moved: Vec<(usize, usize)> = before
+                .iter()
+                .enumerate()
+                .filter_map(|(at, p)| {
+                    let to = now.iter().position(|q| q == p)?;
+                    (to != at).then_some((at, to))
+                })
+                .take(4)
+                .collect();
+            panic!("press {press}: a preloaded page with marks moved rows (from, to): {moved:?}");
+        }
+        assert_eq!(cursor(&boot.model), start + press, "press {press}");
+    }
+    assert!(read >= 12, "each row reached preloads its page: {read}");
+}
+
 fn walk_twenty(archive: &Archive, mut flash: MemFlash, now: Option<loquax::when::WallTime>) {
     let mut boot = home::restore(&mut flash, archive.address).expect("resume");
     assert!(matches!(boot.how, home::How::Resumed { .. }));
