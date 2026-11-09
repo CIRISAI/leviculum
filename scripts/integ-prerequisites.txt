@@ -47,7 +47,9 @@ reference/Reticulum/RNS/__init__.py leviculum-std/rnsd_interop
 # submodules whose submodule URLs point nowhere, 2026-10-04: these seven, and
 # only these, fail in the whole selection there. The `a_third_announce_*`
 # lines came after (1317, 1320), and spawn the same Python peer, as do the
-# `local_clients_announces_*` lines (1358).
+# `local_clients_announces_*` lines (1358) and the `a_link_proof_*` lines (1607).
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_link_proof_later_than_six_rtts_fails_the_python_receipt::a_link_proof_later_than_six_rtts_fails_the_python_receipt
+reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_link_proof_later_than_six_rtts_fails_the_python_receipt::the_same_held_proof_is_delivered_under_a_declared_receipt_deadline
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::a_third_announce_on_a_fresh_interface_waits_at_python
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::control_two_announces_on_a_fresh_interface_both_arrive
 reference/Reticulum/RNS/__init__.py leviculum-std/mvr a_third_announce_on_a_fresh_interface_waits_at_python::five_destinations_on_a_fresh_interface_all_arrive_at_python

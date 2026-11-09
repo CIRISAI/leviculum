@@ -1888,6 +1888,14 @@ class TestDaemon:
                 receipt = packet.send()
                 if receipt is None:
                     return {"error": "packet.send() returned no receipt"}
+                # A link receipt's own deadline is max(rtt * 6, 5 ms)
+                # (Packet.py:431); on a loopback link of ~1 ms RTT that is
+                # 5 to 8 ms, below one scheduler stall of a loaded test host.
+                # A caller that asks whether the proof validates, not whether
+                # it beat that deadline, names its own (Packet.py:575).
+                receipt_timeout = params.get("receipt_timeout")
+                if receipt_timeout is not None:
+                    receipt.set_timeout(float(receipt_timeout))
                 receipt_id = str(self.next_receipt_id)
                 self.next_receipt_id += 1
                 self.packet_receipts[receipt_id] = receipt
@@ -1916,7 +1924,17 @@ class TestDaemon:
                 RNS.PacketReceipt.CULLED: "CULLED",
             }
             status = receipt.get_status()
-            return {"result": {"status": names.get(status, str(status))}}
+            # The receipt's own deadline and the link RTT it came from
+            # (Packet.py:431: max(rtt * traffic_timeout_factor, 5 ms)), so
+            # a FAILED verdict carries the window the proof had to make.
+            return {"result": {
+                "status": names.get(status, str(status)),
+                "timeout": receipt.timeout,
+                "rtt": getattr(receipt.destination, "rtt", None),
+                "age": time.time() - receipt.sent_at,
+                "concluded_after": (receipt.concluded_at - receipt.sent_at)
+                    if receipt.concluded_at else None,
+            }}
 
         elif method == "send_link_request":
             # Python-side RNS.Link.request() against a (Rust) responder.
