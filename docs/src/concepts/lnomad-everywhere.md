@@ -666,8 +666,8 @@ terminal and window get no tab (the second question, answered no for now).
   `std` feature, so `just loquax-core-no-std` and `just
   lnomad-core-no-std` still build both for the firmware triples. The tab
   is `Browse` (`loquax/src/ui/browse.rs:38`): whether the host has the tab
-  (`enabled`, set by the phone's session at
-  `loquax-android/src/session.rs:2216`), whether it is in front, and
+  (`enabled`, set by the phone's session from the config, on unless it
+  says off, at `loquax-android/src/session.rs:2216`), whether it is in front, and
   lnomad's `Model`, marked `hosted`. `TabId::Browse`
   (`loquax/src/ui/scene.rs:82`) joins Chats and Map where enabled, and the
   scene carries lnomad's scene as `browse` (`loquax/src/ui/scene.rs:1035`;
