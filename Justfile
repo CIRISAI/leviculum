@@ -2413,10 +2413,23 @@ site-unpack-docs-selftest:
 # a pass shortens it with `secs`, the reviewer runs the default. Never under
 # /tmp: the soak directory is the target dir's tmp unless LNPND_SOAK_DIR says
 # otherwise (lnpnd/tests/pn_growth_soak.rs).
+#
+# `alloc` picks the daemon's allocator (1592): `mimalloc`, lnpnd's default,
+# or `system`, the libc allocator the field ran before, built with the
+# interface families and without `alloc-mimalloc`. Positional, as just 1.40
+# hands `alloc=system` over as a literal: `just pn-growth-soak 1200 300000 14
+# system`.
 [doc('lnpnd growth soak: does a table grow once the store is full (20 min)')]
-pn-growth-soak secs="1200" messages="300000" peers="14":
+pn-growth-soak secs="1200" messages="300000" peers="14" alloc="mimalloc":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{alloc}}" in
+    mimalloc) features=() ;;
+    system) features=(--no-default-features --features "ble serial i2p") ;;
+    *) echo "pn-growth-soak: alloc={{alloc}}; want mimalloc or system" >&2; exit 2 ;;
+    esac
     LNPND_SOAK_SECS={{secs}} LNPND_SOAK_MESSAGES={{messages}} LNPND_SOAK_PEERS={{peers}} \
-        cargo test --release -p lnpnd --test pn_growth_soak -- --ignored --nocapture
+        cargo test --release -p lnpnd "${features[@]}" --test pn_growth_soak -- --ignored --nocapture
 
 # The forge runner is a shared machine, and a test whose pass depends on the
 # host being fast is a red waiting for a slow day (672: lnpnd's stamp worker
