@@ -43,14 +43,14 @@ pub const RNCP_PY: &str = concat!(
 pub const VENDOR_RNS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../reference/Reticulum");
 
 /// `PacketContext::LinkIdentify` as it appears on the wire
-/// (`leviculum-core/src/packet.rs:175`). The proxy reads bytes, so it names
+/// (`leviculum-core/src/packet.rs:180`). The proxy reads bytes, so it names
 /// the byte.
 pub const CTX_LINK_IDENTIFY: u8 = 0xFB;
-/// `PacketContext::ResourceAdv` (`packet.rs:161`).
+/// `PacketContext::ResourceAdv` (`packet.rs:166`).
 pub const CTX_RESOURCE_ADV: u8 = 0x02;
-/// `PacketContext::ResourceRcl` (`packet.rs:166`) — the receiver's rejection.
+/// `PacketContext::ResourceRcl` (`packet.rs:171`) — the receiver's rejection.
 pub const CTX_RESOURCE_RCL: u8 = 0x07;
-/// `PacketContext::Lrrtt` (`packet.rs:177`) — the initiator's RTT packet, the
+/// `PacketContext::Lrrtt` (`packet.rs:182`) — the initiator's RTT packet, the
 /// frame that takes a responder's link out of its handshake.
 pub const CTX_LRRTT: u8 = 0xFE;
 
