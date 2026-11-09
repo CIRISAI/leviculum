@@ -182,8 +182,8 @@ caller must dispatch.
 | `fn announce_destination(&mut self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> Result<TickOutput, AnnounceError>` — `node/mod.rs:1062` | Build and queue an announce |
 | `fn send_single_packet(&mut self, dest_hash: &DestinationHash, data: &[u8]) -> Result<([u8; TRUNCATED_HASHBYTES], TickOutput), SendError>` — `node/mod.rs:1271` | Build an unreliable data packet |
 | `fn connect(&mut self, dest_hash: DestinationHash, dest_signing_key: &[u8; 32]) -> (LinkId, bool, TickOutput)` — `node/link_management.rs:319` | Build a link request |
-| `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:969` | Send on an established link |
-| `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:787` | Close a link |
+| `fn send_on_link(&mut self, link_id: &LinkId, data: &[u8]) -> Result<TickOutput, SendError>` — `node/link_management.rs:983` | Send on an established link |
+| `fn close_link(&mut self, link_id: &LinkId) -> TickOutput` — `node/link_management.rs:801` | Close a link |
 | `fn handle_packet(&mut self, iface: InterfaceId, data: &[u8]) -> TickOutput` — `node/mod.rs:2714` | Feed received bytes from an interface |
 | `fn handle_timeout(&mut self) -> TickOutput` — `node/mod.rs:2969` | Run periodic maintenance (call at the next deadline) |
 | `fn next_deadline(&self) -> Option<u64>` — `node/mod.rs:3000` | Earliest timer deadline (ms); when to call `handle_timeout` |

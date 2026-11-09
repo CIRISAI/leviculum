@@ -101,7 +101,7 @@ Since leviculum#854 the same exclusion carries a split horizon. An
 announce that the board sends for a destination (a path response or a
 transit rebroadcast) skips the link of the peer its own route to that
 destination runs through (`split_horizon`,
-`leviculum-core/src/transport.rs:4772`). That neighbour could only learn a
+`leviculum-core/src/transport.rs:4777`). That neighbour could only learn a
 route through itself from it, and after a phone left, one did, and two
 boards handed the phone's packets to each other (#848). The driver
 states which interfaces can serve all of their links but one
@@ -129,7 +129,7 @@ same three in `handle_packet_from_peer`,
 `leviculum-nrf/src/bin/rak4631.rs:1195`), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
-`leviculum-core/src/transport.rs:6112`). So the identity-shaped
+`leviculum-core/src/transport.rs:6117`). So the identity-shaped
 addressing already exists end to end; the only open question is whether
 the *send* side spends an interface object on it.
 
@@ -319,7 +319,7 @@ either way.
 Stack is likewise not per-interface: the send loop iterates, it does not
 recurse. What does scale with the interface count is the broadcast
 fan-out — an announce emits one action per entry in the routing map
-(`interface_names`, `leviculum-core/src/transport.rs:13640`), each
+(`interface_names`, `leviculum-core/src/transport.rs:13658`), each
 carrying a cloned packet. With three BLE children an announce would
 allocate three ~500 B action buffers where today it allocates one that
 `tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:301`).

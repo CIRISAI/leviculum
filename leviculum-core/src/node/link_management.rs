@@ -346,10 +346,24 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.connect_routed(dest_hash, dest_signing_key, first_hop_timeout_ms, None)
     }
 
+    /// Send a link request with no path on every interface (+ciris,
+    /// leviculum#104): one broadcast, plus a copy at its own MTU on each
+    /// direct interface a DirectLink upgrade attached
+    /// (`Transport::send_link_request_on_all_interfaces`).
+    fn send_link_request_broadcast(&mut self, packet: &[u8]) {
+        let direct: Vec<(usize, u32)> = self
+            .direct_link_interfaces()
+            .into_iter()
+            .filter_map(|i| self.transport.interface_hw_mtu(i).map(|m| (i, m)))
+            .collect();
+        self.transport
+            .send_link_request_on_all_interfaces(packet, &direct);
+    }
+
     /// The HW_MTU a link request to `dest_hash` signals: the interface `via`
     /// names, else the learned path's next-hop interface. A request with no
-    /// path is re-signalled per interface as it goes out (+ciris,
-    /// leviculum#104, `Transport::send_link_request_on_all_interfaces`).
+    /// path also goes out at its own MTU on each direct interface (+ciris,
+    /// leviculum#104, [`Self::send_link_request_broadcast`]).
     fn link_request_hw_mtu(
         &self,
         dest_hash: &[u8; crate::constants::TRUNCATED_HASHBYTES],
@@ -500,7 +514,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 .send_to_destination(dest_hash.as_bytes(), &packet)
                 .is_ok();
             if !routed {
-                self.transport.send_link_request_on_all_interfaces(&packet);
+                self.send_link_request_broadcast(&packet);
             }
             routed
         };
@@ -4377,7 +4391,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                                 .send_to_destination(&dest_hash_bytes, &packet)
                                 .is_ok();
                             if !routed {
-                                self.transport.send_link_request_on_all_interfaces(&packet);
+                                self.send_link_request_broadcast(&packet);
                             }
                             routed
                         };

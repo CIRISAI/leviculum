@@ -4437,14 +4437,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         let is_from_local_client = self.is_local_client(interface_index);
         let is_local_link_relay =
             is_from_local_client && self.storage.has_link_entry(&packet.destination_hash);
-        // Local-client link requests skip hash dedup to allow link request
-        // retries. When lncp retries a link request, the daemon
-        // receives the same bytes again. Without this exemption, the daemon
-        // would reject the retry as a duplicate (hash cached from first attempt).
-        // This is safe: link requests from local clients are forwarded to the
-        // network, not processed locally, so duplicates don't affect daemon state.
-        // Python avoids this entirely because its outbound path doesn't pass
-        // through inbound() (Transport.py architecture difference).
+        // Local-client link requests skip hash dedup so a client that resends
+        // the same bytes is still forwarded. Nothing current does: since
+        // Codeberg #66 a leviculum retry carries fresh keys (new bytes, new
+        // link id), Python never retries a link request (it times out,
+        // `Link.py:283-284`), and neither does rns-rs (checked on its master
+        // of 2026-11-08: its establishment timeout closes the link). The
+        // exemption stays for a client older than #66, and is
+        // safe: link requests from local clients are forwarded to the
+        // network, not processed locally. The relay's link-id guard below
+        // (+ciris, leviculum#104) lets a same-interface repeat through for
+        // the same reason. Python avoids this entirely because its outbound
+        // path doesn't pass through inbound() (Transport.py architecture
+        // difference).
         let is_local_client_link_request =
             is_from_local_client && packet.flags.packet_type == PacketType::LinkRequest;
         // Link requests for our own destinations (or forwarded to a local
@@ -6311,7 +6316,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4466. A destination with no cached
+    /// link-request path uses at transport.rs:4471. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -8056,14 +8061,19 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let link_id = Link::calculate_link_id(raw);
 
             // +ciris (leviculum#104): a second copy of a request this node
-            // already forwards. The packet-hash dedup does not catch it when
-            // the copies differ only in their signalling bytes (a no-path
-            // request goes out once per interface, each copy signalling its
-            // own MTU), and forwarding it would overwrite the entry the
-            // first copy anchored and double the request on the next hop.
-            // A retry is never one of these: it carries fresh keys, hence a
-            // fresh link id (Codeberg #66).
-            if self.storage.has_link_entry(link_id.as_bytes()) {
+            // already forwards, heard on ANOTHER interface. The packet-hash
+            // dedup does not catch it when the copies differ only in their
+            // signalling bytes (a no-path request's direct-interface copy),
+            // and forwarding it would overwrite the entry the first copy
+            // anchored and double the request on the next hop. A repeat on
+            // the interface the first copy came in on is forwarded as
+            // before: that is a pre-#66 client resending the same bytes
+            // (see the dedup exemption for local-client link requests).
+            if self
+                .storage
+                .get_link_entry(link_id.as_bytes())
+                .is_some_and(|e| e.received_interface_index != interface_index)
+            {
                 crate::tracing::debug!(
                     link = %HexShort(link_id.as_bytes()),
                     iface = %self.iface_name(interface_index),
@@ -10814,40 +10824,48 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Send a link request that has no path on every interface (+ciris,
-    /// leviculum#104), each copy signalling what ITS interface signals.
+    /// leviculum#104): as one broadcast, exactly as before, except that each
+    /// point-to-point direct interface in `direct` gets its own copy at the
+    /// MTU it signals and is left out of the broadcast.
     ///
     /// The reference signals the base MTU whenever the request has no path
     /// (`Link.py:310-314`), so a link to a destination that is never
     /// announced, such as a derived one-hop address on a punched path, was
-    /// held at 500 on a carrier signalling 1400. Signalling is not part of
-    /// the link id (`Link::calculate_link_id`), so the copies are one
-    /// request, and rewriting it per hop is what a reference relay does
-    /// (`Transport.py:1585-1612`, [`Self::clamp_link_request_mtu`]). Every
-    /// interface that signals an MTU gets a copy at that MTU; every other
-    /// interface, the driver's included, gets one broadcast at the base MTU,
-    /// which is what such an interface signals under Codeberg #357. No
-    /// interface is offered more than it signals, and each responder still
-    /// clamps to its receiving interface.
-    pub(crate) fn send_link_request_on_all_interfaces(&mut self, packet: &[u8]) {
-        let signalled: Vec<(usize, u32)> = self
-            .interface_hw_mtus
-            .iter()
-            .map(|(id, mtu)| (*id, *mtu))
-            .collect();
-        for &(id, mtu) in &signalled {
+    /// held at 500 on a carrier that takes more. Signalling is not part of
+    /// the link id (`Link::calculate_link_id`), so a copy is the same
+    /// request, re-signalled the way a reference relay re-signals it per hop
+    /// (`Transport.py:1585-1612`, [`Self::clamp_link_request_mtu`]).
+    ///
+    /// Only direct interfaces get a copy, because a Python responder builds
+    /// one link per copy it hears: its dedup keys on the full packet hash,
+    /// which covers the signalling bytes (`Transport.py:1376`), and
+    /// `Destination.incoming_link_request` never looks the link id up
+    /// (`Destination.py:420-424`, `Link.validate_request`). Copies on two
+    /// shared media (Auto and UDP on one LAN) would give it two links under
+    /// one id with different keys. A direct interface is point to point, and
+    /// its far end ran the DirectLink upgrade, so it is never a Python node.
+    pub(crate) fn send_link_request_on_all_interfaces(
+        &mut self,
+        packet: &[u8],
+        direct: &[(usize, u32)],
+    ) {
+        if direct.is_empty() {
+            self.send_on_all_interfaces(packet);
+            return;
+        }
+        for &(id, mtu) in direct {
             let copy = resignal_link_request(packet, mtu);
             self.storage.add_packet_hash(packet_hash(&copy));
             let _ = self.send_on_interface(id, &copy);
         }
-        let base = resignal_link_request(packet, MTU as u32);
-        let cache_hash = packet_hash(&base);
+        let cache_hash = packet_hash(packet);
         self.storage.add_packet_hash(cache_hash);
         self.stats.packets_sent += 1;
         self.push_broadcast(
-            base,
+            packet.to_vec(),
             None,
             None,
-            signalled.iter().map(|(id, _)| InterfaceId(*id)).collect(),
+            direct.iter().map(|(id, _)| InterfaceId(*id)).collect(),
             Some(ph8(&cache_hash)),
         );
     }
@@ -18898,7 +18916,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7884,,), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7889,,), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -37543,7 +37561,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 /// `packet`, a link request, with its signalled MTU replaced by `mtu` and
 /// its mode kept (+ciris, leviculum#104). A request without signalling is
 /// returned unchanged.
-fn resignal_link_request(packet: &[u8], mtu: u32) -> Vec<u8> {
+pub(crate) fn resignal_link_request(packet: &[u8], mtu: u32) -> Vec<u8> {
     use crate::link::{decode_signaling_bytes, encode_signaling_bytes, SIGNALING_SIZE};
     let mut out = packet.to_vec();
     let Some(at) = out.len().checked_sub(SIGNALING_SIZE) else {

@@ -778,6 +778,17 @@ class TestDaemon:
                 }
             return {"result": links}
 
+        elif method == "get_destination_link_count":
+            # +ciris (leviculum#104): how many Link objects the destination
+            # holds. Destination.incoming_link_request appends one per link
+            # request it validates and never looks the link id up, so two
+            # copies of one request leave two here under one id.
+            dest_hash = params.get("dest_hash")
+            if dest_hash not in self.destinations:
+                return {"error": f"destination {dest_hash} not found"}
+            _identity, dest = self.destinations[dest_hash]
+            return {"result": len(dest.links)}
+
         elif method == "get_link_remote_identity":
             link_hash = params.get("link_hash")
             link = self.links.get(link_hash)
