@@ -2217,7 +2217,7 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
 /// Pixel spent 83.6 % of 44 s in that query, 79 to 100 ms a call while
 /// the pull ran). The list's work must stay under [`UI_BAR`], a few
 /// frames, so no tap is lost; the engine's under [`ENGINE_BAR`]; and
-/// neither may wait while the pump folds more than [`FOLDS_BAR`] events.
+/// neither may wait for the lock behind more than one event a wait.
 /// Measured as cost, not wall time, so a slow runner does not fail it
 /// ([`Block`], 1610). The history must arrive whole.
 #[tokio::test(flavor = "multi_thread")]
@@ -2262,8 +2262,8 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
         // The engine's thread with onResume's commands, every 50 ms, and
         // the UI thread with the list, once a frame, while the pull runs.
         // Each block is kept as what it cost, not how long it took: the
-        // probe thread's own CPU and the engine's events the pump folded
-        // meanwhile ([`Block`]).
+        // probe thread's own CPU, and the engine's events the pump folded
+        // while it waited for the session's lock ([`Block`]).
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let probing = std::sync::Arc::clone(&done);
         let probe = std::thread::spawn(move || {
@@ -2341,16 +2341,19 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
         let ui = Block::worst(&looks);
         eprintln!(
             "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms cpu={} ms \
-             folds={}; list probes={} longest={} ms cpu={} ms folds={} rows={rows}",
+             waited behind {} events in {} locks; list probes={} longest={} ms cpu={} ms \
+             waited behind {} events in {} locks rows={rows}",
             took.as_millis(),
             blocks.len(),
             engine.wall.as_millis(),
             engine.cpu.as_millis(),
             engine.folds,
+            engine.locks,
             looks.len(),
             ui.wall.as_millis(),
             ui.cpu.as_millis(),
             ui.folds,
+            ui.locks,
         );
         loquax_android::stop();
         assert!(whole, "the history not whole in {BIG_PULL_SECS} s");
@@ -2361,9 +2364,11 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
             UI_BAR.as_millis()
         );
         assert!(
-            ui.folds <= FOLDS_BAR,
-            "the list's query waited while the pump folded {} events (bar {FOLDS_BAR})",
-            ui.folds
+            ui.folds <= ui.locks,
+            "the list's query waited for the lock while the pump folded {} events, in {} \
+             waits (bar: one a wait)",
+            ui.folds,
+            ui.locks
         );
         assert!(
             engine.cpu < ENGINE_BAR,
@@ -2373,9 +2378,11 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
             ENGINE_BAR.as_millis()
         );
         assert!(
-            engine.folds <= FOLDS_BAR,
-            "onResume's commands waited while the pump folded {} events (bar {FOLDS_BAR})",
-            engine.folds
+            engine.folds <= engine.locks,
+            "onResume's commands waited for the lock while the pump folded {} events, in {} \
+             waits (bar: one a wait)",
+            engine.folds,
+            engine.locks
         );
     })
     .await
@@ -2401,30 +2408,26 @@ const UI_BAR: Duration = Duration::from_millis(100);
 /// a store commit of its own and the scene of the lists. 13 to 33 ms of
 /// CPU on the host, unconstrained and under 25 % and 15 % of a CPU alike.
 const ENGINE_BAR: Duration = Duration::from_millis(250);
-/// The engine's events the pump may fold while a block waits (1464, 1610):
-/// it ends its turn after the event in hand once a caller waits, so a
-/// probe of two commands waits behind 0 to 4 on the host, 6 at most under
-/// 15 % of a CPU, where the waiting thread can miss the 5 ms the pump lets
-/// go between turns and each turn folds one. A pump that ignores the
-/// waiting caller folds its whole 50 ms slice: 25 to 65 events a probe on
-/// the host, 2353 at the most; one that holds the lock for the whole
-/// backlog (1446) folds thousands.
-const FOLDS_BAR: u64 = 16;
-
 /// What one probe's call cost (1610). The forge runner is shared and slow:
 /// pipeline 617 saw onResume's commands take 438 ms there, 255 to 350 ms
 /// under a quarter of a CPU here and up to 1151 ms under 15 %, while the
-/// same calls cost the same 13 to 33 ms of CPU and waited behind the same
-/// 0 to 4 folded events as on an idle host. The rest is the host's queue,
-/// which no change to the app shortens, so the bars hold the cost: the
-/// calling thread's own CPU time, and how many events the pump folded
-/// while the call ran, which counts a wait on the session's lock in the
-/// pump's own unit, whatever a fold takes on the host. The wall time is
-/// kept for the log.
+/// same calls cost the same 13 to 33 ms of CPU as on an idle host. The rest
+/// is the host's run queue, which no change to the app shortens, so the
+/// bars hold the cost: the calling thread's own CPU time, and the waits
+/// for the session's lock counted in the pump's own unit, the events it
+/// folded while the call waited, whatever a fold takes on the host. The
+/// pump ends its turn after the event in hand once a caller waits, and
+/// starts none while one does, so each wait is behind one event at most.
+/// A pump that ignores the waiting caller folds its whole 50 ms slice,
+/// 25 to 65 events, and one that holds the lock for the whole backlog
+/// (1446) thousands. The wall time is kept for the log.
 #[derive(Clone, Copy, Debug, Default)]
 struct Block {
     wall: Duration,
     cpu: Duration,
+    /// Waits for the session's lock.
+    locks: u64,
+    /// The engine's events the pump folded while they waited.
     folds: u64,
 }
 
@@ -2432,22 +2435,32 @@ impl Block {
     /// Run `call` on this thread and say what it cost.
     fn of(call: impl FnOnce()) -> Self {
         let cpu = thread_cpu();
-        let folds = loquax_android::folded();
+        let (locks, folds) = loquax_android::lock_waits();
         let began = std::time::Instant::now();
         call();
+        let wall = began.elapsed();
+        let (locks_after, folds_after) = loquax_android::lock_waits();
         Self {
-            wall: began.elapsed(),
+            wall,
             cpu: thread_cpu().saturating_sub(cpu),
-            folds: loquax_android::folded().saturating_sub(folds),
+            locks: locks_after - locks,
+            folds: folds_after - folds,
         }
     }
 
-    /// The worst of `blocks`, each measure on its own.
+    /// The worst of `blocks`: the longest wall and CPU time, and the
+    /// block that waited behind the most events beyond one a wait.
     fn worst(blocks: &[Block]) -> Self {
-        blocks.iter().fold(Self::default(), |w, b| Self {
+        let over = |b: &Block| b.folds.saturating_sub(b.locks);
+        let waits = blocks
+            .iter()
+            .max_by_key(|b| (over(b), b.folds))
+            .copied()
+            .unwrap_or_default();
+        blocks.iter().fold(waits, |w, b| Self {
             wall: w.wall.max(b.wall),
             cpu: w.cpu.max(b.cpu),
-            folds: w.folds.max(b.folds),
+            ..w
         })
     }
 }

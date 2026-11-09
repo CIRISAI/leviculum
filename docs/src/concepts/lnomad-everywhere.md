@@ -667,7 +667,7 @@ terminal and window get no tab (the second question, answered no for now).
   lnomad-core-no-std` still build both for the firmware triples. The tab
   is `Browse` (`loquax/src/ui/browse.rs:38`): whether the host has the tab
   (`enabled`, set by the phone's session at
-  `loquax-android/src/session.rs:2018`), whether it is in front, and
+  `loquax-android/src/session.rs:2032`), whether it is in front, and
   lnomad's `Model`, marked `hosted`. `TabId::Browse`
   (`loquax/src/ui/scene.rs:82`) joins Chats and Map where enabled, and the
   scene carries lnomad's scene as `browse` (`loquax/src/ui/scene.rs:1009`;
@@ -754,19 +754,19 @@ two).** Slice 3's network seam: one node, lent, not a second one.
 - **The phone's turn.** `loquax-android/src/browse_fetch.rs` is the task
   the terminal's loop is on a desktop: one fetch in flight, a newer one or
   a cancel superseding it, lnomad's discovery drain beside it. The
-  session's pump (`browse`, `loquax-android/src/session.rs:2116`) hands it
+  session's pump (`browse`, `loquax-android/src/session.rs:2130`) hands it
   the owed effects and folds back what it says: `BrowseEvent::FailedText`,
   `Identifying`, `Downloaded` and `DownloadFailed` are new
   (`loquax/src/ui/browse.rs:104`). A download is kept under the app's
   files as a bubble's file is, `files/browse/` (`keep_download`,
-  `loquax-android/src/session.rs:2178`), and the clipboard text and the
+  `loquax-android/src/session.rs:2192`), and the clipboard text and the
   file go to Java once with the next screen; `BrowsePane` writes the
   clipboard and opens the file, or the share sheet takes it. Announces
   reach the list from the session's start, the tab shown or not.
 - **The phone's start page** is one sentence over the places list, no
   key named (`lnomad/src/app/event.rs:385`, English and German).
 - **Held back.** The tab shows only where the config's `browse_tab` is on
-  (`loquax-android/src/session.rs:2018`), off in the APK, until the fetch
+  (`loquax-android/src/session.rs:2032`), off in the APK, until the fetch
   has been seen on a device; Java hides the tab's button then.
 - **Measured.** From the tap on a node's row to the first screen that
   shows the page, the Reticulum README (23,490 bytes, a response

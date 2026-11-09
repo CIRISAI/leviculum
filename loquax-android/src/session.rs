@@ -74,6 +74,22 @@ pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_
 /// eight a turn ran 60 to 80 ms past its budget on the host, and a command
 /// that came in the middle waited for all of it.
 pub const SLICE: loquax::fanout::Slice = loquax::fanout::SLICE;
+
+thread_local! {
+    /// This thread's calls of [`Session::lock`] and the engine's events the
+    /// pump folded while they waited, summed (1610).
+    static LOCK_WAITS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// How often this thread took the session's lock, and how many of the
+/// engine's events the pump folded while it waited for it, since the
+/// thread began (1610): the pump ends its turn after the event in hand and
+/// starts none while a caller waits, so the second is at most the first,
+/// however slow the host. For the facade test.
+#[doc(hidden)]
+pub fn lock_waits() -> (u64, u64) {
+    LOCK_WAITS.with(std::cell::Cell::get)
+}
 /// How long the pump lets go of the lock between two slices of a backlog:
 /// long enough for a screen woken from its wait on the lock to take it,
 /// short against a [`SLICE`], so the history still comes at nine tenths of
@@ -1166,14 +1182,6 @@ impl Session {
         self.lock().attached.outbox.sever();
     }
 
-    /// The engine's events the pump folded under the lock so far: a
-    /// command's step of it is what it waited behind (1610). For the
-    /// facade test.
-    #[doc(hidden)]
-    pub fn folded(&self) -> u64 {
-        self.folded.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// How many contact keys the home node took. For the facade test.
     #[doc(hidden)]
     pub fn keys_told(&self) -> usize {
@@ -1187,12 +1195,18 @@ impl Session {
         // Counted while it waits, so the pump lets go after the event it
         // is folding (1464).
         self.waiting.fetch_add(1, Ordering::SeqCst);
+        let folded = self.folded.load(Ordering::SeqCst);
         // A panic under the lock is caught at the JNI edge; what it left
         // is still the best state there is.
         let inner = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let behind = self.folded.load(Ordering::SeqCst).saturating_sub(folded);
+        LOCK_WAITS.with(|waits| {
+            let (locks, folds) = waits.get();
+            waits.set((locks + 1, folds.saturating_add(behind)));
+        });
         self.waiting.fetch_sub(1, Ordering::SeqCst);
         inner.stale_scene();
         inner
@@ -2234,30 +2248,38 @@ impl Inner {
         // a waiting caller takes the lock. A caller waiting for the lock
         // ends the turn after the event in hand (1464): a screen's command
         // waits for one commit, not for a slice.
+        // A caller that waits already when the turn begins goes first
+        // (1610): it was woken when the last turn let go, and a starved
+        // thread can take longer than [`BACKLOG_PUMP`] to run. Folding the
+        // first event regardless, every turn it missed would be one more
+        // commit it waits behind; this way it waits behind one at most.
         self.stale_scene();
         let mut slicing = loquax::fanout::Slicing::new(SLICE);
-        loop {
-            let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
-            match slicing.next(&mut self.fanout, &mut self.attached.outbox, waited) {
-                Ok(Some(events)) => {
-                    self.folded.fetch_add(
-                        u64::try_from(events.len()).unwrap_or(u64::MAX),
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    self.fold(events);
-                }
-                Ok(None) => break,
-                Err(gone) => {
-                    self.gone = true;
-                    let _ = self.events.send(Event::Stopped {
-                        v: VERSION,
-                        detail: gone.to_string(),
-                    });
-                    return false;
+        let yielded = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
+        if !yielded {
+            loop {
+                let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                match slicing.next(&mut self.fanout, &mut self.attached.outbox, waited) {
+                    Ok(Some(events)) => {
+                        self.folded.fetch_add(
+                            u64::try_from(events.len()).unwrap_or(u64::MAX),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        self.fold(events);
+                    }
+                    Ok(None) => break,
+                    Err(gone) => {
+                        self.gone = true;
+                        let _ = self.events.send(Event::Stopped {
+                            v: VERSION,
+                            detail: gone.to_string(),
+                        });
+                        return false;
+                    }
                 }
             }
         }
-        self.backlog = slicing.backlog();
+        self.backlog = yielded || slicing.backlog();
         while let Ok(finished) = self.finished_rx.try_recv() {
             match finished {
                 Finished::Send(event) => {

@@ -230,12 +230,12 @@ pub fn simulate_engine_death() -> bool {
     }
 }
 
-/// The engine's events the running session's pump folded under its lock
-/// so far, 0 without one: a command waits behind the step it makes over
-/// the command (1610). For the facade test.
+/// This thread's waits for the session's lock: how many, and how many of
+/// the engine's events the pump folded while they waited (1610). For the
+/// facade test.
 #[doc(hidden)]
-pub fn folded() -> u64 {
-    current().map_or(0, |session| session.folded())
+pub fn lock_waits() -> (u64, u64) {
+    session::lock_waits()
 }
 
 /// Stop the session, if one runs.
