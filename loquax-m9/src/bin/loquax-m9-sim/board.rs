@@ -1135,8 +1135,8 @@ impl Board {
         }
     }
 
-    /// `Client::flush`: the summary log's records and state, a sector a
-    /// call (1591).
+    /// `Client::flush`: the summary log's records and state, one bounded
+    /// write a call (1591, 1597).
     fn flush(&mut self) {
         self.flush_with(None);
     }
@@ -1152,20 +1152,22 @@ impl Board {
             Some(now_ms) => {
                 shelf.quiet_flush(&mut self.flash.messages, || outgoing.pending(), now_ms)
             }
-            None => shelf.flush_within(
-                &mut self.flash.messages,
-                || outgoing.pending(),
-                Some(loquax::home::board::rows::WRITE_BUDGET),
-            ),
+            None => shelf.flush(&mut self.flash.messages, || outgoing.pending()),
         };
         match written {
-            Ok(done) if done.writes > 0 => self.log.line(
-                "[STORE] ",
-                &format!(
-                    "summary records={} writes={} erased={}",
-                    done.entries, done.writes, done.erased
-                ),
-            ),
+            Ok(wrote) if wrote.appended().writes > 0 => {
+                let done = wrote.appended();
+                self.log.line(
+                    "[STORE] ",
+                    &format!(
+                        "summary records={} writes={} erased={} left={}",
+                        done.entries,
+                        done.writes,
+                        done.erased,
+                        u8::from(wrote.partial())
+                    ),
+                )
+            }
             Ok(_) => {}
             Err(error) => self
                 .log

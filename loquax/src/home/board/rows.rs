@@ -274,6 +274,16 @@ pub struct Index {
     owed: alloc::collections::BTreeSet<[u8; 16]>,
     /// Peers whose name is owed the log.
     names_owed: alloc::collections::BTreeSet<[u8; 16]>,
+    /// What a snapshot begun still has to write (1597): the
+    /// conversations and names live when it began whose record has not
+    /// gone to the log since. Apart from the owed sets, so an owe of
+    /// every row while it runs (the bench's, every few seconds in
+    /// window 21's hang.walk) owes them again without putting the
+    /// snapshot back to its start: before, the snapshot ended only once
+    /// nothing at all was owed, never did, and the log came round to it
+    /// late and wrote 303 rows in one call, 28 erases.
+    snap_rows: alloc::collections::BTreeSet<[u8; 16]>,
+    snap_names: alloc::collections::BTreeSet<[u8; 16]>,
     /// Message ids this boot has seen, by their first eight bytes: the
     /// conversation each is in and the ring sector it starts in (1556).
     /// A mark naming one files its sector under that conversation
@@ -433,6 +443,8 @@ impl Index {
         self.kept.remove(&peer);
         self.loaded.remove(&peer);
         self.owed.insert(peer);
+        // A snapshot has no row of it to write; its GONE goes as owed.
+        self.snap_rows.remove(&peer);
     }
 
     /// Every conversation counts as loaded whole: the boot folded the
@@ -467,40 +479,71 @@ impl Index {
         !self.owed.is_empty() || !self.names_owed.is_empty()
     }
 
-    /// The records owed the log, at most about `budget` bytes of them
-    /// (at least one), the names first; those taken leave the owed sets
-    /// (1591: a write of every row at once was 32 sector erases in one
-    /// turn of the I/O core, and the UI core parked for 2.8 s of 5).
-    /// `None` takes all of them.
-    fn owed_records_within(&mut self, budget: Option<usize>) -> Vec<Entry> {
-        let Some(budget) = budget else {
-            return self.owed_records();
-        };
-        let mut out = Vec::new();
-        let mut bytes = 0usize;
-        while bytes < budget {
-            if let Some(peer) = self.names_owed.pop_first() {
-                if let Some(name) = self.names.get(&peer) {
-                    let record = name_record(&peer, name);
-                    bytes += record.packed.len();
-                    out.push(record);
-                }
-                continue;
-            }
-            let Some(peer) = self.owed.pop_first() else {
-                break;
-            };
-            let record = match self.kept.get(&peer) {
-                Some(kept) => row_record(&peer, kept),
-                None => record(GONE, 0, peer.to_vec()),
-            };
-            bytes += record.packed.len();
-            out.push(record);
-        }
-        out
+    /// Whether a snapshot begun still has records to write.
+    pub fn snapshot_owes(&self) -> bool {
+        !self.snap_rows.is_empty() || !self.snap_names.is_empty()
     }
 
-    /// The records owed the log, the owed set emptied.
+    /// Every live record owed to a snapshot (1597): its names and rows,
+    /// written by the bounded writes after, before what else is owed.
+    fn begin_snapshot(&mut self) {
+        self.snap_names = self.names.keys().copied().collect();
+        self.snap_rows = self.kept.keys().copied().collect();
+    }
+
+    /// The next record to write and its peer: a snapshot's names, its
+    /// rows, then the names owed and the rows owed; with `snapshot_only`
+    /// the snapshot's alone. Not taken out of any set.
+    fn next_record(&self, snapshot_only: bool) -> Option<(Pick, [u8; 16])> {
+        if let Some(&peer) = self.snap_names.first() {
+            return Some((Pick::Name, peer));
+        }
+        if let Some(&peer) = self.snap_rows.first() {
+            return Some((Pick::Row, peer));
+        }
+        if snapshot_only {
+            return None;
+        }
+        if let Some(&peer) = self.names_owed.first() {
+            return Some((Pick::Name, peer));
+        }
+        self.owed.first().map(|&peer| (Pick::Row, peer))
+    }
+
+    /// The record `pick` of `peer` as the log would write it now.
+    fn peek_record(&self, pick: Pick, peer: &[u8; 16]) -> Option<Entry> {
+        match pick {
+            Pick::Name => self.names.get(peer).map(|name| name_record(peer, name)),
+            Pick::Row => Some(match self.kept.get(peer) {
+                Some(kept) => row_record(peer, kept),
+                None => record(GONE, 0, peer.to_vec()),
+            }),
+        }
+    }
+
+    /// The record `pick` of `peer` as the log writes it now, and every
+    /// set that owed it emptied of it.
+    fn take_record(&mut self, pick: Pick, peer: [u8; 16]) -> Option<Entry> {
+        match pick {
+            Pick::Name => {
+                self.snap_names.remove(&peer);
+                self.names_owed.remove(&peer);
+                self.names.get(&peer).map(|name| name_record(&peer, name))
+            }
+            Pick::Row => {
+                self.snap_rows.remove(&peer);
+                self.owed.remove(&peer);
+                Some(match self.kept.get(&peer) {
+                    Some(kept) => row_record(&peer, kept),
+                    None => record(GONE, 0, peer.to_vec()),
+                })
+            }
+        }
+    }
+
+    /// The records owed the log, the owed set emptied: the tests'
+    /// control of a log written without snapshots.
+    #[cfg(test)]
     fn owed_records(&mut self) -> Vec<Entry> {
         let mut out = Vec::new();
         for peer in core::mem::take(&mut self.names_owed) {
@@ -514,17 +557,6 @@ impl Index {
                 None => record(GONE, 0, peer.to_vec()),
             });
         }
-        out
-    }
-
-    /// Every live record: a snapshot's.
-    fn all_records(&self) -> Vec<Entry> {
-        let mut out: Vec<Entry> = self
-            .names
-            .iter()
-            .map(|(peer, name)| name_record(peer, name))
-            .collect();
-        out.extend(self.kept.iter().map(|(peer, kept)| row_record(peer, kept)));
         out
     }
 
@@ -809,17 +841,61 @@ pub struct RowLog {
     snapping: Option<u32>,
 }
 
-/// About how many bytes of records one bounded write of the summary log
-/// takes ([`RowLog::write_within`], 1591): a sector, two erases at most
-/// where it crosses into the next, about 90 ms of the UI core parked.
+/// The next record [`RowLog::write`] takes.
+enum Next {
+    Record(Pick, [u8; 16]),
+    Snap,
+    State(State),
+}
+
+/// Which record of a peer [`Index::next_record`] picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    Name,
+    Row,
+}
+
+/// The most bytes of records, frames counted, one write of the summary
+/// log takes ([`RowLog::write`], 1591, 1597): a sector, about 90 ms of
+/// the UI core parked with the erases it brings. A single record larger
+/// goes alone.
 pub const WRITE_BUDGET: usize = super::store::SECTOR;
 
-/// How many sectors short of the last whole snapshot's first a bounded
-/// snapshot may run before the rest goes at once (1595,
-/// [`RowLog::write_within`]): a bounded write crosses into two sectors at
-/// most and a quiet moment erases one ahead, so the old snapshot's
-/// sectors stand until the new one's SNAP record is written.
+/// The most sectors one write of the summary log opens, each an erase
+/// unless a quiet moment made it ahead (1597, [`RowLog::write`]). Window
+/// 21 expected three; a write within [`WRITE_BUDGET`] that starts near
+/// a sector's end opens two.
+pub const ERASE_BUDGET: u32 = 3;
+
+/// How many sectors short of the last whole snapshot's first the log's
+/// ring may come before a snapshot begun takes every write to itself
+/// (1597, [`RowLog::write`]): the rows owed besides wait until its SNAP
+/// record is written, so the old snapshot's sectors stand until then.
 const SNAP_MARGIN: u32 = 8;
+
+/// What one write of the summary log did (1597): what it wrote, and
+/// whether something is left for the next call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrote {
+    /// Nothing owed is left.
+    Whole(Appended),
+    /// The budget ran out first: the rest goes with the next write.
+    Partial(Appended),
+}
+
+impl Wrote {
+    /// What the write did.
+    pub fn appended(&self) -> Appended {
+        match *self {
+            Wrote::Whole(done) | Wrote::Partial(done) => done,
+        }
+    }
+
+    /// Whether something is left for the next write.
+    pub fn partial(&self) -> bool {
+        matches!(self, Wrote::Partial(_))
+    }
+}
 
 /// What the summary log held at boot.
 #[derive(Debug, Default)]
@@ -874,88 +950,120 @@ impl RowLog {
         ))
     }
 
-    /// Write what `index` owes, and `state` when given, in one write per
-    /// sector they touch.
+    /// Write what `index` owes, at most [`WRITE_BUDGET`] bytes of
+    /// records in at most [`ERASE_BUDGET`] newly opened sectors, whatever
+    /// is owed (1597): the rest stays owed and the result says
+    /// [`Wrote::Partial`]. There is no write of everything at once; a
+    /// caller that owes more calls again in a later turn. `state`, when
+    /// given, is the newest and goes with the last record owed: a state
+    /// says the rows are the ring's up to its end.
+    ///
+    /// A snapshot is begun here when one is due (1594) and written a
+    /// budget at a time ahead of what else is owed; its SNAP record goes
+    /// with its last record, and the newest state with it, so the log
+    /// may then take back every sector before it. Once the ring is
+    /// [`SNAP_MARGIN`] sectors short of the last whole snapshot's first,
+    /// the snapshot's records alone are written until it ends. Before,
+    /// a write that found the snapshot late wrote everything owed in
+    /// one call (window 21's hang.walk: 246 to 473 records, 22 to 31
+    /// erases, takes of 1 to 1.6 s).
     pub fn write<S: Sectors>(
         &mut self,
         dev: &mut S,
         index: &mut Index,
         state: Option<&State>,
-    ) -> Result<Appended, S::Error> {
-        self.write_within(dev, index, state, None)
-    }
-
-    /// [`RowLog::write`] of at most about `budget` bytes of the owed
-    /// records (1591, [`WRITE_BUDGET`]); the rest stay owed for the next
-    /// write. `state` is written only with the last of them: a state
-    /// says the rows are the ring's up to its end. A snapshot begun
-    /// ([`RowLog::begin_snapshot`]) ends with the write that takes its
-    /// last record. `None` writes all of them.
-    pub fn write_within<S: Sectors>(
-        &mut self,
-        dev: &mut S,
-        index: &mut Index,
-        state: Option<&State>,
-        budget: Option<usize>,
-    ) -> Result<Appended, S::Error> {
+    ) -> Result<Wrote, S::Error> {
         if let Some(state) = state {
             self.state = Some(state.clone());
         }
-        // A snapshot due and none begun in a quiet moment (a pull keeps
-        // the board from every quiet moment): a bounded write begins one
-        // here (1594), and it and the bounded writes after it write the
-        // snapshot a budget at a time, as a quiet moment's would be.
-        // Window 19's board wrote it whole at three quarters instead, 645
-        // records in one call, 1.5 to 1.77 s of the I/O core and the UI
-        // core parked for most of it.
-        if budget.is_some() && self.snapping.is_none() && self.snapshot_due() {
+        if self.snapping.is_none() && self.snapshot_due() {
             self.begin_snapshot(index);
         }
-        // Three quarters of the log since the last snapshot and none
-        // made: this write is one, before the ring comes round to it,
-        // whole. A bounded snapshot begun goes on a budget at a time
-        // until the ring is [`SNAP_MARGIN`] sectors short of the last
-        // whole snapshot's first sector (1595): the board's index is
-        // about 31 of its log's 128 sectors, so a snapshot begun at half
-        // the log and written beside a pull's own records crossed three
-        // quarters before its end, and the write that found it late wrote
-        // its rest at once (window 20: 243 to 473 records, up to 30
-        // erases, 1 to 1.7 s in one call). Only a write without a budget,
-        // or a snapshot that took the log's ring up to the margin, comes
-        // here.
         let sectors = self.store.sectors();
-        let late_at = match (budget, self.snapping) {
-            (Some(_), Some(_)) => (sectors * 3 / 4).max(sectors.saturating_sub(SNAP_MARGIN)),
-            _ => sectors * 3 / 4,
-        };
-        let late = self.since_snapshot() >= late_at;
-        if late && self.snapping.is_none() {
-            return self.snapshot(dev, index);
-        }
-        let budget = if late { None } else { budget };
-        let mut records = index.owed_records_within(budget);
-        let done = !index.owes();
-        let snapped = match done {
-            true => self.snapping.take(),
-            false => None,
-        };
-        if let Some(at) = snapped {
-            records.push(record(SNAP, u64::from(at), Vec::new()));
-        }
-        if done {
-            if let Some(state) = state {
-                records.push(record(STATE, 0, state.encode()));
+        // A log with no whole snapshot yet has none to keep standing.
+        let late = self.snapping.is_some()
+            && self.snap.is_some()
+            && self.since_snapshot() >= sectors.saturating_sub(SNAP_MARGIN);
+        let mut records: Vec<Entry> = Vec::new();
+        let mut bytes = 0usize;
+        let mut snapped = None;
+        let mut stated = false;
+        loop {
+            // The next record: a snapshot's, an owed one, the SNAP record
+            // once the snapshot has written its last, the state once
+            // nothing is owed.
+            let next = if self.snapping.is_some() && snapped.is_none() && !index.snapshot_owes() {
+                // The snapshot wrote its last record: its SNAP record now,
+                // whatever else is owed, so a re-owe of every row while
+                // it ran never holds it open.
+                Some(Next::Snap)
+            } else if let Some((pick, peer)) = index.next_record(late) {
+                Some(Next::Record(pick, peer))
+            } else if !stated && !late && !index.owes() {
+                match (state, snapped) {
+                    (Some(state), _) => Some(Next::State(state.clone())),
+                    // The snapshot carries the newest state again: the
+                    // sectors that held it may go now.
+                    (None, Some(_)) => self.state.clone().map(Next::State),
+                    (None, None) => None,
+                }
+            } else {
+                None
+            };
+            let Some(next) = next else {
+                break;
+            };
+            let candidate = match &next {
+                Next::Record(pick, peer) => match index.peek_record(*pick, peer) {
+                    Some(record) => record,
+                    None => {
+                        // A name owed that is not heard any more.
+                        let _ = index.take_record(*pick, *peer);
+                        continue;
+                    }
+                },
+                Next::Snap => record(SNAP, u64::from(self.snapping.unwrap_or(1)), Vec::new()),
+                Next::State(state) => record(STATE, 0, state.encode()),
+            };
+            let cost = super::store::framed_len(&candidate);
+            // The first record goes whatever it costs; each after it only
+            // within both budgets.
+            records.push(candidate);
+            if records.len() > 1
+                && (bytes + cost > WRITE_BUDGET || self.store.opens(&records) > ERASE_BUDGET)
+            {
+                let _ = records.pop();
+                break;
+            }
+            bytes += cost;
+            match next {
+                Next::Record(pick, peer) => {
+                    let _ = index.take_record(pick, peer);
+                }
+                Next::Snap => snapped = self.snapping,
+                Next::State(_) => stated = true,
             }
         }
+        let left = index.owes()
+            || index.snapshot_owes()
+            || (self.snapping.is_some() && snapped.is_none())
+            || (state.is_some() && !stated);
         if records.is_empty() {
-            return Ok(Appended::default());
+            return Ok(match left {
+                true => Wrote::Partial(Appended::default()),
+                false => Wrote::Whole(Appended::default()),
+            });
         }
         let cursor = self.store.cursor();
         let appended = self.store.append(dev, &records, cursor)?;
         if let Some(at) = snapped {
             self.snap = Some(at);
+            self.snapping = None;
         }
-        Ok(appended)
+        Ok(match left {
+            true => Wrote::Partial(appended),
+            false => Wrote::Whole(appended),
+        })
     }
 
     /// Begin a snapshot written a budget at a time (1591): every live
@@ -966,7 +1074,7 @@ impl RowLog {
             return;
         }
         self.snapping = Some(self.store.end().0.max(1));
-        index.owe_all();
+        index.begin_snapshot();
     }
 
     /// A snapshot begun is still being written.
@@ -986,31 +1094,6 @@ impl RowLog {
     /// or none made yet.
     pub fn snapshot_due(&self) -> bool {
         self.since_snapshot() >= self.store.sectors() / 2
-    }
-
-    /// Write every live record of `index` and the newest state again
-    /// (1521): the log's ring may then take back every sector before
-    /// it.
-    pub fn snapshot<S: Sectors>(
-        &mut self,
-        dev: &mut S,
-        index: &mut Index,
-    ) -> Result<Appended, S::Error> {
-        index.owed.clear();
-        index.names_owed.clear();
-        self.snapping = None;
-        // The snapshot's own sector: the one the log ends in, or the next
-        // when it ends full; it is said by the record's sequence.
-        let at = self.store.end().0.max(1);
-        let mut records = Vec::from([record(SNAP, u64::from(at), Vec::new())]);
-        records.extend(index.all_records());
-        if let Some(state) = self.state.as_ref() {
-            records.push(record(STATE, 0, state.encode()));
-        }
-        let cursor = self.store.cursor();
-        let done = self.store.append(dev, &records, cursor)?;
-        self.snap = Some(at);
-        Ok(done)
     }
 
     /// Take nothing more into the log's open sector ([`Store::close`]).

@@ -57,11 +57,14 @@ fn owe_all_writes_every_row_again_and_a_closed_log_erases() {
         .expect("write");
     assert!(!index.owes());
     let done = log.write(&mut flash, &mut index, None).expect("nothing");
-    assert_eq!(done.writes, 0);
+    assert_eq!(done, Wrote::Whole(Appended::default()));
     index.owe_all();
     assert!(index.owes());
     log.close();
-    let done = log.write(&mut flash, &mut index, None).expect("again");
+    let done = log
+        .write(&mut flash, &mut index, None)
+        .expect("again")
+        .appended();
     assert_eq!((done.entries, done.writes, done.erased), (3, 1, 1));
     assert!(!index.owes());
     let (_, replayed) = RowLog::open(&mut flash, TAG).expect("reopen");
@@ -116,7 +119,9 @@ fn snapshots_keep_every_record_across_the_ring() {
         log.write(&mut flash, &mut index, Some(&state(1)))
             .expect("first");
         if snapshots {
-            log.snapshot(&mut flash, &mut index).expect("snapshot");
+            while log.snapping() {
+                log.write(&mut flash, &mut index, None).expect("snapshot");
+            }
         }
         // One busy conversation, written far more than the log holds.
         let line = "x".repeat(400);
@@ -125,11 +130,10 @@ fn snapshots_keep_every_record_across_the_ring() {
             index.kept.get_mut(&[41; 16]).expect("busy").entries = turn as u32;
             index.owed.insert([41; 16]);
             if snapshots {
+                // Each write begins a snapshot when one is due and writes
+                // it ahead of the busy row (1597).
                 log.write(&mut flash, &mut index, Some(&state(turn)))
                     .expect("write");
-                if log.snapshot_due() {
-                    log.snapshot(&mut flash, &mut index).expect("snapshot");
-                }
             } else {
                 let mut records = index.owed_records();
                 records.push(record(STATE, 0, state(turn).encode()));
@@ -171,7 +175,7 @@ fn bounded_writes_write_a_due_snapshot_a_budget_at_a_time() {
         index.row(row(peer, &quiet_line));
     }
     while index.owes() {
-        log.write_within(&mut flash, &mut index, Some(&state(0)), Some(WRITE_BUDGET))
+        log.write(&mut flash, &mut index, Some(&state(0)))
             .expect("first");
     }
     let line = "x".repeat(400);
@@ -181,13 +185,9 @@ fn bounded_writes_write_a_due_snapshot_a_budget_at_a_time() {
         index.kept.get_mut(&[200; 16]).expect("busy").entries = turn as u32;
         index.owed.insert([200; 16]);
         let done = log
-            .write_within(
-                &mut flash,
-                &mut index,
-                Some(&state(turn)),
-                Some(WRITE_BUDGET),
-            )
-            .expect("write");
+            .write(&mut flash, &mut index, Some(&state(turn)))
+            .expect("write")
+            .appended();
         most = most.max(done.erased);
     }
     assert!(most <= 3, "a bounded write erased {most} sectors");
@@ -227,13 +227,15 @@ fn a_snapshot_of_the_boards_index_is_written_a_budget_at_a_time() {
         r.peer = peer(n);
         index.row(r);
     }
-    let first = log
-        .write(&mut flash, &mut index, Some(&state(0)))
-        .expect("first");
+    let first = log.used();
+    while index.owes() || log.snapping() {
+        log.write(&mut flash, &mut index, Some(&state(0)))
+            .expect("first");
+    }
+    let took = log.used() - first;
     assert!(
-        (25..=36).contains(&first.writes),
-        "the whole index takes about window 20's 31 sectors, took {}",
-        first.writes
+        (25..=40).contains(&took),
+        "the whole index takes about window 20's 31 sectors, took {took}"
     );
     let mut most_erased = 0;
     let mut most_entries = 0;
@@ -249,13 +251,9 @@ fn a_snapshot_of_the_boards_index_is_written_a_budget_at_a_time() {
         }
         let snapping = log.snapping();
         let done = log
-            .write_within(
-                &mut flash,
-                &mut index,
-                Some(&state(turn)),
-                Some(WRITE_BUDGET),
-            )
-            .expect("write");
+            .write(&mut flash, &mut index, Some(&state(turn)))
+            .expect("write")
+            .appended();
         if snapping && !log.snapping() {
             snapshots += 1;
         }

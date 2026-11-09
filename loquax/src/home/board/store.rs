@@ -844,6 +844,40 @@ impl Store {
         Ok(done)
     }
 
+    /// How many sectors [`Store::append`] of `entries` would open, each
+    /// one an erase unless a quiet moment erased it ahead (1597): the
+    /// placement [`Store::put_spans`] makes, the page's mark with it,
+    /// nothing written. A writer bounded in erases asks before it
+    /// writes.
+    pub fn opens(&self, entries: &[Entry]) -> u32 {
+        let lens = entries
+            .iter()
+            .map(|entry| (ENTRY_HEAD + entry.packed.len(), false))
+            .chain(core::iter::once((8, true)));
+        let mut at = self.tail.map(|(_, at)| at);
+        let mut opened = 0;
+        for (len, whole_only) in lens {
+            let mut rest = len;
+            let mut first = true;
+            while first || rest > 0 {
+                let room = match at {
+                    Some(at) => (SECTOR - at).saturating_sub(FRAME),
+                    None => 0,
+                };
+                if room < LEAST_PART.min(rest.max(1)) || (whole_only && room < rest) {
+                    opened += 1;
+                    at = Some(HEADER);
+                    continue;
+                }
+                let take = rest.min(room);
+                at = at.map(|at| at + FRAME + pad4(take));
+                rest -= take;
+                first = false;
+            }
+        }
+        opened
+    }
+
     /// Take nothing more into the open sector (1540, the M9's bench): the
     /// next write opens the next sector, and erases it, as a full sector
     /// would. What the closed sector holds stays and reads back; its
@@ -1089,6 +1123,12 @@ fn decode(bytes: &[u8]) -> Option<Entry> {
         at,
         packed: bytes[ENTRY_HEAD..].to_vec(),
     })
+}
+
+/// The bytes `entry` takes in a store, its frame's header counted, when
+/// it fits one frame (1597, [`super::rows::WRITE_BUDGET`]).
+pub fn framed_len(entry: &Entry) -> usize {
+    FRAME + pad4(ENTRY_HEAD + entry.packed.len())
 }
 
 fn pad4(len: usize) -> usize {

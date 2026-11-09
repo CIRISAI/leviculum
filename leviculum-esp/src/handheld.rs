@@ -987,14 +987,15 @@ impl Handheld {
 
 impl Client {
     /// Write what the summary log is owed (1521): the rows the model
-    /// said, and the ring's state once every page kept has its rows. A
-    /// sector a call (1591): what is left goes in the quiet turns
-    /// ([`Client::quiet_flush`]), the UI core unparked between.
+    /// said, and the ring's state once every page kept has its rows. One
+    /// bounded write a call (1591, 1597, `Shelf::flush`): what is left
+    /// goes in the quiet turns ([`Client::quiet_flush`]), the UI core
+    /// unparked between.
     fn flush(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>) {
         self.flush_with(stores, log, None);
     }
 
-    /// [`Client::flush`] in a quiet turn: a backlog's next sector not
+    /// [`Client::flush`] in a quiet turn: a backlog's next write not
     /// before `m9home::BACKLOG_GAP_MS` after the last.
     fn quiet_flush(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>) {
         self.flush_with(stores, log, Some(crate::uptime_ms()));
@@ -1007,20 +1008,20 @@ impl Client {
         let outgoing = &self.outgoing;
         let written = match quiet {
             Some(now_ms) => store.quiet_flush(&mut dev, || outgoing.pending(), now_ms),
-            None => store.flush_within(
-                &mut dev,
-                || outgoing.pending(),
-                Some(loquax::home::board::rows::WRITE_BUDGET),
-            ),
+            None => store.flush(&mut dev, || outgoing.pending()),
         };
         match written {
-            Ok(done) => {
+            Ok(wrote) => {
+                let done = wrote.appended();
                 if done.writes > 0 {
                     log.line(
                         "[STORE] ",
                         format_args!(
-                            "summary records={} writes={} erased={}",
-                            done.entries, done.writes, done.erased
+                            "summary records={} writes={} erased={} left={}",
+                            done.entries,
+                            done.writes,
+                            done.erased,
+                            u8::from(wrote.partial())
                         ),
                     );
                 }

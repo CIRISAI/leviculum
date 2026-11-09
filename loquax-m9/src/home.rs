@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use loquax::home::ask::{GroupVerb, HomeError, Outcome, Verb};
 use loquax::home::board;
-use loquax::home::board::rows::{self, Index, RowLog, State, Window, WRITE_BUDGET};
+use loquax::home::board::rows::{self, Index, RowLog, State, Window, Wrote};
 use loquax::home::board::store::{self, Appended, PendingAsk, Restored, Sectors, Store};
 use loquax::home::wire::{Entry, Mark, Submission};
 use loquax::ui::history::StoreRead;
@@ -472,8 +472,8 @@ impl Shelf {
         self.backlog_at_ms
     }
 
-    /// A quiet moment's write of the summary log (1591): one sector of
-    /// what it owes ([`WRITE_BUDGET`]), and while a backlog is left
+    /// A quiet moment's write of the summary log (1591): one bounded
+    /// write ([`Shelf::flush`]), and while a backlog is left
     /// ([`Shelf::owes`]), the next not before [`BACKLOG_GAP_MS`] later at
     /// `now_ms`. Nothing before then.
     pub fn quiet_flush<S: Sectors>(
@@ -481,11 +481,11 @@ impl Shelf {
         dev: &mut S,
         asks: impl FnOnce() -> Vec<PendingAsk>,
         now_ms: u64,
-    ) -> Result<Appended, S::Error> {
+    ) -> Result<Wrote, S::Error> {
         if now_ms < self.backlog_at_ms {
-            return Ok(Appended::default());
+            return Ok(Wrote::Partial(Appended::default()));
         }
-        let done = self.flush_within(dev, asks, Some(WRITE_BUDGET))?;
+        let done = self.flush(dev, asks)?;
         if self.owes() {
             self.backlog_at_ms = now_ms.saturating_add(BACKLOG_GAP_MS);
         }
@@ -544,36 +544,26 @@ impl Shelf {
     }
 
     /// Write the records owed and, once the model said the rows of every
-    /// page kept, the state of the ring with `asks`: one flash write per
-    /// sector of the summary log they touch. Nothing on a partition
+    /// page kept, the state of the ring with `asks`: one bounded write of
+    /// the summary log ([`RowLog::write`], 1597), at most
+    /// `rows::WRITE_BUDGET` bytes in at most `rows::ERASE_BUDGET` sectors
+    /// opened; what is left stays owed for the next call
+    /// ([`Wrote::Partial`]), which the board's loop makes every quiet turn
+    /// and after every page's rows. Every caller goes through here and
+    /// none can ask for more: window 21's hang.walk found a path that
+    /// still wrote everything owed at once. Nothing on a partition
     /// without a summary log.
     pub fn flush<S: Sectors>(
         &mut self,
         dev: &mut S,
         asks: impl FnOnce() -> Vec<PendingAsk>,
-    ) -> Result<Appended, S::Error> {
-        self.flush_within(dev, asks, None)
-    }
-
-    /// [`Shelf::flush`] of at most about `budget` bytes of records
-    /// (1591, `rows::WRITE_BUDGET`): what is left stays owed for the next
-    /// call, and the state goes with the last of it. The board's loop
-    /// calls it every quiet turn and after every page's rows, so a
-    /// write of every row (an eviction, the bench's owe, a snapshot)
-    /// goes a few sectors a turn instead of 32 erases in one, the UI
-    /// core parked for most of it. `None` writes all of it.
-    pub fn flush_within<S: Sectors>(
-        &mut self,
-        dev: &mut S,
-        asks: impl FnOnce() -> Vec<PendingAsk>,
-        budget: Option<usize>,
-    ) -> Result<Appended, S::Error> {
+    ) -> Result<Wrote, S::Error> {
         let Some(log) = self.log.as_mut() else {
-            return Ok(Appended::default());
+            return Ok(Wrote::Whole(Appended::default()));
         };
         let state_due = self.dirty && self.pages_owed == 0;
         if !state_due && !self.index.owes() && !log.snapping() {
-            return Ok(Appended::default());
+            return Ok(Wrote::Whole(Appended::default()));
         }
         self.index.prune(&self.ring);
         let state = state_due.then(|| State {
@@ -585,14 +575,13 @@ impl Shelf {
             placed: true,
         });
         let (first, count) = (self.ring_count, dev.count() - self.ring_count);
-        let done = log.write_within(
+        let done = log.write(
             &mut Window::new(dev, first, count),
             &mut self.index,
             state.as_ref(),
-            budget,
         )?;
         // The state went with the last owed record, or waits for it.
-        if state.is_some() && !self.index.owes() {
+        if state.is_some() && !done.partial() {
             self.dirty = false;
         }
         Ok(done)
@@ -600,7 +589,7 @@ impl Shelf {
 
     /// The idle moment's flash work: erase ahead in the ring, then in
     /// the summary log, then a snapshot begun when one is due (written
-    /// by the bounded flushes after, [`Shelf::flush_within`]). At most
+    /// by the bounded flushes after, [`Shelf::flush`]). At most
     /// one erase per call; whether one was made.
     pub fn quiet<S: Sectors>(&mut self, dev: &mut S) -> Result<bool, S::Error> {
         if self

@@ -10,7 +10,8 @@
 use leviculum_core::Identity;
 use leviculum_lxmf::{DeliveryMethod, Message};
 use loquax::home::board;
-use loquax::home::board::store::{tag, MemFlash, Store};
+use loquax::home::board::rows::ERASE_BUDGET;
+use loquax::home::board::store::{tag, MemFlash, Sectors, Store};
 use loquax::home::wire::Entry;
 use loquax::home::{lxmf_address, KIND_RECEIVED, KIND_SENT};
 use loquax::ui::counters::Counters;
@@ -108,12 +109,48 @@ impl Archive {
     }
 }
 
+/// The quiet turns after a write of the summary log (1597): every
+/// bounded write the shelf owes, made, as the board's loop makes them
+/// one a quiet turn. A boot writes one; the next boot resumes only once
+/// the rest went.
+fn settle(
+    shelf: &mut home::Shelf,
+    flash: &mut MemFlash,
+    asks: Vec<loquax::home::board::store::PendingAsk>,
+) {
+    let mut calls = 0;
+    loop {
+        let done = shelf.flush(flash, || asks.clone()).expect("flush");
+        assert!(
+            done.appended().erased <= ERASE_BUDGET,
+            "a write erased {}",
+            done.appended().erased
+        );
+        if !done.partial() && !shelf.owes() {
+            break;
+        }
+        calls += 1;
+        assert!(calls < 10_000, "the summary log never settled");
+    }
+}
+
+/// [`home::restore`], and the quiet turns after it ([`settle`]).
+fn restore_settled(
+    flash: &mut MemFlash,
+    address: [u8; 16],
+) -> Result<home::Boot, <MemFlash as Sectors>::Error> {
+    let mut boot = home::restore(flash, address)?;
+    let asks = boot.asks.clone();
+    settle(&mut boot.shelf, flash, asks);
+    Ok(boot)
+}
+
 /// The archive kept in a flash store as the pull keeps it, page by page.
 fn kept(archive: &Archive) -> MemFlash {
     let mut flash = MemFlash::new(2048);
     let home::Boot {
         shelf: mut store, ..
-    } = home::restore(&mut flash, archive.address).expect("boot");
+    } = restore_settled(&mut flash, archive.address).expect("boot");
     for page in archive.entries().chunks(72) {
         home::keep(&mut store, &mut flash, page, &archive.address).expect("keep");
     }
@@ -167,7 +204,7 @@ fn a_restore_sorts_and_builds_once() {
 
     let home::Boot {
         model, restored, ..
-    } = home::restore(&mut flash, archive.address).expect("restore");
+    } = restore_settled(&mut flash, archive.address).expect("restore");
     assert_eq!(restored.entries, MESSAGES);
     assert_eq!(model.conversations.len(), CONVERSATIONS);
     // The whole restore's count, every event in it: a model's count of
@@ -241,7 +278,8 @@ fn a_new_message_moves_one_conversation() {
     }
     let archive = Archive::new();
     let mut flash = kept(&archive);
-    let home::Boot { mut model, .. } = home::restore(&mut flash, archive.address).expect("restore");
+    let home::Boot { mut model, .. } =
+        restore_settled(&mut flash, archive.address).expect("restore");
     let friend = &archive.friends[CONVERSATIONS - 1];
     let entry = Entry {
         seq: MESSAGES + 1,
@@ -300,7 +338,7 @@ fn a_pulled_page_sorts_and_builds_once() {
 /// folds the ring and writes the summary log from it (1521).
 fn summarised(archive: &Archive) -> MemFlash {
     let mut flash = kept(archive);
-    let boot = home::restore(&mut flash, archive.address).expect("first boot");
+    let boot = restore_settled(&mut flash, archive.address).expect("first boot");
     assert!(
         matches!(boot.how, home::How::Rebuilt { .. }),
         "a store from before the summaries is read whole once: {:?}",
@@ -329,7 +367,7 @@ fn a_boot_from_summaries_decodes_no_entry() {
     assert!(matches!(whole.how, home::How::Rebuilt { why: "no-state" }));
 
     let started = std::time::Instant::now();
-    let boot = home::restore(&mut flash, archive.address).expect("resume");
+    let boot = restore_settled(&mut flash, archive.address).expect("resume");
     let took = started.elapsed();
     println!("TIME m9.resume {took:?} (records {:?})", boot.how);
     assert!(
@@ -380,7 +418,7 @@ fn a_conversation_opens_with_its_newest_page_alone() {
         erased.sectors[sector as usize].fill(0xFF);
     }
     let whole = home::restore(&mut erased, archive.address).expect("whole");
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     assert!(matches!(boot.how, home::How::Resumed { .. }));
 
     // The long chat: friend 0, every other entry of the first 1700.
@@ -454,7 +492,7 @@ fn a_conversation_opens_with_its_newest_page_alone() {
 fn a_ring_past_its_summary_reads_its_tail_alone() {
     let archive = Archive::new();
     let mut flash = summarised(&archive);
-    let boot = home::restore(&mut flash, archive.address).expect("resume");
+    let boot = restore_settled(&mut flash, archive.address).expect("resume");
     let mut shelf = boot.shelf;
     let friend = &archive.friends[7];
     let entry = Entry {
@@ -470,7 +508,7 @@ fn a_ring_past_its_summary_reads_its_tail_alone() {
     };
     home::keep(&mut shelf, &mut flash, &[entry], &archive.address).expect("keep");
     // No flush: the power went.
-    let after = home::restore(&mut flash, archive.address).expect("after the cut");
+    let after = restore_settled(&mut flash, archive.address).expect("after the cut");
     assert!(
         matches!(after.how, home::How::Resumed { tail: 1, .. }),
         "{:?}",
@@ -482,7 +520,7 @@ fn a_ring_past_its_summary_reads_its_tail_alone() {
     let peer = lxmf_address(&friend.public_key_bytes()).expect("address");
     let top = &after.model.conversations[after.model.order()[0]];
     assert_eq!(top.peer, peer, "the page the summary missed is shown");
-    let again = home::restore(&mut flash, archive.address).expect("again");
+    let again = restore_settled(&mut flash, archive.address).expect("again");
     assert!(
         matches!(again.how, home::How::Resumed { tail: 0, .. }),
         "{:?}",
@@ -548,7 +586,7 @@ fn without_summary(flash: &MemFlash) -> MemFlash {
 fn a_reset_mid_pull_resumes_from_the_summary() {
     let archive = Archive::new();
     let mut flash = summarised(&archive);
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     let newcomers: Vec<Identity> = (0..5).map(|_| Identity::generate(&mut OsRng)).collect();
     let pulled = more(&archive, &newcomers, 5);
     for page in pulled.chunks(72) {
@@ -560,7 +598,7 @@ fn a_reset_mid_pull_resumes_from_the_summary() {
     assert_eq!(whole.decoded, MESSAGES + pulled.len() as u64);
 
     let started = std::time::Instant::now();
-    let after = home::restore_timed(&mut flash, archive.address, &micros).expect("after");
+    let mut after = home::restore_timed(&mut flash, archive.address, &micros).expect("after");
     let took = started.elapsed();
     println!(
         "TIME m9.tail-resume {took:?} decoded={} total_us={} (whole fold decoded {})",
@@ -588,8 +626,11 @@ fn a_reset_mid_pull_resumes_from_the_summary() {
         let peer = lxmf_address(&newcomer.public_key_bytes()).expect("address");
         assert!(after.model.conversations.iter().any(|c| c.peer == peer));
     }
-    // The summary went on to the ring's end: the next boot reads nothing.
-    let again = home::restore(&mut flash, archive.address).expect("again");
+    // The summary went on to the ring's end, the tail boot's one bounded
+    // write and the quiet turns after it (1597): the next boot reads
+    // nothing.
+    settle(&mut after.shelf, &mut flash, Vec::new());
+    let again = restore_settled(&mut flash, archive.address).expect("again");
     assert!(
         matches!(again.how, home::How::Resumed { tail: 0, .. }),
         "{:?}",
@@ -605,7 +646,7 @@ fn a_reset_mid_pull_resumes_from_the_summary() {
 fn a_tail_resume_keeps_the_asks_its_tail_owes() {
     let archive = Archive::new();
     let mut flash = summarised(&archive);
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     let (old, new) = ([1u8; 16], [2u8; 16]);
     boot.shelf
         .keep_ask(&mut flash, &old, 3, b"vor dem Reset")
@@ -615,7 +656,7 @@ fn a_tail_resume_keeps_the_asks_its_tail_owes() {
         tag: 3,
         request: b"vor dem Reset".to_vec(),
     }];
-    boot.shelf.flush(&mut flash, || owed).expect("flush");
+    settle(&mut boot.shelf, &mut flash, owed);
     let newcomers = [Identity::generate(&mut OsRng)];
     for page in more(&archive, &newcomers, 1).chunks(72) {
         home::keep(&mut boot.shelf, &mut flash, page, &archive.address).expect("keep");
@@ -624,7 +665,7 @@ fn a_tail_resume_keeps_the_asks_its_tail_owes() {
         .keep_ask(&mut flash, &new, 4, b"nach dem Summary")
         .expect("keep the new ask");
     boot.shelf.ask_done(&mut flash, &old).expect("done");
-    let after = home::restore(&mut flash, archive.address).expect("after");
+    let after = restore_settled(&mut flash, archive.address).expect("after");
     assert!(
         matches!(after.how, home::How::Resumed { tail: 72, .. }),
         "{:?}",
@@ -648,7 +689,7 @@ fn a_tail_resume_keeps_the_asks_its_tail_owes() {
 fn a_summary_whose_sector_went_round_rebuilds() {
     let archive = Archive::new();
     let mut flash = summarised(&archive);
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     let (end_seq, _) = boot.shelf.ring.end();
     let newcomers = [Identity::generate(&mut OsRng)];
     for page in more(&archive, &newcomers, 3).chunks(72) {
@@ -664,9 +705,9 @@ fn a_summary_whose_sector_went_round_rebuilds() {
         })
         .expect("the summary's sector");
     flash.sectors[sector].fill(0xFF);
-    let after = home::restore(&mut flash, archive.address).expect("after");
+    let after = restore_settled(&mut flash, archive.address).expect("after");
     assert_eq!(after.how, home::How::Rebuilt { why: "ring-moved" });
-    let again = home::restore(&mut flash, archive.address).expect("again");
+    let again = restore_settled(&mut flash, archive.address).expect("again");
     assert!(
         matches!(again.how, home::How::Resumed { tail: 0, .. }),
         "{:?}",
@@ -683,7 +724,7 @@ fn a_summary_whose_sector_went_round_rebuilds() {
 fn live_pages_and_marks_survive_a_resumed_boot() {
     let archive = Archive::new();
     let mut flash = summarised(&archive);
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     let friend = &archive.friends[CONVERSATIONS - 1];
     let peer = lxmf_address(&friend.public_key_bytes()).expect("address");
     let entry = Entry {
@@ -709,9 +750,9 @@ fn live_pages_and_marks_survive_a_resumed_boot() {
     );
     boot.shelf.said(routed.rows, routed.gone);
     boot.shelf.pages_owed -= 1;
-    boot.shelf.flush(&mut flash, Vec::new).expect("flush");
+    settle(&mut boot.shelf, &mut flash, Vec::new());
 
-    let again = home::restore(&mut flash, archive.address).expect("reboot");
+    let again = restore_settled(&mut flash, archive.address).expect("reboot");
     assert!(
         matches!(again.how, home::How::Resumed { .. }),
         "{:?}",
@@ -749,8 +790,8 @@ fn live_pages_and_marks_survive_a_resumed_boot() {
         .expect("the mark changes the row");
     assert_eq!(row.unread, 0, "the read mark clears the unloaded badge");
     again.shelf.said(routed.rows, routed.gone);
-    again.shelf.flush(&mut flash, Vec::new).expect("flush");
-    let third = home::restore(&mut flash, archive.address).expect("third");
+    settle(&mut again.shelf, &mut flash, Vec::new());
+    let third = restore_settled(&mut flash, archive.address).expect("third");
     assert!(matches!(third.how, home::How::Resumed { .. }));
     let conversation = third
         .model
@@ -869,7 +910,7 @@ fn a_rebuilt_and_a_resumed_boot_count_the_same_conversations() {
     let mut flash = MemFlash::new(2048);
     let home::Boot {
         shelf: mut store, ..
-    } = home::restore(&mut flash, archive.address).expect("boot");
+    } = restore_settled(&mut flash, archive.address).expect("boot");
     for page in entries.chunks(72) {
         home::keep(&mut store, &mut flash, page, &archive.address).expect("keep");
     }
@@ -896,13 +937,13 @@ fn a_rebuilt_and_a_resumed_boot_count_the_same_conversations() {
     assert!(control.row(&deleted).is_none());
     assert_eq!(control.conversations.len(), CONVERSATIONS + 2);
 
-    let rebuilt = home::restore(&mut flash, archive.address).expect("rebuild");
+    let rebuilt = restore_settled(&mut flash, archive.address).expect("rebuild");
     assert!(
         matches!(rebuilt.how, home::How::Rebuilt { .. }),
         "{:?}",
         rebuilt.how
     );
-    let resumed = home::restore(&mut flash, archive.address).expect("resume");
+    let resumed = restore_settled(&mut flash, archive.address).expect("resume");
     assert!(
         matches!(resumed.how, home::How::Resumed { .. }),
         "{:?}",
@@ -964,7 +1005,8 @@ fn micros() -> u64 {
 fn a_boots_breakdown_says_every_phase_in_two_lines() {
     let archive = Archive::new();
     let mut flash = kept(&archive);
-    let rebuilt = home::restore_timed(&mut flash, archive.address, &micros).expect("rebuild");
+    let mut rebuilt = home::restore_timed(&mut flash, archive.address, &micros).expect("rebuild");
+    settle(&mut rebuilt.shelf, &mut flash, Vec::new());
     let resumed = home::restore_timed(&mut flash, archive.address, &micros).expect("resume");
     assert!(matches!(rebuilt.how, home::How::Rebuilt { .. }));
     assert!(matches!(resumed.how, home::How::Resumed { .. }));
@@ -1071,15 +1113,15 @@ fn a_chat_opens_with_its_own_marks_only() {
     let mut flash = MemFlash::new(2048);
     let home::Boot {
         shelf: mut store, ..
-    } = home::restore(&mut flash, archive.address).expect("boot");
+    } = restore_settled(&mut flash, archive.address).expect("boot");
     for page in entries.chunks(72) {
         home::keep(&mut store, &mut flash, page, &archive.address).expect("keep");
     }
     store.dirty = true;
-    store.flush(&mut flash, Vec::new).expect("flush");
+    settle(&mut store, &mut flash, Vec::new());
     assert_eq!(store.index.marks, Vec::<u32>::new(), "every mark placed");
 
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     assert!(
         matches!(boot.how, home::How::Resumed { .. }),
         "{:?}",
@@ -1249,7 +1291,7 @@ fn preloaded_rows_keep_their_places(archive: &Archive) {
     // The pull: page by page into the ring and the model, the rows the
     // model said into the summary log, as the board's loop does.
     let mut flash = MemFlash::new(2048);
-    let mut boot = home::restore(&mut flash, archive.address).expect("empty boot");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("empty boot");
     boot.model.now = Some(pulled);
     let mut ids = || [0u8; 16];
     let mut take = |boot: &mut home::Boot, flash: &mut MemFlash, page: &[Entry]| {
@@ -1257,14 +1299,14 @@ fn preloaded_rows_keep_their_places(archive: &Archive) {
         let (_, effects) = home::take(&mut boot.model, page, &archive.address);
         let routed = home::route(&mut boot.model, effects, &mut ids);
         boot.shelf.said(routed.rows, routed.gone);
-        boot.shelf.flush(flash, Vec::new).expect("flush");
+        settle(&mut boot.shelf, flash, Vec::new());
     };
     for page in archive.entries_ahead(HOUR as f64).chunks(72) {
         take(&mut boot, &mut flash, page);
     }
     // The boot after: listed from the rows, the clock two hours on, and
     // a message from a newcomer that arrived after the pull.
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     assert!(
         matches!(boot.how, home::How::Resumed { .. }),
         "{:?}",
@@ -1358,7 +1400,7 @@ fn a_preloaded_page_with_marks_keeps_its_row() {
         offset_secs: 0,
     };
     let mut flash = MemFlash::new(2048);
-    let mut boot = home::restore(&mut flash, archive.address).expect("empty boot");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("empty boot");
     boot.model.now = Some(pulled);
     let mut ids = || [0u8; 16];
     let all: Vec<Entry> = messages.into_iter().chain(marks).collect();
@@ -1367,9 +1409,9 @@ fn a_preloaded_page_with_marks_keeps_its_row() {
         let (_, effects) = home::take(&mut boot.model, page, &archive.address);
         let routed = home::route(&mut boot.model, effects, &mut ids);
         boot.shelf.said(routed.rows, routed.gone);
-        boot.shelf.flush(&mut flash, Vec::new).expect("flush");
+        settle(&mut boot.shelf, &mut flash, Vec::new());
     }
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     assert!(
         matches!(boot.how, home::How::Resumed { .. }),
         "{:?}",
@@ -1395,7 +1437,7 @@ fn a_preloaded_page_with_marks_keeps_its_row() {
     let (_, effects) = home::take(&mut boot.model, &bench, &archive.address);
     let routed = home::route(&mut boot.model, effects, &mut ids);
     boot.shelf.said(routed.rows, routed.gone);
-    boot.shelf.flush(&mut flash, Vec::new).expect("flush");
+    settle(&mut boot.shelf, &mut flash, Vec::new());
     let mut boot = home::restore_shown(
         &mut flash,
         archive.address,
@@ -1442,7 +1484,7 @@ fn a_preloaded_page_with_marks_keeps_its_row() {
 }
 
 fn walk_twenty(archive: &Archive, mut flash: MemFlash, now: Option<loquax::when::WallTime>) {
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
     assert!(matches!(boot.how, home::How::Resumed { .. }));
     // The board's case: its rows were written by a pull that knew the
     // time (the home says it before it hands a page), so each row's
@@ -1516,7 +1558,6 @@ fn walk_twenty(archive: &Archive, mut flash: MemFlash, now: Option<loquax::when:
 /// goes the same way, its SNAP record with its last records.
 #[test]
 fn a_write_of_every_row_goes_a_few_sectors_a_call() {
-    use loquax::home::board::rows::WRITE_BUDGET;
     let archive = Archive::new();
     let mut flash = summarised(&archive);
     let listed = |flash: &MemFlash| -> Vec<[u8; 16]> {
@@ -1534,7 +1575,7 @@ fn a_write_of_every_row_goes_a_few_sectors_a_call() {
     };
     let before = listed(&flash);
     assert_eq!(before.len(), CONVERSATIONS);
-    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+    let mut boot = restore_settled(&mut flash, archive.address).expect("resume");
 
     // Every row owed, as the bench's owe fires it.
     boot.shelf.index.owe_all();
@@ -1542,12 +1583,10 @@ fn a_write_of_every_row_goes_a_few_sectors_a_call() {
     let mut calls = 0;
     let mut records = 0;
     while boot.shelf.index.owes() || boot.shelf.dirty {
-        let done = boot
-            .shelf
-            .flush_within(&mut flash, Vec::new, Some(WRITE_BUDGET))
-            .expect("flush");
+        let done = boot.shelf.flush(&mut flash, Vec::new).expect("flush");
+        let done = done.appended();
         assert!(
-            done.erased <= 3,
+            done.erased <= ERASE_BUDGET,
             "call {calls} erased {} sectors",
             done.erased
         );
@@ -1566,18 +1605,252 @@ fn a_write_of_every_row_goes_a_few_sectors_a_call() {
     log.begin_snapshot(&mut boot.shelf.index);
     let mut calls = 0;
     while boot.shelf.log.as_ref().expect("log").snapping() {
-        let done = boot
-            .shelf
-            .flush_within(&mut flash, Vec::new, Some(WRITE_BUDGET))
-            .expect("flush");
+        let done = boot.shelf.flush(&mut flash, Vec::new).expect("flush");
         assert!(
-            done.erased <= 3,
+            done.appended().erased <= ERASE_BUDGET,
             "snapshot call {calls} erased {}",
-            done.erased
+            done.appended().erased
         );
         calls += 1;
         assert!(calls < 200, "the snapshot never ended");
     }
     assert!(calls > 4, "the snapshot in {calls} calls: not split");
     assert_eq!(listed(&flash), before, "the boot after the snapshot");
+}
+
+/// A [`Sectors`] that counts the erases its caller made in `from..`, the
+/// summary log's sectors.
+struct Counting<'a> {
+    flash: &'a mut MemFlash,
+    from: u32,
+    erases: u32,
+}
+
+impl Sectors for Counting<'_> {
+    type Error = <MemFlash as Sectors>::Error;
+
+    fn count(&self) -> u32 {
+        self.flash.count()
+    }
+
+    fn read(&mut self, sector: u32, offset: usize, buf: &mut [u8]) -> Result<(), Self::Error> {
+        self.flash.read(sector, offset, buf)
+    }
+
+    fn write(&mut self, sector: u32, offset: usize, data: &[u8]) -> Result<(), Self::Error> {
+        self.flash.write(sector, offset, data)
+    }
+
+    fn erase(&mut self, sector: u32) -> Result<(), Self::Error> {
+        if sector >= self.from {
+            self.erases += 1;
+        }
+        self.flash.erase(sector)
+    }
+}
+
+/// The board's partition: 1024 sectors, the summary log the last 128.
+const BOARD_SECTORS: u32 = 1024;
+
+/// The archive with every friend's name, as the board's store holds them
+/// (window 21: 342 names and 303 rows in the summary log): a write of
+/// every row owes the names first.
+fn named_entries(archive: &Archive) -> Vec<Entry> {
+    let mut entries = archive.entries();
+    let mut seq = MESSAGES;
+    for (n, friend) in archive.friends.iter().enumerate() {
+        seq += 1;
+        let peer = lxmf_address(&friend.public_key_bytes()).expect("address");
+        entries.push(Entry {
+            seq,
+            kind: loquax::home::KIND_NAME,
+            at: 1_762_000_000 + seq as i64,
+            packed: loquax::home::wire::name_entry(&peer, &format!("Freund Nummer {n}")),
+        });
+    }
+    entries
+}
+
+/// 1597, window 21's hang.walk: after 1595 the board still took 1 to
+/// 1.6 s eight times, each right after a `[STORE] summary records=246..473
+/// erased=22..31` line. The walk's bench owes every row every few seconds
+/// (`[BENCH] owe=fired`), each owe re-owed the 342 names first, the
+/// snapshot begun ended only when nothing at all was owed, never did, the
+/// log came round to it late, and the writer dropped its budget and
+/// wrote the 303 rows in one call. Replayed here through every caller of
+/// the writer on the board's partition: the boot's rebuild, the bench's
+/// owe (`Client::flush`), the quiet turns (`Shelf::quiet_flush`), an
+/// arrival's rows, the boot that resumes a tail. No call opens more than
+/// `ERASE_BUDGET` sectors of the log, the log comes round many times,
+/// and the boot after it lists every conversation.
+#[test]
+fn every_summary_write_stays_in_its_budget_on_the_hang_walk() {
+    let archive = Archive::new();
+    let entries = named_entries(&archive);
+    let mut flash = MemFlash::new(BOARD_SECTORS);
+    let (ring_count, _) = loquax::home::board::rows::split(BOARD_SECTORS).expect("split");
+    let mut worst: Vec<(String, u32)> = Vec::new();
+    let mut note = |caller: &str, erased: u32| {
+        if erased > ERASE_BUDGET {
+            worst.push((caller.to_string(), erased));
+        }
+    };
+
+    // The pull keeps the ring, no summary written yet (a join).
+    {
+        let home::Boot { mut shelf, .. } =
+            home::restore(&mut flash, archive.address).expect("empty boot");
+        for page in entries.chunks(72) {
+            home::keep(&mut shelf, &mut flash, page, &archive.address).expect("keep");
+        }
+    }
+    // The boot that finds no summary rebuilds and writes it: one bounded
+    // write, the rest owed the quiet turns.
+    let mut counting = Counting {
+        flash: &mut flash,
+        from: ring_count,
+        erases: 0,
+    };
+    let mut boot = home::restore(&mut counting, archive.address).expect("rebuild");
+    note("boot rebuild", counting.erases);
+    assert!(
+        matches!(boot.how, home::How::Rebuilt { .. }),
+        "{:?}",
+        boot.how
+    );
+
+    let mut now_ms = 0u64;
+    let mut seq = MESSAGES + archive.friends.len() as u64 + 1;
+    let mut owes = 0;
+    let used_before = boot.shelf.log.as_ref().expect("log").used();
+    let mut log_sectors_written = 0u32;
+    for cycle in 0..400i64 {
+        // The bench's owe: every row and name owed, written at once.
+        boot.shelf.index.owe_all();
+        boot.shelf.dirty = true;
+        owes += 1;
+        let done = boot.shelf.flush(&mut flash, Vec::new).expect("owe");
+        note("bench owe", done.appended().erased);
+        log_sectors_written += done.appended().erased;
+        // The walk's keys, a second apart: the quiet turns between.
+        for _ in 0..2 {
+            now_ms += 1_000;
+            let done = boot
+                .shelf
+                .quiet_flush(&mut flash, Vec::new, now_ms)
+                .expect("quiet");
+            note("quiet flush", done.appended().erased);
+            log_sectors_written += done.appended().erased;
+            boot.shelf.quiet(&mut flash).expect("quiet erase");
+        }
+        // An arrival: kept in the ring, its rows said, written.
+        let arrival = loquax_m9::bench::Arrival {
+            at: 1_763_000_000 + cycle,
+            named: cycle > 0,
+        };
+        let new = loquax_m9::bench::entries(archive.address, arrival, cycle as u32, seq);
+        seq += new.len() as u64;
+        home::keep(&mut boot.shelf, &mut flash, &new, &archive.address).expect("arrive");
+        boot.shelf.said(Vec::new(), Vec::new());
+        let done = boot.shelf.flush(&mut flash, Vec::new).expect("said");
+        note("arrival rows", done.appended().erased);
+        log_sectors_written += done.appended().erased;
+    }
+    assert!(
+        log_sectors_written > 2 * 128,
+        "the log came round {log_sectors_written} sectors from {used_before}: not the walk's"
+    );
+    assert!(owes == 400);
+
+    // Drained in quiet turns, then a boot that resumes lists them all.
+    for _ in 0..400 {
+        now_ms += 1_000;
+        let done = boot
+            .shelf
+            .quiet_flush(&mut flash, Vec::new, now_ms)
+            .expect("drain");
+        note("quiet flush", done.appended().erased);
+        if !boot.shelf.owes() {
+            break;
+        }
+    }
+    assert!(!boot.shelf.owes(), "the quiet turns never drained the log");
+    // A page kept with no summary after it: the next boot resumes the
+    // tail and writes the summary, one bounded write.
+    let tail = loquax_m9::bench::entries(
+        archive.address,
+        loquax_m9::bench::Arrival {
+            at: 1_764_000_000,
+            named: true,
+        },
+        9_999,
+        seq,
+    );
+    home::keep(&mut boot.shelf, &mut flash, &tail, &archive.address).expect("tail");
+    drop(boot);
+    let mut counting = Counting {
+        flash: &mut flash,
+        from: ring_count,
+        erases: 0,
+    };
+    let again = home::restore_shown(
+        &mut counting,
+        archive.address,
+        &|| 0,
+        loquax_m9::bench::Arrivals::Shown,
+    )
+    .expect("resume");
+    note("boot resume tail", counting.erases);
+    assert!(
+        matches!(again.how, home::How::Resumed { tail, .. } if tail > 0),
+        "{:?}",
+        again.how
+    );
+    assert_eq!(
+        again.model.conversations.len(),
+        CONVERSATIONS + 1,
+        "every conversation and Bench survive the log's rounds"
+    );
+    assert!(
+        worst.is_empty(),
+        "summary writes past {ERASE_BUDGET} erases: {worst:?}"
+    );
+}
+
+/// What [`no_caller_can_write_the_summary_unbounded`] refuses: a summary
+/// write that takes its budget from the caller, `None` for all of it.
+fn unbounded_writes(source: &str) -> Vec<&'static str> {
+    ["flush_within(", "write_within(", "budget: Option<usize>"]
+        .into_iter()
+        .filter(|pattern| source.contains(pattern))
+        .collect()
+}
+
+/// 1597: the bound lives in the writer, so no caller can ask for more.
+/// Before, `RowLog::write_within` and `Shelf::flush_within` took
+/// `Option<usize>`, `None` wrote everything owed, and the boot's flushes
+/// passed it. The writer's sources and every caller's are read: none
+/// may take a budget again. The positive control is the API as it was.
+#[test]
+fn no_caller_can_write_the_summary_unbounded() {
+    let control = "fn write_within(&mut self, budget: Option<usize>) {}";
+    assert_eq!(
+        unbounded_writes(control).len(),
+        2,
+        "the scan finds the old API"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for file in [
+        "loquax/src/home/board/rows.rs",
+        "loquax-m9/src/home.rs",
+        "loquax-m9/src/bin/loquax-m9-sim/board.rs",
+        "leviculum-esp/src/handheld.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(file)).expect(file);
+        assert!(
+            source.contains("flush") || source.contains("write"),
+            "{file} read"
+        );
+        assert_eq!(unbounded_writes(&source), Vec::<&str>::new(), "{file}");
+    }
 }
