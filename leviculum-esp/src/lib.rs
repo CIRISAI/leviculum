@@ -747,6 +747,12 @@ static RX_ERRORS: AtomicU32 = AtomicU32::new(0);
 /// in a FIFO overrun shows as a press the walker sent and this did not
 /// count, without the proxy's log.
 static KEYS_RX: AtomicU32 = AtomicU32::new(0);
+/// Presses the UI core read into a `KEY` line (1612): the `[UART]` line's
+/// `keys_ui=`, beside `keys_rx=`. A walk of injected keys without holds
+/// has the two equal; a gap is a press core 0 took that no UI turn
+/// handled, and a walker that sent more frames than `keys_rx=` counts lost
+/// them on the line.
+static KEYS_UI: AtomicU32 = AtomicU32::new(0);
 
 /// Host bytes the UART handed over since boot, wrapping (1597, the
 /// `[UART]` line's `rx_bytes=`): the proxy's log sums what it sent, so a
@@ -757,6 +763,11 @@ static RX_TAKEN: AtomicU32 = AtomicU32::new(0);
 /// One key frame taken from the host ([`KEYS_RX`]).
 pub fn count_key_rx() {
     KEYS_RX.fetch_add(1, Ordering::Relaxed);
+}
+
+/// One press the UI core read into a `KEY` line ([`KEYS_UI`]).
+pub fn count_key_ui() {
+    KEYS_UI.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Empty the receive FIFO into the keep now (1595): before a flash op,
@@ -1027,11 +1038,12 @@ impl<'d> UartLog<'d> {
             None => alloc::string::String::new(),
         };
         let keys = KEYS_RX.load(Ordering::Relaxed);
+        let keys_ui = KEYS_UI.load(Ordering::Relaxed);
         let rx_bytes = RX_TAKEN.load(Ordering::Relaxed);
         let [env_bad, env_refused, runt] = frames;
         let body = alloc::format!(
             "{counts} stack_free={free}{ui} tx_drop={tx_drop} tx_drop_bytes={tx_drop_bytes} \
-             tx_drop_kind=line:{drop_line},frame:{drop_frame},dump:{drop_dump} keys_rx={keys} \
+             tx_drop_kind=line:{drop_line},frame:{drop_frame},dump:{drop_dump} keys_rx={keys} keys_ui={keys_ui} \
              rx_bytes={rx_bytes} env_bad={env_bad} env_refused={env_refused} runt={runt}"
         );
         self.text("[UART] ", &body);

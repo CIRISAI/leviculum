@@ -111,7 +111,7 @@
 //!                           after the draw, when the page or its cursor
 //!                           moved (1533, `loquax_m9::page`): what a bench
 //!                           walk asserts without a dump
-//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> ui_stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> keys_rx=<n> rx_bytes=<n> env_bad=<n> env_refused=<n> runt=<n> t=<ms>
+//! [UART] rx_lost=<n> overrun=<n> deframe_drop=<n> rx_err=<n> loop_gap_max_ms=<n> stack_free=<n> ui_stack_free=<n> tx_drop=<n> tx_drop_bytes=<n> tx_drop_kind=line:<n>,frame:<n>,dump:<n> keys_rx=<n> keys_ui=<n> rx_bytes=<n> env_bad=<n> env_refused=<n> runt=<n> t=<ms>
 //!                           (1597: rx_bytes the host bytes the UART handed
 //!                           over since boot, to set against the proxy's
 //!                           sent sums; env_bad, env_refused and runt the
@@ -196,6 +196,11 @@
 //! KEY <ms> code=0x6b name=k after a KBRAW line that carries a press (1427)
 //! [KB] answer=mixed t=<ms>  after one whose bytes disagree
 //! [KB] queue_lost=<n> read_failed=<n>   when either count moved (1463)
+//! KEY_DROP reason=<queue_full n=<n> lost=<n>|malformed|value code=<hex>> t=<ms>
+//!                           a press that reached no UI turn (1612): the
+//!                           keyboard queue full, or an injected key frame
+//!                           refused; `keys_ui=` in the `[UART]` line counts
+//!                           the presses that did, each `KEY` line one
 //! [LOOP] turn_ms=<n> stage=<host|node|take|dump|draw|keys> host=.. node=.. take=.. dump=.. draw=.. keys=.. entries=<n>  (dump: the bench's screen dump written out, apart from take since 1603)
 //! [LOOP] core=ui turn_ms=<n> stage=<drain|keys|send|draw> drain=.. keys=.. send=.. draw=.. msgs=<n> folded=<n> turn=<n> rows_us=.. layout_us=.. blit_us=.. flush_us=.. [rows_allocs=.. rows_alloc_us=.. rows_wait_us=.. draw_allocs=.. draw_alloc_us=.. draw_wait_us=.. in the bench image, 1594; rows_built=.. the list rows the scene carried, 1595]  (1569, the UI core's slow turn: msgs the queue held, entries folded; 1591, the turn's draw split: the scene's rows, their layout into cells, the changed cells into the frame, the wait for the last flush)
 //!                           a turn of the loop longer than 100 ms (1463)
@@ -2228,7 +2233,7 @@ fn main() -> ! {
                 #[cfg(m9_bench)]
                 if frame.frame_type == envelope::TYPE_KEY_INJECT {
                     stall::stage(Core::Io, Stage::Line);
-                    let answer = bench::take(frame.payload, kb, &mut inject);
+                    let answer = bench::take(frame.payload, kb, &mut inject, &mut log);
                     log.frame(&answer);
                     continue;
                 }
@@ -2488,6 +2493,14 @@ fn main() -> ! {
             })
         });
         if (kb_lost, kb_fails) != kb_said {
+            // A press the full queue could not keep, the timer's or an
+            // injected one, said by name (1612).
+            if kb_lost > kb_said.0 {
+                log.line(
+                    "KEY_DROP ",
+                    format_args!("reason=queue_full n={} lost={kb_lost}", kb_lost - kb_said.0),
+                );
+            }
             kb_said = (kb_lost, kb_fails);
             log.line(
                 "[KB] ",
@@ -3106,6 +3119,9 @@ fn ui_main(
                 Read::Code(code) => {
                     if let Some(key) = Key::of(code) {
                         log.raw(keyboard::key_line(ms, code, key));
+                        // The `[UART]` line's `keys_ui=` (1612): this
+                        // press reached a UI turn.
+                        leviculum_esp::count_key_ui();
                         // The house key and the open overview (1532);
                         // the pairing has the keys while it shows.
                         let took = match shown.pairing {
@@ -3580,12 +3596,27 @@ mod bench {
     }
 
     /// A `TYPE_KEY_INJECT` payload taken: the press queued and the hold
-    /// kept, and the frame that answers it, an ack or a named refusal.
-    pub fn take(payload: &[u8], kb: Protocol, inject: &mut Inject) -> Vec<u8> {
+    /// kept, and the frame that answers it, an ack or a named refusal. A
+    /// refused frame is counted in `keys_rx=` and makes no press, so it
+    /// is said as a `KEY_DROP` line (1612): no key core 0 took goes
+    /// unsaid between `keys_rx=` and `keys_ui=`.
+    pub fn take(
+        payload: &[u8],
+        kb: Protocol,
+        inject: &mut Inject,
+        log: &mut UartLog<'_>,
+    ) -> Vec<u8> {
         leviculum_esp::count_key_rx();
         match envelope::decode_key_inject_payload(payload) {
-            None => envelope::encode_refusal(envelope::TYPE_KEY_INJECT, envelope::REFUSE_MALFORMED),
+            None => {
+                log.line("KEY_DROP ", format_args!("reason=malformed"));
+                envelope::encode_refusal(envelope::TYPE_KEY_INJECT, envelope::REFUSE_MALFORMED)
+            }
             Some(asked) if !asked.valid() => {
+                log.line(
+                    "KEY_DROP ",
+                    format_args!("reason=value code={:#04x}", asked.code),
+                );
                 envelope::encode_refusal(envelope::TYPE_KEY_INJECT, envelope::REFUSE_VALUE)
             }
             Some(asked) => {
