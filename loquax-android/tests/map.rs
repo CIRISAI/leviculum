@@ -2515,6 +2515,15 @@ fn a_pan_into_the_empty_loads_what_is_on_screen_at_once() {
 /// z15, 80 kB) about ten seconds of it. While it loads the frames go
 /// from the outline through at least two pictures of stand-ins, and the
 /// whole region ends it.
+///
+/// The link stops at [`REGION_HOLD`], inside the region's tiles, until a
+/// frame has said `filling` (1610): the tiles arrive in a window of under
+/// five seconds, and on a shared runner (pipeline 617) the frames came
+/// slowly enough that none fell into it, `frames 51 filling 0 while
+/// loading [25, 99, 100]`. Held, the half-written region is there for as
+/// long as the host takes to draw it, so the test asks what the product
+/// promises, that a frame drawn on a region still arriving says so, and
+/// not whether the host drew one in time.
 #[test]
 fn a_region_fills_the_frame_in_while_it_downloads() {
     use leviculum_mapcut::serve::Serve;
@@ -2522,6 +2531,7 @@ fn a_region_fills_the_frame_in_while_it_downloads() {
     const ARCHIVE: &[u8] = include_bytes!("../../leviculum-mapcut/fixtures/grunewald.pmtiles");
     let serve = Serve::start(vec![("o.pmtiles".into(), ARCHIVE.to_vec())]).expect("serve");
     serve.throttle(8_000, Duration::from_millis(20));
+    serve.hold_at(REGION_HOLD);
     let home = tempfile::tempdir().expect("home");
     std::fs::create_dir_all(home.path().join("maps")).expect("maps");
     std::fs::write(
@@ -2536,16 +2546,26 @@ fn a_region_fills_the_frame_in_while_it_downloads() {
         zoom: Some(15),
         ..request(home.path(), false)
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // A liveness bound: the throttled link takes about 36 s on the host.
+    let deadline = Instant::now() + Duration::from_secs(180);
     let mut frames: Vec<(MapShown, Vec<u8>)> = Vec::new();
+    let mut held = true;
     loop {
         let (shown, rgba) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        if held && shown.filling {
+            serve.release();
+            held = false;
+        }
         let done = !shown.loading && !shown.filling && !shown.pending && frames.len() > 1;
         frames.push((shown, rgba));
         if done {
             break;
         }
-        assert!(Instant::now() < deadline, "the region never landed");
+        assert!(
+            Instant::now() < deadline,
+            "the region never landed (held at {} bytes: {held})",
+            serve.sent()
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     let last = &frames[frames.len() - 1].1;
@@ -2573,3 +2593,10 @@ fn a_region_fills_the_frame_in_while_it_downloads() {
         "the region came nearer: {near:?}"
     );
 }
+
+/// Where the link of [`a_region_fills_the_frame_in_while_it_downloads`]
+/// stops until a frame says `filling`: a body byte inside the region's
+/// tiles. The plan's directories end, and the first tiles are drawn, by
+/// byte 57 003; the last tile of the region arrives by byte 92 364; the
+/// same on one CPU and on ten (1610).
+const REGION_HOLD: u64 = 75_000;
