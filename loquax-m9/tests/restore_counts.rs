@@ -1704,15 +1704,20 @@ fn every_summary_write_stays_in_its_budget_on_the_hang_walk() {
             home::keep(&mut shelf, &mut flash, page, &archive.address).expect("keep");
         }
     }
-    // The boot that finds no summary rebuilds and writes it: one bounded
-    // write, the rest owed the quiet turns.
+    // The boot that finds no summary rebuilds and writes it whole before
+    // it returns (1603): many bounded writes, each in the budget.
     let mut counting = Counting {
         flash: &mut flash,
         from: ring_count,
         erases: 0,
     };
     let mut boot = home::restore(&mut counting, archive.address).expect("rebuild");
-    note("boot rebuild", counting.erases);
+    assert_eq!(
+        counting.erases, boot.settled.erased,
+        "the rebuild's summary writes are all it erased of the log"
+    );
+    assert!(!boot.shelf.owes(), "the rebuild left the summary owed");
+    note("boot rebuild", boot.settle_most_erased);
     assert!(
         matches!(boot.how, home::How::Rebuilt { .. }),
         "{:?}",

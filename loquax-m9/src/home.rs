@@ -418,6 +418,15 @@ pub struct Boot {
     pub spent: Breakdown,
     /// Entries the boot decoded from the ring: none when it resumed.
     pub decoded: u64,
+    /// What a rebuild wrote of the summary log before it returned
+    /// (1603, [`SETTLE_CALLS`]): the records, flash writes and erases of
+    /// all its bounded writes, and how many writes those were. Nothing
+    /// for a boot that resumed.
+    pub settled: Appended,
+    pub settle_calls: u32,
+    /// The most sectors one of those writes erased: each stays in the
+    /// writer's budget (`rows::ERASE_BUDGET`), however many there are.
+    pub settle_most_erased: u32,
 }
 
 /// The board's message store (1521): the ring of entries, the summary
@@ -444,6 +453,16 @@ pub struct Shelf {
 /// its erase and its writes parking the UI core about 90 ms of it.
 /// Window 18's 32 sectors at once parked it 2.8 s of 5.
 pub const BACKLOG_GAP_MS: u64 = 1_000;
+
+/// The most bounded writes a rebuild makes of its summary log before it
+/// returns (1603): the whole log is 128 sectors, each write at most one.
+/// Window 22's summary after a rebuild was 30-odd writes; a rebuild that
+/// left them to the quiet turns, a second apart, left a state-less log
+/// for 33 s, and the walks' resets inside those seconds rebuilt the ring
+/// again each time (25 s a boot). A rebuild runs where nothing draws from
+/// the model yet (the boot, the forget's reopen, a code taken), so the
+/// writes' 1597 spacing, which was for the UI core, does not apply.
+pub const SETTLE_CALLS: u32 = 4 * 128;
 
 impl Shelf {
     fn new(ring: Store, log: Option<RowLog>, index: Index, ring_count: u32) -> Self {
@@ -679,10 +698,38 @@ pub fn restore_shown<S: Sectors>(
     clock: &dyn Fn() -> u64,
     arrivals: Arrivals,
 ) -> Result<Boot, S::Error> {
+    restore_chunked(dev, address, clock, arrivals, &mut |_| ())
+}
+
+/// Entries a rebuild folds between two calls of its `chunk`
+/// ([`restore_chunked`]): about 2.3 s of the board's fold at window 22's
+/// 4.5 ms an entry.
+pub const REBUILD_CHUNK: u64 = 512;
+
+/// [`restore_shown`], with `chunk` called after every [`REBUILD_CHUNK`]
+/// entries a rebuild folded, with how many it folded so far (1603): the
+/// board's `[STORE] rebuild chunk=` line, so a rebuild of 25 s shows its
+/// progress. A boot that resumes never calls it.
+pub fn restore_chunked<S: Sectors>(
+    dev: &mut S,
+    address: [u8; 16],
+    clock: &dyn Fn() -> u64,
+    arrivals: Arrivals,
+    chunk: &mut dyn FnMut(u64),
+) -> Result<Boot, S::Error> {
     let tag = store::tag(&address);
     let Some((ring_count, rows_count)) = rows::split(dev.count()) else {
         let count = dev.count();
-        return rebuild(dev, address, clock, count, None, How::Whole, arrivals);
+        return rebuild(
+            dev,
+            address,
+            clock,
+            count,
+            None,
+            How::Whole,
+            arrivals,
+            chunk,
+        );
     };
     let t0 = clock();
     let (log, replayed) = RowLog::open(&mut Window::new(&mut *dev, ring_count, rows_count), tag)?;
@@ -731,6 +778,9 @@ pub fn restore_shown<S: Sectors>(
                     },
                     spent,
                     decoded: 0,
+                    settled: Appended::default(),
+                    settle_calls: 0,
+                    settle_most_erased: 0,
                 });
             }
             // The ring went on past the summary (a reset or a power cut
@@ -763,6 +813,7 @@ pub fn restore_shown<S: Sectors>(
                 Some(log),
                 How::Rebuilt { why: "ring-moved" },
                 arrivals,
+                chunk,
             )?;
             boot.spent.rows += rows_read;
             boot.spent.total = clock().saturating_sub(t0);
@@ -770,7 +821,16 @@ pub fn restore_shown<S: Sectors>(
         }
     };
     let rows_read = clock().saturating_sub(t0);
-    let mut boot = rebuild(dev, address, clock, ring_count, Some(log), how, arrivals)?;
+    let mut boot = rebuild(
+        dev,
+        address,
+        clock,
+        ring_count,
+        Some(log),
+        how,
+        arrivals,
+        chunk,
+    )?;
     boot.spent.rows += rows_read;
     boot.spent.total = clock().saturating_sub(t0);
     Ok(boot)
@@ -903,6 +963,9 @@ fn resume_tail<S: Sectors>(
             total: clock().saturating_sub(t0),
         },
         decoded,
+        settled: Appended::default(),
+        settle_calls: 0,
+        settle_most_erased: 0,
     }))
 }
 
@@ -933,6 +996,8 @@ fn top(model: &UiModel<Field>) -> usize {
 
 /// The ring folded whole (1476, 1514), its index built on the way, and
 /// the summary log written anew from the model when there is one.
+/// `chunk` hears every [`REBUILD_CHUNK`] entries folded.
+#[allow(clippy::too_many_arguments)]
 fn rebuild<S: Sectors>(
     dev: &mut S,
     address: [u8; 16],
@@ -941,6 +1006,7 @@ fn rebuild<S: Sectors>(
     log: Option<RowLog>,
     how: How,
     arrivals: Arrivals,
+    chunk: &mut dyn FnMut(u64),
 ) -> Result<Boot, S::Error> {
     let start = clock();
     let mut shown = model(address);
@@ -952,11 +1018,16 @@ fn rebuild<S: Sectors>(
     let mut unpack = 0u64;
     let mut step = 0u64;
     let mut batch = Batch::new(&mut shown);
+    let mut folded = 0u64;
     let opened = Store::open_with(
         &mut Window::new(&mut *dev, 0, ring_count),
         store::tag(&address),
         clock,
         |entry, span| {
+            folded += 1;
+            if folded.is_multiple_of(REBUILD_CHUNK) {
+                chunk(folded);
+            }
             if !shows(&entry, arrivals) {
                 return;
             }
@@ -1000,10 +1071,28 @@ fn rebuild<S: Sectors>(
     let drain = clock().saturating_sub(t0);
     let mut shelf = Shelf::new(ring, log, index, ring_count);
     let t0 = clock();
+    let mut settled = Appended::default();
+    let mut settle_calls = 0;
+    let mut settle_most_erased = 0;
     if shelf.log.is_some() {
         shelf.dirty = true;
-        let pending = asks.clone();
-        shelf.flush(dev, || pending)?;
+        // The whole summary, its state last, in bounded writes with the
+        // caller's clock (its watchdog and its line, 1603) between: a
+        // reset after this boot resumes.
+        while settle_calls < SETTLE_CALLS {
+            let pending = asks.clone();
+            let done = shelf.flush(dev, || pending)?;
+            let wrote = done.appended();
+            settled.entries += wrote.entries;
+            settled.writes += wrote.writes;
+            settled.erased += wrote.erased;
+            settle_most_erased = settle_most_erased.max(wrote.erased);
+            settle_calls += 1;
+            if !shelf.owes() {
+                break;
+            }
+            let _ = clock();
+        }
     }
     let rows = clock().saturating_sub(t0);
     // What the open counted as the caller's work holds the unpack and
@@ -1016,6 +1105,9 @@ fn rebuild<S: Sectors>(
         restored,
         asks,
         how,
+        settled,
+        settle_calls,
+        settle_most_erased,
         spent: Breakdown {
             read: spent.read,
             crc: spent.crc,

@@ -408,6 +408,65 @@ fn the_chats_come_back_from_the_flash_store_after_a_reboot() {
     assert_eq!(lost.cursor, 0);
 }
 
+/// 1603, window 22: after a rebuild the summary log was written one
+/// bounded write a quiet turn (1597), 30-odd writes a second apart, its
+/// state last; the walks rebooted within those seconds, so every boot
+/// found no state and rebuilt again for 25 s (`why=no-state`, three boots
+/// in a row). The rebuild now writes the whole summary before the boot
+/// goes on (in bounded writes, the caller's clock between them, before
+/// the UI core takes the model): a reboot right after a rebuild resumes,
+/// with the same list.
+#[test]
+fn a_reboot_right_after_a_rebuild_resumes_with_the_same_list() {
+    use loquax::home::board::rows;
+    use loquax::home::board::store::{MemFlash, Sectors};
+
+    let me = Identity::generate(&mut OsRng);
+    let address = lxmf_address(&me.public_key_bytes()).expect("address");
+    let friends: Vec<Identity> = (0..300).map(|_| Identity::generate(&mut OsRng)).collect();
+    let all = archive(&me, address, &friends, 2400);
+    let mut flash = MemFlash::new(1024);
+    let home::Boot {
+        shelf: mut store, ..
+    } = home::restore(&mut flash, address).expect("boot");
+    for page in all.chunks(72) {
+        home::keep(&mut store, &mut flash, page, &address).expect("keep");
+    }
+    drop(store);
+    // The summary erased, as `bench forget` leaves it.
+    let (ring, summary) = rows::split(1024).expect("split");
+    for sector in ring..ring + summary {
+        flash.erase(sector).expect("erase");
+    }
+
+    let rebuilt = home::restore(&mut flash, address).expect("rebuild");
+    assert_eq!(rebuilt.how.word(), "rebuilt");
+    assert_eq!(rebuilt.model.conversations.len(), 300);
+    let before = list_text(&rebuilt.model);
+    assert!(
+        !rebuilt.shelf.owes(),
+        "the rebuild left the summary owed: a reset now rebuilds again"
+    );
+    // The reset: nothing in memory, no quiet turn between.
+    drop(rebuilt);
+    let resumed = home::restore(&mut flash, address).expect("reboot");
+    assert_eq!(
+        resumed.how.word(),
+        "resumed",
+        "a reboot right after a rebuild boot rebuilt again"
+    );
+    assert_eq!(resumed.decoded, 0, "the resumed boot read no entry");
+    assert_eq!(resumed.model.conversations.len(), 300);
+    let bare = |lines: Vec<String>| -> Vec<String> {
+        lines.into_iter().map(|l| l.replace('▌', " ")).collect()
+    };
+    assert_eq!(
+        bare(list_text(&resumed.model)),
+        bare(before),
+        "the same list"
+    );
+}
+
 /// 1476, the fold decides what is stored: a message for this board and
 /// one it sent are kept, a message for another address, a delivery state
 /// and an imported entry are not; the page's end still moves the store's

@@ -296,7 +296,7 @@ impl Handheld {
                 );
                 (m9home::model(address), None)
             }
-            Some(mut dev) => match m9home::restore_shown(
+            Some(mut dev) => match m9home::restore_chunked(
                 &mut dev,
                 address,
                 &|| {
@@ -304,6 +304,18 @@ impl Handheld {
                     crate::uptime_us()
                 },
                 ARRIVALS,
+                // A rebuild's progress (1603): window 22's reopen folded
+                // for twelve silent seconds before its panic.
+                &mut |entries| {
+                    log.line(
+                        "[STORE] ",
+                        format_args!(
+                            "rebuild chunk={} entries={entries} ms={}",
+                            entries / m9home::REBUILD_CHUNK,
+                            crate::uptime_ms().saturating_sub(t0)
+                        ),
+                    )
+                },
             ) {
                 Ok(boot) => {
                     let (model, store, restored, pending) =
@@ -329,6 +341,21 @@ impl Handheld {
                     // `LINE_MAX` and lost its tail).
                     for line in boot.spent.lines(boot.how, boot.decoded) {
                         log.text("[STORE] ", &line);
+                    }
+                    // The summary a rebuild wrote before it returned
+                    // (1603): the next boot resumes.
+                    if boot.settle_calls > 0 {
+                        log.line(
+                            "[STORE] ",
+                            format_args!(
+                                "summary settled records={} writes={} erased={} calls={} left={}",
+                                boot.settled.entries,
+                                boot.settled.writes,
+                                boot.settled.erased,
+                                boot.settle_calls,
+                                u8::from(store.owes())
+                            ),
+                        );
                     }
                     match boot.how {
                         How::Resumed { records, tail } => log.line(
