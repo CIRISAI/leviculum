@@ -87,6 +87,31 @@ pub const KB_ADDR_V10: u8 = 0x6C;
 pub const KB_I2C_KHZ: u32 = 100;
 
 // ---------------------------------------------------------------------
+// GNSS (`thinknode-m9.md`, "GNSS": an Airoha AG3352, 1477)
+// ---------------------------------------------------------------------
+
+/// UART1 TX, board to receiver. The two public variants name the pins in
+/// opposite directions; these are the community port's, whose probe build
+/// got `$PAIR021,AG3352` back on our unit (2026-10-26).
+pub type GnssTx<'d> = peripherals::GPIO3<'d>;
+/// UART1 RX, receiver to board.
+pub type GnssRx<'d> = peripherals::GPIO2<'d>;
+/// The receiver's power enable: active low on V1.0, active high on V1.1
+/// (Meshtastic's `variant.cpp`, the keyboard controller's address tells
+/// the revision, [`gnss_enable_active_high`]).
+pub type GnssEnable<'d> = peripherals::GPIO11<'d>;
+/// The AG3352's wake line, held high as the Meshtastic variant and the
+/// community port hold it (the page keeps open whether it is an input).
+pub type GnssWake<'d> = peripherals::GPIO10<'d>;
+
+/// Whether the GNSS enable is active high: on V1.1, whose keyboard
+/// controller answers at [`KB_ADDR_V11`]; V1.0's at [`KB_ADDR_V10`] is
+/// active low. A board where neither answered is taken as our V1.1.
+pub fn gnss_enable_active_high(kb_address: u8) -> bool {
+    kb_address != KB_ADDR_V10
+}
+
+// ---------------------------------------------------------------------
 // The host link (`thinknode-m9.md`, "USB and the rest": a CH340K on
 // UART0)
 // ---------------------------------------------------------------------

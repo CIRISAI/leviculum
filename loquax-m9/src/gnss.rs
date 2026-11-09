@@ -21,7 +21,8 @@
 
 use alloc::string::String;
 
-use leviculum_lxmf::telemetry::Location;
+/// The fix as the model takes it, for a caller without the LXMF crate.
+pub use leviculum_lxmf::telemetry::Location;
 
 /// How many bytes an NMEA sentence has at most: 82 by the standard; the
 /// AG3352's proprietary answers are shorter.

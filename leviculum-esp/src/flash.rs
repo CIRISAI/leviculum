@@ -55,6 +55,8 @@ fn parked<R>(f: impl FnOnce() -> R) -> R {
     // receive interrupt waits for its end, an erase up to 57 ms against
     // the FIFO's 11 ms, so the FIFO goes into it empty.
     crate::drain_rx_fifo();
+    // The GNSS receiver's too (1477).
+    crate::gnss_uart::drain();
     crate::mspi::flash(|| {
         stall::locked(Core::Io, Lock::Flash, || {
             let t0 = crate::uptime_us();

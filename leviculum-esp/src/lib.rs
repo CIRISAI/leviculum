@@ -38,6 +38,7 @@ extern crate alloc;
 
 pub mod boards;
 pub mod flash;
+pub mod gnss_uart;
 pub mod handheld;
 pub mod idle;
 pub mod mspi;

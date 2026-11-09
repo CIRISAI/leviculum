@@ -1262,6 +1262,7 @@ dependencies = [
  "esp-storage",
  "esp-sync",
  "leviculum-core",
+ "leviculum-gnss-init",
  "leviculum-log-line",
  "leviculum-serial-mux",
  "leviculum-ui",
@@ -1270,6 +1271,10 @@ dependencies = [
  "rand_core 0.6.4",
  "rlsf",
 ]
+
+[[package]]
+name = "leviculum-gnss-init"
+version = "0.1.0"
 
 [[package]]
 name = "leviculum-log-line"

@@ -93,6 +93,9 @@ loquax = { path = "../loquax", default-features = false }
 # The key events the pairing screen reads (1415), the type the keyboard
 # driver hands out.
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The AG3352's boot init (1477): the T1000-E's `$PAIR` sequence behind
+# the M9's sleep lock, pure and host-tested beside the nRF firmware.
+leviculum-gnss-init = { path = "../leviculum-nrf/gnss-init" }
 
 # esp-bootloader-esp-idf is used only through `esp_app_desc!()`, which
 # expands to a static in a named link section; cargo-machete cannot see

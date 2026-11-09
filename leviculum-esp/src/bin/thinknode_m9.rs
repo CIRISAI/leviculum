@@ -257,6 +257,7 @@ use loquax_m9::field::Field;
 use loquax_m9::fixture::{self, Screen};
 use loquax_m9::font::Size;
 use loquax_m9::frame::{Frame, HEIGHT, WIDTH};
+use loquax_m9::gnss;
 use loquax_m9::home::Answer;
 use loquax_m9::house::{self, Did, Overview};
 use loquax_m9::kbraw::{self, Presses, Protocol, Read};
@@ -448,6 +449,10 @@ enum ToUi {
     Answer(Answer),
     /// The top bar's word moved.
     Word(Option<Word>),
+    /// The receiver made a fix (1477): the model's own.
+    Fix(loquax_m9::gnss::Location),
+    /// What the receiver says of the sky moved (1477): the map's corner.
+    Sky(loquax_m9::gnss::Sky),
     /// An error that is a state (1493), or its end.
     Fault(Option<StrId>),
     /// The pairing screen could not keep the code ([`CodeRefusal`]).
@@ -495,11 +500,148 @@ enum FromUi {
     Load([u8; 16]),
     /// The reader switched the type (1532): the client record keeps it.
     Type(Size),
+    /// Whether the receiver is wanted (1477): the map is open or a share
+    /// runs. Said when it changes.
+    Gnss(bool),
     /// The bench's arrival (1540, 1562): when it is written and whether
     /// the model lists "Bench" already, for the I/O core to keep and
     /// hand back.
     #[cfg(m9_bench)]
     BenchArrive(loquax_m9::bench::Arrival),
+}
+
+/// The AG3352 as core 0 drives it (1477): its enable line, the init on
+/// every power-up, the sentences into `loquax_m9::gnss`, and what changes
+/// told to the UI core. The rules are the host-tested ones
+/// (`loquax-m9/tests/gnss.rs`); this moves bytes and sets a pin.
+struct GnssRun {
+    enable: Output<'static>,
+    active_high: bool,
+    rx: gnss::Receiver,
+    duty: gnss::Duty,
+    lines: gnss::Lines,
+    init: Option<leviculum_gnss_init::AirohaInit>,
+    /// The receiver's sentences at power-up: the init's lock is a clean
+    /// sentence after it.
+    base: u32,
+    /// Sentences still echoed this power-up, as `[GNSS] nmea=` lines: the
+    /// bench window records the real ones.
+    echo: u8,
+    /// The UI core's wish.
+    wanted: bool,
+    /// The sky last told.
+    said: gnss::Sky,
+}
+
+/// Sentences echoed after each power-up.
+const GNSS_ECHO: u8 = 12;
+
+impl GnssRun {
+    /// The enable line's level for `on`.
+    fn level(&self, on: bool) -> Level {
+        match on == self.active_high {
+            true => Level::High,
+            false => Level::Low,
+        }
+    }
+
+    /// One turn of core 0's loop at `now`.
+    fn turn(&mut self, now: u64, log: &mut UartLog<'_>) {
+        let on = self.duty.on(self.wanted, &self.rx, now);
+        if on != self.rx.on() {
+            if !on {
+                // Backup mode before the cut (the AG3335 work's reading of
+                // the LC29H design, `airoha.rs` BACKUP_FRAME).
+                leviculum_esp::gnss_uart::write(&leviculum_gnss_init::airoha::BACKUP_FRAME);
+            }
+            self.enable.set_level(self.level(on));
+            self.rx.power(on, now);
+            self.init = on.then(leviculum_gnss_init::AirohaInit::ag3352);
+            self.base = self.rx.sentences;
+            self.echo = if on { GNSS_ECHO } else { 0 };
+            log.line(
+                "[GNSS] ",
+                format_args!(
+                    "power={} reason={} cadence_s={}",
+                    if on { "on" } else { "off" },
+                    match (on, self.wanted) {
+                        (true, true) => "map-or-share",
+                        (true, false) => "refresh",
+                        (false, _) => "done",
+                    },
+                    self.duty.cadence_ms() / 1000
+                ),
+            );
+        }
+        let mut buf = [0u8; 256];
+        let mut sends: Vec<leviculum_gnss_init::Output> = Vec::new();
+        loop {
+            let n = leviculum_esp::gnss_uart::take(&mut buf);
+            if n == 0 {
+                break;
+            }
+            let bytes = &buf[..n];
+            if !self.rx.on() {
+                continue;
+            }
+            if let Some(init) = self.init.as_mut() {
+                use leviculum_gnss_init::ModuleInit;
+                init.on_bytes(bytes, now, &mut |o| sends.push(o));
+            }
+            let (rx, echo) = (&mut self.rx, &mut self.echo);
+            self.lines.push(bytes, |line| {
+                if let Some(fix) = rx.line(line, now) {
+                    to_ui(ToUi::Fix(fix));
+                }
+                if *echo > 0 {
+                    *echo -= 1;
+                    if let Ok(text) = core::str::from_utf8(line) {
+                        log.line("[GNSS] ", format_args!("nmea={text}"));
+                    }
+                }
+            });
+        }
+        if let Some(init) = self.init.as_mut() {
+            use leviculum_gnss_init::ModuleInit;
+            let seen = self.rx.sentences.wrapping_sub(self.base);
+            init.poll(seen > 0, seen, now, &mut |o| sends.push(o));
+        }
+        for output in sends {
+            match output {
+                leviculum_gnss_init::Output::Send { step, frame } => {
+                    let sent = leviculum_esp::gnss_uart::write(frame);
+                    log.line(
+                        "[GNSS_INIT] ",
+                        format_args!("step={step} {}", if sent { "sent" } else { "tx-error" }),
+                    );
+                }
+                leviculum_gnss_init::Output::AckResult { step, outcome } => log.line(
+                    "[GNSS_INIT] ",
+                    format_args!("step={step} ack={}", outcome.as_str()),
+                ),
+            }
+        }
+        let sky = self.rx.sky(now);
+        if sky != self.said {
+            if core::mem::discriminant(&sky) != core::mem::discriminant(&self.said) {
+                self.say(now, log);
+            }
+            self.said = sky;
+            to_ui(ToUi::Sky(sky));
+        }
+    }
+
+    /// The `[GNSS]` line.
+    fn say(&self, now: u64, log: &mut UartLog<'_>) {
+        let (overruns, errors, lost) = leviculum_esp::gnss_uart::losses();
+        log.text(
+            "[GNSS] ",
+            &alloc::format!(
+                "{} overrun={overruns} rx_err={errors} keep_lost={lost}",
+                self.rx.line_words(now)
+            ),
+        );
+    }
 }
 
 static TO_UI: Mutex<RefCell<VecDeque<ToUi>>> = Mutex::new(RefCell::new(VecDeque::new()));
@@ -1616,6 +1758,52 @@ fn main() -> ! {
         );
     }
 
+    // The GNSS receiver (1477): powered off until the map or a share asks
+    // for it, its enable's polarity the revision's, which the keyboard
+    // controller's address told (V1.0 active low, V1.1 high).
+    let gnss_tx: m9::GnssTx = p.GPIO3;
+    let gnss_rx: m9::GnssRx = p.GPIO2;
+    let gnss_en: m9::GnssEnable = p.GPIO11;
+    let gnss_wake: m9::GnssWake = p.GPIO10;
+    let active_high = m9::gnss_enable_active_high(kb.address);
+    let _gnss_wake = Output::new(gnss_wake, Level::High, OutputConfig::default());
+    let mut gnss_run = GnssRun {
+        enable: Output::new(
+            gnss_en,
+            if active_high { Level::Low } else { Level::High },
+            OutputConfig::default(),
+        ),
+        active_high,
+        rx: gnss::Receiver::new(),
+        duty: gnss::Duty::new(),
+        lines: gnss::Lines::new(),
+        init: None,
+        base: 0,
+        echo: 0,
+        wanted: false,
+        said: gnss::Sky::Off,
+    };
+    let gnss_up = match Uart::new(p.UART1, leviculum_esp::gnss_uart::config()) {
+        Ok(uart) => {
+            leviculum_esp::gnss_uart::start(uart.with_tx(gnss_tx).with_rx(gnss_rx));
+            true
+        }
+        Err(e) => {
+            log.line("[GNSS] ", format_args!("state=down reason=uart err={e:?}"));
+            false
+        }
+    };
+    log.line(
+        "[GNSS] ",
+        format_args!(
+            "module=ag3352 uart=uart1 baud={} tx=gpio3 rx=gpio2 en=gpio11 en_active={} kb_addr={:#04x} state=off up={}",
+            leviculum_esp::gnss_uart::BAUD,
+            if active_high { "high" } else { "low" },
+            kb.address,
+            u8::from(gnss_up)
+        ),
+    );
+
     // The keyboard's poll from here on is the timer's (1463); the same
     // group's watchdog is core 0's loop's (1534), TG1's the UI core's.
     let group0 = TimerGroup::new(p.TIMG0);
@@ -1814,6 +2002,7 @@ fn main() -> ! {
             next_banner = now + BANNER_INTERVAL_MS;
             if now < BANNER_WINDOW_MS {
                 log.identify(m9::LOG_PREFIX, m9::BOARD_NAME, bytes);
+                gnss_run.say(now, &mut log);
                 #[cfg(m9_bench)]
                 log.line("[BENCH] ", format_args!("inject=on"));
             }
@@ -2042,6 +2231,9 @@ fn main() -> ! {
         stall::stage(Core::Io, Stage::Node);
         let t_node = uptime_ms();
         node.turn(uptime_ms(), &mut stores, &mut log);
+        if gnss_up {
+            gnss_run.turn(uptime_ms(), &mut log);
+        }
         turn.node = uptime_ms().saturating_sub(t_node);
         stall::stage(Core::Io, Stage::Take);
         let t_take = uptime_ms();
@@ -2163,6 +2355,7 @@ fn main() -> ! {
                     }
                     log.wait_dump_out(&mut || wdt.feed());
                 }
+                FromUi::Gnss(wanted) => gnss_run.wanted = wanted,
                 FromUi::Type(size) => {
                     // The reader's type into the client record (1532).
                     let kept = match node.keep_type(size.large(), &mut stores) {
@@ -2506,6 +2699,10 @@ fn ui_main(
     // The map's words by the clock (1531): the key hint after it opens
     // and after a key it does not know, the credit once a boot.
     let mut chrome = map::Chrome::default();
+    // What the receiver says of the sky (1477), and whether this core
+    // last said it wants the receiver.
+    let mut sky = gnss::Sky::Off;
+    let mut gnss_wanted = false;
 
     // From here the UI core's loop feeds its own watchdog (1534).
     let wdt = Watchdog::arm(wdt);
@@ -2699,6 +2896,13 @@ fn ui_main(
                     bench::arrive(&model, &mut log);
                     arriving = true;
                 }
+                ToUi::Fix(fix) => {
+                    let effects =
+                        loquax::ui::update(&mut model, loquax::ui::UiEvent::OwnFix(Some(fix)));
+                    route_out(&mut model, effects, &mut ids, &mut log, &mut wants, false);
+                    dirty |= map::shown(&model);
+                }
+                ToUi::Sky(said) => sky = said,
                 ToUi::Word(word) => {
                     if word != shown.word {
                         shown.word = word;
@@ -2889,7 +3093,13 @@ fn ui_main(
         // they change, none while they stand.
         let now = leviculum_esp::uptime_ms();
         chrome.seen(map::shown(&model), now);
-        let overlay = chrome.overlay(now, || !model.map_pins().is_empty());
+        let mut overlay = chrome.overlay(now, || !model.map_pins().is_empty());
+        overlay.sky = sky;
+        let wanted = map::shown(&model) || !model.shares.running.is_empty();
+        if wanted != gnss_wanted {
+            gnss_wanted = wanted;
+            log.send(FromUi::Gnss(wanted));
+        }
         if overlay != shown.map {
             shown.map = overlay;
             dirty = true;
