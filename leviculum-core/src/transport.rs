@@ -8055,6 +8055,31 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             let now = self.clock.now_ms();
             let link_id = Link::calculate_link_id(raw);
 
+            // +ciris (leviculum#104): a second copy of a request this node
+            // already forwards. The packet-hash dedup does not catch it when
+            // the copies differ only in their signalling bytes (a no-path
+            // request goes out once per interface, each copy signalling its
+            // own MTU), and forwarding it would overwrite the entry the
+            // first copy anchored and double the request on the next hop.
+            // A retry is never one of these: it carries fresh keys, hence a
+            // fresh link id (Codeberg #66).
+            if self.storage.has_link_entry(link_id.as_bytes()) {
+                crate::tracing::debug!(
+                    link = %HexShort(link_id.as_bytes()),
+                    iface = %self.iface_name(interface_index),
+                    "Link request already forwarded under this link id, dropping the copy"
+                );
+                Self::push_packet_drop(
+                    &mut self.events,
+                    &packet,
+                    interface_index,
+                    DropReason::Duplicate,
+                    Some(ph8(&truncated_hash)),
+                );
+                self.stats.record_drop(DropReason::Duplicate);
+                return Ok(());
+            }
+
             // Extract responder's Ed25519 signing key from cached announce
             // (Python Transport.py:2179-2191: peer_identity = Identity.recall(...))
             let peer_signing_key =

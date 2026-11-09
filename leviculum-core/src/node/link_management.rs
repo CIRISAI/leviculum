@@ -1238,7 +1238,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if let Some(link) = self.links.get(&link_id) {
             // Link-request retry scenario: if the link is still in PendingIncoming,
             // the original proof was likely lost. Re-send the cached proof.
-            if matches!(link.phase(), LinkPhase::PendingIncoming { .. }) {
+            // +ciris (leviculum#104): only for a repeat on the interface the
+            // link is attached to. A copy on another interface is a sibling
+            // of a no-path request sent once per interface
+            // (`Transport::send_link_request_on_all_interfaces`): the first
+            // copy made the link and was proved, and this one is not a
+            // retry, so it gets no second proof.
+            if matches!(link.phase(), LinkPhase::PendingIncoming { .. })
+                && link.attached_interface() == Some(interface_index)
+            {
                 if let Some(proof) = link.cached_proof() {
                     let proof = proof.to_vec();
                     if let Some(iface_idx) = link.attached_interface() {
