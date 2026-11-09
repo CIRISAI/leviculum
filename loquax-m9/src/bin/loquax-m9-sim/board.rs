@@ -507,6 +507,12 @@ impl Board {
                 }
                 // A quiet turn: the store erases ahead (`node.quiet`).
                 self.quiet();
+                // A summary backlog goes on a sector at a time in the
+                // board's quiet turns after (1591), a second apart; the
+                // sim writes it out here a sector a call, its clock
+                // left where the script has it (a clock moved on would
+                // run the reader's dwell).
+                self.drain_backlog();
                 return;
             }
         }
@@ -1116,13 +1122,43 @@ impl Board {
         }
     }
 
-    /// `Client::flush`: the summary log's records and state.
+    /// What the board's quiet turns would write of a summary backlog
+    /// (1591), a sector a call, until none is owed or a call wrote
+    /// nothing.
+    fn drain_backlog(&mut self) {
+        while self.shelf.as_ref().is_some_and(|s| s.owes()) {
+            let kept = self.log.kept.len();
+            self.flush();
+            if self.log.kept.len() == kept {
+                return;
+            }
+        }
+    }
+
+    /// `Client::flush`: the summary log's records and state, a sector a
+    /// call (1591).
     fn flush(&mut self) {
+        self.flush_with(None);
+    }
+
+    /// `Client::flush_with`: in a quiet turn (`Some` of the clock), a
+    /// backlog's next sector not before `home::BACKLOG_GAP_MS` later.
+    fn flush_with(&mut self, quiet: Option<u64>) {
         let Some(shelf) = self.shelf.as_mut() else {
             return;
         };
         let outgoing = &self.outgoing;
-        match shelf.flush(&mut self.flash.messages, || outgoing.pending()) {
+        let written = match quiet {
+            Some(now_ms) => {
+                shelf.quiet_flush(&mut self.flash.messages, || outgoing.pending(), now_ms)
+            }
+            None => shelf.flush_within(
+                &mut self.flash.messages,
+                || outgoing.pending(),
+                Some(loquax::home::board::rows::WRITE_BUDGET),
+            ),
+        };
+        match written {
             Ok(done) if done.writes > 0 => self.log.line(
                 "[STORE] ",
                 &format!(
@@ -1168,7 +1204,7 @@ impl Board {
 
     /// `Handheld::quiet`: the summary flushed, then one erase ahead.
     fn quiet(&mut self) {
-        self.flush();
+        self.flush_with(Some(uptime_ms()));
         let Some(shelf) = self.shelf.as_mut() else {
             return;
         };

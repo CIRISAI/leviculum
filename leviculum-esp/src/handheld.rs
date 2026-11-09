@@ -530,7 +530,9 @@ impl Handheld {
         let Some(client) = self.client.as_mut() else {
             return false;
         };
-        client.flush(stores, log);
+        // What the summary log owes, a sector a quiet turn, a backlog's
+        // next a second later (1591, `Shelf::quiet_flush`).
+        client.quiet_flush(stores, log);
         let (Some(store), Some(mut dev)) = (client.store.as_mut(), stores.messages()) else {
             return false;
         };
@@ -985,13 +987,33 @@ impl Handheld {
 
 impl Client {
     /// Write what the summary log is owed (1521): the rows the model
-    /// said, and the ring's state once every page kept has its rows.
+    /// said, and the ring's state once every page kept has its rows. A
+    /// sector a call (1591): what is left goes in the quiet turns
+    /// ([`Client::quiet_flush`]), the UI core unparked between.
     fn flush(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>) {
+        self.flush_with(stores, log, None);
+    }
+
+    /// [`Client::flush`] in a quiet turn: a backlog's next sector not
+    /// before `m9home::BACKLOG_GAP_MS` after the last.
+    fn quiet_flush(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>) {
+        self.flush_with(stores, log, Some(crate::uptime_ms()));
+    }
+
+    fn flush_with(&mut self, stores: &mut Stores<'_>, log: &mut UartLog<'_>, quiet: Option<u64>) {
         let (Some(store), Some(mut dev)) = (self.store.as_mut(), stores.messages()) else {
             return;
         };
         let outgoing = &self.outgoing;
-        match store.flush(&mut dev, || outgoing.pending()) {
+        let written = match quiet {
+            Some(now_ms) => store.quiet_flush(&mut dev, || outgoing.pending(), now_ms),
+            None => store.flush_within(
+                &mut dev,
+                || outgoing.pending(),
+                Some(loquax::home::board::rows::WRITE_BUDGET),
+            ),
+        };
+        match written {
             Ok(done) => {
                 if done.writes > 0 {
                     log.line(

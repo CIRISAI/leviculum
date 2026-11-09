@@ -1283,3 +1283,78 @@ fn walk_twenty(archive: &Archive, mut flash: MemFlash, now: Option<loquax::when:
         None => assert_eq!(newest, None),
     }
 }
+
+/// 1591, window 18: a write of every row to the summary log (the bench's
+/// `owe erase`, an eviction, a snapshot) was 644 records, 32 sector
+/// erases, in one turn of the I/O core, the UI core parked for 2.8 s of
+/// 5 and Enter unanswered. Bounded, it goes a few sectors a call; a boot
+/// between two calls still lists every row from the records before
+/// them, and the boot after the last lists the same. A snapshot begun
+/// goes the same way, its SNAP record with its last records.
+#[test]
+fn a_write_of_every_row_goes_a_few_sectors_a_call() {
+    use loquax::home::board::rows::WRITE_BUDGET;
+    let archive = Archive::new();
+    let mut flash = summarised(&archive);
+    let listed = |flash: &MemFlash| -> Vec<[u8; 16]> {
+        let boot = home::restore(&mut flash.clone(), archive.address).expect("boot");
+        assert!(
+            matches!(boot.how, home::How::Resumed { .. }),
+            "{:?}",
+            boot.how
+        );
+        boot.model
+            .order()
+            .into_iter()
+            .map(|i| boot.model.conversations[i].peer)
+            .collect()
+    };
+    let before = listed(&flash);
+    assert_eq!(before.len(), CONVERSATIONS);
+    let mut boot = home::restore(&mut flash, archive.address).expect("resume");
+
+    // Every row owed, as the bench's owe fires it.
+    boot.shelf.index.owe_all();
+    boot.shelf.dirty = true;
+    let mut calls = 0;
+    let mut records = 0;
+    while boot.shelf.index.owes() || boot.shelf.dirty {
+        let done = boot
+            .shelf
+            .flush_within(&mut flash, Vec::new, Some(WRITE_BUDGET))
+            .expect("flush");
+        assert!(
+            done.erased <= 3,
+            "call {calls} erased {} sectors",
+            done.erased
+        );
+        records += done.entries;
+        calls += 1;
+        if calls == 1 {
+            assert_eq!(listed(&flash), before, "a boot after the first call");
+        }
+        assert!(calls < 200, "the owed records never ran out");
+    }
+    assert!(calls > 4, "{records} records in {calls} calls: not split");
+    assert_eq!(listed(&flash), before, "the boot after the last call");
+
+    // A snapshot begun is written the same way.
+    let log = boot.shelf.log.as_mut().expect("a summary log");
+    log.begin_snapshot(&mut boot.shelf.index);
+    let mut calls = 0;
+    while boot.shelf.log.as_ref().expect("log").snapping() {
+        let done = boot
+            .shelf
+            .flush_within(&mut flash, Vec::new, Some(WRITE_BUDGET))
+            .expect("flush");
+        assert!(
+            done.erased <= 3,
+            "snapshot call {calls} erased {}",
+            done.erased
+        );
+        calls += 1;
+        assert!(calls < 200, "the snapshot never ended");
+    }
+    assert!(calls > 4, "the snapshot in {calls} calls: not split");
+    assert_eq!(listed(&flash), before, "the boot after the snapshot");
+}

@@ -467,6 +467,39 @@ impl Index {
         !self.owed.is_empty() || !self.names_owed.is_empty()
     }
 
+    /// The records owed the log, at most about `budget` bytes of them
+    /// (at least one), the names first; those taken leave the owed sets
+    /// (1591: a write of every row at once was 32 sector erases in one
+    /// turn of the I/O core, and the UI core parked for 2.8 s of 5).
+    /// `None` takes all of them.
+    fn owed_records_within(&mut self, budget: Option<usize>) -> Vec<Entry> {
+        let Some(budget) = budget else {
+            return self.owed_records();
+        };
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        while bytes < budget {
+            if let Some(peer) = self.names_owed.pop_first() {
+                if let Some(name) = self.names.get(&peer) {
+                    let record = name_record(&peer, name);
+                    bytes += record.packed.len();
+                    out.push(record);
+                }
+                continue;
+            }
+            let Some(peer) = self.owed.pop_first() else {
+                break;
+            };
+            let record = match self.kept.get(&peer) {
+                Some(kept) => row_record(&peer, kept),
+                None => record(GONE, 0, peer.to_vec()),
+            };
+            bytes += record.packed.len();
+            out.push(record);
+        }
+        out
+    }
+
     /// The records owed the log, the owed set emptied.
     fn owed_records(&mut self) -> Vec<Entry> {
         let mut out = Vec::new();
@@ -766,7 +799,17 @@ pub struct RowLog {
     snap: Option<u32>,
     /// The newest STATE written: what a snapshot carries again.
     state: Option<State>,
+    /// A snapshot written a budget at a time (1591): the sector it began
+    /// in. Its records go as owed records ([`Index::owe_all`]); its SNAP
+    /// record goes last, once none is owed, so a log replayed before then
+    /// still counts from the last whole snapshot.
+    snapping: Option<u32>,
 }
+
+/// About how many bytes of records one bounded write of the summary log
+/// takes ([`RowLog::write_within`], 1591): a sector, two erases at most
+/// where it crosses into the next, about 90 ms of the UI core parked.
+pub const WRITE_BUDGET: usize = super::store::SECTOR;
 
 /// What the summary log held at boot.
 #[derive(Debug, Default)]
@@ -810,7 +853,15 @@ impl RowLog {
             }
         })?;
         let state = replayed.state.clone();
-        Ok((Self { store, snap, state }, replayed))
+        Ok((
+            Self {
+                store,
+                snap,
+                state,
+                snapping: None,
+            },
+            replayed,
+        ))
     }
 
     /// Write what `index` owes, and `state` when given, in one write per
@@ -821,24 +872,72 @@ impl RowLog {
         index: &mut Index,
         state: Option<&State>,
     ) -> Result<Appended, S::Error> {
+        self.write_within(dev, index, state, None)
+    }
+
+    /// [`RowLog::write`] of at most about `budget` bytes of the owed
+    /// records (1591, [`WRITE_BUDGET`]); the rest stay owed for the next
+    /// write. `state` is written only with the last of them: a state
+    /// says the rows are the ring's up to its end. A snapshot begun
+    /// ([`RowLog::begin_snapshot`]) ends with the write that takes its
+    /// last record. `None` writes all of them.
+    pub fn write_within<S: Sectors>(
+        &mut self,
+        dev: &mut S,
+        index: &mut Index,
+        state: Option<&State>,
+        budget: Option<usize>,
+    ) -> Result<Appended, S::Error> {
         if let Some(state) = state {
             self.state = Some(state.clone());
         }
         // Three quarters of the log since the last snapshot and none
         // made in a quiet moment: this write is one, before the ring
-        // comes round to it.
-        if self.since_snapshot() >= self.store.sectors() * 3 / 4 {
+        // comes round to it, whole.
+        let late = self.since_snapshot() >= self.store.sectors() * 3 / 4;
+        if late && self.snapping.is_none() {
             return self.snapshot(dev, index);
         }
-        let mut records = index.owed_records();
-        if let Some(state) = state {
-            records.push(record(STATE, 0, state.encode()));
+        let budget = if late { None } else { budget };
+        let mut records = index.owed_records_within(budget);
+        let done = !index.owes();
+        let snapped = match done {
+            true => self.snapping.take(),
+            false => None,
+        };
+        if let Some(at) = snapped {
+            records.push(record(SNAP, u64::from(at), Vec::new()));
+        }
+        if done {
+            if let Some(state) = state {
+                records.push(record(STATE, 0, state.encode()));
+            }
         }
         if records.is_empty() {
             return Ok(Appended::default());
         }
         let cursor = self.store.cursor();
-        self.store.append(dev, &records, cursor)
+        let appended = self.store.append(dev, &records, cursor)?;
+        if let Some(at) = snapped {
+            self.snap = Some(at);
+        }
+        Ok(appended)
+    }
+
+    /// Begin a snapshot written a budget at a time (1591): every live
+    /// record owed again, written by the next bounded writes, the SNAP
+    /// record with the last of them. Nothing is written here.
+    pub fn begin_snapshot(&mut self, index: &mut Index) {
+        if self.snapping.is_some() {
+            return;
+        }
+        self.snapping = Some(self.store.end().0.max(1));
+        index.owe_all();
+    }
+
+    /// A snapshot begun is still being written.
+    pub fn snapping(&self) -> bool {
+        self.snapping.is_some()
     }
 
     /// The log's sectors opened since the newest snapshot began.
@@ -865,6 +964,7 @@ impl RowLog {
     ) -> Result<Appended, S::Error> {
         index.owed.clear();
         index.names_owed.clear();
+        self.snapping = None;
         // The snapshot's own sector: the one the log ends in, or the next
         // when it ends full; it is said by the record's sequence.
         let at = self.store.end().0.max(1);
