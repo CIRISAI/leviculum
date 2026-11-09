@@ -703,6 +703,65 @@ pub fn punch_frame_kind(data: &[u8]) -> Option<PunchKind> {
     }
 }
 
+/// +ciris (leviculum#104): the magic of a path-MTU probe.
+const MTU_PROBE_MAGIC: &[u8; 4] = b"RNSM";
+
+/// +ciris (leviculum#104): the probe sizes, largest first. Each is the size
+/// of the UDP payload, which is what a Reticulum packet at that MTU fills:
+/// `DIRECT_LINK_MTU`, then the IPv6 minimum link MTU. A path that carries
+/// neither (a tunnel, an APN or 464XLAT clamping below it) signals no MTU,
+/// so links over it hold the base 500.
+pub const MTU_PROBE_STEPS: [u32; 2] = [super::DIRECT_LINK_MTU, 1280];
+
+/// The high half of the sequence number a probe carries, and its ack echoes.
+const MTU_PROBE_SEQ_TAG: u32 = 0xFFFE_0000;
+
+/// +ciris (leviculum#104): a path-MTU probe of `size` bytes for this
+/// session: a punch frame with its own magic, the probe's size in its
+/// sequence number, zero-padded to `size`. The peer answers with an ordinary
+/// [`PunchKind::Ack`] echoing that sequence number. A peer that predates
+/// probes does not recognise the frame (its length is not
+/// [`PUNCH_FRAME_LEN`]) and never acks, which reads as "too large".
+pub fn mtu_probe_frame(session: &SessionId, token: &[u8; 32], size: u32) -> alloc::vec::Vec<u8> {
+    let size = (size as usize).max(PUNCH_FRAME_LEN);
+    let mut out = alloc::vec![0u8; size];
+    out[..4].copy_from_slice(MTU_PROBE_MAGIC);
+    out[4..20].copy_from_slice(session);
+    out[20..52].copy_from_slice(token);
+    out[52..56].copy_from_slice(&mtu_probe_seq(size as u32).to_be_bytes());
+    out
+}
+
+/// The sequence number a probe of `size` bytes carries.
+pub const fn mtu_probe_seq(size: u32) -> u32 {
+    MTU_PROBE_SEQ_TAG | (size & 0xFFFF)
+}
+
+/// Whether `data` is probe-shaped, whatever session it claims. A direct
+/// interface never hands one to transport.
+pub fn is_mtu_probe(data: &[u8]) -> bool {
+    data.len() >= PUNCH_FRAME_LEN && &data[..4] == MTU_PROBE_MAGIC
+}
+
+/// The sequence number to ack for a probe that belongs to this session and
+/// arrived whole: its length matches the size it names.
+pub fn parse_mtu_probe(data: &[u8], session: &SessionId, token: &[u8; 32]) -> Option<u32> {
+    if !is_mtu_probe(data) || &data[4..20] != session || &data[20..52] != token {
+        return None;
+    }
+    let seq = u32::from_be_bytes([data[52], data[53], data[54], data[55]]);
+    (seq == mtu_probe_seq(data.len() as u32)).then_some(seq)
+}
+
+/// The probe size an ack's sequence number confirms, if it is a probe ack.
+pub const fn mtu_probe_acked_size(seq: u32) -> Option<u32> {
+    if seq & 0xFFFF_0000 == MTU_PROBE_SEQ_TAG {
+        Some(seq & 0xFFFF)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -966,5 +1025,35 @@ mod tests {
         assert_eq!(punch_frame_kind(&frame[..55]), None);
         let keepalive = punch_frame(PunchKind::Punch, &SESSION, &token, KEEPALIVE_SEQ);
         assert_eq!(&keepalive[..4], b"RNSH");
+    }
+
+    #[test]
+    fn an_mtu_probe_is_its_size_and_is_acked_by_size() {
+        let token = [7u8; 32];
+        let frame = mtu_probe_frame(&SESSION, &token, 1280);
+        assert_eq!(frame.len(), 1280);
+        assert!(is_mtu_probe(&frame));
+        assert_eq!(
+            punch_frame_kind(&frame),
+            None,
+            "never a punch to an old peer"
+        );
+        let seq = parse_mtu_probe(&frame, &SESSION, &token).expect("ours");
+        assert_eq!(mtu_probe_acked_size(seq), Some(1280));
+        assert_eq!(
+            parse_mtu_probe(&frame, &SESSION, &[8u8; 32]),
+            None,
+            "wrong token"
+        );
+        assert_eq!(
+            parse_mtu_probe(&frame[..1000], &SESSION, &token),
+            None,
+            "truncated"
+        );
+        assert_eq!(
+            mtu_probe_acked_size(5),
+            None,
+            "a keepalive ack is not a probe ack"
+        );
     }
 }

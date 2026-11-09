@@ -1957,3 +1957,68 @@ async fn test_mtu_d2_udp_relay_tcp() {
     node_b.stop().await.ok();
     relay.stop().await.ok();
 }
+
+/// E1 (+ciris, leviculum#104): a link request with no path reaches a Python
+/// responder on two media as ONE request, not two.
+///
+/// Rust (TCP + UDP) → Python daemon (TCP + UDP), destination never
+/// announced, so the request has no path and goes out on both interfaces.
+/// Python's dedup keys on the full packet hash, signalling bytes included
+/// (`Transport.py:1376`), and `Destination.incoming_link_request` never looks
+/// the link id up (`Destination.py:420-424`): two copies that differ in
+/// their signalling would leave two Link objects under one id, with two
+/// proofs from two keys. The request is one broadcast with the same bytes on
+/// every shared medium, so Python keeps exactly one.
+#[tokio::test]
+async fn test_mtu_e1_no_path_request_is_one_link_on_python() {
+    use crate::common::{extract_signing_key, parse_dest_hash, wait_for_link_established};
+    use leviculum_std::driver::ReticulumNodeBuilder;
+
+    let daemon = TestDaemon::start_with_udp()
+        .await
+        .expect("Failed to start daemon with UDP");
+    let py_listen = daemon.udp_listen_addr().expect("UDP listen addr");
+    let rust_listen = daemon.udp_forward_addr().expect("UDP forward addr");
+
+    let _storage = crate::common::temp_storage("test_mtu_e1_no_path_two_media", "node");
+    let mut node = ReticulumNodeBuilder::new()
+        .add_tcp_client(daemon.rns_addr())
+        // port-handoff: the harness drew this UDP pair for the Python daemon.
+        .add_udp_interface(rust_listen, py_listen)
+        .storage_path(_storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("Failed to build node");
+    node.start().await.expect("Failed to start node");
+    let mut events = node.take_event_receiver().expect("event receiver");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Registered, never announced: Rust has its key out of band and no path.
+    let dest_info = daemon
+        .register_destination("mtu_e1", &["test"])
+        .await
+        .expect("Failed to register destination");
+    let dest_hash = parse_dest_hash(&dest_info.hash);
+    assert!(!node.has_path(&dest_hash), "never announced");
+
+    let signing_key = extract_signing_key(&dest_info.public_key);
+    let handle = node
+        .connect(&dest_hash, &signing_key)
+        .await
+        .expect("Failed to connect");
+    let link_id = *handle.link_id();
+    assert!(
+        wait_for_link_established(&mut events, &link_id, Duration::from_secs(10)).await,
+        "the link comes up over one of the two media"
+    );
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let count = daemon
+        .get_destination_link_count(&dest_info.hash)
+        .await
+        .expect("link count");
+    println!("E1: Python destination holds {count} link(s)");
+    assert_eq!(count, 1, "one request, one Link on the Python side");
+
+    node.stop().await.ok();
+}

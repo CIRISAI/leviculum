@@ -5880,7 +5880,7 @@ async fn run_event_loop(
                             .lock_recover()
                             .direct_link_probed_with_local(&session, public, local),
                     ),
-                    Outcome::Punched { session, peer: Some(peer), early } => {
+                    Outcome::Punched { session, peer: Some(peer), early, mtu } => {
                         let id = InterfaceId(
                             autoconnect_wiring
                                 .next_id
@@ -5888,7 +5888,7 @@ async fn run_event_loop(
                         );
                         // try_send: this loop is the channel's only reader,
                         // so waiting on a full channel would never end.
-                        match direct_links.interface_for(session, peer, early, id) {
+                        match direct_links.interface_for(session, peer, early, mtu, id) {
                             Some(handle) => match autoconnect_wiring.new_iface_tx.try_send(handle) {
                                 Ok(()) => None,
                                 Err(_) => {

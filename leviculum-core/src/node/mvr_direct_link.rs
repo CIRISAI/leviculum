@@ -2323,3 +2323,79 @@ fn a_held_move_keeps_the_link_busy() {
         DirectLinkError::AlreadyUpgrading
     );
 }
+
+/// leviculum#104: after an upgrade, a link to a destination the peer never
+/// announced (a derived one-hop address) goes out as one broadcast at the
+/// base MTU on the shared media plus one copy at 1400 on the direct
+/// interface, which the broadcast leaves out. The peer answers the direct
+/// copy and both ends run at 1400, a plain UDP interface on the dialler
+/// notwithstanding.
+#[test]
+fn a_derived_link_after_an_upgrade_runs_at_the_direct_mtu() {
+    use crate::direct_link::DIRECT_LINK_MTU;
+    let mut pair = Pair::new();
+    let (session, _) = to_punch(&mut pair);
+    let a_udp = add_iface(&mut pair.a, "A_udp");
+    let a_direct = add_iface(&mut pair.a, "A_direct");
+    let b_direct = add_iface(&mut pair.b, "B_direct");
+    // What the std driver registers for a DirectPeer interface.
+    pair.a.set_interface_hw_mtu(a_direct, DIRECT_LINK_MTU);
+    pair.b.set_interface_hw_mtu(b_direct, DIRECT_LINK_MTU);
+    punch_both(&mut pair, &session, a_direct, b_direct);
+    assert_eq!(pair.a.direct_link_interface(&pair.link), Some(a_direct));
+
+    // B's derived destination, never announced.
+    let identity = Identity::generate(&mut OsRng);
+    let key = identity.ed25519_verifying().to_bytes();
+    let mut derived = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrapp",
+        &["derived"],
+    )
+    .unwrap();
+    derived.set_accepts_links(true);
+    let derived_hash = *derived.hash();
+    pair.b.register_destination(derived);
+
+    let (link, routed, out) = pair.a.connect(derived_hash, &key).unwrap();
+    assert!(!routed);
+    let mut broadcasts = Vec::new();
+    let mut on_direct = Vec::new();
+    for action in &out.actions {
+        match action {
+            Action::Broadcast {
+                data,
+                exclude_ifaces,
+                ..
+            } => broadcasts.push((data.clone(), exclude_ifaces.clone())),
+            Action::SendPacket { iface, data, .. } => {
+                assert_eq!(iface.0, a_direct, "only the direct interface gets a copy");
+                on_direct.push(data.clone());
+            }
+        }
+    }
+    let mtu = |p: &[u8]| {
+        let tail: [u8; 3] = p[p.len() - 3..].try_into().unwrap();
+        crate::link::decode_signaling_bytes(&tail).0
+    };
+    assert_eq!(broadcasts.len(), 1, "one broadcast, as before");
+    assert_eq!(mtu(&broadcasts[0].0), crate::constants::MTU as u32);
+    assert_eq!(broadcasts[0].1, std::vec![InterfaceId(a_direct)]);
+    assert_eq!(on_direct.len(), 1);
+    assert_eq!(mtu(&on_direct[0]), DIRECT_LINK_MTU);
+    let _ = a_udp;
+
+    let (proof, _) = deliver(&mut pair.b, b_direct, on_direct);
+    let (rtt, _) = deliver(&mut pair.a, a_direct, proof);
+    let _ = deliver(&mut pair.b, b_direct, rtt);
+    assert_eq!(
+        pair.a.link(&link).unwrap().negotiated_mtu(),
+        DIRECT_LINK_MTU
+    );
+    assert_eq!(
+        pair.b.link(&link).unwrap().negotiated_mtu(),
+        DIRECT_LINK_MTU
+    );
+}
