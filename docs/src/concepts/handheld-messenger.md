@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:1077`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:1081`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1178,7 +1178,7 @@ its cells when the screen leaves the map (`leave_map`,
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:6400`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:6414`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1357,14 +1357,14 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1100`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1146`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
 1.2 keeps `SwFlowControl` in its config and never programs it. Instead
 an interrupt empties the 128-byte receive FIFO into 8 KiB of memory
 whenever it holds more than 64 bytes (`uart0_rx`,
-`leviculum-esp/src/lib.rs:799`, since 1440), so a frame that arrives
+`leviculum-esp/src/lib.rs:821`, since 1440), so a frame that arrives
 during a 5.7 s dump or while the loop checks an announce is read
 afterwards and not lost. Until 1440 the FIFO was emptied only when the
 loop wrote or read the line; a turn longer than the FIFO's 11 ms let it
@@ -1931,7 +1931,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2625`).
+both (`thinknode_m9.rs:2643`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -1963,14 +1963,14 @@ say on the board.
 message's id where the fold already unpacks it (`home::keep`, the
 rebuilt boot, and the page read itself, so the board's own read mark
 after a resumed boot has a home too, `Index::learn_event`,
-`loquax/src/home/board/rows.rs:365`). A mark naming a known message
+`loquax/src/home/board/rows.rs:375`). A mark naming a known message
 adds its sector to that conversation's sectors, which the summary log's
 ROW record already carries; one naming a message the index never saw
 stays in the ring-wide marks (`Index::take_mark`,
-`loquax/src/home/board/rows.rs:390`). A page reads the marks of its own
+`loquax/src/home/board/rows.rs:400`). A page reads the marks of its own
 sectors and of the unplaced ones from its oldest sector on, and hands on
 only those naming one of its messages (`Index::page`,
-`loquax/src/home/board/rows.rs:564`). The STATE record ends with a byte
+`loquax/src/home/board/rows.rs:596`). The STATE record ends with a byte
 saying the marks are filed this way (`State::placed`,
 `loquax/src/home/board/rows.rs:174`); a state an older image wrote has
 none, and that boot folds the ring once (`[STORE] restore=rebuilt`,
@@ -1979,7 +1979,7 @@ read: those of messages pulled before a resumed boot and not opened
 since.
 
 `a_chat_opens_with_its_own_marks_only`
-(`loquax-m9/tests/restore_counts.rs:1058`) keeps the archive with 1800
+(`loquax-m9/tests/restore_counts.rs:1100`) keeps the archive with 1800
 read marks of another chat and a deleted mark of the small chat's: after
 a resumed boot the small chat's page is its 5 messages and the one mark
 from 8 sectors, its deleted message stays deleted, and the bubbles are
@@ -2002,7 +2002,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2637`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2655`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2035,7 +2035,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:983`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:987`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2043,13 +2043,13 @@ for everything before its end. `Store::open_after`
 (`loquax/src/home/board/store.rs:252`) reads only the frames after it,
 and the boot folds them into the model and the index as the live pull
 folded them, then writes the summary at the ring's end
-(`resume_tail`, `loquax-m9/src/home.rs:801`); `[STORE] index=summaries`
+(`resume_tail`, `loquax-m9/src/home.rs:790`); `[STORE] index=summaries`
 says `tail=<n>`. A state whose sector went round the ring, or an end the
 log does not reach, still rebuilds. On the host the fixture's 4000
 entries with a 360-entry tail resume in 22 ms decoding the 360, against
 4360 for the whole fold, and list what the whole fold lists
 (`a_reset_mid_pull_resumes_from_the_summary`,
-`loquax-m9/tests/restore_counts.rs:548`).
+`loquax-m9/tests/restore_counts.rs:586`).
 
 That test found a model bug on the way: a chat listed from its kept row
 counted only its loaded messages once a live one came in, 96 of 776
@@ -2109,7 +2109,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2698`), and the fold runs behind the list
+(`thinknode_m9.rs:2716`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2173,13 +2173,13 @@ equal them. The arrival goes into one conversation the list calls
 - **A release image** restores with `Arrivals::Dropped`. The rebuild
   and the resumed tail skip the bench's entries, and a summary's
   "Bench" row and name are not listed (`listed`,
-  `loquax-m9/src/home.rs:929`). A release image never shows "Bench".
+  `loquax-m9/src/home.rs:918`). A release image never shows "Bench".
 - **Read marks.** The board leaves the bench's message ids out of the
   marks it sends its home (`route`). It keeps the read on the board
   itself.
 - **`bench forget`** (`TYPE_BENCH_FORGET` 0x1D, bench image only)
   takes the following out of the ring (`home::forget`,
-  `loquax-m9/src/home.rs:1068`, over `Store::forget`,
+  `loquax-m9/src/home.rs:1057`, over `Store::forget`,
   `loquax/src/home/board/store.rs:286`):
   - the flagged entries;
   - 1540's unflagged entries, which have a zero signature and text
