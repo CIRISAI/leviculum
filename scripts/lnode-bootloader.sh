@@ -217,7 +217,7 @@ cmd_update_rak() {
     if [ -z "$target" ] || [ "$target" = unknown ]; then
         die "the image names no bootloader version"
     fi
-    if printf '%s\n' "$plan" | grep -q '^BL_PLAN store_pages_lost=.'; then
+    if grep -q '^BL_PLAN store_pages_lost=.' <<<"$plan"; then
         if [ "${LEVICULUM_BL_ACCEPT_STORE_LOSS:-0}" != 1 ]; then
             say ">>> the staging overwrites the record-log pages above; records on them are lost."
             local answer=""
