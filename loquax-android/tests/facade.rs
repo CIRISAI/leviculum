@@ -834,6 +834,116 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     node.kill().await;
 }
 
+/// 1614: a rename the reader takes back just before the app stops reaches
+/// the home all the same, and the next start does not bring the old name
+/// back. The forge gate on 0a67952c saw "Mum ·5a5a ≈" on the second start
+/// of `a_phone_joins_sends_pulls_and_comes_back`: the clear was handed to
+/// the home on a task the stop dropped, and the second start's pull took
+/// the home's "Mum" again. Here the stop follows the clear at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_taken_back_before_the_stop_stays_taken_back() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    ugly(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_dir = home.path().to_path_buf();
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let peer = loquax::address::to_hex(&[0x5a; 16]);
+    let peer_again = peer.clone();
+    let home_petnames = move |address: [u8; 16]| -> Vec<([u8; 16], Option<String>)> {
+        let store = loquax::store::Store::open_read_only(
+            &home_dir.join(loquax::store::STORE_FILE),
+            address,
+        )
+        .expect("the home store")
+        .expect("there");
+        store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .iter()
+            .filter(|e| e.kind == loquax::home::KIND_PETNAME)
+            .map(|e| loquax::home::wire::read_petname_entry(&e.packed).expect("petname"))
+            .filter(|(peer, _)| *peer == [0x5a; 16])
+            .collect()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let address = session.address();
+        session
+            .request(Request::Rename {
+                peer: peer.clone(),
+                name: "Mum".to_string(),
+            })
+            .expect("rename");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while home_petnames(address).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no petname reached home"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+        session
+            .request(Request::Rename {
+                peer: peer.clone(),
+                name: String::new(),
+            })
+            .expect("clear");
+        session.stop();
+        // The clear reached the home before the stop let go of the node.
+        assert_eq!(home_petnames(address), [([0x5a; 16], None)]);
+    })
+    .await
+    .expect("the first session");
+
+    let again = Start {
+        dir,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("the pull failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
+            }
+        }
+        let messages: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: peer_again.clone(),
+                })
+                .expect("query"),
+        )
+        .expect("decode");
+        assert_eq!(messages.name, format!("<{}…>", &peer_again[..8]));
+        assert_eq!(messages.petname, None);
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+
+    node.kill().await;
+}
+
 /// The wake on the phone (1123): a joined session, its open pull done,
 /// then a loquax messenger on the home node's instance sends to the home
 /// address. The session pulls on the home node's wake, with no `pull`

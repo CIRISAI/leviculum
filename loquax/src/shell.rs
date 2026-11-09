@@ -225,6 +225,10 @@ pub(crate) struct Shell {
     fetch_task: Option<(tokio::task::JoinHandle<()>, &'static str)>,
     /// The tasks handing marks to the home node, waited for before leaving.
     mark_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// The petnames and peer states on their way to the home node, in the
+    /// order they were set (1614), waited for before leaving; opened with
+    /// the first of them.
+    hand_offs: Option<runner::HandOffs>,
     /// The mailbox's syncs that failed before a link, and the nodes they
     /// excluded.
     unanswered: Unanswered,
@@ -672,38 +676,35 @@ impl Shell {
         }
     }
 
-    /// The petnames the reader set, handed to the home node in order on a
-    /// task of their own, as marks are (1139).
+    /// The petnames the reader set, handed to the home node in order on
+    /// the lane of [`runner::HandOffs`] (1139, 1614).
     fn hand_petnames(&mut self) {
         let petnames = self.model.take_petnames();
-        let Some(client) = self.context.client.clone() else {
-            return;
-        };
-        if petnames.is_empty() {
-            return;
+        if !petnames.is_empty() {
+            self.hand_off(runner::HandOff::Petnames(petnames));
         }
-        self.mark_tasks.retain(|task| !task.is_finished());
-        let budget = self.context.timeout;
-        self.mark_tasks.push(tokio::spawn(runner::hand_petnames(
-            client, petnames, budget,
-        )));
     }
 
     /// The peer states the reader set (1146), handed to the home node as
     /// petnames are.
     fn hand_peer_states(&mut self) {
         let states = self.model.take_peer_states();
+        if !states.is_empty() {
+            self.hand_off(runner::HandOff::PeerStates(states));
+        }
+    }
+
+    /// Queue `off` on the lane to the home node, opened on the first.
+    fn hand_off(&mut self, off: runner::HandOff) {
         let Some(client) = self.context.client.clone() else {
             return;
         };
-        if states.is_empty() {
-            return;
-        }
-        self.mark_tasks.retain(|task| !task.is_finished());
         let budget = self.context.timeout;
-        self.mark_tasks.push(tokio::spawn(runner::hand_peer_states(
-            client, states, budget,
-        )));
+        self.hand_offs
+            .get_or_insert_with(|| {
+                runner::HandOffs::new(&tokio::runtime::Handle::current(), client, budget)
+            })
+            .hand(off);
     }
 
     /// The marks a fold made, handed to the home node in order, on a task
@@ -1193,13 +1194,20 @@ impl Shell {
     /// the same pump that delivered the proof (leviculum 1014).
     pub(crate) async fn settle(&mut self) {
         // The marks the reader made before leaving reach the home node, or
-        // run out of a send's budget.
+        // run out of a send's budget, and so do the petnames and peer
+        // states (1614).
         self.hand_marks();
+        self.hand_petnames();
+        self.hand_peer_states();
         let budget = tokio::time::Instant::now() + self.context.timeout;
         for task in std::mem::take(&mut self.mark_tasks) {
             if tokio::time::timeout_at(budget, task).await.is_err() {
                 tracing::warn!("HOME mark still running at the end; given up");
             }
+        }
+        if let Some(lane) = self.hand_offs.take() {
+            let left = budget.saturating_duration_since(tokio::time::Instant::now());
+            lane.finish(left).await;
         }
         let mut tasks: Vec<tokio::task::JoinHandle<()>> =
             self.send_task.take().into_iter().collect();
@@ -1707,6 +1715,7 @@ pub(crate) async fn start(
         send_task: None,
         fetch_task: None,
         mark_tasks: Vec::new(),
+        hand_offs: None,
         unanswered: Unanswered::default(),
         replacing: None,
         legs_seen: Vec::new(),

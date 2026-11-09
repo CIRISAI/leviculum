@@ -48,6 +48,13 @@ pub const DOWNLOADS: &str = "browse";
 pub const SERVER_FILE: &str = "home-server";
 /// How long a join, a send or a mark may take; a pull gets twice this.
 pub const BUDGET: Duration = Duration::from_secs(60);
+
+/// How long a stop waits for the petnames and peer states still on their
+/// way to the home node (1614). Each is a link and one request, well under
+/// a second on a reachable home node; a home node out of reach does not
+/// hold the app's end longer than this, and what did not arrive is given
+/// up as a send past its budget is.
+const HAND_OFF_GRACE: Duration = Duration::from_secs(10);
 /// How often the session takes what the engine said and runs the clock
 /// while something is going on: the terminal's pump interval.
 pub const PUMP: Duration = Duration::from_millis(100);
@@ -191,6 +198,10 @@ struct Inner {
     attached: Attached,
     fanout: Fanout,
     client: HomeClient,
+    /// The petnames and peer states the reader set, on their way to the
+    /// home node in order (1614); [`Session::stop`] waits for them.
+    /// `None` once the stop took it.
+    hand_offs: Option<runner::HandOffs>,
     home: PathBuf,
     offset: i32,
     /// The phone's language: the scene's words are said in it (1217).
@@ -1959,6 +1970,7 @@ impl Session {
         let Some(runtime) = runtime else {
             return;
         };
+        let hand_offs;
         {
             let mut inner = self.lock();
             // A draft typing has not paused on yet is kept all the same
@@ -1966,6 +1978,7 @@ impl Session {
             inner.model.flush_drafts();
             inner.persist();
             inner.gone = true;
+            hand_offs = inner.hand_offs.take();
             let _ = inner.events.send(Event::Stopped {
                 v: VERSION,
                 detail: String::new(),
@@ -1975,6 +1988,11 @@ impl Session {
         // and its store are let go of in order.
         let here = self.here().take();
         let finish = move || {
+            // The reader's last words on peers reach the home node before
+            // its node closes (1614).
+            if let Some(lane) = hand_offs {
+                runtime.block_on(lane.finish(HAND_OFF_GRACE));
+            }
             if let Some(mut here) = here {
                 runtime.block_on(here.stop());
             }
@@ -2070,12 +2088,14 @@ impl Inner {
                 .unwrap_or(Some(loquax::sync::DEFAULT_BOUND_MS)),
         ));
         let (finished_tx, finished_rx) = channel();
+        let hand_offs = Some(runner::HandOffs::new(&runtime, client.clone(), BUDGET));
         Ok(Self {
             model,
             store,
             attached,
             fanout: Fanout::default(),
             client,
+            hand_offs,
             home: home.to_path_buf(),
             offset,
             lang,
@@ -2638,17 +2658,14 @@ impl Inner {
             });
         }
         let petnames = self.model.take_petnames();
-        if !petnames.is_empty() {
-            self.runtime
-                .spawn(runner::hand_petnames(self.client.clone(), petnames, BUDGET));
-        }
         let states = self.model.take_peer_states();
-        if !states.is_empty() {
-            self.runtime.spawn(runner::hand_peer_states(
-                self.client.clone(),
-                states,
-                BUDGET,
-            ));
+        if let Some(lane) = &self.hand_offs {
+            if !petnames.is_empty() {
+                lane.hand(runner::HandOff::Petnames(petnames));
+            }
+            if !states.is_empty() {
+                lane.hand(runner::HandOff::PeerStates(states));
+            }
         }
         let marks = self.model.take_marks();
         if marks.is_empty() {

@@ -397,6 +397,116 @@ pub async fn hand_peer_states(
     }
 }
 
+/// A peer and the reader's name for it, `None` for none.
+pub type PetnameWord = ([u8; 16], Option<String>);
+/// A peer and the reader's word on it and its conversation.
+pub type PeerStateWord = ([u8; 16], super::wire::PeerState);
+
+/// The reader's words on peers a device owes its home node: petnames and
+/// peer states, as a fold set them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HandOff {
+    Petnames(Vec<PetnameWord>),
+    PeerStates(Vec<PeerStateWord>),
+}
+
+/// The hand-offs taken off the lane at once, each peer's newest word only,
+/// in the order of each peer's newest: the home node keeps only a peer's
+/// newest entry of each kind, so an older one it would never keep.
+pub fn coalesce(offs: Vec<HandOff>) -> (Vec<PetnameWord>, Vec<PeerStateWord>) {
+    fn newest<T>(mut words: Vec<([u8; 16], T)>) -> Vec<([u8; 16], T)> {
+        let mut seen = std::collections::BTreeSet::new();
+        words.reverse();
+        words.retain(|(peer, _)| seen.insert(*peer));
+        words.reverse();
+        words
+    }
+    let mut petnames = Vec::new();
+    let mut states = Vec::new();
+    for off in offs {
+        match off {
+            HandOff::Petnames(more) => petnames.extend(more),
+            HandOff::PeerStates(more) => states.extend(more),
+        }
+    }
+    (newest(petnames), newest(states))
+}
+
+/// One lane for a device's petnames and peer states to its home node
+/// (1614): one task hands them in the order they were set, so a rename
+/// and its taking back cannot reach the home node the other way round, as
+/// two tasks of their own could; and the frontend's end waits for the lane
+/// ([`HandOffs::finish`]) before it closes the node, so a word the reader
+/// said just before leaving is not dropped with the runtime. A dropped one
+/// left the home node's older word in its archive, and the next start's
+/// pull brought that back over the reader's (the forge gate on 0a67952c,
+/// "Mum ·5a5a ≈" after the petname was cleared).
+pub struct HandOffs {
+    tx: tokio::sync::mpsc::UnboundedSender<HandOff>,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl HandOffs {
+    /// The lane to `client`'s home node, each request given `budget`.
+    pub fn new(runtime: &tokio::runtime::Handle, client: HomeClient, budget: Duration) -> Self {
+        Self::with(runtime, move |offs| {
+            let client = client.clone();
+            async move {
+                let (petnames, states) = coalesce(offs);
+                if !petnames.is_empty() {
+                    hand_petnames(client.clone(), petnames, budget).await;
+                }
+                if !states.is_empty() {
+                    hand_peer_states(client, states, budget).await;
+                }
+            }
+        })
+    }
+
+    /// The lane with its hand-over of a batch given: what waits on the
+    /// lane when one batch ends is the next batch, whole.
+    pub fn with<F, Fut>(runtime: &tokio::runtime::Handle, mut hand: F) -> Self
+    where
+        F: FnMut(Vec<HandOff>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<HandOff>();
+        let worker = runtime.spawn(async move {
+            while let Some(first) = rx.recv().await {
+                let mut batch = vec![first];
+                while let Ok(more) = rx.try_recv() {
+                    batch.push(more);
+                }
+                hand(batch).await;
+            }
+        });
+        Self { tx, worker }
+    }
+
+    /// Queue `off` behind what the lane holds.
+    pub fn hand(&self, off: HandOff) {
+        if self.tx.send(off).is_err() {
+            tracing::warn!("HOME hand-off lane gone; a word on a peer is not handed");
+        }
+    }
+
+    /// Close the lane and wait up to `grace` for what it holds to reach
+    /// the home node. False when the grace ran out first: the rest is
+    /// given up, as a send's budget gives a send up.
+    pub async fn finish(self, grace: Duration) -> bool {
+        drop(self.tx);
+        let mut worker = self.worker;
+        match tokio::time::timeout(grace, &mut worker).await {
+            Ok(_) => true,
+            Err(_) => {
+                worker.abort();
+                tracing::warn!("HOME hand-offs still running at the end; given up");
+                false
+            }
+        }
+    }
+}
+
 /// A received message the store already holds, which the screen drops
 /// before it folds: the mailbox copy of one that came directly, perhaps
 /// before a restart and below the window the screen loaded. A store that
@@ -456,5 +566,71 @@ pub fn keep_name(
     };
     if let Err(error) = store.save_name(destination, name) {
         crate::events::store_failed(&error.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::home::wire::PeerState;
+
+    const A: [u8; 16] = [0xa; 16];
+    const B: [u8; 16] = [0xb; 16];
+
+    /// Each peer's newest word stays, in the order of the newest words; an
+    /// older one, which the home node would drop, is not sent.
+    #[test]
+    fn a_batch_hands_each_peers_newest_word_only() {
+        let pinned = PeerState {
+            pinned: true,
+            ..PeerState::default()
+        };
+        let (petnames, states) = coalesce(vec![
+            HandOff::Petnames(vec![(A, Some("Mum".into())), (B, Some("Bob".into()))]),
+            HandOff::PeerStates(vec![(A, pinned)]),
+            HandOff::Petnames(vec![(A, None)]),
+            HandOff::PeerStates(vec![(A, PeerState::default()), (B, pinned)]),
+        ]);
+        assert_eq!(petnames, [(B, Some("Bob".to_string())), (A, None)]);
+        assert_eq!(states, [(A, PeerState::default()), (B, pinned)]);
+    }
+
+    /// 1614: the lane hands its batches one after another, the second
+    /// after the first has ended however long the first takes, and its end
+    /// waits for what it holds: the clear after "Mum" reaches the home
+    /// node, and last.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_lane_hands_in_order_and_its_end_waits_for_it() {
+        let handed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&handed);
+        let first = Arc::new(tokio::sync::Notify::new());
+        let held = Arc::clone(&first);
+        let lane = HandOffs::with(&tokio::runtime::Handle::current(), move |offs| {
+            let seen = Arc::clone(&seen);
+            let held = Arc::clone(&held);
+            async move {
+                let (petnames, _) = coalesce(offs);
+                if petnames.iter().any(|(_, name)| name.is_some()) {
+                    // The first batch is slow: the clear is queued meanwhile.
+                    held.notified().await;
+                }
+                seen.lock().expect("the record").extend(petnames);
+            }
+        });
+        lane.hand(HandOff::Petnames(vec![(A, Some("Mum".into()))]));
+        tokio::task::yield_now().await;
+        lane.hand(HandOff::Petnames(vec![(A, None)]));
+        first.notify_one();
+        assert!(lane.finish(Duration::from_secs(10)).await);
+        let handed = handed.lock().expect("the record").clone();
+        assert_eq!(handed.last(), Some(&(A, None)), "{handed:?}");
+
+        // Negative: a lane whose hand-over never ends is given up at the
+        // grace, and says so.
+        let stuck = HandOffs::with(&tokio::runtime::Handle::current(), |_| {
+            std::future::pending::<()>()
+        });
+        stuck.hand(HandOff::Petnames(vec![(A, None)]));
+        assert!(!stuck.finish(Duration::from_millis(50)).await);
     }
 }
