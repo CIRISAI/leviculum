@@ -173,6 +173,10 @@ pub enum StoreWrite {
     /// hold it (1490, the lazy start): the store applies the mark to
     /// its own rows, so the count a restart reads is the read one.
     ReadThrough { id: [u8; 32] },
+    /// Keep the petnames this device owes the home node, all of them in
+    /// place of what was kept (1635, schema 19): a restart hands them
+    /// again.
+    OwedPetnames(alloc::collections::BTreeMap<[u8; 16], Option<String>>),
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -440,6 +444,9 @@ impl<B> UiModel<B> {
         }
         if let Some(state) = self.pn_asker.take_changed() {
             writes.push(StoreWrite::PnAsks(state));
+        }
+        if let Some(owed) = self.take_owed_petnames_changed() {
+            writes.push(StoreWrite::OwedPetnames(owed));
         }
         // The rows the list shows, re-derived beside what changed them
         // (1490): a conversation with nothing loaded writes none, and

@@ -2255,6 +2255,9 @@ impl Inner {
         // What the propagation node is still to be asked about (1409).
         model.pn_asker =
             loquax::pn_status::Asker::restore(store.pn_asks().map_err(|error| error.to_string())?);
+        // The petnames the home had not taken when the session ended
+        // (1635): handed again, and the reader's word over the first pull.
+        model.restore_owed_petnames(store.owed_petnames().map_err(|error| error.to_string())?);
         // A share runs on across a restart (1273); one whose time ran out
         // meanwhile ends at the next clock with its end report.
         model.restore_shares(store.shares().map_err(|error| error.to_string())?);
@@ -2903,10 +2906,18 @@ impl Inner {
                 tracing::warn!("HEARD not kept: {error}");
             }
         }
+        // The petnames owed to the home (1635): what it took comes back
+        // as an event, the rest goes with the next hand.
         let petnames = self.model.take_petnames();
         if !petnames.is_empty() {
-            self.runtime
-                .spawn(runner::hand_petnames(self.client.clone(), petnames, BUDGET));
+            let client = self.client.clone();
+            let done = self.finished_tx.clone();
+            let wake = Arc::clone(&self.wake);
+            self.runtime.spawn(async move {
+                let event = runner::hand_petnames(client, petnames, BUDGET).await;
+                let _ = done.send(Finished::Event(event));
+                wake.notify_one();
+            });
         }
         // The Browse tab's bookmark changes (1579): the phone keeps none
         // past the session, its home keeps them for every device.

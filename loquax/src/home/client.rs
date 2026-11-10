@@ -1002,6 +1002,7 @@ async fn take_in(
                     .submit(Command::HomePetname {
                         destination,
                         petname,
+                        at: entry.at,
                     })
                     .map_err(gone)?,
                 Err(_) => tracing::warn!("HOME pull: entry {} is no petname", entry.seq),
@@ -1363,11 +1364,13 @@ mod tests {
                 },
                 Command::HomePetname {
                     destination: [5; 16],
-                    petname: Some("Mum".to_string())
+                    petname: Some("Mum".to_string()),
+                    at: 0
                 },
                 Command::HomePetname {
                     destination: [4; 16],
-                    petname: None
+                    petname: None,
+                    at: 0
                 },
                 Command::HomePeerState {
                     destination: [5; 16],

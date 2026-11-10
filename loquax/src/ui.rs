@@ -1339,9 +1339,22 @@ pub struct UiModel<B> {
     /// Marks for the home node, in the order they were made
     /// ([`UiModel::take_marks`]).
     marks: Vec<crate::home::wire::Mark>,
-    /// Petnames for the home node, in the order they were set
-    /// ([`UiModel::take_petnames`]).
-    petnames: Vec<([u8; 16], Option<String>)>,
+    /// The petnames this device set that the home node has not taken
+    /// yet, the newest of each peer (1635, [`UiModel::take_petnames`]):
+    /// kept in the store until the home takes them, and the reader's word
+    /// on the peer over any entry a pull brings meanwhile.
+    pub(crate) owed_petnames: BTreeMap<[u8; 16], Option<String>>,
+    /// A hand of [`UiModel::take_petnames`] is under way: the next waits
+    /// for its [`UiEvent::PetnamesHanded`], so the home takes a peer's
+    /// petnames in the order they were set.
+    petnames_in_flight: bool,
+    /// [`Self::owed_petnames`] changed since the store last kept it.
+    owed_petnames_changed: bool,
+    /// The petnames the home took from this device until the next pull
+    /// ends, each with this device's clock when the home's answer came
+    /// (1635): a pull under way when the home took it may still bring an
+    /// older entry, which the home's stamp tells apart from a newer word.
+    taken_petnames: BTreeMap<[u8; 16], (Option<String>, i64)>,
     /// Peer states for the home node, in the order they were set
     /// ([`UiModel::take_peer_states`]).
     peer_states: Vec<([u8; 16], crate::home::wire::PeerState)>,
@@ -1626,7 +1639,10 @@ impl<B: InputBuffer + Default> UiModel<B> {
             history: false,
             list_apart: false,
             marks: Vec::new(),
-            petnames: Vec::new(),
+            owed_petnames: BTreeMap::new(),
+            petnames_in_flight: false,
+            owed_petnames_changed: false,
+            taken_petnames: BTreeMap::new(),
             peer_states: Vec::new(),
             pull_owed: None,
             confirm: None,
@@ -3321,6 +3337,11 @@ pub enum UiEvent {
     /// The home's answer to [`UiEffect::DeleteGroup`] (1307 pass four):
     /// the group, or why not.
     GroupDeleted(Result<[u8; 16], String>),
+    /// A hand of [`UiModel::take_petnames`] ended (1635): the petnames the
+    /// home node took. Those still owed go with the next hand.
+    PetnamesHanded {
+        taken: Vec<([u8; 16], Option<String>)>,
+    },
     /// A tab of the bar was chosen (1337): the Browse tab comes to the
     /// front, or leaves it for the chats or the map.
     Tab(scene::TabId),
@@ -4008,6 +4029,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::GroupMade(made) => model.group_made(made),
         UiEvent::MembersAdded(added) => model.members_added(added),
         UiEvent::GroupDeleted(deleted) => model.group_deleted(deleted),
+        UiEvent::PetnamesHanded { taken } => {
+            model.petnames_handed(taken);
+            Vec::new()
+        }
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -4137,6 +4162,9 @@ pub fn position_fields(location: leviculum_lxmf::telemetry::Location) -> Vec<Fie
 /// messages, and the first failure in a row, not every retry's.
 fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Vec<UiEffect> {
     model.fetching = false;
+    // A pull ended: the next began after every petname the home took so
+    // far, and brings nothing older than them (1635).
+    model.taken_petnames.clear();
     model.fetches_done += 1;
     let now = model.elapsed_ms;
     let failures = model.sync.as_mut().map_or(1, |sync| {
@@ -6166,7 +6194,8 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
         OutboxEvent::HomePetname {
             destination,
             petname,
-        } => return model.home_petname(destination, petname),
+            at,
+        } => return model.home_petname(destination, petname, at),
         OutboxEvent::HomePeerState { destination, state } => {
             return model.home_peer_state(destination, state)
         }
@@ -16175,15 +16204,22 @@ pub(crate) mod tests {
                 blocked: false
             })]
         );
-        assert_eq!(
-            model.take_petnames(),
-            [(PEER, Some("Mama".to_string())), (PEER, None)]
+        // The newest of the peer is what is owed (1635).
+        assert_eq!(model.take_petnames(), [(PEER, None)]);
+        update(
+            &mut model,
+            UiEvent::PetnamesHanded {
+                taken: vec![(PEER, None)],
+            },
         );
+        assert!(model.take_petnames().is_empty(), "the home took it");
         // Pulled: the reader's word here, the file told, nothing queued.
+        // Taken by the home after this device's word (1635).
         let pulled = |petname: Option<&str>| {
             UiEvent::Engine(OutboxEvent::HomePetname {
                 destination: PEER,
                 petname: petname.map(str::to_string),
+                at: 1,
             })
         };
         let effects = update(&mut model, pulled(Some("Mutti \u{202e}")));
@@ -16200,6 +16236,112 @@ pub(crate) mod tests {
         assert!(update(&mut model, pulled(Some("Mutti"))).is_empty());
         update(&mut model, pulled(None));
         assert_eq!(model.names.label(&PEER, model.lang), "Alice");
+    }
+
+    /// 1635: a petname this device set and the home node has not taken
+    /// yet is the reader's newest word on the peer. The home stamps an
+    /// entry when it takes it, so the one this device still owes will be
+    /// the home's newest: an older entry a pull brings in the meantime,
+    /// the "Mum" the reader just cleared, changes nothing here.
+    #[test]
+    fn a_petname_owed_to_the_home_outlives_an_older_pulled_one() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        model.home_client = true;
+        let rename = |name: &str| UiEvent::Rename {
+            peer: PEER,
+            name: name.into(),
+        };
+        // Stamped by the home at `at`; this test's model has no clock, so
+        // a hand's answer came at 0.
+        let pulled_at = |petname: Option<&str>, at: i64| {
+            UiEvent::Engine(OutboxEvent::HomePetname {
+                destination: PEER,
+                petname: petname.map(str::to_string),
+                at,
+            })
+        };
+        let pulled = |petname: Option<&str>| pulled_at(petname, 0);
+        let handed = |taken: &[Option<&str>]| UiEvent::PetnamesHanded {
+            taken: taken
+                .iter()
+                .map(|name| (PEER, name.map(str::to_string)))
+                .collect(),
+        };
+        update(&mut model, rename("Mum"));
+        assert_eq!(model.take_petnames(), [(PEER, Some("Mum".to_string()))]);
+        // One hand at a time: the clearing waits for the first.
+        update(&mut model, rename(""));
+        assert!(model.take_petnames().is_empty(), "a hand is under way");
+        update(&mut model, handed(&[Some("Mum")]));
+        // The home took "Mum", and the clearing is owed: the pull's "Mum"
+        // is older than it and changes nothing.
+        assert!(update(&mut model, pulled(Some("Mum"))).is_empty());
+        assert_eq!(model.names.label(&PEER, model.lang), "Alice");
+        // Kept in the store, so a restart hands it again.
+        let owed = |writes: Vec<StoreWrite>| {
+            writes
+                .into_iter()
+                .filter_map(|write| match write {
+                    StoreWrite::OwedPetnames(owed) => Some(owed),
+                    _ => None,
+                })
+                .next_back()
+        };
+        let kept = owed(model.take_writes()).expect("the owed kept");
+        assert_eq!(kept, BTreeMap::from([(PEER, None)]));
+        // A restart: the owed handed first, and over the first pull.
+        let mut again = UiModel::<Field>::new(&[PEER]);
+        announced(&mut again, PEER, "Alice");
+        again.home_client = true;
+        again.restore_owed_petnames(kept);
+        assert_eq!(again.take_petnames(), [(PEER, None)]);
+        // A hand the home did not take: still owed, handed again.
+        update(&mut again, handed(&[]));
+        assert_eq!(again.take_petnames(), [(PEER, None)]);
+        assert!(update(&mut again, pulled(Some("Mum"))).is_empty());
+        assert_eq!(again.names.label(&PEER, again.lang), "Alice");
+        // The home's echo of the clearing: owed no more, kept so.
+        update(&mut again, pulled(None));
+        assert_eq!(owed(again.take_writes()), Some(BTreeMap::new()));
+        update(&mut again, handed(&[None]));
+        assert!(again.take_petnames().is_empty());
+        // A name another device set later is the reader's word here.
+        update(&mut again, pulled(Some("Mutti")));
+        assert_eq!(again.names.label(&PEER, again.lang), "Mutti");
+
+        // Taken: a pull under way when the home took the clearing may
+        // still bring the older "Mum" (the forge's pipeline #620); the
+        // home stamped it before the answer came, so it changes nothing.
+        // A name the home took after it does, and once a pull ended the
+        // next brings nothing older.
+        let mut taken = UiModel::<Field>::new(&[PEER]);
+        announced(&mut taken, PEER, "Alice");
+        taken.home_client = true;
+        update(&mut taken, rename("Mum"));
+        update(&mut taken, rename(""));
+        assert_eq!(taken.take_petnames(), [(PEER, None)]);
+        update(&mut taken, handed(&[None]));
+        assert!(update(&mut taken, pulled_at(Some("Mum"), 0)).is_empty());
+        assert_eq!(taken.names.label(&PEER, taken.lang), "Alice");
+        update(&mut taken, pulled_at(Some("Mutti"), 1));
+        assert_eq!(taken.names.label(&PEER, taken.lang), "Mutti");
+        update(&mut taken, rename(""));
+        assert_eq!(taken.take_petnames(), [(PEER, None)]);
+        update(&mut taken, handed(&[None]));
+        update(&mut taken, UiEvent::FetchDone(Ok(0)));
+        update(&mut taken, pulled_at(Some("Mum"), 0));
+        assert_eq!(taken.names.label(&PEER, taken.lang), "Mum");
+        // Off a home node nothing is owed.
+        let mut alone = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut alone,
+            UiEvent::Rename {
+                peer: PEER,
+                name: "Mum".into(),
+            },
+        );
+        assert!(owed(alone.take_writes()).is_none());
     }
 
     /// `rename` asks in the palette, holding the petname to edit: `Enter`

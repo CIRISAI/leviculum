@@ -177,11 +177,13 @@ pub enum Command {
     /// the client heard itself would be.
     HomeName { destination: [u8; 16], name: String },
     /// On a client: the reader's name for a peer one of the home's devices
-    /// set, `None` for none, pulled from the archive (1139); reported as
+    /// set, `None` for none, pulled from the archive (1139), and when the
+    /// home took it, unix seconds on the home's clock (1635); reported as
     /// [`OutboxEvent::HomePetname`].
     HomePetname {
         destination: [u8; 16],
         petname: Option<String>,
+        at: i64,
     },
     /// On a client: the reader's word on a peer one of the home's devices
     /// set, pulled from the archive (1146); reported as
@@ -276,6 +278,7 @@ pub enum OutboxEvent {
     HomePetname {
         destination: [u8; 16],
         petname: Option<String>,
+        at: i64,
     },
     /// The reader's word on a peer, set on one of the home's devices
     /// ([`Command::HomePeerState`]).

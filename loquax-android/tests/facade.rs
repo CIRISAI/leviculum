@@ -1793,6 +1793,190 @@ async fn an_import_beside_the_running_mailbox_wakes_a_phone_that_only_watches() 
 /// room for a loaded test host.
 const WAKE_BOUND_SECS: u64 = 5;
 
+/// The petname entries the home node of `home` keeps for `peer`, oldest
+/// first, and their sequences.
+fn home_petnames(home: &Path, address: [u8; 16], peer: [u8; 16]) -> Vec<(u64, Option<String>)> {
+    let store =
+        loquax::store::Store::open_read_only(&home.join(loquax::store::STORE_FILE), address)
+            .expect("the home store")
+            .expect("there");
+    let page = store.archive_since(0, usize::MAX).expect("page");
+    page.entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_PETNAME)
+        .map(|e| {
+            let (about, name) = loquax::home::wire::read_petname_entry(&e.packed).expect("petname");
+            (about, (e.seq, name))
+        })
+        .filter(|(about, _)| *about == peer)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// Wait until the home node of `home` keeps `want` as `peer`'s petname,
+/// reading `session`'s events meanwhile; the entry's sequence.
+fn home_keeps_petname(session: &Session, home: &Path, peer: [u8; 16], want: Option<&str>) -> u64 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let kept = home_petnames(home, session.address(), peer);
+        if let Some((seq, name)) = kept.last() {
+            if name.as_deref() == want {
+                return *seq;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the home never kept {want:?}: {kept:?}"
+        );
+        let _ = session.next_event(Duration::from_millis(200));
+    }
+}
+
+/// 1635: the reader names a peer "Mum", the home node keeps it, and the
+/// reader clears the name again. `taken` says whether the home node took
+/// the clearing before the session stopped; without it the home is
+/// killed first, as a phone that stops before its hand of the clearing
+/// ended (the forge's pipeline #620). The phone's pull cursor is set back
+/// before the "Mum" entry, as on a phone whose pull had not reached it,
+/// and the home node comes back. The second start must show no petname,
+/// and the home must come to keep the clearing.
+async fn a_cleared_petname_across_a_restart(taken: bool) {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_dir = home.path().to_path_buf();
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let peer = [0x5a; 16];
+    let hex = loquax::address::to_hex(&peer);
+    let runtime = tokio::runtime::Handle::current();
+    let (to, at) = (hex.clone(), home_dir.clone());
+    let mut node = Some(node);
+    let mum = tokio::task::spawn_blocking(move || {
+        let mut kill = || {
+            if let Some(node) = node.take() {
+                runtime.block_on(node.kill());
+            }
+        };
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        session
+            .request(Request::Rename {
+                peer: to.clone(),
+                name: "Mum".to_string(),
+            })
+            .expect("rename");
+        let mum = home_keeps_petname(&session, &at, peer, Some("Mum"));
+        if !taken {
+            kill();
+        }
+        session
+            .request(Request::Rename {
+                peer: to.clone(),
+                name: String::new(),
+            })
+            .expect("clear");
+        if taken {
+            home_keeps_petname(&session, &at, peer, None);
+            kill();
+        }
+        let address = session.address();
+        session.stop();
+        (mum, address)
+    })
+    .await
+    .expect("the first session");
+    let (mum, address) = mum;
+    // What the phone owes its home: the clearing, unless the home took it.
+    let owed = loquax::store::Store::open_read_only(
+        &phone.path().join(loquax::store::STORE_FILE),
+        address,
+    )
+    .expect("the phone's store")
+    .expect("there")
+    .owed_petnames()
+    .expect("owed");
+    let want = match taken {
+        true => std::collections::BTreeMap::new(),
+        false => std::collections::BTreeMap::from([(peer, None)]),
+    };
+    assert_eq!(owed, want, "what the phone owes its home");
+
+    // The cursor before the "Mum" entry; a phone that never ended a pull
+    // has none, which is before every entry.
+    let cursors = files_named(phone.path(), loquax::home::client::CURSOR_FILE);
+    assert!(cursors.len() <= 1, "{cursors:?}");
+    for cursor in cursors {
+        std::fs::write(&cursor, format!("{}\n", mum - 1)).expect("the cursor set back");
+    }
+
+    let listener =
+        std::net::TcpListener::bind(format!("127.0.0.1:{port}")).expect("the same port again");
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let again = Start {
+        dir,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("the pull failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
+            }
+        }
+        let shown: schema::Detail = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Detail { peer: hex.clone() })
+                .expect("detail"),
+        )
+        .expect("decode");
+        assert_eq!(shown.petname, None, "the cleared petname came back");
+        // The home node comes to keep the clearing, and the phone still
+        // shows none once its echo is pulled.
+        home_keeps_petname(&session, &home_dir, peer, None);
+        session.request(Request::Pull).expect("pull");
+        let shown: schema::Detail = wait_for(
+            &session,
+            schema::Query::Detail { peer: hex.clone() },
+            5,
+            |d: &schema::Detail| d.petname.is_none(),
+        );
+        assert_eq!(shown.petname, None);
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+    node.stop().await;
+}
+
+/// 1635: a petname cleared while the home node could not take it stays
+/// cleared after a restart, and reaches the home node then.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleared_petname_the_home_never_took_stays_cleared_after_a_restart() {
+    a_cleared_petname_across_a_restart(false).await;
+}
+
+/// 1635's control: the home node took the clearing before the stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleared_petname_the_home_took_stays_cleared_after_a_restart() {
+    a_cleared_petname_across_a_restart(true).await;
+}
+
 /// A shared-instance name of this test process's own.
 fn instance() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

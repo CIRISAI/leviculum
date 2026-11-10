@@ -131,7 +131,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 18;
+pub const SCHEMA_VERSION: i32 = 19;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -467,6 +467,18 @@ CREATE TABLE home_bookmarks(
 CREATE INDEX home_bookmarks_by_stamp ON home_bookmarks(identity, stamp);
 ";
 
+/// What schema 19 adds to schema 18 (1635): the petnames this device
+/// set that its home node has not taken yet (`owed_petnames`, one row a
+/// peer, the newest name, NULL for a cleared one), so a restart hands
+/// them again and a pull of an older entry does not undo them.
+const SCHEMA_V19: &str = "
+CREATE TABLE owed_petnames(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    petname TEXT,
+    PRIMARY KEY (identity, peer));
+";
+
 pub mod groups;
 pub mod pages;
 
@@ -524,6 +536,9 @@ const TABLES_V15: [&str; 2] = ["pn_asks", "pn_nodes"];
 
 /// The tables schema 18 adds.
 const TABLES_V18: [&str; 2] = ["home_pages", "home_bookmarks"];
+
+/// The table schema 19 adds.
+const TABLES_V19: [&str; 1] = ["owed_petnames"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -696,7 +711,7 @@ impl Store {
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
              {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} {SCHEMA_V17} \
-             {SCHEMA_V18} \
+             {SCHEMA_V18} {SCHEMA_V19} \
              PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
@@ -799,6 +814,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 19 {
+            if let Some(missing) = missing(&TABLES_V19) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate(version);
         }
@@ -872,7 +892,10 @@ impl Store {
                 if version < 17 {
                     batch.push_str(SCHEMA_V17);
                 }
-                batch.push_str(SCHEMA_V18);
+                if version < 18 {
+                    batch.push_str(SCHEMA_V18);
+                }
+                batch.push_str(SCHEMA_V19);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -1304,6 +1327,29 @@ impl Store {
             .map_err(|e| failed(&path, e))?;
         }
         tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// The petnames this device owes its home node (1635), as the last
+    /// [`StoreWrite::OwedPetnames`] kept them.
+    pub fn owed_petnames(&self) -> Result<BTreeMap<[u8; 16], Option<String>>, StoreError> {
+        let read = || -> rusqlite::Result<BTreeMap<[u8; 16], Option<String>>> {
+            let mut statement = self
+                .conn
+                .prepare("SELECT peer, petname FROM owed_petnames WHERE identity = ?1")?;
+            let rows = statement.query_map(params![&self.identity[..]], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            let mut owed = BTreeMap::new();
+            for row in rows {
+                let (peer, petname) = row?;
+                // A row of another length is no address: passed over.
+                if let Ok(peer) = <[u8; 16]>::try_from(peer.as_slice()) {
+                    owed.insert(peer, petname);
+                }
+            }
+            Ok(owed)
+        };
+        read().map_err(|e| self.failed(e))
     }
 
     /// What the propagation node is still to be asked about (1409), as
@@ -3718,6 +3764,18 @@ fn apply(
             }
         }
         StoreWrite::PnAsks(state) => write_pn_asks(tx, identity, state)?,
+        StoreWrite::OwedPetnames(owed) => {
+            tx.execute(
+                "DELETE FROM owed_petnames WHERE identity = ?1",
+                params![&identity[..]],
+            )?;
+            for (peer, petname) in owed {
+                tx.execute(
+                    "INSERT INTO owed_petnames(identity, peer, petname) VALUES (?1, ?2, ?3)",
+                    params![&identity[..], &peer[..], petname],
+                )?;
+            }
+        }
         StoreWrite::Group(group) => {
             tx.execute(
                 "INSERT INTO client_groups(identity, address, name, admin_name, inviter, ours, \
@@ -5140,6 +5198,45 @@ mod tests {
         drop(conn);
         let text = refused(home.path());
         assert!(text.contains("table shares is missing"), "{text}");
+    }
+
+    /// 1635: the petnames a device owes its home node come back after a
+    /// restart as they were kept, a cleared one as `None`; a write
+    /// replaces all of them, and another identity sees none. A store of
+    /// schema 18 gains the table on open.
+    #[test]
+    fn owed_petnames_survive_a_restart_and_a_schema_18_store_gains_them() {
+        let home = tempfile::tempdir().expect("home");
+        let owed = BTreeMap::from([([0x5a; 16], None), ([0x5b; 16], Some("Mum".to_string()))]);
+        {
+            let mut store = Store::open_in(home.path(), US).expect("open");
+            assert!(store.owed_petnames().expect("read").is_empty());
+            store
+                .write(&[StoreWrite::OwedPetnames(owed.clone())])
+                .expect("kept");
+        }
+        let mut store = Store::open_in(home.path(), US).expect("again");
+        assert_eq!(store.owed_petnames().expect("read"), owed);
+        let fewer = BTreeMap::from([([0x5b; 16], Some("Mum".to_string()))]);
+        store
+            .write(&[StoreWrite::OwedPetnames(fewer.clone())])
+            .expect("replaced");
+        assert_eq!(store.owed_petnames().expect("read"), fewer);
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert!(other.owed_petnames().expect("read").is_empty());
+        drop((store, other));
+
+        let old = tempfile::tempdir().expect("an older home");
+        drop(Store::open_in(old.path(), US).expect("create"));
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch("DROP TABLE owed_petnames; PRAGMA user_version = 18;")
+            .expect("made schema 18");
+        drop(conn);
+        let mut store = Store::open_in(old.path(), US).expect("migrated");
+        store
+            .write(&[StoreWrite::OwedPetnames(fewer.clone())])
+            .expect("kept");
+        assert_eq!(store.owed_petnames().expect("read"), fewer);
     }
 
     /// 1409: what the propagation node is still to be asked about comes

@@ -345,15 +345,17 @@ pub async fn delete_group(client: HomeClient, group: [u8; 16], budget: Duration)
     UiEvent::GroupDeleted(deleted.map(|()| group).map_err(|error| error.to_string()))
 }
 
-/// The petnames a fold set, handed to the home node in order (1139): the
-/// screen and the contacts file have them already. One the home node did
-/// not take is said in the log; the other devices keep the name they had
-/// until this device sets one again.
+/// The petnames this device owes, handed to the home node in order (1139,
+/// [`crate::ui::UiModel::take_petnames`]): the screen and the contacts
+/// file have them already. The event the model folds names those the home
+/// took (1635); one it did not take is said in the log and stays owed,
+/// handed again with the next hand or after a restart.
 pub async fn hand_petnames(
     client: HomeClient,
     petnames: Vec<([u8; 16], Option<String>)>,
     budget: Duration,
-) {
+) -> UiEvent {
+    let mut taken = Vec::new();
     for (peer, petname) in petnames {
         let outcome = super::client::petname(
             &client.node,
@@ -364,12 +366,16 @@ pub async fn hand_petnames(
             budget,
         )
         .await;
-        let peer = crate::address::to_hex(&peer);
+        let hex = crate::address::to_hex(&peer);
         match outcome {
-            Ok(()) => tracing::info!("HOME petname peer={peer}"),
-            Err(error) => tracing::warn!("HOME petname peer={peer} not taken: {error}"),
+            Ok(()) => {
+                tracing::info!("HOME petname peer={hex}");
+                taken.push((peer, petname));
+            }
+            Err(error) => tracing::warn!("HOME petname peer={hex} not taken: {error}"),
         }
     }
+    UiEvent::PetnamesHanded { taken }
 }
 
 /// The bookmark changes a fold made (1579), handed to the home in order:

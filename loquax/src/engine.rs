@@ -1010,9 +1010,11 @@ impl Engine {
                 Command::HomePetname {
                     destination,
                     petname,
+                    at,
                 } => self.emit(OutboxEvent::HomePetname {
                     destination,
                     petname,
+                    at,
                 }),
                 Command::HomePeerState { destination, state } => {
                     self.emit(OutboxEvent::HomePeerState { destination, state })
