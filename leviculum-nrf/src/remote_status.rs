@@ -69,12 +69,20 @@ pub fn handle_events<R, C, S>(
             format_args!("answered len={} lstats={}", response.len(), include_lstats),
         );
         // The two failure lines are the ones the board printed before the
-        // send moved into core, so a capture reads the same either way.
+        // send moved into core. A resource error is named by the kebab-case
+        // word `PN_REJECT` already prints it with, not by its derived
+        // `Debug`: that impl, its variant names and the formatter's padding
+        // adapter it was the last user of were 1064 B of the RAK4631's flash
+        // for this one line (order 1620).
         match send_status_response(node, &request, &response) {
             Ok(send) => out.merge(send),
-            Err(StatusSendError::Resource(e)) => {
-                crate::log::log_fmt("[REMOTE_STATUS] ", format_args!("resource failed: {:?}", e))
-            }
+            Err(StatusSendError::Resource(e)) => crate::log::log_fmt(
+                "[REMOTE_STATUS] ",
+                format_args!(
+                    "resource failed: {}",
+                    leviculum_pn_store::resource_error_name(&e)
+                ),
+            ),
             Err(StatusSendError::Packet(e)) => {
                 crate::log::log_fmt("[REMOTE_STATUS] ", format_args!("send failed: {:?}", e))
             }

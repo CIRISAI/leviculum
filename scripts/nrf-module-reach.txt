@@ -48,7 +48,7 @@ src/radio.rs (218): boards log lora sx1262
 src/radio_store.rs (197): boards flash log telemetry
 src/record_store.rs (216): ble flash pn usb
 src/remote_dfu.rs (167): log lora usb
-src/remote_status.rs (138): log lora
+src/remote_status.rs (146): log lora
 src/rng.rs (214): log
 src/st7789.rs (408): log log_stack panel_facts vext
 src/store_spike.rs (164): flash log record_store
