@@ -6,7 +6,7 @@
     <!-- The first screen, the service and its channels (1345). -->
     <string name="starting">Startet…</string>
     <string name="joining">Verbinde mit deinem Postfach…</string>
-    <string name="code_label">Der Code, den dein Postfach zeigt, von loquax mailbox setup auf dem Computer</string>
+    <string name="code_label">Der Code, den dein Postfach zeigt</string>
     <string name="server_label">Wo dein Postfach ist: Adresse und Port des Computers</string>
     <string name="join">Beitreten</string>
     <string name="address_hint">Adresse einer neuen Unterhaltung</string>
@@ -160,15 +160,15 @@
     <string name="where_computer">Auf einem Computer zu Hause</string>
     <string name="where_computer_text">Nachrichten kommen auch an, wenn dein Handy aus ist. Du brauchst einen Computer oder Raspberry Pi, der eingeschaltet bleibt.</string>
     <string name="where_later">Du kannst dein Postfach später umziehen, ohne etwas zu verlieren.</string>
-    <string name="here_title">Dein Postfach auf diesem Handy</string>
     <string name="here_background">Loquax läuft im Hintergrund weiter. Das kostet etwas Akku.</string>
-    <string name="here_offline">Ist das Handy aus oder offline, warten Nachrichten im Netz und kommen an, sobald du wieder da bist. Der Absender sieht "zugestellt" erst dann.</string>
     <string name="here_backup">Deine Adresse wohnt auf diesem Handy. Sichere sie, sonst bedeutet ein verlorenes Handy eine neue Adresse.</string>
-    <string name="use_this_phone">Dieses Handy nehmen</string>
     <string name="next">Weiter</string>
     <string name="have_address">Ich habe schon eine Loquax-Adresse</string>
     <string name="computer_title">Richte dein Postfach auf dem Computer ein</string>
-    <string name="computer_text">Starte auf deinem Computer: loquax mailbox setup\nEr zeigt einen Code. Scanne ihn hier oder füge ihn ein. So installierst du es: leviculum.network/mailbox</string>
+    <string name="computer_install">1. Installiere Loquax auf dem Computer:</string>
+    <string name="computer_run">2. Starte dort:</string>
+    <string name="computer_code">3. Dort erscheint ein Code. Scanne ihn hier oder füge ihn ein.</string>
+    <string name="computer_command_copied">Befehl kopiert.</string>
     <string name="paste_code">Code einfügen</string>
     <string name="phone_until_then">Bis dahin dieses Handy nehmen</string>
     <string name="background_title">Lass Loquax im Hintergrund laufen</string>

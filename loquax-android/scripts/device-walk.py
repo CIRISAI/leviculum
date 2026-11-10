@@ -121,7 +121,6 @@ STEPS = [
 WHERE_TITLE = "Where should your mailbox be?"
 WHERE_COMPUTER = "On a computer at home"
 WHERE_PHONE = "On this phone"
-USE_THIS_PHONE = "Use this phone"
 DONE = "Done"
 # Link a device (1264, finding 7): the profile's row, the sheet's ids, the
 # line once the other device came, and the name the walk's second device
@@ -4935,7 +4934,8 @@ class Walk:
         dev.shell(f"am start -W -n {PACKAGE}/{ACTIVITY}", timeout=60)
         self.wait_text(WHERE_TITLE, 20)
         self.tap_text(WHERE_PHONE)
-        self.tap_text(USE_THIS_PHONE)
+        # One primary button whatever is chosen (1448, walk finding 15).
+        self.tap_text(CONTINUE)
         problems: list[str] | None = None
         deadline = time.monotonic() + 90
         while True:
@@ -4943,7 +4943,7 @@ class Walk:
             if find(nodes, rid="write") and find(nodes, rid="avatar"):
                 break
             if time.monotonic() > deadline:
-                raise StepFailed(f"no chats 90s after Use this phone; screen: {texts(nodes)[:12]}")
+                raise StepFailed(f"no chats 90s after Continue on this phone; screen: {texts(nodes)[:12]}")
             if find(nodes, rid=WELCOME_QR):
                 if problems is None:
                     problems = first_start_name_problems(nodes)

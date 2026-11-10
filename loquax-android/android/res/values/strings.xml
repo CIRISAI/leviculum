@@ -3,7 +3,7 @@
     <string name="app_name" translatable="false">Loquax</string>
     <string name="starting">Starting…</string>
     <string name="joining">Connecting to your mailbox…</string>
-    <string name="code_label">The code your mailbox shows, from loquax mailbox setup on the computer</string>
+    <string name="code_label">The code your mailbox shows</string>
     <string name="code_hint" translatable="false">lqxh1…</string>
     <string name="server_label">Where your mailbox is: the computer\'s address and port</string>
     <string name="server_hint" translatable="false">192.168.1.20:4242</string>
@@ -166,15 +166,19 @@
     <string name="where_computer">On a computer at home</string>
     <string name="where_computer_text">Messages arrive even when your phone is off. You need a computer or a Raspberry Pi that stays on.</string>
     <string name="where_later">You can move your mailbox later without losing anything.</string>
-    <string name="here_title">Your mailbox on this phone</string>
     <string name="here_background">Loquax keeps running in the background. It uses some battery.</string>
-    <string name="here_offline">When the phone is off or has no internet, messages wait in the network and arrive when you are back. The sender sees "delivered" only then.</string>
     <string name="here_backup">Your address lives on this phone. Save a backup, or a lost phone means a new address.</string>
-    <string name="use_this_phone">Use this phone</string>
     <string name="next">Continue</string>
     <string name="have_address">I already have a Loquax address</string>
     <string name="computer_title">Set up your mailbox on the computer</string>
-    <string name="computer_text">On your computer, run: loquax mailbox setup\nIt shows a code. Scan it here, or paste it. How to install it: leviculum.network/mailbox</string>
+    <!-- The computer's page (1448, walk finding 15): three steps, the
+         link tappable, the command a block of its own that copies. -->
+    <string name="computer_install">1. Install Loquax on the computer:</string>
+    <string name="computer_install_link" translatable="false">https://leviculum.network/mailbox</string>
+    <string name="computer_run">2. Run this there:</string>
+    <string name="computer_command" translatable="false">loquax mailbox setup</string>
+    <string name="computer_code">3. A code appears there. Scan it here, or paste it.</string>
+    <string name="computer_command_copied">Command copied.</string>
     <string name="paste_code">Paste a code</string>
     <string name="phone_until_then">Use this phone until then</string>
     <string name="background_title">Let Loquax run in the background</string>

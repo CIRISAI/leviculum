@@ -329,3 +329,77 @@ fn the_parity_check_names_a_missing_german_and_a_changed_argument() {
     assert!(!de.iter().any(|(n, _, _)| n == "b"));
     assert_eq!(arguments("100% sure, %2$s and %1$d"), ["%1$d", "%2$s"]);
 }
+
+/// The body of the Java method that starts with `head` in `source`: from
+/// its line to the next method's comment at the same indent.
+fn method<'a>(source: &'a str, head: &str) -> &'a str {
+    let start = source
+        .find(head)
+        .unwrap_or_else(|| panic!("no {head:?} in the source"));
+    let rest = &source[start..];
+    let end = rest.find("\n    /**").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// 1448, walk finding 15: the first start has one primary button,
+/// "Continue" whatever is chosen, and its three special ways as links; the
+/// computer's command is a block of its own, never inside a sentence, and
+/// the sentence after it says where the code appears ("Er zeigt einen
+/// Code" had no clear "er"). Control: the method before 1448, four
+/// buttons and the renamed one, fails the same checks.
+#[test]
+fn the_first_start_has_one_primary_button_and_the_command_stands_alone() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("android/src/network/leviculum/loquax/WelcomeActivity.java");
+    let source = std::fs::read_to_string(&path).expect("WelcomeActivity.java");
+    let problems = |choice: &str| {
+        let mut problems = Vec::new();
+        let primaries = choice.matches("primary(").count();
+        if primaries != 1 {
+            problems.push(format!("{primaries} primary buttons"));
+        }
+        if choice.contains("button(") {
+            problems.push("a plain button beside the primary one".to_string());
+        }
+        if choice.matches("link(").count() != 3 {
+            problems.push("not three links".to_string());
+        }
+        if choice.contains("setText(") || choice.contains("use_this_phone") {
+            problems.push("the primary button is renamed".to_string());
+        }
+        problems
+    };
+    let choice = method(&source, "    private void choice(LinearLayout body) {");
+    assert_eq!(problems(choice), Vec::<String>::new());
+    let before = r#"
+        final Button next = button(getString(here ? R.string.use_this_phone : R.string.next));
+        next.setText(here ? R.string.use_this_phone : R.string.next);
+        Button join = button(getString(R.string.join_existing));
+        Button move = button(getString(R.string.move_from_old));
+        Button have = button(getString(R.string.have_address));"#;
+    assert_eq!(problems(before).len(), 4, "the control: {:?}", problems(before));
+
+    let command = "loquax mailbox setup";
+    for dir in LANGUAGES {
+        let xml = resources(dir);
+        for (name, attributes, text) in entries(&xml) {
+            if text.contains(command) {
+                assert!(
+                    name == "computer_command" && attributes.contains("translatable=\"false\""),
+                    "{dir}: {name} names the command inside a sentence: {text:?}"
+                );
+            }
+        }
+        let code = string(&xml, "computer_code").unwrap_or_default();
+        assert!(
+            code.contains("appears there") || code.contains("Dort erscheint"),
+            "{dir}: computer_code {code:?}"
+        );
+    }
+    let commands: Vec<String> = entries(&resources("values"))
+        .into_iter()
+        .filter(|(name, _, _)| name == "computer_command")
+        .map(|(_, _, text)| text)
+        .collect();
+    assert_eq!(commands, [command]);
+}

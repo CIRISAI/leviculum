@@ -98,6 +98,10 @@
     <item name="move_code" type="id" />
     <item name="move_status" type="id" />
     <item name="where_move" type="id" />
+    <!-- The first start's primary button and the computer's link and command (1448). -->
+    <item name="where_next" type="id" />
+    <item name="computer_link" type="id" />
+    <item name="computer_command" type="id" />
     <item name="move_paste" type="id" />
     <item name="move_go" type="id" />
     <item name="take_back" type="id" />
