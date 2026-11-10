@@ -248,6 +248,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .storage
         .unwrap_or_else(|| config.reticulum.resolve_storage_path(&config_dir));
     info!("Storage: {}", storage_path.display());
+    // One daemon per storage directory (1638): a second lnsd under another
+    // instance name would otherwise run on the same files. Held until exit.
+    let _storage_lock = leviculum_std::storage_lock::StorageLock::take(
+        &storage_path,
+        &config.reticulum.instance_name,
+    )?;
     // The servers medium (#471 step 3) keeps its choice in the storage
     // directory, so it is applied once that is known.
     let env_servers = std::env::var(leviculum_std::auto_servers::ENV_SERVERS).ok();

@@ -69,6 +69,9 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 *<storage>/auto_servers*
 :   The server entries the automatic layer dials, one `host:port` per slot, kept across starts while the list still names them.
 
+*<storage>/lnsd.lock*
+:   Held with an exclusive `flock` while **lnsd** runs, and holding its instance name and pid. A second **lnsd** on the same storage directory, under any instance name, refuses to start with one sentence naming the running daemon's instance and pid and exits non-zero; give it its own **--storage**. The kernel drops the lock when the daemon exits, however it exits, so a file left behind blocks nothing.
+
 *~/.config/reticulum/config*
 :   Per-user configuration, used when the system-wide file is absent.
 

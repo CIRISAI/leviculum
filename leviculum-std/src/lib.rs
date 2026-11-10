@@ -75,6 +75,8 @@ pub(crate) mod rpc;
 pub(crate) mod sequence_counts;
 pub mod socket_hook;
 pub(crate) mod storage;
+/// One daemon per storage directory: the `flock` lnsd holds on it.
+pub mod storage_lock;
 pub(crate) mod sync_ext;
 pub mod table_budget;
 pub mod test_support;
