@@ -335,6 +335,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
     let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
     backfill_contacts(&mut store, &home, archive_cap_bytes)?;
+    archive_own_name(&mut store, address, &own_name, archive_cap_bytes);
     let mut relations = relations_at_start(&store, &home)?;
     let signer = identity.clone();
     let mut outgoing = Outgoing::new(policy);
@@ -1761,6 +1762,18 @@ fn keep_page(store: &mut Store, node: &lnomad::discovery::DiscoveredNode) -> Opt
     }
 }
 
+/// The owner's own name, for its devices (1449 item 2, walk 1 finding 8):
+/// a device never hears its identity's announce (its own node holds the
+/// destination), so the archive hands the name as it hands a peer's, and
+/// the pull's name entry names the avatar and the profile. Archived once
+/// per change: the same name again is no new entry, and no name is none.
+fn archive_own_name(store: &mut Store, address: [u8; 16], own_name: &str, cap: u64) -> Option<u64> {
+    match own_name.trim().is_empty() {
+        true => None,
+        false => archive_name(store, address, own_name, cap),
+    }
+}
+
 /// Keep a name a peer announced in the archive, for the clients that hear
 /// no announces: its sequence, when the name is new for the peer.
 fn archive_name(store: &mut Store, peer: [u8; 16], name: &str, cap: u64) -> Option<u64> {
@@ -2670,6 +2683,26 @@ mod tests {
             .filter(|entry| entry.kind == crate::home::KIND_PETNAME)
             .map(|entry| crate::home::wire::read_petname_entry(&entry.packed).expect("a petname"))
             .collect()
+    }
+
+    /// 1449 item 2 (walk 1 finding 8): the start archives the owner's own
+    /// name for its devices, once per change; a home without a name
+    /// archives none.
+    #[test]
+    fn the_start_archives_the_owners_own_name_for_its_devices() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        assert_eq!(archive_own_name(&mut store, US, "  ", u64::MAX), None);
+        assert!(names_archived(&store).is_empty(), "no name, no entry");
+        assert!(archive_own_name(&mut store, US, "Lew", u64::MAX).is_some());
+        assert_eq!(
+            archive_own_name(&mut store, US, "Lew", u64::MAX),
+            None,
+            "once"
+        );
+        assert!(archive_own_name(&mut store, US, "Lew P.", u64::MAX).is_some());
+        // The archive keeps a peer's newest name only, the owner's too.
+        assert_eq!(names_archived(&store), [(US, "Lew P.".to_string())]);
     }
 
     /// 1159: a home node that imported before names travelled holds them in

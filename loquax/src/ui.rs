@@ -6201,8 +6201,18 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
             model.rooms.heard.hear(hub);
             settings::settle_suggestion(&mut model.rooms);
         }
-        // Our own announce, echoed back, names nobody.
-        OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
+        // Our own announce, echoed back, names nobody else: a name in it
+        // is the reader's own, which the mailbox announces and its archive
+        // hands every device (1449 item 2, walk 1 finding 8). It names the
+        // avatar and the profile, never a conversation; an echo without a
+        // name (a phone's node announces none) keeps the one heard.
+        OutboxEvent::Announced {
+            destination, name, ..
+        } if model.address == Some(destination) => {
+            if let Some(name) = name.as_deref().filter(|n| !n.trim().is_empty()) {
+                model.names.heard(destination, Some(name));
+            }
+        }
         OutboxEvent::Announced {
             destination, name, ..
         } => {
@@ -13461,10 +13471,14 @@ pub(crate) mod tests {
             ["hi  ◷", "── was Alice, now announces Ally ──"]
         );
         assert_eq!(view(&model).messages_title, "Ally");
-        // Our own address names nobody.
+        // Our own address names the reader alone (1449 item 2): the avatar
+        // and the profile, no conversation and no note.
         model.address = Some(OTHER);
+        let notes = model.conversations[0].notes.len();
         announced(&mut model, OTHER, "me");
-        assert_eq!(model.names.heard_count(), 1);
+        assert_eq!(model.names.shown(&OTHER), Some("me"));
+        assert!(model.conversations.iter().all(|c| c.peer != OTHER));
+        assert_eq!(model.conversations[0].notes.len(), notes);
         model.address = None;
         // A peer with no conversation gets no note, and none is invented.
         announced(&mut model, OTHER, "Carol");

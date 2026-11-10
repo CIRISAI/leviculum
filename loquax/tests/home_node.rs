@@ -1065,6 +1065,20 @@ async fn wake_run(wake: bool) -> Woken {
         mut events,
         watching,
     } = watching_leaf(port, &code, address, &node).await;
+    // The device catches up first, as a joined one has: the home archives
+    // its owner's name at start (1449), and a wake for that entry is no
+    // wake for the message.
+    loquax::home::client::pull_into(
+        &mut attached.outbox,
+        &link,
+        phone.path(),
+        &code.public_key,
+        &device,
+        Duration::from_secs(40),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("catch-up pull: {error}\nhome node:\n{}", node.log()));
+    while events.try_recv().is_ok() {}
 
     // A loquax messenger on the daemon's instance sends to the home node;
     // meanwhile the archive line and the wake are timed as they come.
@@ -1283,9 +1297,22 @@ async fn strangers_names_wake_nobody_and_a_conversation_peers_rename_rides_the_n
         .expect("hex")
         .try_into()
         .expect("16 bytes");
+    // The owner's own name rides the first pull (1449: the home archives
+    // it at start, for the avatar and the profile); besides it, the
+    // rename is the only name.
+    let others: Vec<_> = pull
+        .names
+        .iter()
+        .filter(|(peer, _)| *peer != address)
+        .cloned()
+        .collect();
     assert_eq!(
-        pull.names,
+        others,
         [(sender_bytes, "Renamed Peer".to_string())],
+        "{pull:?}"
+    );
+    assert!(
+        pull.names.iter().any(|(peer, _)| *peer == address),
         "{pull:?}"
     );
     assert_eq!(pull.messages(), 1, "the message, counted; the name is not");

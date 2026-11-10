@@ -236,6 +236,8 @@ final class MapView extends View {
     private Long atZoom;
     /** The phone's own fix (1201), and where the last frame put it in its view. */
     private Long ownLat;
+    /** Our own address on the marks, drawn as the dot; null for none. */
+    private String ownPeer;
     private Long ownLon;
     private Long ownX;
     /** The position sheet's map (1448): the own dot alone, never the radar. */
@@ -412,10 +414,16 @@ final class MapView extends View {
         return zoomMilli == null ? 0 : zoomMilli;
     }
 
-    /** The people the marks name, by peer, and the peer whose card is open. */
-    void people(Map<String, Map<String, Object>> rows, String card) {
+    /**
+     * The people the marks name, by peer, the peer whose card is open, and
+     * our own address when the store has a position of ours (null for
+     * none): that mark is the blue dot, never an avatar (1449, walk 1
+     * finding 8).
+     */
+    void people(Map<String, Map<String, Object>> rows, String card, String own) {
         people = rows;
         carded = card;
+        ownPeer = own;
         invalidate();
     }
 
@@ -745,8 +753,11 @@ final class MapView extends View {
         if (ownX == null || ownY == null || ownLat == null) {
             return;
         }
-        float cx = offX + scale * ownX;
-        float cy = offY + scale * ownY;
+        dot(canvas, offX + scale * ownX, offY + scale * ownY);
+    }
+
+    /** The blue dot in a ring of the background at (cx, cy). */
+    private void dot(Canvas canvas, float cx, float cy) {
         ring.setColor(getContext().getColor(R.color.background));
         canvas.drawCircle(cx, cy, 9 * density, ring);
         circle.setColor(getContext().getColor(R.color.own_dot));
@@ -794,6 +805,15 @@ final class MapView extends View {
                 continue;
             }
             String peer = names.get(0);
+            if (peer.equals(ownPeer)) {
+                // Our own position (1449, walk finding 8): the blue dot as
+                // the maps people know draw it, never an avatar; the phone's
+                // own fix, when it has one, is that dot already.
+                if (ownLat == null) {
+                    dot(canvas, cx, cy);
+                }
+                continue;
+            }
             Map<String, Object> row = people.get(peer);
             if (row == null) {
                 row = new HashMap<>();

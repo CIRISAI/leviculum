@@ -378,6 +378,47 @@ mod tests {
     use super::*;
     use crate::ui::strings::Lang;
 
+    /// 1449 item 2 (walk 1 finding 8): the mailbox's archive hands the
+    /// reader's own name as an announce of the reader's own address; the
+    /// avatar's letters and the profile's name are it, never the address's
+    /// hex digits. An echo without a name keeps it.
+    #[test]
+    fn the_own_name_from_the_mailbox_names_the_avatar_and_the_profile() {
+        use crate::outbox::OutboxEvent;
+        use crate::ui::tests::Field;
+        use crate::ui::{update, UiEvent};
+        let own = [0x90; 16];
+        let mut model = UiModel::<Field>::new(&[]);
+        model.address = Some(own);
+        model.profile.mailbox = Mailbox::Away {
+            name: None,
+            rung: None,
+            word: None,
+        };
+        let before = profile(&model);
+        assert_ne!(before.avatar.initials, "LP", "the control: no name before");
+        assert_eq!(
+            before.name.resolve(Lang::De),
+            StrId::ProfileNameElsewhere.text(Lang::De)
+        );
+        let heard = |name: Option<&str>| {
+            UiEvent::Engine(OutboxEvent::Announced {
+                destination: own,
+                name: name.map(String::from),
+                path_response: false,
+            })
+        };
+        update(&mut model, heard(Some("Lew Palm")));
+        update(&mut model, heard(None));
+        let after = profile(&model);
+        assert_eq!(after.avatar.initials, "LP");
+        assert_eq!(after.name.resolve(Lang::De), "Lew Palm");
+        assert!(
+            model.conversations.is_empty(),
+            "the reader is no conversation"
+        );
+    }
+
     #[test]
     fn an_address_reads_in_groups_of_four() {
         let address: [u8; 16] = core::array::from_fn(|i| i as u8 * 17);

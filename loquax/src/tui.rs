@@ -25,7 +25,7 @@ use crossterm::event::{
 use futures::StreamExt;
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Margin, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
@@ -2323,13 +2323,14 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
                     if !area.contains(Position::new(col, row)) {
                         continue;
                     }
-                    frame.buffer_mut().set_stringn(
-                        col,
-                        row,
-                        text,
-                        usize::from(inner.width),
-                        Style::default(),
-                    );
+                    // Our own position, the dot in blue (1449 item 2).
+                    let style = match pin.own {
+                        true => Style::default().fg(Color::Rgb(0x1a, 0x73, 0xe8)),
+                        false => Style::default(),
+                    };
+                    frame
+                        .buffer_mut()
+                        .set_stringn(col, row, text, usize::from(inner.width), style);
                 }
             }
         }

@@ -2373,7 +2373,9 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
             "the title's mark and two pins\n{map}"
         );
         assert_eq!(map.matches('◉').count(), 1, "the selected pin\n{map}");
-        assert!(map.contains("● you · 1 min"), "{map}");
+        // Our own position is the dot alone, no name and no age (1449
+        // item 2): the control is that "you" was drawn before.
+        assert!(!map.contains("you · 1 min"), "{map}");
         // Tab: the selection moves from the first pin by name to the next.
         let next = frame(&frames, "next pin");
         assert!(
@@ -2539,7 +2541,7 @@ async fn the_map_drawing_cycles_through_the_text_techniques() {
     // Every frame keeps the pins and the credit.
     for label in ["octant", "blocks", "braille-thin", "mosaic", "braille"] {
         let shown = frame(&frames, label);
-        assert!(shown.contains("● you · 1 min"), "{label}\n{shown}");
+        assert_eq!(shown.matches('●').count(), 3, "{label}\n{shown}");
         assert!(
             shown.contains("© OpenStreetMap contributors"),
             "{label}\n{shown}"

@@ -479,7 +479,7 @@ final class MapPane implements MapView.Listener {
             own = Core.str(ours, "peer");
             people.put(own, ours);
         }
-        map.people(people, carded);
+        map.people(people, carded, own);
         // The pins drawn, and how many are nodes nearby (1302): the device
         // walk counts them here, the canvas has no nodes to dump.
         int nearby = 0;
@@ -582,7 +582,7 @@ final class MapPane implements MapView.Listener {
         friendsButton.setVisibility(View.GONE);
         locateButton.setVisibility(View.GONE);
         empty.setVisibility(View.GONE);
-        map.people(people, carded);
+        map.people(people, carded, own);
     }
 
     private void closeCard() {
@@ -591,7 +591,7 @@ final class MapPane implements MapView.Listener {
         friendsButton.setVisibility(View.VISIBLE);
         locateButton.setVisibility(View.VISIBLE);
         empty.setVisibility(friends.isEmpty() ? View.VISIBLE : View.GONE);
-        map.people(people, null);
+        map.people(people, null, own);
     }
 
     /** The card's words and buttons for `row`. */

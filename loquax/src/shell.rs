@@ -807,12 +807,7 @@ impl Shell {
             runner::keep_signature(&mut self.store, &event);
             self.apply(UiEvent::Engine(event));
             if let Some(destination) = named {
-                runner::keep_name(
-                    &mut self.store,
-                    &self.model.names,
-                    self.model.address,
-                    destination,
-                );
+                runner::keep_name(&mut self.store, &self.model.names, destination);
             }
         }
     }

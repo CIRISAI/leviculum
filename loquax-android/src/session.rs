@@ -2431,7 +2431,7 @@ impl Inner {
             };
             self.apply(UiEvent::Engine(event));
             if let Some(peer) = named {
-                runner::keep_name(&mut self.store, &self.model.names, self.model.address, peer);
+                runner::keep_name(&mut self.store, &self.model.names, peer);
             }
         }
     }

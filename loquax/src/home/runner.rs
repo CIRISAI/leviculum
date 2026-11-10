@@ -503,17 +503,10 @@ pub fn keep_signature(store: &mut Store, event: &OutboxEvent) {
     }
 }
 
-/// A name an announce carried, kept for the next run; never the screen's
-/// own address.
-pub fn keep_name(
-    store: &mut Store,
-    names: &crate::names::Names,
-    own: Option<[u8; 16]>,
-    destination: [u8; 16],
-) {
-    if own == Some(destination) {
-        return;
-    }
+/// A name an announce carried, kept for the next run. The reader's own
+/// is kept too (1449 item 2): the mailbox's archive hands it once, and the
+/// avatar and the profile need it after a restart.
+pub fn keep_name(store: &mut Store, names: &crate::names::Names, destination: [u8; 16]) {
     let Some(name) = names.announced(&destination) else {
         return;
     };

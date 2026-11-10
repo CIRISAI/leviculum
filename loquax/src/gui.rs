@@ -3336,8 +3336,13 @@ impl canvas::Program<Message> for MapCanvas<'_> {
                 .filter(|_| !pin.nearby)
                 .map(|[r, g, b]| Color::from_rgb8(r, g, b));
             let blue = hue.unwrap_or(Color::from_rgb8(0x20, 0x50, 0xc0));
+            let [or, og, ob] = map::OWN_DOT;
             let ink = match (pin.selected, pin.nearby, pin.stale) {
                 (true, ..) => Color::from_rgb8(0xd0, 0x30, 0x30),
+                // Our own position, the blue dot (1449 item 2).
+                (false, _, stale) if pin.own => {
+                    Color::from_rgb8(or, og, ob).scale_alpha(if stale { 0.45 } else { 1.0 })
+                }
                 // A node nearby that is no contact (1302): a neutral grey.
                 (false, true, false) => Color::from_rgb8(0x80, 0x80, 0x80),
                 (false, true, true) => Color::from_rgba8(0x80, 0x80, 0x80, 0.45),

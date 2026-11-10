@@ -175,7 +175,16 @@ pub struct Placed {
     pub selected: bool,
     /// [`MapPin::low_battery`] (1386): a battery beside the marker.
     pub low_battery: bool,
+    /// [`MapPin::own`]: the reader's own position, drawn as the blue dot
+    /// ([`OWN_DOT`]) without a label (1449 item 2, walk 1 finding 8).
+    pub own: bool,
 }
+
+/// The own position's blue, as the maps people know draw it, on every
+/// target's map (1449 item 2): the window's canvas, its picture, the
+/// terminal's picture; the phone's `R.color.own_dot` and the terminal's
+/// text map say the same.
+pub const OWN_DOT: [u8; 3] = [0x1a, 0x73, 0xe8];
 
 /// The sizes the label rule counts with at `scale`.
 pub fn metrics(scale: f32) -> Metrics {
@@ -251,8 +260,15 @@ fn labelled(
         .into_iter()
         .filter_map(|(index, x, y)| {
             let pin = pins.get(index)?;
-            let words = pin.words();
-            let width = measure(&words, LABEL * scale);
+            // Our own position is the dot alone (1449 item 2).
+            let words = match pin.own {
+                true => String::new(),
+                false => pin.words(),
+            };
+            let width = match pin.own {
+                true => 0,
+                false => measure(&words, LABEL * scale),
+            };
             Some((pin, x, y, words, width))
         })
         .collect();
@@ -279,12 +295,15 @@ fn labelled(
             peer: pin.peer,
             x: x as f32,
             y: y as f32,
-            label: label.map(|l| (l.x as f32, l.y as f32, words)),
+            label: label
+                .filter(|_| !pin.own)
+                .map(|l| (l.x as f32, l.y as f32, words)),
             width: width as f32,
             stale: pin.stale,
             nearby: pin.nearby,
             selected: Some(pin.peer) == selected,
             low_battery: pin.low_battery(),
+            own: pin.own,
         })
         .collect();
     out.sort_by_key(|p| p.selected);
@@ -340,6 +359,7 @@ fn pin_ink(pin: &Placed, theme: MapTheme, hue: Option<[u8; 3]>) -> PinInk {
     };
     let marker = match (pin.selected, pin.stale) {
         (true, _) => ([0xd0, 0x30, 0x30], 1.0),
+        (false, stale) if pin.own => (OWN_DOT, if stale { 0.45 } else { 1.0 }),
         (false, false) => (ground, 1.0),
         (false, true) => (ground, 0.45),
     };

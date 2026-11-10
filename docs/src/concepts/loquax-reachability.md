@@ -87,13 +87,13 @@ path's interface changes. Nothing medium-aware enters transport
   `hops=0`.
 - **What the code does today (read 2026-11-04, not yet measured).** A
   desktop Loquax that is a client of a mailbox attaches to the shared
-  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1689`;
+  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1684`;
   `Upstream::Shared`, `loquax/src/engine/shell.rs:433`) and dials
   nothing: the only callers of the rendezvous rotation (`dial`,
   `loquax/src/engine/shell.rs:616`) are the leaf, the phone's own
   mailbox and the mailbox daemon. The daemon on a shared instance dials
   its rendezvous as a peer (`DaemonUpstream::Shared`,
-  `loquax/src/home/daemon.rs:380`), which it needs for devices that are
+  `loquax/src/home/daemon.rs:381`), which it needs for devices that are
   elsewhere, not for the one beside it. So on one lnsd the client should
   find the mailbox through the local interface with no rendezvous
   dialled. Slice 1 turns this reading into a cell before anything else

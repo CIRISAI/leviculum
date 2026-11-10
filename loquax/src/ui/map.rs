@@ -262,6 +262,10 @@ pub struct PinCell {
     /// [`MapPin::nearby`].
     pub nearby: bool,
     pub selected: bool,
+    /// [`MapPin::own`]: the reader's own position, the blue dot alone as
+    /// the maps people know draw it, never a name or an avatar (1449 item 2,
+    /// walk 1 finding 8).
+    pub own: bool,
 }
 
 /// A pin's name set on a row of its own.
@@ -667,8 +671,10 @@ pub fn place(
             let pin = pins.get(placed.index)?;
             let col = u16::try_from(placed.x / u32::from(setup.cell_px.0.max(1))).ok()?;
             let row = u16::try_from(placed.y / u32::from(setup.cell_px.1.max(1))).ok()?;
-            // A battery below a fifth after the name (1386).
+            // A battery below a fifth after the name (1386). Our own
+            // position is the dot alone, no name (1449 item 2).
             let words = match (pin.low_battery(), ascii) {
+                _ if pin.own => String::new(),
                 (false, _) => pin.words(),
                 (true, false) => format!("{} {BATTERY_GLYPH}", pin.words()),
                 (true, true) => format!("{} !", pin.words()),
@@ -713,6 +719,7 @@ pub fn place(
                 })
             };
             let (col, text, apart) = match side {
+                _ if pin.own => (col, marker.to_string(), None),
                 Some(Side::Right) => (col, format!("{marker} {words}"), None),
                 Some(Side::Left) => (
                     col.saturating_sub(len + 1),
@@ -732,6 +739,7 @@ pub fn place(
                 stale: pin.stale,
                 nearby: pin.nearby,
                 selected,
+                own: pin.own,
             }
         })
         .collect();
