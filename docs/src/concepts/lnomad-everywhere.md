@@ -88,7 +88,7 @@ tokens, the keymap mechanism with the scroll rows, input and editing, the
 footer, help and toast models, and the ratatui widgets over them. **None
 of the contract is shared.** The scene, the intents and the string
 catalogue live inside the `loquax` crate (`pub mod scene`,
-`loquax/src/ui.rs:170`): `scene.rs` 1,231 lines (1,091 production),
+`loquax/src/ui.rs:171`): `scene.rs` 1,231 lines (1,091 production),
 `intent.rs` 543 (495), `strings.rs` 474 (350). lnomad depends on
 `leviculum-ui`, not on `loquax`, so today it cannot name one node type of
 the contract.
@@ -683,7 +683,7 @@ terminal and window get no tab (the second question, answered no for now).
   address field as they are. An announce is kept while the tab is off.
 - **Chat and page hand over.** A NomadNet page link in a chat
   (`<hash>:/page/...`) opens the tab at that page where the host has the
-  tab (`loquax/src/ui.rs:5327`) and is copied for lnomad where not. A
+  tab (`loquax/src/ui.rs:5324`) and is copied for lnomad where not. A
   page's `lxmf@` link raises lnomad's new `Effect::Write`
   (`lnomad/src/app/model.rs:455`) when hosted
   (`lnomad/src/app/event.rs:1572`), and Loquax opens that chat for
@@ -754,12 +754,12 @@ two).** Slice 3's network seam: one node, lent, not a second one.
 - **The phone's turn.** `loquax-android/src/browse_fetch.rs` is the task
   the terminal's loop is on a desktop: one fetch in flight, a newer one or
   a cancel superseding it, lnomad's discovery drain beside it. The
-  session's pump (`browse`, `loquax-android/src/session.rs:2418`) hands it
+  session's pump (`browse`, `loquax-android/src/session.rs:2424`) hands it
   the owed effects and folds back what it says: `BrowseEvent::FailedText`,
   `Identifying`, `Downloaded` and `DownloadFailed` are new
   (`loquax/src/ui/browse.rs:238`). A download is kept under the app's
   files as a bubble's file is, `files/browse/` (`keep_download`,
-  `loquax-android/src/session.rs:2480`), and the clipboard text and the
+  `loquax-android/src/session.rs:2486`), and the clipboard text and the
   file go to Java once with the next screen; `BrowsePane` writes the
   clipboard and opens the file, or the share sheet takes it. Announces
   reach the list from the session's start, the tab shown or not.
@@ -819,9 +819,9 @@ as the phone, on by default since 1618.
   the bookmarks and pins to their files. A write and a quit stay the
   core's (`effects_of`).
 - **The keys.** While the tab is in front the core hands keys and the
-  mouse to the browser (`loquax/src/ui.rs:3832`, `loquax/src/ui.rs:3887`),
+  mouse to the browser (`loquax/src/ui.rs:3824`, `loquax/src/ui.rs:3879`),
   so lnomad's whole key table works, its `q` leaves the tab, and the
-  terminal's screen size is the page's (`loquax/src/ui.rs:3885`). `B` and
+  terminal's screen size is the page's (`loquax/src/ui.rs:3877`). `B` and
   the palette's `browse` bring the tab to the front
   (`loquax/src/keys.rs:643`, `browse::open`, `loquax/src/ui/browse.rs:405`);
   with the tab off they say how to switch it on.
