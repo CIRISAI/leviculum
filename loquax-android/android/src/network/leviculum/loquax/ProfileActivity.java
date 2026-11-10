@@ -301,6 +301,10 @@ public class ProfileActivity extends Activity {
             return;
         }
         TextView scan = row(getString(R.string.profile_scan), R.id.profile_scan);
+        // An action looks like one (1632, walk 4 new 19: plain text under
+        // two real buttons), as "Standort einschalten" does since 1629.
+        scan.setTextColor(getColor(R.color.accent));
+        scan.setTypeface(null, android.graphics.Typeface.BOLD);
         scan.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
