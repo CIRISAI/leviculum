@@ -62,6 +62,7 @@
         "args": [],
         "key": "explore_no_joined"
       },
+      "open_rooms": null,
       "servers_empty": {
         "args": [
           "marcel"

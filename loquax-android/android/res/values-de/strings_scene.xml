@@ -22,6 +22,8 @@
     <string name="explore_no_pages">Noch keine Seiten bekannt: sie erscheinen hier, sobald dein Postfach oder dieses Gerät eine hört.</string>
     <string name="explore_pages_off">Seiten lassen sich auf diesem Gerät noch nicht öffnen.</string>
     <string name="explore_no_joined">Du bist in keinem Raum. Such dir unten einen Server aus.</string>
+    <string name="explore_no_joined_on">Du bist in keinem Raum auf %1$s.</string>
+    <string name="explore_open_rooms">Räume öffnen</string>
     <string name="explore_servers">Server</string>
     <string name="explore_no_servers">Kein Server in Reichweite.</string>
     <string name="explore_no_server_match">Kein Server passt zu „%1$s“.</string>

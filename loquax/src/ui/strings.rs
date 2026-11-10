@@ -62,6 +62,8 @@ leviculum_ui::catalogue! {
     // 1621 (walk 2): the rooms the reader is in, then the servers, each
     // section one sentence when empty.
     ExploreNoJoined = "explore_no_joined", "You are in no room. Pick a server below.", "Du bist in keinem Raum. Such dir unten einen Server aus.";
+    ExploreNoJoinedOn = "explore_no_joined_on", "You are in no room on %1$s.", "Du bist in keinem Raum auf %1$s.";
+    ExploreOpenRooms = "explore_open_rooms", "Open rooms", "Räume öffnen";
     ExploreServers = "explore_servers", "Servers", "Server";
     ExploreNoServers = "explore_no_servers", "No server within reach.", "Kein Server in Reichweite.";
     ExploreNoServerMatch = "explore_no_server_match", "No server matches “%1$s”.", "Kein Server passt zu „%1$s“.";

@@ -22,6 +22,8 @@
     <string name="explore_no_pages">No pages known yet: they appear here as soon as your mailbox or this device hears one.</string>
     <string name="explore_pages_off">Pages cannot be opened on this device yet.</string>
     <string name="explore_no_joined">You are in no room. Pick a server below.</string>
+    <string name="explore_no_joined_on">You are in no room on %1$s.</string>
+    <string name="explore_open_rooms">Open rooms</string>
     <string name="explore_servers">Servers</string>
     <string name="explore_no_servers">No server within reach.</string>
     <string name="explore_no_server_match">No server matches “%1$s”.</string>

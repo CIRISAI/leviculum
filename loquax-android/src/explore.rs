@@ -111,6 +111,7 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             .unwrap_or_default(),
         rooms_title: rooms.title.resolve(lang),
         joined_empty: text_or_empty(&rooms.joined_empty, lang),
+        open_rooms: text_or_empty(&rooms.open_rooms, lang),
         servers_title: rooms.servers_title.resolve(lang),
         servers_empty: text_or_empty(&rooms.servers_empty, lang),
         joined: rooms
@@ -174,6 +175,11 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             .map(|s| text_or_empty(&s.retry, lang))
             .unwrap_or_default(),
         sheet_asking: node.sheet.as_ref().is_some_and(|s| s.asking),
+        sheet_open_rooms: node
+            .sheet
+            .as_ref()
+            .map(|s| text_or_empty(&s.open_rooms, lang))
+            .unwrap_or_default(),
         sheet_close: node
             .sheet
             .as_ref()
@@ -202,6 +208,7 @@ pub fn events(verb: &str, text: &str, to: &str, index: i64) -> Result<Vec<UiEven
         )),
         "hub" => explore(ExploreEvent::Hub(dest(to)?)),
         "use" => explore(ExploreEvent::UseHub(dest(to)?)),
+        "rooms" => explore(ExploreEvent::OpenRooms),
         "join" => explore(ExploreEvent::JoinRoom(dest(to)?, text.to_string())),
         "ask" => explore(ExploreEvent::AskAgain(dest(to)?)),
         "close" => explore(ExploreEvent::CloseSheet),
@@ -229,6 +236,10 @@ mod tests {
         assert_eq!(
             events("open", "", &node, 0),
             Ok(vec![UiEvent::Explore(ExploreEvent::OpenPage([0x5a; 16]))])
+        );
+        assert_eq!(
+            events("rooms", "", "", 0),
+            Ok(vec![UiEvent::Explore(ExploreEvent::OpenRooms)])
         );
         assert_eq!(
             events("az", "", "", 1),

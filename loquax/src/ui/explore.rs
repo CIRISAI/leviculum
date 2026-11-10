@@ -183,6 +183,10 @@ pub enum ExploreEvent {
     /// A hub's row: its sheet opens. Nothing is chosen and nothing linked
     /// (1618).
     Hub([u8; 16]),
+    /// "Open rooms" (1655, walk 9, 45): the rooms screen of the server in
+    /// use, its list, its state and the field for another room, joining
+    /// nothing; it connects when it is not connected.
+    OpenRooms,
     /// The sheet's button: this hub is the public rooms' hub from now on,
     /// linked at once (1652), and its rooms show as it lists them.
     UseHub([u8; 16]),
@@ -269,8 +273,15 @@ pub struct RoomsSection {
     pub joined: Vec<RoomRow>,
     /// Where the terminal's cursor is among them.
     pub joined_cursor: Option<usize>,
-    /// "You are in no room. Pick a server below." while there is none.
+    /// "You are in no room. Pick a server below." while there is none,
+    /// "You are in no room on `<server>`." while one is in use (1655, walk
+    /// 9, 45: the first sentence stood above the server's tick).
     pub joined_empty: Option<Text>,
+    /// "Open rooms" while a server is in use (1655, walk 9, 45): its
+    /// rooms screen, without joining anything.
+    pub open_rooms: Option<Text>,
+    /// The terminal's cursor is on it.
+    pub open_cursor: bool,
     /// "Servers".
     pub servers_title: Text,
     /// The servers Loquax ships, the reader's own and those heard on the
@@ -308,8 +319,12 @@ pub struct HubSheet {
     /// The question is out and the sentence may still turn: a frontend
     /// that draws on answers only draws again within a second.
     pub asking: bool,
+    /// "Open rooms" on the sheet of the server in use (1655, walk 9, 45:
+    /// it had no way to its rooms screen but joining a room).
+    pub open_rooms: Option<Text>,
     pub close: Text,
-    /// The terminal's cursor: 0 the button, then the rooms.
+    /// The terminal's cursor: 0 the button ("Open rooms" on the server in
+    /// use), then the rooms.
     pub cursor: usize,
 }
 
@@ -328,6 +343,8 @@ pub enum Pick {
     Address,
     Page([u8; 16]),
     Room(usize),
+    /// "Open rooms" (1655).
+    OpenRooms,
     Hub([u8; 16]),
 }
 
@@ -638,6 +655,9 @@ pub fn picks<B>(model: &UiModel<B>) -> Vec<Pick> {
     }
     out.extend(listed(model).into_iter().map(|(k, _)| Pick::Page(k.dest)));
     out.extend((0..model.rooms.rooms.len()).map(Pick::Room));
+    if model.rooms.hub.is_some() {
+        out.push(Pick::OpenRooms);
+    }
     out.extend(hub_list(model).iter().map(|h| Pick::Hub(h.hash)));
     out
 }
@@ -868,13 +888,13 @@ fn ask<B>(model: &mut UiModel<B>, hash: [u8; 16]) -> Vec<UiEffect> {
     Vec::from([UiEffect::Rooms(super::rooms::RoomAsk::Peek { hub: hash })])
 }
 
-/// The sheet's rows in the terminal cursor's order: the button (while
-/// the hub is not in force), then the rooms.
+/// The sheet's rows in the terminal cursor's order: the button ("Open
+/// rooms" on the hub in force, 1655), then the rooms.
 pub fn sheet_picks<B>(model: &UiModel<B>) -> usize {
     let Some(hash) = model.explore.sheet else {
         return 0;
     };
-    usize::from(model.rooms.hub != Some(hash)) + sheet_rooms(&model.rooms, &hash).len()
+    1 + sheet_rooms(&model.rooms, &hash).len()
 }
 
 /// The open sheet as the frontends draw it.
@@ -905,6 +925,7 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
         rooms_note: rooms_note(&model.rooms, &hash, !rooms.is_empty(), clock),
         retry: retry(&model.rooms, &hash, clock).then(|| Text::key(StrId::RoomsRetry)),
         asking: matches!(model.rooms.named.get(&hash), Some(Named::Asking { .. })),
+        open_rooms: chosen.then(|| Text::key(StrId::ExploreOpenRooms)),
         rooms,
         close: Text::key(StrId::ExploreServerClose),
         cursor: model
@@ -1008,10 +1029,18 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
         pages,
         rooms: RoomsSection {
             title: Text::key(StrId::ExploreRooms),
-            joined_empty: rooms_node
-                .rows
-                .is_empty()
-                .then(|| Text::key(StrId::ExploreNoJoined)),
+            joined_empty: rooms_node.rows.is_empty().then(|| match model.rooms.hub {
+                // The server in use by name (1655, walk 9, 45).
+                Some(_) => Text::Key(
+                    StrId::ExploreNoJoinedOn,
+                    Vec::from([Arg::Text(alloc::boxed::Box::new(super::rooms::hub_label(
+                        &model.rooms,
+                    )))]),
+                ),
+                None => Text::key(StrId::ExploreNoJoined),
+            }),
+            open_rooms: model.rooms.hub.map(|_| Text::key(StrId::ExploreOpenRooms)),
+            open_cursor: cursor == Some(&Pick::OpenRooms),
             joined: rooms_node.rows,
             joined_cursor,
             servers_title: Text::key(StrId::ExploreServers),
@@ -1108,6 +1137,16 @@ pub(super) fn fold<B: InputBuffer + Default>(
                 return Vec::new();
             }
             ask(model, hash)
+        }
+        ExploreEvent::OpenRooms => {
+            if model.rooms.hub.is_none() {
+                return Vec::new();
+            }
+            model.explore.sheet = None;
+            show_rooms(model);
+            let mut effects = super::rooms::fold(model, RoomsEvent::Show(None));
+            effects.extend(super::rooms::fold(model, RoomsEvent::Retry));
+            effects
         }
         ExploreEvent::UseHub(hash) => {
             model.explore.sheet = None;
@@ -1206,14 +1245,17 @@ pub(super) fn key<B: InputBuffer + Default>(
     // the rooms, Enter takes the one under the cursor, Esc closes it.
     if let Some(hash) = model.explore.sheet {
         let rows = sheet_picks(model);
-        let button = usize::from(model.rooms.hub != Some(hash));
+        let button = 1;
         let at = model.explore.sheet_cursor.min(rows.saturating_sub(1));
         match key.code {
             KeyCode::Up => model.explore.sheet_cursor = at.saturating_sub(1),
             KeyCode::Down if rows > 0 => model.explore.sheet_cursor = (at + 1).min(rows - 1),
             KeyCode::Enter if rows > 0 => {
                 if at < button {
-                    return fold(model, ExploreEvent::UseHub(hash));
+                    return match model.rooms.hub == Some(hash) {
+                        true => fold(model, ExploreEvent::OpenRooms),
+                        false => fold(model, ExploreEvent::UseHub(hash)),
+                    };
                 }
                 if let Some(room) = sheet_rooms(&model.rooms, &hash)
                     .into_iter()
@@ -1262,6 +1304,7 @@ pub(super) fn key<B: InputBuffer + Default>(
                 Some(Pick::Address) => fold(model, ExploreEvent::OpenAddress),
                 Some(Pick::Page(dest)) => fold(model, ExploreEvent::OpenPage(dest)),
                 Some(Pick::Room(i)) => fold(model, ExploreEvent::OpenRoom(i)),
+                Some(Pick::OpenRooms) => fold(model, ExploreEvent::OpenRooms),
                 Some(Pick::Hub(hash)) => fold(model, ExploreEvent::Hub(hash)),
                 None => Vec::new(),
             };
@@ -1329,6 +1372,7 @@ impl ExploreNode {
                 })).collect::<Vec<_>>(),
                 "joined_cursor": r.joined_cursor,
                 "joined_empty": r.joined_empty.as_ref().map(Text::to_json),
+                "open_rooms": r.open_rooms.as_ref().map(Text::to_json),
                 "servers_title": r.servers_title.to_json(),
                 "hubs": r.hubs.iter().map(hub_json).collect::<Vec<_>>(),
                 "servers_empty": r.servers_empty.as_ref().map(Text::to_json),
@@ -1344,6 +1388,7 @@ impl ExploreNode {
                 "rooms_title": s.rooms_title.to_json(),
                 "rooms": s.rooms,
                 "rooms_note": s.rooms_note.as_ref().map(Text::to_json),
+                "open_rooms": s.open_rooms.as_ref().map(Text::to_json),
                 "close": s.close.to_json(),
                 "cursor": s.cursor,
             })),
@@ -2400,6 +2445,98 @@ mod tests {
             explore(&mut model, ExploreEvent::Hub(silent)),
             [UiEffect::Rooms(RoomAsk::Peek { hub: silent })]
         );
+    }
+
+    /// The server in use has a way to its rooms screen (1655, walk 9, 45:
+    /// "You are in no room. Pick a server below." stood above
+    /// "EuskalReticulum ✓", and its sheet had no way there but joining).
+    /// The sentence names it; "Open rooms" on the section and on its
+    /// sheet opens the rooms screen and connects, joining nothing.
+    #[test]
+    fn the_server_in_use_opens_its_rooms_without_a_join() {
+        let Some(euskal) = crate::ui::hubs::shipped()
+            .into_iter()
+            .find(|h| h.name == "EuskalReticulum")
+        else {
+            panic!("EuskalReticulum is shipped");
+        };
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        // Before a server is in use: the old sentence, no button.
+        let shown = node(&model);
+        assert_eq!(
+            shown.rooms.joined_empty,
+            Some(Text::key(StrId::ExploreNoJoined))
+        );
+        assert_eq!(shown.rooms.open_rooms, None);
+        assert!(!picks(&model).contains(&Pick::OpenRooms));
+        // In use, as a start reads it from the config: nothing linked yet.
+        model.rooms.hub = Some(euskal.hash);
+        model.rooms.enabled = true;
+        let shown = node(&model);
+        assert_eq!(
+            shown
+                .rooms
+                .joined_empty
+                .as_ref()
+                .map(|t| t.resolve(Lang::De))
+                .as_deref(),
+            Some("Du bist in keinem Raum auf EuskalReticulum.")
+        );
+        assert_eq!(
+            shown
+                .rooms
+                .open_rooms
+                .as_ref()
+                .map(|t| t.resolve(Lang::De))
+                .as_deref(),
+            Some("Räume öffnen")
+        );
+        // Its sheet says so too, and the cursor's first row is it.
+        explore(&mut model, ExploreEvent::Hub(euskal.hash));
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert!(sheet.chosen);
+        assert_eq!(sheet.open_rooms, Some(Text::key(StrId::ExploreOpenRooms)));
+        // Another server's sheet has none.
+        explore(&mut model, ExploreEvent::Hub([0x77; 16]));
+        assert_eq!(node(&model).sheet.expect("the sheet").open_rooms, None);
+        explore(&mut model, ExploreEvent::CloseSheet);
+        // The tap: the rooms screen in front, the link asked, no join.
+        let effects = explore(&mut model, ExploreEvent::OpenRooms);
+        assert!(
+            effects.contains(&UiEffect::Rooms(RoomAsk::Open { hub: euskal.hash })),
+            "{effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, UiEffect::Rooms(RoomAsk::Join { .. }))),
+            "{effects:?}"
+        );
+        assert!(model.rooms.open && model.explore.open && !model.browse.open);
+        assert_eq!(model.rooms.state, HubState::Linking);
+        assert_eq!(model.explore.sheet, None);
+        // The terminal's Enter on the sheet's first row is the same verb.
+        let mut terminal = phone();
+        terminal.rooms.hub = Some(euskal.hash);
+        terminal.rooms.enabled = true;
+        update(&mut terminal, UiEvent::Tab(TabId::Explore));
+        explore(&mut terminal, ExploreEvent::Hub(euskal.hash));
+        key(
+            &mut terminal,
+            leviculum_ui::input::KeyEvent::new(
+                leviculum_ui::input::KeyCode::Enter,
+                leviculum_ui::input::KeyModifiers::NONE,
+            ),
+        );
+        assert!(
+            terminal.rooms.open,
+            "Enter on the first row opened the rooms"
+        );
+        // Without a server in use the verb does nothing.
+        let mut none = phone();
+        assert!(explore(&mut none, ExploreEvent::OpenRooms).is_empty());
+        assert!(!none.rooms.open);
     }
 
     /// One room is one row on the sheet (1655, walk 9, 46: Minuteman

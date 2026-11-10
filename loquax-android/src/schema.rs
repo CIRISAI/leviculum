@@ -2428,6 +2428,10 @@ pub struct ExploreScreen {
     pub joined: Vec<RoomsRow>,
     #[serde(default)]
     pub joined_empty: String,
+    /// "Räume öffnen" while a server is in use (1655): a tap is the
+    /// `rooms` verb, its rooms screen without joining. Empty otherwise.
+    #[serde(default)]
+    pub open_rooms: String,
     /// "Servers": the servers Loquax ships, the reader's own and those
     /// heard on the mesh, in one list, or the one sentence that there is
     /// none (in a search: none matches).
@@ -2472,6 +2476,10 @@ pub struct ExploreScreen {
     /// sentence turns at its time (1653).
     #[serde(default)]
     pub sheet_asking: bool,
+    /// "Räume öffnen" on the sheet of the server in use (1655): the
+    /// `rooms` verb. Empty on any other sheet.
+    #[serde(default)]
+    pub sheet_open_rooms: String,
     #[serde(default)]
     pub sheet_close: String,
 }

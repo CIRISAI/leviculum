@@ -85,7 +85,9 @@ final class ExplorePane {
         static final int PAGE = 4;
         static final int ROOM = 5;
         static final int SERVER = 6;
-        static final int KINDS = 7;
+        /** "Räume öffnen" (1655). */
+        static final int OPEN = 7;
+        static final int KINDS = 8;
 
         final int kind;
         final String key;
@@ -524,6 +526,9 @@ final class ExplorePane {
             case Row.SERVER:
                 verb("hub", "", Core.str(row.item, "dest"), 0);
                 break;
+            case Row.OPEN:
+                verb("rooms", "", "", 0);
+                break;
             default:
                 break;
         }
@@ -687,6 +692,11 @@ final class ExplorePane {
             out.add(new Row(Row.ROOM, "room:" + Core.str(room, "name"), Core.str(room, "name"), room, i));
         }
         note(out, "joined_empty", Core.str(shown, "joined_empty"));
+        // The rooms screen of the server in use, joining nothing (1655).
+        String open = Core.str(shown, "open_rooms");
+        if (!open.isEmpty()) {
+            out.add(new Row(Row.OPEN, "open:rooms", open, null, 0));
+        }
         out.add(new Row(Row.HEADING, "heading:servers", Core.str(shown, "servers_title"), null, 0));
         for (Map<String, Object> hub : Core.list(shown, "hubs")) {
             out.add(new Row(Row.SERVER, "server:" + Core.str(hub, "dest"), Core.str(hub, "name"), hub, 0));
@@ -715,7 +725,7 @@ final class ExplorePane {
         }
         String shows = Core.str(shown, "sheet_said") + "|" + Core.bool(shown, "sheet_chosen") + "|"
                 + Core.words(shown, "sheet_rooms") + "|" + Core.str(shown, "sheet_rooms_note") + "|"
-                + Core.str(shown, "sheet_retry");
+                + Core.str(shown, "sheet_retry") + "|" + Core.str(shown, "sheet_open_rooms");
         // While the question is out the sentence turns at its time, 20 s
         // (1653, walk 8, 42), which no answer may come to draw: once a
         // second, as the Rooms pane counts its seconds.
@@ -770,6 +780,23 @@ final class ExplorePane {
             TextView inUse = words(Core.str(shown, "sheet_button"), 16, R.color.text);
             inUse.setPadding(0, dp(12), 0, dp(4));
             body.addView(inUse);
+            // Its rooms screen, joining nothing (1655, walk 9, 45).
+            String open = Core.str(shown, "sheet_open_rooms");
+            if (!open.isEmpty()) {
+                Button rooms = new Button(screen);
+                rooms.setText(open);
+                rooms.setAllCaps(false);
+                rooms.setTag("explore_sheet_open_rooms");
+                rooms.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        sheetFor = "";
+                        closeSheet();
+                        verb("rooms", "", "", 0);
+                    }
+                });
+                body.addView(rooms);
+            }
         } else {
             Button use = new Button(screen);
             use.setText(Core.str(shown, "sheet_button"));
@@ -881,7 +908,8 @@ final class ExplorePane {
         @Override
         public boolean isEnabled(int position) {
             int kind = rows.at(position).kind;
-            return kind == Row.ADDRESS || kind == Row.PAGE || kind == Row.ROOM || kind == Row.SERVER;
+            return kind == Row.ADDRESS || kind == Row.PAGE || kind == Row.ROOM || kind == Row.SERVER
+                    || kind == Row.OPEN;
         }
 
         @Override
@@ -896,6 +924,8 @@ final class ExplorePane {
                     return heading(convert, row.words);
                 case Row.ADDRESS:
                     return address(convert, row.words);
+                case Row.OPEN:
+                    return openRooms(convert, row.words);
                 case Row.PAGE:
                     return item(convert, row, Core.str(row.item, "said"), true);
                 case Row.ROOM:
@@ -992,6 +1022,15 @@ final class ExplorePane {
         TextView view = reuse(convert, 17, R.color.accent);
         view.setPadding(dp(16), dp(12), dp(16), dp(12));
         view.setId(R.id.explore_address);
+        view.setText(words);
+        return view;
+    }
+
+    /** "Räume öffnen" (1655): an action in the accent, as the address is. */
+    private TextView openRooms(View convert, String words) {
+        TextView view = reuse(convert, 17, R.color.accent);
+        view.setPadding(dp(16), dp(12), dp(16), dp(12));
+        view.setTag("explore_open_rooms");
         view.setText(words);
         return view;
     }

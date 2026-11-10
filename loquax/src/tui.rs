@@ -2012,6 +2012,17 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
     if let Some(empty) = &rooms.joined_empty {
         lines.push(Line::from(Span::styled(empty.resolve(lang), quiet)));
     }
+    // The rooms screen of the server in use (1655).
+    if let Some(open) = &rooms.open_rooms {
+        if rooms.open_cursor {
+            at = Some(lines.len());
+        }
+        lines.push(Line::from(format!(
+            "{}[ {} ]",
+            mark(rooms.open_cursor),
+            open.resolve(lang)
+        )));
+    }
     // The servers under their own heading (1621).
     lines.push(Line::from(Span::styled(
         format!(" {}", rooms.servers_title.resolve(lang)),
@@ -2058,6 +2069,18 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
             row += 1;
         } else {
             lines.push(Line::from(format!(" ✓ {}", sheet.button.resolve(lang))));
+            // Its rooms screen (1655).
+            if let Some(open) = &sheet.open_rooms {
+                if sheet.cursor == row {
+                    at = Some(lines.len());
+                }
+                lines.push(Line::from(format!(
+                    "{}[ {} ]",
+                    mark(sheet.cursor == row),
+                    open.resolve(lang)
+                )));
+            }
+            row += 1;
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(

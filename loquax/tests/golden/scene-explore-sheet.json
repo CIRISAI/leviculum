@@ -278,6 +278,7 @@
         "args": [],
         "key": "explore_no_joined"
       },
+      "open_rooms": null,
       "servers_empty": null,
       "servers_title": {
         "args": [],
@@ -313,6 +314,7 @@
         "args": [],
         "key": "rooms_no_name"
       },
+      "open_rooms": null,
       "rooms": [],
       "rooms_note": {
         "args": [],

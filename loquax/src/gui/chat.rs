@@ -993,6 +993,16 @@ impl App {
         if let Some(empty) = &rooms.joined_empty {
             list = list.push(heading(empty.resolve(lang)));
         }
+        // The rooms screen of the server in use (1655).
+        if let Some(open) = &rooms.open_rooms {
+            list = list.push(
+                container(
+                    button(text(open.resolve(lang)).size(size::BODY))
+                        .on_press(Message::Explore(ExploreEvent::OpenRooms)),
+                )
+                .padding([6, 16]),
+            );
+        }
         // The servers under their own heading (1621).
         list = list.push(heading(rooms.servers_title.resolve(lang)));
         for row in &rooms.hubs {
@@ -1055,6 +1065,16 @@ impl App {
                 container(text(sheet.button.resolve(lang)).size(size::BODY).color(ink))
                     .padding([10, 16]),
             );
+            // Its rooms screen (1655).
+            if let Some(open) = &sheet.open_rooms {
+                list = list.push(
+                    container(
+                        button(text(open.resolve(lang)).size(size::BODY))
+                            .on_press(Message::Explore(ExploreEvent::OpenRooms)),
+                    )
+                    .padding([0, 16]),
+                );
+            }
         } else {
             list = list.push(
                 container(
