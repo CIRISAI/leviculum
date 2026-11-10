@@ -151,6 +151,13 @@
     <string name="live_ago">%1$s ago</string>
     <string name="live_now">now</string>
     <string name="last_position">last position %1$s</string>
+    <string name="position_live">Live position</string>
+    <string name="position_today">Position from today %1$s</string>
+    <string name="position_yesterday">Position from yesterday %1$s</string>
+    <string name="position_weekday">Position from %1$s %2$s</string>
+    <string name="position_date">Position from %1$s %2$s</string>
+    <string name="info_place">Place</string>
+    <string name="info_accuracy">Accuracy</string>
     <string name="position_of">Position of %1$s, %2$s</string>
     <string name="position_marker">⌖</string>
     <string name="map_you">you</string>

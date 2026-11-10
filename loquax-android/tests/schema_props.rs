@@ -380,8 +380,8 @@ fn invite_parts() -> BoxedStrategy<InviteParts> {
 /// A group's line parts (1307 pass four): the note line's flag and the
 /// late words, boxed on their own as the others are; 1449 adds the
 /// mark's words.
-fn line_parts() -> BoxedStrategy<(bool, String, String)> {
-    (any::<bool>(), text(), text()).boxed()
+fn line_parts() -> BoxedStrategy<(bool, String, String, String)> {
+    (any::<bool>(), text(), text(), text()).boxed()
 }
 
 /// A chat's and a row's group parts (1307), boxed the same way.
@@ -430,7 +430,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 (
                     files,
                     (writer, invite_group, invite_title, invite_trust, invite_state, invite_join),
-                    (note, late, state_words),
+                    (note, late, state_words, position_words),
                 ),
                 (
                     voice_mode,
@@ -490,6 +490,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 note,
                 late,
                 state_words,
+                position_words,
             },
         )
         .boxed()

@@ -14080,8 +14080,8 @@ pub(crate) mod tests {
             shown(&model),
             vec![
                 "── Today ──".to_string(),
-                "◎ position 43.77310 N 11.25600 E ·".to_string(),
-                "live · 4 min ago  14:00".to_string(),
+                // One sentence (1449 item 5); the coordinates are the Info's.
+                "◎ Live position  14:00".to_string(),
             ]
         );
         assert_eq!(view(&model).messages_title_right, "pos 4 min");
@@ -14135,14 +14135,15 @@ pub(crate) mod tests {
         let rows = shown(&model);
         let lines: Vec<&String> = rows.iter().filter(|r| r.contains('◎')).collect();
         assert_eq!(lines.len(), 1, "{rows:?}");
-        assert!(
-            lines[0].contains("◎ position 43.77350 N"),
-            "the latest: {rows:?}"
-        );
+        assert!(lines[0].contains("◎ Live position"), "the latest: {rows:?}");
         // The newest says whether the position is alive (1209): 13:50,
         // 13:55 and 13:59, so every 5 minutes, the last a minute ago.
-        assert!(
-            rows.join(" ").contains("· live · every 5 min · 1 min ago"),
+        // The bubble says one sentence (1449 item 5); the cadence stays
+        // the liveness's, which the list and the map read.
+        let now = model.now.map(|now| now.unix_secs);
+        assert_eq!(
+            model.conversations[0].liveness(now).cadence_s,
+            Some(300),
             "{rows:?}"
         );
         assert!(rows.contains(&"on my way  14:00".to_string()));
@@ -14168,9 +14169,11 @@ pub(crate) mod tests {
             2,
             "{rows:?}"
         );
-        // The older run says how many it stands for, since when (1184).
+        // The older run says when its newest fix was taken, one sentence
+        // (1449 item 5: "7 Meldungen seit 17:53" explained nothing); its
+        // reports stay folded, the long press lists them (1184).
         assert!(
-            rows.join(" ").contains("· 3 updates since 14:00"),
+            rows.join(" ").contains("◎ Position from today 13:59"),
             "{rows:?}"
         );
     }
@@ -14251,7 +14254,7 @@ pub(crate) mod tests {
             .iter()
             .position(|r| r == "parked at the gate")
             .unwrap_or_else(|| panic!("{rows:?}"));
-        assert_eq!(rows[at + 1], "◎ position 52.00000 N 13.00000 E  14:00");
+        assert_eq!(rows[at + 1], "◎ Position from today 13:59  14:00");
         assert_eq!(model.positions[&PEER].location.latitude_e6, 52_000_000);
         assert_eq!(
             model.toasts.last().map(|t| t.text.as_str()),
@@ -14387,10 +14390,7 @@ pub(crate) mod tests {
         assert_eq!(view(&model).messages_title_right, "pos ahead");
         // Its liveness counts from when it came, not from the claim (1209).
         let rows = shown(&model).join(" ");
-        assert!(
-            rows.contains("◎ position 1.00000 N 1.00000 E · live · now  14:00"),
-            "{rows:?}"
-        );
+        assert!(rows.contains("◎ Live position  14:00"), "{rows:?}");
         // An honest fix a minute later replaces it: the claim sorted at 14:00.
         clock(&mut model, 26, 14, 2);
         arrive(
@@ -15397,8 +15397,24 @@ pub(crate) mod tests {
             vec![
                 "── Today ──".to_string(),
                 "at the bridge".to_string(),
-                "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
+                "◎ Position from today 13:56  14:00".to_string(),
             ]
+        );
+        // The coordinates and the accuracy are the Info's (1449 item 5).
+        let activity = model.conversations[0]
+            .messages
+            .last()
+            .map(|m| m.activity)
+            .expect("it");
+        let info = info::message_info(&model, PEER, activity).expect("its info");
+        let rows: Vec<(String, String)> = info
+            .rows
+            .iter()
+            .map(|r| r.resolve(strings::Lang::En))
+            .collect();
+        assert!(
+            rows.contains(&("Place".to_string(), "43.77310 N 11.25600 E".to_string())),
+            "{rows:?}"
         );
         assert!(model.message_fix(0, 0).is_some());
         update(&mut model, key(KeyCode::Tab));
@@ -15415,7 +15431,7 @@ pub(crate) mod tests {
         update(&mut model, key(KeyCode::Char('I')));
         assert_eq!(model.detail, Some((0, 0)));
         update(&mut model, key(KeyCode::Esc));
-        let line = cell_of(&model, "◎ position 43.77310", 3);
+        let line = cell_of(&model, "◎ Position from", 3);
         press(&mut model, line);
         assert_eq!(
             model.map.expect("a click opens it too").centre,
@@ -15651,7 +15667,7 @@ pub(crate) mod tests {
                 by_user: false,
             },
         );
-        let older = cell_of(&model, "◎ position 43.77310", 3);
+        let older = cell_of(&model, "◎ ", 3);
         let effects = press(&mut model, older);
         assert!(effects.is_empty(), "{effects:?}");
         let state = model.map.expect("open");

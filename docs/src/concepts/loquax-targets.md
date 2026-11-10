@@ -60,13 +60,13 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | # | Feature | Android | Window | Terminal |
 |---|---------|---------|--------|----------|
 | 1 | Chats: list, open, send text | `ChatActivity.java:1948` | `loquax/src/gui.rs:1571` | `loquax/src/ui.rs:4291` |
-| 2 | Drafts | `ChatActivity.java:2518` | `loquax/src/gui.rs:1314` | `loquax/src/ui.rs:1750` |
+| 2 | Drafts | `ChatActivity.java:2501` | `loquax/src/gui.rs:1314` | `loquax/src/ui.rs:1750` |
 | 3 | React | `ChatActivity.java:2075` | `loquax/src/gui.rs:1696` | `loquax/src/ui.rs:5827` (palette `react`) |
 | 4 | Reply | `ChatActivity.java:1948` | `loquax/src/gui.rs:1416` | `loquax/src/ui.rs:5754` (palette `reply`) (1371) |
 | 5 | Forward | `ChatActivity.java:2107` | `loquax/src/gui/chat.rs:2104`, `loquax/src/gui.rs:1654` (1371) | `loquax/src/ui.rs:5756` (palette `forward`) (1371) |
-| 6 | Send again | `ChatActivity.java:2662` | `loquax/src/gui.rs:1421` | `loquax/src/ui.rs:5755` (palette `send again`) (1371) |
-| 7 | Delete a message | `ChatActivity.java:2270` | `loquax/src/gui.rs:1767` | `loquax/src/ui.rs:5744` |
-| 8 | Copy a message | `ChatActivity.java:2487` | `loquax/src/gui.rs:1746` | `loquax/src/ui.rs:4499` (OSC 52) |
+| 6 | Send again | `ChatActivity.java:2645` | `loquax/src/gui.rs:1421` | `loquax/src/ui.rs:5755` (palette `send again`) (1371) |
+| 7 | Delete a message | `ChatActivity.java:2349` | `loquax/src/gui.rs:1767` | `loquax/src/ui.rs:5744` |
+| 8 | Copy a message | `ChatActivity.java:2470` | `loquax/src/gui.rs:1746` | `loquax/src/ui.rs:4499` (OSC 52) |
 | 9 | Search | `ConversationsActivity.java:70` | `loquax/src/gui.rs:1561` | `loquax/src/ui.rs:5740` |
 | 10 | Read receipts on/off | `SettingsActivity.java:708` | `loquax/src/gui.rs:1527` | `loquax/src/ui.rs:5718` |
 | 11 | Send a picture (Gallery) | `ChatActivity.java:1661` | `loquax/src/gui.rs:1283`, `loquax/src/desktop.rs:158` (1341) | `loquax/src/ui.rs:5783` (palette `send picture`, a typed path), `loquax/src/shell.rs:418` (1371) |

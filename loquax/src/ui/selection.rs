@@ -158,27 +158,12 @@ pub fn runs(chat: &Chat, lang: Lang) -> Vec<TextRun> {
     out
 }
 
-/// A bubble's position line as the window draws it: the coordinates, the
-/// accuracy, and whether the position is alive (the newest report) or how
-/// many reports the row stands for. None without a fix.
+/// A bubble's position line as the window draws it: the scene's one
+/// sentence (1449 item 5, walk 1 finding 11), `Live position` or
+/// `Position from yesterday 21:46`; the coordinates and the accuracy are
+/// the Info's. None without a fix.
 pub fn position_line(node: &BubbleNode, lang: Lang) -> Option<String> {
-    let bubble = &node.bubble;
-    let fix = bubble.fix.as_ref()?;
-    let mut words = crate::telemetry::coordinates(&fix.location);
-    if let Some(accuracy) = crate::telemetry::accuracy(&fix.location) {
-        words = format!("{words}  {accuracy}");
-    }
-    match &node.live {
-        Some(live) => {
-            words.push_str(" · ");
-            words.push_str(&live.resolve(lang));
-        }
-        None => words.push_str(&crate::telemetry::run_words(
-            bubble.updates,
-            bubble.since.as_ref(),
-        )),
-    }
-    Some(words)
+    node.position.as_ref().map(|words| words.resolve(lang))
 }
 
 /// A conversation's key among the list's runs: its peer's first eight

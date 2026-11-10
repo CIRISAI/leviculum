@@ -2031,14 +2031,16 @@ async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line
     for size in ["80x24", "120x40"] {
         let frames = telemetry_session(size).await;
         let folded = frame(&frames, "folded");
+        // One line, one sentence (1449 item 5): the coordinates are the
+        // Info's.
         assert_eq!(
-            folded.matches("◎ position 4").count(),
+            folded.matches("◎ Live position").count(),
             1,
             "{size}: the two reports are one line\n{folded}"
         );
         assert!(
-            folded.contains("◎ position 43.77310 N 11.25600 E"),
-            "{size}: the latest\n{folded}"
+            !folded.contains("◎ position 43"),
+            "{size}: no coordinates in the bubble\n{folded}"
         );
         match size {
             "80x24" => assert!(folded.contains("pos 4 min"), "{folded}"),
@@ -2197,7 +2199,8 @@ async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
         .0;
     let live = frame(&frames, "live");
     let joined = |f: &str| f.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(joined(live).contains("live · every 10 min · now"), "{live}");
+    // The bubble says one sentence (1449 item 5); the list says how alive.
+    assert!(joined(live).contains("◎ Live position"), "{live}");
     assert!(live.contains("◎ position · live"), "{live}");
     assert!(live.contains("⌖"), "the map pin\n{live}");
     assert!(
@@ -2205,14 +2208,14 @@ async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
         "no badge\n{live}"
     );
     let recent = frame(&frames, "recent");
-    assert!(
-        joined(recent).contains("last position 25 min ago"),
-        "{recent}"
-    );
+    assert!(joined(recent).contains("◎ Position from today"), "{recent}");
     // The entry's map pin (1224) stands left of where a badge would.
     assert!(recent.contains("◎ position · 25 mi… ⌖"), "{recent}");
     let stale = frame(&frames, "stale");
-    assert!(joined(stale).contains("last position 25 h ago"), "{stale}");
+    assert!(
+        joined(stale).contains("◎ Position from yesterday"),
+        "{stale}"
+    );
     assert!(!stale.contains("⌖"), "no pin past a day\n{stale}");
     if frames != EXPECTED_LIVENESS {
         let kept = std::env::temp_dir().join("loquax-tui-liveness.frames");

@@ -2232,9 +2232,8 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     /**
      * The bubble's text: the body, and under it, for a message that carries
-     * a position, its line (1132): a pin, the coordinates, the accuracy
-     * when the sender gave one, how old the fix is; dimmed once it is
-     * stale. A report has no body: its line is the bubble.
+     * a position, its line (1132): a pin and the library's sentence (1449);
+     * dimmed once it is stale. A report has no body: its line is the bubble.
      */
     private CharSequence text(Map<String, Object> row, boolean ours, long now) {
         String body = Core.str(row, "body");
@@ -2249,26 +2248,10 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (row.get("place") == null) {
             return body;
         }
-        StringBuilder line = new StringBuilder("\uD83D\uDCCD ").append(Core.str(row, "place"));
-        String accuracy = Core.str(row, "accuracy");
-        if (!accuracy.isEmpty()) {
-            line.append(" \u00B7 ").append(accuracy);
-        }
-        String live = Core.str(row, "live");
-        if (!live.isEmpty()) {
-            // The newest report says whether the position is alive (1209),
-            // in the library's words (1217).
-            line.append(" \u00B7 ").append(live);
-        } else if (row.get("fix_at") != null) {
-            line.append(" \u00B7 ").append(Ui.age(this, Core.num(row, "fix_at"), now));
-        }
-        // An older run stands for all of it (1184): how many, since when.
-        long updates = Core.num(row, "updates");
-        if (updates > 1 && live.isEmpty()) {
-            String since = android.text.format.DateFormat.getTimeFormat(this)
-                    .format(new java.util.Date(Core.num(row, "since") * 1000));
-            line.append(" \u00B7 ").append(getString(R.string.run_updates, (int) updates, since));
-        }
+        // One sentence, the library's (1449, walk 1 finding 11): "Live-
+        // Position" or "Position von gestern 21:46"; the coordinates and the
+        // accuracy are the Info's.
+        StringBuilder line = new StringBuilder("\uD83D\uDCCD ").append(Core.str(row, "position_words"));
         SpannableStringBuilder out = new SpannableStringBuilder(body);
         if (out.length() > 0) {
             out.append('\n');

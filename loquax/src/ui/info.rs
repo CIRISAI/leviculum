@@ -86,6 +86,17 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     if let Some(at) = message.at {
         rows.push(InfoRow::new(StrId::InfoSent, when(&at, model.now.as_ref())));
     }
+    // A shared position's coordinates and accuracy live here, not in the
+    // bubble, which says one sentence (1449 item 5, walk 1 finding 11).
+    if let Some(fix) = super::message_fix(conversation.peer, message) {
+        rows.push(InfoRow::new(
+            StrId::InfoPlace,
+            Text::Raw(crate::telemetry::coordinates(&fix.location)),
+        ));
+        if let Some(accuracy) = crate::telemetry::accuracy(&fix.location) {
+            rows.push(InfoRow::new(StrId::InfoAccuracy, Text::Raw(accuracy)));
+        }
+    }
     // The ladder's times of ours (1462): when its proof came (the
     // recipient's mailbox or device), when the device said it has it, when
     // it was read; each once known, read only where receipts are shown.

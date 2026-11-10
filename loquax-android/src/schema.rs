@@ -1975,6 +1975,11 @@ pub struct MessageRow {
     /// `Ui.state(state)` alone would say one device. Empty for none.
     #[serde(default)]
     pub state_words: String,
+    /// The position it carries in one sentence, the scene's (1449 item 5,
+    /// walk 1 finding 11): `Live-Position`, `Position von gestern 21:46`;
+    /// the coordinates and the accuracy are the Info's. Empty for none.
+    #[serde(default)]
+    pub position_words: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

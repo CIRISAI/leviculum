@@ -41,9 +41,9 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││ ◎ position 43.77050 N 11.25600 E ·                 │
-│                        ││ live · every 10 min · now  14:00                   │
+│                        ││ ◎ Live position  14:00                             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -66,9 +66,9 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││ ◎ position 43.77050 N 11.25600 E ·                 │
-│                        ││ last position 25 min ago  14:00                    │
+│                        ││ ◎ Position from today 14:00  14:00                 │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -91,9 +91,9 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││              ── Monday 26 October ──               │
-│                        ││ ◎ position 43.77050 N 11.25600 E ·                 │
-│                        ││ last position 25 h ago  14:00                      │
+│                        ││ ◎ Position from yesterday 14:00  14:00             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

@@ -5167,7 +5167,7 @@ mod tests {
                             accuracy_e2: 500,
                             last_update: 0,
                         };
-                        node.bubble.fix = Some(loquax::telemetry::Fix {
+                        let fix = loquax::telemetry::Fix {
                             peer: ANNA,
                             via: ANNA,
                             message: None,
@@ -5175,7 +5175,10 @@ mod tests {
                             location,
                             telemetry: Vec::new(),
                             source: loquax::telemetry::Source::Telemetry,
-                        });
+                        };
+                        // The scene's sentence with it (1449 item 5).
+                        node.position = Some(loquax::ui::scene::position_words(&fix, false, None));
+                        node.bubble.fix = Some(fix);
                         let mut line = node.clone();
                         line.bubble.note = true;
                         line.bubble.key = 990;
@@ -5308,8 +5311,9 @@ mod tests {
             vec!["Are you coming to the market tomorrow?"]
         );
         assert_eq!(of(Part::Note), vec!["Bert joined."]);
+        // One sentence (1449 item 5); the coordinates are the Info's.
         assert!(
-            of(Part::Position)[0].starts_with("52.52"),
+            of(Part::Position)[0].contains("osition") && !of(Part::Position)[0].contains("52.52"),
             "{:?}",
             of(Part::Position)
         );

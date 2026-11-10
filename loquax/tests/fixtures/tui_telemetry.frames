@@ -40,11 +40,11 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││ leaving the hut now  14:00                         │
 │                        ││                                                    │
-│                        ││ ◎ position 43.77310 N 11.25600 E ·                 │
-│                        ││ live · 4 min ago  14:00                            │
+│                        ││ ◎ Live position  14:00                             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -152,7 +152,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  ││                                   ── Today ──                                    │
 │                                  ││ leaving the hut now  14:00                                                       │
 │                                  ││                                                                                  │
-│                                  ││ ◎ position 43.77310 N 11.25600 E · live · 4 min ago  14:00                       │
+│                                  ││ ◎ Live position  14:00                                                           │
 │                                  │├  to them───────────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
@@ -193,7 +193,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  ││                                   ── Today ──                                    │
 │                                  ││ leaving the hut now  14:00                                                       │
 │                                  ││                                                                                  │
-│                                  ││▌◎ position 43.77310 N 11.25600 E · live · 4 min ago  14:00                       │
+│                                  ││▌◎ Live position  14:00                                                           │
 │                                  │├  to them───────────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘

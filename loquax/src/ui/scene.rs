@@ -486,6 +486,9 @@ pub struct BubbleNode {
     pub text: Option<String>,
     /// The newest report's words (`live · every 10 min · 2 min ago`).
     pub live: Option<Text>,
+    /// The sentence of the position it carries, [`position_words`]: a
+    /// renderer draws it after the pin, never the coordinates.
+    pub position: Option<Text>,
     /// Ours only: the ladder's mark, what a screen reader says for it,
     /// and for a failed one the tap that sends it again (1232).
     pub mark: Option<MarkNode>,
@@ -1994,6 +1997,12 @@ fn bubble_node(
     let id = NodeId::Bubble(bubble.key);
     let now_secs = now.map(|now| now.unix_secs);
     let live = bubble.liveness.map(|l| row_live(&l, now_secs));
+    let position = bubble.fix.as_ref().map(|fix| {
+        let alive = bubble
+            .liveness
+            .is_some_and(|l| l.state == liveness::State::Live);
+        position_words(fix, alive, now)
+    });
     let to = Target::Peer(peer);
     let mut actions = Vec::new();
     if let Some(target) = bubble.id {
@@ -2102,6 +2111,7 @@ fn bubble_node(
         bubble,
         place,
         live,
+        position,
         mark,
         photo,
         files,
@@ -2192,6 +2202,47 @@ pub fn day_words(at: &WallTime, now: Option<&WallTime>) -> Text {
             args.push(Arg::Int(c.year));
             Text::Key(StrId::DateYear, args)
         }
+    }
+}
+
+/// A shared position's sentence in a chat (1449 item 5, walk 1 finding
+/// 11), the one rule of every target: `Live position` while the reports
+/// still come, else when the fix was taken, `Position from yesterday
+/// 21:46`. The coordinates and the accuracy are the Info's, never the
+/// bubble's.
+pub fn position_words(fix: &crate::telemetry::Fix, live: bool, now: Option<WallTime>) -> Text {
+    if live {
+        return Text::key(StrId::PositionLive);
+    }
+    // A claim ahead of our clock is its receive time, as everywhere.
+    let at = WallTime {
+        unix_secs: fix.order_time(),
+        offset_secs: now.map_or(0, |now| now.offset_secs),
+    };
+    let clock = Arg::Str(at.hh_mm());
+    let c = at.civil();
+    match now.map(|now| now.day() - at.day()) {
+        Some(..=0) => Text::Key(StrId::PositionToday, Vec::from([clock])),
+        Some(1) => Text::Key(StrId::PositionYesterday, Vec::from([clock])),
+        Some(2..=6) => Text::Key(
+            StrId::PositionWeekday,
+            Vec::from([
+                Arg::Text(Box::new(Text::key(WEEKDAYS[c.weekday as usize % 7]))),
+                clock,
+            ]),
+        ),
+        Some(_) => Text::Key(
+            StrId::PositionDate,
+            Vec::from([
+                Arg::Text(Box::new(list_time(&at, &now.unwrap_or(at)))),
+                clock,
+            ]),
+        ),
+        // No clock said yet: the whole date, as the day line says it.
+        None => Text::Key(
+            StrId::PositionDate,
+            Vec::from([Arg::Text(Box::new(day_words(&at, None))), clock]),
+        ),
     }
 }
 
@@ -2894,6 +2945,67 @@ mod tests {
         assert_eq!(list_live(&live, now).resolve(Lang::De), "live");
         assert_eq!(ago(30).resolve(Lang::En), liveness::ago(30));
         assert_eq!(ago(4 * 86_400).resolve(Lang::En), liveness::ago(4 * 86_400));
+    }
+
+    /// 1449 item 5 (walk 1 finding 11): a shared position is one sentence,
+    /// `Live position` while its reports come, else when its fix was taken,
+    /// in both languages; never the coordinates.
+    #[test]
+    fn a_shared_position_is_one_sentence_never_coordinates() {
+        let at = |unix_secs| WallTime {
+            unix_secs,
+            offset_secs: 3600,
+        };
+        // 2026-10-30 10:00 local, a Friday.
+        let t = 1_793_350_800;
+        let now = at(t);
+        let fix = |taken: i64| crate::telemetry::Fix {
+            peer: [1; 16],
+            via: [1; 16],
+            message: None,
+            received_at: Some(t),
+            location: leviculum_lxmf::telemetry::Location {
+                latitude_e6: 53_105_960,
+                longitude_e6: 9_159_300,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 10_200,
+                last_update: taken,
+            },
+            telemetry: Vec::new(),
+            source: crate::telemetry::Source::Telemetry,
+        };
+        let said = |taken: i64, live: bool, lang| {
+            position_words(&fix(taken), live, Some(now)).resolve(lang)
+        };
+        assert_eq!(said(t - 60, true, Lang::De), "Live-Position");
+        assert_eq!(said(t - 60, true, Lang::En), "Live position");
+        assert_eq!(said(t - 600, false, Lang::De), "Position von heute 09:50");
+        // Yesterday 21:46 local.
+        let yesterday = t - (10 * 3600) - (2 * 3600 + 14 * 60);
+        assert_eq!(
+            said(yesterday, false, Lang::De),
+            "Position von gestern 21:46"
+        );
+        assert_eq!(
+            said(yesterday, false, Lang::En),
+            "Position from yesterday 21:46"
+        );
+        assert_eq!(
+            said(t - 3 * 86_400, false, Lang::De),
+            "Position von Dienstag 10:00"
+        );
+        assert_eq!(
+            said(t - 9 * 86_400, false, Lang::De),
+            "Position vom 21.10. 10:00"
+        );
+        for lang in [Lang::De, Lang::En] {
+            let words = said(t - 600, false, lang);
+            assert!(!words.contains("53.") && !words.contains('±'), "{words}");
+        }
+        // A claim ahead of our clock is said at its receive time.
+        assert_eq!(said(t + 7200, false, Lang::De), "Position von heute 10:00");
     }
 
     /// 1449 item 4 (walk 1 finding 10): one format in the list's time

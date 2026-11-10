@@ -516,26 +516,25 @@ fn block(
     let body = match (message.is_report(), draw.mark) {
         // A report has no text: its line says what it carried.
         (true, _) => {
-            let received = message.at.map(|at| at.unix_secs);
-            let read = telemetry::read(peer, &message.fields, received);
-            // The newest report says whether the position is alive
-            // (1209); an older run, which stands for all of it, its count
-            // (1184).
-            let newest = conversation.newest_fix_report();
-            let words = match newest == Some(index) {
-                true => {
+            // The scene's one sentence (1449 item 5, walk 1 finding 11):
+            // `Live position` while the newest report is alive, else when
+            // the fix was taken; the coordinates are the Info's.
+            match super::message_fix(peer, message) {
+                Some(fix) => {
                     let now = draw.now.map(|now| now.unix_secs);
-                    format!(" · {}", conversation.liveness(now).row_words(now))
+                    let alive = conversation.newest_fix_report() == Some(index)
+                        && conversation.liveness(now).state == super::liveness::State::Live;
+                    format!(
+                        "{} {}",
+                        telemetry::REPORT_MARK,
+                        super::scene::position_words(&fix, alive, draw.now).resolve(draw.lang)
+                    )
                 }
-                false => {
-                    let run = conversation.run(index);
-                    let since = run
-                        .first()
-                        .and_then(|&first| conversation.messages[first].at);
-                    telemetry::run_words(run.len(), since.as_ref())
+                None => {
+                    let received = message.at.map(|at| at.unix_secs);
+                    telemetry::report_line(&telemetry::read(peer, &message.fields, received))
                 }
-            };
-            format!("{}{words}", telemetry::report_line(&read))
+            }
         }
         (false, mark) => {
             // A group's copy without words names its writer as every copy
@@ -556,11 +555,11 @@ fn block(
     // A text that came with a position says so under it, in a report's
     // words: `Enter` on it opens the map there.
     let body = match (message.is_report(), super::message_fix(peer, message)) {
-        (false, Some(_)) => {
-            let received = message.at.map(|at| at.unix_secs);
-            let read = telemetry::read(peer, &message.fields, received);
-            format!("{body}\n{}", telemetry::report_line(&read))
-        }
+        (false, Some(fix)) => format!(
+            "{body}\n{} {}",
+            telemetry::REPORT_MARK,
+            super::scene::position_words(&fix, false, draw.now).resolve(draw.lang)
+        ),
         _ => body,
     };
     // The media first, the words under them (1268), as every target draws

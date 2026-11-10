@@ -142,9 +142,9 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
-│                        ││▌more) · live · 4 min ago  14:00                    │
+│                        ││▌◎ Live position  14:00                             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -167,9 +167,9 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
-│                        ││▌more) · live · 4 min ago  14:00                    │
+│                        ││▌◎ Live position  14:00                             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -217,9 +217,9 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
-│                        ││▌more) · live · 4 min ago  14:00                    │
+│                        ││▌◎ Live position  14:00                             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -368,9 +368,9 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
-│                        ││▌more) · live · 4 min ago  14:00                    │
+│                        ││▌◎ Live position  14:00                             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -393,9 +393,9 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
-│                        ││▌more) · live · 4 min ago  14:00                    │
+│                        ││▌◎ Live position  14:00                             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
@@ -443,9 +443,9 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
-│                        ││▌more) · live · 4 min ago  14:00                    │
+│                        ││▌◎ Live position  14:00                             │
 │                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘

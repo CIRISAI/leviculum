@@ -203,6 +203,15 @@ leviculum_ui::catalogue! {
     LiveAgo = "live_ago", "%1$s ago", "vor %1$s";
     LiveNow = "live_now", "now", "gerade eben";
     LastPosition = "last_position", "last position %1$s", "letzte Position %1$s";
+    // A shared position in a chat (1449 item 5, walk 1 finding 11): one
+    // sentence, never the coordinates, which the Info shows.
+    PositionLive = "position_live", "Live position", "Live-Position";
+    PositionToday = "position_today", "Position from today %1$s", "Position von heute %1$s";
+    PositionYesterday = "position_yesterday", "Position from yesterday %1$s", "Position von gestern %1$s";
+    PositionWeekday = "position_weekday", "Position from %1$s %2$s", "Position von %1$s %2$s";
+    PositionDate = "position_date", "Position from %1$s %2$s", "Position vom %1$s %2$s";
+    InfoPlace = "info_place", "Place", "Ort";
+    InfoAccuracy = "info_accuracy", "Accuracy", "Genauigkeit";
     PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
     PositionMarker = "position_marker", "⌖", "⌖";
     // Our own pin on the map (1447): "you" was English on every screen.
