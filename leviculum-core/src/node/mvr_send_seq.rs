@@ -107,7 +107,7 @@ fn send_seq(node: &mut EndpointNode, link_id: &LinkId, payload: &[u8]) -> (u16, 
 }
 
 fn through(node: &EndpointNode, link_id: &LinkId, seq: u16) -> bool {
-    node.link_stats(link_id)
+    node.link_seq_stats(link_id)
         .expect("link held")
         .delivered_through(seq)
 }
@@ -134,7 +134,7 @@ fn a_send_sequence_is_proved_by_its_own_delivery_across_the_wrap() {
     }
     assert_eq!(
         initiator
-            .link_stats(&link_id)
+            .link_seq_stats(&link_id)
             .unwrap()
             .oldest_unacked_sequence(),
         None
@@ -147,13 +147,16 @@ fn a_send_sequence_is_proved_by_its_own_delivery_across_the_wrap() {
     let seqs: Vec<u16> = sent.iter().map(|(s, _)| *s).collect();
     assert_eq!(seqs, [0xFFFE, 0xFFFF, 0, 1], "consecutive across the wrap");
     assert_eq!(
-        initiator.link_stats(&link_id).unwrap().last_sent_sequence(),
-        Some(1),
+        initiator
+            .link_seq_stats(&link_id)
+            .unwrap()
+            .last_sent_sequence(),
+        1,
         "the stats name the newest send"
     );
     assert_eq!(
         initiator
-            .link_stats(&link_id)
+            .link_seq_stats(&link_id)
             .unwrap()
             .oldest_unacked_sequence(),
         Some(0xFFFE)
@@ -183,7 +186,7 @@ fn a_send_sequence_is_proved_by_its_own_delivery_across_the_wrap() {
     assert!(!through(&initiator, &link_id, 1));
     assert_eq!(
         initiator
-            .link_stats(&link_id)
+            .link_seq_stats(&link_id)
             .unwrap()
             .oldest_unacked_sequence(),
         Some(1)
@@ -194,7 +197,7 @@ fn a_send_sequence_is_proved_by_its_own_delivery_across_the_wrap() {
     assert!(through(&initiator, &link_id, 1));
     assert_eq!(
         initiator
-            .link_stats(&link_id)
+            .link_seq_stats(&link_id)
             .unwrap()
             .oldest_unacked_sequence(),
         None

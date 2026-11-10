@@ -13477,3 +13477,7 @@ mod first_hop_timeout_tests {
         );
     }
 }
+
+// +ciris: a link's Channel sequence watermarks, in its own file so no cited
+// line moves.
+mod seq_stats;

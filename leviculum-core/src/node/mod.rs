@@ -386,9 +386,6 @@ pub struct LinkStats {
     pub(crate) busy_rejections: u64,
     pub(crate) pacing_rejections: u64,
     pub(crate) iface_pacing_rejections: u64,
-    // +ciris: the per-message delivery proof (see `send_seq`).
-    pub(crate) oldest_unacked_sequence: Option<u16>,
-    pub(crate) last_sent_sequence: Option<u16>,
 }
 
 impl LinkStats {
@@ -13613,7 +13610,9 @@ pub use event::FrameExpiry;
 mod mvr_relay_route;
 #[cfg(test)]
 mod mvr_timed_frames;
-// A Channel send's sequence and its delivery proof (+ciris).
-mod send_seq;
+// A Channel send's sequence and its delivery proof (+ciris), declared last
+// so the fork moves no line an upstream citation points at.
 #[cfg(test)]
 mod mvr_send_seq;
+mod send_seq;
+pub use send_seq::LinkSeqStats;

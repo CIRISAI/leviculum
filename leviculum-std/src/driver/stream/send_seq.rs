@@ -12,9 +12,9 @@ impl LinkHandle {
     ///
     /// The message has been proved delivered, together with everything sent
     /// on this link before it, once
-    /// [`LinkStats::delivered_through`](leviculum_core::node::LinkStats::delivered_through)
-    /// holds for that sequence. The link stats come from the driver's
-    /// `link_stats`. Takes the core lock.
+    /// [`LinkSeqStats::delivered_through`](leviculum_core::node::LinkSeqStats::delivered_through)
+    /// holds for that sequence (`ReticulumNode::link_seq_stats`). Takes the
+    /// core lock.
     pub async fn try_send_seq(&self, data: &[u8]) -> Result<u16, Error> {
         if self.closed {
             return Err(Error::NotRunning);
