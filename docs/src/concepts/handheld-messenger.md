@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:1103`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:1137`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1952,7 +1952,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2728`).
+both (`thinknode_m9.rs:2810`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2023,7 +2023,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2740`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2822`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2056,7 +2056,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1009`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1043`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2130,7 +2130,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2801`), and the fold runs behind the list
+(`thinknode_m9.rs:2883`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2456,7 +2456,7 @@ entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
 (the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
 could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
 heap at every step, as the forget's reopen and a taken code do
-(`leviculum-esp/src/bin/thinknode_m9.rs:1942`). The held bytes live in
+(`leviculum-esp/src/bin/thinknode_m9.rs:2044`). The held bytes live in
 2 KiB blocks, at most 35 s of the line (`RxHeld`,
 `leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
 the pool for 256 KiB in one piece, and 22 s was shorter than the
@@ -2482,7 +2482,7 @@ owed, the reboot `rebuilt`).
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside
 the take stage, so the walks read takes of 1 to 6 s. The dump is now
 timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
-`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2472`); `m9-walk.py`
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2561`); `m9-walk.py`
 takes `dump=` as the dump's turn and holds the rest of that turn to the
 bar.
 
@@ -2634,6 +2634,49 @@ distribution 1613 asked for first. The bar on the board (window 24):
 proxy keeps injecting at full rate — a pacing retry would be the
 bench's crutch, and the product's line (lnsd under announce traffic)
 does not pace.
+
+### The flash ring counts what it loses, and the boot parks too (1622)
+
+Window 24 proved 1613 on the board (100 of 100 keys, `overrun=0` over
+the pull, `park_coop=8606 park_fallback=0`) and left three things.
+
+**The `[FLASH]` ring.** It held 32 records and is drained once per
+loop turn, so a turn of more ops lost the rest unsaid: the forget's
+128 erases came out as 7 lines. The ring is now `loquax_m9::oplog`,
+1024 records (two words each, 8 KiB of the bench image's internal
+RAM; the release image keeps none), and a drain that still finds
+records overwritten says `[FLASH] lost=<n>`, the `[IDLE]` line
+`flash_lost=` per window. `loquax-m9/tests/oplog.rs` runs the real
+forget and the rebuild over a 1489-shaped store in the board's 896
+sectors, counting ops as the board does (an erase one, a write one
+per 512-byte chunk): 571 ops in the turn, of which the old ring says
+32 and counts 539 lost, the new one says all.
+
+**The boot.** A rebuild boot counted `overrun=2` before its first
+`[IDLE]` line, in windows 23 and 24: the restore ran before the UI
+core was started, `corepark::hold` had nobody to park, and every erase
+masked core 0 with no popper anywhere. The UI core now starts before
+the restore, arms the park as its first act and waits for its model
+(`UI_START`); core 0 waits for `corepark::armed` (`[CORES] park=armed
+waited_ms=<n>`), restores, hands the model over, and waits for the
+census as before, which still runs alone. Draining the FIFO between
+sectors instead could not reach zero: the erase of one sector is the
+masked window, and 1613's arithmetic gives even a 512-byte FIFO 44 ms
+of it. The first `[UART]` line of a rebuild boot is window 25's bar:
+`overrun=0`.
+
+**The two turns over 250 ms in hang.walk** (`turn_ms=258`, `take=216`
+and `take=212`) are the bench's owe: `bench owe` closes the ring and
+the summary log, and the next open's mark and the two summary writes
+each open a sector with an erase, four erases of 34 to 42 ms and 23
+write chunks in the take stage (the `[FLASH]` records after the turn).
+Window 23 had the same take (230, 232, 222 ms). What tipped them over
+250 is the host stage, 40 and 41 ms in those turns, which both windows
+show in turns that open a chat (window 23: 38 to 105 ms beside an owe). The popper's harvest is inside the
+take stage, in `hold` before core 0 unmasks, and is bounded by the
+rings' 2048 and 1024 bytes; the `[FLASH]` record of an op includes it,
+and the erases it timed (34 to 42 ms) are the bare erases window 23
+measured.
 
 ### Tracks on the M9 (1385, not built)
 
