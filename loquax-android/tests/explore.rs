@@ -547,6 +547,84 @@ fn a_restart_lists_what_was_heard_and_holds_the_suggestion() {
     );
 }
 
+/// Walk 8 of 1653, 41: no server said "empfohlen", where walk 5 had it on
+/// ValleiRug. A restart holds the suggestion it kept (1632); a held hub
+/// the store no longer lists, or one not heard yet this session, must not
+/// take the mark with it. Through the facade, on the same store: the held
+/// hub never kept and another named shipped hub kept, the restart marks
+/// the kept one; nothing kept at all, no mark, and the first named shipped
+/// hub heard this session takes it, the held one too when it comes back.
+/// The control: a hub in force marks none.
+#[test]
+fn a_restart_with_a_held_hub_not_heard_yet_still_suggests_one() {
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let shipped = loquax::ui::hubs::shipped();
+    let (held, other) = (&shipped[0], &shipped[1]);
+    // The held hub was never kept; another was.
+    let home = tempfile::tempdir().expect("app dir");
+    {
+        let (mut store, mut model) = started(home.path(), me);
+        hub_heard(&mut model, other, 3, 600);
+        let owed = loquax::ui::explore::take_heard(&mut model);
+        loquax::heard::keep(&mut store, home.path(), owed).expect("kept");
+    }
+    loquax::config::save_hash(home.path(), loquax::heard::SUGGESTED_KEY, Some(held.hash))
+        .expect("held");
+    let (_store, mut model) = started(home.path(), me);
+    tap(&mut model, "tab", "", "", 0);
+    assert_eq!(
+        servers(&screen(&model)).1.as_deref(),
+        Some(other.name.as_str()),
+        "the kept hub takes the mark: {:?}",
+        servers(&screen(&model))
+    );
+    // The held one heard again this session: the mark stays where it is.
+    hub_heard(&mut model, held, 1, 10);
+    assert_eq!(
+        servers(&screen(&model)).1.as_deref(),
+        Some(other.name.as_str())
+    );
+    // Nothing kept, the held hub in the config: no mark until a named
+    // shipped hub is heard, then that one.
+    let bare = tempfile::tempdir().expect("app dir");
+    loquax::config::save_hash(bare.path(), loquax::heard::SUGGESTED_KEY, Some(held.hash))
+        .expect("held");
+    let (_store, mut cold) = started(bare.path(), me);
+    tap(&mut cold, "tab", "", "", 0);
+    assert_eq!(
+        servers(&screen(&cold)).1,
+        None,
+        "nothing heard, nothing suggested"
+    );
+    hub_heard(&mut cold, other, 4, 30);
+    assert_eq!(
+        servers(&screen(&cold)).1.as_deref(),
+        Some(other.name.as_str()),
+        "the first heard takes it"
+    );
+    // The held hub first, after the restart: it is the one.
+    let again = tempfile::tempdir().expect("app dir");
+    loquax::config::save_hash(again.path(), loquax::heard::SUGGESTED_KEY, Some(held.hash))
+        .expect("held");
+    let (_store, mut back) = started(again.path(), me);
+    hub_heard(&mut back, held, 6, 30);
+    hub_heard(&mut back, other, 1, 20);
+    tap(&mut back, "tab", "", "", 0);
+    assert_eq!(
+        servers(&screen(&back)).1.as_deref(),
+        Some(held.name.as_str())
+    );
+    // The control: a hub in force, no mark on any.
+    loquax::config::save_hash(again.path(), "rooms_hub", Some(other.hash)).expect("in force");
+    let (_store, mut chosen) = started(again.path(), me);
+    let config = loquax::config::load(again.path()).expect("config");
+    chosen.rooms.hub = config.rooms_hub;
+    hub_heard(&mut chosen, held, 6, 30);
+    tap(&mut chosen, "tab", "", "", 0);
+    assert_eq!(servers(&screen(&chosen)).1, None, "a hub in force: no mark");
+}
+
 /// Walk 4 of 1632, new 14: the browser's "Orte" sheet on the phone said
 /// "Gefundene Knoten" and rows like "RNS Search · 3e5f19fd… · 110
 /// Sprünge". Through the facade: the heading says what the rows are, a

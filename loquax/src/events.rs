@@ -361,6 +361,33 @@ pub fn rooms_join(room: &str, ok: bool) {
     );
 }
 
+/// The server "suggested" marks (1653, walk 8, 41), at a start and
+/// whenever it moves: `hub` the one or `-`, `why` `marked`, `in_use` (a
+/// hub in force marks none) or `none_fits` (no named shipped hub heard
+/// that answers), `fits` how many could carry the mark.
+pub fn rooms_suggest(hub: Option<&[u8; 16]>, why: &str, fits: usize) {
+    tracing::debug!(
+        event = "ROOMS_SUGGEST",
+        hub = %hub.map_or_else(|| String::from("-"), |h| to_hex(h)),
+        why = %scalar(why),
+        fits = fits,
+    );
+}
+
+/// A page the browser asked for and how it went (1653, walk 8, 40: the
+/// places sheet closed once with "Link fehlgeschlagen" and nobody could
+/// tell a tap from a link dropped while idle): `state` `asked`, `ok` or
+/// `failed`, `why` the failure in English or `-`.
+pub fn browse_fetch(dest: &[u8; 16], path: &str, state: &str, why: &str) {
+    tracing::debug!(
+        event = "BROWSE_FETCH",
+        dest = %to_hex(dest),
+        path = %scalar(path),
+        state = %scalar(state),
+        why = %scalar(why),
+    );
+}
+
 /// The first eight hex characters of an address, as the log lines carry it.
 fn short_hex(address: &[u8; 16]) -> String {
     let mut hex = to_hex(address);

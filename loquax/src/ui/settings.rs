@@ -497,8 +497,44 @@ pub fn suggested(
 /// The suggestion after the hubs heard changed: held while it fits,
 /// else the closest that does ([`suggested`]). A hub in force holds none.
 pub fn settle_suggestion(rooms: &mut super::rooms::Rooms) {
+    let before = rooms.heard.held();
+    let now = settled(rooms);
+    if now != before {
+        say_suggestion(rooms);
+    }
+}
+
+/// The suggestion settled ([`settle_suggestion`]) and said in the event
+/// log whether it moved or not: a start says where it stands.
+pub fn settle_suggestion_said(rooms: &mut super::rooms::Rooms) {
+    settled(rooms);
+    say_suggestion(rooms);
+}
+
+fn settled(rooms: &mut super::rooms::Rooms) -> Option<[u8; 16]> {
     let now = suggested(&offered_hubs(rooms), rooms.hub, rooms.heard.held());
     rooms.heard.hold(now);
+    now
+}
+
+/// `ROOMS_SUGGEST` (1653, walk 8, 41: no server said "empfohlen", and
+/// nothing on the device told why): the hub held, or `-`, and why: a hub
+/// in force (`in_use`), no named shipped hub heard that answers
+/// (`none_fits`), or the one marked (`marked`); `fits` counts the hubs
+/// that could be.
+fn say_suggestion(rooms: &super::rooms::Rooms) {
+    let offered = offered_hubs(rooms);
+    let fits = offered
+        .iter()
+        .filter(|o| o.shipped && o.heard && o.answered != Some(false) && o.name.is_some())
+        .count();
+    let held = rooms.heard.held();
+    let why = match (rooms.hub, held) {
+        (Some(_), _) => "in_use",
+        (None, None) => "none_fits",
+        (None, Some(_)) => "marked",
+    };
+    crate::events::rooms_suggest(held.as_ref(), why, fits);
 }
 
 /// What a hub's row says beside its name: how far, "suggested" for the

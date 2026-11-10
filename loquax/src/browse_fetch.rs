@@ -201,6 +201,8 @@ async fn serve(
     let (brought_tx, mut brought) = mpsc::unbounded_channel::<(u64, Brought)>();
     let mut inflight: Option<tokio::task::JoinHandle<()>> = None;
     let mut generation = 0u64;
+    // The page asked last, for its outcome's event line.
+    let mut asked_page: Option<Target> = None;
     let (shots_tx, mut shots) = mpsc::unbounded_channel::<transfer::ImageOutcome>();
     let mut pictures: Option<tokio::task::JoinHandle<()>> = None;
     let mut picture_generation = 0u64;
@@ -217,6 +219,13 @@ async fn serve(
                     continue;
                 }
                 inflight = None;
+                if let (Brought::Page(result), Some(target)) = (&outcome, asked_page.take()) {
+                    let (state, why) = match result {
+                        Ok(_) => ("ok", String::from("-")),
+                        Err(text) => ("failed", text.resolve(lnomad::app::strings::Lang::En)),
+                    };
+                    crate::events::browse_fetch(&target.dest_hash, &target.path, state, &why);
+                }
                 let told = match outcome {
                     Brought::Page(Ok(page)) => vec![
                         Told::Browse(BrowseEvent::Loaded { micron: page.micron, title: page.title }),
@@ -273,6 +282,8 @@ async fn serve(
                 let asked = generation;
                 match ask {
                     Ask::Navigate(target) => {
+                        crate::events::browse_fetch(&target.dest_hash, &target.path, "asked", "-");
+                        asked_page = Some(target.clone());
                         let (session, tx) = (Arc::clone(&session), brought_tx.clone());
                         inflight = Some(tokio::spawn(async move {
                             let page = transfer::fetch_page(&mut *session.lock().await, &target, TIMEOUT).await;

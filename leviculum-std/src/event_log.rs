@@ -903,6 +903,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["room", "ok"],
     },
     EventSchema {
+        name: "ROOMS_SUGGEST",
+        required_keys: &["hub", "why", "fits"],
+    },
+    EventSchema {
+        name: "BROWSE_FETCH",
+        required_keys: &["dest", "path", "state", "why"],
+    },
+    EventSchema {
         name: "LNMSG_SYNC_DONE",
         required_keys: &["received", "duplicates", "new"],
     },

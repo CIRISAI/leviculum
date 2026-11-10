@@ -149,7 +149,7 @@ pub fn restore_heard<B>(
         model.rooms.heard.hear(hub);
     }
     model.rooms.heard.hold(held);
-    super::settings::settle_suggestion(&mut model.rooms);
+    super::settings::settle_suggestion_said(&mut model.rooms);
     model.explore.held_kept = model.rooms.heard.held();
 }
 
