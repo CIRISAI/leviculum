@@ -23,6 +23,7 @@ use super::*;
 use leviculum_ui_iced::headless::{self, Program};
 use loquax::ui::update;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// How long the window is left alone, and how long before that it may
 /// settle (its first frames, the map's first picture) at the least.
@@ -43,13 +44,68 @@ const QUIET_TURNS: u32 = 50;
 /// anyway and say what it drew.
 const SETTLE_AT_MOST: Duration = Duration::from_secs(60);
 
+/// What a control has to see in its window (1623): this many wakes and
+/// redraws for [`Rule::EveryChange`], this many presents for
+/// [`Rule::Loading`]. The blink with the compose field pressed into has
+/// to show one frame.
+const CONTROL: usize = 4;
+
+/// How long past [`IDLE`] a control's window is held open at most while
+/// it has not seen [`CONTROL`] (1623). The shell's tick runs on the wall,
+/// one a second; an unoptimised frame on a host loaded by a parallel run
+/// took long enough that five wall seconds held three redraws
+/// (`redrawn=3`, `presents: 3`), red where the rule had held all the
+/// while. The window now stays open until the control has seen its
+/// count, so a slow host stretches the window instead of emptying it; a
+/// rule that wakes nothing still reads red after this guard.
+const HOLD_AT_MOST: Duration = Duration::from_secs(60);
+
+/// When the shell woke the window and when the window redrew and
+/// presented, from the shell's start: what a control's window waits on
+/// (1623), shared by the shell, the clock and the script.
+#[derive(Default)]
+struct Tally {
+    wakes: Vec<Duration>,
+    redraws: Vec<Duration>,
+    presents: Vec<Duration>,
+}
+
+impl Tally {
+    /// Whether the window from `from` to `until` has seen what the
+    /// case's control asks; the idle cases ask nothing.
+    fn seen(&self, screen: Screen1455, rule: Rule, from: Duration, until: Duration) -> bool {
+        let since =
+            |times: &[Duration]| times.iter().filter(|t| **t >= from && **t < until).count();
+        match (screen, rule) {
+            (Screen1455::Typing, _) => since(&self.presents) >= 1,
+            (_, Rule::Shown) => true,
+            (_, Rule::EveryChange) => {
+                since(&self.wakes) >= CONTROL && since(&self.redraws) >= CONTROL
+            }
+            (_, Rule::Loading) => since(&self.presents) >= CONTROL,
+        }
+    }
+}
+
 /// The clock the drive runs on: the shell's, so the frames, the wakes
-/// and the messages are all timed from one start.
-struct Since(Instant);
+/// and the messages are all timed from one start; it tallies the redraws
+/// and the presents (1623).
+struct Since(Instant, Rc<RefCell<Tally>>);
 
 impl headless::Clock for Since {
+    fn turn(&mut self, redrawn: bool) {
+        if redrawn {
+            let now = self.now();
+            self.1.borrow_mut().redraws.push(now);
+        }
+    }
+
     fn now(&self) -> Duration {
         self.0.elapsed()
+    }
+
+    fn presented(&mut self, at: Duration) {
+        self.1.borrow_mut().presents.push(at);
     }
 }
 
@@ -80,8 +136,8 @@ struct Shell {
     last: Option<Seen>,
     start: Instant,
     ticks: u32,
-    /// When the window was handed a state, seconds since the start.
-    wakes: Vec<f64>,
+    /// When the window was handed a state ([`Tally::wakes`]).
+    tally: Rc<RefCell<Tally>>,
 }
 
 impl Shell {
@@ -122,7 +178,7 @@ impl Shell {
                 },
             };
             if let Some(seen) = offered {
-                self.wakes.push(self.start.elapsed().as_secs_f64());
+                self.tally.borrow_mut().wakes.push(self.start.elapsed());
                 out = Some(seen);
             }
         }
@@ -138,11 +194,13 @@ struct Idle {
     /// start, and its kind.
     handed: Vec<(f64, String)>,
     /// Whether the drive was let end though the window still waited on
-    /// its worker, two seconds after the idle ones.
+    /// its worker, two seconds after the idle ones ([`Idle::ended`]).
     forced: std::cell::Cell<bool>,
+    /// When the idle seconds, a control's held open, ended.
+    ended: Rc<std::cell::Cell<Option<Duration>>>,
     /// When the window settled ([`QUIET_TURNS`]), from the shell's
     /// start; and the quiet turns so far.
-    settled: std::rc::Rc<std::cell::Cell<Option<Duration>>>,
+    settled: Rc<std::cell::Cell<Option<Duration>>>,
     quiet: std::cell::Cell<u32>,
 }
 
@@ -192,10 +250,7 @@ impl Program for Idle {
         if self.window.idle() {
             return true;
         }
-        let deadline = self
-            .settled
-            .get()
-            .map(|at| at + IDLE + Duration::from_secs(2));
+        let deadline = self.ended.get().map(|at| at + Duration::from_secs(2));
         let now = self.shell.borrow().start.elapsed();
         let late = deadline.is_some_and(|deadline| now >= deadline);
         if late && !self.forced.get() {
@@ -226,9 +281,13 @@ enum Screen1455 {
     Typing,
 }
 
-/// What five idle seconds did, after the settle.
+/// What five idle seconds did, after the settle; a control's held open
+/// until it saw its count.
 #[derive(Debug)]
 struct Quiet {
+    /// How long the window was: [`IDLE`], or longer for a control held
+    /// open ([`HOLD_AT_MOST`]).
+    seconds: f64,
     /// States the shell handed the window.
     wakes: usize,
     /// Every message the window was handed, by kind.
@@ -249,8 +308,8 @@ struct Quiet {
 impl Quiet {
     fn line(&self, screen: Screen1455, rule: Rule) -> String {
         format!(
-            "IDLE_WINDOW screen={screen:?} rule={rule:?} seconds={} wakes={} messages={:?} busy={} redraws_unpresented={} presents={} max_damage={:.4} last_rects={}",
-            IDLE.as_secs(),
+            "IDLE_WINDOW screen={screen:?} rule={rule:?} seconds={:.1} wakes={} messages={:?} busy={} redraws_unpresented={} presents={} max_damage={:.4} last_rects={}",
+            self.seconds,
             self.wakes,
             self.messages,
             self.busy,
@@ -280,6 +339,7 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
         Screen1455::Map => (map_window(w, h).0, chat_model()),
     };
     let template = app.seen.clone();
+    let tally: Rc<RefCell<Tally>> = Rc::default();
     let mut program = Idle {
         window: Window::new(app),
         shell: RefCell::new(Shell {
@@ -294,11 +354,12 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
             last: None,
             start: Instant::now(),
             ticks: 0,
-            wakes: Vec::new(),
+            tally: tally.clone(),
         }),
         handed: Vec::new(),
         forced: std::cell::Cell::new(false),
-        settled: std::rc::Rc::default(),
+        ended: Rc::default(),
+        settled: Rc::default(),
         quiet: std::cell::Cell::new(0),
     };
     let settled = program.settled.clone();
@@ -325,6 +386,7 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
     };
     steps.reverse();
     let script_settled = settled.clone();
+    let (script_tally, script_ended) = (tally.clone(), program.ended.clone());
     let mut script = |now: Duration| -> Option<Vec<iced::Event>> {
         let mut events = Vec::new();
         while steps.last().is_some_and(|(t, _)| *t <= now) {
@@ -332,7 +394,21 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
                 events.push(event);
             }
         }
-        let over = script_settled.get().is_some_and(|at| now >= at + IDLE);
+        // The idle seconds end IDLE after the settle, held open while a
+        // control has not seen its count (1623): a case whose count the
+        // IDLE seconds held keeps exactly those, though the script may be
+        // asked a slow frame after them.
+        if let (None, Some(at)) = (script_ended.get(), script_settled.get()) {
+            let tally = script_tally.borrow();
+            let end = at + IDLE;
+            if now >= end && tally.seen(screen, rule, at, end) {
+                script_ended.set(Some(end));
+            } else if now >= end && (tally.seen(screen, rule, at, now) || now >= end + HOLD_AT_MOST)
+            {
+                script_ended.set(Some(now));
+            }
+        }
+        let over = script_ended.get().is_some();
         if over {
             events.append(&mut leave);
         }
@@ -341,11 +417,12 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
             false => Some(events),
         }
     };
-    let run = headless::drive_on(&mut program, w, h, &mut Since(start), &mut script, SETTLE)
+    let mut clock = Since(start, tally.clone());
+    let run = headless::drive_on(&mut program, w, h, &mut clock, &mut script, SETTLE)
         .expect("a renderer");
     let from = settled.get().unwrap_or(SETTLE + SETTLE_AT_MOST);
-    let (from, until) = (from.as_secs_f64(), (from + IDLE).as_secs_f64());
-    let shell = program.shell.borrow();
+    let until = program.ended.get().unwrap_or(from + IDLE).max(from + IDLE);
+    let (from, until) = (from.as_secs_f64(), until.as_secs_f64());
     let inside = |t: f64| t >= from && t < until;
     let presented: Vec<_> = run.frames.iter().filter(|f| inside(f.at)).collect();
     let rects = run
@@ -363,8 +440,15 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
             None => messages.push((kind.clone(), 1)),
         }
     }
+    let wakes = tally
+        .borrow()
+        .wakes
+        .iter()
+        .filter(|t| inside(t.as_secs_f64()))
+        .count();
     Quiet {
-        wakes: shell.wakes.iter().filter(|&&t| inside(t)).count(),
+        seconds: until - from,
+        wakes,
         messages,
         busy: program.forced.get(),
         unpresented: run.unpresented.iter().filter(|&&t| inside(t)).count(),
@@ -437,11 +521,14 @@ fn an_idle_window_draws_nothing() {
                 "{screen:?} idle: {quiet:?}"
             ),
             (_, Rule::EveryChange) => assert!(
-                quiet.wakes >= 4 && quiet.unpresented + quiet.presents >= 4,
+                quiet.wakes >= CONTROL && quiet.unpresented + quiet.presents >= CONTROL,
                 "the control woke nothing: {quiet:?}"
             ),
             (_, Rule::Loading) => {
-                assert!(quiet.presents >= 4, "the control drew nothing: {quiet:?}")
+                assert!(
+                    quiet.presents >= CONTROL,
+                    "the control drew nothing: {quiet:?}"
+                )
             }
         }
     }
