@@ -995,6 +995,67 @@ it). A missing cell is the next order.
 | `RoomsHub` | the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577) | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: no settings on the M9 |
 <!-- intent-inventory:end -->
 
+### The goldens' index
+
+Every scene a golden pins, with its golden per target, so a walk that
+cannot run a target reads this list instead of guessing file names
+(1451, after UI walk 1 found scenes no golden showed). A file stands
+under the scene it shows; "not drawn" says the target has no such
+screen, with the reason, which is what a walk reports, not a missing
+golden. The window's pictures and the terminal's screens are in
+`loquax/tests/golden/` (`gui-*`, `tui-*`, the scenes `scene-*` and the
+tracks' cells `tracks-*`), the terminal's sessions in
+`loquax/tests/fixtures/` (`*.frames`, one file a session with every
+frame it asks for), the M9's frames in `loquax-m9/tests/golden/`, the
+phone's in `loquax-android/tests/golden/`; each directory's README or
+the test named in it says what a file shows. Every terminal golden has
+its German twin (`-de`, `_de`), drawn as a desktop under
+`LANG=de_DE.UTF-8` draws it; the style map `tui_chat.styles` has none,
+it pins colours, not words. `loquax/tests/golden_index.rs` refuses a
+name here with no file, a golden file with no name here, and a terminal
+golden without its German twin.
+
+<!-- goldens-index:begin -->
+| scene | window | terminal | terminal, German | M9 | phone | scene, every target |
+|---|---|---|---|---|---|---|
+| First start, before a mailbox | `gui-first-start.png`, `gui-first-start-profile.png` | `tui-first-start.txt`, `tui-first-start-profile.txt` | `tui-first-start-de.txt`, `tui-first-start-profile-de.txt` | `m9-fw-splash.png`, `m9-fw-pairing.png` | not pinned: the first start is `WelcomeActivity.java`'s own | |
+| Joining a mailbox with its code | not drawn: a desktop joins with `loquax mailbox join` | not drawn: a desktop joins with `loquax mailbox join` | | `m9-joining.png` | not pinned: the join form is `JoinForm.java`'s own | |
+| The mailbox out of reach, and back | not drawn: the desktop's shell never learns the mailbox's reach | not drawn: the desktop's shell never learns the mailbox's reach | | `m9-offline.png`, `m9-online.png` | not pinned: the offline bar is `ConversationsActivity.java`'s own | |
+| The chats list and an open chat | `gui-chat-light.png`, `gui-chat-dark.png` | `tui_session.frames`, `tui_chat.frames`, `tui_chat.styles`, `tui_layout.frames` | `tui_session_de.frames`, `tui_chat_de.frames`, `tui_layout_de.frames` | `m9-chats.png`, `m9-chats-cursor.png`, `m9-chat.png`, `m9-chat-cursor.png`, `m9-fw-chats.png`, `m9-fw-chat.png` | | `scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json` |
+| A narrow window | `gui-chat-compact-chat.png`, `gui-chat-compact-list.png` | | | | | |
+| The large type | | | | `m9-chats-large.png`, `m9-chat-large.png` | | |
+| The settings | `gui-settings-light.png`, `gui-settings-privacy-light.png`, `gui-settings-advanced-light.png` | `tui-settings.txt`, `tui-settings-advanced.txt` | `tui-settings-de.txt`, `tui-settings-advanced-de.txt` | `m9-settings.png`, `m9-settings-de.png` (the house key's overview, the M9's only settings) | | |
+| The keys' help | not pinned: the shared overlay lnomad's window draws | not pinned: `?` | | not drawn: no key opens the help; the keys stand on their screens (`m9-fw-pairing.png`, `m9-map-hint.png`, the group's frames) | n/a: no keys | |
+| The keymap and the mouse | | `tui_keys.frames`, `tui_mouse.frames` | `tui_keys_de.frames`, `tui_mouse_de.frames` | | | |
+| Typing and sending | | | | `m9-compose.png`, `m9-sent.png` | | |
+| A reply, a reaction, a photo | `gui-reply-sent.png` | `tui-reply-sent.txt` | `tui-reply-sent-de.txt` | `m9-reply.png`, `m9-reaction.png` (the M9 draws no reaction), `m9-photo.png` | | `scene-reply.json` |
+| A reply being written | `gui-reply-compose.png` | `tui-reply-compose.txt` (the terminal draws no quote) | `tui-reply-compose-de.txt` | `m9-reply-compose.png` (the M9 says not what it answers) | | `scene-reply-compose.json` |
+| Reactions and their picker | | `tui_reactions.frames` | `tui_reactions_de.frames` | | | |
+| A long message read by the line | | `tui_long_message.frames` | `tui_long_message_de.frames` | `m9-chat-long-mid.png`, `m9-chat-long-back.png`, `m9-chat-top-held.png` | | |
+| Photos, files and voice in a chat | `gui-chat-media.png`, `gui-attach-sheet-light.png` | `tui_media.frames` | `tui_media_de.frames` | | | |
+| Recording a voice message | `gui-recording-held.png`, `gui-recording-locked.png`, `gui-recording-paused.png` | `tui_recording.frames` | `tui_recording_de.frames` | | | |
+| Selecting and copying text | `gui-chat-selected-light.png`, `gui-chat-selected-dark.png` | `tui-copy-mode.txt` | `tui-copy-mode-de.txt` | | | |
+| A late message at its sent time | `gui-late-message.png` | `tui-late-message.txt`, `tui_late.frames` | `tui-late-message-de.txt`, `tui_late_de.frames` | `m9-late-message.png` | `late-message.json` | |
+| Two contacts of one name | `gui-same-name.png` | `tui-same-name.txt`, `tui_names.frames` | `tui-same-name-de.txt`, `tui_names_de.frames` | `m9-same-name-list.png`, `m9-same-name-chat.png` | | |
+| The ticks and the receipts' ladder | | | | | | `scene-ladder.json` |
+| Search | | `tui_search.frames`, `tui_search_session.frames` | `tui_search_de.frames`, `tui_search_session_de.frames` | | | |
+| A new conversation from the palette | | `tui_palette_new.frames` | `tui_palette_new_de.frames` | | | |
+| A send's two legs in the toast | | `tui_toast_two_legs.frame` | `tui_toast_two_legs_de.frame` | | | |
+| History, drafts and an import | | `tui_history.frames`, `tui_draft.frames`, `tui_ugly.frames` | `tui_history_de.frames`, `tui_draft_de.frames`, `tui_ugly_de.frames` | | | |
+| The profile | `gui-profile-light.png` | `tui_profile.frames` | `tui_profile_de.frames` | | `profile-words.json` | `scene-profile.json` |
+| Groups: new, invited, the chat, its members | `gui-group-new.png`, `gui-group-invitation.png`, `gui-group-chat.png`, `gui-group-members.png` | | | `m9-group.png`, `m9-fw-groups.png`, `m9-fw-invite.png`, `m9-fw-members.png`, `m9-fw-admin.png`, `m9-fw-ask.png`, `m9-fw-name.png`, `m9-fw-pick.png` | | `scene-group-list.json`, `scene-group-new-name.json`, `scene-group-new-pick.json`, `scene-group-invitation.json`, `scene-group-invited-chat.json`, `scene-group-chat.json`, `scene-group-members.json`, `scene-group-members-leave.json` |
+| A group's one and two ticks | `gui-group-ticks.png` | `tui-group-ticks.txt` | `tui-group-ticks-de.txt` | `m9-group-ticks.png` | `group-ticks.json` | `scene-group-ticks.json` |
+| A relayed group | `gui-relay-group.png` | `tui-relay-group.txt` | `tui-relay-group-de.txt` | | `relay-group.json` | `scene-relay-group.json` |
+| A room | `gui-rooms-room.png` | `tui-rooms-room.txt` | `tui-rooms-room-de.txt` | not drawn: the M9 has no rooms | `rooms-room.json` | |
+| Explore | `gui-explore.png` | `tui-explore.txt`, `tui-explore-sheet.txt` | `tui-explore-de.txt`, `tui-explore-sheet-de.txt` | not drawn: the M9 has no Explore | | `scene-explore.json`, `scene-explore-search.json`, `scene-explore-sheet.json`, `scene-explore-wide.json` |
+| Browse, a NomadNet page | `gui-browse-list.png`, `gui-browse-page.png` | `tui-browse-list.txt`, `tui-browse-page.txt` | `tui-browse-list-de.txt`, `tui-browse-page-de.txt` | not drawn: the M9 has no Browse tab | | `scene-browse-list.json`, `scene-browse-page.json`, `scene-browse-form.json` |
+| The map with two peers, one selected | `gui-map-pins.png` | `tui-map-pins.txt` | `tui-map-pins-de.txt` | `m9-map-card.png` | | |
+| The map screen and its menu | `gui-map-window.png`, `gui-map-window-menu.png`, `gui-map-window-week.png`, `gui-map-uncovered-dark.png` | `tui_map.frames`, `tui_map_cycle.frames`, `tui_mapload.frames` | `tui_map_de.frames`, `tui_map_cycle_de.frames`, `tui_mapload_de.frames` | `m9-map-open.png`, `m9-map-hint.png`, `m9-map-no-region.png`, `m9-map-overview.png`, `m9-map-world-z2.png`, `m9-map-z13.png`, `m9-map-z16.png`, `m9-map-sky-fix.png`, `m9-map-sky-searching.png`, `m9-fw-map.png`, `m9-fw-pan.png` | | |
+| The map's picture: names and buildings | `gui-names-florence-z16.png`, `gui-buildings-light-z16.png`, `gui-buildings-dark-z16.png`, `gui-buildings-light-z17.png`, `gui-buildings-dark-z17.png` | | | | `map-florence-z16.png` | |
+| A position in a chat, shared and typed | `gui-position-sheet-light.png`, `gui-position-entry-light.png` | `tui_telemetry.frames`, `tui_liveness.frames`, `tui_share_chip.frames` | `tui_telemetry_de.frames`, `tui_liveness_de.frames`, `tui_share_chip_de.frames` | | | |
+| Tracks | `gui-tracks-hiking.png`, `gui-tracks-park.png`, `gui-tracks-park-dark.png`, `gui-tracks-convoy.png`, `gui-tracks-week-old.png`, `gui-tracks-outlier.png`, `gui-tracks-handbag.png`, `gui-tracks-radar.png`, `gui-tracks-way-back.png`, `gui-tracks-late.png`, `gui-tracks-battery.png`, `gui-tracks-fit-all.png` | `tracks-hiking.txt`, `tracks-park.txt`, `tracks-convoy.txt`, `tracks-week-old.txt`, `tracks-outlier.txt`, `tracks-handbag.txt`, `tracks-radar.txt`, `tracks-way-back.txt`, `tracks-late.txt`, `tracks-battery.txt`, `tracks-fit-all.txt` | `tracks-hiking-de.txt`, `tracks-park-de.txt`, `tracks-convoy-de.txt`, `tracks-week-old-de.txt`, `tracks-outlier-de.txt`, `tracks-handbag-de.txt`, `tracks-radar-de.txt`, `tracks-way-back-de.txt`, `tracks-late-de.txt`, `tracks-battery-de.txt`, `tracks-fit-all-de.txt` | | | |
+<!-- goldens-index:end -->
+
 ## 2. Decision: what honesty about delivery looks like
 
 Most chat UIs lie by simplification: one check for sent, two for delivered,

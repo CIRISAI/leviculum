@@ -251,7 +251,19 @@ for every session `tests/tui_snapshot.rs` pins, each script run after
 `lang de` as `tui_chat_de.frames` is. `LOQUAX_WRITE_GOLDEN=1` writes the
 terminal's goldens and frame sets anew.
 
+`scene-reply.json`, `scene-reply-compose.json`: the scene of the chat of
+`tests/support/reply_scene.rs` (1451), Compact, before and after
+`reply_composing`: our reply with its quote of her question and her chip,
+her photo's bubble; then the compose node holding the draft and the line
+it answers. Drawn by
+`scene_golden::a_reply_a_reaction_and_a_photo_are_the_golden_scene`; every
+target's golden of this chat is drawn from the same fixture.
+
 `tracks-*-de.txt`: the track scenes' cells in German (1451), the pins'
 ages as a reader under `LANG=de_DE.UTF-8` reads them ("vor 13 Min.",
 "gerade eben"), drawn by the same two tests in
 `ui::tracks::scenes::tests` beside the English ones.
+
+The goldens' index, every scene with its golden per target, is the
+section "The goldens' index" of `docs/src/concepts/loquax-ui.md`;
+`tests/golden_index.rs` holds it to the files here.
