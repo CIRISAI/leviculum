@@ -25,9 +25,33 @@ use loquax::ui::update;
 use std::cell::RefCell;
 
 /// How long the window is left alone, and how long before that it may
-/// settle (its first frames, the map's first picture).
+/// settle (its first frames, the map's first picture) at the least.
 const IDLE: Duration = Duration::from_secs(5);
 const SETTLE: Duration = Duration::from_millis(1500);
+
+/// The idle seconds begin once the window has settled (1619): past
+/// [`SETTLE`], its worker idle, and this many turns of the loop in a row
+/// with no frame drawn and no message of the window's own (the loop
+/// sleeps 200 us a waiting turn, so at least 10 ms of quiet). Before
+/// 1619 they began at [`SETTLE`] on the wall, and on a host loaded by a
+/// parallel run the map's first picture, or the frame that showed it,
+/// came after: `screen=Map rule=Shown presents=1`.
+const QUIET_TURNS: u32 = 50;
+
+/// How long past [`SETTLE`] the window may take to settle at most: a
+/// guard against one that never does, whose idle seconds then begin
+/// anyway and say what it drew.
+const SETTLE_AT_MOST: Duration = Duration::from_secs(60);
+
+/// The clock the drive runs on: the shell's, so the frames, the wakes
+/// and the messages are all timed from one start.
+struct Since(Instant);
+
+impl headless::Clock for Since {
+    fn now(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
 
 /// The window size: the goldens', so the debug build stays quick.
 const SIZE: (u32, u32) = (900, 560);
@@ -113,10 +137,13 @@ struct Idle {
     /// Every message the window was handed: when, seconds since the
     /// start, and its kind.
     handed: Vec<(f64, String)>,
-    /// When the drive is let end though the window still waits on its
-    /// worker, and whether it had to be.
-    deadline: Duration,
+    /// Whether the drive was let end though the window still waited on
+    /// its worker, two seconds after the idle ones.
     forced: std::cell::Cell<bool>,
+    /// When the window settled ([`QUIET_TURNS`]), from the shell's
+    /// start; and the quiet turns so far.
+    settled: std::rc::Rc<std::cell::Cell<Option<Duration>>>,
+    quiet: std::cell::Cell<u32>,
 }
 
 impl Program for Idle {
@@ -146,6 +173,15 @@ impl Program for Idle {
 
     fn pump(&self, drawn: bool) -> Vec<Message> {
         let mut out = self.window.pump(drawn);
+        if self.settled.get().is_none() {
+            let now = self.shell.borrow().start.elapsed();
+            let quiet = !drawn && out.is_empty() && self.window.idle();
+            self.quiet.set(if quiet { self.quiet.get() + 1 } else { 0 });
+            let settled = now >= SETTLE && self.quiet.get() >= QUIET_TURNS;
+            if settled || now >= SETTLE + SETTLE_AT_MOST {
+                self.settled.set(Some(now));
+            }
+        }
         if let Some(seen) = self.shell.borrow_mut().pump() {
             out.push(Message::Seen(Box::new(seen)));
         }
@@ -156,7 +192,12 @@ impl Program for Idle {
         if self.window.idle() {
             return true;
         }
-        let late = self.shell.borrow().start.elapsed() >= self.deadline;
+        let deadline = self
+            .settled
+            .get()
+            .map(|at| at + IDLE + Duration::from_secs(2));
+        let now = self.shell.borrow().start.elapsed();
+        let late = deadline.is_some_and(|deadline| now >= deadline);
         if late && !self.forced.get() {
             let app = &self.window.app;
             println!(
@@ -256,30 +297,34 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
             wakes: Vec::new(),
         }),
         handed: Vec::new(),
-        deadline: SETTLE + IDLE + Duration::from_secs(2),
         forced: std::cell::Cell::new(false),
+        settled: std::rc::Rc::default(),
+        quiet: std::cell::Cell::new(0),
     };
-    let end = SETTLE + IDLE;
+    let settled = program.settled.clone();
+    let start = program.shell.borrow().start;
     // Typing: a press into the compose field while the window settles,
-    // and one on the list's empty foot after the idle seconds, which
-    // takes the focus and ends the blink, as the bench's idle case does.
+    // and one on the list's empty foot after the idle seconds (`leave`),
+    // which takes the focus and ends the blink, as the bench's idle case
+    // does.
     let field = iced::Point::new(w as f32 - 250.0, h as f32 - 28.0);
     let list = iced::Point::new(200.0, h as f32 - 40.0);
     let at = |p| iced::Event::Mouse(mouse::Event::CursorMoved { position: p });
     let down = iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
     let up = iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
-    let mut steps: Vec<(Duration, iced::Event)> = match screen {
-        Screen1455::Typing => vec![
-            (SETTLE / 3, at(field)),
-            (SETTLE / 3, down.clone()),
-            (SETTLE / 3, up.clone()),
-            (end, at(list)),
-            (end, down),
-            (end, up),
-        ],
-        _ => Vec::new(),
+    let (mut steps, mut leave): (Vec<(Duration, iced::Event)>, Vec<iced::Event>) = match screen {
+        Screen1455::Typing => (
+            vec![
+                (SETTLE / 3, at(field)),
+                (SETTLE / 3, down.clone()),
+                (SETTLE / 3, up.clone()),
+            ],
+            vec![at(list), down, up],
+        ),
+        _ => (Vec::new(), Vec::new()),
     };
     steps.reverse();
+    let script_settled = settled.clone();
     let mut script = |now: Duration| -> Option<Vec<iced::Event>> {
         let mut events = Vec::new();
         while steps.last().is_some_and(|(t, _)| *t <= now) {
@@ -287,13 +332,19 @@ fn idle(screen: Screen1455, rule: Rule) -> Quiet {
                 events.push(event);
             }
         }
-        match now >= end && steps.is_empty() && events.is_empty() {
+        let over = script_settled.get().is_some_and(|at| now >= at + IDLE);
+        if over {
+            events.append(&mut leave);
+        }
+        match over && steps.is_empty() && events.is_empty() {
             true => None,
             false => Some(events),
         }
     };
-    let run = headless::drive(&mut program, w, h, &mut script, SETTLE).expect("a renderer");
-    let (from, until) = (SETTLE.as_secs_f64(), end.as_secs_f64());
+    let run = headless::drive_on(&mut program, w, h, &mut Since(start), &mut script, SETTLE)
+        .expect("a renderer");
+    let from = settled.get().unwrap_or(SETTLE + SETTLE_AT_MOST);
+    let (from, until) = (from.as_secs_f64(), (from + IDLE).as_secs_f64());
     let shell = program.shell.borrow();
     let inside = |t: f64| t >= from && t < until;
     let presented: Vec<_> = run.frames.iter().filter(|f| inside(f.at)).collect();
