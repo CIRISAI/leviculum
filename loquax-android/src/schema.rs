@@ -2570,6 +2570,10 @@ pub struct GroupRow {
     pub you: bool,
     #[serde(default)]
     pub remove: String,
+    /// The sheet: the member's avatar letters (1449 item 3), its colours
+    /// from `peer` as every avatar's.
+    #[serde(default)]
+    pub initials: String,
 }
 
 /// What [`Query::Shares`] answers (1273): the running shares, by peer,

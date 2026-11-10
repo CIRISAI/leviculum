@@ -20,7 +20,7 @@ use super::intent::{Intent, Target};
 use super::scene::{A11y, Action, Avatar, NodeId};
 use super::strings::{Arg, StrId, Text};
 use super::{chat, UiModel};
-use leviculum_ui::scene::{actions_json as actions, Role};
+use leviculum_ui::scene::{actions_json as actions, Role, ToJson};
 
 /// A group's row and chat bar: how many are in it, and whether the reader
 /// is only invited yet.
@@ -94,7 +94,11 @@ pub struct MemberRow {
     /// `admin`, `joined`, `invited`, `left`.
     pub state: Text,
     pub you: bool,
-    /// The admin's Remove, on every other present member.
+    /// Its picture, the list's avatar (1449 item 3, walk 1 finding 9).
+    pub avatar: Avatar,
+    /// The admin's Remove, on every other present member: a renderer
+    /// offers it in the row's menu, never on a tap of the row, and the
+    /// sheet asks before it acts.
     pub remove: Option<Action>,
     pub a11y: A11y,
 }
@@ -319,15 +323,30 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
     let info = model.group(&sheet.group)?;
     let group = sheet.group;
     let id = NodeId::Members;
+    // Two members of one name are told apart by their hash tails, as the
+    // list does (1452), here among the sheet's own rows (1449 item 3, walk
+    // 1 finding 9: two "lew" rows).
+    let shown: Vec<String> = info.members.iter().map(|m| model.member_name(m)).collect();
     let rows = info
         .members
         .iter()
-        .map(|m| {
+        .zip(&shown)
+        .map(|(m, plain)| {
             let you = model.address == Some(m.address);
-            let name = match you {
-                true => Text::key(StrId::GroupYou),
-                false => Text::Raw(model.member_name(m)),
+            let twice = shown.iter().filter(|other| *other == plain).count() > 1;
+            let name = match (you, twice) {
+                (true, _) => Text::key(StrId::GroupYou),
+                (false, false) => Text::Raw(plain.clone()),
+                (false, true) => {
+                    Text::Raw(format!("{plain} {}", crate::names::hash_suffix(&m.address)))
+                }
             };
+            let avatar = Avatar::of(
+                chat::initials(Some(plain.as_str()), &m.address),
+                &m.address,
+                None,
+                None,
+            );
             let state = Text::key(match super::groups::member_words(m, you) {
                 "left" => StrId::GroupStateLeft,
                 "admin" => StrId::GroupAdmin,
@@ -346,6 +365,7 @@ pub fn member_sheet<B>(model: &UiModel<B>) -> Option<MemberSheet> {
                 name,
                 state,
                 you,
+                avatar,
                 remove: (info.ours && !you && !m.left).then(|| {
                     verb(Verb::Remove {
                         group: Target::Peer(group),
@@ -558,6 +578,7 @@ impl MemberSheet {
                 "name": r.name.to_json(),
                 "state": r.state.to_json(),
                 "you": r.you,
+                "avatar": r.avatar.to_json(),
                 "remove": r.remove.as_ref().map(Action::to_json),
                 "a11y": r.a11y.to_json(),
             })).collect::<Vec<_>>(),

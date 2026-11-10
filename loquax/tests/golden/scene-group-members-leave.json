@@ -362,6 +362,12 @@
           "role": "row",
           "selected": false
         },
+        "avatar": {
+          "bg": "3d6fb6",
+          "fg": "ffffff",
+          "initials": "L",
+          "ring": null
+        },
         "id": "member_41414141414141414141414141414141",
         "name": {
           "raw": "Lew"
@@ -392,6 +398,12 @@
           "role": "row",
           "selected": false
         },
+        "avatar": {
+          "bg": "8e4b8a",
+          "fg": "ffffff",
+          "initials": "Y",
+          "ring": null
+        },
         "id": "member_30303030303030303030303030303030",
         "name": {
           "args": [],
@@ -421,6 +433,12 @@
           "resource": "member_42424242424242424242424242424242",
           "role": "row",
           "selected": false
+        },
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "A",
+          "ring": null
         },
         "id": "member_42424242424242424242424242424242",
         "name": {

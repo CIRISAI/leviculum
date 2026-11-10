@@ -394,6 +394,9 @@ leviculum_ui::catalogue! {
     GroupYes = "group_yes", "Yes", "Ja";
     GroupNo = "group_no", "No", "Nein";
     GroupYou = "group_you", "You", "Du";
+    // 1449 item 3 (walk 1 finding 9): a group's chat menu names the group,
+    // never a contact.
+    GroupInfo = "group_info", "Group info", "Gruppeninfo";
     GroupAdmin = "group_admin", "admin", "Admin";
     GroupStateJoined = "group_state_joined", "joined", "beigetreten";
     GroupStateInvited = "group_state_invited", "invited", "eingeladen";

@@ -3359,6 +3359,7 @@ impl Inner {
                     name: r.name.resolve(lang),
                     state: r.state.resolve(lang),
                     you: r.you,
+                    initials: r.avatar.initials.clone(),
                     remove: r
                         .remove
                         .as_ref()

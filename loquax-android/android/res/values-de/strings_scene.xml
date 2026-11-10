@@ -304,6 +304,7 @@
     <string name="group_yes">Ja</string>
     <string name="group_no">Nein</string>
     <string name="group_you">Du</string>
+    <string name="group_info">Gruppeninfo</string>
     <string name="group_admin">Admin</string>
     <string name="group_state_joined">beigetreten</string>
     <string name="group_state_invited">eingeladen</string>

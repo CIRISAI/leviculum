@@ -2019,6 +2019,54 @@ mod tests {
         assert!(bubbles[0].writer.is_none());
     }
 
+    /// 1449 item 3 (walk 1 finding 9): two members of one name are told
+    /// apart on the sheet by their hash tails, every row has its avatar's
+    /// letters, and the reader is "You". Control: a name only one member
+    /// has carries no tail.
+    #[test]
+    fn the_member_sheet_tells_two_of_one_name_apart_and_shows_avatars() {
+        let mut model = reader(&[LEW]);
+        arrive(&mut model, LEW, 1, "invite", invite("Lew"));
+        arrive(
+            &mut model,
+            GROUP,
+            2,
+            "",
+            members(
+                2,
+                &[
+                    (LEW, "lew", 2 | 4),
+                    (ME, "Me", 4),
+                    (ANNA, "lew", 4),
+                    (BOB, "Bob", 4),
+                ],
+            ),
+        );
+        verb(
+            &mut model,
+            Verb::Members {
+                group: Target::Peer(GROUP),
+            },
+        );
+        let sheet = super::super::group_scene::member_sheet(&model).expect("sheet");
+        let names: Vec<String> = sheet
+            .rows
+            .iter()
+            .map(|r| r.name.resolve(Lang::En))
+            .collect();
+        let lew = format!("lew {}", crate::names::hash_suffix(&LEW));
+        let anna = format!("lew {}", crate::names::hash_suffix(&ANNA));
+        assert_eq!(names, [lew.as_str(), "You", anna.as_str(), "Bob"]);
+        assert_ne!(lew, anna);
+        let letters: Vec<&str> = sheet
+            .rows
+            .iter()
+            .map(|r| r.avatar.initials.as_str())
+            .collect();
+        assert_eq!(letters[3], "B", "{letters:?}");
+        assert!(letters.iter().all(|l| !l.is_empty()), "{letters:?}");
+    }
+
     /// The member sheet (study 4.4, 4.6): it opens from the header, Leave
     /// asks once and then sends the reader alone, flagged left, 3 taps;
     /// the admin's Remove sends the member alone, flagged left. A newer

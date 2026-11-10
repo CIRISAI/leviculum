@@ -1231,10 +1231,19 @@ public class ChatActivity extends Activity implements Events.Listener {
     /** The bar's menu: the contact, search, the map, the address book and the name. */
     private void showMenu(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
-        popup.getMenu().add(0, R.string.contact_info, 0, R.string.contact_info);
+        // A group's menu names the group (1449, walk 1 finding 9): its info
+        // is the members screen, and no entry speaks of a contact.
+        boolean group = Core.num(header, "group_members") > 0;
+        if (group) {
+            popup.getMenu().add(0, R.string.group_info, 0, R.string.group_info);
+        } else {
+            popup.getMenu().add(0, R.string.contact_info, 0, R.string.contact_info);
+        }
         popup.getMenu().add(0, R.string.chat_search, 0, R.string.chat_search);
         popup.getMenu().add(0, R.string.map, 1, R.string.map);
-        if (Core.bool(header, "linked")) {
+        if (group) {
+            // Nothing of the address book for a group.
+        } else if (Core.bool(header, "linked")) {
             popup.getMenu().add(0, R.string.open_contact, 2, R.string.open_contact);
             Object others = header.get("others");
             if (others instanceof List && !((List<?>) others).isEmpty()) {
@@ -1245,10 +1254,6 @@ public class ChatActivity extends Activity implements Events.Listener {
             popup.getMenu().add(0, R.string.add_to_contacts, 2, R.string.add_to_contacts);
         }
         popup.getMenu().add(0, R.string.rename, 5, R.string.rename);
-        // A group's members (1307), its Leave and the admin's Remove.
-        if (Core.num(header, "group_members") > 0) {
-            popup.getMenu().add(0, R.string.group_members, 0, R.string.group_members);
-        }
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
@@ -1278,7 +1283,8 @@ public class ChatActivity extends Activity implements Events.Listener {
                     choose();
                 } else if (id == R.string.rename) {
                     rename();
-                } else if (id == R.string.group_members) {
+                } else if (id == R.string.group_info) {
+                    // The members screen (1307), its Leave and the admin's Remove.
                     GroupDialogs.members(ChatActivity.this, peer, again);
                 }
                 return true;
