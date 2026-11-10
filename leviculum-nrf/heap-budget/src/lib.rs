@@ -246,7 +246,7 @@ pub const SERVE_PEAK_BYTES: usize = serve_peak_bytes(SYNC_SLICE_BYTES, SERVE_RES
 ///   streamed answer to one outbound offer;
 /// * `pn_work` — queued upload payloads, one per phone at the announced
 ///   [`BOARD_TRANSFER_LIMIT_KB`], two phones (the #388 field scenario);
-/// * 5 KiB — everything structural: the peer table (§5's `104·16` plus
+/// * 6 KiB — everything structural: the peer table (§5's `104·16` plus
 ///   the 64 B of public keys each peer now keeps (#388 pass 3, ~1 KiB
 ///   at `BOARD_MAX_PEERS` — grown from the previous 4 KiB term
 ///   because the keys did not fit its slack), the offer plan
@@ -305,7 +305,7 @@ pub const ROLE_BUDGET_BYTES: usize = SYNC_SLICE_BYTES
 /// store writes). Named so the per-operation peaks ([`peak`]) can say what
 /// the budget leaves for a transient once this and the queued uploads are
 /// spent.
-pub const ROLE_STRUCTURAL_BYTES: usize = 5 * 1024;
+pub const ROLE_STRUCTURAL_BYTES: usize = 6 * 1024; // order 1641, see the end of this file
 
 /// The board peer-table cap (`PeeringConfig::max_peers`,
 /// `leviculum-nrf/src/pn.rs`), §5's derivation
@@ -319,7 +319,7 @@ pub const ROLE_STRUCTURAL_BYTES: usize = 5 * 1024;
 /// The 104 B is §5's persisted record. What the table costs in RAM by the
 /// census's own model is [`peak::peer_table_bytes`], which is larger; the
 /// test `the_peer_table_at_the_cap_against_its_slice` prints both.
-pub const BOARD_MAX_PEERS: usize = 16;
+pub const BOARD_MAX_PEERS: usize = 7; // order 1641: what the structural term funds
 
 /// §5's per-peer record, aligned (`propagation-node-on-a-board.md`).
 pub const PEER_RECORD_BYTES: usize = 104;
@@ -346,7 +346,7 @@ const _: () = assert!(
 /// allocation (an MTU packet plus its copies) times a churn factor,
 /// not at the idle loss. Re-derive from `largest=` under two-phone
 /// load when the field census arrives.
-const FRAG_RESERVE_BYTES: usize = 6 * 1024;
+const FRAG_RESERVE_BYTES: usize = 5 * 1024; // order 1641 moved 1 KiB to the role
 
 /// One 11-slot B-tree node of the boxed link table, amortised per link
 /// in the budget's `per_link=` term (the value is a `Box` pointer since
@@ -384,8 +384,8 @@ pub const fn budget_reserve() -> usize {
 /// link currently rides them, because a claimable GATT connection can
 /// fill its queues). What remains of [`HEAP_SIZE`] is divided by
 /// [`budget_per_link`], the carrier-independent cost of one more link.
-/// With today's numbers (node box [`NODE_BOX_BYTES`], role 21 120 B,
-/// reserve 18 848 B, sessions 4 × 3 948 B, per-link 2 696 B) the
+/// With today's numbers (node box [`NODE_BOX_BYTES`], role 22 144 B,
+/// reserve 17 824 B, sessions 4 × 3 948 B, per-link 2 696 B) the
 /// division yields 4 with 16 B over — the heap affords exactly the
 /// BLE-session count, and no extra LoRa-backed links until a fixed term shrinks. The
 /// binaries assert `>=` [`MAX_LINKS`]: a node box grown past
@@ -737,11 +737,11 @@ pub const fn held_announce_bytes(per_iface: usize, ifaces: usize) -> usize {
 /// ```text
 ///   free at the 2026-09-23 T114 panic (two phones + role)  30 380 B
 /// − SERVE_MARGIN_BYTES        claimed while a /get is in   14 696 B
-/// − FRAG_RESERVE_BYTES        the allocator's elbow room    6 144 B
-/// =                           what a hold may take          9 540 B
+/// − FRAG_RESERVE_BYTES        the allocator's elbow room    5 120 B
+/// =                           what a hold may take         10 564 B
 /// ```
 ///
-/// 8 KiB is under that with 1.3 KiB to spare. What it buys is
+/// 8 KiB is under that with 2.3 KiB to spare. What it buys is
 /// [`BOARD_MAX_HELD_ANNOUNCES`] = 6 per interface at the MTU bound
 /// (7 256 B for both holding interfaces full, LoRa and BLE; the USB serial
 /// interface holds none, [`BOARD_INGRESS_CONTROL`]); at the rig's 183 B
@@ -851,3 +851,51 @@ const _: () =
 /// it now takes 17 more bytes in `NodeCore` to cost a link. The box is
 /// never allocated on a board, which declares no interface.
 pub const NODE_BOX_BYTES: usize = 31_744;
+
+// The role's structural term against what the bench measured (order 1641,
+// Refs LV-1006). Declared last, like the node box above, so the book's line
+// citations into this file stay where they are.
+//
+// On 2026-11-10 a T114 with sixteen peers (a LAN of stock lxmd nodes filled
+// the table) printed, two minutes before each of its out-of-memory panics,
+// `pn_peers=7152 n_peers=16 pn_out=128 pn_links=640..1320 pn_role=14..734
+// pn_flush=1168..1376`: about 10.7 KB of structure against a 5 KiB term.
+// The term had been sized from §5's 104 B persisted record, while the table
+// holds each 200 B `Peer` inline in a B-tree whose nodes are allocated
+// eleven slots wide: one node funds up to eleven peers, and the twelfth
+// splits the root into two leaves under an internal node, about three times
+// the bytes. The census's model (`peak::peer_table_bytes`, fill of seven)
+// agrees with the allocation exactly at seven peers or fewer, 2 384 B.
+//
+// So the cap is seven, the most one model-and-allocation node holds, and the
+// term is what the table at that cap plus the rest of the structure the
+// bench measured actually cost:
+//
+//   peer_table_bytes(7)                 2 384 B
+// + the measured rest (largest seen)    3 558 B  pn_out + pn_links + pn_role + pn_flush
+// =                                     5 942 B  ≤ 6 144 B
+//
+// The extra KiB comes out of the fragmentation reserve, so the total, the
+// link count and the slack do not move. The reserve was sized against the
+// field's 340 B refusal at 4 760 B free; the bench's three censuses lost
+// 35, 44 and 43 B to fragmentation at 35 and 22 KB free, and the table this
+// change shrinks gives back about 4.8 KB of steady state, four times what
+// the reserve lends. A peer declined at the cap is the reference's own
+// full-table answer (`DeclineReason::TableFull`, `LXMRouter.py:2032`), and
+// rotation keeps a slot free for newcomers.
+
+/// The non-table part of the role's structural term, the largest the
+/// 2026-11-10 T114 bench measured (`pn_out` 128 + `pn_links` 1 320 +
+/// `pn_role` 734 + `pn_flush` 1 376 B, each the largest of three censuses).
+pub const ROLE_STRUCTURAL_REST_MEASURED_BYTES: usize = 128 + 1_320 + 734 + 1_376;
+
+const _: () = assert!(
+    peak::peer_table_bytes(BOARD_MAX_PEERS) + ROLE_STRUCTURAL_REST_MEASURED_BYTES
+        <= ROLE_STRUCTURAL_BYTES
+);
+// One more peer is one more B-tree node in the census's model: the cap is
+// the largest the term funds, not a number below it.
+const _: () = assert!(
+    peak::peer_table_bytes(BOARD_MAX_PEERS + 1) + ROLE_STRUCTURAL_REST_MEASURED_BYTES
+        > ROLE_STRUCTURAL_BYTES
+);

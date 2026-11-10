@@ -93,7 +93,7 @@ const BLE_IFACE: usize = 2;
 /// A neighbour in this table has already bought its one announce and
 /// never buys another for the rest of the boot, which is what keeps rule
 /// 4 a trigger rather than a cadence. Thirty-two is well above the peer
-/// table the propagation role sizes for (`BOARD_MAX_PEERS`, 16), so a
+/// table the propagation role sizes for (`BOARD_MAX_PEERS`, 7), so a
 /// board reaches it only on a channel busier than anything either stack
 /// is provisioned for; the cost when it does is one extra announce for
 /// the neighbour whose entry was displaced, bounded again by the

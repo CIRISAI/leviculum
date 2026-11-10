@@ -188,7 +188,8 @@ impl core::fmt::Write for ByteWriter<'_> {
 }
 
 /// Capture a panic's message into the retained record, magic last, so the
-/// next boot can log it. The log ring is unusable here: the executor is
+/// next boot can log it, followed by ` phase=<name>`
+/// ([`crate::thread_watch::Phase`]). The log ring is unusable here: the executor is
 /// dead and would never drain it. For the bind crate's `#[panic_handler]`;
 /// no allocation, volatile writes only.
 pub fn record_panic(info: &core::panic::PanicInfo) {
@@ -200,7 +201,18 @@ pub fn record_panic(info: &core::panic::PanicInfo) {
             buf: buf_slice,
             pos: 0,
         };
-        let _ = core::fmt::write(&mut writer, format_args!("{}", info));
+        // The phase thread mode last entered rides at the END, where the
+        // ring keeps it whatever the message's length (order 1641): an
+        // allocation failure names only its size, and the phase is what says
+        // which work asked for it.
+        let _ = core::fmt::write(
+            &mut writer,
+            format_args!(
+                "{} phase={}",
+                info,
+                crate::thread_watch::current_phase().name()
+            ),
+        );
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).len), writer.pos as u32);
         // Magic last — partial write must not appear valid.
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), PANIC_PM.fresh);

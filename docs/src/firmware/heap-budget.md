@@ -61,13 +61,13 @@ The field T114 on ed0754e4 (2026-10-07) printed `node_box=31152` and
 | rest of `NodeCore` (transport, node state) | | | 1 720 | node box less storage |
 | Endpoint links: boxed `Link` + link-map share | 2 632 + 64 = 2 696 | 4 | 10 784 | `LINK_BYTES` (asserted), `LINK_MAP_BYTES_PER_LINK` |
 | BLE sessions: `LINK_OUT` 4 × 564, pump 2 × 564, defragmenter 564 | 3 948 | 4 | 15 792 | `SESSION_BUDGET_BYTES` |
-| Propagation role | | 1 | 21 120 | `ROLE_BUDGET_BYTES` |
+| Propagation role | | 1 | 22 144 | `ROLE_BUDGET_BYTES` |
 | of which the sync slice | | 1 | 8 000 | `SYNC_SLICE_BYTES` |
 | of which queued uploads | 4 000 | 2 | 8 000 | `BOARD_TRANSFER_LIMIT_KB` |
-| of which structural (peer table, offer plan, maps, cache) | | 1 | 5 120 | `ROLE_STRUCTURAL_BYTES` |
+| of which structural (peer table at 7 peers, offer plan, maps, cache) | | 1 | 6 144 | `ROLE_STRUCTURAL_BYTES` |
 | of which the serve reserve | | | 0 | `SERVE_RESERVE_BYTES` |
-| Reserve | | | 18 848 | `budget_reserve` |
-| of which fragmentation | | | 6 144 | `FRAG_RESERVE_BYTES` |
+| Reserve | | | 17 824 | `budget_reserve` |
+| of which fragmentation | | | 5 120 | `FRAG_RESERVE_BYTES` |
 | of which the shared BLE channels | 2 × 4 × 564 | | 4 512 | `CHANNEL_BUDGET_BYTES` |
 | of which one incoming resource | 8 192 | 1 | 8 192 | `MAX_INCOMING_RESOURCE_BYTES` |
 | **Total** | | | **98 288** | `budget_total` |

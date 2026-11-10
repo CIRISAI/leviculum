@@ -981,8 +981,11 @@ and one request names ten ids; a link with a larger negotiated MTU
 uses more, up to the ceiling. Both engines therefore plan the offer
 when the link is up, not when the round is scheduled — until then
 there is no MDU to size against, and the plan made at scheduling time
-answers only "is anything above the cursor offerable at all". **Board cap: 16 peers**
-still holds, now with less margin; **host config default: 20**, the
+answers only "is anything above the cursor offerable at all". **Board cap: 7 peers**
+since order 1641 (it was 16 until a T114 bench with sixteen peers measured
+the table at 7 152 B against a 5 KiB structural term and ran out of heap;
+seven is one B-tree node, the arithmetic is at the end of
+`leviculum-nrf/heap-budget/src/lib.rs`); **host config default: 20**, the
 reference's own `MAX_PEERS` (`LXMRouter.py:43`), settable as
 `max_peers`. The full-table policy is deterministic and documented on
 `DeclineReason::TableFull`: first heard wins, a full table declines

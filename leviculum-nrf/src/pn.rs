@@ -194,7 +194,7 @@
 //! `links` is DERIVED, not chosen
 //! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
 //! subtracted from the heap and the remainder divided by `per_link`.
-//! With today's numbers — node box 31 752, role 21 120, reserve 18 848,
+//! With today's numbers — node box 31 752, role 22 144, reserve 17 824,
 //! sessions 4 · 3 948 = 15 792, per_link 2 696 — the remainder is
 //! 10 792 B and the division yields **4** (leaving 8 B of slack, #661, #662, #666, #852, 860, 867, 981): the heap affords exactly the
 //! BLE-session count, no extra LoRa-backed links until a fixed term
@@ -1190,6 +1190,7 @@ impl Engine {
     {
         let mut out = TickOutput::default();
         for event in events {
+            leviculum_firmware::thread_watch::set_phase(event_phase(event));
             self.on_event(node, event, &mut out);
         }
         out
@@ -2484,6 +2485,9 @@ impl Engine {
         let mut out = TickOutput::default();
         let now_ms = node.now_ms();
 
+        leviculum_firmware::thread_watch::set_phase(
+            leviculum_firmware::thread_watch::Phase::PnTicks,
+        );
         self.harvest_mining();
         // The PN's path requests are the application's, as LXMRouter's and
         // LXMPeer's are in the reference (`LXMRouter.py:642`,
@@ -2497,8 +2501,14 @@ impl Engine {
         self.tick_maintenance(node, now_ms);
         self.tick_stats(now_ms);
         self.tick_idle_links(node, now_ms, &mut out);
+        leviculum_firmware::thread_watch::set_phase(
+            leviculum_firmware::thread_watch::Phase::PnSyncRound,
+        );
         self.tick_sync(node, now_ms, &mut out);
 
+        leviculum_firmware::thread_watch::set_phase(
+            leviculum_firmware::thread_watch::Phase::PnWork,
+        );
         if self.grind.as_ref().is_some_and(|grind| grind.reprice) {
             // The walk's record is mid-workblock: it finishes first, because
             // the one parked stream cannot be handed to another material.
@@ -2515,6 +2525,9 @@ impl Engine {
                 self.work.push_front(unfinished);
             }
         } else if self.sync_batch.is_some() {
+            leviculum_firmware::thread_watch::set_phase(
+                leviculum_firmware::thread_watch::Phase::PnSyncIntake,
+            );
             self.perform_sync_step(node, &mut out).await;
         } else if self.reprice.is_some() {
             // Lowest priority: the walk takes a pass only when no upload,
@@ -2522,6 +2535,9 @@ impl Engine {
             self.reprice_step();
         }
 
+        leviculum_firmware::thread_watch::set_phase(
+            leviculum_firmware::thread_watch::Phase::PnFlush,
+        );
         self.flush(node).await;
         out
     }
@@ -3826,5 +3842,22 @@ fn notify_if_for_us(destination_hash: &[u8; 16], duplicate: bool) {
     let own = leviculum_firmware::identity::report().and_then(|report| report.lxmf);
     if !duplicate && own.as_ref() == Some(destination_hash) {
         leviculum_firmware::feedback::notify();
+    }
+}
+
+/// The thread-watch phase one core event puts the engine in (order 1641):
+/// what a stall or a failed allocation inside `on_event` is reported as.
+fn event_phase(event: &NodeEvent) -> leviculum_firmware::thread_watch::Phase {
+    use leviculum_firmware::thread_watch::Phase;
+    match event {
+        NodeEvent::AnnounceReceived { .. } => Phase::PnAnnounce,
+        NodeEvent::LinkDataReceived { .. }
+        | NodeEvent::RequestReceived { .. }
+        | NodeEvent::ResponseReceived { .. }
+        | NodeEvent::RequestTimedOut { .. } => Phase::PnLinkData,
+        NodeEvent::ResourceAdvertised { .. }
+        | NodeEvent::ResourceCompleted { .. }
+        | NodeEvent::ResourceFailed { .. } => Phase::PnResource,
+        _ => Phase::PnEvents,
     }
 }

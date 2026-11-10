@@ -58,12 +58,11 @@ pub const OFFER_REQUEST_PATH: &str = "/offer";
 
 /// Reference peer-table cap and our host default
 /// (`MAX_PEERS`, `reference/LXMF/LXMF/LXMRouter.py:43`). The board build
-/// configures 16 instead: §5 budgets `104·N + 6144 ≤ 8192` bytes of
-/// peering RAM against the worst observed free heap, N ≤ 19, with margin
-/// (`BOARD_MAX_PEERS`, `leviculum-nrf/heap-budget/src/lib.rs`, where a
-/// compile-time assert holds the derivation; the record was 80 B in the
-/// design draft and grew to 104 B when the identity hash and the announce
-/// facts joined it).
+/// configures 7 instead (`BOARD_MAX_PEERS`,
+/// `leviculum-nrf/heap-budget/src/lib.rs`, where compile-time asserts hold
+/// the derivation): §5's record arithmetic allowed 16, but the table holds
+/// each `Peer` inline in a B-tree, and a T114 with 16 peers ran out of heap
+/// on 2026-11-10; seven is the most one B-tree node holds.
 pub const MAX_PEERS_DEFAULT: usize = 20;
 
 /// Autopeer on propagation announces by default

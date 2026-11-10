@@ -817,7 +817,15 @@ async fn retic_serial_task(
                 // Read succeeded within timeout
                 Either3::First(Ok(Ok(n))) => {
                     log_u32("SER: USB read", n as u32);
-                    let results = deframer.process(&read_buf[..n]);
+                    // Deframing allocates on thread mode outside the main
+                    // loop: named for the stall line and the panic record,
+                    // and restored before the first await (order 1641).
+                    let results = {
+                        let _phase = leviculum_firmware::thread_watch::phase_scope(
+                            leviculum_firmware::thread_watch::Phase::SerialIngress,
+                        );
+                        deframer.process(&read_buf[..n])
+                    };
                     for r in results {
                         if let DeframeResult::Frame(ref data) = r {
                             match envelope::classify_control_frame(data, ACCEPTED_CONTROL_TYPES) {
@@ -827,7 +835,13 @@ async fn retic_serial_task(
                                         leviculum_firmware::iface_bytes::SERIAL,
                                         data.len(),
                                     );
-                                    incoming_tx.send(data.clone()).await;
+                                    let copy = {
+                                        let _phase = leviculum_firmware::thread_watch::phase_scope(
+                                            leviculum_firmware::thread_watch::Phase::SerialIngress,
+                                        );
+                                        data.clone()
+                                    };
+                                    incoming_tx.send(copy).await;
                                 }
                                 // Host-requested reboot. The duty-cycle
                                 // histogram, radio config and queues all

@@ -1799,11 +1799,12 @@ pub fn board_peering_config(
     }
 }
 
-/// The most hashes one operator list holds: the peer table's cap, which
-/// bounds the static list by what the table can hold, and the same for the
-/// two allow lists so one frame shape and one bound serve all three
-/// (256 B of body, well inside a page).
-pub const BOARD_LIST_MAX: usize = leviculum_heap_budget::BOARD_MAX_PEERS;
+/// The most hashes one operator list holds, the same for the static list
+/// and the two allow lists so one frame shape and one bound serve all three
+/// (256 B of body, well inside a page). It was the peer table's cap until
+/// order 1641 lowered that to seven for the heap; the lists live in flash and
+/// in the envelope (`PN_LIST_MAX_HASHES`), so they keep their sixteen.
+pub const BOARD_LIST_MAX: usize = 16;
 
 /// One of the operator's lists, set at flash time (`lnflash --static-peer`,
 /// `--auth-allowed`, `--control-allowed`) and read at boot. Each is one

@@ -21,6 +21,16 @@
 //! persistent tail: how long thread mode has not beaten, and the site it
 //! was in. One line per stall: a second report needs a beat in between.
 //!
+//! Besides the site, thread mode records its PHASE ([`Phase`], order 1641):
+//! the main-loop arm or propagation-engine step it last entered, set on
+//! entry and never cleared until the loop goes back to its `select`. A site
+//! names a blocking call; a phase names the work a stall or a failed
+//! allocation happened inside, which on 2026-11-10 was the one thing the
+//! T114's four `memory allocation of 3456 bytes failed` panics and its
+//! `THREAD_STALL ... site=none` could not say. The phase rides the stall
+//! line as `phase=` and the panic record's message as a trailing
+//! ` phase=<name>` (`crate::postmortem::record_panic`).
+//!
 //! All state is in atomics, read and written from either executor. The
 //! millisecond stamps are `u32` and compared with wrapping arithmetic, so
 //! the 49-day wrap costs at most one wrong age, never a panic.
@@ -68,6 +78,121 @@ impl Site {
     }
 }
 
+/// The work thread mode last entered: a main-loop arm or a step of the
+/// propagation engine. Set on entry with [`set_phase`] (or [`phase_scope`]
+/// around a synchronous section of another task, which restores the phase
+/// it found), reset to [`Phase::Idle`] when the main loop goes back to its
+/// `select`. Unlike a [`Site`] it is not cleared on the way out of the
+/// work, so a panic or a stall after the work returned still names the last
+/// arm thread mode was in, which is what a post-mortem needs.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// The main loop is parked in its `select`; whatever ran was another
+    /// task of the thread executor.
+    Idle = 0,
+    /// The serial (USB) reception arm: `handle_packet` on interface 0.
+    SerRx,
+    /// The LoRa reception arm.
+    LoraRx,
+    /// The BLE reception arm.
+    BleRx,
+    /// A BLE peer transition.
+    BlePeer,
+    /// The core's timer arm (`handle_timeout`).
+    Timer,
+    /// A host control envelope (wall time, telemetry target, position,
+    /// announce request).
+    HostCtl,
+    /// The telemetry tick.
+    Telemetry,
+    /// The periodic or button announce.
+    Announce,
+    /// The heap census walk.
+    Census,
+    /// The propagation engine digesting one dispatch's core events that
+    /// none of the named engine phases below covers.
+    PnEvents,
+    /// The engine handling an announce: a propagation node's (peer table,
+    /// recall) or any other (the active-delivery trigger).
+    PnAnnounce,
+    /// The engine handling link data, a request or a response on a link.
+    PnLinkData,
+    /// The engine handling a resource advertisement, completion or failure:
+    /// the sync intake and the client upload.
+    PnResource,
+    /// The engine's periodic jobs at the top of `settle` (announce,
+    /// maintenance, idle links, stats, path requests).
+    PnTicks,
+    /// The engine's sync scheduler: picking a peer, opening a round,
+    /// planning an offer.
+    PnSyncRound,
+    /// One queued work item (`perform`: upload, `/get`, `/offer`).
+    PnWork,
+    /// One step of an inbound sync batch's drain.
+    PnSyncIntake,
+    /// The engine flushing its store adapters' queued writes.
+    PnFlush,
+    /// The USB serial task deframing what the host sent.
+    SerialIngress,
+}
+
+impl Phase {
+    /// Every phase, in discriminant order.
+    pub const ALL: [Phase; 20] = [
+        Self::Idle,
+        Self::SerRx,
+        Self::LoraRx,
+        Self::BleRx,
+        Self::BlePeer,
+        Self::Timer,
+        Self::HostCtl,
+        Self::Telemetry,
+        Self::Announce,
+        Self::Census,
+        Self::PnEvents,
+        Self::PnAnnounce,
+        Self::PnLinkData,
+        Self::PnResource,
+        Self::PnTicks,
+        Self::PnSyncRound,
+        Self::PnWork,
+        Self::PnSyncIntake,
+        Self::PnFlush,
+        Self::SerialIngress,
+    ];
+
+    fn from_u8(v: u8) -> Self {
+        Self::ALL.get(usize::from(v)).copied().unwrap_or(Self::Idle)
+    }
+
+    /// The `phase=` value.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::SerRx => "ser-rx",
+            Self::LoraRx => "lora-rx",
+            Self::BleRx => "ble-rx",
+            Self::BlePeer => "ble-peer",
+            Self::Timer => "timer",
+            Self::HostCtl => "host-ctl",
+            Self::Telemetry => "telemetry",
+            Self::Announce => "announce",
+            Self::Census => "census",
+            Self::PnEvents => "pn-events",
+            Self::PnAnnounce => "pn-announce",
+            Self::PnLinkData => "pn-link-data",
+            Self::PnResource => "pn-resource",
+            Self::PnTicks => "pn-ticks",
+            Self::PnSyncRound => "pn-sync-round",
+            Self::PnWork => "pn-work",
+            Self::PnSyncIntake => "pn-sync-intake",
+            Self::PnFlush => "pn-flush",
+            Self::SerialIngress => "serial-ingress",
+        }
+    }
+}
+
 /// One stall, as the line reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stall {
@@ -78,6 +203,8 @@ pub struct Stall {
     pub site: Site,
     /// Milliseconds since it entered that site; 0 for [`Site::None`].
     pub site_age_ms: u32,
+    /// The phase thread mode was in.
+    pub phase: Phase,
 }
 
 /// Thread mode's last beat and current site.
@@ -85,6 +212,7 @@ pub struct Witness {
     beat_ms: AtomicU32,
     site: AtomicU8,
     site_since_ms: AtomicU32,
+    phase: AtomicU8,
     /// The beat a stall was last reported against, plus one so that 0
     /// means "none reported" even for a stall before the first beat.
     reported: AtomicU32,
@@ -103,6 +231,7 @@ impl Witness {
             beat_ms: AtomicU32::new(0),
             site: AtomicU8::new(Site::None as u8),
             site_since_ms: AtomicU32::new(0),
+            phase: AtomicU8::new(Phase::Idle as u8),
             reported: AtomicU32::new(0),
         }
     }
@@ -121,6 +250,22 @@ impl Witness {
     /// The call named by the last [`enter`](Self::enter) returned.
     pub fn leave(&self) {
         self.site.store(Site::None as u8, Ordering::Release);
+    }
+
+    /// Thread mode entered `phase`.
+    pub fn set_phase(&self, phase: Phase) {
+        self.phase.store(phase as u8, Ordering::Relaxed);
+    }
+
+    /// Thread mode entered `phase`; returns the phase it was in, for a
+    /// caller that restores it ([`PhaseScope`]).
+    pub fn swap_phase(&self, phase: Phase) -> Phase {
+        Phase::from_u8(self.phase.swap(phase as u8, Ordering::Relaxed))
+    }
+
+    /// The phase thread mode last entered.
+    pub fn phase(&self) -> Phase {
+        Phase::from_u8(self.phase.load(Ordering::Relaxed))
     }
 
     /// Whether thread mode has stalled as of `now_ms`, once per stall:
@@ -145,6 +290,7 @@ impl Witness {
             beat_age_ms,
             site,
             site_age_ms,
+            phase: self.phase(),
         })
     }
 }
@@ -156,6 +302,38 @@ pub static THREAD: Witness = Witness::new();
 /// which does nothing but wait on a timer, so its silence is thread mode's.
 pub fn beat_now() {
     THREAD.beat(embassy_time::Instant::now().as_millis() as u32);
+}
+
+/// [`THREAD`] entered `phase`.
+pub fn set_phase(phase: Phase) {
+    THREAD.set_phase(phase);
+}
+
+/// The phase [`THREAD`] last entered; the panic handler's read.
+pub fn current_phase() -> Phase {
+    THREAD.phase()
+}
+
+/// A phase held for one synchronous section and restored when dropped.
+/// For a task other than the main loop: it must not leave the main loop's
+/// phase overwritten when it yields back. Never hold one across an
+/// `await`.
+#[must_use = "the phase is restored when the scope drops"]
+pub struct PhaseScope {
+    previous: Phase,
+}
+
+/// Enter `phase` until the returned scope drops.
+pub fn phase_scope(phase: Phase) -> PhaseScope {
+    PhaseScope {
+        previous: THREAD.swap_phase(phase),
+    }
+}
+
+impl Drop for PhaseScope {
+    fn drop(&mut self) {
+        THREAD.set_phase(self.previous);
+    }
 }
 
 /// Hand `value` to `tx`, waiting as `send` does. When the channel is full,
@@ -182,16 +360,17 @@ pub async fn send_watched<T, const N: usize>(
 /// found full (`lora`: the LoRa task's hand-off to the main loop).
 ///
 /// ```text
-/// THREAD_STALL beat_age_ms=38114 site=panel-flush site_age_ms=38102 waiting=lora t=42616
+/// THREAD_STALL beat_age_ms=38114 site=panel-flush site_age_ms=38102 phase=pn-work waiting=lora t=42616
 /// ```
 pub fn log_stall(stall: &Stall, waiting: &str) {
     crate::log::log_fmt(
         "",
         format_args!(
-            "THREAD_STALL beat_age_ms={} site={} site_age_ms={} waiting={}",
+            "THREAD_STALL beat_age_ms={} site={} site_age_ms={} phase={} waiting={}",
             stall.beat_age_ms,
             stall.site.name(),
             stall.site_age_ms,
+            stall.phase.name(),
             waiting
         ),
     );
@@ -220,6 +399,7 @@ mod tests {
                 beat_age_ms: 38_616,
                 site: Site::PanelFlush,
                 site_age_ms: 38_516,
+                phase: Phase::Idle,
             })
         );
         // The same stall, asked again on the next full channel: silent.
@@ -272,5 +452,35 @@ mod tests {
         for v in 0..=2u8 {
             assert_eq!(Site::from_u8(v) as u8, v);
         }
+    }
+
+    #[test]
+    fn a_stall_names_the_phase_thread_mode_last_entered() {
+        let w = Witness::new();
+        w.beat(0);
+        w.set_phase(Phase::PnWork);
+        let s = w.stall(STALL_AFTER_MS);
+        assert_eq!(s.map(|s| s.phase), Some(Phase::PnWork));
+    }
+
+    #[test]
+    fn a_swapped_phase_hands_back_the_one_it_replaced() {
+        let w = Witness::new();
+        w.set_phase(Phase::PnWork);
+        assert_eq!(w.swap_phase(Phase::SerialIngress), Phase::PnWork);
+        assert_eq!(w.phase(), Phase::SerialIngress);
+    }
+
+    #[test]
+    fn every_phase_has_its_own_name_and_round_trips() {
+        for (i, p) in Phase::ALL.iter().enumerate() {
+            assert_eq!(*p as u8 as usize, i);
+            assert_eq!(Phase::from_u8(i as u8), *p);
+        }
+        let mut names: alloc::vec::Vec<&str> = Phase::ALL.iter().map(|p| p.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), Phase::ALL.len());
+        assert_eq!(Phase::from_u8(200), Phase::Idle);
     }
 }
