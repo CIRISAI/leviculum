@@ -7,10 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::sync_ext::MutexRecover;
 
-use tokio::sync::mpsc;
-
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
-use leviculum_core::transport::TickOutput;
 use leviculum_core::DestinationHash;
 
 use super::StdNodeCore;
@@ -44,7 +41,7 @@ use crate::error::Error;
 pub struct PacketSender {
     dest_hash: DestinationHash,
     inner: Arc<Mutex<StdNodeCore>>,
-    action_dispatch_tx: mpsc::Sender<TickOutput>,
+    action_dispatch_tx: super::ActionTx,
     /// The shared instance this node is a client of, asked for the first
     /// hop timeout that prices each receipt (leviculum#485).
     shared_instance: Option<crate::rpc::SharedInstanceClient>,
@@ -55,7 +52,7 @@ impl PacketSender {
     pub(crate) fn new(
         dest_hash: DestinationHash,
         inner: Arc<Mutex<StdNodeCore>>,
-        action_dispatch_tx: mpsc::Sender<TickOutput>,
+        action_dispatch_tx: super::ActionTx,
         shared_instance: Option<crate::rpc::SharedInstanceClient>,
     ) -> Self {
         Self {
@@ -134,6 +131,8 @@ impl PacketSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviculum_core::transport::TickOutput;
+    use tokio::sync::mpsc;
 
     use super::super::ReticulumNodeBuilder;
 
@@ -142,7 +141,7 @@ mod tests {
     // delete the storage directory out from under the node.
     fn make_node_and_inner() -> (
         Arc<Mutex<StdNodeCore>>,
-        mpsc::Sender<TickOutput>,
+        super::super::ActionTx,
         tempfile::TempDir,
     ) {
         let td = tempfile::tempdir().expect("tempdir");
@@ -152,7 +151,7 @@ mod tests {
             .expect("build_sync");
         let inner = node.inner();
         let (tx, _rx) = mpsc::channel(16);
-        (inner, tx, td)
+        (inner, super::super::ActionTx::detached(tx), td)
     }
 
     #[tokio::test]
@@ -204,7 +203,12 @@ mod tests {
         let (tx, rx) = mpsc::channel::<TickOutput>(1);
         drop(rx); // close the receiver
 
-        let ep = PacketSender::new(dest_hash, Arc::clone(&inner), tx, None);
+        let ep = PacketSender::new(
+            dest_hash,
+            Arc::clone(&inner),
+            super::super::ActionTx::detached(tx),
+            None,
+        );
         let result = ep.send(b"hello").await;
         assert!(result.is_err(), "send on closed channel should fail");
     }

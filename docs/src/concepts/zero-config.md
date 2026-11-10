@@ -62,7 +62,7 @@ transport off, a shared instance named `default`, log level 4,
 - Every interface section carries an origin, `configured` or `default`
   (`InterfaceOrigin`, `leviculum-std/src/config.rs:693`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
-  builds any (`leviculum-std/src/driver/mod.rs:2479`), and once
+  builds any (`leviculum-std/src/driver/mod.rs:2487`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:229`).
 - `interface_stats` serves the origin as the `origin` key
   (`leviculum-std/src/rpc/handlers.rs:691`), and `lnstatus` prints it,

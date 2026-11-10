@@ -1115,6 +1115,11 @@ struct EventLoopChannels {
     /// share one ordered channel.
     peer_event_rx: mpsc::Receiver<(InterfaceId, crate::interfaces::PeerEvent)>,
     shutdown: watch::Receiver<bool>,
+    /// The gate every [`dispatch_committed`] holds across its commit and
+    /// enqueue (order 1656). Branch 5 holds it from its drain of
+    /// `action_dispatch_rx` through the new interface's interface-up, so no
+    /// commit lands between the two. See [`ActionTx`].
+    commit_gate: Arc<Mutex<()>>,
 }
 
 /// Runtime auto-connect wiring handed to the event loop (Codeberg #32).
@@ -1592,7 +1597,7 @@ pub struct ReticulumNode {
     runner_handle: Option<tokio::task::JoinHandle<()>>,
     /// Channel for dispatching TickOutput from outside the event loop
     /// (used by connect, send_on_link, close_link, announce)
-    action_dispatch_tx: mpsc::Sender<TickOutput>,
+    action_dispatch_tx: ActionTx,
     /// Fault injection: corrupt ~1 byte per N bytes on TCP write
     corrupt_every: Option<u64>,
     /// Outbound-socket hook applied to each TCP client's connect socket.
@@ -1797,6 +1802,7 @@ impl ReticulumNode {
         };
         // Create dummy channel; real one is created in start()
         let (action_dispatch_tx, _) = mpsc::channel(1);
+        let action_dispatch_tx = ActionTx::detached(action_dispatch_tx);
 
         Self {
             inner: Arc::new(Mutex::new(core)),
@@ -2233,7 +2239,8 @@ impl ReticulumNode {
         // every iteration, so the queue only backs up if the event loop is
         // blocked (which also stalls all other I/O).
         let (action_dispatch_tx, action_dispatch_rx) = mpsc::channel(ACTION_DISPATCH_CAPACITY);
-        self.action_dispatch_tx = action_dispatch_tx;
+        let commit_gate = Arc::new(Mutex::new(()));
+        self.action_dispatch_tx = ActionTx::new(action_dispatch_tx, Arc::clone(&commit_gate));
 
         // Clone handles for the runner. The event loop owns a single
         // `EventSink` built from clones of both plane senders; it is the only
@@ -2380,6 +2387,7 @@ impl ReticulumNode {
                     remove_iface_rx,
                     peer_event_rx,
                     shutdown: shutdown_rx,
+                    commit_gate,
                 },
                 iface_stats_map,
                 radio_cache,
@@ -4837,6 +4845,7 @@ async fn run_event_loop(
     let mut tunnel_notify_rx = channels.tunnel_notify_rx;
     let mut remove_iface_rx = channels.remove_iface_rx;
     let mut peer_event_rx = channels.peer_event_rx;
+    let commit_gate = channels.commit_gate;
     // A removal can arrive before the event loop has registered its interface
     // (a detach racing a just-accepted add); held here, applied on arrival.
     let mut pending_removals: std::collections::HashSet<InterfaceId> =
@@ -5402,6 +5411,16 @@ async fn run_event_loop(
                 // reached it a second time, the burst a Python peer holds
                 // the third announce of. Draining here keeps the dispatch in
                 // commit order, whichever branch the loop takes first.
+                //
+                // The commit gate is held from the drain through the
+                // interface-up below (order 1656): a commit landing after
+                // the drain and before the registration put its destination
+                // in the cache the interface-up reads AND a broadcast in the
+                // channel that reached the new interface after it, two
+                // copies on one fresh connection. With the gate a commit is
+                // either drained here or made after the interface-up, when
+                // the core paces it onto the new interface itself.
+                let _commit_gate = commit_gate.lock_recover();
                 while let Ok(output) = action_dispatch_rx.try_recv() {
                     let processor_delay = dispatch_output(
                         output,
@@ -6969,17 +6988,61 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
 ///
 /// Fails with [`Error::NotRunning`] before `commit` runs when the event loop
 /// is gone or has closed the channel for shutdown.
+///
+/// The commit and the enqueue happen under [`ActionTx`]'s gate, so the event
+/// loop's interface registration sees every commit either with its output
+/// already queued or not at all (order 1656).
 pub(crate) async fn dispatch_committed<T>(
-    action_dispatch_tx: &mpsc::Sender<TickOutput>,
+    action_dispatch_tx: &ActionTx,
     commit: impl FnOnce() -> Result<(T, TickOutput), Error>,
 ) -> Result<T, Error> {
     let permit = action_dispatch_tx
+        .tx
         .reserve()
         .await
         .map_err(|_| Error::NotRunning)?;
+    let _gate = action_dispatch_tx.gate.lock_recover();
     let (value, output) = commit()?;
     permit.send(output);
     Ok(value)
+}
+
+/// The sending half of the event loop's action channel, with the gate that
+/// makes a commit and its enqueue one step for the loop's Branch 5 (order
+/// 1656, Refs #232).
+///
+/// Branch 5 registers a new interface and calls `handle_interface_up`, which
+/// re-announces every destination with a cached announce on it. Before it
+/// does, it drains the action channel (order 1320) so a broadcast committed
+/// earlier goes out to the interfaces that existed then. Without the gate an
+/// announce could commit after that drain and before the registration: its
+/// cache entry made the interface-up re-announce it, and its queued
+/// broadcast, dispatched after the registration, reached the new interface
+/// too. Two announces of one destination inside a millisecond, and with the
+/// next destination's the three a Python peer holds the third of: the phone
+/// mailbox's delivery destination went unheard for the six minutes to its
+/// next announce (`leviculum-std/tests/mvr/a_new_interface_hears_an_announce_made_before_it.rs`).
+///
+/// The gate is a std mutex held only across synchronous code, never across
+/// an await. Lock order: the gate first, then the core lock, in
+/// [`dispatch_committed`] and in Branch 5 alike.
+#[derive(Clone)]
+pub(crate) struct ActionTx {
+    tx: mpsc::Sender<TickOutput>,
+    gate: Arc<Mutex<()>>,
+}
+
+impl ActionTx {
+    /// The sender the event loop drains, sharing `gate` with it.
+    pub(crate) fn new(tx: mpsc::Sender<TickOutput>, gate: Arc<Mutex<()>>) -> Self {
+        Self { tx, gate }
+    }
+
+    /// A sender with a gate of its own: the placeholder before `start()`,
+    /// and tests that drive the channel without an event loop.
+    pub(crate) fn detached(tx: mpsc::Sender<TickOutput>) -> Self {
+        Self::new(tx, Arc::new(Mutex::new(())))
+    }
 }
 
 /// The first hop's timeout toward `dest_hash` as the shared instance
@@ -10777,6 +10840,7 @@ mod tests {
                 remove_iface_rx: remove_rx,
                 peer_event_rx,
                 shutdown: shutdown_rx,
+                commit_gate: Arc::new(Mutex::new(())),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
             crate::rpc::radio_cache::shared(),

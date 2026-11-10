@@ -42,7 +42,7 @@
 //! duller than the async API. It is **not** primarily
 //! `futures::executor::block_on` over a smuggled [`super::PacketSender`]: that
 //! sender takes the core lock only after its `.await` has reserved room in
-//! the channel (`leviculum-std/src/driver/sender.rs:92-104`), so whenever the
+//! the channel (`leviculum-std/src/driver/sender.rs:89-101`), so whenever the
 //! channel has room, which is nearly always, such a call gets past the
 //! channel and deadlocks on the mutex.
 //!

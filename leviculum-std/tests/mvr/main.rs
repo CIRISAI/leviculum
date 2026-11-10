@@ -387,6 +387,7 @@ mod a_dead_sync_link_ends_the_round_beside_a_second_node;
 mod a_frame_the_modem_consumed_without_transmitting;
 mod a_link_proof_later_than_six_rtts_fails_the_python_receipt;
 mod a_lost_link_rtt_strands_the_resource_transfer;
+mod a_new_interface_hears_an_announce_made_before_it;
 #[cfg(feature = "serial")]
 mod a_raw_xoff_mutes_a_single_uart_board;
 mod a_repeated_path_request_queues_one_response_on_the_board;
