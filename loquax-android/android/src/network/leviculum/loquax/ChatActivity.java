@@ -3024,7 +3024,11 @@ public class ChatActivity extends Activity implements Events.Listener {
                 mark.setImageDrawable(new Glyph(kind, ink,
                         getColor(R.color.failed_ground), getColor(R.color.failed_mark)));
                 mark.setId(Glyph.resource(kind));
-                mark.setContentDescription(Ui.state(ChatActivity.this, state, Core.num(row, "read_at")));
+                // The scene's words (1449 item 7): a group's two ticks say
+                // the devices, as the Info does.
+                String markWords = Core.str(row, "state_words");
+                mark.setContentDescription(markWords.isEmpty()
+                        ? Ui.state(ChatActivity.this, state, Core.num(row, "read_at")) : markWords);
                 if (kind == Glyph.Kind.FAILED) {
                     final long key = Core.num(row, "key");
                     mark.setOnClickListener(new View.OnClickListener() {

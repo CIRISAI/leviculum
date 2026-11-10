@@ -29,6 +29,11 @@ final class JoinFormTest {
         check(JoinForm.advancedOpen(true, "", ""), "opened");
         check(JoinForm.advancedOpen(false, "server", ""), "a join that needs the server opens it");
         check(JoinForm.advancedOpen(false, "", "home.example:4242"), "a server written stays shown");
+        // 1449 item 7: a join that needs the server, on a code that carries
+        // servers, sends the user to the code; control: a bare code does not.
+        check(JoinForm.codesServersFailed("server", carried), "the code's servers failed: edit the code");
+        check(!JoinForm.codesServersFailed("server", "lqxh1q2w3e4r"), "control: a bare code needs the field");
+        check(!JoinForm.codesServersFailed("code", carried), "a missing code is not the servers' failure");
         System.out.println(checks + " checks passed");
     }
 

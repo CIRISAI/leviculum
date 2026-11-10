@@ -188,6 +188,7 @@
     <string name="setting_up">Setting up your mailbox…</string>
     <string name="setup_failed">Your mailbox did not start: %1$s</string>
     <string name="try_again">Try again</string>
+    <string name="join_code_servers_failed">The servers in this code did not answer. Check the code, or ask for a new one.</string>
     <string name="address_title">Your address</string>
     <string name="address_text">Show this to people who should write to you.</string>
     <string name="write_message">Write a message</string>

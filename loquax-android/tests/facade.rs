@@ -7384,6 +7384,20 @@ fn a_groups_one_and_two_ticks_are_the_phones_golden() {
     };
     assert_eq!(value(&two, "Status"), "Auf den Geräten");
     assert_eq!(value(&one, "Status"), "Angekommen");
+    // 1449 item 7: the row's word for a screen reader is the Info's, not
+    // `Ui.state("delivered")`'s one device.
+    let words: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|r| r.ours)
+        .map(|r| (r.body.as_str(), r.state_words.as_str()))
+        .collect();
+    assert_eq!(
+        words,
+        [
+            ("Brot ist da", "Auf den Geräten"),
+            ("Wer kommt mit?", "Angekommen")
+        ]
+    );
     assert!(
         value(&one, "Anna").starts_with("Auf dem Gerät · "),
         "{one:?}"

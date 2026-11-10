@@ -178,6 +178,7 @@
     <string name="setting_up">Dein Postfach wird eingerichtet…</string>
     <string name="setup_failed">Dein Postfach ist nicht gestartet: %1$s</string>
     <string name="try_again">Nochmal versuchen</string>
+    <string name="join_code_servers_failed">Die Server in diesem Code haben nicht geantwortet. Prüf den Code oder lass dir einen neuen geben.</string>
     <string name="address_title">Deine Adresse</string>
     <string name="address_text">Zeig das den Leuten, die dir schreiben sollen.</string>
     <string name="write_message">Nachricht schreiben</string>

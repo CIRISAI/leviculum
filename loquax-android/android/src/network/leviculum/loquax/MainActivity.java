@@ -388,13 +388,19 @@ public class MainActivity extends Activity {
             return;
         }
         retry.setText(R.string.try_again);
-        error.setText(Core.str(started, "error"));
+        boolean codesServers = JoinForm.codesServersFailed(need, code.getText().toString());
+        error.setText(codesServers
+                ? Core.str(started, "error") + "\n\n" + getString(R.string.join_code_servers_failed)
+                : Core.str(started, "error"));
         retry.setVisibility(View.VISIBLE);
         String said = Core.str(started, "details");
         details.setText(said);
         detailsToggle.setVisibility(said.isEmpty() ? View.GONE : View.VISIBLE);
         showDetails(false);
-        if ("server".equals(need)) {
+        if (codesServers) {
+            // The servers are the code's (1471): the code is what to edit.
+            code.requestFocus();
+        } else if ("server".equals(need)) {
             server.requestFocus();
         } else if ("code".equals(need)) {
             code.requestFocus();

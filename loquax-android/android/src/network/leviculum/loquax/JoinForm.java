@@ -40,4 +40,14 @@ final class JoinForm {
     static boolean advancedOpen(boolean opened, String need, String field) {
         return opened || "server".equals(need) || !field.trim().isEmpty();
     }
+
+    /**
+     * Whether a join that needs the server failed on the servers the code
+     * itself carries (1471, 1449 item 7): the address field is not offered
+     * then, so focus goes to the code and the sentence says to check it or
+     * ask for a new one, never to a field the user cannot reach.
+     */
+    static boolean codesServersFailed(String need, String code) {
+        return "server".equals(need) && ServerField.carried(code);
+    }
 }

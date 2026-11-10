@@ -1964,6 +1964,12 @@ pub struct MessageRow {
     /// words under the bubble ("arrived late"), empty for any other.
     #[serde(default)]
     pub late: String,
+    /// Ours only: what a screen reader says for the mark, the scene's
+    /// words in the reader's language (1466, 1449 item 7): a group's two
+    /// ticks are "On the devices", as the Info says, where
+    /// `Ui.state(state)` alone would say one device. Empty for none.
+    #[serde(default)]
+    pub state_words: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

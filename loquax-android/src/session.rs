@@ -3852,7 +3852,9 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
             };
             let invite = node.invite.clone();
             let late = node.bubble.late;
+            let state_words = node.mark.as_ref().map(|m| m.words.resolve(lang));
             let mut row = row(node.bubble);
+            row.state_words = state_words.unwrap_or_default();
             if late {
                 row.late = StrId::GroupArrivedLate.text(lang).to_string();
             }
@@ -3999,6 +4001,7 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         invite_join: false,
         note: bubble.note,
         late: String::new(),
+        state_words: String::new(),
     }
 }
 
