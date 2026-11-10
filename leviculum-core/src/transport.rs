@@ -60,6 +60,7 @@ use crate::destination::{Destination, DestinationHash, DestinationType};
 use crate::hex_fmt::HexShort;
 use crate::identity::Identity;
 use crate::ifac::IfacConfig;
+use crate::iface_map::{IfaceMap, IfaceSet};
 use crate::link::Link;
 use crate::packet::{
     build_proof_packet, packet_hash, HeaderType, Packet, PacketContext, PacketData, PacketError,
@@ -421,7 +422,7 @@ struct LossPricing {
     /// [`Transport::set_interface_path_choice`]; transport only stores the
     /// answer and never asks what medium an interface is.
     /// [`TransportConfig::path_choice`], when `Some`, overrides it.
-    interfaces: BTreeSet<usize>,
+    interfaces: IfaceSet,
     /// Direct-link announce re-hear evidence per destination, fed only
     /// while some interface prices loss. Capped at [`DIRECT_EVIDENCE_CAP`]
     /// entries; a full table evicts the entry whose accounted emission is
@@ -516,7 +517,7 @@ impl core::fmt::Display for InterfaceId {
 
 /// Display helper: shows registered name or falls back to "iface:{id}"
 pub(crate) struct IfaceName<'a> {
-    names: &'a BTreeMap<usize, String>,
+    names: &'a IfaceMap<String>,
     id: usize,
 }
 
@@ -539,7 +540,7 @@ impl core::fmt::Display for IfaceName<'_> {
 /// [`IfaceName`] for an optional interface index: renders the literal
 /// `None` when absent (same convention as PATH_TABLE_ENTRY's next_hop).
 pub(crate) struct IfaceNameOpt<'a> {
-    names: &'a BTreeMap<usize, String>,
+    names: &'a IfaceMap<String>,
     id: Option<usize>,
 }
 
@@ -2168,22 +2169,22 @@ pub enum DropReason {
     /// does on a Python node.
     LinkIfaceMismatch,
     /// A packet for one of our own links that is not Active yet (or any
-    /// more): link DATA, a request or a channel packet on a link still in
-    /// its handshake. Until 860 the link layer dropped it at trace level and
-    /// a board printed nothing (858 §Q6: a phone's 483 B transfer packet and
-    /// a 99 B packet on 2026-10-19, 17:48 CEST, left no line on the board
-    /// that terminated the link).
+    /// more), other than an RTT, keepalive or close, that does not establish
+    /// it: on a responder link in its handshake one that does not decrypt
+    /// under the link keys, on any other non-Active link any such packet.
+    /// Until 860 these were trace-level drops a board never printed (858
+    /// §Q6: a phone's 483 B and 99 B packets on 2026-10-19, 17:48 CEST, left
+    /// no line on the board that terminated the link); until 1624 a resource
+    /// advertisement, hashmap update, response or identify still was silent.
     ///
-    /// The reference does NOT refuse all of these, which is what makes the
-    /// line worth having: a responder registers its link as active before
-    /// the RTT arrives (`reference/Reticulum/RNS/Link.py:216`,
-    /// `reference/Reticulum/RNS/Transport.py:2447-2452`), and `Link.receive`
-    /// decrypts and delivers plain link data and channel data with no status
-    /// check (`reference/Reticulum/RNS/Link.py:988-1000`, `:1168-1176`). Only
-    /// a request waits for ACTIVE (`reference/Reticulum/RNS/Link.py:853-854`).
-    /// So a rising count of this reason on a link a Python peer opened names
-    /// packets a Python terminus would have taken; 860 only names them, and
-    /// whether to take them is a decision of its own.
+    /// A packet that DOES decrypt on a responder link in its handshake
+    /// establishes the link instead, as only the initiator holds the keys,
+    /// and is taken (1624: a lost RTT stranded the link until the responder's
+    /// establishment timeout). The reference takes such packets with no
+    /// status gate (`reference/Reticulum/RNS/Link.py:974`, RESOURCE_ADV at
+    /// `:1068`) but leaves HANDSHAKE only on the RTT (`:541`), so its watchdog
+    /// still closes the link at the establishment timeout (`:773-777`); we
+    /// keep it.
     LinkNotActive,
     /// Link DATA (a plain packet or a request) for an Active link of ours
     /// that did not decrypt under the link key: corruption, or a peer that
@@ -2194,9 +2195,9 @@ pub enum DropReason {
     /// An RTT packet a responder link could not take: the link is not in
     /// its handshake (already established, a retry or duplicate), we are
     /// the link's initiator, or it did not decrypt or parse. The responder
-    /// link stays in its handshake if the RTT never validates, and every
-    /// later packet on it is a [`DropReason::LinkNotActive`]; this is the
-    /// line that names the start of that chain (858 §Q6). The reference
+    /// link stays in its handshake until a packet of the initiator decrypts
+    /// on it (1624), each packet before that a [`DropReason::LinkNotActive`];
+    /// this line names the start of that chain (858 §Q6). The reference
     /// runs an RTT on an already active responder link through again
     /// (`reference/Reticulum/RNS/Link.py:1059-1061`, no state check), where
     /// we refuse it; the link is up either way, so that refusal loses
@@ -3164,7 +3165,7 @@ pub enum TransportError {
     NoPath,
     /// Target interface is pacing, retry no earlier than `ready_at_ms`.
     /// Mirrors `ChannelError::PacingDelay` / `SendError::PacingDelay` so
-    /// async callers (see `driver/stream.rs:119`) can `sleep_until` to
+    /// async callers (see `driver/stream.rs:116`) can `sleep_until` to
     /// the exact ready time instead of polling.
     PacingDelay { ready_at_ms: u64 },
     /// Packet parsing error
@@ -3263,11 +3264,11 @@ pub struct Transport<C: Clock, S: Storage> {
     // announce_rate_table: migrated to Storage trait
     /// Per-interface announce bandwidth caps (Python Interface.py:25-28)
     /// Keyed by interface index. Only present for interfaces with bitrate > 0.
-    interface_announce_caps: BTreeMap<usize, InterfaceAnnounceCap>,
+    interface_announce_caps: IfaceMap<InterfaceAnnounceCap>,
 
     /// Human-readable interface names for log messages.
     /// Populated by the driver at registration time, removed on interface down.
-    interface_names: BTreeMap<usize, String>,
+    interface_names: IfaceMap<String>,
 
     /// Indexes torn down and not registered again (981). An interface-up
     /// notification is driver state that crosses a channel, so it can land
@@ -3283,7 +3284,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// for a table that is empty there always. The box is exactly that
     /// 24-B-to-8-B trade, not an extra indirection worth removing.
     #[allow(clippy::box_collection)]
-    torn_down_interfaces: Option<Box<BTreeSet<usize>>>,
+    torn_down_interfaces: Option<Box<IfaceSet>>,
 
     /// Interfaces whose driver currently reports `is_online() == false`
     /// (Codeberg #365). A missing entry means online — the default, so a
@@ -3296,7 +3297,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// our runtime media switch turns a carrier off without detaching
     /// the interface, so the equivalent statement lives at the path
     /// lookup.
-    offline_interfaces: BTreeSet<usize>,
+    offline_interfaces: IfaceSet,
 
     /// Interfaces whose own TX gate currently holds frames for regulatory
     /// airtime budget (leviculum#493, decided on #433). Mirrored the same
@@ -3312,7 +3313,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// held frames), and Python's per-interface announce admission is the
     /// precedent — an interface over its cap relays no announce
     /// (Transport.py:1252-1294).
-    duty_hold_ifaces: BTreeSet<usize>,
+    duty_hold_ifaces: IfaceSet,
 
     /// Live direct-peer count per interface, mirrored by the driver the
     /// same way as [`Self::set_interface_online`] (Codeberg #365). A
@@ -3324,7 +3325,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// ([`Self::reoriginate_toward_peer_links`]) to decide which
     /// interfaces are worth asking on behalf of a request we cannot
     /// answer.
-    interface_peer_counts: BTreeMap<usize, usize>,
+    interface_peer_counts: IfaceMap<usize>,
 
     /// Interfaces whose driver declared they can serve every link but one
     /// ([`Self::set_interface_link_sparing`], leviculum#854), one bit per
@@ -3402,8 +3403,8 @@ pub struct Transport<C: Clock, S: Storage> {
     /// missing entry means `InterfaceMode::Full` (the default). Set from config
     /// by the driver at registration; drives the per-mode announce-propagation
     /// and path-expiry rules (Python Transport.py:1193-1245, 773-778, 1875-1880).
-    interface_modes: BTreeMap<usize, InterfaceMode>,
-    interface_kinds: BTreeMap<usize, InterfaceKind>,
+    interface_modes: IfaceMap<InterfaceMode>,
+    interface_kinds: IfaceMap<InterfaceKind>,
 
     /// Per-interface ingress-control enable flag (Codeberg #8; Python
     /// `Interface.ingress_control`, Reticulum.py:768-769, Interface.py:112).
@@ -3415,7 +3416,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// overridden per interface from config. Transport carries no interface-type
     /// awareness: it only reads this flag to decide whether the announce/path-
     /// request burst limiter runs for a given interface.
-    interface_ingress_control: BTreeMap<usize, bool>,
+    interface_ingress_control: IfaceMap<bool>,
 
     /// Per-interface egress-control enable flag (Codeberg #172; Python
     /// `Interface.egress_control`, Reticulum.py:770-771/911, Interface.py:86-87).
@@ -3424,11 +3425,11 @@ pub struct Transport<C: Clock, S: Storage> {
     /// interfaces an operator switched on are stored. Read by
     /// [`Transport::should_egress_limit_pr`] to decide whether a re-originated
     /// path request may leave over this interface.
-    interface_egress_control: BTreeMap<usize, bool>,
+    interface_egress_control: IfaceMap<bool>,
 
     /// Hardware MTU per interface (for link MTU negotiation).
     /// Keyed by interface index. Set by driver at registration, removed on interface down.
-    interface_hw_mtus: BTreeMap<usize, u32>,
+    interface_hw_mtus: IfaceMap<u32>,
 
     /// What each interface says about the medium it drives: the on-air
     /// bitrate it derived from its own settings, and the ceiling of the
@@ -3441,7 +3442,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// applied to measurement rather than to scheduling. Distinct from
     /// `interface_announce_caps`, whose bitrate comes from the `bitrate`
     /// config key and drives announce bandwidth capping.
-    interface_link_profiles: BTreeMap<usize, LinkProfile>,
+    interface_link_profiles: IfaceMap<LinkProfile>,
 
     /// A shared instance client's record of its daemon's `first_hop_timeout`
     /// answers: destination → (whole first hop timeout in ms, expiry in
@@ -3464,7 +3465,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Set of interface indices that are local IPC clients (shared instance).
     /// Used for: announce forwarding, transport override, path request routing.
     /// Removal path: removed in handle_interface_down via set_local_client(id, false).
-    local_client_interfaces: BTreeSet<usize>,
+    local_client_interfaces: IfaceSet,
 
     /// The interface (if any) over which this node reaches a shared instance it
     /// is a CLIENT of. Mirrors Python's `interface_to_shared_instance` predicate
@@ -3476,30 +3477,30 @@ pub struct Transport<C: Clock, S: Storage> {
 
     /// Per-interface incoming announce timestamps for frequency computation (Python ia_freq_deque).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_incoming_announce_times: BTreeMap<usize, VecDeque<u64>>,
+    interface_incoming_announce_times: IfaceMap<VecDeque<u64>>,
 
     /// Per-interface outgoing announce timestamps for frequency computation (Python oa_freq_deque).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_outgoing_announce_times: BTreeMap<usize, VecDeque<u64>>,
+    interface_outgoing_announce_times: IfaceMap<VecDeque<u64>>,
 
     /// Per-interface incoming path-request timestamps for frequency computation
     /// (Python ip_freq_deque, Interface.py:135). Mirrors the incoming-announce
     /// deque above (Codeberg #67 Stage 2a).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_incoming_pr_times: BTreeMap<usize, VecDeque<u64>>,
+    interface_incoming_pr_times: IfaceMap<VecDeque<u64>>,
 
     /// Per-interface outgoing path-request timestamps for frequency computation
     /// (Python op_freq_deque, Interface.py:136). Mirrors the outgoing-announce
     /// deque above (Codeberg #67 Stage 2a).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_outgoing_pr_times: BTreeMap<usize, VecDeque<u64>>,
+    interface_outgoing_pr_times: IfaceMap<VecDeque<u64>>,
 
     /// Per-interface ingress-control burst state (Codeberg #87). Entry created
     /// at interface registration (`set_interface_name`) so the new-interface
     /// window is measured from registration, and lazily on first ingest for
     /// interfaces that never registered a name (e.g. in tests).
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_ingress_burst: BTreeMap<usize, IngressBurstState>,
+    interface_ingress_burst: IfaceMap<IngressBurstState>,
     /// Own-announce pacing while an interface is fresh (order 1320,
     /// `fresh_announce_pacing`), created in `set_interface_name`. Boxed like
     /// `torn_down_interfaces`: the board's node box has 8 B of slack, a vec
@@ -3514,7 +3515,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// [`MAX_HELD_ANNOUNCES`] per interface. Drained by `process_held_announces`
     /// on the poll cadence; entries fed back into the normal inbound path.
     /// Removal path: removed in handle_interface_down via remove_announce_freq_tracking().
-    interface_held_announces: BTreeMap<usize, BTreeMap<[u8; TRUNCATED_HASHBYTES], HeldAnnounce>>,
+    interface_held_announces: IfaceMap<BTreeMap<[u8; TRUNCATED_HASHBYTES], HeldAnnounce>>,
 
     /// Announce-table entries temporarily displaced by a scheduled path
     /// response (Codeberg #170; Python `Transport.held_announces`,
@@ -3544,14 +3545,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `announce_rate_*` key; absent entries resolve identically to an
     /// all-`None` config. Read by `interface_stats` to emit the real values.
     /// Removal path: removed in handle_interface_down via remove_announce_rate_config().
-    interface_announce_rate_configs: BTreeMap<usize, AnnounceRateConfig>,
+    interface_announce_rate_configs: IfaceMap<AnnounceRateConfig>,
 
     /// Per-interface "earliest ready" wall-clock ms pushed by the driver
     /// after each `dispatch_output` tick. Driver computes this via
     /// `Interface::next_slot_ms(MTU, now)` on each handle and mirrors the
     /// answer here so Transport can consult it without holding interface
     /// trait objects (Transport stays sans-I/O).
-    interface_next_slot_ms: BTreeMap<usize, u64>,
+    interface_next_slot_ms: IfaceMap<u64>,
 
     /// Per-interface per-frame turnaround in milliseconds, mirrored from
     /// `Interface::frame_turnaround_ms()` the same way, and for the same
@@ -3559,7 +3560,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// handles, asks each one, and pushes the answer here, so Transport
     /// learns a carrier fact without holding a trait object and stays
     /// sans-I/O. Absent ⇒ zero, the trait default.
-    interface_turnaround_ms: BTreeMap<usize, u64>,
+    interface_turnaround_ms: IfaceMap<u64>,
 
     /// Per-interface worst-case cost of ONE acquisition of the carrier, for a
     /// full-size frame, mirrored from `Interface::acquisition_max_ms()` the
@@ -3569,7 +3570,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// A second number beside the turnaround because it is paid a different
     /// number of times: the turnaround once per frame, the acquisition once
     /// per burst, by the frame that takes the channel.
-    interface_acquisition_ms: BTreeMap<usize, u64>,
+    interface_acquisition_ms: IfaceMap<u64>,
 
     /// Per-interface worst-case airtime in milliseconds for a single
     /// MTU-sized transmit. Driver pushes one entry per LoRa-Serial
@@ -3577,7 +3578,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// interfaces are absent from the map. Read by
     /// `announce_jitter_max_ms` to size the announce-retry jitter
     /// window proportional to the slowest registered link.
-    interface_max_airtime_ms: BTreeMap<usize, u64>,
+    interface_max_airtime_ms: IfaceMap<u64>,
 
     /// Per-interface IFAC (Interface Access Code) configurations.
     /// Keyed by interface index. Only present for interfaces with networkname/passphrase configured.
@@ -3608,7 +3609,7 @@ pub struct Transport<C: Clock, S: Storage> {
     /// `interface.tunnel_id`, Transport.py:2346). Present only while an
     /// interface currently carries an established tunnel; cleared when the
     /// interface goes down (the tunnel entry itself persists for restore).
-    interface_tunnel_ids: BTreeMap<usize, [u8; TUNNEL_ID_LEN]>,
+    interface_tunnel_ids: IfaceMap<[u8; TUNNEL_ID_LEN]>,
 
     /// Monotonic timestamp of the last tunnel-table cull (ms). Throttles the
     /// expiry sweep to one pass per minute (`TUNNEL_CULL_INTERVAL_MS`).
@@ -3621,14 +3622,14 @@ pub struct Transport<C: Clock, S: Storage> {
     /// is the peer-opaque `interface_hash` field of the synthesize payload
     /// (Python `interface.get_hash()`, Transport.py:2286); it need only be
     /// stable across the interface's reconnects so the derived tunnel id is too.
-    tunnel_interface_hashes: BTreeMap<usize, [u8; SYNTH_IFHASH_LEN]>,
+    tunnel_interface_hashes: IfaceMap<[u8; SYNTH_IFHASH_LEN]>,
 
     /// The tunnel id WE last advertised as initiator on each interface (Python
     /// computes but does not persist this; we keep it for observability and for
     /// tests to assert the initiator derived the same id a responder will).
     /// This is distinct from `interface_tunnel_ids`, which holds tunnel ids of
     /// *peers* whose paths we restore.
-    own_tunnel_ids: BTreeMap<usize, [u8; TUNNEL_ID_LEN]>,
+    own_tunnel_ids: IfaceMap<[u8; TUNNEL_ID_LEN]>,
 
     /// Pending I/O actions for the driver (sans-I/O buffer)
     pending_actions: Vec<Action>,
@@ -3671,50 +3672,50 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             tunnel_synthesize_hash,
             // announce_cache: migrated to Storage
             // announce_rate_table: migrated to Storage
-            interface_announce_caps: BTreeMap::new(),
-            interface_names: BTreeMap::new(),
+            interface_announce_caps: IfaceMap::new(),
+            interface_names: IfaceMap::new(),
             torn_down_interfaces: None,
-            offline_interfaces: BTreeSet::new(),
-            duty_hold_ifaces: BTreeSet::new(),
-            interface_peer_counts: BTreeMap::new(),
+            offline_interfaces: IfaceSet::new(),
+            duty_hold_ifaces: IfaceSet::new(),
+            interface_peer_counts: IfaceMap::new(),
             link_sparing_ifaces: 0,
             peer_link_reoriginations: BTreeSet::new(),
             discovery_request_peers: BTreeMap::new(),
             discovery_extra_requesters: BTreeSet::new(),
             ingress_peer: None,
             loop_refusals: None,
-            interface_modes: BTreeMap::new(),
-            interface_kinds: BTreeMap::new(),
-            interface_ingress_control: BTreeMap::new(),
-            interface_egress_control: BTreeMap::new(),
-            interface_hw_mtus: BTreeMap::new(),
-            interface_link_profiles: BTreeMap::new(),
+            interface_modes: IfaceMap::new(),
+            interface_kinds: IfaceMap::new(),
+            interface_ingress_control: IfaceMap::new(),
+            interface_egress_control: IfaceMap::new(),
+            interface_hw_mtus: IfaceMap::new(),
+            interface_link_profiles: IfaceMap::new(),
             shared_instance_first_hop_answers: BTreeMap::new(),
             loss_pricing: None,
-            local_client_interfaces: BTreeSet::new(),
+            local_client_interfaces: IfaceSet::new(),
             shared_instance_interface: None,
-            interface_incoming_announce_times: BTreeMap::new(),
-            interface_outgoing_announce_times: BTreeMap::new(),
-            interface_incoming_pr_times: BTreeMap::new(),
-            interface_outgoing_pr_times: BTreeMap::new(),
-            interface_ingress_burst: BTreeMap::new(),
+            interface_incoming_announce_times: IfaceMap::new(),
+            interface_outgoing_announce_times: IfaceMap::new(),
+            interface_incoming_pr_times: IfaceMap::new(),
+            interface_outgoing_pr_times: IfaceMap::new(),
+            interface_ingress_burst: IfaceMap::new(),
             fresh_announce_pacers: None,
-            interface_held_announces: BTreeMap::new(),
+            interface_held_announces: IfaceMap::new(),
             held_announce_entries: BTreeMap::new(),
             pending_local_path_requests: BTreeMap::new(),
-            interface_announce_rate_configs: BTreeMap::new(),
-            interface_next_slot_ms: BTreeMap::new(),
-            interface_turnaround_ms: BTreeMap::new(),
-            interface_acquisition_ms: BTreeMap::new(),
-            interface_max_airtime_ms: BTreeMap::new(),
+            interface_announce_rate_configs: IfaceMap::new(),
+            interface_next_slot_ms: IfaceMap::new(),
+            interface_turnaround_ms: IfaceMap::new(),
+            interface_acquisition_ms: IfaceMap::new(),
+            interface_max_airtime_ms: IfaceMap::new(),
             ifac_configs: BTreeMap::new(),
             blackholed_identities: BTreeMap::new(),
             blackhole_last_checked_ms: 0,
             tunnels: BTreeMap::new(),
-            interface_tunnel_ids: BTreeMap::new(),
+            interface_tunnel_ids: IfaceMap::new(),
             tunnels_last_culled_ms: 0,
-            tunnel_interface_hashes: BTreeMap::new(),
-            own_tunnel_ids: BTreeMap::new(),
+            tunnel_interface_hashes: IfaceMap::new(),
+            own_tunnel_ids: IfaceMap::new(),
             pending_actions: Vec::new(),
             last_discovery_retry_ms: 0,
             #[cfg(test)]
@@ -5330,12 +5331,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.should_ingress_limit(iface);
                 self.should_ingress_limit_pr(iface);
             }
-            use core::ops::Bound::{Excluded, Unbounded};
-            cursor = self
-                .interface_ingress_burst
-                .range((Excluded(iface), Unbounded))
-                .next()
-                .map(|(&next, _)| next);
+            cursor = self.interface_ingress_burst.next_key_after(iface);
         }
 
         // Codeberg #87: release held announces on the poll cadence (Python runs
@@ -5684,7 +5680,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 } => data.capacity() + hc::vec_bytes(exclude_ifaces),
             };
         }
-        bytes += hc::btree_map_bytes(&self.interface_announce_caps);
+        bytes += self.interface_announce_caps.heap_bytes();
         for cap in self.interface_announce_caps.values() {
             bytes += hc::vec_deque_bytes(&cap.queue);
             for queued in &cap.queue {
@@ -5702,7 +5698,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 bytes += queued.raw.capacity();
             }
         }
-        bytes += hc::btree_map_bytes(&self.interface_held_announces);
+        bytes += self.interface_held_announces.heap_bytes();
         for held in self.interface_held_announces.values() {
             bytes += hc::btree_map_bytes(held);
             for announce in held.values() {
@@ -5714,42 +5710,42 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             bytes += entry.raw_packet.capacity();
         }
         bytes += hc::btree_set_bytes(&self.local_destinations)
-            + hc::btree_map_bytes(&self.interface_names)
+            + self.interface_names.heap_bytes()
             + self.torn_down_interfaces.as_ref().map_or(0, |torn| {
-                core::mem::size_of::<BTreeSet<usize>>() + hc::btree_set_bytes(torn)
+                core::mem::size_of::<IfaceSet>() + torn.heap_bytes()
             })
             + self
                 .interface_names
                 .values()
                 .map(|name| name.capacity())
                 .sum::<usize>()
-            + hc::btree_set_bytes(&self.offline_interfaces)
-            + hc::btree_set_bytes(&self.duty_hold_ifaces)
-            + hc::btree_map_bytes(&self.interface_peer_counts)
+            + self.offline_interfaces.heap_bytes()
+            + self.duty_hold_ifaces.heap_bytes()
+            + self.interface_peer_counts.heap_bytes()
             + hc::btree_set_bytes(&self.peer_link_reoriginations)
             + hc::btree_map_bytes(&self.discovery_request_peers)
             + hc::btree_set_bytes(&self.discovery_extra_requesters)
             + self.loop_refusals.as_ref().map_or(0, |r| {
                 core::mem::size_of::<LoopRefusals>() + hc::vec_bytes(&r.0)
             })
-            + hc::btree_map_bytes(&self.interface_modes)
-            + hc::btree_map_bytes(&self.interface_kinds)
-            + hc::btree_map_bytes(&self.interface_ingress_control)
-            + hc::btree_map_bytes(&self.interface_egress_control)
-            + hc::btree_map_bytes(&self.interface_hw_mtus)
-            + hc::btree_map_bytes(&self.interface_link_profiles)
+            + self.interface_modes.heap_bytes()
+            + self.interface_kinds.heap_bytes()
+            + self.interface_ingress_control.heap_bytes()
+            + self.interface_egress_control.heap_bytes()
+            + self.interface_hw_mtus.heap_bytes()
+            + self.interface_link_profiles.heap_bytes()
             + hc::btree_map_bytes(&self.shared_instance_first_hop_answers)
             + self.loss_pricing.as_ref().map_or(0, |l| {
                 core::mem::size_of::<LossPricing>()
-                    + hc::btree_set_bytes(&l.interfaces)
+                    + l.interfaces.heap_bytes()
                     + hc::btree_map_bytes(&l.evidence)
             })
-            + hc::btree_set_bytes(&self.local_client_interfaces)
+            + self.local_client_interfaces.heap_bytes()
             + hc::btree_map_bytes(&self.pending_local_path_requests)
-            + hc::btree_map_bytes(&self.interface_announce_rate_configs)
-            + hc::btree_map_bytes(&self.interface_next_slot_ms)
-            + hc::btree_map_bytes(&self.interface_turnaround_ms)
-            + hc::btree_map_bytes(&self.interface_max_airtime_ms)
+            + self.interface_announce_rate_configs.heap_bytes()
+            + self.interface_next_slot_ms.heap_bytes()
+            + self.interface_turnaround_ms.heap_bytes()
+            + self.interface_max_airtime_ms.heap_bytes()
             + hc::btree_map_bytes(&self.ifac_configs)
             + hc::btree_map_bytes(&self.blackholed_identities)
             + hc::btree_map_bytes(&self.tunnels)
@@ -5764,15 +5760,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
-            + hc::btree_map_bytes(&self.interface_tunnel_ids)
-            + hc::btree_map_bytes(&self.interface_ingress_burst);
+            + self.interface_tunnel_ids.heap_bytes()
+            + self.interface_ingress_burst.heap_bytes();
         for windows in [
             &self.interface_incoming_announce_times,
             &self.interface_outgoing_announce_times,
             &self.interface_incoming_pr_times,
             &self.interface_outgoing_pr_times,
         ] {
-            bytes += hc::btree_map_bytes(windows);
+            bytes += windows.heap_bytes();
             for window in windows.values() {
                 bytes += hc::vec_deque_bytes(window);
             }
@@ -6491,7 +6487,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4606. A destination with no cached
+    /// link-request path uses at transport.rs:4607. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7292,7 +7288,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1795 ran in the
+        // Gate on the already-incremented hops (transport.rs:1796 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -7428,26 +7424,57 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // rebroadcast ourselves (`retries > 0`). Without this guard, a neighbor
                 // heard within the jitter window of the initial entry could cancel our
                 // first-ever fire, violating the Python on-wire count.
-                if packet.hops == existing.hops.saturating_add(1) {
+                //
+                // Both arms count only a copy OF THE ENTRY'S ANNOUNCE, and the
+                // forwarded arm only while the retransmit is still in the
+                // future (order 1617, Refs #232). We keyed both on the
+                // destination and let the forwarded arm cancel any pending
+                // retransmit: Python's echo of a local client's PREVIOUS
+                // announce (hops + 2) then cancelled the client's renamed
+                // announce, whose entry starts at retries =
+                // PATHFINDER_RETRIES and is due the moment it lands, before
+                // it ever left, and the Python peer kept the old name. The
+                // reference also keys on the destination (Transport.py:1724)
+                // but wants `now < retransmit_timeout` (:1736), which a
+                // retransmit due now fails; a copy of another emission says
+                // nothing about whether this one was passed on either. The
+                // packet hash leaves out hops and the transport id, so every
+                // relay of one announce shares it. Wire unchanged; the
+                // deviation only keeps an announce on its way that nobody
+                // has forwarded yet.
+                let hops_on = packet.hops.wrapping_sub(existing.hops);
+                let copy_hash = if hops_on == 1 || hops_on == 2 {
+                    Some(crate::packet::packet_hash(raw))
+                } else {
+                    None
+                };
+                let echoes_entry = copy_hash.is_some()
+                    && copy_hash == Some(crate::packet::packet_hash(&existing.raw_packet));
+                let mut cancelled = None;
+                if echoes_entry && hops_on == 1 {
                     existing.local_rebroadcasts = existing.local_rebroadcasts.saturating_add(1);
                     if existing.retries > 0 && existing.local_rebroadcasts >= LOCAL_REBROADCASTS_MAX
                     {
                         existing.retransmit_at_ms = None;
-                        crate::tracing::trace!(
-                            dest = %HexShort(&dest_hash),
-                            "Rebroadcasted announce has been passed on to another node, no further tries needed"
-                        );
+                        cancelled = Some("passed_on");
                     }
-                } else if packet.hops == existing.hops.saturating_add(2)
+                } else if echoes_entry
                     && existing.retries > 0
-                    && existing.retransmit_at_ms.is_some()
+                    && existing.retransmit_at_ms.is_some_and(|due| now < due)
                 {
                     // Another node forwarded our rebroadcast (hops+2 means they got
                     // our retransmit at hops+1 and forwarded it)
                     existing.retransmit_at_ms = None;
-                    crate::tracing::trace!(
-                        dest = %HexShort(&dest_hash),
-                        "Rebroadcasted announce has been forwarded by another node, no further tries needed"
+                    cancelled = Some("forwarded");
+                }
+                if let (Some(reason), Some(h)) = (cancelled, copy_hash) {
+                    crate::tracing::debug!(
+                        event = "ANN_REBROADCAST_CANCELLED",
+                        dst = %HexShort(&dest_hash),
+                        ph = %HexShort(&h[..PKT_PH_BYTES]),
+                        hops = packet.hops,
+                        iface = %self.iface_name(interface_index),
+                        reason = reason,
                     );
                 }
 
@@ -9665,7 +9692,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         data: &PacketData,
         prev_hop_iface: usize,
         next_hop_iface: usize,
-        hw_mtus: &BTreeMap<usize, u32>,
+        hw_mtus: &IfaceMap<u32>,
     ) -> Option<PacketData> {
         use crate::link::{
             decode_signaling_bytes, encode_signaling_bytes, LINK_REQUEST_BASE_SIZE, SIGNALING_SIZE,
@@ -12626,7 +12653,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2943`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2944`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -18978,7 +19005,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:8077), a deliberate anti-replay
+            // `random_blobs` (transport.rs:8104), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -25272,7 +25299,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1795) before
+        // The inbound path increments hops once (transport.rs:1796) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -30145,7 +30172,7 @@ mod tests {
         #[test]
         fn test_clamp_tcp_to_udp() {
             // A hop signalling 262144 → relay → a hop signalling 1064
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144); // TCP prev-hop
             hw_mtus.insert(1, 1064); // UDP next-hop
 
@@ -30166,7 +30193,7 @@ mod tests {
         #[test]
         fn test_no_clamp_same_mtu() {
             // Both interfaces same MTU, no clamping needed
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 1064);
             hw_mtus.insert(1, 1064);
 
@@ -30180,7 +30207,7 @@ mod tests {
         #[test]
         fn test_no_clamp_next_hop_larger() {
             // Next-hop MTU is larger than signaled, no clamping
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 1064);
             hw_mtus.insert(1, 262144);
 
@@ -30197,7 +30224,7 @@ mod tests {
         #[test]
         fn test_no_signaling_bytes_passthrough() {
             // 64-byte request (no signaling), should pass through unchanged
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144);
             hw_mtus.insert(1, 1064);
 
@@ -30222,7 +30249,7 @@ mod tests {
         /// hop, which is the frame size neither end can put in a datagram.
         #[test]
         fn test_next_hop_without_hw_mtu_strips_signalling() {
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144);
             // iface 1 signals no MTU, so it is not in the map at all.
 
@@ -30247,7 +30274,7 @@ mod tests {
         /// further when the next hop signals no MTU either.
         #[test]
         fn test_no_signalling_and_no_next_hop_mtu_passthrough() {
-            let hw_mtus = BTreeMap::new();
+            let hw_mtus = IfaceMap::new();
 
             let data = make_lr_payload_no_signaling();
             let result =
@@ -30259,7 +30286,7 @@ mod tests {
         #[test]
         fn test_clamp_to_prev_hop_when_smaller() {
             // Signaled MTU higher than both interfaces, prev-hop is bottleneck
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 500); // prev-hop bottleneck
             hw_mtus.insert(1, 1064); // next-hop
 
@@ -30278,7 +30305,7 @@ mod tests {
         #[test]
         fn test_clamp_preserves_mode() {
             // Verify mode byte is preserved through clamping
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144);
             hw_mtus.insert(1, 1064);
 
@@ -30300,7 +30327,7 @@ mod tests {
         #[test]
         fn test_clamp_unknown_prev_hop_only_uses_next_hop() {
             // prev-hop HW_MTU not registered, defaults to MAX, only next-hop matters
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             // iface 0 not registered
             hw_mtus.insert(1, 1064);
 
@@ -30319,7 +30346,7 @@ mod tests {
         #[test]
         fn test_clamp_preserves_base_payload() {
             // Verify base 64 bytes are not modified by clamping
-            let mut hw_mtus = BTreeMap::new();
+            let mut hw_mtus = IfaceMap::new();
             hw_mtus.insert(0, 262144);
             hw_mtus.insert(1, 1064);
 

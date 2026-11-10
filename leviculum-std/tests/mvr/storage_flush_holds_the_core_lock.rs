@@ -260,6 +260,9 @@ async fn the_hourly_flush_leaves_the_core_lock_free() {
     let mut node = ReticulumNodeBuilder::new()
         .enable_transport(true)
         .storage_path(storage.path().to_path_buf())
+        // The field node's desktop ceilings, on any host (order 1586 fits
+        // them to the host's RAM otherwise).
+        .host_ram_bytes(None)
         .flush_interval_secs(FLUSH_INTERVAL_SECS)
         .core_processor(FieldShape {
             paths: paths.clone(),

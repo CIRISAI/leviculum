@@ -180,7 +180,14 @@ impl Storage {
                 if !hashes.is_empty() {
                     tracing::info!("Loaded {} packet hashes from storage", hashes.len());
                 }
-                hashes.into_iter().collect()
+                // The file holds both generations, the newer first; a file
+                // written under a larger ceiling (the desktop 100 000 a
+                // client ran before order 1586) comes in as one generation
+                // of this one.
+                hashes
+                    .into_iter()
+                    .take((packet_hash_cap / 2).max(1))
+                    .collect()
             }
             Err(e) => {
                 tracing::warn!("Failed to load packet_hashlist: {e}");
@@ -894,7 +901,10 @@ impl leviculum_core::traits::Storage for Storage {
     }
     fn add_packet_hash(&mut self, hash: [u8; 32]) {
         self.packet_cache.insert(hash);
-        if self.packet_cache.len() > self.packet_hash_cap / 2 {
+        // At the ceiling, not one past it: the census states half the cap
+        // as each generation's ceiling, and the growth soak found the
+        // previous generation one over it (order 1586).
+        if self.packet_cache.len() >= (self.packet_hash_cap / 2).max(1) {
             std::mem::swap(&mut self.packet_cache, &mut self.packet_cache_prev);
             self.packet_cache.clear();
         }
@@ -1293,13 +1303,19 @@ impl leviculum_core::traits::Storage for Storage {
                 _ => row,
             })
             .collect();
-        counts.push(CollectionCount::unbounded(
+        // Both are bounded since order 1585, and the census says so with
+        // the rule's own figures (order 1586): memory keeps the newest
+        // `known_dest_cap` known destinations at load and after every
+        // flush, and the stamps go once they pass twice that.
+        counts.push(CollectionCount::bounded(
             "known_dest_entries",
             self.known_dest_entries.len(),
+            self.known_dest_cap,
         ));
-        counts.push(CollectionCount::unbounded(
+        counts.push(CollectionCount::bounded(
             "remembered_at",
             self.remembered_at.len(),
+            2 * self.known_dest_cap.max(1),
         ));
         counts
     }
@@ -2311,11 +2327,12 @@ mod tests {
         // Override cap to a small value for testing
         storage.packet_hash_cap = 10;
 
-        // Add 6 hashes (exceeds half of 10 = 5), triggers rotation
+        // Add 6 hashes: the 5th fills half of 10 and rotates
         for i in 0..6u8 {
             let mut hash = [0u8; 32];
             hash[0] = i;
             CoreStorage::add_packet_hash(&mut storage, hash);
+            assert!(storage.packet_cache.len() < 5 && storage.packet_cache_prev.len() <= 5);
         }
 
         // All 6 should still be findable (5 in prev, 1 in current after rotation)
@@ -2328,13 +2345,12 @@ mod tests {
             );
         }
 
-        // Current should have 1 entry (the 6th hash, after rotation cleared current)
-        // Wait, 6th hash triggers rotation, then gets inserted? No:
-        // add_packet_hash inserts first, then checks. So after inserting 6th:
-        // current has 6, exceeds 5, rotation happens: current(6) -> prev, current cleared.
-        // So current=0, prev=6. The 6th hash is in prev.
-        assert_eq!(storage.packet_cache.len(), 0);
-        assert_eq!(storage.packet_cache_prev.len(), 6);
+        // add_packet_hash inserts first, then checks: the 5th insert fills
+        // the generation to its ceiling of 5 and rotates it, so no
+        // generation ever holds more than the ceiling the census states
+        // (order 1586); the 6th lands in the fresh one.
+        assert_eq!(storage.packet_cache.len(), 1);
+        assert_eq!(storage.packet_cache_prev.len(), 5);
     }
 
     #[test]
@@ -2356,12 +2372,10 @@ mod tests {
 
             CoreStorage::add_packet_hash(&mut storage, hash_a);
             CoreStorage::add_packet_hash(&mut storage, hash_b);
-            // After 2 inserts: current has 2, but cap/2=2, so 2 > 2 is false, no rotation yet
-            // Actually: len() > cap/2 means 2 > 2 which is false, no rotation
-            // Add a third to trigger rotation
+            // The second insert fills cap/2 = 2 and rotates: prev=[A,B].
             let hash_c = [0xCC; 32];
             CoreStorage::add_packet_hash(&mut storage, hash_c);
-            // Now current had 3, 3 > 2, rotation: prev=[A,B,C], current=[]
+            // current=[C]
 
             CoreStorage::flush(&mut storage);
         }
@@ -2751,5 +2765,38 @@ mod tests {
         assert!(!storage
             .known_dest_entries
             .contains_key(&[0xF0; TRUNCATED_HASHBYTES]));
+    }
+
+    /// Order 1586: a hash list written under a larger ceiling (a client
+    /// that ran the desktop 100 000 before) loads as one generation of
+    /// this one, not as a generation the census reports over its ceiling.
+    #[test]
+    fn a_hash_list_from_a_larger_ceiling_loads_at_this_one() {
+        use leviculum_core::traits::Storage as CoreStorage;
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_hash_ceiling_")
+            .tempdir()
+            .unwrap();
+        {
+            let mut storage = Storage::new(&path).unwrap();
+            for i in 0..1000u32 {
+                let mut hash = [0u8; 32];
+                hash[..4].copy_from_slice(&i.to_be_bytes());
+                CoreStorage::add_packet_hash(&mut storage, hash);
+            }
+            CoreStorage::flush(&mut storage);
+        }
+        let storage = Storage::new_with_limits(&path, TableCaps::desktop(), 64).unwrap();
+        assert_eq!(storage.packet_cache.len(), 32);
+        for row in CoreStorage::collection_counts(&storage) {
+            if let Some(cap) = row.capacity {
+                assert!(
+                    row.entries <= cap,
+                    "{} {} over {cap}",
+                    row.name,
+                    row.entries
+                );
+            }
+        }
     }
 }

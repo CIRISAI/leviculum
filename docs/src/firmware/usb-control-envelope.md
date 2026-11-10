@@ -83,7 +83,20 @@ below), `0x07` no calendar clock (the command needs one and the board has
 none yet — seed it with a GNSS fix or `--set-time` and retry), `0x08` not
 running (the value is durably on the flash page and applies at the next
 reset, but the carrier it configures did not come up this boot — see
-below). The version in the capability report (`1`) names the envelope framing itself;
+below), `0x09` persist pending (the value is applied and the page write
+is still being retried when the answer is due; the board logs
+`[TELEMETRY] persist landed <record> after <ms> ms` when it lands, or
+`persist gave up after retries <record>` if it never does).
+
+`0x06` and `0x09` split what one code said until order 1626: `0x06` now
+means the store task **gave up** and a reset loses the value, `0x09` means
+it is **still writing**. The SoftDevice schedules flash access between
+radio events, and a BLE link that is busy or being torn down can hold an
+erase off for seconds (the store retries for twelve rounds, about 12 s
+worst case, longer than any host waits for one answer). A host that needs
+the record durable before a reset re-asks — the query, or the same frame
+again, which a page already carrying the value answers at once — until the
+answer is durable. The version in the capability report (`1`) names the envelope framing itself;
 new frame types extend the accepted list without bumping it.
 
 ### Facts in the capability report
@@ -418,8 +431,8 @@ One boot state changes the promise: a board whose boot did not bring the
 LoRa carrier up (a `lora=off` media profile in flash) has no LoRa task,
 so no config can be delivered or applied before the next reset. The
 config goes to the flash store, and the answer waits for the confirmed
-page write (#358) — a failed write refuses with `0x06` (persist), a
-confirmed one refuses with `0x08` (**not running**). A refusal rather
+page write (#358) — a failed write refuses with `0x06` (persist), one
+still being retried with `0x09` (persist pending), a confirmed one refuses with `0x08` (**not running**). A refusal rather
 than an ack because the only true claim here is *a reboot comes back on
 this configuration*, which is not the claim an ack makes: until #363 both
 states sent the same three bytes, and a host that reads that ack as "the

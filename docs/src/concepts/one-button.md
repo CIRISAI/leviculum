@@ -23,9 +23,9 @@ and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:123`).
 
 Since 889 every board brings the button up with the same task
 (`leviculum-nrf/src/bin/t114.rs:150`,
-`leviculum-nrf/src/bin/solarnode.rs:582`,
+`leviculum-nrf/src/bin/solarnode.rs:586`,
 `leviculum-nrf/src/bin/rak4631.rs:149`,
-`leviculum-nrf/src/bin/t1000e.rs:528`). The T114 and the Solar Node used
+`leviculum-nrf/src/bin/t1000e.rs:532`). The T114 and the Solar Node used
 to say `[BTN] none` only because nobody had wired the task: neither pin
 is shared with anything the firmware drives, and the Solar Node's touch
 pad is a second pin (`TouchButton`, `leviculum-nrf/src/boards/solarnode.rs:95`)
@@ -37,8 +37,8 @@ Node and the T1000-E flashed theirs once at boot and never touched it
 again. The boot blink stays, and since order 1055 it is the LED player's
 opening, on a timer instead of a spin that held USB back
 (`leviculum-nrf/src/bin/t114.rs:221`,
-`leviculum-nrf/src/bin/solarnode.rs:684`,
-`leviculum-nrf/src/bin/t1000e.rs:609`). The Pocket V2's two LEDs pulsed
+`leviculum-nrf/src/bin/solarnode.rs:688`,
+`leviculum-nrf/src/bin/t1000e.rs:613`). The Pocket V2's two LEDs pulsed
 LoRa TX and RX activity (`leviculum-nrf/src/led.rs`), and a bare RAK4631
 module without the baseboard blinked a 1 Hz heartbeat (that build was
 retired on 2026-10-28, D5 of the node-loop diff, and the heartbeat with
@@ -136,14 +136,14 @@ players only through the `Sinks` seam. Five things play:
 - **A held button reaching 2 s** (`leviculum-nrf/firmware/src/button.rs:216`, `release_now`)
   plays `release-now` on the LED and the buzzer.
 - **A message for this board's own `lxmf.delivery` destination stored by
-  the propagation role** (`leviculum-nrf/src/pn.rs:3352,3642`, a client
+  the propagation role** (`leviculum-nrf/src/pn.rs:3411,3701`, a client
   upload and a peer sync; a duplicate is not news) plays `notify` on the
   notification LED where the board has one, else on the LED, and on the
   buzzer. The board has no inbox, so its propagation store is the one
   place a message for its user is kept.
 - **The proof of the report a double press sent** plays
   `report-delivered` on the LED and the buzzer
-  (`leviculum-nrf/src/telemetry.rs:1788`), see the next section.
+  (`leviculum-nrf/src/telemetry.rs:1831`), see the next section.
 - **The announces of a double press leaving the radio** play
   `announce-sent` on the LED and the buzzer, see "The double press's
   announces" below.
@@ -170,12 +170,12 @@ queue that the duty lock, the mute and CSMA stand between and the air.
 So the press is answered from the LoRa task. The interface numbers every
 packet it accepts (`accepted_packets`, `leviculum-nrf/src/lora.rs:49`) and
 the task settles each one in that order, keyed or dropped
-(`settle_packet`, `leviculum-nrf/src/lora.rs:55`, called at the mute's
+(`settle_packet`, `leviculum-nrf/src/lora.rs:65`, called at the mute's
 drop, the stale drop and after a transmission,
-`leviculum-nrf/src/lora.rs:1865,2260,2505`). The button arm notes the
+`leviculum-nrf/src/lora.rs:1875,2270,2515`). The button arm notes the
 count before and after its dispatch around the feedback policy's
 watch (`leviculum-nrf/firmware/src/feedback.rs:280`, called from each
-binary, e.g. `leviculum-nrf/src/bin/t1000e.rs:1111-1131`), and the
+binary, e.g. `leviculum-nrf/src/bin/t1000e.rs:1153-1176`), and the
 press's last LoRa packet settling keyed plays the pattern
 (`leviculum-nrf/firmware/src/feedback.rs:291`). The rule is
 `leviculum_feedback::AirWatch` (`leviculum-nrf/feedback/src/lib.rs:270`),
@@ -206,8 +206,8 @@ figure, 360 ms against the 650 ms of two short.
 Since 914 the double press does what the gesture table says: after the
 two announces the node loop's button arm asks the telemetry reporter for
 one report (`leviculum_nrf::telemetry::on_button_press`,
-`leviculum-nrf/src/telemetry.rs:2002`, called from each binary, e.g.
-`leviculum-nrf/src/bin/t1000e.rs:1136`). There is no second sender. The
+`leviculum-nrf/src/telemetry.rs:2045`, called from each binary, e.g.
+`leviculum-nrf/src/bin/t1000e.rs:1153`). There is no second sender. The
 press arms the same immediate report a target write or a request from
 the target arms ([Telemetry](telemetry.md), "Setting a target emits one
 immediate report" and "A request from the target triggers one report"),
@@ -236,13 +236,13 @@ reason=immediate trigger=button …`. Each report names who asked for it
 
 **The proof.** The report goes out opportunistically, and the recipient
 proves it. The core surfaces a verified proof for a sent packet as
-`NodeEvent::PacketDeliveryConfirmed` (`leviculum-core/src/node/mod.rs:4898`),
+`NodeEvent::PacketDeliveryConfirmed` (`leviculum-core/src/node/mod.rs:4912`),
 and the reporter's proof wait (`ProofTracker`, with its one
-retransmission) takes it (`leviculum-nrf/src/telemetry.rs:1771`). The
+retransmission) takes it (`leviculum-nrf/src/telemetry.rs:1814`). The
 wait now carries who asked for the report. When the proof of a press's
 report arrives, whether for the first send or the retransmission, the
 board plays `report-delivered` once
-(`leviculum-nrf/src/telemetry.rs:1788`), with its
+(`leviculum-nrf/src/telemetry.rs:1831`), with its
 `FEEDBACK pattern=report-delivered sink=led` line (and `sink=buzzer` on
 the T1000-E). A proof of a cadence, target-set or request report plays
 nothing: the rule is for the user's own press, the one person standing

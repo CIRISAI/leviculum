@@ -76,10 +76,10 @@ fn the_derived_constants_have_these_values() {
         ("SERVE_RESOURCE_SDU", SERVE_RESOURCE_SDU, 464),
         ("SERVE_RESERVE_BYTES", SERVE_RESERVE_BYTES, 0),
         ("SERVE_PEAK_BYTES", SERVE_PEAK_BYTES, 17_264),
-        ("ROLE_BUDGET_BYTES", ROLE_BUDGET_BYTES, 21_120),
+        ("ROLE_BUDGET_BYTES", ROLE_BUDGET_BYTES, 22_144),
         ("LINK_BYTES", LINK_BYTES, 2_632),
         ("budget_per_link", budget_per_link(), 2_696),
-        ("budget_reserve", budget_reserve(), 18_848),
+        ("budget_reserve", budget_reserve(), 17_824),
         ("SERVE_MARGIN_BYTES", SERVE_MARGIN_BYTES, 14_696),
     ];
     for (name, value, _) in rows {
@@ -353,7 +353,7 @@ fn four_links_advertising_at_once_get_what_the_reserve_funds() {
     assert_eq!(admitted, vec!["phone-a"], "one admitted, three refused");
     assert_eq!(in_flight, INCOMING_RESOURCES_FUNDED);
     // Closed by admission, not by funding: the reserve term did not move.
-    assert_eq!(budget_reserve(), 18_848);
+    assert_eq!(budget_reserve(), 17_824);
 
     // The admitted transfer concluded: the next advertisement is taken.
     in_flight -= 1;

@@ -229,7 +229,7 @@ The replay is lnsd answering from its cache: a path request from a local
 client for a destination the path table holds is answered with the cached
 announce, sent to the requesting interface alone, and the handler returns
 without forwarding the request (`handle_path_request`,
-`leviculum-core/src/transport.rs:12331`, the local-client arm at
+`leviculum-core/src/transport.rs:12358`, the local-client arm at
 `:12157-12202`, the send at `:12195`; pinned by
 `test_path_request_from_local_client_returns_cached_announce`, `:30745`,
 which asserts no send to the network interface and no
@@ -249,7 +249,7 @@ Limits, measured and reasoned:
   number or pre-sorts the propagation node candidates.
 - A client attached over a non-loopback shared-instance TCP port counts as
   this device, because the daemon names it `LocalInterface[...]` too
-  (`leviculum-std/src/interfaces/inventory.rs:102-107`). This is rare: the
+  (`leviculum-std/src/interfaces/inventory.rs:106-111`). This is rare: the
   reference binds the shared-instance port to loopback
   (`LocalInterface.py:408`).
 
@@ -505,7 +505,7 @@ census column.
   local client of its shared instance, and so is every hosted group's
   engine: one node more per group. A local client keeps at most
   `TableCaps::local_client` (`leviculum-core/src/memory_storage.rs:194`,
-  applied in `client_table_caps`, `leviculum-std/src/driver/builder.rs:1288`):
+  applied in `client_table_caps`, `leviculum-std/src/driver/builder.rs:1336`):
   2 048 identities and destinations, 1 024 paths, 10 000 packet hashes,
   about 10 MB at the ceiling where the desktop profile allows 339 MB. The
   instance holds the network's tables and answers a client's path
@@ -513,9 +513,9 @@ census column.
   builds through the same place.
 - **Known destinations in memory.** The newest `identity_cap` by announce
   time, at load and after every flush (`newest_known_destinations`,
-  `leviculum-std/src/storage.rs:532`); the file keeps all of them. The
+  `leviculum-std/src/storage.rs:539`); the file keeps all of them. The
   remember stamps a flush folds are held to what the identity table still
-  holds (`leviculum-std/src/storage.rs:1185`): the growth soak found them
+  holds (`leviculum-std/src/storage.rs:1195`): the growth soak found them
   rising 111 kB/min at 40 announces a second, cleared only by the hourly
   flush.
 - **Names heard from strangers.** The newest 4 096 (`HEARD_CAP`,
@@ -539,7 +539,7 @@ census column.
 
 ### The soak
 
-`just mailbox-growth-soak` (`Justfile:2425`) runs the release mailbox
+`just mailbox-growth-soak` (`Justfile:2471`) runs the release mailbox
 beside an in-process shared instance that hears new named delivery
 destinations every second, takes a census every ten minutes for two
 hours, and prints the slope of every mailbox column and node table after

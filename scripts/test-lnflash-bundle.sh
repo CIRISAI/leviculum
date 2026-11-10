@@ -51,11 +51,13 @@ STUBS="$WORK/stubs"
 mkdir -p "$STUBS"
 cat >"$STUBS/cargo" <<'EOF'
 #!/usr/bin/env bash
-# metadata: where the fixture's target directory and workspace root are.
+# metadata: where the fixture's target directory and workspace root are,
+# and no packages, so nrf-rustflags.sh's per-dependency remaps (order 1620)
+# come out empty.
 # build: a placeholder where cargo would have written the artefact, and a
 # line saying which firmware rustflags it was handed.
 case "$1" in
-metadata) printf '{"target_directory":"%s","workspace_root":"%s"}\n' "$FIXTURE_TARGET" "$PWD" ;;
+metadata) printf '{"target_directory":"%s","workspace_root":"%s","packages":[]}\n' "$FIXTURE_TARGET" "$PWD" ;;
 build)
     echo "$*" >>"$FIXTURE_TARGET/cargo-builds.log"
     [ "${3:-}" = lnflash ] ||

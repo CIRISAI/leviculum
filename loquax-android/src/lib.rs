@@ -266,6 +266,14 @@ pub fn simulate_engine_death() -> bool {
     }
 }
 
+/// This thread's waits for the session's lock: how many, and how many of
+/// the engine's events the pump folded while they waited (1610). For the
+/// facade test.
+#[doc(hidden)]
+pub fn lock_waits() -> (u64, u64) {
+    session::lock_waits()
+}
+
 /// Stop the session, if one runs.
 pub fn stop() {
     let session = SESSION

@@ -87,7 +87,7 @@ path's interface changes. Nothing medium-aware enters transport
   `hops=0`.
 - **What the code does today (read 2026-11-04, not yet measured).** A
   desktop Loquax that is a client of a mailbox attaches to the shared
-  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1769`;
+  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1791`;
   `Upstream::Shared`, `loquax/src/engine/shell.rs:433`) and dials
   nothing: the only callers of the rendezvous rotation (`dial`,
   `loquax/src/engine/shell.rs:616`) are the leaf, the phone's own
@@ -328,7 +328,7 @@ holds no path and has no local clients, re-originates nothing: the
 reference gates the search on the receiving interface's mode
 (`reference/Reticulum/RNS/Transport.py:2918`), and so does lnsd
 (`discovers_paths`, `leviculum-core/src/traits.rs:115`;
-`leviculum-core/src/transport.rs:12753`). lnsd widens the gate only for
+`leviculum-core/src/transport.rs:12780`). lnsd widens the gate only for
 interfaces that report live peers, and today only BLE does
 (`leviculum-std/src/interfaces/ble/mod.rs:1812`). Without an announce of
 `loquax.home` no relay holds its path either. So A worked only when the
@@ -504,7 +504,7 @@ The shipped rendezvous list is a bootstrap, not an architecture (Lew,
   (`get_interface_announce_data`, `reference/Reticulum/RNS/Discovery.py:96-186`),
   every node keeps the registry, and ours is byte compatible with
   Python's (`list_discovered_interfaces`,
-  `leviculum-std/src/discovery.rs:449`). Autoconnect with a ceiling is
+  `leviculum-std/src/discovery.rs:461`). Autoconnect with a ceiling is
   the zero-config design ([zero config](zero-config.md), "The server
   list"), and it takes only transport nodes as Python does
   (`leviculum-std/src/autoconnect.rs:379`). Loquax reads that registry

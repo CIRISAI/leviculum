@@ -66,6 +66,7 @@ pub(crate) mod packet_hashlist;
 /// the anonymous-mapping histogram and the gap arithmetic (Codeberg #437).
 pub mod proc_memory;
 pub mod process;
+pub mod remote_dfu;
 pub mod remote_status;
 pub mod resolver;
 pub mod resource_policy;
@@ -74,7 +75,10 @@ pub(crate) mod rpc;
 pub(crate) mod sequence_counts;
 pub mod socket_hook;
 pub(crate) mod storage;
+/// One daemon per storage directory: the `flock` lnsd holds on it.
+pub mod storage_lock;
 pub(crate) mod sync_ext;
+pub mod table_budget;
 pub mod test_support;
 pub mod user;
 

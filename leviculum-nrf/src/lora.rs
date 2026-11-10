@@ -50,6 +50,16 @@ pub fn accepted_packets() -> u32 {
     LORA_ACCEPTED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether packet number `packet` (an [`accepted_packets`] reading) and
+/// every packet accepted before it have been settled: transmitted, or
+/// dropped by the queue's own age or mute rule. Wrapping, like both
+/// counters. The `/dfu` exit waits on this before the reset (#235): on LoRa
+/// "handed to the interface" is not "on the air".
+pub fn settled_through(packet: u32) -> bool {
+    let settled = LORA_SETTLED.load(core::sync::atomic::Ordering::Relaxed);
+    (settled.wrapping_sub(packet) as i32) >= 0
+}
+
 /// Settle the oldest unsettled packet; `keyed` is whether it went on the
 /// air. Only the LoRa task calls this.
 fn settle_packet(keyed: bool) {

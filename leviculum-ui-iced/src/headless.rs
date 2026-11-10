@@ -454,6 +454,100 @@ fn difference(a: &[u8], b: &[u8], w: u32) -> [u32; 4] {
     out
 }
 
+/// The clock a [`drive`] runs on: what the script is asked with, what the
+/// mark is compared with and what a frame's [`DrawnFrame::at`] says
+/// (1619). The wall's ([`Wall`]) for a measurement; a test that counts
+/// frames owns one that a slow host cannot run out from under it
+/// ([`Paced`]), as a frame that takes a second on a loaded host leaves a
+/// window of wall seconds without a frame. The program's own timers (a
+/// cursor's blink, a redraw asked for a later [`Instant`](std::time::Instant))
+/// stay on the wall's: they are the program's, not the script's.
+pub trait Clock {
+    /// The drive begins: before its first view.
+    fn start(&mut self) {}
+    /// One turn of the window's loop, before the script is asked;
+    /// `redrawn` when the window redrew since the turn before.
+    fn turn(&mut self, _redrawn: bool) {}
+    /// The time since the drive began.
+    fn now(&self) -> std::time::Duration;
+    /// A frame was presented at `at` by this clock.
+    fn presented(&mut self, _at: std::time::Duration) {}
+}
+
+/// The wall's clock: real time since the drive began.
+pub struct Wall(std::time::Instant);
+
+impl Wall {
+    pub fn new() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+impl Default for Wall {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clock for Wall {
+    fn start(&mut self) {
+        self.0 = std::time::Instant::now();
+    }
+
+    fn now(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
+}
+
+/// How many turns of the loop with no redraw count as idle in [`Paced`]:
+/// the loop sleeps 200 us a turn when it waits, so at least 100 ms of
+/// waiting, and a turn that builds a view is one turn however long the
+/// build takes.
+pub const IDLE_TURNS: u32 = 500;
+
+/// A clock that the window's redraws move rather than the wall (1472,
+/// a clock since 1619): each redraw moves it `step` on, and a stretch
+/// with none of the script's events in it is skipped, so a frame sees the
+/// script's events of one step whatever the machine's speed. A window
+/// that redraws nothing for [`IDLE_TURNS`] turns moves it on too, so an
+/// event that changes nothing cannot stall the script.
+pub struct Paced {
+    /// When the script's events are due, sorted.
+    times: Vec<std::time::Duration>,
+    step: std::time::Duration,
+    clock: std::time::Duration,
+    idle: u32,
+}
+
+impl Paced {
+    pub fn new(mut times: Vec<std::time::Duration>, step: std::time::Duration) -> Self {
+        times.sort();
+        Self {
+            times,
+            step,
+            clock: std::time::Duration::ZERO,
+            idle: 0,
+        }
+    }
+}
+
+impl Clock for Paced {
+    fn turn(&mut self, redrawn: bool) {
+        self.idle += 1;
+        if redrawn || self.idle >= IDLE_TURNS {
+            self.idle = 0;
+            let stepped = self.clock + self.step;
+            // The next event not yet due: the stretch before it is skipped.
+            let next = self.times.iter().find(|t| **t > self.clock).copied();
+            self.clock = next.map_or(stepped, |next| stepped.max(next));
+        }
+    }
+
+    fn now(&self) -> std::time::Duration {
+        self.clock
+    }
+}
+
 /// `program` in a window of `w` by `h` as iced 0.14's loop runs it on X11
 /// (iced_winit 0.14.1, `lib.rs`), in real time: the events `script` says
 /// are due (it is asked with the time since the start, and says `None`
@@ -472,26 +566,41 @@ pub fn drive<P: Program>(
     script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
     mark: std::time::Duration,
 ) -> Option<Run> {
-    drive_with(program, w, h, script, mark, false)
+    drive_with(program, w, h, &mut Wall::new(), script, mark, false)
 }
 
-/// [`drive`], every frame presented a second time on a twin surface that
-/// draws no scroll as a shift (1468), the two compared byte for byte:
-/// [`Run::differed`] says when they were not the same.
+/// [`drive`] on `clock` instead of the wall's (1619): the script, the
+/// mark and the frames' times are the clock's.
+pub fn drive_on<P: Program>(
+    program: &mut P,
+    w: u32,
+    h: u32,
+    clock: &mut dyn Clock,
+    script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
+    mark: std::time::Duration,
+) -> Option<Run> {
+    drive_with(program, w, h, clock, script, mark, false)
+}
+
+/// [`drive_on`], every frame presented a second time on a twin surface
+/// that draws no scroll as a shift (1468), the two compared byte for
+/// byte: [`Run::differed`] says when they were not the same.
 pub fn drive_twinned<P: Program>(
     program: &mut P,
     w: u32,
     h: u32,
+    clock: &mut dyn Clock,
     script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
     mark: std::time::Duration,
 ) -> Option<Run> {
-    drive_with(program, w, h, script, mark, true)
+    drive_with(program, w, h, clock, script, mark, true)
 }
 
 fn drive_with<P: Program>(
     program: &mut P,
     w: u32,
     h: u32,
+    clock: &mut dyn Clock,
     script: &mut dyn FnMut(std::time::Duration) -> Option<Vec<Event>>,
     mark: std::time::Duration,
     twinned: bool,
@@ -517,9 +626,10 @@ fn drive_with<P: Program>(
     let mut want = true;
     let mut over = false;
     let mut drawn = false;
+    let mut redrawn = false;
     let mut redraw_at: Option<Instant> = None;
     let mut messages: Vec<P::Message> = Vec::new();
-    let start = Instant::now();
+    clock.start();
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let measure = CPU.with(|c| c.get());
     let cpu = || measure.then(thread_cpu_ns).flatten();
@@ -544,11 +654,13 @@ fn drive_with<P: Program>(
         run.views += 1;
         let mut done = false;
         loop {
-            if run.marked_rgb.is_none() && start.elapsed() >= mark {
+            clock.turn(std::mem::take(&mut redrawn));
+            let now = clock.now();
+            if run.marked_rgb.is_none() && now >= mark {
                 run.marked_rgb = Some(surface.rgb());
             }
             if !over {
-                match script(start.elapsed()) {
+                match script(now) {
                     Some(events) if !events.is_empty() => {
                         for event in &events {
                             if let Event::Mouse(mouse::Event::CursorMoved { position }) = event {
@@ -618,7 +730,8 @@ fn drive_with<P: Program>(
                 pending.damage = surface.present(&mut renderer, background);
                 pending.present_ms = ms(t.elapsed());
                 add_cpu(&mut pending, c);
-                pending.at = start.elapsed().as_secs_f64();
+                let at = clock.now();
+                pending.at = at.as_secs_f64();
                 if let Some(twin) = &mut twin {
                     let _ = twin.present(&mut renderer, background);
                     run.shifted += usize::from(surface.shifted().is_some());
@@ -646,12 +759,14 @@ fn drive_with<P: Program>(
                     }
                 }
                 drawn = true;
+                redrawn = true;
                 if pending.damage == 0.0 {
                     // No frame: nothing changed (1455).
                     run.unpresented.push(pending.at);
                     pending = DrawnFrame::default();
                     continue;
                 }
+                clock.presented(at);
                 pending.marked = program.marked();
                 crate::fps::emulated(
                     Instant::now(),
@@ -663,7 +778,7 @@ fn drive_with<P: Program>(
                 );
                 run.rects.push(surface.rects().to_vec());
                 run.frames.push(std::mem::take(&mut pending));
-                run.seconds = start.elapsed().as_secs_f64();
+                run.seconds = clock.now().as_secs_f64();
                 continue;
             }
             if over && redraw_at.is_none() && program.idle() {

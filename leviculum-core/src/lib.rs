@@ -122,6 +122,7 @@ pub mod hex_fmt;
 pub mod identity;
 pub mod identity_store;
 pub mod ifac;
+pub mod iface_map;
 pub mod interface_counters;
 pub mod known_destinations;
 pub mod link;

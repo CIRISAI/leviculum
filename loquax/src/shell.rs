@@ -725,7 +725,8 @@ impl Shell {
     }
 
     /// The petnames the reader set, handed to the home node in order on a
-    /// task of their own, as marks are (1139).
+    /// task of their own, as marks are (1139); what the home took comes
+    /// back as an event, the rest stays owed (1635).
     fn hand_petnames(&mut self) {
         // Taken only with a client to hand them to: a take waits for its
         // answer before the next (1635).
@@ -1448,8 +1449,11 @@ impl Shell {
     /// the same pump that delivered the proof (leviculum 1014).
     pub(crate) async fn settle(&mut self) {
         // The marks the reader made before leaving reach the home node, or
-        // run out of a send's budget.
+        // run out of a send's budget, and so do the petnames and peer
+        // states (1614, owed until the home takes them since 1640).
         self.hand_marks();
+        self.hand_petnames();
+        self.hand_peer_states();
         let budget = tokio::time::Instant::now() + self.context.timeout;
         for task in std::mem::take(&mut self.mark_tasks) {
             if tokio::time::timeout_at(budget, task).await.is_err() {
@@ -1725,21 +1729,39 @@ pub(crate) async fn start(
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
     let display_name = display_name::from_process(None).map_err(crate::usage)?;
-    let config_dir = crate::daemon_config_dir(options.config.clone());
-    let instance = options
-        .instance
-        .clone()
-        .unwrap_or_else(|| crate::instance_name(&config_dir));
     // The terminal and the window attach to a shared instance; where none
     // answers they start lnsd as their child (#471 step 4), which goes when
     // they do. Quiet: the screen is stderr, the line goes to the log file.
-    let daemon = leviculum_std::instance::for_tool(
-        &config_dir,
-        &instance,
-        options.no_start,
-        leviculum_std::instance::Report::Quiet,
-    )
-    .map_err(|error| crate::no_start(error, &instance))?;
+    // Every running daemon the lookup names is tried before one is started
+    // (1598).
+    let lookup = crate::daemon_lookup(options.config.clone(), options.instance.clone());
+    let mut daemon = None;
+    let mut answered = lookup.start.clone();
+    for look in &lookup.looks {
+        let mut request = leviculum_std::instance::Request::new(&look.dir, &look.instance);
+        request.no_start = true;
+        request.report = leviculum_std::instance::Report::Quiet;
+        request.source = Some(look.source.as_str());
+        if let Ok(Some(found)) = leviculum_std::instance::for_request(&request) {
+            daemon = Some(found);
+            answered = look.clone();
+            break;
+        }
+    }
+    if daemon.is_none() {
+        let start = &lookup.start;
+        let mut request = leviculum_std::instance::Request::new(&start.dir, &start.instance);
+        request.no_start = options.no_start;
+        request.report = leviculum_std::instance::Report::Quiet;
+        request.source = Some(start.source.as_str());
+        daemon = leviculum_std::instance::for_request(&request)
+            .map_err(|error| crate::no_start(error, &start.instance))?;
+    }
+    let crate::Look {
+        dir: config_dir,
+        instance,
+        ..
+    } = answered;
     let storage_dir =
         crate::storage_dir(&home).map_err(|error| crate::failure(error, "no-daemon"))?;
 

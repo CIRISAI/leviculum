@@ -138,6 +138,10 @@ pub struct Request {
     /// in a test that wants the [`InstanceError::Timeout`] without waiting
     /// for it.
     pub start_bound: Duration,
+    /// Where the tool took [`instance_name`](Self::instance_name) from, a
+    /// word the `INSTANCE` event carries as `source=` (loquax: `flag`,
+    /// `home`, `default-dir`, `none`). `None` logs no such key.
+    pub source: Option<&'static str>,
 }
 
 impl Request {
@@ -151,6 +155,7 @@ impl Request {
             lnsd: None,
             report: Report::Started,
             start_bound: START_BOUND,
+            source: None,
         }
     }
 }
@@ -198,13 +203,31 @@ impl Instance {
         }
     }
 
-    fn log(&self, report: Report) {
-        match self {
-            Instance::Found { via } => {
+    fn log(&self, report: Report, source: Option<&str>) {
+        match (self, source) {
+            (Instance::Found { via }, None) => {
                 tracing::info!(event = "INSTANCE", found = "yes", via = %via, pid = "none")
             }
-            Instance::Started { via, pid, .. } => {
+            (Instance::Found { via }, Some(source)) => {
+                tracing::info!(
+                    event = "INSTANCE",
+                    found = "yes",
+                    via = %via,
+                    pid = "none",
+                    source = %source
+                )
+            }
+            (Instance::Started { via, pid, .. }, None) => {
                 tracing::info!(event = "INSTANCE", started = "yes", via = %via, pid = *pid)
+            }
+            (Instance::Started { via, pid, .. }, Some(source)) => {
+                tracing::info!(
+                    event = "INSTANCE",
+                    started = "yes",
+                    via = %via,
+                    pid = *pid,
+                    source = %source
+                )
             }
         }
         let loud = match report {
@@ -447,7 +470,7 @@ fn load(config_dir: &Path) -> Option<Config> {
 pub fn find_or_start(request: &Request) -> Result<Instance, InstanceError> {
     let config = load(&request.config_dir);
     let wanted = candidates(config.as_ref(), &request.instance_name);
-    if let Some(found) = found(&wanted, &request.instance_name, request.report) {
+    if let Some(found) = found(&wanted, request) {
         return Ok(found);
     }
     if request.no_start {
@@ -469,7 +492,7 @@ pub fn find_or_start(request: &Request) -> Result<Instance, InstanceError> {
     })?;
     let _lock = StartLock::take(&request.config_dir.join(START_LOCK))?;
     // Under the lock: a tool that held it before us may have started one.
-    if let Some(found) = found(&wanted, &request.instance_name, request.report) {
+    if let Some(found) = found(&wanted, request) {
         return Ok(found);
     }
 
@@ -527,13 +550,13 @@ pub fn find_or_start(request: &Request) -> Result<Instance, InstanceError> {
             } else {
                 Instance::Started { via, pid, daemon }
             };
-            instance.log(request.report);
+            instance.log(request.report, request.source);
             return Ok(instance);
         }
         if let Some(child) = daemon.child.as_mut() {
             if let Ok(Some(status)) = child.try_wait() {
                 // One more look: the winner may bind a moment after ours left.
-                if let Some(found) = found(&now_wanted, &request.instance_name, request.report) {
+                if let Some(found) = found(&now_wanted, request) {
                     return Ok(found);
                 }
                 return Err(InstanceError::Exited {
@@ -569,7 +592,14 @@ pub fn for_tool(
     let mut request = Request::new(config_dir, instance_name);
     request.no_start = no_start;
     request.report = report;
-    match find_or_start(&request) {
+    for_request(&request)
+}
+
+/// [`for_tool`] for a tool that fills the [`Request`] itself (loquax names
+/// the `source`): the same `Ok(None)` for nothing found where nothing may be
+/// started.
+pub fn for_request(request: &Request) -> Result<Option<Instance>, InstanceError> {
+    match find_or_start(request) {
         Ok(instance) => Ok(Some(instance)),
         Err(InstanceError::NotFound { .. } | InstanceError::SharingOff { .. }) => Ok(None),
         Err(e) => Err(e),
@@ -577,15 +607,11 @@ pub fn for_tool(
 }
 
 /// The find step: on a hit, point the dial there and report it.
-fn found(
-    wanted: &[(Via, SharedInstanceTransport)],
-    instance_name: &str,
-    report: Report,
-) -> Option<Instance> {
-    let (via, transport) = find_transport(wanted, instance_name)?;
+fn found(wanted: &[(Via, SharedInstanceTransport)], request: &Request) -> Option<Instance> {
+    let (via, transport) = find_transport(wanted, &request.instance_name)?;
     set_shared_instance_transport(transport);
     let instance = Instance::Found { via };
-    instance.log(report);
+    instance.log(request.report, request.source);
     Some(instance)
 }
 

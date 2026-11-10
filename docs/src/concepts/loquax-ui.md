@@ -1288,12 +1288,12 @@ Show what a message will cost before it is sent, next to the send action:
 ```
 
 The pieces exist. `leviculum_core::rnode::airtime_ms`
-(`leviculum-core/src/rnode.rs:1107`) and `packet_airtime_ms`
-(`leviculum-core/src/rnode.rs:1701`) are public, interfaces report a
+(`leviculum-core/src/rnode.rs:1096`) and `packet_airtime_ms`
+(`leviculum-core/src/rnode.rs:1667`) are public, interfaces report a
 `bitrate` (`leviculum-std/src/interfaces/mod.rs:700-702`) computed from
 spreading factor, coding rate and bandwidth
-(`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:3451`), and
-`fetch_remote_status` (`leviculum-std/src/remote_status.rs:187`) retrieves
+(`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:3452`), and
+`fetch_remote_status` (`leviculum-std/src/remote_status.rs:311`) retrieves
 the interface list from the daemon, which is how `lnstatus` works. Note two
 honesty constraints: `fetch_remote_status` needs the management authkey,
 and the status surface reports `bitrate` but not the raw radio parameters,
@@ -1304,7 +1304,7 @@ When the peer advertises a stamp cost, the estimate must include the
 proof-of-work, and that number has to be *measured* first: the crate
 contains no benchmarks, and the cost model (2^cost hashes plus a 3000-round
 workblock, `leviculum-lxmf/src/constants.rs:53`,
-`leviculum-lxmf/src/stamp.rs:458-466`) predicts scaling but not
+`leviculum-lxmf/src/stamp.rs:467-475`) predicts scaling but not
 milliseconds on a Pi.
 
 ### Offline as a state, not a failure

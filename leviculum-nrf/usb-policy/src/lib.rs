@@ -700,7 +700,8 @@ pub fn config_route(lora_booted: bool) -> ConfigRoute {
 }
 
 /// The [`ConfigRoute::Store`] answer: stored for the next boot when the page
-/// write is confirmed, refused as not persisted when it was lost.
+/// write is confirmed, refused as not persisted when it was lost, and as
+/// still being written when the store task had not finished (order 1626).
 pub fn stored_answer(
     persist: leviculum_core::envelope::Persist,
 ) -> leviculum_core::envelope::ConfigDelivery {
@@ -708,6 +709,7 @@ pub fn stored_answer(
     match persist {
         Persist::Durable => ConfigDelivery::Stored,
         Persist::Lost => ConfigDelivery::StoreFailed,
+        Persist::Pending => ConfigDelivery::StorePending,
     }
 }
 

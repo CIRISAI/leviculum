@@ -55,7 +55,7 @@ use leviculum_lxmf::telemetry::{
     build_report, celsius_from_quarter_degrees, screen_telemetry_request, Battery, Location,
     PhysicalLink, Telemetry, TelemetryRequestVerdict,
 };
-use leviculum_persist_ack::{PersistGate, Persisted, SaveTicket};
+use leviculum_persist_ack::{Answer, PersistGate, Persisted, SaveTicket};
 use leviculum_telemetry_policy::reporter::{
     accuracy_m, deliver_newest, key_step, location_source, owed_retry, path_withhold,
     report_position, report_time, FlashSave, KeyRecordDebt, KeyStep, LocationSource, SaveStep,
@@ -374,9 +374,12 @@ impl PersistSlot {
         }
     }
 
-    pub(crate) fn finish(&self, ticket: SaveTicket, outcome: Persisted) {
-        self.gate.finish(ticket, outcome);
+    /// Settle `ticket`; `true` when the requester had already answered it
+    /// as pending ([`PersistGate::finish`]).
+    pub(crate) fn finish(&self, ticket: SaveTicket, outcome: Persisted) -> bool {
+        let late = self.gate.finish(ticket, outcome);
         self.wake.signal(());
+        late
     }
 }
 
@@ -413,23 +416,27 @@ impl PendingSave {
 /// How long a caller waits for the store task before answering the frame
 /// with the truth instead of a promise.
 ///
-/// The observed cost of one page write is ~200 ms (#358), and the store
-/// task's own retry budget is [`SAVE_RETRIES`] ×
-/// [`SAVE_RETRY_MS`](leviculum_telemetry_policy::reporter::SAVE_RETRY_MS) plus
-/// three erase-and-write rounds — call it 1.2 s if the SoftDevice keeps
-/// refusing flash access while the radio is busy. 2.5 s covers that twice
-/// over and still lands inside the 3.5 s window lnflash gives one control
-/// conversation (`lnflash::radio::ACK_WITHIN`), so a board that has to
-/// report a failure gets the report out before the host stops listening.
+/// The observed cost of one page write is ~200 ms (#358), so an idle board
+/// answers durable well inside this. 2.5 s still lands inside the 3.5 s
+/// window lnflash gives one control conversation
+/// (`lnflash::radio::ACK_WITHIN`). The store task's own retry budget is
+/// longer than any host waits ([`SAVE_RETRIES`], order 1626): a SoftDevice
+/// that times flash access out while a BLE link is busy or being torn down
+/// costs ~1 s a round (741 ms measured on the T114, plus
+/// [`SAVE_RETRY_MS`](leviculum_telemetry_policy::reporter::SAVE_RETRY_MS)),
+/// so a write still running when this window closes is answered
+/// [`Persist::Pending`], and only one the store task gave up on is
+/// [`Persist::Lost`].
 const PERSIST_CONFIRM_WITHIN: embassy_time::Duration = embassy_time::Duration::from_millis(2_500);
 
 /// Wait until the store task has settled `save`, and say what a reset
 /// would find (Codeberg #358).
 ///
 /// This is what turns the control-envelope ack from "applied" into "a
-/// reset cannot lose this". The wait is bounded: a wedged store task
-/// makes the frame answer [`Persist::Lost`] — the truth — rather than
-/// holding the transport port open forever.
+/// reset cannot lose this". The wait is bounded: a store task still
+/// writing when it runs out makes the frame answer [`Persist::Pending`]
+/// rather than holding the transport port open, and the store task logs
+/// `persist landed` or `persist gave up` when it settles (order 1626).
 ///
 /// It does block the calling task for the duration, which for the serial
 /// task means it stops servicing the transport CDC — typically ~200 ms,
@@ -454,19 +461,21 @@ pub async fn confirm(save: PendingSave) -> Persist {
             .is_err()
         {
             // One last look: the store task may have finished between the
-            // poll above and the deadline.
-            return match save.slot.gate.poll(save.ticket) {
-                Some(Persisted::Durable) => Persist::Durable,
-                Some(Persisted::Lost) => Persist::Lost,
-                None => {
+            // poll above and the deadline. Still running is pending, not
+            // lost (order 1626): the store task keeps trying past this
+            // window, and a write it has not given up on usually lands.
+            return match save.slot.gate.answer_at_deadline(save.ticket) {
+                Answer::Durable => Persist::Durable,
+                Answer::Lost => Persist::Lost,
+                Answer::Pending => {
                     crate::log::log_fmt(
                         "[TELEMETRY] ",
                         format_args!(
-                            "persist unconfirmed after {} ms",
+                            "persist pending after {} ms",
                             PERSIST_CONFIRM_WITHIN.as_millis()
                         ),
                     );
-                    Persist::Lost
+                    Persist::Pending
                 }
             };
         }
@@ -596,7 +605,8 @@ fn read_record<const N: usize>(addr: u32) -> [u8; N] {
 /// cooperative and single-core, so nothing runs between the `try_receive`
 /// and the `try_send` that could refill a depth-1 channel. If it somehow
 /// did, the ticket would go unanswered and [`confirm`] would time out and
-/// report [`Persist::Lost`] — slow, but still the truth.
+/// report [`Persist::Pending`] with no `persist landed` line ever following,
+/// which a host that re-asks reads as the old value still on the page.
 pub fn request_save(target: &TelemetryTargetWire) -> PendingSave {
     let save = TARGET_PERSIST.issue();
     if PENDING_SAVE.try_send((save.ticket, *target)).is_err() {
@@ -775,31 +785,52 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
             continue;
         }
 
+        let started = embassy_time::Instant::now();
         let mut save = FlashSave::new();
         let written = loop {
+            let asked = embassy_time::Instant::now();
+            let mut flash = flash.lock().await;
+            let lock_ms = asked.elapsed().as_millis();
             let result = async {
-                let mut flash = flash.lock().await;
-                flash.erase(page, page + 4096).await?;
-                flash.write(page + TARGET_OFFSET, &target.0).await?;
-                flash.write(page + FIXED_POSITION_OFFSET, &fixed.0).await?;
-                flash.write(page + MEDIA_OFFSET, &media.0).await?;
-                flash.write(page + NAME_OFFSET, &name.0).await?;
-                flash.write(page + PN_CONFIG_OFFSET, &pn.0).await?;
-                flash.write(page + MGMT_ALLOW_OFFSET, &mgmt.0).await?;
-                flash.write(page + POSITION_SHARE_OFFSET, &share.0).await
+                use crate::flash::timed;
+                timed("erase", flash.erase(page, page + 4096)).await?;
+                timed("w-target", flash.write(page + TARGET_OFFSET, &target.0)).await?;
+                timed(
+                    "w-fixed",
+                    flash.write(page + FIXED_POSITION_OFFSET, &fixed.0),
+                )
+                .await?;
+                timed("w-media", flash.write(page + MEDIA_OFFSET, &media.0)).await?;
+                timed("w-name", flash.write(page + NAME_OFFSET, &name.0)).await?;
+                timed("w-pn", flash.write(page + PN_CONFIG_OFFSET, &pn.0)).await?;
+                timed("w-mgmt", flash.write(page + MGMT_ALLOW_OFFSET, &mgmt.0)).await?;
+                timed(
+                    "w-share",
+                    flash.write(page + POSITION_SHARE_OFFSET, &share.0),
+                )
+                .await
             }
             .await;
-            match save.after_attempt(result.is_ok()) {
+            // Released before the pause, so a retry loop never starves the
+            // other store tasks of the shared handle.
+            drop(flash);
+            let fault = result.err();
+            match save.after_attempt(fault.is_none()) {
                 SaveStep::Written => break true,
                 SaveStep::Failed {
                     attempt,
                     wait_ms,
                     gave_up,
                 } => {
-                    crate::log::log_fmt(
-                        "[TELEMETRY] ",
-                        format_args!("persist write failed, attempt {}/{}", attempt, SAVE_RETRIES),
-                    );
+                    if let Some(fault) = fault {
+                        crate::flash::log_step_fault(
+                            "[TELEMETRY] ",
+                            attempt,
+                            SAVE_RETRIES,
+                            fault,
+                            lock_ms,
+                        );
+                    }
                     embassy_time::Timer::after(embassy_time::Duration::from_millis(wait_ms)).await;
                     if gave_up {
                         break false;
@@ -807,25 +838,37 @@ pub async fn store_task(flash: &'static crate::flash::SharedFlash, page: u32) {
                 }
             }
         };
+        let took_ms = started.elapsed().as_millis();
 
         if written {
-            crate::log::log_fmt("[TELEMETRY] ", format_args!("persist saved {}", what));
+            crate::log::log_fmt(
+                "[TELEMETRY] ",
+                format_args!("persist saved {} took_ms={}", what, took_ms),
+            );
         } else {
             crate::log::log_fmt(
                 "[TELEMETRY] ",
-                format_args!("persist gave up after retries"),
+                format_args!("persist gave up after retries {}", what),
             );
         }
         // After the log line and on both paths: the requester is blocked
-        // on this, and what it is owed is the outcome, not silence.
-        slot.finish(
+        // on this, and what it is owed is the outcome, not silence. When
+        // the requester already answered "pending" (order 1626), the host
+        // it told is waiting for this line instead.
+        if slot.finish(
             ticket,
             if written {
                 Persisted::Durable
             } else {
                 Persisted::Lost
             },
-        );
+        ) && written
+        {
+            crate::log::log_fmt(
+                "[TELEMETRY] ",
+                format_args!("persist landed {} after {} ms", what, took_ms),
+            );
+        }
     }
 }
 

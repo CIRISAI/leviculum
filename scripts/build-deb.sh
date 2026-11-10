@@ -24,11 +24,24 @@
 #   scripts/build-deb.sh arm64
 #   scripts/build-deb.sh armhf
 #   LEVICULUM_ALLOC=system scripts/build-deb.sh amd64
+#   scripts/build-deb.sh --check [amd64|arm64|armhf]   (default: the host's)
 #
-# lnsd runs on mimalloc, leviculum-cli's default feature (#437, 766).
-# LEVICULUM_ALLOC=system builds the leviculum and leviculum-heapacct packages'
-# lnsd on the libc allocator instead (`--no-default-features`), for a node that
-# has to be compared against the old build; anything else is refused.
+# --check (1593) runs `cargo check --release` over exactly the target triples
+# and feature sets the packages are built with, and stops there: no stamps, no
+# manual pages, no clean, no link, no package. `just deb-features-check` calls
+# it for the host's architecture. It exists because loquax under
+# `tui gui` on the gnu triple did not compile on master from 902bc129 to
+# cbbd870d (1570 added a field to `GuiArgs` and not to two initialisers), and
+# no coder gate builds that pair on that triple: `just loquax-gui` builds
+# `gui` alone and `just loquax-tui` `tui` alone. The sets are read by both
+# modes from the *_ARGS arrays below, so the check cannot drift from the build.
+#
+# lnsd runs on mimalloc, leviculum-cli's default feature (#437, 766), and
+# lnpnd too, lnpnd's default feature (1592). LEVICULUM_ALLOC=system builds
+# both daemons, in their plain and heapacct packages, on the libc allocator
+# instead (`--no-default-features`, lnpnd keeping its interface families),
+# for a node that has to be compared against the old build; anything else is
+# refused.
 #
 # Expects scripts/deb-stamp.sh to have run. The versions are read from
 # its stamp files rather than derived here, so an amd64 + arm64 pair
@@ -69,6 +82,24 @@ TARGET="$(cargo_target_dir "$ROOT")"
 # runs, keeps the musl-static terminal build and its `terminal` variant.
 GLIBC_FLOOR=2.31
 DESKTOP_TRIPLE=
+CHECK_ONLY=
+if [ "${1:-}" = --check ]; then
+    CHECK_ONLY=1
+    shift
+    # Without an architecture, --check takes the host's: the coder gate
+    # checks what this machine's nightly would package.
+    if [ -z "${1:-}" ]; then
+        case "$(uname -m)" in
+        x86_64) set -- amd64 ;;
+        aarch64) set -- arm64 ;;
+        armv7l) set -- armhf ;;
+        *)
+            echo "error: no package architecture for host $(uname -m)" >&2
+            exit 2
+            ;;
+        esac
+    fi
+fi
 ARCH="${1:-}"
 case "$ARCH" in
 amd64)
@@ -84,7 +115,7 @@ arm64)
 # 2026-10-30, lnsd on mimalloc included.
 armhf) TRIPLE=armv7-unknown-linux-musleabihf ;;
 *)
-    echo "usage: $0 <amd64|arm64|armhf>" >&2
+    echo "usage: $0 [--check] <amd64|arm64|armhf>" >&2
     exit 2
     ;;
 esac
@@ -94,7 +125,7 @@ esac
 # version files read below; its last entry, lnflash, is packaged from the
 # firmware bundle by scripts/build-lnflash-deb.sh instead.
 CRATES=(leviculum-cli lnomad lblogd lnpnd loquax)
-BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd loquax)
+BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt lnomad lblogd lnpnd loquax)
 # loquax's terminal frontend is off by default (loquax/Cargo.toml); the package
 # is what a person installs, so plain `loquax` opens the messenger. The musl
 # loquax is armhf's package and every architecture's static tarball
@@ -114,6 +145,64 @@ pkg_name() {
     esac
 }
 
+LEVICULUM_ALLOC="${LEVICULUM_ALLOC:-mimalloc}"
+case "$LEVICULUM_ALLOC" in
+mimalloc)
+    alloc_args=()
+    lnpnd_alloc_args=()
+    ;;
+system)
+    alloc_args=(--no-default-features)
+    lnpnd_alloc_args=(--no-default-features --features "ble serial i2p")
+    ;;
+*)
+    echo "error: LEVICULUM_ALLOC=${LEVICULUM_ALLOC}; want mimalloc or system" >&2
+    exit 2
+    ;;
+esac
+
+# Every cargo compile this script runs, as the arguments after `--target`:
+# the one source both modes read (1593). The heap-accounting pair is the
+# packages' instrumented variants; the SYSTEM pair is the libc-allocator
+# rebuild of the two daemons and is empty under mimalloc.
+bin_args=()
+for bin in "${BINS[@]}"; do
+    bin_args+=(--bin "$bin")
+done
+MAIN_ARGS=("${bin_args[@]}" "${FEATURES[@]}")
+DESKTOP_ARGS=(-p loquax --bin loquax "${DESKTOP_FEATURES[@]}")
+LNSD_HEAPACCT_ARGS=(-p leviculum-cli --bin lnsd "${alloc_args[@]}" --features heap-accounting)
+LNPND_HEAPACCT_ARGS=(-p lnpnd --bin lnpnd "${lnpnd_alloc_args[@]}" --features heap-accounting)
+LNSD_SYSTEM_ARGS=(-p leviculum-cli --bin lnsd --no-default-features)
+LNPND_SYSTEM_ARGS=(-p lnpnd --bin lnpnd "${lnpnd_alloc_args[@]}")
+
+# cargo-zigbuild uses Zig as the C compiler/linker — the only way to
+# reach aarch64-musl from an amd64 host without docker-in-docker or a
+# dedicated arm64 runner. The check is plain cargo on every architecture:
+# cargo-zigbuild 0.x has no `check` subcommand (`cargo zigbuild check` is
+# refused, measured 2026-11-09), and the recipe checks the host's own
+# architecture, whose C build scripts (mimalloc) the host compiler serves.
+build_cmd=(cargo build)
+[ "$ARCH" != amd64 ] && build_cmd=(cargo zigbuild)
+check_cmd=(cargo check)
+
+if [ -n "$CHECK_ONLY" ]; then
+    echo "[build-deb] --check ${ARCH} (${TRIPLE}${DESKTOP_TRIPLE:+, ${DESKTOP_TRIPLE}}) allocator=${LEVICULUM_ALLOC}"
+    "${check_cmd[@]}" --release --target "$TRIPLE" "${MAIN_ARGS[@]}"
+    if [ -n "$DESKTOP_TRIPLE" ]; then
+        # The glibc floor is a link-time suffix; a check has nothing to link.
+        "${check_cmd[@]}" --release --target "$DESKTOP_TRIPLE" "${DESKTOP_ARGS[@]}"
+    fi
+    if [ "$LEVICULUM_ALLOC" = system ]; then
+        "${check_cmd[@]}" --release --target "$TRIPLE" "${LNSD_SYSTEM_ARGS[@]}"
+        "${check_cmd[@]}" --release --target "$TRIPLE" "${LNPND_SYSTEM_ARGS[@]}"
+    fi
+    "${check_cmd[@]}" --release --target "$TRIPLE" "${LNSD_HEAPACCT_ARGS[@]}"
+    "${check_cmd[@]}" --release --target "$TRIPLE" "${LNPND_HEAPACCT_ARGS[@]}"
+    echo "[build-deb] --check ${ARCH}: every package's feature set compiles"
+    exit 0
+fi
+
 # The stamp files are inputs to this script, not something it derives.
 # Failing loudly beats building packages whose version strings silently
 # disagree with the ones the other architecture shipped.
@@ -127,18 +216,9 @@ done
     echo "error: .build-id missing — run scripts/deb-stamp.sh first" >&2
     exit 1
 }
-LEVICULUM_ALLOC="${LEVICULUM_ALLOC:-mimalloc}"
-case "$LEVICULUM_ALLOC" in
-mimalloc) alloc_args=() ;;
-system) alloc_args=(--no-default-features) ;;
-*)
-    echo "error: LEVICULUM_ALLOC=${LEVICULUM_ALLOC}; want mimalloc or system" >&2
-    exit 2
-    ;;
-esac
 LEVICULUM_BUILD_ID="$(cat .build-id)"
 export LEVICULUM_BUILD_ID
-echo "[build-deb] ${ARCH} (${TRIPLE}) build-id=${LEVICULUM_BUILD_ID} lnsd allocator=${LEVICULUM_ALLOC}"
+echo "[build-deb] ${ARCH} (${TRIPLE}) build-id=${LEVICULUM_BUILD_ID} lnsd and lnpnd allocator=${LEVICULUM_ALLOC}"
 
 # Render docs/src/man/*.1.md to roff under target/man/, which the three
 # .deb manifests install from. The Markdown is the single source: the
@@ -169,19 +249,9 @@ if [ -n "$DESKTOP_TRIPLE" ]; then
     cargo clean -p loquax --target "$DESKTOP_TRIPLE"
 fi
 
-# cargo-zigbuild uses Zig as the C compiler/linker — the only way to
-# reach aarch64-musl from an amd64 host without docker-in-docker or a
-# dedicated arm64 runner.
-build_cmd=(cargo build)
-[ "$ARCH" != amd64 ] && build_cmd=(cargo zigbuild)
-bin_args=()
-for bin in "${BINS[@]}"; do
-    bin_args+=(--bin "$bin")
-done
-"${build_cmd[@]}" --release --target "$TRIPLE" "${bin_args[@]}" "${FEATURES[@]}"
+"${build_cmd[@]}" --release --target "$TRIPLE" "${MAIN_ARGS[@]}"
 if [ -n "$DESKTOP_TRIPLE" ]; then
-    cargo zigbuild --release --target "${DESKTOP_TRIPLE}.${GLIBC_FLOOR}" -p loquax --bin loquax \
-        "${DESKTOP_FEATURES[@]}"
+    cargo zigbuild --release --target "${DESKTOP_TRIPLE}.${GLIBC_FLOOR}" "${DESKTOP_ARGS[@]}"
 fi
 
 # amd64's loquax a second time, for x86-64-v3 (1469, #474): the window draws
@@ -217,14 +287,15 @@ if [ "$ARCH" = amd64 ]; then
 fi
 
 # The allocator is read off the bytes, like the heap-accounting marker below:
-# an arm64 binary cannot be run here. lnsd logs `Allocator: mimalloc` at
-# startup only when it was built on mimalloc, so a package that would ship
-# lnsd on the wrong allocator fails here instead of on a field node a day
-# later, as resident memory nobody can account for.
+# an arm64 binary cannot be run here. lnsd and lnpnd log `Allocator: mimalloc`
+# at startup only when they were built on mimalloc, so a package that would
+# ship either daemon on the wrong allocator fails here instead of on a field
+# node a day later, as resident memory nobody can account for.
 mimalloc_marker='Allocator: mimalloc'
 release_dir="$TARGET/$TRIPLE/release"
 if [ "$LEVICULUM_ALLOC" = system ]; then
-    "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd --no-default-features
+    "${build_cmd[@]}" --release --target "$TRIPLE" "${LNSD_SYSTEM_ARGS[@]}"
+    "${build_cmd[@]}" --release --target "$TRIPLE" "${LNPND_SYSTEM_ARGS[@]}"
 fi
 require_allocator() {
     local bin="$release_dir/$1"
@@ -239,6 +310,7 @@ require_allocator() {
     fi
 }
 require_allocator lnsd
+require_allocator lnpnd
 
 # One --deb-version per package: the three are versioned independently,
 # so a single shared version string would be wrong for at least two of
@@ -325,8 +397,7 @@ require_symtab() {
 # Read off the bytes, not the exit code: an arm64 binary cannot be run here,
 # and the startup line exists only in a heap-accounting build.
 heapacct_marker='Heap accounting: on'
-env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd \
-    "${alloc_args[@]}" --features heap-accounting
+env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" "${LNSD_HEAPACCT_ARGS[@]}"
 require_symtab
 grep -qaF "$heapacct_marker" "$release_dir/lnsd" || {
     echo "error: lnsd built with --features heap-accounting does not carry the feature" >&2
@@ -342,13 +413,13 @@ debs+=("$TARGET/debian/leviculum-heapacct_${heapacct_version}_${ARCH}.deb")
 # propagation daemon reports measured live bytes the way its lnsd does. Its
 # own package, a variant of lnpnd's, because the daemon ships with its own
 # unit and service user; lnpnd's build carries the same startup line.
-env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p lnpnd --bin lnpnd \
-    --features heap-accounting
+env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" "${LNPND_HEAPACCT_ARGS[@]}"
 require_symtab lnpnd
 grep -qaF "$heapacct_marker" "$release_dir/lnpnd" || {
     echo "error: lnpnd built with --features heap-accounting does not carry the feature" >&2
     exit 1
 }
+require_allocator lnpnd
 lnpnd_heapacct_version="$(cat .deb-version-lnpnd)+heapacct"
 cargo deb -p lnpnd --variant heapacct --target "$TRIPLE" --no-build --no-strip \
     --deb-version "$lnpnd_heapacct_version"
@@ -365,6 +436,7 @@ if grep -qaF "$heapacct_marker" "$release_dir/lnpnd"; then
     echo "error: the plain lnpnd was not restored after the heap-accounting build" >&2
     exit 1
 fi
+require_allocator lnpnd
 
 # The things cargo-deb gets wrong or cannot produce: native changelog
 # name, md5sums, empty Depends. Idempotent, in place.

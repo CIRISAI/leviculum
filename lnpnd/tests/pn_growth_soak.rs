@@ -48,15 +48,47 @@
 //!   bytes a message.
 //! - `tables`, their sum, through its columns; a jump that is the origins'
 //!   hash table doubling is named (`PN_GROWTH resize`).
+//! - `transport`, the node's own transport tables (order 1586), by their
+//!   ceilings at every sample: red when one has none
+//!   (`transport_unbounded`) or holds more than its own
+//!   (`transport_over`). An announcer on the shared instance sends
+//!   [`ANNOUNCES_PER_MIN`] fresh destinations a minute, the public mesh
+//!   miauhaus relays to its clients, so the tables reach their ceilings
+//!   within the run; the last `PN_TRANSPORT` line, every table with its
+//!   fill and ceiling, is printed at the end.
+//!
+//! - the allocator's retention (order 1592): the slope of `mem_kb`, the
+//!   process's anonymous memory wherever it lies (`anon_rss_kb`, resident,
+//!   plus `swap_kb`, VmSwap), less the slope of `tables`, what the census
+//!   says the tables grew by design, over the full-store window against
+//!   [`MEM_FLAT_KB_PER_MIN`]. Not the resident set: it carries file pages
+//!   and drops when the kernel reclaims them, and on a host under memory
+//!   pressure the kernel swaps the cold store index out and pages it back
+//!   in, so its slope is the host's, not the node's (the order's first
+//!   libc run sat at 10 MB resident under a 97 MB index). The
+//!   tables can all be flat while the allocator keeps what it once had:
+//!   the lnpnd on miauhaus (902bc129) grew about 70 MB an hour in fresh
+//!   anonymous mappings no table owned, on musl's mallocng. Beside it every
+//!   sample carries the anonymous writable mappings of `/proc/<pid>/maps`,
+//!   the field census's view: `anon_maps` regions, `anon_kb` their bytes,
+//!   `anon_big_maps` the regions above 8 MB; and `anon_rss_kb`, the
+//!   resident anonymous memory of `/proc/<pid>/smaps_rollup`. The mapped
+//!   bytes are address space: mimalloc reserves a 1 GiB arena up front, so
+//!   under it `anon_kb` stands at about 1 GB from the first sample and only
+//!   the resident figure moves.
 //!
 //! Red too when the store never filled: then the soak proved nothing.
 //! Every sample's whole census is printed (`PN_SOAK_SAMPLE`), and on red
 //! the node's event log is kept beside the store cache, named in the
-//! failure. `rss_kb` is printed beside the tables, not judged: the
-//! allocator keeps what it once had, and what to fix is the table.
+//! failure.
+//!
+//! `just pn-growth-soak` runs the default build, mimalloc; `just
+//! pn-growth-soak 1200 300000 14 system` the libc allocator, for the
+//! comparison.
 //!
 //! Run it with `just pn-growth-soak` (release, 20 minutes, 300 000
 //! messages). Knobs: `LNPND_SOAK_MESSAGES`, `LNPND_SOAK_PEERS`,
+//! `LNPND_SOAK_ANNOUNCES_PER_MIN`,
 //! `LNPND_SOAK_SECS`, `LNPND_SOAK_SAMPLE_SECS`, `LNPND_SOAK_PEER_MESSAGES`,
 //! `LNPND_SOAK_DIR` (a directory on a real disk, the target dir's tmp by
 //! default; never `/tmp`, a tmpfs every lane shares).
@@ -86,6 +118,15 @@ use lnpnd::engine::{Engine, EngineConfig};
 /// emptied by the rounds in flight at the sample.
 const FLAT_KB_PER_MIN: f64 = 1.0;
 
+/// The allocator's retention allowed over the full-store window: anonymous
+/// memory's slope less the tables' (order 1592), in kB a minute. The
+/// field's 70 MB an hour is 1 170 kB a minute; what the soak measured on
+/// both allocators is in the order's report.
+const MEM_FLAT_KB_PER_MIN: f64 = 300.0;
+
+/// A mapping above this is one the field census lists by size.
+const BIG_MAP_BYTES: u64 = 8 * 1024 * 1024;
+
 /// One peer's store: room for its fresh messages (10 000 at most 600 bytes)
 /// and for what the node forwards it, which it evicts as it goes.
 const PEER_STORE_BYTES: u64 = 8_000_000;
@@ -94,6 +135,11 @@ const PEER_STORE_BYTES: u64 = 8_000_000;
 /// lxmd's `SYNC_LIMIT`, `lnpnd/src/main.rs`): what one peer's sync batch
 /// may hold, the `sync_in` bound per peer.
 const SYNC_LIMIT_BYTES: f64 = 256.0 * 40.0 * 1000.0;
+
+/// Fresh destinations the announcer sends a minute (order 1586): 20
+/// minutes of it is 8 000, four times the local client profile's 2 048
+/// identities and destinations (order 1585).
+const ANNOUNCES_PER_MIN: u64 = 400;
 
 /// The line lnpnd prints once its propagation destination is up.
 const READY: &str = "lnpnd: propagation node ready";
@@ -165,6 +211,35 @@ fn propagation_hash_of(identity: &Identity) -> [u8; 16] {
 }
 
 /// The release lnpnd beside this test binary, or the one cargo built for it.
+/// The anonymous writable mappings of process `pid`, the field census's
+/// columns: region count, their bytes in kB, and the regions above
+/// [`BIG_MAP_BYTES`].
+fn anon_maps(pid: u32) -> [(String, f64); 5] {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
+    let regions = leviculum_std::proc_memory::parse_anon_writable_maps(&text);
+    let bytes: u64 = regions.iter().map(|r| r.size()).sum();
+    let big = regions.iter().filter(|r| r.size() > BIG_MAP_BYTES).count();
+    // `Anonymous:` in kB, the resident anonymous pages of every mapping.
+    let rollup = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).unwrap_or_default();
+    let anon_rss_kb = rollup
+        .lines()
+        .find_map(|line| line.strip_prefix("Anonymous:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|kb| kb.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+    let swap_kb = leviculum_std::proc_memory::parse_status(&status)
+        .swap_bytes
+        .map_or(0.0, |bytes| (bytes / 1024) as f64);
+    [
+        ("swap_kb".to_string(), swap_kb),
+        ("anon_maps".to_string(), regions.len() as f64),
+        ("anon_kb".to_string(), (bytes / 1024) as f64),
+        ("anon_big_maps".to_string(), big as f64),
+        ("anon_rss_kb".to_string(), anon_rss_kb),
+    ]
+}
+
 fn lnpnd_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lnpnd"))
 }
@@ -295,6 +370,56 @@ async fn start_peers(
     peers
 }
 
+/// A client on the shared instance announcing `per_min` fresh destinations
+/// a minute, each under a new identity, until `stop` is set: the mesh's
+/// announces as the instance relays them to its local clients (order
+/// 1586). Returns how many it announced.
+fn start_announcer(
+    instance: &str,
+    storage: PathBuf,
+    per_min: u64,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<usize> {
+    let instance = instance.to_string();
+    tokio::spawn(async move {
+        use std::sync::atomic::Ordering;
+        std::fs::create_dir_all(&storage).expect("announcer storage");
+        let mut node = ReticulumNodeBuilder::new()
+            .enable_transport(false)
+            .connect_to_shared_instance(&instance)
+            .storage_path(storage)
+            .without_events()
+            .build()
+            .await
+            .expect("build the announcer");
+        node.start().await.expect("start the announcer");
+        let mut sent = 0usize;
+        if per_min == 0 {
+            node.stop().await.ok();
+            return sent;
+        }
+        let spacing = Duration::from_millis(60_000 / per_min);
+        while !stop.load(Ordering::Relaxed) {
+            let destination = Destination::new(
+                Some(leviculum_std::generate_identity()),
+                leviculum_core::Direction::In,
+                leviculum_core::DestinationType::Single,
+                "soak",
+                &["announcer"],
+            )
+            .expect("a destination");
+            let hash = *destination.hash();
+            node.register_destination(destination);
+            if node.announce_destination(&hash, None).await.is_ok() {
+                sent += 1;
+            }
+            tokio::time::sleep(spacing).await;
+        }
+        node.stop().await.ok();
+        sent
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a 20-minute soak (order 1515): run with `just pn-growth-soak`"]
 async fn pn_tables_stay_flat_once_the_store_is_full() {
@@ -303,6 +428,7 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     let soak_secs = knob("LNPND_SOAK_SECS", 1200);
     let sample_secs = knob("LNPND_SOAK_SAMPLE_SECS", 60).max(1);
     let fresh = knob("LNPND_SOAK_PEER_MESSAGES", 10_000) as usize;
+    let announces_per_min = knob("LNPND_SOAK_ANNOUNCES_PER_MIN", ANNOUNCES_PER_MIN);
     let base = std::env::var_os("LNPND_SOAK_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pn-growth-soak"));
@@ -310,7 +436,7 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     let run = tempfile::tempdir_in(&base).expect("a run directory");
     eprintln!(
         "PN_SOAK dir={} messages={messages} peers={peer_count} secs={soak_secs} \
-         sample_secs={sample_secs} fresh_per_peer={fresh}",
+         sample_secs={sample_secs} fresh_per_peer={fresh} announces_per_min={announces_per_min}",
         run.path().display()
     );
 
@@ -404,6 +530,13 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
     }
 
     let _peers = start_peers(&instance, node_hash, peer_count, fresh, run.path()).await;
+    let stop_announcer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let announcer = start_announcer(
+        &instance,
+        run.path().join("announcer"),
+        announces_per_min,
+        Arc::clone(&stop_announcer),
+    );
 
     // Every sample: SIGUSR1, then the census the next tick writes.
     let started = Instant::now();
@@ -424,8 +557,12 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
         let asked = Instant::now();
         loop {
             let (values, end) = last_census(&event_log, read_from);
-            if let Some(values) = values {
+            if let Some(mut values) = values {
                 read_from = end;
+                values.extend(anon_maps(child.0.id()));
+                let mem_kb = values.get("anon_rss_kb").copied().unwrap_or(0.0)
+                    + values.get("swap_kb").copied().unwrap_or(0.0);
+                values.insert("mem_kb".to_string(), mem_kb);
                 let sample = Sample {
                     minute: started.elapsed().as_secs_f64() / 60.0,
                     values,
@@ -481,6 +618,15 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
             .or_default() += 1;
     }
     eprintln!("PN_SOAK peer table changes {peer_reasons:?}");
+    stop_announcer.store(true, std::sync::atomic::Ordering::Relaxed);
+    let announced = announcer.await.unwrap_or(0);
+    let last_transport = log
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("PN_TRANSPORT "))
+        .unwrap_or("PN_TRANSPORT none")
+        .to_string();
+    eprintln!("PN_SOAK announced={announced} last {last_transport}");
     drop(child);
     daemon.stop().await.ok();
 
@@ -575,6 +721,47 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
         slope(window, "dup") / 1000.0,
     );
 
+    // The node's transport tables (order 1586), by their ceilings at every
+    // sample: none may lack one, none may hold more than its own. Below
+    // the ceilings they grow by design, with every destination announced.
+    let transport_breach = samples
+        .iter()
+        .find(|s| s.get("transport_unbounded") > 0.0 || s.get("transport_over") > 0.0);
+    let at_ceiling = |name: &str| {
+        last_transport
+            .split_whitespace()
+            .find_map(|f| f.strip_prefix("tables="))
+            .and_then(|tables| {
+                tables
+                    .split(',')
+                    .find_map(|t| t.strip_prefix(&format!("{name}:")).map(str::to_string))
+            })
+            .unwrap_or_else(|| "?".to_string())
+    };
+    println!(
+        "PN_GROWTH table=transport judged=bound announced={announced} first_kb={:.1} \
+         last_kb={:.1} kb_per_min={:.2} entries={} unbounded={} over={} \
+         known_identities={} path_table={} announce_cache={} known_dest_entries={}",
+        first.get("transport") / 1000.0,
+        last.get("transport") / 1000.0,
+        slope(window, "transport") / 1000.0,
+        last.get("transport_entries"),
+        last.get("transport_unbounded"),
+        last.get("transport_over"),
+        at_ceiling("known_identities"),
+        at_ceiling("path_table"),
+        at_ceiling("announce_cache"),
+        at_ceiling("known_dest_entries"),
+    );
+    if let Some(sample) = transport_breach {
+        red.push(format!(
+            "transport: {} table(s) without a ceiling, {} over theirs at minute {:.1}",
+            sample.get("transport_unbounded"),
+            sample.get("transport_over"),
+            sample.minute
+        ));
+    }
+
     // `sync_in` holds the sync batches in flight, each at most the node's
     // per-sync limit, one per peer at most: a bounded transient. It is
     // judged by its peak against that bound and by its return to the floor
@@ -645,12 +832,41 @@ async fn pn_tables_stay_flat_once_the_store_is_full() {
         first.get("tables") / 1000.0,
         last.get("tables") / 1000.0
     );
+    // Resident plus swap by its slope (order 1592): flat tables under a
+    // growing process are the allocator keeping what it had.
+    let mem_per_min = slope(window, "mem_kb");
+    let tables_per_min = slope(window, "tables") / 1000.0;
+    let retained_per_min = mem_per_min - tables_per_min;
     println!(
-        "PN_GROWTH table=rss kb_per_min={:.2} first_kb={} last_kb={} (printed, not judged)",
-        slope(window, "rss_kb"),
+        "PN_GROWTH table=allocator judged=slope retained_kb_per_min={retained_per_min:.2} \
+         allowed={MEM_FLAT_KB_PER_MIN:.2} anon_plus_swap_kb_per_min={mem_per_min:.2} \
+         tables_kb_per_min={tables_per_min:.2} first_kb={} last_kb={} window_first_kb={} \
+         rss_kb={}->{} rss_kb_per_min={:.2} swap_kb={}->{} \
+         anon_maps={}->{} anon_kb={}->{} anon_kb_per_min={:.2} anon_big_maps={} \
+         anon_rss_kb={}->{} anon_rss_kb_per_min={:.2}",
+        first.get("mem_kb"),
+        last.get("mem_kb"),
+        window[0].get("mem_kb"),
         first.get("rss_kb"),
-        last.get("rss_kb")
+        last.get("rss_kb"),
+        slope(window, "rss_kb"),
+        first.get("swap_kb"),
+        last.get("swap_kb"),
+        first.get("anon_maps"),
+        last.get("anon_maps"),
+        first.get("anon_kb"),
+        last.get("anon_kb"),
+        slope(window, "anon_kb"),
+        last.get("anon_big_maps"),
+        first.get("anon_rss_kb"),
+        last.get("anon_rss_kb"),
+        slope(window, "anon_rss_kb"),
     );
+    if retained_per_min > MEM_FLAT_KB_PER_MIN {
+        red.push(format!(
+            "allocator retains {retained_per_min:.2} kB/min beyond the tables"
+        ));
+    }
     println!(
         "PN_GROWTH window_from_minute={:.1} samples={} evicted={evicted} accepted={accepted} \
          accepts_per_min={:.0} stored_per_min={stored_per_min:.1} \

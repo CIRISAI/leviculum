@@ -26,14 +26,14 @@ runs an event-driven main loop that dispatches packets between them:
 | Interface | ID | Medium | HW MTU |
 |-----------|----|--------|--------|
 | `serial_usb` | 0 | USB CDC-ACM, HDLC framing to host | 564 |
-| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/node_loop.rs:458`) |
+| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/node_loop.rs:462`) |
 | `ble` | 2 | BLE peripheral, Columba v2.2 | 564 |
 
 (Interface registration and MTUs:
-`set_interface_name` (`leviculum-nrf/src/node_loop.rs:439-456`, the T114
+`set_interface_name` (`leviculum-nrf/src/node_loop.rs:443-460`, the T114
 and the RAK4631 alike). The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/node_loop.rs:849`.)
+`leviculum-nrf/src/node_loop.rs:866`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
@@ -47,7 +47,7 @@ A board does not accept compressed resources. The firmware builds
 megabytes of working memory against a 96 KiB heap. A board therefore
 refuses a compressed advertisement at once with a receiver cancel, before
 it requests a single part, and the sender fails that transfer immediately
-(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:2827`;
+(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:2889`;
 the refusal logs `RESOURCE_ADV_REFUSED reason=compressed` where tracing is
 compiled in). A Python sender compresses by default whenever bz2 shrinks
 the data (`auto_compress=True`, `reference/Reticulum/RNS/Resource.py:248`);
@@ -525,7 +525,7 @@ board. Exactly one BSP feature must be enabled per build; a
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
-> (through `node_loop::ble_up`, `leviculum-nrf/src/node_loop.rs:563`,
+> (through `node_loop::ble_up`, `leviculum-nrf/src/node_loop.rs:567`,
 > `leviculum-nrf/src/bin/t114.rs:100`,
 > `leviculum-nrf/src/bin/rak4631.rs:129`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
@@ -548,8 +548,8 @@ The mapping from board to binary and features used by the flash recipes:
 | SenseCAP T1000-E | `t1000e` | `bsp-t1000e` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:2172`, `Justfile:2203`,
-`Justfile:2219`.)
+`just flash-rak4631-pocket` recipes: `Justfile:2197`, `Justfile:2228`,
+`Justfile:2244`.)
 
 ### What the `lnflash` bundle carries
 
@@ -615,8 +615,8 @@ RNode configuration on the same LoRa network.
 | TX power | 22 dBm |
 
 (`leviculum-nrf/README.md:8`. The profile the firmware loads at boot,
-`eu_medium` (`leviculum-nrf/src/lora.rs:631-670`), applied at
-`leviculum-nrf/src/node_loop.rs:474` on every board on the shared loop.)
+`eu_medium` (`leviculum-nrf/src/lora.rs:641-680`), applied at
+`leviculum-nrf/src/node_loop.rs:478` on every board on the shared loop.)
 
 See [Flashing](flashing.md) for how to build and write these binaries to
 a board, and [Recovery](recovery.md) for the bootloader-entry details.

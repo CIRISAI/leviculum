@@ -2695,6 +2695,15 @@ fn report_mgmt(
             ));
         }
         Err(SessionReply::Refused(reason))
+            if reason == leviculum_core::envelope::REFUSE_PERSIST_PENDING =>
+        {
+            return ui.say(&format!(
+                "{port}: the board runs the allow-list and is still writing it to flash. Wait \
+                 for `persist landed` on if00, or ask again (an unchanged page answers at once), \
+                 before you reset it."
+            ));
+        }
+        Err(SessionReply::Refused(reason))
             if reason == leviculum_core::envelope::REFUSE_PERSIST =>
         {
             return ui.say(&format!(

@@ -352,10 +352,19 @@ impl<R: CryptoRngCore, Y: Yield> CooperativeStamper<R, Y> {
             return Err(StampError::InvalidCost);
         }
         let base = self.workblock_hasher(material, rounds).await;
+        // One draw per search, then a counter: a stamp is any 32 bytes whose
+        // digest clears the cost, the validator asks nothing else of it
+        // (`LXStamper.py:73-77`), so candidates need to be distinct, not each
+        // freshly random. A draw per candidate made the source the search's
+        // cost: on a board it is the SoftDevice's entropy pool, and a draw
+        // that finds the pool short spins in thread mode until it refills,
+        // so the slices between two yields ran for seconds (order 1631,
+        // LV-1006; `a_search_draws_its_randomness_once`).
+        let mut seed = [0u8; 32];
+        self.rng.fill_bytes(&mut seed);
         let mut tries = 0usize;
         loop {
-            let mut s = [0; 32];
-            self.rng.fill_bytes(&mut s);
+            let s = nth_candidate(&seed, tries as u64);
             let candidate = digest_from_base(&base, &s);
             if digest_valid(&candidate, cost) {
                 return Ok(s);
@@ -464,6 +473,18 @@ fn digest_valid(hash: &[u8; 32], cost: u8) -> bool {
     target[31 - bit / 8] = 1 << (bit % 8);
     *hash <= target
 }
+/// The `n`-th candidate of a search seeded with `seed`: the seed with its
+/// first eight bytes, read little-endian, advanced by `n`. Distinct for
+/// every `n` below 2^64, far past any search that terminates.
+#[cfg(feature = "pow")]
+fn nth_candidate(seed: &[u8; 32], n: u64) -> [u8; 32] {
+    let mut candidate = *seed;
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&seed[..8]);
+    let advanced = u64::from_le_bytes(head).wrapping_add(n);
+    candidate[..8].copy_from_slice(&advanced.to_le_bytes());
+    candidate
+}
 #[cfg(feature = "pow")]
 fn digest_from_base(base: &Sha256, stamp: &[u8; 32]) -> [u8; 32] {
     let mut hasher = base.clone();
@@ -554,6 +575,67 @@ mod tests {
         assert_eq!(
             futures::executor::block_on(stamper.validate_stamp(b"material", &[0; 32], 255, 1)),
             Ok(None)
+        );
+    }
+
+    /// A random source that counts its draws, over the OS source.
+    #[cfg(feature = "pow")]
+    struct CountingRng {
+        draws: usize,
+    }
+
+    #[cfg(feature = "pow")]
+    impl rand_core::RngCore for CountingRng {
+        fn next_u32(&mut self) -> u32 {
+            self.draws += 1;
+            rand_core::OsRng.next_u32()
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.draws += 1;
+            rand_core::OsRng.next_u64()
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            self.draws += 1;
+            rand_core::OsRng.fill_bytes(dest);
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "pow")]
+    impl rand_core::CryptoRng for CountingRng {}
+
+    /// One search draws its randomness once, not once per candidate
+    /// (order 1631, LV-1006).
+    ///
+    /// On a board the source is the SoftDevice's entropy pool, and a draw
+    /// that finds the pool short spins in thread mode until it refills
+    /// (`leviculum-nrf/src/rng.rs`, `wait_consume`). With a 32-byte draw per
+    /// candidate, 64 candidates between two yields held thread mode for
+    /// seconds: the field Pocket's two-second tick missed 202 of 286 beats
+    /// while it mined one cost-18 peering key, and the boot before it panicked
+    /// out of heap after a 12 s `THREAD_STALL` with the same key in work. A
+    /// cost-8 search tries about 256 candidates; it must still draw once.
+    #[cfg(feature = "pow")]
+    #[test]
+    fn a_search_draws_its_randomness_once() {
+        use super::{CooperativeStamper, ReadyYield, StampCancel};
+
+        let mut stamper = CooperativeStamper::new(CountingRng { draws: 0 }, ReadyYield);
+        let material = b"order 1631 material";
+        let stamp =
+            futures::executor::block_on(stamper.generate(material, 8, 25, &StampCancel::new()))
+                .expect("cost 8 terminates");
+        assert_eq!(
+            stamper.rng.draws, 1,
+            "one draw per search, not per candidate"
+        );
+        let value = futures::executor::block_on(stamper.validate_stamp(material, &stamp, 8, 25));
+        assert!(
+            matches!(value, Ok(Some(v)) if v >= 8),
+            "the stamp found still clears its cost: {value:?}"
         );
     }
 }

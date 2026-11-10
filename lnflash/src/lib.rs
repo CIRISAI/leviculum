@@ -20,6 +20,7 @@
 //! Commit `362c1c2d` records a T114 image landing on a RAK4631 when that
 //! rule was absent.
 
+pub mod bootloader_update;
 pub mod dfu;
 pub mod entry;
 pub mod envelope;

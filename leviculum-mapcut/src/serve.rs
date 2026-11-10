@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// A running server; it stops when dropped.
@@ -28,6 +28,12 @@ struct Shared {
     /// A slow link (1291): bytes a second all answers share, 0 for none,
     /// and the wait before each answer's first byte.
     link: Mutex<Link>,
+    /// Body bytes written so far, every answer together.
+    sent: AtomicU64,
+    /// The body byte the answers stop before until [`Serve::release`],
+    /// `None` for no hold (1610).
+    hold: Mutex<Option<u64>>,
+    released: Condvar,
 }
 
 #[derive(Default)]
@@ -53,6 +59,9 @@ impl Serve {
             failing: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             link: Mutex::new(Link::default()),
+            sent: AtomicU64::new(0),
+            hold: Mutex::new(None),
+            released: Condvar::new(),
         });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -94,6 +103,34 @@ impl Serve {
         self.shared.failing.store(failing, Ordering::SeqCst);
     }
 
+    /// Body bytes written so far, every answer together.
+    pub fn sent(&self) -> u64 {
+        self.shared.sent.load(Ordering::SeqCst)
+    }
+
+    /// Stop every answer once `bytes` body bytes are written in all, until
+    /// [`release`](Self::release) (1610): a download held part way, so a
+    /// test sees the state it is in for as long as it needs to on a slow
+    /// host, instead of racing the link for it.
+    pub fn hold_at(&self, bytes: u64) {
+        *self
+            .shared
+            .hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(bytes);
+        self.shared.released.notify_all();
+    }
+
+    /// Lift a [`hold_at`](Self::hold_at).
+    pub fn release(&self) {
+        *self
+            .shared
+            .hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        self.shared.released.notify_all();
+    }
+
     /// Send at most `rate` bytes a second over every connection together,
     /// each answer's first byte `latency` after its request: a slow link,
     /// for the tests and the measurement of a region arriving (1291). A
@@ -112,37 +149,70 @@ impl Serve {
     }
 }
 
-/// Write `body` to `stream` at the link's rate.
+/// Write `body` to `stream` at the link's rate, stopping at a hold.
 fn send(shared: &Shared, stream: &mut TcpStream, body: &[u8]) -> std::io::Result<()> {
     let (rate, latency) = {
         let link = shared.link.lock().unwrap_or_else(PoisonError::into_inner);
         (link.rate, link.latency)
     };
     std::thread::sleep(latency);
-    if rate == 0 {
-        return stream.write_all(body);
-    }
-    for chunk in body.chunks(CHUNK) {
-        // Book the chunk's time on the shared link, then wait for it.
-        let start = {
-            let mut link = shared.link.lock().unwrap_or_else(PoisonError::into_inner);
-            let now = Instant::now();
-            let start = link.free.map_or(now, |f| f.max(now));
-            let takes = Duration::from_secs_f64(chunk.len() as f64 / link.rate.max(1) as f64);
-            link.free = Some(start + takes);
-            start + takes
-        };
-        if let Some(wait) = start.checked_duration_since(Instant::now()) {
-            std::thread::sleep(wait);
-        }
+    let mut rest = body;
+    while !rest.is_empty() {
+        let room = held(shared);
+        let take = rest.len().min(CHUNK).min(room);
+        let (chunk, after) = rest.split_at(take);
+        pace(shared, rate, chunk.len());
         stream.write_all(chunk)?;
+        shared.sent.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+        rest = after;
     }
     Ok(())
+}
+
+/// The bytes an answer may write before the hold, at least one: waits
+/// while the hold is reached.
+fn held(shared: &Shared) -> usize {
+    let mut hold = shared.hold.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        let sent = shared.sent.load(Ordering::SeqCst);
+        match *hold {
+            Some(at) if sent >= at => {
+                hold = shared
+                    .released
+                    .wait(hold)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            Some(at) => return usize::try_from(at - sent).unwrap_or(usize::MAX),
+            None => return usize::MAX,
+        }
+    }
+}
+
+/// Wait for `len` bytes' time on the shared link of `rate` bytes a second,
+/// none at a rate of 0.
+fn pace(shared: &Shared, rate: u64, len: usize) {
+    if rate == 0 {
+        return;
+    }
+    // Book the chunk's time on the shared link, then wait for it.
+    let start = {
+        let mut link = shared.link.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        let start = link.free.map_or(now, |f| f.max(now));
+        let takes = Duration::from_secs_f64(len as f64 / link.rate.max(1) as f64);
+        link.free = Some(start + takes);
+        start + takes
+    };
+    if let Some(wait) = start.checked_duration_since(Instant::now()) {
+        std::thread::sleep(wait);
+    }
 }
 
 impl Drop for Serve {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+        // An answer stopped at a hold ends instead of waiting for ever.
+        self.release();
         // Wake the accept loop so it sees the flag.
         let addr = self
             .base

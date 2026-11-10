@@ -736,26 +736,170 @@ fn no_daemon(error: &loquax::engine::AttachError) -> ExitCode {
     }
 }
 
-/// The configuration directory of the daemon the window and the terminal
-/// attach to, and start when none answers: `--config`, else
-/// `$LNMSG_HOME/reticulum` when [`LNMSG_HOME`](identity::HOME_ENV) moves
-/// Loquax's state, else the user's default (`~/.reticulum`). A Loquax whose
-/// state lives elsewhere (a test, a second identity) starts its daemon
-/// there too, never in the user's own directory (1570: a test's started
-/// lnsd ran 20 s on the coder host's `~/.reticulum`, its AutoInterface up).
-/// The instance it asks for is still the config's, `default` without one, so
-/// a running default daemon is found from either.
+/// `$LNMSG_HOME/reticulum` when `LNMSG_HOME` is set.
 #[cfg(any(feature = "tui", feature = "gui"))]
-fn daemon_config_dir(flag: Option<std::path::PathBuf>) -> std::path::PathBuf {
-    flag.unwrap_or_else(|| {
-        std::env::var_os(identity::HOME_ENV)
-            .filter(|home| !home.is_empty())
-            .map(|home| std::path::PathBuf::from(home).join(DAEMON_DIR))
-            .unwrap_or_else(Config::default_config_dir)
-    })
+fn moved_daemon_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os(identity::HOME_ENV)
+        .filter(|home| !home.is_empty())
+        .map(|home| std::path::PathBuf::from(home).join(DAEMON_DIR))
 }
 
-/// The daemon's directory under a moved `LNMSG_HOME` ([`daemon_config_dir`]).
+/// Where the instance name the window and the terminal ask for came from,
+/// as the `INSTANCE` line's `source=` says it.
+#[cfg(any(feature = "tui", feature = "gui"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NameSource {
+    /// `--instance`, or the config `--config` names.
+    Flag,
+    /// The config under `$LNMSG_HOME/reticulum`.
+    Home,
+    /// The config under the user's `~/.reticulum`.
+    DefaultDir,
+    /// No config: `default`.
+    None,
+}
+
+#[cfg(any(feature = "tui", feature = "gui"))]
+impl NameSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            NameSource::Flag => "flag",
+            NameSource::Home => "home",
+            NameSource::DefaultDir => "default-dir",
+            NameSource::None => "none",
+        }
+    }
+}
+
+/// One daemon to look for: its config directory (its transport, and the
+/// RPC key a client asks it with) and the instance name.
+#[cfg(any(feature = "tui", feature = "gui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Look {
+    pub dir: std::path::PathBuf,
+    pub instance: String,
+    pub source: NameSource,
+}
+
+/// What the window and the terminal look for before they start a daemon,
+/// and what they start (1598). The running daemon is looked for, in order,
+/// by `--instance`, by the config under `$LNMSG_HOME/reticulum`, by the one
+/// under `~/.reticulum`, and, where a config named another, as `default`;
+/// `--instance` or `--config` is the one look there is. Only when none
+/// answers is a daemon started, under the name `--instance` or that
+/// directory's config gives, in `--config`, else `$LNMSG_HOME/reticulum`
+/// when [`LNMSG_HOME`](identity::HOME_ENV) moves Loquax's state, else the
+/// user's `~/.reticulum`: a Loquax whose state lives elsewhere (a test, a
+/// second identity) starts its daemon there too, never in the user's own
+/// directory (1570: a test's started lnsd ran 20 s on the coder host's
+/// `~/.reticulum`, its AutoInterface up). Before 1598 the
+/// name came from the start directory alone, so a Loquax with `LNMSG_HOME`
+/// set asked for `default`, missed the user's daemon with its own name, and
+/// started a second one beside it.
+#[cfg(any(feature = "tui", feature = "gui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DaemonLookup {
+    /// The running daemons to try, in order.
+    pub looks: Vec<Look>,
+    /// The daemon to start when none of them answers.
+    pub start: Look,
+}
+
+#[cfg(any(feature = "tui", feature = "gui"))]
+pub(crate) fn daemon_lookup(
+    config: Option<std::path::PathBuf>,
+    instance: Option<String>,
+) -> DaemonLookup {
+    lookup_in(
+        config,
+        instance,
+        moved_daemon_dir(),
+        Config::default_config_dir(),
+    )
+}
+
+/// [`daemon_lookup`] with its directories given, for the tests.
+#[cfg(any(feature = "tui", feature = "gui"))]
+fn lookup_in(
+    config: Option<std::path::PathBuf>,
+    instance: Option<String>,
+    moved: Option<std::path::PathBuf>,
+    default_dir: std::path::PathBuf,
+) -> DaemonLookup {
+    let has_config = |dir: &std::path::Path| dir.join("config").is_file();
+    let explicit = config.is_some() || instance.is_some();
+    let start_dir = config
+        .clone()
+        .or_else(|| moved.clone())
+        .unwrap_or_else(|| default_dir.clone());
+    let start = match (&instance, explicit) {
+        (Some(name), _) => Look {
+            dir: start_dir.clone(),
+            instance: name.clone(),
+            source: NameSource::Flag,
+        },
+        (None, true) => Look {
+            instance: instance_name(&start_dir),
+            dir: start_dir.clone(),
+            source: NameSource::Flag,
+        },
+        (None, false) => Look {
+            instance: instance_name(&start_dir),
+            source: match (has_config(&start_dir), moved.is_some()) {
+                (false, _) => NameSource::None,
+                (true, true) => NameSource::Home,
+                (true, false) => NameSource::DefaultDir,
+            },
+            dir: start_dir.clone(),
+        },
+    };
+    if explicit {
+        // What the flags name is what is asked for, and nothing else.
+        let dir = match &config {
+            Some(dir) => dir.clone(),
+            None => [moved.clone(), Some(default_dir.clone())]
+                .into_iter()
+                .flatten()
+                .find(|dir| has_config(dir))
+                .unwrap_or_else(|| start_dir.clone()),
+        };
+        return DaemonLookup {
+            looks: vec![Look {
+                dir,
+                ..start.clone()
+            }],
+            start,
+        };
+    }
+    let mut looks: Vec<Look> = Vec::new();
+    let configured = moved
+        .iter()
+        .map(|dir| (dir, NameSource::Home))
+        .chain([(&default_dir, NameSource::DefaultDir)]);
+    for (dir, source) in configured {
+        if has_config(dir) {
+            looks.push(Look {
+                dir: dir.clone(),
+                instance: instance_name(dir),
+                source,
+            });
+        }
+    }
+    if !looks.iter().any(|look| look.instance == "default") {
+        // A default daemon is most likely the user's own, whose RPC key
+        // lies under `~/.reticulum` when anywhere.
+        looks.push(Look {
+            dir: default_dir.clone(),
+            instance: "default".to_string(),
+            source: NameSource::None,
+        });
+    }
+    let mut seen = std::collections::HashSet::new();
+    looks.retain(|look| seen.insert(look.instance.clone()));
+    DaemonLookup { looks, start }
+}
+
+/// The daemon's directory under a moved `LNMSG_HOME` ([`daemon_lookup`]).
 /// Not the state directory itself: Loquax's own `config` lies there.
 #[cfg(any(feature = "tui", feature = "gui"))]
 const DAEMON_DIR: &str = "reticulum";
@@ -2927,6 +3071,88 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1598: the lookup table. The running daemon is asked for by
+    /// `--instance`, the moved home's config, the user's config, then as
+    /// `default`; a daemon is started only in the start directory, under
+    /// that directory's name (1570).
+    #[cfg(any(feature = "tui", feature = "gui"))]
+    #[test]
+    fn the_daemon_lookup_asks_each_config_before_it_starts_one() {
+        use std::path::PathBuf;
+        let root = tempfile::tempdir().expect("root");
+        let moved = root.path().join("lnmsg").join(DAEMON_DIR);
+        let users = root.path().join("dot-reticulum");
+        let flag = root.path().join("flag");
+        let configure = |dir: &PathBuf, name: &str| {
+            std::fs::create_dir_all(dir).expect("dir");
+            std::fs::write(
+                dir.join("config"),
+                format!("[reticulum]\n  share_instance = Yes\n  instance_name = {name}\n"),
+            )
+            .expect("config");
+        };
+        let look = |dir: &PathBuf, instance: &str, source| Look {
+            dir: dir.clone(),
+            instance: instance.to_string(),
+            source,
+        };
+        let plan = |config: Option<&PathBuf>, instance: Option<&str>, with_home: bool| {
+            lookup_in(
+                config.cloned(),
+                instance.map(str::to_string),
+                with_home.then(|| moved.clone()),
+                users.clone(),
+            )
+        };
+
+        // No config anywhere: `default`, found or started where Loquax
+        // lives.
+        let got = plan(None, None, true);
+        assert_eq!(got.looks, vec![look(&users, "default", NameSource::None)]);
+        assert_eq!(got.start, look(&moved, "default", NameSource::None));
+        let got = plan(None, None, false);
+        assert_eq!(got.start, look(&users, "default", NameSource::None));
+
+        // The user's daemon names its instance (the conformance cell):
+        // asked for by that name, then as `default`; a start still in the
+        // moved home under its own name.
+        configure(&users, "node-x");
+        let got = plan(None, None, true);
+        assert_eq!(
+            got.looks,
+            vec![
+                look(&users, "node-x", NameSource::DefaultDir),
+                look(&users, "default", NameSource::None),
+            ]
+        );
+        assert_eq!(got.start, look(&moved, "default", NameSource::None));
+        let got = plan(None, None, false);
+        assert_eq!(got.looks[0], look(&users, "node-x", NameSource::DefaultDir));
+        assert_eq!(got.start, look(&users, "node-x", NameSource::DefaultDir));
+
+        // A config in the moved home comes first.
+        configure(&moved, "home-y");
+        let got = plan(None, None, true);
+        assert_eq!(
+            got.looks,
+            vec![
+                look(&moved, "home-y", NameSource::Home),
+                look(&users, "node-x", NameSource::DefaultDir),
+                look(&users, "default", NameSource::None),
+            ]
+        );
+        assert_eq!(got.start, look(&moved, "home-y", NameSource::Home));
+
+        // `--instance` and `--config` are asked for alone.
+        let got = plan(None, Some("z"), true);
+        assert_eq!(got.looks, vec![look(&moved, "z", NameSource::Flag)]);
+        assert_eq!(got.start, look(&moved, "z", NameSource::Flag));
+        configure(&flag, "flag-w");
+        let got = plan(Some(&flag), None, true);
+        assert_eq!(got.looks, vec![look(&flag, "flag-w", NameSource::Flag)]);
+        assert_eq!(got.start, look(&flag, "flag-w", NameSource::Flag));
+    }
 
     /// 1342: plain `loquax` with a flag only the terminal view takes asks
     /// for it, so a key script never opens a window on a desktop; the

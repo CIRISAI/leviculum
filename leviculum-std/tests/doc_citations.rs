@@ -164,6 +164,15 @@ const EXTERNAL_PREFIXES: &[&str] = &[
     // A crates.io dependency, cited by the nRF gate scripts. Its source is
     // under `~/.cargo`, never in this tree, so it can only be counted.
     "nrf-softdevice/",
+    // The Adafruit nRF52 bootloader the boards carry (1601, OTA stage 1):
+    // cited from a clone of github.com/adafruit/Adafruit_nRF52_Bootloader at
+    // tag 0.9.0 (a73fe207), which no host keeps beside this tree.
+    "Adafruit_nRF52_Bootloader/",
+    // i2pd, the I2P router the I2P interface talks SAM to (1654, its
+    // five-second session linger): cited from a clone of
+    // github.com/PurpleI2P/i2pd at tag 2.56.0 (fb90b01f), the version
+    // Debian ships, which no host keeps beside this tree.
+    "i2pd/",
 ];
 
 /// The vendored references. A citation into one of these that is not
@@ -359,7 +368,7 @@ fn ident_regexes() -> [Regex; 4] {
 }
 
 /// A backticked token that is itself a citation: `Destination.py:322`,
-/// `Justfile:1806`. Tables list these next to each other, so without this
+/// `Justfile:1815`. Tables list these next to each other, so without this
 /// the second citation of a row would take the first as its subject.
 fn citation_shaped() -> Regex {
     Regex::new(r"(?:\.[A-Za-z]+|^Justfile):\d").unwrap()
@@ -957,7 +966,7 @@ fn check<'a>(root: &Path, citations: &'a [Citation]) -> (Counts, Vec<Failure>, V
                 .into_owned()
         })
         .collect();
-    // Bare filenames like `transport.rs:569` resolve by suffix.
+    // Bare filenames like `transport.rs:570` resolve by suffix.
     let resolve = |cited: &str| -> Vec<&str> {
         let suffix = format!("/{cited}");
         rel_files
@@ -1992,7 +2001,7 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
         "`Transport.outbound()` is the loop, and (",
         // A citation next to a citation, the shape a comparison table has.
         "| Self-announce one-shot | `Destination.py:322`, ",
-        "the recipe moved (`Justfile:1806`, ",
+        "the recipe moved (`Justfile:1815`, ",
         // A token with no letter in its last segment cannot be searched
         // for as an identifier.
         "the VID:PID `1209:0001` (",

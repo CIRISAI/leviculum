@@ -63,7 +63,10 @@
 //! that the heap is fine.
 //!
 //! Cadence: every [`PERIOD`](crate::heap_census::PERIOD) (4× the `[HEAP]`
-//! line's 30 s), riding the
+//! line's 30 s), and out of turn, at most once a
+//! [`LOW_PERIOD`](crate::heap_census::LOW_PERIOD), when free heap is below
+//! [`LOW_FREE_BYTES`](crate::heap_census::LOW_FREE_BYTES), preceded by a
+//! critical `[HEAP_LOW] free=… threshold=… phase=…` line; riding the
 //! main loop the way `[TRANSPORT]` does — the census walks state only
 //! the loop owns. On demand: the byte `c` on the debug CDC port
 //! ([`request`](crate::heap_census::request)) makes the next loop wake-up
@@ -83,6 +86,19 @@ use rand_core::CryptoRngCore;
 /// carried by `[HEAP]` — the census names the holders along it.
 pub const PERIOD: Duration = Duration::from_secs(120);
 
+/// Free heap below which the census is emitted out of turn (order 1641).
+/// The periodic line comes every two minutes, and on 2026-11-10 the T114's
+/// last census before each of four `memory allocation ... failed` panics
+/// showed 16 to 22 KB free and was up to two minutes old: the census that
+/// names the holder of the heap at the moment it ran out was never taken.
+/// 24 KiB is above every one of those readings, so a board on its way to
+/// that failure crosses it first.
+pub const LOW_FREE_BYTES: usize = 24 * 1024;
+
+/// At most one low-heap census per this period: a board hovering at the
+/// threshold must not spend its loop walking its own tables.
+pub const LOW_PERIOD: Duration = Duration::from_secs(60);
+
 /// One-shot request flag, set by the debug-port byte `c`.
 static REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -97,6 +113,8 @@ pub fn request() {
 /// exclusively.
 pub struct Ticker {
     next: Instant,
+    /// The earliest instant a low-heap census may run again.
+    low_next: Instant,
 }
 
 impl Ticker {
@@ -104,6 +122,7 @@ impl Ticker {
     pub fn new() -> Self {
         Self {
             next: Instant::now() + PERIOD,
+            low_next: Instant::from_ticks(0),
         }
     }
 
@@ -123,8 +142,25 @@ impl Ticker {
         S: Storage,
     {
         let now = Instant::now();
-        if now < self.next && !REQUESTED.swap(false, Ordering::Relaxed) {
+        let (_, free) = leviculum_firmware::heap::heap_stats();
+        let low = free < LOW_FREE_BYTES && now >= self.low_next;
+        if now < self.next && !REQUESTED.swap(false, Ordering::Relaxed) && !low {
             return;
+        }
+        if low {
+            self.low_next = now + LOW_PERIOD;
+            // Critical, so it reaches the persistent tail the next boot
+            // replays; the phase is the work thread mode did last, which is
+            // the work that left the heap this low.
+            crate::log::log_fmt_critical(
+                "[HEAP_LOW] ",
+                format_args!(
+                    "free={} threshold={} phase={}",
+                    free,
+                    LOW_FREE_BYTES,
+                    leviculum_firmware::thread_watch::current_phase().name()
+                ),
+            );
         }
         // Re-arm from now, as [TRANSPORT] does: no catch-up bursts.
         self.next = now + PERIOD;
@@ -303,6 +339,9 @@ where
     C: Clock,
     S: Storage,
 {
+    let _phase = leviculum_firmware::thread_watch::phase_scope(
+        leviculum_firmware::thread_watch::Phase::Census,
+    );
     let (used, _free, _watermark) = leviculum_firmware::heap::heap_watermark_sample();
     let largest = largest_free_block();
     // Re-read free after the probe: the probe cannot change it (every

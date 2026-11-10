@@ -241,44 +241,81 @@ fn corrupt_last_byte(pkt: &[u8]) -> Vec<u8> {
 }
 
 /// The 15:48 shape, the RTT withheld: link data, a request and a channel
-/// packet on a responder link still in its handshake are each a
-/// `[DROP] reason=link-not-active`. Before 860 each was silent.
+/// packet on a responder link still in its handshake that do not decrypt
+/// under the link keys are each a `[DROP] reason=link-not-active`, and the
+/// link stays in its handshake. Before 860 each was silent.
 ///
-/// This pins today's refusal, not a judgment on it: a Python responder
-/// would deliver the plain data and the channel packet here (see
-/// `DropReason::LinkNotActive`). Taking them is a separate decision; if it
-/// is taken, this test changes with it.
+/// A genuine packet is not refused any more (1624): it proves the initiator
+/// holds the link keys, as the RTT would have, and establishes the link. The
+/// positive control below is that packet.
 #[test]
 fn traffic_on_a_handshake_link_is_a_named_drop() {
-    let (mut pair, rtt) = handshake_holding_rtt();
+    let (mut pair, _rtt) = handshake_holding_rtt();
 
     let data = pair.data(b"the 483 B packet");
-    let out = pair.deliver(&data);
+    let out = pair.deliver(&corrupt_last_byte(&data));
     assert!(!delivered(&out));
+    assert!(!established(&out));
     assert_one_drop(&out, DropReason::LinkNotActive);
 
     let request = pair.request("/page");
-    assert_one_drop(&pair.deliver(&request), DropReason::LinkNotActive);
+    assert_one_drop(
+        &pair.deliver(&corrupt_last_byte(&request)),
+        DropReason::LinkNotActive,
+    );
 
     let channel = pair.channel(b"the 99 B packet");
-    assert_one_drop(&pair.deliver(&channel), DropReason::LinkNotActive);
+    assert_one_drop(
+        &pair.deliver(&corrupt_last_byte(&channel)),
+        DropReason::LinkNotActive,
+    );
 
     assert_eq!(
         pair.responder.transport().stats().drops_link_not_active(),
         3
     );
+    assert!(!pair.responder_link_active());
 
-    // Positive control: the RTT arrives, and new data on the link is taken.
-    assert!(established(&pair.deliver(&rtt)));
-    let data = pair.data(b"after the rtt");
+    // Positive control: the same data packet, intact, establishes the link
+    // and is delivered on it.
     let out = pair.deliver(&data);
-    assert!(delivered(&out));
+    assert!(established(&out), "events: {:?}", out.events);
+    assert!(delivered(&out), "events: {:?}", out.events);
     assert!(drops(&out).is_empty(), "events: {:?}", out.events);
+    assert!(pair.responder_link_active());
+}
+
+/// 1624: with the RTT lost, the initiator's first genuine packet of any of
+/// the three kinds establishes the responder link, and the RTT that turns up
+/// after it is the named refusal an RTT on an established link always is.
+#[test]
+fn a_genuine_packet_establishes_a_handshake_link() {
+    for kind in ["data", "request", "channel"] {
+        let (mut pair, rtt) = handshake_holding_rtt();
+        let pkt = match kind {
+            "data" => pair.data(b"payload"),
+            "request" => pair.request("/page"),
+            _ => pair.channel(b"payload"),
+        };
+        let out = pair.deliver(&pkt);
+        assert!(established(&out), "{kind}: events: {:?}", out.events);
+        assert!(pair.responder_link_active(), "{kind}");
+        assert_eq!(
+            pair.responder.transport().stats().drops_link_not_active(),
+            0,
+            "{kind}"
+        );
+
+        let out = pair.deliver(&rtt);
+        assert!(!established(&out), "{kind}: established once only");
+        assert_one_drop(&out, DropReason::RttInvalid);
+    }
 }
 
 /// The 15:48 shape, the RTT corrupted: the RTT that does not validate is a
-/// `[DROP] reason=rtt-invalid`, the link stays in its handshake, and the
-/// data after it is `link-not-active` — the whole chain on the capture.
+/// `[DROP] reason=rtt-invalid`, the link stays in its handshake, and data
+/// after it that does not decrypt either is `link-not-active` — the whole
+/// chain on the capture. (Genuine data after it establishes the link, 1624.)
 #[test]
 fn a_corrupted_rtt_is_a_named_drop_and_so_is_what_follows() {
     let (mut pair, rtt) = handshake_holding_rtt();
@@ -289,7 +326,10 @@ fn a_corrupted_rtt_is_a_named_drop_and_so_is_what_follows() {
     assert!(!pair.responder_link_active());
 
     let data = pair.data(b"after the bad rtt");
-    assert_one_drop(&pair.deliver(&data), DropReason::LinkNotActive);
+    assert_one_drop(
+        &pair.deliver(&corrupt_last_byte(&data)),
+        DropReason::LinkNotActive,
+    );
     assert_eq!(pair.responder.transport().stats().drops_rtt_invalid(), 1);
 
     // Positive control: the genuine RTT still establishes the link.

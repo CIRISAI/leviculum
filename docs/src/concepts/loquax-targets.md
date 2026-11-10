@@ -73,7 +73,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 12 | Photo size, three tiers | `SettingsActivity.java:470` | `loquax/src/gui/chat.rs:1282` (settings) (1371) | `loquax/src/ui.rs:5809` (palette `photo size`) (1371) |
 | 13 | View a photo | `ChatActivity.java:1994` | `loquax/src/gui.rs:1758` (own viewer) | `loquax/src/ui.rs:4578`, `loquax/src/shell.rs:459` (system viewer) |
 | 14 | Camera | `ChatActivity.java:1214` | n/a | n/a |
-| 15 | Send a file | `ChatActivity.java:1714` | `loquax/src/gui.rs:1287`, `loquax/src/shell.rs:870` (1341) | `loquax/src/ui.rs:5827` (palette `send file`, a typed path), `loquax/src/shell.rs:429` (1371) |
+| 15 | Send a file | `ChatActivity.java:1714` | `loquax/src/gui.rs:1287`, `loquax/src/shell.rs:871` (1341) | `loquax/src/ui.rs:5827` (palette `send file`, a typed path), `loquax/src/shell.rs:429` (1371) |
 | 16 | Open and save a received file | `ChatActivity.java:1894` | `loquax/src/gui.rs:1759`, `loquax/src/shell.rs:466` | `loquax/src/ui.rs:4589`, `loquax/src/shell.rs:396` |
 | 17 | Record a voice message | `RecordingBar.java:369` | `loquax/src/gui/chat.rs:2400`, `loquax/src/shell.rs:553`, `mic.rs` | `loquax/src/ui.rs:5120`, `loquax/src/shell.rs:484`, `mic.rs` |
 | 18 | Play a voice message | `ChatActivity.java:1580` | `loquax/src/gui.rs:1762`, `loquax/src/shell.rs:485` | `loquax/src/ui.rs:4598`, `loquax/src/shell.rs:402` |
@@ -93,10 +93,10 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 32 | Rename | `ContactActivity.java:528` | row menu, its field (1371) | `loquax/src/ui.rs:5756` |
 | 33 | Forget a conversation | `ContactActivity.java:411` | row menu, asked once (1371) | `loquax/src/ui.rs:5726` |
 | 34 | Add a contact by code, typed or pasted | `AddContact.java:92` | `loquax/src/gui.rs:1284` | `loquax/src/ui.rs:5888` |
-| 35 | A contact code from a QR | `loquax-android/src/lib.rs:364` (the scanner screen's decoder) | `loquax/src/gui.rs:1739`, `loquax/src/gui/chat.rs:1339`, `loquax/src/scan.rs:39` (1341) | `loquax/src/ui.rs:5831` (palette `code in a picture`, a typed path), `loquax/src/shell.rs:432` (1371) |
+| 35 | A contact code from a QR | `loquax-android/src/lib.rs:372` (the scanner screen's decoder) | `loquax/src/gui.rs:1739`, `loquax/src/gui/chat.rs:1339`, `loquax/src/scan.rs:39` (1341) | `loquax/src/ui.rs:5831` (palette `code in a picture`, a typed path), `loquax/src/shell.rs:432` (1371) |
 | 36 | My code | `ProfileActivity.java:285` | `loquax/src/gui.rs:1455`, `loquax/src/gui.rs:2788` (settings row, QR) (1371) | `loquax/src/ui.rs:5888` |
 | 37 | Home setup | `WelcomeActivity.java:589` | CLI (`loquax/src/main.rs:211`) | CLI (`loquax/src/main.rs:209`) |
-| 38 | Link a device | `ProfileActivity.java:385` | CLI (`loquax/src/main.rs:225`, `loquax/src/main.rs:241`) | CLI (`loquax/src/main.rs:223`, `loquax/src/main.rs:239`) |
+| 38 | Link a device | `ProfileActivity.java:385` | CLI (`loquax/src/main.rs:241`, `loquax/src/main.rs:225`) | CLI (`loquax/src/main.rs:239`, `loquax/src/main.rs:223`) |
 | 39 | Move the phone | `ProfileActivity.java:433` | MISSING | MISSING |
 | 40 | Backup | `BackupActivity.java:130` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:671` | `loquax/src/gui.rs:1444`, `loquax/src/gui.rs:2908` (the shared overlay) (1371) | `loquax/src/ui.rs:5657` |
@@ -166,6 +166,10 @@ opened. The M9 has no third button: what it
 would need is on [the handheld page](handheld-messenger.md), "Explore on
 the M9".
 
+Public channels carried over LXMF propagation, an earlier concept, are
+superseded by these RRC rooms and by mailbox groups (Lew, 2026-11-09), so
+a channel layer on top of propagation nodes is not to be built again.
+
 ## What 1341 brought, and how
 
 - **Pictures and files in the window.** The window sets the core's
@@ -177,7 +181,7 @@ the M9".
   in the lock through the window's theme reader (leviculum-ui-iced, mundy);
   neither `rfd` nor another dialog crate is in the tree, and zbus needs no
   GTK. The shell sends the pick as the phone sends its picker's
-  (`loquax/src/shell.rs:992`): a picture scaled at the reader's photo size, a file
+  (`loquax/src/shell.rs:993`): a picture scaled at the reader's photo size, a file
   whole up to what a receiver takes. Saving a received file is the
   existing save under the home's `files/` and the system's handler
   (`loquax/src/shell.rs:466`), the same in both desktop targets.

@@ -15,15 +15,15 @@ today:
 
 - **LoRa transport, with the receiver always on.** When the queue is
   empty the radio task parks in continuous receive and does not re-arm a
-  window (`leviculum-nrf/src/lora.rs:2638-2640`). There is no receive
+  window (`leviculum-nrf/src/lora.rs:2648-2650`). There is no receive
   duty cycle anywhere in the image.
 - **BLE for Columba** ([Bluetooth interfaces](bluetooth-interfaces.md)).
 - **The propagation node role** ([An LXMF propagation node on a
   board](propagation-node-on-a-board.md)). `pn.rs` is in every image: all
   four board binaries load its configuration at boot
-  (`leviculum-nrf/src/node_loop.rs:720`, which the T114 and the RAK4631
-  run, `leviculum-nrf/src/bin/solarnode.rs:718`,
-  `leviculum-nrf/src/bin/t1000e.rs:637`).
+  (`leviculum-nrf/src/node_loop.rs:724`, which the T114 and the RAK4631
+  run, `leviculum-nrf/src/bin/solarnode.rs:722`,
+  `leviculum-nrf/src/bin/t1000e.rs:641`).
 - **Telemetry at the announce cadence** ([Announce
   cadence](announce-cadence.md), [Telemetry](telemetry.md)).
 
@@ -78,12 +78,12 @@ Transport nodes rate-limit the announces they rebroadcast. With
 transport enabled and the interface leaving the keys unset, the target
 is 3600 s with a grace of 5 (`Interface.py:89-91`, applied at
 `Reticulum.py:830-833`; ours are `DEFAULT_AR_TARGET` and
-`DEFAULT_AR_GRACE`, `leviculum-core/src/transport.rs:201-205`). Each
+`DEFAULT_AR_GRACE`, `leviculum-core/src/transport.rs:202-206`). Each
 announce that arrives sooner than the target after the last one passed
 counts a violation, one that arrives later forgives one, and a sixth
 outstanding violation blocks rebroadcast until the last passed announce
 plus the target (`Transport.py:1853-1865`, ours `update_announce_rate`,
-`leviculum-core/src/transport.rs:14639-14671`). Worked through for the
+`leviculum-core/src/transport.rs:14666-14698`). Worked through for the
 300 s moving cadence: the first six announces, over 25 minutes, are
 rebroadcast by each transit node; after that about one in thirteen is,
 one every 65 minutes. The tracker's own neighbours hear every announce;

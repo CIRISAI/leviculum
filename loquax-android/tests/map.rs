@@ -1922,11 +1922,21 @@ fn the_crosshair_centres_on_the_own_fix_and_the_frame_places_it() {
     assert!(away.own_y.expect("y") < 0, "{away:?}");
 }
 
+/// How many threads [`names_fade_out_and_in_by_the_clock`] draws on: the
+/// painters' cap before their count became the host's cores (3f0f236b).
+const FADE_WORKERS: usize = 8;
+
 /// 1205: a name a pinch drops fades out by the renderer's clock (1167),
 /// from 255 to nothing over 150 ms; the names the frame at rest after the
 /// pinch places anew fade in over as long; while one fades the frame is
 /// pending, so Java asks again; and with the fades done the frame at rest
 /// is the one a fresh renderer draws there, byte for byte.
+///
+/// The renderer draws on [`FADE_WORKERS`] threads whatever the host has
+/// (1610): a moving frame draws two tiles a thread, and on one CPU, or
+/// under a CPU quota, which `available_parallelism` reads as one, the
+/// pinch's frames still owed tiles at 150 ms and said `pending` for them,
+/// which this test read as a fade not over.
 #[test]
 fn names_fade_out_and_in_by_the_clock() {
     let first_home = home();
@@ -1945,6 +1955,7 @@ fn names_fade_out_and_in_by_the_clock() {
         (shown, rgba, names)
     };
     let _ = frame(&loquax_android::map::render(&rest, Some(Vec::new()), now()));
+    loquax_android::map::tune_tiles(&dir, Some(FADE_WORKERS), false);
     let (shown, _, names) = draw(&rest, 1000);
     assert!(
         !shown.pending,
@@ -2528,6 +2539,15 @@ fn a_pan_into_the_empty_loads_what_is_on_screen_at_once() {
 /// z15, 80 kB) about ten seconds of it. While it loads the frames go
 /// from the outline through at least two pictures of stand-ins, and the
 /// whole region ends it.
+///
+/// The link stops at [`REGION_HOLD`], inside the region's tiles, until a
+/// frame has said `filling` (1610): the tiles arrive in a window of under
+/// five seconds, and on a shared runner (pipeline 617) the frames came
+/// slowly enough that none fell into it, `frames 51 filling 0 while
+/// loading [25, 99, 100]`. Held, the half-written region is there for as
+/// long as the host takes to draw it, so the test asks what the product
+/// promises, that a frame drawn on a region still arriving says so, and
+/// not whether the host drew one in time.
 #[test]
 fn a_region_fills_the_frame_in_while_it_downloads() {
     use leviculum_mapcut::serve::Serve;
@@ -2535,6 +2555,7 @@ fn a_region_fills_the_frame_in_while_it_downloads() {
     const ARCHIVE: &[u8] = include_bytes!("../../leviculum-mapcut/fixtures/grunewald.pmtiles");
     let serve = Serve::start(vec![("o.pmtiles".into(), ARCHIVE.to_vec())]).expect("serve");
     serve.throttle(8_000, Duration::from_millis(20));
+    serve.hold_at(REGION_HOLD);
     let home = tempfile::tempdir().expect("home");
     std::fs::create_dir_all(home.path().join("maps")).expect("maps");
     std::fs::write(
@@ -2549,16 +2570,26 @@ fn a_region_fills_the_frame_in_while_it_downloads() {
         zoom: Some(15),
         ..request(home.path(), false)
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // A liveness bound: the throttled link takes about 36 s on the host.
+    let deadline = Instant::now() + Duration::from_secs(180);
     let mut frames: Vec<(MapShown, Vec<u8>)> = Vec::new();
+    let mut held = true;
     loop {
         let (shown, rgba) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        if held && shown.filling {
+            serve.release();
+            held = false;
+        }
         let done = !shown.loading && !shown.filling && !shown.pending && frames.len() > 1;
         frames.push((shown, rgba));
         if done {
             break;
         }
-        assert!(Instant::now() < deadline, "the region never landed");
+        assert!(
+            Instant::now() < deadline,
+            "the region never landed (held at {} bytes: {held})",
+            serve.sent()
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     let last = &frames[frames.len() - 1].1;
@@ -2586,6 +2617,13 @@ fn a_region_fills_the_frame_in_while_it_downloads() {
         "the region came nearer: {near:?}"
     );
 }
+
+/// Where the link of [`a_region_fills_the_frame_in_while_it_downloads`]
+/// stops until a frame says `filling`: a body byte inside the region's
+/// tiles. The plan's directories end, and the first tiles are drawn, by
+/// byte 57 003; the last tile of the region arrives by byte 92 364; the
+/// same on one CPU and on ten (1610).
+const REGION_HOLD: u64 = 75_000;
 
 /// The first-tile walk of 1527: the Grunewald, a synthetic archive of it
 /// ([`leviculum_mapcut::pmtiles::padded`]: a real z15 tile in every slot,

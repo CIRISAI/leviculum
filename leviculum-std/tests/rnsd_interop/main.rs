@@ -83,6 +83,7 @@ mod lrproof_hop_undercount_interop_tests;
 mod lxmd_drop_in_tests;
 mod lxmd_peer;
 mod lxmf_interop_tests;
+mod mailbox_announce_new_interface_tests;
 mod mtu_tests;
 mod multihop_tests;
 mod node_api_tests;

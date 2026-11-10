@@ -1358,8 +1358,10 @@ pub fn decode_peer_record(body: &[u8]) -> Option<PeerRecord> {
         last_heard: le64(87),
         cursor: le64(95),
         is_static: flags & PEER_FLAG_STATIC != 0,
-        // The board does not rotate its table, so the log does not keep
-        // the host's traffic statistics (`PeerRecord::traffic`).
+        // The board holds its table to the cap by cursor
+        // (`PeerTable::trim_to_cap`), not by the host's traffic-ranked
+        // rotation, so the log does not keep those statistics
+        // (`PeerRecord::traffic`).
         traffic: Default::default(),
     })
 }
@@ -1458,6 +1460,98 @@ impl<R: Region> PnPeerStore<R> {
             })
         });
         newest
+    }
+}
+
+impl<R: Region> PnPeerStore<R> {
+    /// Re-save every peer record whose newest copy has aged into the older
+    /// half of the region, unchanged, and return whose. The queued writes
+    /// drain with the engine's next flush like any other save.
+    ///
+    /// The peer records live in the message log, whose round-robin reclaim
+    /// erases its oldest page whole (`leviculum-record-log`, `advance`). A
+    /// peer is saved when it is added, refreshed by an announce or moved by
+    /// a sync; a stored peer that does none of these for a lap of the region
+    /// was erased with its page, and the next boot restored the table
+    /// without it and without any `PN_PEER action=drop`. That is how the
+    /// T114 went from 15 to 14 to 13 peers across the panic reboots of
+    /// 2026-11-10 (order 1651, LV-1006): its four announcing peers were
+    /// re-saved on every announce and survived, the quiet ones were reclaimed
+    /// one by one, and the loss only showed at the next restore. The same
+    /// half-lap rule keeps the recalled announces
+    /// ([`Self::remember_announce`]) and the operator lists
+    /// ([`board_list_refresh_ops`]).
+    ///
+    /// A destination with a queued save or remove is skipped: the queue
+    /// already carries its newest state.
+    pub fn refresh_ageing_peers(&mut self) -> Vec<[u8; DESTINATION_LENGTH]> {
+        let mut newest_page = 0u32;
+        let mut pages = 0u32;
+        // Per destination: the newest copy's sequence and page, and how many
+        // live copies there are (an interrupted save leaves two).
+        let mut held: Vec<([u8; DESTINATION_LENGTH], u64, u32, usize, PeerRecord)> = Vec::new();
+        self.region.with_bytes(|bytes| {
+            pages = (bytes.len() / SECTOR_SIZE as usize) as u32;
+            scan(bytes, |record| {
+                newest_page = newest_page.max(record.page_seq);
+                if !record.live || record.tag != TAG_PEER || self.is_purge_masked(record.offset) {
+                    return;
+                }
+                let Some(decoded) = decode_peer_record(record.body) else {
+                    return;
+                };
+                let seq = record.sequence();
+                match held
+                    .iter_mut()
+                    .find(|entry| entry.0 == decoded.destination_hash)
+                {
+                    Some(entry) => {
+                        entry.3 += 1;
+                        if entry.1 < seq {
+                            entry.1 = seq;
+                            entry.2 = record.page_seq;
+                            entry.4 = decoded;
+                        }
+                    }
+                    None => held.push((decoded.destination_hash, seq, record.page_seq, 1, decoded)),
+                }
+            })
+        });
+        let mut refreshed = Vec::new();
+        for (destination_hash, _, page, copies, record) in held {
+            let ageing = newest_page - page >= pages / 2;
+            if !(ageing || copies > 1)
+                || self.removed.contains(&destination_hash)
+                || self
+                    .pending
+                    .iter()
+                    .any(|queued| queued.destination_hash == destination_hash)
+            {
+                continue;
+            }
+            let _ = self.save(&record);
+            refreshed.push(destination_hash);
+        }
+        refreshed
+    }
+
+    /// Live peer records whose body no longer decodes: [`PeerStore::load_all`]
+    /// leaves them out, so a restore without them is a table that lost a
+    /// peer without a drop. The engine counts them at boot and says so.
+    pub fn undecodable_peer_records(&self) -> usize {
+        let mut count = 0;
+        self.region.with_bytes(|bytes| {
+            scan(bytes, |record| {
+                if record.live
+                    && record.tag == TAG_PEER
+                    && !self.is_purge_masked(record.offset)
+                    && decode_peer_record(record.body).is_none()
+                {
+                    count += 1;
+                }
+            })
+        });
+        count
     }
 }
 
@@ -1799,11 +1893,12 @@ pub fn board_peering_config(
     }
 }
 
-/// The most hashes one operator list holds: the peer table's cap, which
-/// bounds the static list by what the table can hold, and the same for the
-/// two allow lists so one frame shape and one bound serve all three
-/// (256 B of body, well inside a page).
-pub const BOARD_LIST_MAX: usize = leviculum_heap_budget::BOARD_MAX_PEERS;
+/// The most hashes one operator list holds, the same for the static list
+/// and the two allow lists so one frame shape and one bound serve all three
+/// (256 B of body, well inside a page). It was the peer table's cap until
+/// order 1641 lowered that to seven for the heap; the lists live in flash and
+/// in the envelope (`PN_LIST_MAX_HASHES`), so they keep their sixteen.
+pub const BOARD_LIST_MAX: usize = 16;
 
 /// One of the operator's lists, set at flash time (`lnflash --static-peer`,
 /// `--auth-allowed`, `--control-allowed`) and read at boot. Each is one

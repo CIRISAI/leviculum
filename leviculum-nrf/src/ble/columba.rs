@@ -62,6 +62,7 @@ use static_cell::StaticCell;
 
 use leviculum_core::node_name::NodeName;
 
+use super::err_text::ErrText;
 use super::notify::{notify_fragments, BLE_TX_DRAIN_UNROUTED, BLE_TX_DROPPED, BLE_TX_PACKETS};
 use super::{BleLinkEvent, CarrierWaiter, HVN_DRAIN, MAX_LINKS};
 
@@ -2567,7 +2568,10 @@ async fn central_link(
         Err(err) => {
             crate::log::log_fmt(
                 "[BLE ] ",
-                format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=connect err={err:?}"),
+                format_args!(
+                    "BLE_CENTRAL_FAIL addr={peer_value:012x} stage=connect err={}",
+                    ErrText(&err)
+                ),
             );
             if connect_failure_condemns(decision) {
                 note_dead_end(peer_value, "fallback_connect");
@@ -2604,7 +2608,10 @@ async fn central_connected(
         Err(err) => {
             crate::log::log_fmt(
                 "[BLE ] ",
-                format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=discover err={err:?}"),
+                format_args!(
+                    "BLE_CENTRAL_FAIL addr={peer_value:012x} stage=discover err={}",
+                    ErrText(&err)
+                ),
             );
             let _ = conn.disconnect();
             // No service, or one without the Columba characteristics,
@@ -2625,7 +2632,10 @@ async fn central_connected(
         Err(err) => {
             crate::log::log_fmt(
                 "[BLE ] ",
-                format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=identity err={err:?}"),
+                format_args!(
+                    "BLE_CENTRAL_FAIL addr={peer_value:012x} stage=identity err={}",
+                    ErrText(&err)
+                ),
             );
             let _ = conn.disconnect();
             // An identity of the wrong size is the peer's answer, as
@@ -2818,7 +2828,10 @@ async fn run_central_session(
     if let Err(err) = client.tx_cccd_write(true).await {
         crate::log::log_fmt(
             "[BLE ] ",
-            format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=subscribe err={err:?}"),
+            format_args!(
+                "BLE_CENTRAL_FAIL addr={peer_value:012x} stage=subscribe err={}",
+                ErrText(&err)
+            ),
         );
         let _ = conn.disconnect();
         let error = match err {
@@ -2852,7 +2865,10 @@ async fn run_central_session(
     if let Err(err) = client.rx_write(&primer).await {
         crate::log::log_fmt(
             "[BLE ] ",
-            format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=primer err={err:?}"),
+            format_args!(
+                "BLE_CENTRAL_FAIL addr={peer_value:012x} stage=primer err={}",
+                ErrText(&err)
+            ),
         );
         let _ = conn.disconnect();
         // A peer that errors the primer will not take the handshake
@@ -2876,7 +2892,10 @@ async fn run_central_session(
     if let Err(err) = client.rx_write(&handshake).await {
         crate::log::log_fmt(
             "[BLE ] ",
-            format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=handshake err={err:?}"),
+            format_args!(
+                "BLE_CENTRAL_FAIL addr={peer_value:012x} stage=handshake err={}",
+                ErrText(&err)
+            ),
         );
         let _ = conn.disconnect();
         // The peer answered our identity with an ATT error: it will not
@@ -3030,13 +3049,13 @@ async fn run_central_session(
                             crate::log::log_fmt(
                                 "[BLE ] ",
                                 format_args!(
-                                    "BLE_TX_DROP kind=packet len={} frag={} of={} sent={} reason=write_cmd code=0 dropped={} err={:?}",
+                                    "BLE_TX_DROP kind=packet len={} frag={} of={} sent={} reason=write_cmd code=0 dropped={} err={}",
                                     packet.len(),
                                     index,
                                     fragments.len(),
                                     sent,
                                     dropped,
-                                    err,
+                                    ErrText(&err),
                                 ),
                             );
                             aborted = true;
@@ -3210,7 +3229,7 @@ async fn central_task(sd: &'static Softdevice, identity_hash: [u8; 16]) {
             // never a panic.
             Either::First(Ok(None)) => ScanPass::Empty,
             Either::First(Err(err)) => {
-                crate::warn!("BLE: scan pass failed err={:?}", err);
+                crate::warn!("BLE: scan pass failed err={}", ErrText(&err));
                 ScanPass::Failed
             }
             // Carrier switched off mid-scan: dropping the scan future

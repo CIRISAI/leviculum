@@ -57,9 +57,6 @@ pub(super) struct Window {
     done: mpsc::Receiver<Arc<Shown>>,
     /// A frame from the worker came since the last frame presented.
     fresh: std::cell::Cell<bool>,
-    /// How many times the loop drew, as [`Program::pump`] is told; what
-    /// [`paced`] steps its clock by.
-    pub(super) drawn: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 impl Window {
@@ -79,7 +76,6 @@ impl Window {
             jobs,
             done,
             fresh: std::cell::Cell::new(false),
-            drawn: std::rc::Rc::default(),
         }
     }
 
@@ -132,9 +128,6 @@ impl Program for Window {
     }
 
     fn pump(&self, drawn: bool) -> Vec<Message> {
-        if drawn {
-            self.drawn.set(self.drawn.get() + 1);
-        }
         let mut out: Vec<Message> = self.done.try_iter().map(Message::Painted).collect();
         if self
             .app
@@ -211,51 +204,10 @@ fn script(
     }
 }
 
-/// How many turns of the loop with no frame drawn count as idle in
-/// [`paced`]: the loop sleeps 200 us a turn when it waits, so at least
-/// 100 ms of waiting, and a turn that builds a view is one turn however
-/// long the build takes.
-const IDLE_TURNS: u32 = 500;
-
-/// [`script`] on a clock that the window's frames move rather than the
-/// wall's (1472): each frame drawn moves it `step` on, and a stretch with
-/// no event in it is skipped, so a frame sees the gesture's events of one
-/// step whatever the machine's speed. A window that draws nothing for
-/// [`IDLE_TURNS`] turns moves it on too, so an event that changes nothing
-/// cannot stall the script.
-fn paced(
-    mut timed: Vec<(Duration, iced::Event)>,
-    drawn: std::rc::Rc<std::cell::Cell<usize>>,
-    step: Duration,
-) -> impl FnMut(Duration) -> Option<Vec<iced::Event>> {
-    timed.sort_by_key(|(t, _)| *t);
-    let mut next = 0;
-    let mut clock = Duration::ZERO;
-    let mut seen = drawn.get();
-    let mut idle = 0;
-    move |_| {
-        if next >= timed.len() {
-            return None;
-        }
-        let now = drawn.get();
-        idle += 1;
-        if now > seen || idle >= IDLE_TURNS {
-            seen = now;
-            idle = 0;
-            clock += step;
-            clock = clock.max(timed[next].0);
-        }
-        let from = next;
-        while next < timed.len() && timed[next].0 <= clock {
-            next += 1;
-        }
-        Some(timed[from..next].iter().map(|(_, e)| e.clone()).collect())
-    }
-}
-
-/// The step [`paced`] moves the clock by a frame in
-/// [`a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole`]: the chat
-/// wheel's notch interval, so a frame sees one notch.
+/// The step a [`headless::Paced`] clock moves by a redraw in the tests
+/// that count frames ([`a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole`],
+/// [`the_benchs_gestures_move_the_window`]): the chat wheel's notch
+/// interval, so a frame sees one notch.
 const PACE: Duration = Duration::from_millis(50);
 
 fn moved(p: Point) -> iced::Event {
@@ -325,6 +277,74 @@ enum Case {
 /// when the focus leaves the field again.
 const IDLE_FROM: Duration = Duration::from_millis(600);
 const IDLE_UNTIL: Duration = Duration::from_millis(3000);
+
+/// The blink frames the idle case holds the focus for in the test
+/// ([`Held`]): one more than [`the_benchs_gestures_move_the_window`]'s
+/// three.
+const IDLE_FRAMES: usize = 4;
+
+/// How long past [`IDLE_UNTIL`] a [`Held`] clock holds at most: a guard
+/// against a window that never blinks, which would hold it for ever; the
+/// test's count then says the frames that came.
+const HOLD_AT_MOST: Duration = Duration::from_secs(60);
+
+/// The wall's clock, but held just short of `until` until `least` frames
+/// were presented since `from` (1619): the idle case's frames counted by
+/// the blinks the window drew, not by a window of wall seconds, which a
+/// frame of a second on a loaded host (`chat-drag frame_ms_mean=1200`
+/// beside 1100 tests) can leave empty. Unloaded the blink draws its
+/// frames inside the wall's window and the hold never begins.
+struct Held {
+    start: Instant,
+    from: Duration,
+    until: Duration,
+    least: usize,
+    seen: usize,
+}
+
+impl Held {
+    fn new(from: Duration, until: Duration, least: usize) -> Self {
+        Self {
+            start: Instant::now(),
+            from,
+            until,
+            least,
+            seen: 0,
+        }
+    }
+}
+
+impl headless::Clock for Held {
+    fn start(&mut self) {
+        self.start = Instant::now();
+    }
+
+    fn now(&self) -> Duration {
+        let wall = self.start.elapsed();
+        let hold = self.seen < self.least && wall < self.until + HOLD_AT_MOST;
+        match hold && wall >= self.until {
+            true => self.until - Duration::from_micros(1),
+            false => wall,
+        }
+    }
+
+    fn presented(&mut self, at: Duration) {
+        if at >= self.from && at < self.until {
+            self.seen += 1;
+        }
+    }
+}
+
+/// The clock a case is measured on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pace {
+    /// The wall's: the bench's measurements (frames a second are a wall's).
+    Wall,
+    /// The test's: a gesture paced by the window's redraws
+    /// ([`headless::Paced`], [`PACE`] a redraw), the idle case's blink
+    /// held for [`IDLE_FRAMES`] frames ([`Held`]).
+    Test,
+}
 
 impl Case {
     const ALL: [Case; 12] = [
@@ -517,20 +537,41 @@ fn measure(case: Case, w: u32, h: u32, overlay: bool) -> Measured {
 /// that much further apart, for a profiler that runs the program that
 /// much slower (1468).
 fn measure_slowed(case: Case, w: u32, h: u32, overlay: bool, slow: u32) -> Measured {
+    measure_on(case, w, h, overlay, slow, Pace::Wall)
+}
+
+/// [`measure_slowed`] on the clock `pace` says: the wall's for the bench,
+/// the test's own for [`the_benchs_gestures_move_the_window`] (1619).
+fn measure_on(case: Case, w: u32, h: u32, overlay: bool, slow: u32, pace: Pace) -> Measured {
     let (app, events) = case.setup(w, h);
-    let events = events.into_iter().map(|(t, e)| (t * slow, e)).collect();
+    let events: Vec<_> = events.into_iter().map(|(t, e)| (t * slow, e)).collect();
+    let (from, until) = case.span();
+    let (from, until) = (from * slow, until.map(|u| u * slow));
+    let mut clock: Box<dyn headless::Clock> = match (pace, until) {
+        (Pace::Wall, _) => Box::new(headless::Wall::new()),
+        (Pace::Test, Some(until)) => Box::new(Held::new(from, until, IDLE_FRAMES)),
+        (Pace::Test, None) => Box::new(headless::Paced::new(
+            events.iter().map(|(t, _)| *t).collect(),
+            PACE * slow,
+        )),
+    };
     let mut window = Window::new(app);
     let mut script = script(events);
     if overlay {
         leviculum_ui_iced::fps::enable(|_| {});
     }
-    let run = headless::drive(&mut window, w, h, &mut script, SETTLE * slow);
+    let run = headless::drive_on(
+        &mut window,
+        w,
+        h,
+        clock.as_mut(),
+        &mut script,
+        SETTLE * slow,
+    );
     if overlay {
         leviculum_ui_iced::fps::disable();
     }
     let run = run.expect("the software renderer");
-    let (from, until) = case.span();
-    let (from, until) = (from * slow, until.map(|u| u * slow));
     let at = from.as_secs_f64();
     let until = until.map_or(f64::INFINITY, |u| u.as_secs_f64());
     let frames: Vec<&DrawnFrame> = run
@@ -650,8 +691,16 @@ fn one_gesture_for_a_profiler() {
 /// run only in an optimised build: unoptimised, its first view (300 long
 /// paragraphs shaped) takes longer than the gesture lasts, and the
 /// release bench runs them (`the_real_chat_is_shaped_like_lews` holds the
-/// fixture in every build). Unoptimised, a gesture draws at least one
-/// frame; optimised, more than three.
+/// fixture in every build). Every gesture counted draws more than three
+/// frames, in either build: the gestures run on a clock the window's
+/// redraws move ([`headless::Paced`]) and the idle case holds the focus
+/// until the blink drew [`IDLE_FRAMES`] frames ([`Held`]), so a host
+/// slowed by a parallel run stretches the test, not its count (1619:
+/// `chat-idle frames=0` beside 1100 tests, where a wall window of 2.4 s
+/// held no frame; before it an unoptimised gesture had to draw one frame
+/// only, 1442). The drag on the messages runs on the wall's clock: it
+/// asserts nothing, and paced it would build a view of 3000 bubbles for
+/// each of its forty steps.
 #[test]
 fn the_benchs_gestures_move_the_window() {
     let optimised = !cfg!(debug_assertions);
@@ -668,15 +717,14 @@ fn the_benchs_gestures_move_the_window() {
         {
             continue;
         }
-        let m = measure(case, 900, 560, false);
+        let pace = match case {
+            Case::ChatDrag(_) => Pace::Wall,
+            _ => Pace::Test,
+        };
+        let m = measure_on(case, 900, 560, false, 1, pace);
         println!("{}", m.line());
-        // More than three frames where the build is optimised; one
-        // unoptimised, where a view of 3000 bubbles built per mouse
-        // report can take the gesture's two seconds in three frames
-        // under load (1442: `chat-scrollbar` sat at 3 once).
-        let least = if optimised { 3 } else { 0 };
         assert!(
-            m.frames > least || matches!(case, Case::ChatDrag(_)),
+            m.frames > 3 || matches!(case, Case::ChatDrag(_)),
             "{}",
             m.line()
         );
@@ -773,13 +821,9 @@ fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
         ] {
             let (app, events) = case.setup(w, h);
             let mut window = Window::new(app);
-            let mut script = paced(events, window.drawn.clone(), PACE);
-            let host = HostLoad::start();
-            let mut watched = Watched {
-                inner: &mut window,
-                host: &host,
-            };
-            let run = headless::drive_twinned(&mut watched, w, h, &mut script, SETTLE)
+            let mut clock = headless::Paced::new(events.iter().map(|(t, _)| *t).collect(), PACE);
+            let mut script = script(events);
+            let run = headless::drive_twinned(&mut window, w, h, &mut clock, &mut script, SETTLE)
                 .expect("the software renderer");
             let what = format!(
                 "{} at {w}x{h}: {} frames, {} shifted, at most {} pixels a frame off, {} by more than one step, by at most {}; more at {:?}, first within {:?}",
@@ -797,14 +841,9 @@ fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
             assert!(run.past_one <= EDGE_PIXELS, "{what}");
             // A scrollbar's drag over 3000 messages moves them further
             // than the pane is high with every report: nothing to keep.
-            // Whether a frame shifts depends on how many the gesture's
-            // wall-clock seconds drew: under a loaded host a wheel's
-            // notches pile into two frames that move further than the
-            // pane (1469: "2 frames, 0 shifted" at load 4.7), so this is
-            // asserted only within the bench's load bound (1473).
-            if !matches!(case, Case::ChatScrollbar(_))
-                && host.measured(&format!("frames shifted, {what}"))
-            {
+            // The gestures are paced by the window's redraws (1472, 1619),
+            // so how many frames they draw does not hang on the host's load.
+            if !matches!(case, Case::ChatScrollbar(_)) {
                 assert!(run.shifted > 0, "{what}");
             }
         }

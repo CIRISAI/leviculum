@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the two #[ignore]d live I2P tests on a private I2P network (T-0009, 1576).
+# Run the two #[ignore]d live I2P tests on a private I2P network (T-0009, 1576),
+# and the status, discovery and stale checks of 1588 on the same bed.
 #
 # leviculum-std/src/interfaces/i2p/i2pd_live.rs holds the only coverage of
 # I2PInterface against a real SAM bridge: that i2pd accepts our exact SESSION
@@ -33,14 +34,38 @@ TEST_BUDGET_S=600
 
 say() { echo "[i2p-live] $*"; }
 
+# Stages, all on one bed: `tests` (the two live cargo tests) and `rows`
+# (scripts/i2p-live-status.py, 1588: both stacks' rnstatus rows side by side,
+# the discovery announce with `reachable_on`, the stale mark under a frozen
+# router). I2P_LIVE_STAGES picks a subset, e.g. `rows` alone; `restart` (the
+# LeaseSet question of 1589, about 15 min) only runs when named.
+STAGES=${I2P_LIVE_STAGES:-tests rows}
+
 # Build first, so the routers' clock starts with the tests and the measured
 # wall is the bed's, not the compiler's.
 say "building the leviculum-std lib tests"
 cargo test -p leviculum-std --lib --no-run
+case " $STAGES " in
+    *" rows "*|*" restart "*)
+        for bin in lnsd lnstatus; do
+            [ -x "target/x86_64-unknown-linux-musl/release/$bin" ] \
+                || { say "target/x86_64-unknown-linux-musl/release/$bin missing: run just build-integ-bins"; exit 1; }
+        done ;;
+esac
 
 # shellcheck disable=SC2016  # expanded by the inner shell, inside the bed
 exec bash scripts/i2p-privnet.sh 5 -- bash -c '
-    echo "[i2p-live] running the live tests on $SAM_A and $SAM_B (budget '"$TEST_BUDGET_S"' s)"
-    LEVICULUM_I2P_SAM="$SAM_A" LEVICULUM_I2P_SAM_PEER="$SAM_B" timeout '"$TEST_BUDGET_S"' \
-        cargo test -p leviculum-std --lib interfaces::i2p::i2pd_live -- --ignored --nocapture --test-threads=1
+    rc=0
+    case " '"$STAGES"' " in *" tests "*)
+        echo "[i2p-live] running the live tests on $SAM_A and $SAM_B (budget '"$TEST_BUDGET_S"' s)"
+        LEVICULUM_I2P_SAM="$SAM_A" LEVICULUM_I2P_SAM_PEER="$SAM_B" timeout '"$TEST_BUDGET_S"' \
+            cargo test -p leviculum-std --lib interfaces::i2p::i2pd_live -- --ignored --nocapture --test-threads=1 || rc=$?
+    esac
+    for stage in rows restart; do
+        case " '"$STAGES"' " in *" $stage "*)
+            echo "[i2p-live] stage $stage"
+            python3 -I scripts/i2p-live-status.py "$stage" || rc=$?
+        esac
+    done
+    exit "$rc"
 '

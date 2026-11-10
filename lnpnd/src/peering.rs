@@ -61,6 +61,7 @@ fn drop_reason_name(reason: DropReason) -> &'static str {
         DropReason::Unreachable => "unreachable",
         DropReason::NoAccess => "no_access",
         DropReason::Rotation => "rotation",
+        DropReason::Cap => "cap",
     }
 }
 
@@ -446,15 +447,16 @@ impl PeeringRuntime {
         let mut table = PeerTable::new(config);
         let mut traffic = HashMap::new();
         // A record already unheard past the reference's 14 days is not
-        // restored; it is purged below, once the runtime owns the store.
-        let mut unreachable = Vec::new();
+        // restored, nor one past `max_peers` (`PeerTable::restore`); both
+        // are purged below, once the runtime owns the store.
+        let mut not_restored = Vec::new();
         match peer_store.load_all() {
             Ok(records) => {
                 for record in &records {
                     traffic.insert(record.destination_hash, record.traffic);
                 }
-                unreachable = table.restore(records, unix_secs());
-                for dropped in &unreachable {
+                not_restored = table.restore(records, unix_secs());
+                for (dropped, _) in &not_restored {
                     traffic.remove(dropped);
                 }
             }
@@ -492,9 +494,9 @@ impl PeeringRuntime {
             static_paths_pending,
             events,
         };
-        for dropped in &unreachable {
+        for (dropped, reason) in &not_restored {
             runtime.forget(dropped);
-            runtime.log_peer("drop", dropped, drop_reason_name(DropReason::Unreachable));
+            runtime.log_peer("drop", dropped, drop_reason_name(*reason));
         }
         for destination_hash in &activated {
             runtime.log_peer("add", destination_hash, "static");
@@ -2055,6 +2057,7 @@ impl PeeringRuntime {
             // Cursor untouched: the whole plan is offered again after the
             // backoff, which is what "marks nothing handled until the
             // transfer concludes" means on our side.
+            self.defer_after_failed_transfer(&peer_hash);
             self.finish_round(&peer_hash, "transfer_failed", 0, 0);
             out.merge(core.close_link(link_id));
         }
@@ -2101,9 +2104,13 @@ impl PeeringRuntime {
         }
         let peer_hash = sync.peer;
         let concluded = sync.concluded;
+        let transferring = sync.sending.is_some();
         self.outbound = None;
         if let Some(peer) = self.table.get_mut(&peer_hash) {
             peer.state = SyncPhase::Idle;
+        }
+        if !concluded && transferring {
+            self.defer_after_failed_transfer(&peer_hash);
         }
         if !concluded {
             self.emit(EngineEvent::SyncDone {
@@ -2114,6 +2121,44 @@ impl PeeringRuntime {
                 result: "link_closed",
             });
         }
+    }
+
+    /// A round whose resource the link did not carry to the end holds the
+    /// peer for one backoff step, as the reference holds every round that
+    /// failed after its link came up (`reference/LXMF/LXMF/LXMPeer.py:321-322`,
+    /// the deferral `:330` and `:541` leave in place).
+    ///
+    /// `note_link_established` clears that deferral for the sake of a lost
+    /// `/offer` frame (leviculum-lxmf, the deviation measured 2026-09-17),
+    /// and that is right before the peer answered. After it answered and
+    /// the transfer then broke, the same plan comes back on the next pass:
+    /// on miauhaus 179 messages were offered about 690 times in two days,
+    /// each round ending `transferred 0 ... link_closed` (order 1586). The
+    /// offer phase keeps its quick retry; the transfer phase waits a step.
+    fn defer_after_failed_transfer(&mut self, peer_hash: &[u8; 16]) {
+        if let Some(peer) = self.table.get_mut(peer_hash) {
+            peer.book_sync_attempt(unix_secs());
+        }
+    }
+
+    /// Put a round in its transfer phase, as `on_link_established` does
+    /// once the resource is on the link: for tests of how it ends.
+    #[cfg(test)]
+    pub(crate) fn transferring_round_for_tests(&mut self, peer: [u8; 16], link_id: LinkId) {
+        self.outbound = Some(OutboundSync {
+            peer,
+            link_id,
+            plan: OfferPlan {
+                ids: Vec::new(),
+                cursor_target: 0,
+                skipped_oversize: 0,
+                skipped_low_value: 0,
+            },
+            request_id: None,
+            sending: Some((1, 1)),
+            deadline_ms: u64::MAX,
+            concluded: false,
+        });
     }
 
     /// Successful end of a round: cursor forward, persisted, reported.
@@ -3118,6 +3163,46 @@ mod tests {
         assert!(
             !origins.came_from(&[1; 32], &peer),
             "past the expiry, once it outgrew the store"
+        );
+    }
+
+    /// Order 1586: a round whose link closed during the transfer, after
+    /// the peer had answered the offer, holds the peer for a backoff step
+    /// instead of offering the same plan again on the next pass; a round
+    /// whose link closed before the transfer keeps the quick retry.
+    #[test]
+    fn a_transfer_that_broke_holds_the_peer_for_a_step() {
+        use leviculum_lxmf::peering::SYNC_BACKOFF_STEP_SECS;
+        let mut runtime = runtime_with_cursors(&[0, 0]);
+        let (broke, offering) = ([1u8; 16], [2u8; 16]);
+        for hash in [broke, offering] {
+            let peer = runtime.table.get_mut(&hash).expect("restored peer");
+            peer.note_link_established();
+        }
+
+        runtime.transferring_round_for_tests(broke, LinkId::new([0x11; 16]));
+        runtime.on_link_closed(&LinkId::new([0x11; 16]));
+        let held = runtime.peer_for_tests(&broke).expect("still peered");
+        assert!(
+            held.next_sync_attempt >= unix_secs() + SYNC_BACKOFF_STEP_SECS - 1,
+            "next attempt {} now {}",
+            held.next_sync_attempt,
+            unix_secs()
+        );
+        assert!(
+            runtime.outbound.is_none(),
+            "the round leaves nothing behind"
+        );
+
+        runtime.transferring_round_for_tests(offering, LinkId::new([0x22; 16]));
+        if let Some(sync) = runtime.outbound.as_mut() {
+            sync.sending = None;
+        }
+        runtime.on_link_closed(&LinkId::new([0x22; 16]));
+        let quick = runtime.peer_for_tests(&offering).expect("still peered");
+        assert_eq!(
+            quick.next_sync_attempt, 0,
+            "the offer phase retries at once"
         );
     }
 }

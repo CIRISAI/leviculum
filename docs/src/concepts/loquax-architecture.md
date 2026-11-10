@@ -210,9 +210,9 @@ Every router method that can produce work returns this. There is no
 callback and no channel. The library never drops an event, but it never
 retains one either: if the application drops a `RouterOutput`, those events
 are gone. `#[must_use]` on both `RouterOutput` and `TickOutput`
-(`leviculum-core/src/transport.rs:615`) is the only safety net, and
+(`leviculum-core/src/transport.rs:616`) is the only safety net, and
 `TickOutput`'s own doc says dropping it "silently loses outbound packets
-and application events" (`leviculum-core/src/transport.rs:584-586`).
+and application events" (`leviculum-core/src/transport.rs:585-587`).
 
 There is a re-entrancy obligation that is easy to miss and fatal to get
 wrong: `RouterOutput.core.events` contains `NodeEvent`s that must be fed
@@ -459,7 +459,7 @@ restarts, and must not pretend to.
   benchmark exists in the crate and none was run for this document, so any
   UI estimate of mining time must be measured first, not guessed. There is
   no cancellation and no deadline: `generate` loops until it succeeds
-  (`leviculum-lxmf/src/stamp.rs:356-367`), and `StampError::Cancelled`
+  (`leviculum-lxmf/src/stamp.rs:366-376`), and `StampError::Cancelled`
   exists but is never constructed (`leviculum-lxmf/src/stamp.rs:25`).
 
 ### Fields with constants but no codec
@@ -511,7 +511,7 @@ carries hard obligations:
   enforced. Message packing costs about 0.8 ms and unpacking with signature
   verification about 3.2 ms for 1 MiB, per
   [The core lock budget](core-lock-budget.md). `NodeCore::send_resource`
-  (`leviculum-core/src/node/mod.rs:1877`) must not be called from a hook:
+  (`leviculum-core/src/node/mod.rs:1891`) must not be called from a hook:
   141 ms under the lock for 1 MiB.
 - The processor needs its own periodic slot to drain its command queue,
   because an event tap can never initiate anything. `leviculum-lxmf-node`
@@ -882,7 +882,7 @@ why the exit code is what the tests assert. The ID does not become
 unobtainable, because `loquax status <id>` needs it: `LNMSG_ENQUEUED … id=…`
 carries it into the structured event log, which `LEVICULUM_EVENT_LOG=<path>`
 turns on and which is written by an unfiltered layer, so the line arrives even
-at the `warn` default (`leviculum-std/src/event_log.rs:830-837`). No
+at the `warn` default (`leviculum-std/src/event_log.rs:861-868`). No
 `--print-id` flag was added: nothing consumes the ID today, and an option
 added against a hypothetical user is an option nobody tests.
 
@@ -967,7 +967,7 @@ not a list of open work.
    (`leviculum-lxmf/src/router.rs:2354-2371`), so every client writes its
    own persistence and replay.
 6. **No stamp cancellation or deadline.** `generate` loops until success
-   (`leviculum-lxmf/src/stamp.rs:356-367`) and `StampError::Cancelled` is
+   (`leviculum-lxmf/src/stamp.rs:366-376`) and `StampError::Cancelled` is
    declared but never constructed (`leviculum-lxmf/src/stamp.rs:25`). A
    user who starts a message to a high-cost peer and changes their mind has
    no way out.

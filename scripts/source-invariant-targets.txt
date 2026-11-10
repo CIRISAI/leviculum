@@ -73,6 +73,7 @@ run   leviculum-std   t114_boot_lines            # reads the T114 binary, the sh
 run   leviculum-std   rak4631_boot_lines         # reads the RAK4631 binary, the shared node loop and the board file; the boot lines are the pre-move ones with D1, D2, D5 to D8 applied
 skip  leviculum-ui-iced desktop_theme              # its subject is the code (the desktop tone stream), and it opens a D-Bus connection
 run   lnflash         doc_board_catalogue        # reads catalogue.toml against the board facts the book repeats
+run   lnflash         bootloader_update          # reads memory.x and the RAK4631 pages against the vendored bootloader UF2: a moved page fails on push
 run   loquax          package_metadata           # reads loquax/Cargo.toml and leviculum-cli/Cargo.toml; the package depends on leviculum, which enables and starts lnsd
 run   loquax          golden_index               # reads docs/src/concepts/loquax-ui.md and the golden directories of loquax, loquax-m9 and loquax-android; the index names every golden file and only those
 
@@ -224,6 +225,7 @@ skip  leviculum-std   obs_iface_name_whitespace  # drives the real emit sites in
 skip  leviculum-std   obs_outbound_route_events  # drives the real emit sites in-process; subject is the code
 skip  leviculum-std   port_alloc_multiprocess    # spawns processes to race port allocation
 skip  leviculum-std   public_node_config_acceptance # builds node configs in temp dirs; subject is the config builder
+skip  leviculum-std   remote_dfu_sender          # two in-process nodes over TCP loopback; subject is the /dfu sender
 skip  leviculum-std   rnsd_interop               # drives Python rnsd over sockets; Tier 1
 skip  leviculum-std   shared_instance_client_count # tokio runtime with a shared instance
 skip  leviculum-std   shared_instance_conflict   # tokio runtime with two competing instances
@@ -313,5 +315,6 @@ skip  lnpnd           pn_growth_soak             # a 20-minute soak: spawns the 
 skip  lnpnd           status_default_budget      # tokio runtime with sleeps
 skip  lnpnd           status_under_transport_load # tokio runtime, local instance sockets, an announce storm and minute-scale timeouts
 skip  lnpnd           store_index_at_start       # spawns the daemon three times against a shared-instance socket and signals it
+skip  lnpnd           store_index_census         # its subject is the code: a store built in a temp dir against a counting allocator, 2 s
 skip  nmea0183        parsing                    # sentence corpus in-process; subject is the parser
 skip  vectors-verify  corpus                     # reads the vector corpus, but the subject is the codecs under it

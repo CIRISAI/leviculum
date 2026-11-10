@@ -649,8 +649,10 @@ fn the_too_large_fifo_outgrows_its_bound() {
 }
 
 /// §5 sized the cap from a 104 B record; in RAM the `Peer` is inline in the
-/// map at 200 B, and by the census's model a full table is 7 152 B, most of
-/// the 8 KiB slice before the offer list the derivation also put there.
+/// map at 200 B, and by the census's model a full table of 16 was 7 152 B,
+/// which the T114 bench measured on 2026-11-10 (`pn_peers=7152`). The cap is
+/// seven since order 1641: one B-tree node, 2 384 B by the model and by the
+/// allocation alike.
 #[test]
 fn the_peer_table_at_the_cap_against_its_slice() {
     let table = peer_table_bytes(BOARD_MAX_PEERS);
@@ -659,7 +661,8 @@ fn the_peer_table_at_the_cap_against_its_slice() {
          slice={PEERING_SLICE_BYTES}",
         104 * BOARD_MAX_PEERS
     );
-    assert_eq!(table, 7_152);
+    assert_eq!(table, 2_384);
+    assert_eq!(peer_table_bytes(16), 7_152);
     assert!(table <= PEERING_SLICE_BYTES);
 }
 

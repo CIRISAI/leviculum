@@ -22,12 +22,12 @@ with lnsd started as `lnsd -c` on an empty directory:
 - **No interface.** Without a file lnsd took `Config::default()`, whose
   interface map is empty. It logged `Node started with 0 interface(s)`.
 - **No shared instance.** The default is `shared_instance: false`
-  (`shared_instance`, `leviculum-std/src/config.rs:635`), where rnsd
+  (`shared_instance`, `leviculum-std/src/config.rs:647`), where rnsd
   defaults to yes. No client could attach, so lnomad, lnstatus and the
   Python tools saw nothing at all. Every cell line therefore states
   `shared_instance=` first.
 - **Transport on.** The default is `enable_transport: true`
-  (`enable_transport`, `leviculum-std/src/config.rs:631`), and lnsd said
+  (`enable_transport`, `leviculum-std/src/config.rs:643`), and lnsd said
   so in its `CONFIG_DEFAULT` line (`value=true rnsd=false`). The stock
   file rnsd writes on its first start says `enable_transport = False`
   (`Reticulum.py:1879`).
@@ -43,15 +43,15 @@ start moved.
 ## Step 1, as built
 
 Without a `config` file lnsd now runs the file rnsd would have written,
-from memory (`load_or_default`, `leviculum-std/src/config.rs:1563`). The
-text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:738`): not
+from memory (`load_or_default`, `leviculum-std/src/config.rs:1575`). The
+text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:750`): not
 the template literal of `Reticulum.py:1860` but what ConfigObj makes of
 it on `write()`, which indents every key by two spaces and drops the
 last empty line. Captured from the vendored ConfigObj of the pinned
 reference, 4013 bytes. Two tests hold it: its lines are the template's
 lines, and, where `python3` runs, the template through the reference's
 own ConfigObj is byte for byte the same file. lnsd parses it with its
-own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1549`), so
+own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1561`), so
 what it runs and what rnsd would write cannot drift apart. It means:
 transport off, a shared instance named `default`, log level 4,
 `discover_interfaces` at lnsd's default, and one AutoInterface,
@@ -60,19 +60,19 @@ transport off, a shared instance named `default`, log level 4,
 - `lnsd --writeconfig` writes the same text to `<dir>/config` and exits;
   it never replaces an existing file.
 - Every interface section carries an origin, `configured` or `default`
-  (`InterfaceOrigin`, `leviculum-std/src/config.rs:681`). lnsd logs one
+  (`InterfaceOrigin`, `leviculum-std/src/config.rs:693`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
-  builds any (`leviculum-std/src/driver/mod.rs:2348`), and once
+  builds any (`leviculum-std/src/driver/mod.rs:2487`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:229`).
 - `interface_stats` serves the origin as the `origin` key
-  (`leviculum-std/src/rpc/handlers.rs:674`), and `lnstatus` prints it,
+  (`leviculum-std/src/rpc/handlers.rs:691`), and `lnstatus` prints it,
   behind `--origin`, as an `Origin` line under `Status`. Without the flag
   the render is rnstatus's, which the drop-in parity tests pin
   (`leviculum-std/tests/rnsd_interop/status_parity_tests.rs`); rnsd serves
   no such key, so against rnsd the flag adds nothing. A row named after a section takes that
   section's origin; a row no section names (the shared instance, an
   AutoInterface's peers) takes the origin all sections share
-  (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:266`), and
+  (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:493`), and
   where no section is left, as on a start without a file under
   `LEVICULUM_NO_AUTO=1`, the origin of the configuration itself:
   `default` without a file, `configured` with one.
@@ -286,11 +286,11 @@ marked one not, is the reviewer's.
 
 A start without a file opens two TCP connections to entries drawn at
 random from a list shipped in the binary, each marked `bootstrap_only`
-(`bootstrap_only`, `leviculum-std/src/driver/builder.rs:646`): it exists
+(`bootstrap_only`, `leviculum-std/src/driver/builder.rs:665`): it exists
 to join the network and is detached once enough discovered connections
 stand. Discovery is already on by default (`default_discover_interfaces`,
-`leviculum-std/src/config.rs:588`); autoconnect is not
-(`autoconnect_discovered_interfaces`, `leviculum-std/src/config.rs:656`),
+`leviculum-std/src/config.rs:600`); autoconnect is not
+(`autoconnect_discovered_interfaces`, `leviculum-std/src/config.rs:668`),
 and the automatic layer raises it to a ceiling of two or three. The
 ceiling and the entry count are constants in the code (step 3 as built,
 above), changed after a measurement, not before. Transport stays off
@@ -345,8 +345,8 @@ only when both hold:
 
 Then, and only then, one `CMD_DETECT` with `DETECT_REQ`; a device that
 answers `DETECT_RESP` is an RNode. lnsd already speaks this handshake
-(`detect_on_port`, `leviculum-std/src/interfaces/rnode.rs:1932`; the same
-frame is its serial heartbeat, `leviculum-std/src/interfaces/rnode.rs:3086-3088`).
+(`detect_on_port`, `leviculum-std/src/interfaces/rnode.rs:1933`; the same
+frame is its serial heartbeat, `leviculum-std/src/interfaces/rnode.rs:3087-3089`).
 A refused device is remembered and not asked again; hotplug is a rescan
 of the by-id directory every 5 s (built so, see step 5 below). The directory is
 `LEVICULUM_AUTO_SERIAL_DIR`, default `/dev/serial/by-id`, so a cell can
@@ -364,7 +364,7 @@ clear log line, not a silent skip.
 An attached LNode, and the M9, gets `interface_mode = gateway` on its
 interface: the board behind the line asks paths for itself and only a
 discovering mode looks for them onwards
-(`leviculum-core/src/transport.rs:12753`); in full mode a board's join
+(`leviculum-core/src/transport.rs:12780`); in full mode a board's join
 to its home ends in `NoPath` (1439, measured on the bench).
 
 All found boards are attached. Two RNodes on one frequency in one room
@@ -606,6 +606,12 @@ The function is `find_or_start` (`leviculum-std/src/instance.rs`), and
   pid=none` or `INSTANCE started=yes via=unix|tcp pid=<pid>`. The command
   line tools print it on stderr after a start, and after a find too under
   `-v`; Loquax writes it to its log only, its screen being its stderr.
+- **Loquax's lookup** (1598): its window and terminal ask for a running
+  daemon by `--instance` (or `--config`) alone, else by the name in
+  `$LNMSG_HOME/reticulum/config`, then the one in `~/.reticulum/config`,
+  then as `default`, and only when none answers start lnsd in
+  `$LNMSG_HOME/reticulum` (1570), its `INSTANCE` line carrying
+  `source=flag|home|default-dir|none`.
 - **Two tools at once.** The find and the start run under an exclusive
   `flock` on `.lnsd-start.lock` in the config directory: the first starts
   the daemon, the second finds it once it holds the lock. Two directories

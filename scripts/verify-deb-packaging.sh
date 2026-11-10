@@ -349,7 +349,7 @@ check_package() {
 echo "verify-deb-packaging: arch=${ARCH}"
 echo
 
-check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath
+check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath lnmgmt
 # No stock config (#471, 1510): lnsd writes its first-start file itself, and
 # a shipped one would be "a configuration present", which keeps the
 # automatic layer's servers, BLE and serial off on every package install.
@@ -363,22 +363,23 @@ contains "$CONTENTS" "lnsd.service" "ships the lnsd systemd unit"
 # run, so an arm64 package is checked from an amd64 host too; the startup
 # line is in the binary only when it was built on mimalloc. LEVICULUM_ALLOC=
 # system is build-deb.sh's knob and inverts the check.
-check_lnsd_allocator() {
-    local deb tmp want="${LEVICULUM_ALLOC:-mimalloc}"
-    deb="$(find_deb leviculum)"
+# lnpnd likewise since 1592, checked in its own section below.
+check_allocator() {
+    local package="$1" bin="$2" deb tmp want="${LEVICULUM_ALLOC:-mimalloc}"
+    deb="$(find_deb "$package")"
     [ -n "$deb" ] || return 0
     tmp="$(mktemp -d)"
     dpkg-deb -x "$deb" "$tmp"
-    if grep -qaF 'Allocator: mimalloc' "$tmp/usr/bin/lnsd"; then
-        [ "$want" = mimalloc ] && pass "lnsd is built on mimalloc" \
-            || fail "lnsd is built on mimalloc under LEVICULUM_ALLOC=${want}"
+    if grep -qaF 'Allocator: mimalloc' "$tmp/usr/bin/$bin"; then
+        [ "$want" = mimalloc ] && pass "$bin is built on mimalloc" \
+            || fail "$bin is built on mimalloc under LEVICULUM_ALLOC=${want}"
     else
-        [ "$want" = system ] && pass "lnsd is built on the libc allocator (LEVICULUM_ALLOC=system)" \
-            || fail "lnsd is not built on mimalloc (no 'Allocator: mimalloc' in /usr/bin/lnsd)"
+        [ "$want" = system ] && pass "$bin is built on the libc allocator (LEVICULUM_ALLOC=system)" \
+            || fail "$bin is not built on mimalloc (no 'Allocator: mimalloc' in /usr/bin/$bin)"
     fi
     rm -rf "$tmp"
 }
-check_lnsd_allocator
+check_allocator leviculum lnsd
 rm -rf "$CTRL_DIR"
 echo
 
@@ -620,6 +621,8 @@ if grep -q ' \./etc/' <<<"$CONTENTS"; then
 else
     pass "ships nothing under /etc (first-start config, like lxmd)"
 fi
+# lnpnd ships on mimalloc as lnsd does (1592), read off the bytes the same way.
+check_allocator lnpnd lnpnd
 rm -rf "$CTRL_DIR"
 echo
 

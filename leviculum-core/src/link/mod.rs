@@ -928,6 +928,40 @@ impl Link {
         if !rtt_seconds.is_finite() || rtt_seconds <= 0.0 {
             return Err(LinkError::InvalidRtt);
         }
+        Ok(self.finish_responder_handshake(rtt_seconds, now_ms))
+    }
+
+    /// Establish a responder link on a packet of the initiator other than the
+    /// RTT, when the RTT was lost (1624).
+    ///
+    /// The responder derived the link keys when it sent its proof, so a
+    /// packet that decrypts under them comes from the one peer that holds
+    /// them: the initiator, which went Active on that proof and is already
+    /// using the link. Without this a lost RTT strands the link for good, as
+    /// the initiator never resends it (`reference/Reticulum/RNS/Link.py:441`
+    /// sends it once, in `validate_proof`). The link's RTT is our own
+    /// measurement from the proof send, which bounds the true RTT from above,
+    /// so the keepalive and stale windows err long, never short.
+    ///
+    /// Returns the RTT in seconds; `Err` leaves the link in its handshake
+    /// (not a responder link in its handshake, or the packet did not
+    /// decrypt).
+    pub fn establish_on_initiator_packet(
+        &mut self,
+        encrypted_data: &[u8],
+        now_ms: u64,
+    ) -> Result<f64, LinkError> {
+        self.require_state(LinkState::Handshake)?;
+        self.require_responder()?;
+        let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
+        self.decrypt(encrypted_data, &mut plaintext)?;
+        Ok(self.finish_responder_handshake(0.0, now_ms))
+    }
+
+    /// The RTT of a responder link that leaves its handshake now, the larger
+    /// of `wire_rtt_seconds` and our measurement from the proof send, and the
+    /// state change that goes with it.
+    fn finish_responder_handshake(&mut self, wire_rtt_seconds: f64, now_ms: u64) -> f64 {
         let measured_seconds = match self.phase {
             LinkPhase::PendingIncoming { proof_sent_at_ms } => {
                 now_ms.saturating_sub(proof_sent_at_ms) as f64 / MS_PER_SECOND as f64
@@ -935,7 +969,7 @@ impl Link {
             _ => 0.0,
         };
         const MAX_PLAUSIBLE_RTT_SECS: f64 = 3600.0;
-        let rtt_seconds = rtt_seconds
+        let rtt_seconds = wire_rtt_seconds
             .max(measured_seconds)
             .min(MAX_PLAUSIBLE_RTT_SECS);
 
@@ -950,7 +984,7 @@ impl Link {
         self.state = LinkState::Active;
         self.cached_proof = None;
 
-        Ok(rtt_seconds)
+        rtt_seconds
     }
 
     /// Get the link ID

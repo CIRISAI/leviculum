@@ -76,6 +76,7 @@
 extern crate alloc;
 
 pub mod columba;
+pub mod err_text;
 pub mod notify;
 
 use alloc::vec::Vec;

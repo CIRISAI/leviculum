@@ -185,9 +185,20 @@ impl SequenceCounts {
 
     /// Heap bytes the table pins.
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.sequences.capacity() * std::mem::size_of::<u64>()
-            + self.counted.capacity()
-            + self.tree.capacity() * std::mem::size_of::<u32>()
+        self.heap_bytes_live_and_allocated().1
+    }
+
+    /// The three vectors' bytes by their length, and by their capacity:
+    /// what the slots hold, and what the allocator handed out for them.
+    pub(crate) fn heap_bytes_live_and_allocated(&self) -> (usize, usize) {
+        let slot = std::mem::size_of::<u64>() + std::mem::size_of::<bool>();
+        let fenwick = std::mem::size_of::<u32>();
+        (
+            self.sequences.len() * slot + self.tree.len() * fenwick,
+            self.sequences.capacity() * std::mem::size_of::<u64>()
+                + self.counted.capacity() * std::mem::size_of::<bool>()
+                + self.tree.capacity() * fenwick,
+        )
     }
 }
 

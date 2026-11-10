@@ -422,6 +422,29 @@ one whole `NodeCore` in a frame and fails here.
 The gate prefers `arm-none-eabi-objdump` and falls back to the rustup
 `llvm-tools` `llvm-objdump`; `install-ci.sh` installs the latter.
 
+## The package feature-set gate
+
+`just deb-features-check` (1593) compiles every package this host's
+architecture ships with exactly the target triple and feature set the
+packages are built with: `cargo check --release`, nothing linked or
+packaged. On amd64 that is the musl binaries with `loquax/tui`, Loquax
+on the gnu triple with `loquax/tui loquax/gui`, and lnsd and lnpnd with
+`heap-accounting`. The recipe runs `scripts/build-deb.sh --check`, the
+packaging script's own mode over the same argument arrays its build
+reads, so the check and the build cannot name different sets.
+
+It exists because Loquax with `tui` and `gui` together on the gnu triple
+did not compile on master from 902bc129 to cbbd870d: 1570 added a field
+to `GuiArgs` and not to the two initialisers that only that pair
+compiles, so no package could have been built, and `loquax-gui` (`gui`
+alone) and `loquax-tui` (`tui` alone) were both green.
+
+It is in `fast` and not in `guards`: 9.5 s after touching
+`leviculum-core`, 3 min 35 s cold (measured 2026-11-09), and two release
+feature sets of its own to build. Run it by hand before committing
+whenever a change touches a `cfg(feature` boundary, a CLI args struct or
+a feature list in a `Cargo.toml`.
+
 ## Manual operation
 
 ```

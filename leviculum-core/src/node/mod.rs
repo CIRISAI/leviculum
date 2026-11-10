@@ -44,6 +44,7 @@
 mod builder;
 mod event;
 mod link_management;
+pub mod remote_dfu;
 pub mod remote_status;
 // Gated on `tracing`: the mvr captures structured tracing output to prove the
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
@@ -212,6 +213,8 @@ mod mvr_reboot_relay_nopath_solicit;
 mod mvr_relay_endpoint_announce_loss;
 #[cfg(test)]
 mod mvr_relay_pr_from_next_hop;
+#[cfg(test)]
+mod mvr_renamed_client_before_teardown;
 #[cfg(test)]
 mod mvr_request_response_pins;
 #[cfg(test)]
@@ -897,7 +900,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// `allowed` is the set of identity hashes permitted to query; an empty
     /// list registers the handler but rejects every requester (Python parity:
     /// the ACL is consulted even when empty).
-    fn enable_remote_management(&mut self, allowed: Vec<[u8; TRUNCATED_HASHBYTES]>) {
+    ///
+    /// `dfu` also registers `/dfu` beside `/status`, under the same list
+    /// ([`remote_dfu`], Codeberg #235). Python never asks for that path, so
+    /// no Python peer can trip over it.
+    fn enable_remote_management(&mut self, allowed: Vec<[u8; TRUNCATED_HASHBYTES]>, dfu: bool) {
         let identity_bytes = match self.transport.identity().private_key_bytes() {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -929,6 +936,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // IN/SINGLE destinations accept links by default; the client
         // establishes a link, identifies, then issues the `/status` request.
         self.register_destination(mgmt_dest);
+        if dfu {
+            self.register_request_handler(
+                hash,
+                remote_dfu::DFU_PATH,
+                request::RequestPolicy::AllowList(allowed.clone()),
+            );
+        }
         self.register_request_handler(hash, "/status", request::RequestPolicy::AllowList(allowed));
         self.remote_mgmt_dest_hash = Some(hash);
         self.mgmt_destinations.push(hash);
@@ -2612,7 +2626,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ) -> Result<(), crate::resource::ResourceError> {
         // Resolve a possibly-stale caller-visible id: the caller configures
         // the link straight off the `LinkEstablished` event
-        // (`leviculum-cli/src/cp.rs:809`, `leviculum-std/src/remote_status.rs:283`),
+        // (`leviculum-cli/src/cp.rs:809`, `leviculum-std/src/remote_status.rs:374`),
         // and after a #66 retry that id is the pre-re-key one.
         let link_id = &self.resolve_link_id(link_id);
         let link = self

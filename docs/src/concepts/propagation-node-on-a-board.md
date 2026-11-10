@@ -65,6 +65,13 @@ carries the operator verbs `/pn/get/stats`, `/pn/peer/sync` and
 `LXMRouter.py:91`) and is behind an allow-list, so it is not part of
 what a stranger can drive.
 
+A propagation node is no traffic oracle: it never answers a question about
+an arbitrary destination hash. Peer sync puts every foreign mailbox entry in
+its store, so an endpoint that told a stranger what it holds for a named
+address would reveal per-address volume and timing for the whole mesh; the
+only read path stays the identity-bound `/get`, which serves a client
+nothing but its own destination's entries.
+
 Messages move in three shapes, and only three:
 
 1. **A client uploads one message.** A single link packet carrying
@@ -542,7 +549,7 @@ firmware reported `op=tx duration_ms=903..905` for 13 of the 15 such
 transmissions in the run (SF8, BW 125 kHz, CR 4:5, 18-symbol preamble).
 Our airtime model agrees: computed 543 ms for the 184-byte frame the
 same log reports as `airtime_ms=544` (`airtime_ms_with_preamble`,
-`leviculum-core/src/rnode.rs:1107`; preamble from
+`leviculum-core/src/rnode.rs:1096`; preamble from
 `derive_preamble_symbols`, `leviculum-core/src/rnode.rs:963`, which
 floors at 18, `LORA_PREAMBLE_SYMBOLS_MIN`,
 `leviculum-core/src/rnode.rs:898`).
@@ -562,7 +569,7 @@ usable way for two boards to meet rather than a consolation prize.
 
 **BLE.** The negotiated MTU is bounded by measurement rather than
 assumed: the SoftDevice is configured with an ATT MTU ceiling of 256
-(`CONN_GATT`, `leviculum-nrf/src/ble/mod.rs:415`), but the field log
+(`CONN_GATT`, `leviculum-nrf/src/ble/mod.rs:416`), but the field log
 shows a 183-byte packet fragmenting into 2 and a 275-byte packet also
 into 2, which brackets the payload per fragment to 138 to 182 bytes and
 the MTU to 146 to 190 — consistent with the 185 default
@@ -606,7 +613,7 @@ remains.
 
 **At an advertised cost of 0 the cost is not incurred at all.** Our
 validator short-circuits before the workblock when the cost is zero
-(`validate_stamp`, `leviculum-lxmf/src/stamp.rs:373`). The firmware ran
+(`validate_stamp`, `leviculum-lxmf/src/stamp.rs:382`). The firmware ran
 this way for delivery stamps until the role landed, with the LXMF
 dependency pulled without `pow`; the role brought `pow` in, because the
 board announces stamp cost 13 and has to validate what it accepts, through
@@ -856,6 +863,11 @@ somebody sends a message.
   `LXMRouter.py:45`). B assumes a cap we enforce ourselves keeps the
   peer-set arithmetic survivable; three Python routers in range would
   show whether it does.
+- **What full peer participation costs inbound.** A node in the peer
+  network receives the entire LXMF propagation traffic of the reachable
+  mesh, not only what its own users send. The storage and bandwidth that
+  takes has not been measured on a real node, and it sets the hardware
+  floor.
 - **Whether 16 pages is the right size.** 68 would buy 38 years and cost
   the image 212 KiB of headroom. The number lives in `memory.x` and the
   trade is argued there; changing it later is a reformat, which `mount`
@@ -969,8 +981,11 @@ and one request names ten ids; a link with a larger negotiated MTU
 uses more, up to the ceiling. Both engines therefore plan the offer
 when the link is up, not when the round is scheduled — until then
 there is no MDU to size against, and the plan made at scheduling time
-answers only "is anything above the cursor offerable at all". **Board cap: 16 peers**
-still holds, now with less margin; **host config default: 20**, the
+answers only "is anything above the cursor offerable at all". **Board cap: 7 peers**
+since order 1641 (it was 16 until a T114 bench with sixteen peers measured
+the table at 7 152 B against a 5 KiB structural term and ran out of heap;
+seven is one B-tree node, the arithmetic is at the end of
+`leviculum-nrf/heap-budget/src/lib.rs`); **host config default: 20**, the
 reference's own `MAX_PEERS` (`LXMRouter.py:43`), settable as
 `max_peers`. The full-table policy is deterministic and documented on
 `DeclineReason::TableFull`: first heard wins, a full table declines

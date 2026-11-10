@@ -96,7 +96,9 @@ pub fn lines_written(src: &str) -> Vec<(usize, String)> {
         r"\b(log_fmt_critical|log_fmt)\(\s*{lit},\s*format_args!\(\s*{lit}"
     ))
     .expect("regex");
-    let phase = Regex::new(r"Phase::(\w+)").expect("regex");
+    // `thread_watch::Phase` (order 1641) is the main loop's work phase, set
+    // on every arm, not a boot stamp: only `boot_trace`'s phases are lines.
+    let phase = Regex::new(r"(thread_watch::)?Phase::(\w+)").expect("regex");
     let call = Regex::new(r"(?:(\w+)(::|\.))?\b(log_\w+)\(").expect("regex");
     let mut out = Vec::new();
     for c in mac.captures_iter(src) {
@@ -108,8 +110,11 @@ pub fn lines_written(src: &str) -> Vec<(usize, String)> {
         out.push((at, format!("{} {}{}", &c[1], &c[2], &c[3])));
     }
     for c in phase.captures_iter(src) {
+        if c.get(1).is_some() {
+            continue;
+        }
         let at = c.get(0).expect("match").start();
-        out.push((at, format!("phase {}", &c[1])));
+        out.push((at, format!("phase {}", &c[2])));
     }
     for c in call.captures_iter(src) {
         let name = &c[3];

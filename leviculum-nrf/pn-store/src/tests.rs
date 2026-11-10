@@ -2615,3 +2615,130 @@ fn expiry_tick_cost_on_a_full_board_region() {
         rest.as_micros()
     );
 }
+
+/// Fill the log with message records until `peer`'s newest copy has fallen
+/// `lag` pages behind the newest page, or is gone; `refresh` runs the
+/// engine's half-lap refresh after every message. Returns whether the
+/// peer's record is still live.
+fn age_peer_by_messages(
+    store: &mut PnPeerStore<SharedRegion>,
+    messages: &mut PnStore<SharedRegion>,
+    region: &SharedRegion,
+    log: &mut RecordLog<SimNor>,
+    peer: [u8; 16],
+    laps: u32,
+    refresh: bool,
+) -> bool {
+    let start = {
+        let mut newest = 0u32;
+        scan(log.flash_mut().bytes(), |r| newest = newest.max(r.page_seq));
+        newest
+    };
+    let mut n = 0u32;
+    loop {
+        let mut newest = 0u32;
+        scan(log.flash_mut().bytes(), |r| newest = newest.max(r.page_seq));
+        if newest - start >= laps * SECTORS {
+            break;
+        }
+        messages
+            .append(&key(5_000 + n), 1, 0, &msg_body(1, FIELD_BODY))
+            .unwrap();
+        flush_messages(messages, region, log);
+        if refresh {
+            store.refresh_ageing_peers();
+            flush_peers(store, region, log);
+        }
+        n += 1;
+    }
+    let mut live = false;
+    scan(log.flash_mut().bytes(), |r| {
+        live |= r.live && r.tag == TAG_PEER && r.key == &peer_key(&peer)
+    });
+    live
+}
+
+/// Order 1651, item 3: a stored peer that neither announces nor syncs for a
+/// lap of the region is erased with its page by round-robin reclaim, and
+/// the next boot restores the table without it and without a drop event
+/// (the T114's 15 -> 14 -> 13 across its panic reboots). With the
+/// half-lap refresh the engine now runs, the same peer survives two laps,
+/// unchanged, as one live copy.
+#[test]
+fn a_quiet_peer_record_survives_reclaim_only_through_the_half_lap_refresh() {
+    block_on(async {
+        // Without the refresh: the record is reclaimed.
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let mut messages = PnStore::new(region.clone(), SECTORS);
+        let mut store = PnPeerStore::new(region.clone());
+        let quiet = full_peer(0x51, 7);
+        store.save(&quiet).unwrap();
+        flush_peers(&mut store, &region, &mut log);
+        assert!(!age_peer_by_messages(
+            &mut store,
+            &mut messages,
+            &region,
+            &mut log,
+            quiet.destination_hash,
+            1,
+            false,
+        ));
+        assert!(
+            PnPeerStore::new(region.clone())
+                .load_all()
+                .unwrap()
+                .is_empty(),
+            "the reboot restores a table without the quiet peer"
+        );
+
+        // With it: the record outlives two laps.
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        sync(&region, &mut log);
+        let mut messages = PnStore::new(region.clone(), SECTORS);
+        let mut store = PnPeerStore::new(region.clone());
+        store.save(&quiet).unwrap();
+        flush_peers(&mut store, &region, &mut log);
+        assert!(
+            store.refresh_ageing_peers().is_empty(),
+            "a fresh copy is not rewritten"
+        );
+        assert!(age_peer_by_messages(
+            &mut store,
+            &mut messages,
+            &region,
+            &mut log,
+            quiet.destination_hash,
+            2,
+            true,
+        ));
+        let mut copies = 0;
+        scan(log.flash_mut().bytes(), |r| {
+            copies += (r.live && r.tag == TAG_PEER) as usize
+        });
+        assert_eq!(copies, 1, "each refresh purges the copy it replaces");
+        assert_eq!(
+            PnPeerStore::new(region.clone()).load_all().unwrap(),
+            vec![quiet]
+        );
+    });
+}
+
+/// A peer record whose body does not decode is left out of the load; the
+/// store counts it so the engine can say a peer went missing.
+#[test]
+fn an_undecodable_peer_record_is_counted() {
+    block_on(async {
+        let region = SharedRegion::new(SECTORS);
+        let mut log = fresh(SECTORS).await;
+        log.append(&peer_key(&[0x33; 16]), 1, TAG_PEER, &[0xFF; 5])
+            .await
+            .unwrap();
+        sync(&region, &mut log);
+        let store = PnPeerStore::new(region.clone());
+        assert!(store.load_all().unwrap().is_empty());
+        assert_eq!(store.undecodable_peer_records(), 1);
+    });
+}

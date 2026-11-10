@@ -87,6 +87,22 @@ pub const SHARE_PUMP: Duration = Duration::from_secs(loquax::ui::share::MIN_GAP_
 /// eight a turn ran 60 to 80 ms past its budget on the host, and a command
 /// that came in the middle waited for all of it.
 pub const SLICE: loquax::fanout::Slice = loquax::fanout::SLICE;
+
+thread_local! {
+    /// This thread's calls of [`Session::lock`] and the engine's events the
+    /// pump folded while they waited, summed (1610).
+    static LOCK_WAITS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// How often this thread took the session's lock, and how many of the
+/// engine's events the pump folded while it waited for it, since the
+/// thread began (1610): the pump ends its turn after the event in hand and
+/// starts none while a caller waits, so the second is at most the first,
+/// however slow the host. For the facade test.
+#[doc(hidden)]
+pub fn lock_waits() -> (u64, u64) {
+    LOCK_WAITS.with(std::cell::Cell::get)
+}
 /// How long the pump lets go of the lock between two slices of a backlog:
 /// long enough for a screen woken from its wait on the lock to take it,
 /// short against a [`SLICE`], so the history still comes at nine tenths of
@@ -233,6 +249,10 @@ struct Inner {
     /// How many callers of [`Session::lock`] wait for the lock now: the
     /// pump ends its turn after the event it is folding (1464).
     waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// The engine's events the pump folded under the lock so far: what a
+    /// caller of [`Session::lock`] waited behind is the count's step over
+    /// its wait (1610).
+    folded: Arc<std::sync::atomic::AtomicU64>,
     /// The list screens as of the pump's last change (1464), which the UI
     /// thread reads while the pump holds the lock.
     scene: Arc<Mutex<Scene>>,
@@ -411,6 +431,8 @@ pub struct Session {
     pump: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// [`Inner::waiting`].
     waiting: Arc<std::sync::atomic::AtomicUsize>,
+    /// [`Inner::folded`].
+    folded: Arc<std::sync::atomic::AtomicU64>,
     /// [`Inner::scene`].
     scene: Arc<Mutex<Scene>>,
     /// Wakes the pump when a request may have started work (1176).
@@ -688,6 +710,7 @@ impl Session {
             Arc::clone(&wake),
         ));
         let waiting = Arc::clone(&inner.waiting);
+        let folded = Arc::clone(&inner.folded);
         let scene = Arc::clone(&inner.scene);
         // The lists exist before any screen asks (1491): a screen never
         // makes them, so the first is made here, before the pump runs.
@@ -739,6 +762,7 @@ impl Session {
             inner,
             pump: Mutex::new(Some(pump)),
             waiting,
+            folded,
             scene,
             wake,
             held,
@@ -1402,7 +1426,13 @@ impl Session {
         // edge; parking_lot does not poison, so what it left is the state
         // the next caller sees, as it was before 1496.
         self.waiting.fetch_add(1, Ordering::SeqCst);
+        let folded = self.folded.load(Ordering::SeqCst);
         let inner = self.inner.lock();
+        let behind = self.folded.load(Ordering::SeqCst).saturating_sub(folded);
+        LOCK_WAITS.with(|waits| {
+            let (locks, folds) = waits.get();
+            waits.set((locks + 1, folds.saturating_add(behind)));
+        });
         self.waiting.fetch_sub(1, Ordering::SeqCst);
         inner
     }
@@ -2384,6 +2414,7 @@ impl Inner {
             dirty: true,
             backlog: false,
             waiting: Arc::default(),
+            folded: Arc::default(),
             scene: Arc::default(),
             counts: 0,
             gone: false,
@@ -2547,23 +2578,37 @@ impl Inner {
         // a waiting caller takes the lock. A caller waiting for the lock
         // ends the turn after the event in hand (1464): a screen's command
         // waits for one commit, not for a slice.
+        // A caller that waits already when the turn begins goes first
+        // (1610): it was woken when the last turn let go, and a starved
+        // thread can take longer than [`BACKLOG_PUMP`] to run. Folding the
+        // first event regardless, every turn it missed would be one more
+        // commit it waits behind; this way it waits behind one at most.
         let mut slicing = loquax::fanout::Slicing::new(SLICE);
-        loop {
-            let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
-            match slicing.next(&mut self.fanout, &mut self.attached.outbox, waited) {
-                Ok(Some(events)) => self.fold(events),
-                Ok(None) => break,
-                Err(gone) => {
-                    self.gone = true;
-                    let _ = self.events.send(Event::Stopped {
-                        v: VERSION,
-                        detail: gone.to_string(),
-                    });
-                    return false;
+        let yielded = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
+        if !yielded {
+            loop {
+                let waited = self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                match slicing.next(&mut self.fanout, &mut self.attached.outbox, waited) {
+                    Ok(Some(events)) => {
+                        self.folded.fetch_add(
+                            u64::try_from(events.len()).unwrap_or(u64::MAX),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        self.fold(events);
+                    }
+                    Ok(None) => break,
+                    Err(gone) => {
+                        self.gone = true;
+                        let _ = self.events.send(Event::Stopped {
+                            v: VERSION,
+                            detail: gone.to_string(),
+                        });
+                        return false;
+                    }
                 }
             }
         }
-        self.backlog = slicing.backlog();
+        self.backlog = yielded || slicing.backlog();
         while let Ok(finished) = self.finished_rx.try_recv() {
             match finished {
                 Finished::Send(event) => {

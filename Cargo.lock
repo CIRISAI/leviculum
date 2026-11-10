@@ -3452,6 +3452,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-std",
+ "mimalloc",
  "rand_core 0.6.4",
  "tempfile",
  "tokio",

@@ -152,7 +152,7 @@ fn a_peer_silent_across_seeded_boots_ages_and_is_dropped_at_load() {
         let mut table = table();
         let dropped = table.restore(store.load_all().unwrap(), floor);
         if !dropped.is_empty() {
-            assert_eq!(dropped, vec![[7; 16]]);
+            assert_eq!(dropped, vec![([7; 16], DropReason::Unreachable)]);
             store.remove(&[7; 16]).unwrap();
             break;
         }
@@ -1424,10 +1424,89 @@ fn restore_leaves_out_and_hands_back_the_peers_unheard_past_fourteen_days() {
         NOW,
     );
 
-    assert_eq!(dropped, vec![[1; 16]]);
+    assert_eq!(dropped, vec![([1; 16], DropReason::Unreachable)]);
     assert!(table.get(&[1; 16]).is_none());
     assert!(table.get(&[2; 16]).is_some());
     assert!(table.get(&[3; 16]).is_some_and(|peer| peer.is_static));
+    assert_eq!(table.len(), 2);
+}
+
+/// A store written under a larger cap comes back held to the current one
+/// (order 1651, LV-1006): fifteen records against `max_peers = 7` restore
+/// seven, the most synced by cursor and then the most recently heard, a
+/// static peer on top of them bypasses the cap as at admission, and every
+/// record left out comes back as a [`DropReason::Cap`] drop for the host to
+/// purge and log. Before the fix all fifteen were restored and the board
+/// booted past the budget its heap was sized for.
+#[test]
+fn restore_holds_a_larger_stored_table_to_the_cap() {
+    const NOW: u64 = 1_790_000_000;
+    let mut table = PeerTable::new(PeeringConfig {
+        max_peers: 7,
+        static_peers: vec![[0xEE; 16]],
+        ..PeeringConfig::default()
+    });
+    let mut store = MemoryPeerStore::default();
+    for n in 1..=15u8 {
+        // Cursor rises with n for the first ten; the last five share cursor
+        // 0 and differ only in when they were last heard.
+        let mut peer = Peer::from_announce([n; 16], &announce(1), false, NOW - 1000 + n as u64);
+        peer.cursor = if n <= 10 { n as u64 * 100 } else { 0 };
+        store.save(&PeerRecord::of(&peer)).unwrap();
+    }
+    let quiet_static = Peer::from_announce([0xEE; 16], &announce(1), false, NOW - 5);
+    store.save(&PeerRecord::of(&quiet_static)).unwrap();
+
+    let dropped = table.restore(store.load_all().unwrap(), NOW);
+
+    // Seven slots, the static peer's included: it takes one, and the six
+    // highest cursors (5..=10) take the rest.
+    assert_eq!(table.len(), 7);
+    assert!(table.get(&[0xEE; 16]).is_some_and(|peer| peer.is_static));
+    for n in 5..=10u8 {
+        assert!(table.get(&[n; 16]).is_some(), "peer {n} kept");
+    }
+    assert_eq!(dropped.len(), 9);
+    assert!(dropped.iter().all(|(_, reason)| *reason == DropReason::Cap));
+    // Least valuable first: cursor 0 before any cursor, and among cursor 0
+    // the longest unheard first.
+    let order: Vec<u8> = dropped.iter().map(|(hash, _)| hash[0]).collect();
+    assert_eq!(order, vec![11, 12, 13, 14, 15, 1, 2, 3, 4]);
+    for (hash, _) in &dropped {
+        store.remove(hash).unwrap();
+    }
+    assert_eq!(
+        store.load_all().unwrap().len(),
+        7,
+        "the trimmed table is what persists"
+    );
+}
+
+/// The trim never drops a peer mid-round: its round would end on a missing
+/// entry. It drops the next least valuable idle peer instead, and a table
+/// already inside the cap is left alone.
+#[test]
+fn trim_to_cap_spares_a_peer_mid_round_and_leaves_a_fitting_table_alone() {
+    let mut table = PeerTable::new(PeeringConfig {
+        max_peers: 2,
+        ..PeeringConfig::default()
+    });
+    for n in 1..=3u8 {
+        let mut peer = Peer::from_announce([n; 16], &announce(1), false, 100);
+        peer.cursor = n as u64;
+        table.restore(vec![PeerRecord::of(&peer)], 100);
+    }
+    // restore already trimmed peer 1 on the third load.
+    assert_eq!(table.len(), 2);
+    assert!(table.get(&[1; 16]).is_none());
+    assert!(table.trim_to_cap().is_empty());
+
+    let mut extra = Peer::from_announce([9; 16], &announce(1), false, 100);
+    extra.cursor = 9;
+    table.peers.insert([9; 16], extra);
+    table.get_mut(&[2; 16]).unwrap().state = SyncPhase::RequestSent;
+    assert_eq!(table.trim_to_cap(), vec![[3; 16]]);
+    assert!(table.get(&[2; 16]).is_some());
     assert_eq!(table.len(), 2);
 }
 

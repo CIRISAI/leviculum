@@ -340,6 +340,7 @@ rnode-chip-offsets:
 [doc('Shellcheck the flash-runner and CI shell scripts')]
 nrf-shellcheck:
     shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
+        scripts/lnode-bootloader.sh \
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
         scripts/rig-cell.sh scripts/test-rig-cell.sh \
         scripts/device-watchdog.sh scripts/test-device-watchdog.sh \
@@ -1505,6 +1506,14 @@ tree-clean-selftest:
 # not-in-guards: no-atomic64-gate -- a cargo check on a third triple, which it
 #   installs itself
 # not-in-guards: check-all-targets -- compiles every target in the workspace
+# not-in-guards: deb-features-check -- cargo check of every package's feature
+#   set on its release triple (1593): 9.5 s after `touch
+#   leviculum-core/src/lib.rs`, 3 min 35 s cold (measured 2026-11-09), and
+#   two release feature sets of its own (clause b). RUN IT BY HAND INSTEAD
+#   whenever a pass touches a `cfg(feature` boundary, a CLI args struct or a
+#   `Cargo.toml` feature list: `just deb-features-check`. 1570 added
+#   `GuiArgs::no_start` and loquax under `tui gui` on the gnu triple stayed
+#   uncompilable from 902bc129 to cbbd870d with every coder gate green.
 # not-in-guards: citation-guard -- a cargo test target (clause c), and over the
 #   ten besides: 18.65 s for the bare-anchor test alone and 20.0 s for the
 #   recipe (measured 2026-09-27; the other thirteen tests in the binary run
@@ -1590,7 +1599,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest m9-walk-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest m9-walk-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets deb-features-check citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2012,6 +2021,20 @@ build-deb-arm64: (_require-cargo-deb) _deb-stamp
 build-deb-armhf: (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh armhf
 
+# 1593: every package this host's nightly would build, compiled with exactly
+# the target triple and feature set scripts/build-deb.sh builds it with, by
+# that script's own `--check` mode, so the two cannot drift: `cargo check
+# --release`, nothing linked, nothing packaged, no stamps. loquax under `tui
+# gui` on the gnu triple did not compile on master from 902bc129 to cbbd870d
+# (1570 added `GuiArgs::no_start` and not the two initialisers in `gui_args`)
+# and no coder gate saw it: `loquax-gui` checks `gui` alone and `loquax-tui`
+# `tui` alone. In `fast`, not in `guards` (see the ledger there). RUN IT BY
+# HAND INSTEAD whenever a pass touches a `cfg(feature` boundary, a CLI args
+# struct or a `Cargo.toml` feature list.
+[doc('cargo check every .deb feature set on its triple (host arch)')]
+deb-features-check:
+    bash scripts/build-deb.sh --check
+
 # The heap-accounting variants of the leviculum package (#437) and of the
 # lnpnd package (550), for one architecture. Both build-deb-* recipes produce them
 # beside the plain packages, because scripts/build-deb.sh always does; this
@@ -2219,6 +2242,29 @@ flash-rak4631-one PORT:
 [doc('Flash a RAK4631 with the WisMesh Pocket V2 baseboard peripherals')]
 flash-rak4631-pocket:
     {{rak4631_env}} bash scripts/nrf-flash.sh rak4631 bsp-rak4631,rak-baseboard
+
+# Which bootloader build a board carries: touch PORT (or "-" and double-tap
+# by hand), mount the volume read-only, print INFO_UF2.TXT, give it back. The
+# board stays in its bootloader afterwards; its own flash recipe brings the
+# application back (a Pocket V2 does not leave it on a power cycle, the
+# battery holds it). Run on the Pocket and the RAK before any update:
+# docs/src/concepts/ota-stage-1-ble-dfu.md, "Bootloader update".
+#   just bootloader-info /dev/leviculum-rak-transport
+[doc('Print INFO_UF2.TXT of an LNode bootloader (- = double-tap by hand)')]
+bootloader-info PORT:
+    LEVICULUM_USB_PID=0002 bash scripts/lnode-bootloader.sh info {{PORT}}
+
+# Lift a RAK4631's bootloader to the build in UF2 (RAK's update-*_nosd.uf2;
+# 0.4.4 is vendored at lnflash/tests/fixtures/bootloader/rak4631/). The
+# planner refuses an image that would stage outside the record log, the run
+# reads INFO before and after, flashes our application as flash-rak4631-one
+# does and asserts [IDENTITY] kept. PORT "-" means double-tap by hand and
+# leaves the identity unverified. The procedure, the recovery over SWD and
+# why the record log loses pages: docs/src/concepts/ota-stage-1-ble-dfu.md.
+#   just bootloader-update-rak lnflash/tests/fixtures/bootloader/rak4631/update-wiscore_rak4631_board_bootloader-0.4.4_nosd.uf2 /dev/leviculum-rak-transport
+[doc('Lift a RAK4631 bootloader from a self-update UF2, reflash our firmware')]
+bootloader-update-rak UF2 PORT="-":
+    {{rak4631_env}} bash scripts/lnode-bootloader.sh update-rak {{UF2}} {{PORT}}
 
 # What every SenseCAP Solar Node flash recipe tells the runner about this
 # board. The Board-ID is the XIAO MODULE's, not this product's: a DIY XIAO
@@ -2435,10 +2481,23 @@ mailbox-growth-soak secs="7200" sample="600" rate="2" limit="20":
 # a pass shortens it with `secs`, the reviewer runs the default. Never under
 # /tmp: the soak directory is the target dir's tmp unless LNPND_SOAK_DIR says
 # otherwise (lnpnd/tests/pn_growth_soak.rs).
+#
+# `alloc` picks the daemon's allocator (1592): `mimalloc`, lnpnd's default,
+# or `system`, the libc allocator the field ran before, built with the
+# interface families and without `alloc-mimalloc`. Positional, as just 1.40
+# hands `alloc=system` over as a literal: `just pn-growth-soak 1200 300000 14
+# system`.
 [doc('lnpnd growth soak: does a table grow once the store is full (20 min)')]
-pn-growth-soak secs="1200" messages="300000" peers="14":
+pn-growth-soak secs="1200" messages="300000" peers="14" alloc="mimalloc":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{alloc}}" in
+    mimalloc) features=() ;;
+    system) features=(--no-default-features --features "ble serial i2p") ;;
+    *) echo "pn-growth-soak: alloc={{alloc}}; want mimalloc or system" >&2; exit 2 ;;
+    esac
     LNPND_SOAK_SECS={{secs}} LNPND_SOAK_MESSAGES={{messages}} LNPND_SOAK_PEERS={{peers}} \
-        cargo test --release -p lnpnd --test pn_growth_soak -- --ignored --nocapture
+        cargo test --release -p lnpnd "${features[@]}" --test pn_growth_soak -- --ignored --nocapture
 
 # The forge runner is a shared machine, and a test whose pass depends on the
 # host being fast is a red waiting for a slow day (672: lnpnd's stamp worker

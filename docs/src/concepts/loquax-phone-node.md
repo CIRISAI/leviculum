@@ -20,7 +20,7 @@ change to the interface seam keeps the way to the full node open.
 (`loquax/src/engine.rs:389`) says it "registers nothing, by
 construction", and a guard test, `a_client_engine_registers_no_delivery_destination`,
 holds that. The session attaches through `attach_leaf`
-(`loquax-android/src/session.rs:548`) with `Role::Client`. That node runs
+(`loquax-android/src/session.rs:570`) with `Role::Client`. That node runs
 with transport off and has no interface from the config: the rendezvous
 rotation dials one TCP client at a time (`Upstream::Tcp`,
 `loquax/src/engine/shell.rs:838`). The only destination it talks to is the
@@ -82,11 +82,11 @@ its medium. For the phone that means the following:
 What already fits the seam:
 
 - **USB serial needs no new interface.** `RNodeChannelFactory`
-  (`leviculum-std/src/interfaces/rnode.rs:3627`) exists for exactly this
+  (`leviculum-std/src/interfaces/rnode.rs:3628`) exists for exactly this
   case: a host that never sees `/dev/ttyACM*`, Android named. The phone
   supplies `open`. The KISS detection and configuration, the airtime
   bucket and the reconnect loop stay the host RNode interface's own, and
-  `spawn_rnode_channel_interface` (`leviculum-std/src/driver/mod.rs:2703`)
+  `spawn_rnode_channel_interface` (`leviculum-std/src/driver/mod.rs:2842`)
   hot-plugs the radio when the cable goes in.
 - **BLE needs a second carrier binding, not a second interface.** The
   host BLE interface is split into a pure half, `links` (admission,

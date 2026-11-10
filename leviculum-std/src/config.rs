@@ -453,10 +453,22 @@ impl ReticulumConfig {
     /// The per-table ceilings this config asks for (Codeberg #421): the named
     /// profile, with any individually configured key overriding it.
     pub fn table_caps(&self) -> TableCaps {
-        let mut caps = match self.storage_profile.as_deref() {
+        self.table_caps_on(self.profile_caps())
+    }
+
+    /// The named profile's ceilings, before any per-table key: the part
+    /// the builder fits to the host's RAM (order 1586,
+    /// [`crate::table_budget::fit`]).
+    pub fn profile_caps(&self) -> TableCaps {
+        match self.storage_profile.as_deref() {
             Some("compact") => TableCaps::compact(),
             _ => TableCaps::desktop(),
-        };
+        }
+    }
+
+    /// `base` with every individually configured ceiling written over it.
+    pub fn table_caps_on(&self, base: TableCaps) -> TableCaps {
+        let mut caps = base;
         if let Some(n) = self.path_table_cap {
             caps.path_cap = n;
         }

@@ -233,30 +233,8 @@ impl Handler for BaudTouchHandler {
             // Hot path: no `await`, no allocation, no logging between the
             // GPREGRET write and `sys_reset()`. Any preemption here would
             // risk the magic being lost before the reset fires.
-            const DFU_MAGIC_UF2_RESET: u32 = 0x57;
-            // GPREGRET lives in the POWER peripheral, which the S140
-            // SoftDevice owns once `Softdevice::enable` has run: a direct
-            // write post-enable is an MWU MEMACC (info bit 0, POWER) and
-            // records one bogus panic per touch-flash (Codeberg #249).
-            // Post-enable the write must go through the SoC syscalls;
-            // pre-enable (this handler can fire before `ble::init` on a
-            // fast host) the syscalls fail, and the direct write is legal.
-            if softdevice_enabled() {
-                unsafe {
-                    // GPREGRET syscalls are bit-mask ops: clear all bits,
-                    // then set the UF2 magic.
-                    nrf_softdevice_s140::sd_power_gpregret_clr(0, 0xFF);
-                    nrf_softdevice_s140::sd_power_gpregret_set(0, DFU_MAGIC_UF2_RESET);
-                }
-            } else {
-                // SAFETY: pre-`Softdevice::enable` the POWER peripheral is
-                // unprotected; a direct GPREGRET write is legal only in
-                // this window.
-                unsafe {
-                    const GPREGRET: *mut u32 = 0x4000_051C as *mut u32;
-                    core::ptr::write_volatile(GPREGRET, DFU_MAGIC_UF2_RESET);
-                }
-            }
+            const DFU_MAGIC_UF2_RESET: u8 = 0x57;
+            write_gpregret(DFU_MAGIC_UF2_RESET);
             cortex_m::peripheral::SCB::sys_reset();
             // sys_reset() is `-> !` and never returns.
         }
@@ -423,6 +401,43 @@ fn log_write_failed(what: &str) {
 
 /// Serial HW_MTU (matches Python SerialInterface)
 const SERIAL_HW_MTU: usize = 564;
+
+/// Write a bootloader magic to `GPREGRET`: the one seam both ways into the
+/// Adafruit bootloader go through, the 1200-baud UF2 touch (`0x57`, above)
+/// and the mesh's `/dfu` verb (`0xA8`, `crate::remote_dfu`, #235). The
+/// caller resets right after, with no await, allocation or logging between.
+pub fn write_gpregret(magic: u8) {
+    // GPREGRET lives in the POWER peripheral, which the S140
+    // SoftDevice owns once `Softdevice::enable` has run: a direct
+    // write post-enable is an MWU MEMACC (info bit 0, POWER) and
+    // records one bogus panic per touch-flash (Codeberg #249).
+    // Post-enable the write must go through the SoC syscalls;
+    // pre-enable (the touch handler can fire before `ble::init` on a
+    // fast host) the syscalls fail, and the direct write is legal.
+    if softdevice_enabled() {
+        unsafe {
+            // GPREGRET syscalls are bit-mask ops: clear all bits,
+            // then set the magic.
+            nrf_softdevice_s140::sd_power_gpregret_clr(0, 0xFF);
+            nrf_softdevice_s140::sd_power_gpregret_set(0, u32::from(magic));
+        }
+    } else {
+        // SAFETY: pre-`Softdevice::enable` the POWER peripheral is
+        // unprotected; a direct GPREGRET write is legal only in
+        // this window.
+        unsafe {
+            const GPREGRET: *mut u32 = 0x4000_051C as *mut u32;
+            core::ptr::write_volatile(GPREGRET, u32::from(magic));
+        }
+    }
+}
+
+/// Whether the serial interface's outbound queue is empty: the transport
+/// writer has taken every frame the core handed it. The `/dfu` exit waits on
+/// this before the reset (#235).
+pub fn outgoing_drained() -> bool {
+    OUTGOING_CHANNEL.is_empty()
+}
 
 /// Whether the S140 SoftDevice is enabled. `sd_softdevice_is_enabled` is
 /// legal in every SoftDevice state and always returns `NRF_SUCCESS`.
@@ -802,7 +817,15 @@ async fn retic_serial_task(
                 // Read succeeded within timeout
                 Either3::First(Ok(Ok(n))) => {
                     log_u32("SER: USB read", n as u32);
-                    let results = deframer.process(&read_buf[..n]);
+                    // Deframing allocates on thread mode outside the main
+                    // loop: named for the stall line and the panic record,
+                    // and restored before the first await (order 1641).
+                    let results = {
+                        let _phase = leviculum_firmware::thread_watch::phase_scope(
+                            leviculum_firmware::thread_watch::Phase::SerialIngress,
+                        );
+                        deframer.process(&read_buf[..n])
+                    };
                     for r in results {
                         if let DeframeResult::Frame(ref data) = r {
                             match envelope::classify_control_frame(data, ACCEPTED_CONTROL_TYPES) {
@@ -812,7 +835,13 @@ async fn retic_serial_task(
                                         leviculum_firmware::iface_bytes::SERIAL,
                                         data.len(),
                                     );
-                                    incoming_tx.send(data.clone()).await;
+                                    let copy = {
+                                        let _phase = leviculum_firmware::thread_watch::phase_scope(
+                                            leviculum_firmware::thread_watch::Phase::SerialIngress,
+                                        );
+                                        data.clone()
+                                    };
+                                    incoming_tx.send(copy).await;
                                 }
                                 // Host-requested reboot. The duty-cycle
                                 // histogram, radio config and queues all
@@ -1199,13 +1228,14 @@ async fn retic_serial_task(
                                     let persist =
                                         crate::telemetry::confirm(crate::pn::apply_config(config))
                                             .await;
-                                    let answer = match persist {
-                                        envelope::Persist::Durable => {
-                                            envelope::encode_ack(envelope::TYPE_PN_CONFIG)
-                                        }
-                                        envelope::Persist::Lost => envelope::encode_refusal(
+                                    // Lost and pending (order 1626) are
+                                    // named apart, like every answer on
+                                    // the persist path.
+                                    let answer = match envelope::persist_refusal(persist) {
+                                        None => envelope::encode_ack(envelope::TYPE_PN_CONFIG),
+                                        Some(reason) => envelope::encode_refusal(
                                             envelope::TYPE_PN_CONFIG,
-                                            envelope::REFUSE_PERSIST,
+                                            reason,
                                         ),
                                     };
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
@@ -1224,13 +1254,14 @@ async fn retic_serial_task(
                                         crate::position::apply_setting(setting),
                                     )
                                     .await;
-                                    let answer = match persist {
-                                        envelope::Persist::Durable => {
-                                            envelope::encode_ack(envelope::TYPE_POSITION_SHARE)
-                                        }
-                                        envelope::Persist::Lost => envelope::encode_refusal(
+                                    // Lost and pending (order 1626) are
+                                    // named apart, like every answer on
+                                    // the persist path.
+                                    let answer = match envelope::persist_refusal(persist) {
+                                        None => envelope::encode_ack(envelope::TYPE_POSITION_SHARE),
+                                        Some(reason) => envelope::encode_refusal(
                                             envelope::TYPE_POSITION_SHARE,
-                                            envelope::REFUSE_PERSIST,
+                                            reason,
                                         ),
                                     };
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)

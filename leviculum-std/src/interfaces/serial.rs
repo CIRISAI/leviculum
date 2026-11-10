@@ -1232,8 +1232,9 @@ const MEDIA_QUERY_ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 /// The profile is the one media frame the board answers only after a flash
 /// write: the firmware applies it, then waits for the store task to settle
 /// the page (`crate::telemetry::confirm`) for up to `PERSIST_CONFIRM_WITHIN`,
-/// 2500 ms (`leviculum-nrf/src/telemetry.rs:424`), before it writes either
-/// the report or [`leviculum_core::envelope::REFUSE_PERSIST`]. A 2 s window
+/// 2500 ms (`leviculum-nrf/src/telemetry.rs:430`), before it writes either
+/// the report, [`leviculum_core::envelope::REFUSE_PERSIST_PENDING`] (still
+/// writing) or [`leviculum_core::envelope::REFUSE_PERSIST`] (gave up). A 2 s window
 /// called a board whose save was merely slow unanswered although it had
 /// taken the profile (470). The firmware sized its bound to land inside
 /// lnflash's window, so the host waits that window and both clients read the
@@ -1568,7 +1569,9 @@ where
                     );
                     answer = Some(MediaAnswer::NoAnswer);
                 }
-                Seen::Refused(envelope::REFUSE_PERSIST)
+                // Pending (order 1626) is the same sentence for this
+                // caller: applied now, not yet promised to survive a reset.
+                Seen::Refused(envelope::REFUSE_PERSIST | envelope::REFUSE_PERSIST_PENDING)
                     if asked_type == envelope::TYPE_MEDIA_PROFILE =>
                 {
                     tracing::warn!(
@@ -1605,8 +1608,9 @@ enum MediaPersist {
     /// The board answered with its report, which it writes only once the
     /// record is on the page.
     Durable,
-    /// The board answered [`leviculum_core::envelope::REFUSE_PERSIST`]: it
-    /// runs the profile now, and a reset may bring back the previous one.
+    /// The board answered [`leviculum_core::envelope::REFUSE_PERSIST`] or
+    /// [`leviculum_core::envelope::REFUSE_PERSIST_PENDING`]: it runs the
+    /// profile now, and a reset may bring back the previous one.
     Unconfirmed,
 }
 
@@ -2264,7 +2268,7 @@ mod tests {
     /// `SerialInterface` block naming one builds, spawns, and puts a value on
     /// the wire that `RadioConfig::from_wire_config` returns `None` for. The
     /// legacy contract for a config the driver cannot take is silence
-    /// (`leviculum-nrf/src/usb.rs:829-849`), so the board stays on the PHY it
+    /// (`leviculum-nrf/src/usb.rs:858-878`), so the board stays on the PHY it
     /// already had while the host's airtime bucket goes on pricing every
     /// frame at the bandwidth it asked for.
     #[test]

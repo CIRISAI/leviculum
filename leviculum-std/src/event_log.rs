@@ -469,6 +469,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "ANN_PACED",
         required_keys: &["dst", "iface", "release_ms"],
     },
+    // A pending announce rebroadcast cancelled because a copy of the SAME
+    // announce (packet hash `ph`, the entry's) was heard further on (order
+    // 1617): `reason` is `passed_on` (hops + 1, the local-rebroadcast limit
+    // reached) or `forwarded` (hops + 2 while the retransmit was still in
+    // the future). `hops` is the copy's, `iface` where it was heard.
+    EventSchema {
+        name: "ANN_REBROADCAST_CANCELLED",
+        required_keys: &["dst", "ph", "hops", "iface", "reason"],
+    },
     // A received announce that found a targeted path response still in its
     // grace (1262): the response stays, carrying this newer emission, and
     // the announce's rebroadcast waits in the held slot until the response
@@ -517,6 +526,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "RESPONSE_TX",
         required_keys: &["len", "link", "request_id"],
+    },
+    // OTA stage 1 (#235): a `/dfu` request on the management destination,
+    // decided. `from` is the link's identity hash or `none`; `reason` is
+    // `accepted`, `not-listed` or `no-identity`. The boards print the same
+    // key set as their `MGMT_DFU` line (leviculum_log_line::MgmtDfuBody).
+    EventSchema {
+        name: "MGMT_DFU",
+        required_keys: &["accepted", "from", "reason"],
     },
     // OBS-2: periodic per-reason drop summary at the PATH_TABLE cadence (~10s).
     // Surfaces the always-on drop counters (including the high-volume overheard
@@ -789,6 +806,20 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "TCP_TOTAL_CAPPED",
         required_keys: &["iface", "source", "held"],
     },
+    // An I2P peer's tunnel read nothing for longer than the stale threshold
+    // (20 s, the reference's `I2P_PROBE_AFTER*2`, I2PInterface.py:681): the
+    // mark rnstatus shows as `Tunnel Unresponsive`. `idle_ms` is the silence
+    // when it was noticed. The teardown still waits for the 110 s read
+    // timeout, so this is the early sign, not an action (1588).
+    EventSchema {
+        name: "I2P_TUNNEL_STALE",
+        required_keys: &["iface", "idle_ms"],
+    },
+    // The same tunnel read a byte again; `stale_ms` is how long it was stale.
+    EventSchema {
+        name: "I2P_TUNNEL_ACTIVE",
+        required_keys: &["iface", "stale_ms"],
+    },
     // A connection that delivered no valid frame was closed: `reason` is
     // `timeout` (the silent timeout in force) or `evicted` (room for a
     // newcomer at the total cap). One line per 10 s; `suppressed` counts the
@@ -1004,6 +1035,24 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "origin_ids",
             "dup_cap_ids",
             "origin_slots",
+            "transport",
+            "transport_entries",
+            "transport_unbounded",
+            "transport_over",
+        ],
+    },
+    // lnpnd: its node's transport tables beside the census, each as
+    // `name:entries/ceiling` (order 1586): a local client keeps a client's
+    // tables, and the line names the one that grows.
+    EventSchema {
+        name: "PN_TRANSPORT",
+        required_keys: &[
+            "occasion",
+            "bytes",
+            "entries",
+            "unbounded",
+            "over",
+            "tables",
         ],
     },
     // loquax-mailbox: one heap census of the mailbox's own tables, every
@@ -1877,7 +1926,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4971`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:5111`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

@@ -444,12 +444,13 @@ link plus a resource transfer, where a report is a single packet. Both
 figures belong in a port's own arithmetic; neither is a licence to skip
 it.
 
-There is no third shape. Reticulum has no multi-hop broadcast at all —
-see [Public channels over
-LXMF](public-channels.md#1-why-the-obvious-approach-does-not-work), which
-settles this at the protocol level rather than by what two apps happen to
-implement. LXMF's `FIELD_GROUP` is conversation metadata and not a
-delivery mechanism; it would not produce a broadcast even if every
+There is no third shape. Reticulum has no multi-hop broadcast at all: a
+GROUP or PLAIN destination can never be announced
+(`Destination.py:251-252`), and any receiving node drops such a packet once
+`hops > 1` (`Transport.py:1354-1373`), so its reach is one hop plus locally
+attached clients. That settles it at the protocol level rather than by what
+two apps happen to implement. LXMF's `FIELD_GROUP` is conversation metadata
+and not a delivery mechanism; it would not produce a broadcast even if every
 viewer read it.
 
 ### Relaying someone else's readings needs permission
@@ -459,7 +460,7 @@ that redistribution. It therefore answers requests only from an explicit
 allow-list, empty by default, set only through a path that is not the
 radio: on a host that is the config file, as `remote_management_allowed`
 is (`leviculum-std/src/config.rs:166`, empty by default at
-`leviculum-std/src/config.rs:609`); on a firmware with no filesystem it
+`leviculum-std/src/config.rs:621`); on a firmware with no filesystem it
 is the local control channel, which is the same requirement in a
 different envelope.
 
@@ -550,14 +551,14 @@ their index stamps (there is no re-index).
   destination is impossible without it. There is no broadcast around
   this: the reference's transmit-on-all-interfaces branch
   (`reference/Reticulum/RNS/Transport.py:1177-1182`, our equivalent
-  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:5046`)
+  `send_on_all_interfaces`, `leviculum-core/src/transport.rs:5047`)
   applies to a packet that already exists, and building one required the
   key. So a port either preconfigures the target identity or waits until
   it has heard the target announce.
 - **A path, or a request for one.** `send_to_destination`
-  (`leviculum-core/src/transport.rs:5164`) fails without a path entry.
+  (`leviculum-core/src/transport.rs:5165`) fails without a path entry.
   The primitive for obtaining one is `request_path_unthrottled`
-  (`leviculum-core/src/node/mod.rs:3971`), the application's request,
+  (`leviculum-core/src/node/mod.rs:3985`), the application's request,
   which always leaves; a node with the key but no path asks and waits
   rather than giving up.
 - **An out-of-band trust step at the receiver, in the operator's hands.**

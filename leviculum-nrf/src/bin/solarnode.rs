@@ -234,7 +234,11 @@ async fn main(spawner: Spawner) {
     // mast — an unattended node announcing a management destination with
     // nobody on the list is advertising a door (#235).
     if let leviculum_nrf::mgmt::RemoteMgmtDecision::Enabled(allowed) = &mgmt_allow {
-        builder = builder.remote_management(true, allowed.clone());
+        // `/dfu` beside `/status`, under the same list (#235): a
+        // board can enter its bootloader, so it serves the verb.
+        builder = builder
+            .remote_management(true, allowed.clone())
+            .remote_dfu(true);
     }
 
     let identity_loaded = {
@@ -801,6 +805,9 @@ async fn main(spawner: Spawner) {
     // own locals; expanded only after a dispatch, never inside the
     // select, so the engine's awaits cannot be cancelled (the DropBomb
     // rule, `leviculum_nrf::record_store` module docs).
+    // An accepted `/dfu` command's reply, parked by the engine pass for the
+    // exit at the top of the loop (#235).
+    let mut dfu_exit: Option<leviculum_core::transport::TickOutput> = None;
     macro_rules! pn_step {
         ($events:expr) => {
             // Board-visible core-event lines (LINK_REFUSED, #388) render
@@ -814,6 +821,15 @@ async fn main(spawner: Spawner) {
             {
                 let mut status_out = leviculum_core::transport::TickOutput::empty();
                 leviculum_nrf::remote_status::handle_events(&mut node, $events, &mut status_out);
+                // #235, OTA stage 1: `/dfu`. A refusal's typed reply rides
+                // this dispatch; an accepted command is parked for the exit
+                // at the top of the loop, the one place it is expanded.
+                leviculum_nrf::remote_dfu::handle_events(
+                    &mut node,
+                    $events,
+                    &mut status_out,
+                    &mut dfu_exit,
+                );
                 if !status_out.actions.is_empty() {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
@@ -846,6 +862,18 @@ async fn main(spawner: Spawner) {
     // 9. Telemetry evaluation tick (only while a target is configured)
     // 10. User button press that announces (#459; never on a board without one)
     loop {
+        // #235: an accepted `/dfu` leaves from here: reply handed over and
+        // waited for, then the bootloader magic and the reset. Does not
+        // return when a command is parked.
+        leviculum_nrf::remote_dfu::exit_if_commanded(&mut node, &mut dfu_exit, |node, out| {
+            if !out.actions.is_empty() {
+                let mut ifaces: [&mut dyn Interface; 3] =
+                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                let dispatched = dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
+                leviculum_firmware::dispatch::settle("remote-dfu", node, &dispatched);
+            }
+        })
+        .await;
         transport_stats.poll(&node);
         // Close a `[DROP]` rate-limit window that expired without a further
         // drop to carry its summary (#346): the silence after a storm is the
@@ -912,6 +940,10 @@ async fn main(spawner: Spawner) {
             .await
         };
 
+        // Back to the select: what runs from here until an arm is entered is
+        // another task's, and a stall or panic in it must not blame the last
+        // arm (order 1641).
+        leviculum_firmware::thread_watch::set_phase(leviculum_firmware::thread_watch::Phase::Idle);
         let wake = select4(
             select4(
                 serial.incoming_rx.receive(),
@@ -972,6 +1004,9 @@ async fn main(spawner: Spawner) {
         time_checkpoint.poll(node.anchor_rank(), node.emission_secs(), node.now_ms());
         match wake {
             Either4::Second(unix) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::HostCtl,
+                );
                 // A GNSS fix carrying UTC. The seam applies the same
                 // sanity window as every other time source; a refusal is
                 // surfaced as a structured event, never swallowed.
@@ -992,6 +1027,9 @@ async fn main(spawner: Spawner) {
                 let _ = unix;
             }
             Either4::Third(Either4::First(unix_secs)) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::HostCtl,
+                );
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The
                 // seam applies the same sanity window as every other time
                 // source; the bool picks the enveloped ack or the named
@@ -1012,6 +1050,9 @@ async fn main(spawner: Spawner) {
                 let _ = serial_ctl_tx.try_send(answer);
             }
             Either4::Third(Either4::Second(wire)) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::HostCtl,
+                );
                 // A host set or cleared the telemetry target (#236). What
                 // happens here is the part that needs the node — the
                 // identity lookup that decides ready vs awaiting-key. The
@@ -1029,6 +1070,9 @@ async fn main(spawner: Spawner) {
                 }
             }
             Either4::Third(Either4::Third(position)) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::HostCtl,
+                );
                 // A host set or cleared the fixed position. This is the
                 // part that needs the reporter — the source switch and the
                 // confirmation re-arm; the persist is the serial task's,
@@ -1048,6 +1092,9 @@ async fn main(spawner: Spawner) {
                 }
             }
             Either4::Third(Either4::Fourth(())) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::Announce,
+                );
                 // A host asked for an announce now (#376 `TYPE_ANNOUNCE`,
                 // `lnflash --announce`, periculum's `announce_board`):
                 // every announce this board makes on its own cadence,
@@ -1158,6 +1205,9 @@ async fn main(spawner: Spawner) {
                 let _ = serial_ctl_tx.try_send(answer);
             }
             Either4::Fourth(Either3::First(())) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::Telemetry,
+                );
                 // Telemetry evaluation (#236). Everything decided here is
                 // decided in the policy crate; this arm reads the board's
                 // sensors, hands them over, and dispatches whatever came
@@ -1180,6 +1230,9 @@ async fn main(spawner: Spawner) {
                 }
             }
             Either4::Fourth(Either3::Second(())) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::Announce,
+                );
                 // The periodic announce (#376 item 2). Independent of
                 // telemetry: a node that reports rarely, or has no target
                 // at all, still has to be findable, and a phone that
@@ -1200,6 +1253,9 @@ async fn main(spawner: Spawner) {
                 }
             }
             Either4::Fourth(Either3::Third(())) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::Announce,
+                );
                 // A double press of the user button that got past its
                 // debouncer and its 30 s limit (#459, `leviculum_nrf::button`):
                 // both announces, booked in the cadence's duty budget. A
@@ -1234,6 +1290,9 @@ async fn main(spawner: Spawner) {
                 leviculum_nrf::telemetry::on_button_press(reporter.as_mut(), now_ms);
             }
             Either4::First(Either4::First(data)) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::SerRx,
+                );
                 info!("SER RX {} bytes", data.len());
                 let output = node.handle_packet(InterfaceId(0), &data);
                 info!("SER RX -> {} actions", output.actions.len());
@@ -1249,6 +1308,9 @@ async fn main(spawner: Spawner) {
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Second(data)) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::LoraRx,
+                );
                 // A medium switched off at runtime stops carrying traffic
                 // in BOTH directions from the moment the frame was
                 // answered: the interface drops what the core hands it,
@@ -1274,6 +1336,9 @@ async fn main(spawner: Spawner) {
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Third(Either::First(event))) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::BleRx,
+                );
                 // `ble_link::deliver` routes peer transitions onto their
                 // own channel; only inbound packets ride this one.
                 let BleLinkEvent::Inbound {
@@ -1316,6 +1381,9 @@ async fn main(spawner: Spawner) {
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Third(Either::Second(event))) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::BlePeer,
+                );
                 // A BLE peer transition (Codeberg #365). Lost: cull the
                 // paths whose next hop is that peer so the next report
                 // re-resolves over a carrier that can still deliver.
@@ -1376,6 +1444,9 @@ async fn main(spawner: Spawner) {
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Fourth(())) => {
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::Timer,
+                );
                 let output = node.handle_timeout();
                 if !output.actions.is_empty() {
                     info!("timeout: {} actions", output.actions.len());

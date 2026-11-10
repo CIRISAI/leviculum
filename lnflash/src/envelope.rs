@@ -28,11 +28,11 @@ use leviculum_core::envelope::{
     encode_telemetry_target, encode_tx_spacing, encode_wall_time, FixedPositionWire,
     IdentityReportWire, MediaProfileWire, MgmtAllowState, NodeNameState, TelemetryTargetWire,
     REFUSE_BUSY, REFUSE_MALFORMED, REFUSE_NOT_RUNNING, REFUSE_NO_CLOCK, REFUSE_PERSIST,
-    REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK, TYPE_CAPABILITY_REPORT,
-    TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT, TYPE_MEDIA_PROFILE, TYPE_MEDIA_QUERY,
-    TYPE_MEDIA_REPORT, TYPE_MGMT_ALLOW, TYPE_MGMT_ALLOW_QUERY, TYPE_MGMT_ALLOW_REPORT,
-    TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT, TYPE_POSITION_SOURCE_QUERY,
-    TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
+    REFUSE_PERSIST_PENDING, REFUSE_UNKNOWN_TYPE, REFUSE_UNSUPPORTED, REFUSE_VALUE, TYPE_ACK,
+    TYPE_CAPABILITY_REPORT, TYPE_IDENTITY_QUERY, TYPE_IDENTITY_REPORT, TYPE_MEDIA_PROFILE,
+    TYPE_MEDIA_QUERY, TYPE_MEDIA_REPORT, TYPE_MGMT_ALLOW, TYPE_MGMT_ALLOW_QUERY,
+    TYPE_MGMT_ALLOW_REPORT, TYPE_NODE_NAME, TYPE_NODE_NAME_QUERY, TYPE_NODE_NAME_REPORT,
+    TYPE_POSITION_SOURCE_QUERY, TYPE_POSITION_SOURCE_REPORT, TYPE_REFUSAL,
 };
 use leviculum_core::framing::hdlc::{frame, DeframeResult, Deframer};
 use leviculum_core::node_name::NodeName;
@@ -164,6 +164,11 @@ pub fn reason_str(reason: u8) -> &'static str {
         REFUSE_PERSIST => {
             "the board applied the value but could not write it to flash, \
                            so a reset would lose it"
+        }
+        REFUSE_PERSIST_PENDING => {
+            "the board applied the value and is still writing it to flash; \
+                           its debug port logs `persist landed` when it is on the page, \
+                           and a reset before that would lose it"
         }
         REFUSE_NO_CLOCK => {
             "the board has no calendar clock yet, so it withheld the announce \

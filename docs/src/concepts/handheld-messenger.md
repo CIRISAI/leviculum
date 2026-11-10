@@ -802,7 +802,7 @@ well as into the renderer, and both must be refused for thumbv7em.
 **The page fits a packet.** A link on LoRa keeps the default MTU, 500
 bytes, and its MDU is 431 (`LORA_LINK_MDU`,
 `loquax/src/home/ask.rs:139`). A response longer than that goes as a
-resource (`leviculum-core/src/node/mod.rs:1827`), which is an
+resource (`leviculum-core/src/node/mod.rs:1841`), which is an
 advertisement, its parts and a proof. The home's own page bound is
 64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:370`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
@@ -831,7 +831,7 @@ out, because they are the nodes' cost and not the client's.
 | wake | 2 | 115 B | 83 B | channel message 83 (down), its proof 115 |
 | pull one message | 7 | 610 B | 345 B | link 102, 118, 83, 211; `/sync` 115, the page 227 (down); close 99 |
 | mark one read | 7 | 642 B | 217 B | link 102, 118, 83, 211; `/mark` 147, answer 99; close 99 |
-| keepalive | 2 | 20 B | 20 B | flags, hops, link id, context, one byte (`build_keepalive_packet`, `leviculum-core/src/link/mod.rs:2697`), every 230 s |
+| keepalive | 2 | 20 B | 20 B | flags, hops, link id, context, one byte (`build_keepalive_packet`, `leviculum-core/src/link/mod.rs:2731`), every 230 s |
 
 Five entries pulled in LoRa pages came as two pages, answers of 499 and
 467 bytes, each one packet of at most two LoRa frames. The control, the
@@ -840,7 +840,7 @@ larger link MTU that is one packet, but on LoRa it would be a resource.
 
 **The airtime**, at our defaults (BW 125 kHz, SF8, CR 4/5, 18-symbol
 preamble), from those lengths through `packet_airtime_ms`
-(`leviculum-core/src/rnode.rs:1702`), as [Announce
+(`leviculum-core/src/rnode.rs:1668`), as [Announce
 cadence](announce-cadence.md) reckons its announces. Every entry the
 archive gains wakes the watching link, the board's own entries too, and
 every wake past the cursor is a pull. So a message in costs a wake, a
@@ -1295,7 +1295,7 @@ All targets:
   our pin on the map where it is newer than our last share; otherwise
   unchanged.
 - **Android:** the phone's own fix (`Intent::OwnFix`,
-  `loquax-android/src/session.rs:1678`) is our pin the same way;
+  `loquax-android/src/session.rs:1708`) is our pin the same way;
   otherwise unchanged.
 - **The home:** unchanged; it carries no region yet (above).
 
@@ -1559,7 +1559,7 @@ phone pulls from; the bench line is lnsd on schneckenschreck, the
 rendezvous, the home behind it. lnsd's serial interface to the M9 needs
 `interface_mode = gateway`: in the default full mode a path request
 from the board for the home is not discovered onwards
-(`leviculum-core/src/transport.rs:12753`, only access point, gateway
+(`leviculum-core/src/transport.rs:12780`, only access point, gateway
 and roaming re-originate), and the join ends in `NoPath`. The M9 sets
 its own end to Gateway already (`leviculum-esp/src/handheld.rs:210`).
 

@@ -98,7 +98,7 @@ struct Args {
     config_dir: PathBuf,
     defer_resource_builds: bool,
     /// `-v` / `--verbose` occurrences, `lnsd`'s and `lnpnd`'s spelling
-    /// (`leviculum-cli/src/lnsd.rs:114-119`, `lnpnd/src/main.rs:96-99`).
+    /// (`leviculum-cli/src/lnsd.rs:114-119`, `lnpnd/src/main.rs:110-113`).
     verbose: u8,
     /// `-q` / `--quiet` occurrences.
     quiet: u8,
@@ -139,14 +139,14 @@ fn verbosity_flag(arg: &str) -> Option<(u8, u8)> {
 /// carries `[logging] loglevel = 5` (`periculum/src/topology.rs:9186`) and the
 /// container environment carries `RUST_LOG=debug`
 /// (`periculum/src/compose.rs:291-294`), so a scenario gets `PATH_REBALANCE`
-/// (`transport.rs:10787`) without touching the argv.
+/// (`transport.rs:10814`) without touching the argv.
 const DEFAULT_LOGLEVEL: u8 = 4;
 
 /// Map an RNS log level (0-7) to a tracing env-filter directive.
 ///
 /// tracing has no notice/verbose/extreme, so notice folds into info, verbose
 /// into debug and extreme into trace. The third copy of this ladder
-/// (`leviculum-cli/src/lnsd.rs:458`, `lnpnd/src/config.rs:468`); kept local
+/// (`leviculum-cli/src/lnsd.rs:464`, `lnpnd/src/config.rs:468`); kept local
 /// because this batch is scoped to this crate, and cited from here so a later
 /// consolidation into `leviculum-std` finds all three.
 fn loglevel_filter(level: u8) -> &'static str {
@@ -160,7 +160,7 @@ fn loglevel_filter(level: u8) -> &'static str {
 }
 
 /// The config level shifted by the CLI's net verbosity, clamped to the RNS
-/// range — `lnpnd`'s arithmetic (`lnpnd/src/main.rs:275`). `RUST_LOG` is not
+/// range — `lnpnd`'s arithmetic (`lnpnd/src/main.rs:289`). `RUST_LOG` is not
 /// consulted here: `install_global_subscriber` gives it precedence over
 /// whatever default we hand it.
 fn effective_level(config_loglevel: Option<u8>, verbose: u8, quiet: u8) -> u8 {

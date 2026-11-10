@@ -29,12 +29,26 @@ use tokio::signal::unix::{signal, SignalKind};
 
 /// Measured live heap, under the default-off `heap-accounting` feature
 /// (550): the same counting shim lnsd installs (`leviculum-cli/src/lnsd.rs`),
-/// for the same reason. It only counts and forwards to `System`, so the
-/// node runs the allocator it would run without it.
-#[cfg(feature = "heap-accounting")]
+/// for the same reason. It only counts and forwards to the allocator below
+/// it, so the node runs the allocator it would run without it.
+#[cfg(all(feature = "heap-accounting", not(feature = "alloc-mimalloc")))]
 #[global_allocator]
 static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
     leviculum_std::heap_accounting::CountingAllocator;
+
+/// mimalloc instead of the libc allocator, under the default
+/// `alloc-mimalloc` feature (1592), as lnsd since 766: on miauhaus the
+/// lnpnd on musl's mallocng grew about 70 MB an hour in anonymous mappings
+/// no table owned, the retention lnsd showed there before it moved.
+/// Counted, in the same shim, when `heap-accounting` is on too.
+#[cfg(all(feature = "heap-accounting", feature = "alloc-mimalloc"))]
+#[global_allocator]
+static ALLOC: leviculum_std::heap_accounting::CountingOver<mimalloc::MiMalloc> =
+    leviculum_std::heap_accounting::CountingOver(mimalloc::MiMalloc);
+
+#[cfg(all(not(feature = "heap-accounting"), feature = "alloc-mimalloc"))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// `--version`: the crate version, the build id, `+heapacct` in an
 /// instrumented build and the commit in parentheses, composed by build.rs the
@@ -633,6 +647,13 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         );
         leviculum_std::heap_accounting::configure_sampler_from_env();
     }
+    // Both ways, as lnsd's, so a field node's log names its allocator
+    // whichever build it runs; build-deb.sh reads the mimalloc line off the
+    // binary, so each arm is a whole literal.
+    #[cfg(feature = "alloc-mimalloc")]
+    tracing::info!("Allocator: mimalloc");
+    #[cfg(not(feature = "alloc-mimalloc"))]
+    tracing::info!("Allocator: system (libc)");
 
     let data_dir = args
         .data_dir
@@ -868,8 +889,16 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
             },
             _ = sigterm.recv() => break "SIGTERM",
             _ = sigusr1.recv() => {
+                let (taken, _) = census.latest();
                 census.request();
-                eprint!("{}", census_dump(&node));
+                // The engine takes the census at its next tick; the dump
+                // waits for it so its total holds the role's tables of
+                // now, and takes the last one if the tick is late.
+                let deadline = tokio::time::Instant::now() + CENSUS_WAIT;
+                while census.latest().0 == taken && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                eprint!("{}", census_dump(&node, census.dump_section()));
             }
         }
     };
@@ -879,16 +908,37 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The SIGUSR1 dump: the composed census, then the measured live line in a
-/// build that can measure it. Written in one piece, because periculum tells
-/// a fresh dump from the last by its `gap:` line and reads each section as
-/// the last line of its kind.
-fn census_dump(node: &leviculum_std::ReticulumNode) -> String {
+/// How long a SIGUSR1 dump waits for the census it asked the engine for.
+const CENSUS_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The SIGUSR1 dump: the node's census, the role's `PN_CENSUS` line under
+/// it, one total over both, then the measured live line in a build that
+/// can measure it. The total is what the `gap:` line subtracts as
+/// `tracked`, so it holds the role's tables (order 1648): before, it held
+/// the transport's alone and the gap's `unaccounted` counted the whole
+/// store index. Written in one piece, because periculum tells a fresh dump
+/// from the last by its `gap:` line and reads each section as the last
+/// line of its kind.
+fn census_dump(node: &leviculum_std::ReticulumNode, role: Option<(String, u64)>) -> String {
+    let (own, own_bytes) = role.unwrap_or_else(|| {
+        (
+            "PN_CENSUS none yet: the engine has not registered\n".into(),
+            0,
+        )
+    });
     #[allow(unused_mut)]
-    let mut dump = leviculum_std::reticulum::compose_diagnostic_dump(node.diagnostic_dump());
+    let mut dump = leviculum_std::census::compose_multi_node_dump(
+        &[("lnpnd".to_string(), node.diagnostic_dump())],
+        &own,
+        own_bytes,
+    );
     #[cfg(feature = "heap-accounting")]
     dump.push_str(&leviculum_std::heap_accounting::measured_live_line(
-        "system",
+        if cfg!(feature = "alloc-mimalloc") {
+            "mimalloc"
+        } else {
+            "system"
+        },
     ));
     dump
 }

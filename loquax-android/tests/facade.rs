@@ -921,6 +921,131 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     node.kill().await;
 }
 
+/// 1614, 1635: a rename the reader takes back just before the app stops
+/// stays taken back, and reaches the home all the same. The forge gate on
+/// 0a67952c saw "Mum ·5a5a ≈" on the second start of
+/// `a_phone_joins_sends_pulls_and_comes_back`: the clear was handed to the
+/// home on a task the stop dropped, and the second start's pull took the
+/// home's "Mum" again. Here the stop follows the clear at once. The clear
+/// is owed until the home takes it (1635): kept in the store over the
+/// stop, the reader's word over the second start's pull, and handed by
+/// the second session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_taken_back_before_the_stop_stays_taken_back() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    ugly(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_dir = home.path().to_path_buf();
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let peer = loquax::address::to_hex(&[0x5a; 16]);
+    let peer_again = peer.clone();
+    let home_petnames = move |address: [u8; 16]| -> Vec<([u8; 16], Option<String>)> {
+        let store = loquax::store::Store::open_read_only(
+            &home_dir.join(loquax::store::STORE_FILE),
+            address,
+        )
+        .expect("the home store")
+        .expect("there");
+        store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .iter()
+            .filter(|e| e.kind == loquax::home::KIND_PETNAME)
+            .map(|e| loquax::home::wire::read_petname_entry(&e.packed).expect("petname"))
+            .filter(|(peer, _)| *peer == [0x5a; 16])
+            .collect()
+    };
+    let home_petnames_again = home_petnames.clone();
+    let address = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        let address = session.address();
+        session
+            .request(Request::Rename {
+                peer: peer.clone(),
+                name: "Mum".to_string(),
+            })
+            .expect("rename");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while home_petnames(address).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no petname reached home"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+        session
+            .request(Request::Rename {
+                peer: peer.clone(),
+                name: String::new(),
+            })
+            .expect("clear");
+        session.stop();
+        address
+    })
+    .await
+    .expect("the first session");
+
+    let again = Start {
+        dir,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("the pull failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
+            }
+        }
+        let messages: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: peer_again.clone(),
+                })
+                .expect("query"),
+        )
+        .expect("decode");
+        // The peer's own name, "Unknown" while it has none (9dd62f9c),
+        // never the cleared petname.
+        assert!(!messages.name.contains("Mum"), "{}", messages.name);
+        assert_eq!(messages.petname, None);
+        // The owed clear reaches the home from the second session.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while home_petnames_again(address) != [([0x5a; 16], None)] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the owed clear never reached the home: {:?}",
+                home_petnames_again(address)
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+
+    node.kill().await;
+}
+
 /// The wake on the phone (1123): a joined session, its open pull done,
 /// then a loquax messenger on the home node's instance sends to the home
 /// address. The session pulls on the home node's wake, with no `pull`
@@ -2829,10 +2954,11 @@ async fn a_network_change_reconnects_the_phone_without_a_restart() {
 /// `Engine.run` would; the UI thread asks the conversation list every
 /// 16 ms, as `ConversationsActivity.ask` does once per frame (1464: the
 /// Pixel spent 83.6 % of 44 s in that query, 79 to 100 ms a call while
-/// the pull ran). The list's longest block must stay under [`UI_BAR`], a
-/// few frames, so no tap is lost; the engine's under [`ENGINE_BAR`]; both
-/// only on a quiet host ([`loquax::host_load::HostLoad`], 1486), else the
-/// run prints `NOT MEASURED`. The history must arrive whole, always.
+/// the pull ran). The list's work must stay under [`UI_BAR`], a few
+/// frames, so no tap is lost; the engine's under [`ENGINE_BAR`]; and
+/// neither may wait for the lock behind more than one event a wait.
+/// Measured as cost, not wall time, so a slow runner does not fail it
+/// ([`Block`], 1610). The history must arrive whole.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
     let _facade = facade_turn().await;
@@ -2874,37 +3000,34 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
 
         // The engine's thread with onResume's commands, every 50 ms, and
         // the UI thread with the list, once a frame, while the pull runs.
-        // The host's load over the pull (1486): both probes sample it.
-        let host = std::sync::Arc::new(loquax::host_load::HostLoad::start());
+        // Each block is kept as what it cost, not how long it took: the
+        // probe thread's own CPU, and the engine's events the pump folded
+        // while it waited for the session's lock ([`Block`]).
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let probing = std::sync::Arc::clone(&done);
-        let probe_host = std::sync::Arc::clone(&host);
         let probe = std::thread::spawn(move || {
             let close = schema::encode(&Request::Close);
             let front = schema::encode(&Request::Front { front: true });
             let mut blocks = Vec::new();
             while !probing.load(std::sync::atomic::Ordering::Relaxed) {
-                let began = std::time::Instant::now();
-                let _ = loquax_android::command(&close);
-                let _ = loquax_android::command(&front);
-                blocks.push(began.elapsed());
-                probe_host.sample();
+                blocks.push(Block::of(|| {
+                    let _ = loquax_android::command(&close);
+                    let _ = loquax_android::command(&front);
+                }));
                 std::thread::sleep(Duration::from_millis(50));
             }
             blocks
         });
         let looking = std::sync::Arc::clone(&done);
-        let look_host = std::sync::Arc::clone(&host);
         let look = std::thread::spawn(move || {
             let list = schema::encode(&schema::Query::Conversations { search: None });
             let mut blocks = Vec::new();
             let mut rows = 0;
             while !looking.load(std::sync::atomic::Ordering::Relaxed) {
-                let began = std::time::Instant::now();
+                let mut answer = Vec::new();
+                blocks.push(Block::of(|| answer = loquax_android::query(&list)));
                 let answer: schema::Conversations =
-                    rmp_serde::from_slice(&loquax_android::query(&list)).expect("the list");
-                blocks.push(began.elapsed());
-                look_host.sample();
+                    rmp_serde::from_slice(&answer).expect("the list");
                 rows = rows.max(answer.conversations.len());
                 std::thread::sleep(Duration::from_millis(16));
             }
@@ -2953,41 +3076,52 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
         done.store(true, std::sync::atomic::Ordering::Relaxed);
         let blocks = probe.join().expect("the probe");
         let (looks, rows) = look.join().expect("the list's probe");
-        let longest = blocks.iter().max().copied().unwrap_or_default();
-        let longest_look = looks.iter().max().copied().unwrap_or_default();
-        let slow_looks = looks.iter().filter(|block| **block >= FRAME).count();
+        let engine = Block::worst(&blocks);
+        let ui = Block::worst(&looks);
         eprintln!(
-            "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms; \
-             list probes={} longest={} ms over a frame={} rows={rows}",
+            "BIGPULL whole={whole} after {} ms; onResume probes={} longest={} ms cpu={} ms \
+             waited behind {} events in {} locks; list probes={} longest={} ms cpu={} ms \
+             waited behind {} events in {} locks rows={rows}",
             took.as_millis(),
             blocks.len(),
-            longest.as_millis(),
+            engine.wall.as_millis(),
+            engine.cpu.as_millis(),
+            engine.folds,
+            engine.locks,
             looks.len(),
-            longest_look.as_millis(),
-            slow_looks,
+            ui.wall.as_millis(),
+            ui.cpu.as_millis(),
+            ui.folds,
+            ui.locks,
         );
         loquax_android::stop();
         assert!(whole, "the history not whole in {BIG_PULL_SECS} s");
-        // The bars are waits on the session's lock, so wall clock: the
-        // waiting thread's own CPU time is near nothing however long the
-        // pump holds the lock, and would pass 1446's freeze too. A loaded
-        // host stretches the holder's turn instead (359 ms at load 17.5,
-        // 63 ms alone, 1486), so they count only on a quiet host.
-        if !host.measured("the first pull's blocks") {
-            return;
-        }
         assert!(
-            longest_look < UI_BAR,
-            "the list's query blocked the UI thread {} ms during the first pull (bar {} ms)",
-            longest_look.as_millis(),
+            ui.cpu < UI_BAR,
+            "the list's query worked {} ms on the UI thread during the first pull (bar {} ms)",
+            ui.cpu.as_millis(),
             UI_BAR.as_millis()
         );
         assert!(
-            longest < ENGINE_BAR,
-            "onResume's commands blocked the engine's thread {} ms during the first pull \
+            ui.folds <= ui.locks,
+            "the list's query waited for the lock while the pump folded {} events, in {} \
+             waits (bar: one a wait)",
+            ui.folds,
+            ui.locks
+        );
+        assert!(
+            engine.cpu < ENGINE_BAR,
+            "onResume's commands worked {} ms on the engine's thread during the first pull \
              (bar {} ms)",
-            longest.as_millis(),
+            engine.cpu.as_millis(),
             ENGINE_BAR.as_millis()
+        );
+        assert!(
+            engine.folds <= engine.locks,
+            "onResume's commands waited for the lock while the pump folded {} events, in {} \
+             waits (bar: one a wait)",
+            engine.folds,
+            engine.locks
         );
     })
     .await
@@ -2999,21 +3133,89 @@ async fn the_first_pull_of_a_big_mailbox_never_blocks_the_screen() {
 const BIG_CONVERSATIONS: usize = 100;
 /// Its archive cap: room for all of it.
 const BIG_CAP: u64 = 64 << 20;
-/// How long its first pull may take on the host.
-const BIG_PULL_SECS: u64 = 240;
-/// The longest block we accept (1464): 100 ms, a few frames. 1446's 1 s
-/// kept Android's 5 s input limit away, but the Pixel still froze 35 s
-/// in blocks of 80 to 100 ms, one per event, and lost taps.
+/// How long its first pull may take: a liveness bound, nothing measures
+/// it. The pull took 16 to 24 s on the coder host, 65 to 76 s under a
+/// quarter of a CPU and 187 to 199 s under 15 % (1610).
+const BIG_PULL_SECS: u64 = 600;
+/// The list query's work on the UI thread (1464): 100 ms, a few frames.
+/// 1446's 1 s kept Android's 5 s input limit away, but the Pixel still
+/// froze 35 s in blocks of 80 to 100 ms, one per event, and lost taps.
+/// The query reads the scene the pump keeps; on the host it costs 1 to
+/// 11 ms of CPU under any quota.
 const UI_BAR: Duration = Duration::from_millis(100);
-/// The engine thread's longest block for onResume's two commands (1464):
-/// each makes a store commit of its own and waits for at most the one
-/// event the pump is folding, another commit; on the host's disk a commit
-/// takes 10 to 35 ms with fsync spikes past 50 ms, so the two together
-/// measured 64 to 110 ms. Not the screen's wait since 1446, and below the
-/// 156 to 287 ms they took when the pump held the lock for whole slices.
+/// The engine thread's work for onResume's two commands (1464): each makes
+/// a store commit of its own and the scene of the lists. 13 to 33 ms of
+/// CPU on the host, unconstrained and under 25 % and 15 % of a CPU alike.
 const ENGINE_BAR: Duration = Duration::from_millis(250);
-/// One frame at 60 Hz: the list's blocks longer than this are counted.
-const FRAME: Duration = Duration::from_millis(16);
+/// What one probe's call cost (1610). The forge runner is shared and slow:
+/// pipeline 617 saw onResume's commands take 438 ms there, 255 to 350 ms
+/// under a quarter of a CPU here and up to 1151 ms under 15 %, while the
+/// same calls cost the same 13 to 33 ms of CPU as on an idle host. The rest
+/// is the host's run queue, which no change to the app shortens, so the
+/// bars hold the cost: the calling thread's own CPU time, and the waits
+/// for the session's lock counted in the pump's own unit, the events it
+/// folded while the call waited, whatever a fold takes on the host. The
+/// pump ends its turn after the event in hand once a caller waits, and
+/// starts none while one does, so each wait is behind one event at most.
+/// A pump that ignores the waiting caller folds its whole 50 ms slice,
+/// 25 to 65 events, and one that holds the lock for the whole backlog
+/// (1446) thousands. The wall time is kept for the log.
+#[derive(Clone, Copy, Debug, Default)]
+struct Block {
+    wall: Duration,
+    cpu: Duration,
+    /// Waits for the session's lock.
+    locks: u64,
+    /// The engine's events the pump folded while they waited.
+    folds: u64,
+}
+
+impl Block {
+    /// Run `call` on this thread and say what it cost.
+    fn of(call: impl FnOnce()) -> Self {
+        let cpu = thread_cpu();
+        let (locks, folds) = loquax_android::lock_waits();
+        let began = std::time::Instant::now();
+        call();
+        let wall = began.elapsed();
+        let (locks_after, folds_after) = loquax_android::lock_waits();
+        Self {
+            wall,
+            cpu: thread_cpu().saturating_sub(cpu),
+            locks: locks_after - locks,
+            folds: folds_after - folds,
+        }
+    }
+
+    /// The worst of `blocks`: the longest wall and CPU time, and the
+    /// block that waited behind the most events beyond one a wait.
+    fn worst(blocks: &[Block]) -> Self {
+        let over = |b: &Block| b.folds.saturating_sub(b.locks);
+        let waits = blocks
+            .iter()
+            .max_by_key(|b| (over(b), b.folds))
+            .copied()
+            .unwrap_or_default();
+        blocks.iter().fold(waits, |w, b| Self {
+            wall: w.wall.max(b.wall),
+            cpu: w.cpu.max(b.cpu),
+            ..w
+        })
+    }
+}
+
+/// The calling thread's CPU time so far: the first field of its
+/// `schedstat`, nanoseconds on the CPU.
+fn thread_cpu() -> Duration {
+    let stat =
+        std::fs::read_to_string("/proc/thread-self/schedstat").expect("this thread's schedstat");
+    let ns = stat
+        .split_whitespace()
+        .next()
+        .and_then(|ns| ns.parse().ok())
+        .expect("its CPU time");
+    Duration::from_nanos(ns)
+}
 
 /// The mailbox on the phone (1152): the first start that chooses it needs no
 /// code and no server, the phone's node dials its entry server (here a stock

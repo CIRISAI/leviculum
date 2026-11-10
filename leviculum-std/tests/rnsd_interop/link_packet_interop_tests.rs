@@ -392,12 +392,32 @@ async fn poll_receipt_status(daemon: &TestDaemon, receipt_id: &str, duration: Du
     status
 }
 
+/// The deadline the positive test gives Python's receipt, in seconds.
+///
+/// The reference's own for a link is `max(rtt * 6, 5 ms)` (Packet.py:431),
+/// and Python checks it whenever `get_receipt_status` asks
+/// (`scripts/test_daemon.py`) or its job loop passes (Transport.py:556).
+/// On this loopback link the RTT is about 1 ms, so the deadline is 5 to 8
+/// ms, and the race it opens is between that check and the proof's arrival:
+/// our proof leaves in the same core step that decrypts the data
+/// (`leviculum-core/src/node/link_management.rs`, `ProofStrategy::All`
+/// arm), about 0.5 ms round trip on an idle host, but one scheduler stall
+/// of any of the three processes under the parallel load of the whole suite
+/// outlasts 5 ms (order 1607: 1 red in 380 under `cargo test --workspace`,
+/// 23.9 ms proof against a 23.6 ms deadline measured beside `stress-ng`).
+/// The test asks whether our proof VALIDATES, so it declares the timing it
+/// depends on. The deadline itself is pinned by
+/// `test_python_raw_link_packet_to_rust_prove_none_receipt_fails` and by
+/// the mvr `a_link_proof_later_than_six_rtts_fails_the_python_receipt`.
+const PROVE_ALL_RECEIPT_TIMEOUT_S: f64 = 10.0;
+
 /// Python → Rust raw link packet, our destination proves (ProofStrategy::All).
 ///
 /// `RNS.Packet(link, data).send()` creates a PacketReceipt (Packet.py:274,
 /// 123/144); our responder auto-proves plain link data for a PROVE_ALL
 /// destination, and Python's `validate_link_proof` must flip the receipt to
-/// DELIVERED (Packet.py:450-495).
+/// DELIVERED (Packet.py:450-495). The receipt carries
+/// [`PROVE_ALL_RECEIPT_TIMEOUT_S`], not the reference's loopback deadline.
 #[tokio::test]
 async fn test_python_raw_link_packet_to_rust_prove_all_receipt_delivered() {
     let (mut rust_node, mut event_rx, daemon, link_id, py_link_hash, _storage) =
@@ -409,7 +429,7 @@ async fn test_python_raw_link_packet_to_rust_prove_all_receipt_delivered() {
 
     let payload = b"python raw packet with receipt";
     let (receipt_id, _packet_hash) = daemon
-        .send_on_link_tracked(&py_link_hash, payload)
+        .send_on_link_tracked(&py_link_hash, payload, Some(PROVE_ALL_RECEIPT_TIMEOUT_S))
         .await
         .expect("send_on_link_tracked");
 
@@ -420,10 +440,21 @@ async fn test_python_raw_link_packet_to_rust_prove_all_receipt_delivered() {
     assert_eq!(data, payload, "payload must round-trip byte-exact");
 
     // Our auto-proof must reach Python's PacketReceipt.
-    let status = poll_receipt_status(&daemon, &receipt_id, Duration::from_secs(10)).await;
+    // Poll past the declared deadline, so a missing proof ends FAILED here
+    // rather than in a SENT that says nothing.
+    let status = poll_receipt_status(
+        &daemon,
+        &receipt_id,
+        Duration::from_secs_f64(PROVE_ALL_RECEIPT_TIMEOUT_S + 5.0),
+    )
+    .await;
+    let report = daemon
+        .get_receipt_report(&receipt_id)
+        .await
+        .expect("get_receipt_report");
     assert_eq!(
         status, "DELIVERED",
-        "Python PacketReceipt must be DELIVERED by our data proof"
+        "Python PacketReceipt must be DELIVERED by our data proof: {report}"
     );
 
     rust_node.stop().await.expect("stop node");
@@ -445,7 +476,7 @@ async fn test_python_raw_link_packet_to_rust_prove_none_receipt_fails() {
 
     let payload = b"python raw packet unproven";
     let (receipt_id, _packet_hash) = daemon
-        .send_on_link_tracked(&py_link_hash, payload)
+        .send_on_link_tracked(&py_link_hash, payload, None)
         .await
         .expect("send_on_link_tracked");
 

@@ -42,7 +42,7 @@
 //! duller than the async API. It is **not** primarily
 //! `futures::executor::block_on` over a smuggled [`super::PacketSender`]: that
 //! sender takes the core lock only after its `.await` has reserved room in
-//! the channel (`leviculum-std/src/driver/sender.rs:92-104`), so whenever the
+//! the channel (`leviculum-std/src/driver/sender.rs:89-101`), so whenever the
 //! channel has room, which is nearly always, such a call gets past the
 //! channel and deadlocks on the mutex.
 //!
@@ -253,7 +253,7 @@ pub const PROCESSOR_TICK_BUDGET: Duration = Duration::from_millis(5);
 ///
 /// # The one call on `core` that must not be made
 ///
-/// `NodeCore::send_resource` (`leviculum-core/src/node/mod.rs:1877`) is `pub`
+/// `NodeCore::send_resource` (`leviculum-core/src/node/mod.rs:1891`) is `pub`
 /// and reachable on the handle. It is the composed single call that
 /// `docs/src/concepts/core-lock-budget.md` was written about: 141 ms under the
 /// lock for a 1 MiB payload, a 32 % inbound-throughput stall (Codeberg #152).

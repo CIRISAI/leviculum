@@ -2502,10 +2502,19 @@ impl TestDaemon {
 
     /// Send `RNS.Packet(link, data)` from the Python side and keep the
     /// PacketReceipt for status polling. Returns `(receipt_id, packet_hash)`.
+    ///
+    /// `receipt_timeout` (seconds) replaces the receipt's own deadline via
+    /// `PacketReceipt.set_timeout` (Packet.py:575). `None` keeps the
+    /// reference's, which for a link is `max(rtt * 6, 5 ms)` (Packet.py:431):
+    /// 5 to 8 ms on a loopback link, so a proof that one scheduler stall of
+    /// a loaded host holds up reads FAILED (order 1607). A test that asks
+    /// whether our proof validates passes a deadline of its own; a test
+    /// that asks for the timeout itself passes `None`.
     pub async fn send_on_link_tracked(
         &self,
         link_hash: &str,
         data: &[u8],
+        receipt_timeout: Option<f64>,
     ) -> Result<(String, String), HarnessError> {
         let result = self
             .query(
@@ -2513,6 +2522,7 @@ impl TestDaemon {
                 serde_json::json!({
                     "link_hash": link_hash,
                     "data": hex::encode(data),
+                    "receipt_timeout": receipt_timeout,
                 }),
             )
             .await?;
@@ -2542,6 +2552,21 @@ impl TestDaemon {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| HarnessError::ParseError("Missing status".to_string()))
+    }
+
+    /// The whole status report of a tracked PacketReceipt: `status` plus the
+    /// receipt's own `timeout`, the link `rtt` it was derived from, its `age`
+    /// and `concluded_after` (seconds), for an assertion message that names
+    /// the window a proof had to make.
+    pub async fn get_receipt_report(
+        &self,
+        receipt_id: &str,
+    ) -> Result<serde_json::Value, HarnessError> {
+        self.query(
+            "get_receipt_status",
+            serde_json::json!({ "receipt_id": receipt_id }),
+        )
+        .await
     }
 
     /// Issue a Python-side `Link.request()` (non-blocking). `data` must be a

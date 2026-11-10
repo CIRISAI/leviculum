@@ -45,22 +45,38 @@ pub const SLICE: Slice = Slice {
 /// frontend says to stop; [`Slicing::backlog`] then says whether events
 /// still wait, for the frontend to come back soon, after its screens had
 /// their turn. The frontend folds each chunk itself, between the calls.
+///
+/// The budget is spent on a clock: the wall's for the frontends
+/// ([`Slicing::new`]), one the caller owns with [`Slicing::on`] (1623: a
+/// test's folds advance its own clock, where a slept millisecond on a
+/// loaded host overran the budget's slack and read "a round took 47 ms").
 pub struct Slicing {
     slice: Slice,
-    began: Instant,
+    clock: Box<dyn Fn() -> Duration + Send>,
+    began: Duration,
     /// Whether the last chunk was full; none before the first.
     full: Option<bool>,
     backlog: bool,
 }
 
 impl Slicing {
+    /// A slice on the wall's clock.
     pub fn new(slice: Slice) -> Self {
+        let start = Instant::now();
+        Self::on(slice, Box::new(move || start.elapsed()))
+    }
+
+    /// A slice whose budget is spent on `clock`: the time since any fixed
+    /// start, read when the slice begins and before each chunk.
+    pub fn on(slice: Slice, clock: Box<dyn Fn() -> Duration + Send>) -> Self {
+        let began = clock();
         Self {
             slice: Slice {
                 chunk: slice.chunk.max(1),
                 ..slice
             },
-            began: Instant::now(),
+            clock,
+            began,
             full: None,
             backlog: false,
         }
@@ -76,7 +92,9 @@ impl Slicing {
     ) -> Result<Option<Vec<OutboxEvent>>, OutboxGone> {
         match self.full {
             Some(false) => return Ok(None),
-            Some(true) if stop || self.began.elapsed() >= self.slice.budget => {
+            Some(true)
+                if stop || (self.clock)().saturating_sub(self.began) >= self.slice.budget =>
+            {
                 self.backlog = true;
                 return Ok(None);
             }
@@ -258,6 +276,7 @@ impl Outbox for Tap {
 mod tests {
     use super::*;
     use crate::outbox::fake::FakeOutbox;
+    use std::sync::{Arc, Mutex};
 
     const ADDRESS: [u8; 16] = [0x42; 16];
 
@@ -335,6 +354,12 @@ mod tests {
     /// 1464: a slice folds no longer than its budget and one chunk past
     /// it, says a backlog while events wait, and its rounds fold them all
     /// in order; `stop` ends it after the chunk in hand.
+    ///
+    /// The slices run on the test's clock, which each fold moves on by its
+    /// cost (1623): before, a fold slept its millisecond on the wall, and
+    /// under a parallel run on a host at load 28 one round read 47 ms
+    /// against the 20 ms budget and 15 ms of slack. The bound is now exact,
+    /// the budget and one chunk.
     #[test]
     fn a_slice_ends_at_its_budget_and_its_rounds_fold_everything() {
         let queued = |n: u16| OutboxEvent::Queued {
@@ -351,27 +376,31 @@ mod tests {
             budget: Duration::from_millis(20),
         };
         let fold_cost = Duration::from_millis(1);
+        let clock = Arc::new(Mutex::new(Duration::ZERO));
+        let now = || *clock.lock().expect("the clock");
         let mut folded = Vec::new();
         let mut rounds = 0;
         let mut longest = Duration::ZERO;
         loop {
             rounds += 1;
-            let began = Instant::now();
-            let mut slicing = Slicing::new(slice);
+            let began = now();
+            let read = clock.clone();
+            let mut slicing =
+                Slicing::on(slice, Box::new(move || *read.lock().expect("the clock")));
             while let Some(events) = slicing.next(&mut fanout, &mut engine, false).expect("pump") {
-                std::thread::sleep(fold_cost * events.len() as u32);
+                *clock.lock().expect("the clock") += fold_cost * events.len() as u32;
                 folded.extend(events);
             }
-            longest = longest.max(began.elapsed());
+            longest = longest.max(now() - began);
             if !slicing.backlog() {
                 break;
             }
         }
         assert_eq!(folded, (0..400).map(queued).collect::<Vec<_>>());
         assert!(rounds >= 10, "400 ms of folding in {rounds} rounds");
-        // One chunk past the budget, and the scheduler's slack.
+        // At most one chunk past the budget.
         assert!(
-            longest < slice.budget + fold_cost + Duration::from_millis(15),
+            longest <= slice.budget + fold_cost,
             "a round took {longest:?}"
         );
 

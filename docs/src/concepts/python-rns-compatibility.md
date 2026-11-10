@@ -136,7 +136,7 @@ Leviculum defaults it **off** on dial-out point-to-point links —
 `TCPClientInterface`, `BackboneClientInterface`, `UDPInterface`, and an
 `I2PInterface` without `connectable` — and leaves it **on** everywhere
 else, including every listener
-(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:1419`).
+(`ingress_control_default_for_type`, `leviculum-std/src/config.rs:1431`).
 
 Against the rule: the flag decides only whether *we* hold incoming
 announces, so no wire byte and no behaviour a peer observes changes
@@ -170,7 +170,7 @@ whichever is lower (`rnode::resolve_tx_power` and
 `lawful_erp_dbm`, applied in both interface builders and in the
 `SerialInterface` LNode path). The standalone LNode firmware's
 compiled profile carries the uncapped board maximum
-(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:631-670`), which
+(`RadioConfig::eu_medium`, `leviculum-nrf/src/lora.rs:641-680`), which
 is the capped resolution's own result at that profile's 869.463 MHz.
 
 Against the rule: TX power is a local modem setting. It is never on the
@@ -188,7 +188,7 @@ whose maximum is lower answers by clamping and echoing the clamped
 value (`RNode_Firmware/RNode_Firmware.ino:861-879` — 17 dBm on an
 SX127x, `PA_MAX_OUTPUT` on an SX1262 with an external PA). Confirmation
 is otherwise an exact match on both stacks (ours at
-`leviculum-std/src/interfaces/rnode.rs:2090`, the reference at
+`leviculum-std/src/interfaces/rnode.rs:2091`, the reference at
 `RNodeInterface.py:677`), so the derived default — and only the derived
 default — accepts a confirmation *below* what it asked for, logs the
 board's ceiling, and runs. An explicitly configured power keeps the
@@ -318,13 +318,13 @@ The reference behaves this way on every forwarding path:
 Loop-freedom never came from interface suppression. It comes from
 transport_id addressing (only the addressed relay processes a Type2
 transport packet), the hop-count limit, and packet-hash dedup —
-`has_packet_hash` (`leviculum-core/src/transport.rs:4637`) drops a
+`has_packet_hash` (`leviculum-core/src/transport.rs:4638`) drops a
 repeated copy, `add_packet_hash`
-(`leviculum-core/src/transport.rs:4684`) records it.
+(`leviculum-core/src/transport.rs:4685`) records it.
 
 The forwarding decision lives in the media-agnostic core
 (`forward_on_interface_from`,
-`leviculum-core/src/transport.rs:9736`). Whether the relayed echo
+`leviculum-core/src/transport.rs:9763`). Whether the relayed echo
 needs TX spacing on a half-duplex channel is the interface's business
 — see [Interface Isolation](interface-isolation.md).
 

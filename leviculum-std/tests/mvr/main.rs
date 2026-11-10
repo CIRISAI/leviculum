@@ -61,11 +61,11 @@ pub use harness::port_alloc;
 /// Per-thread arming was necessary and not sufficient. libtest gives each
 /// test its own thread, so no other test's *own* allocations land in this
 /// window — but `tracing` dispatch runs on the thread that emits the event,
-/// and `EventLogLayer::emit`, under `on_event` (`leviculum-std/src/event_log.rs:2372`)
+/// and `EventLogLayer::emit`, under `on_event` (`leviculum-std/src/event_log.rs:2421`)
 /// pushes one `String` into the buffer of EVERY capture handle any test has
 /// registered, "regardless of which test emitted it" (that module's own doc).
 /// So the code under test emitting `PKT_TX`
-/// (`leviculum-core/src/transport.rs:4982`) inside the window made THIS
+/// (`leviculum-core/src/transport.rs:4983`) inside the window made THIS
 /// thread pay another test's `Vec<String>` growth step: on 2026-09-25,
 /// `link_failure_recovery_silent_resume.rs:520` held the only handle in this
 /// binary, its buffer crossed 256 -> 512 entries during the calibration
@@ -385,6 +385,9 @@ mod a_dead_sync_link_ends_the_round_beside_a_second_node;
 // to test (#463, `just lnsd-minimal`).
 #[cfg(feature = "serial")]
 mod a_frame_the_modem_consumed_without_transmitting;
+mod a_link_proof_later_than_six_rtts_fails_the_python_receipt;
+mod a_lost_link_rtt_strands_the_resource_transfer;
+mod a_new_interface_hears_an_announce_made_before_it;
 #[cfg(feature = "serial")]
 mod a_raw_xoff_mutes_a_single_uart_board;
 mod a_repeated_path_request_queues_one_response_on_the_board;
@@ -392,6 +395,7 @@ mod a_returning_phone_is_asked_for_its_stored_mail;
 mod a_stranger_inside_the_port_handoff_window;
 mod a_third_announce_on_a_fresh_interface_waits_at_python;
 mod an_application_path_request_inside_the_interval_leaves;
+mod an_older_emissions_echo_keeps_the_renamed_announce;
 mod announce_emission_unix_time;
 mod burst_continuation_contends_inside_its_own_answer;
 mod cad_tears_down_the_frame_it_then_detects;

@@ -27,7 +27,24 @@
 //! `rss_kb`, `stored`, `peered`, `events_queued`, and the `dup` column by
 //! its parts (order 1558): `processed_ids`, `departed_ids`, `origin_ids`,
 //! the bound the three are held to, `dup_cap_ids`, and the origins' hash
-//! table buckets, `origin_slots`, which name a table doubling.
+//! table buckets, `origin_slots`, which name a table doubling. Then the
+//! `store_index` column by its parts (order 1648): `store_index_entries`,
+//! the live entries' own bytes, and `store_index_spare`, what the
+//! containers allocate beyond them; the two sum to the column.
+//!
+//! The SIGUSR1 dump carries the latest line too, and its `tables` in the
+//! dump's total (order 1648): the `gap:` line subtracts the role's tables
+//! with the transport's, so its `unaccounted` is what neither counts
+//! ([`CensusHandle::latest`]).
+//!
+//! After them, the node's transport tables (order 1586): `transport`, the
+//! core storage's own byte estimate (the SIGUSR1 dump's tracked total),
+//! `transport_entries` across its tables, `transport_unbounded`, the
+//! tables with no ceiling, and `transport_over`, the tables above theirs.
+//! The tables are the core's, not the engine's, so they are not a column:
+//! [`FIELD_COLUMNS`] counts the engine's fields. A `PN_TRANSPORT` line
+//! beside the census names each table with its fill and its ceiling
+//! ([`TransportCensus`]).
 //!
 //! [`FIELD_COLUMNS`] maps every field of the structs that hold the daemon's
 //! state to the column that counts it, and a unit test reads the structs'
@@ -35,7 +52,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SendError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::engine::EngineEvent;
 
@@ -162,6 +179,75 @@ pub struct PnCensus {
     /// Buckets of the origins' hash table: a jump in `dup` with this
     /// doubled is the table resizing, not growth.
     pub origin_slots: usize,
+    /// The `store_index` column by its parts (order 1648): the live
+    /// entries' own bytes, and what the containers allocate beyond them.
+    pub store_index_entries: usize,
+    pub store_index_spare: usize,
+    /// The node's transport tables (order 1586, [`TransportCensus`]).
+    pub transport: TransportCensus,
+}
+
+/// The node's transport tables: what the core storage holds, table by
+/// table, beside the ceiling it holds each to (order 1586).
+///
+/// lnpnd attaches to the host's shared instance and runs the local client
+/// profile (`TableCaps::local_client`, order 1585); before that it carried
+/// a full copy of the instance's tables, which no line of `PN_CENSUS`
+/// showed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TransportCensus {
+    /// The storage's own byte estimate, the dump's tracked total.
+    pub bytes: u64,
+    /// Every table: name, entries, ceiling.
+    pub tables: Vec<(&'static str, usize, Option<usize>)>,
+}
+
+impl TransportCensus {
+    /// Read the census off a core storage.
+    pub fn of(storage: &impl leviculum_core::traits::Storage) -> Self {
+        Self {
+            bytes: storage.diagnostic_dump().1,
+            tables: storage
+                .collection_counts()
+                .into_iter()
+                .map(|row| (row.name, row.entries, row.capacity))
+                .collect(),
+        }
+    }
+
+    /// Entries across every table.
+    pub fn entries(&self) -> usize {
+        self.tables.iter().map(|(_, entries, _)| entries).sum()
+    }
+
+    /// Tables with no ceiling.
+    pub fn unbounded(&self) -> usize {
+        self.tables
+            .iter()
+            .filter(|(_, _, cap)| cap.is_none())
+            .count()
+    }
+
+    /// Tables holding more than their ceiling.
+    pub fn over(&self) -> usize {
+        self.tables
+            .iter()
+            .filter(|(_, entries, cap)| cap.is_some_and(|cap| *entries > cap))
+            .count()
+    }
+
+    /// `name:entries/ceiling` per table, `-` for no ceiling, comma
+    /// separated: one whitespace-free token the event log keeps as is.
+    pub fn detail(&self) -> String {
+        self.tables
+            .iter()
+            .map(|(name, entries, cap)| match cap {
+                Some(cap) => format!("{name}:{entries}/{cap}"),
+                None => format!("{name}:{entries}/-"),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
 }
 
 impl PnCensus {
@@ -194,7 +280,9 @@ impl PnCensus {
         }
         line.push_str(&format!(
             " tables={} rss_kb={} stored={} peered={} events_queued={} processed_ids={} \
-             departed_ids={} origin_ids={} dup_cap_ids={} origin_slots={}",
+             departed_ids={} origin_ids={} dup_cap_ids={} origin_slots={} \
+             store_index_entries={} store_index_spare={} transport={} \
+             transport_entries={} transport_unbounded={} transport_over={}",
             self.tables(),
             self.rss_kb,
             self.stored,
@@ -205,6 +293,12 @@ impl PnCensus {
             self.origin_ids,
             self.dup_cap_ids,
             self.origin_slots,
+            self.store_index_entries,
+            self.store_index_spare,
+            self.transport.bytes,
+            self.transport.entries(),
+            self.transport.unbounded(),
+            self.transport.over(),
         ));
         line
     }
@@ -234,6 +328,21 @@ impl PnCensus {
             origin_ids = self.origin_ids,
             dup_cap_ids = self.dup_cap_ids,
             origin_slots = self.origin_slots,
+            store_index_entries = self.store_index_entries,
+            store_index_spare = self.store_index_spare,
+            transport = self.transport.bytes,
+            transport_entries = self.transport.entries(),
+            transport_unbounded = self.transport.unbounded(),
+            transport_over = self.transport.over(),
+        );
+        tracing::info!(
+            event = "PN_TRANSPORT",
+            occasion = occasion,
+            bytes = self.transport.bytes,
+            entries = self.transport.entries(),
+            unbounded = self.transport.unbounded(),
+            over = self.transport.over(),
+            tables = self.transport.detail().as_str(),
         );
     }
 }
@@ -286,6 +395,14 @@ impl From<Sender<EngineEvent>> for EventSender {
 pub struct CensusHandle {
     requested: Arc<AtomicBool>,
     counts: Arc<EventCounts>,
+    latest: Arc<Mutex<Latest>>,
+}
+
+/// The last census the engine took, and how many it has taken.
+#[derive(Default)]
+struct Latest {
+    taken: u64,
+    census: Option<PnCensus>,
 }
 
 impl CensusHandle {
@@ -293,7 +410,32 @@ impl CensusHandle {
         Self {
             requested: Arc::default(),
             counts: Arc::clone(&events.counts),
+            latest: Arc::default(),
         }
+    }
+
+    /// The engine took a census: keep it for the SIGUSR1 dump.
+    pub(crate) fn publish(&self, census: &PnCensus) {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        latest.taken += 1;
+        latest.census = Some(census.clone());
+    }
+
+    /// How many censuses the engine has taken, and the last of them.
+    pub fn latest(&self) -> (u64, Option<PnCensus>) {
+        let latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        (latest.taken, latest.census.clone())
+    }
+
+    /// The SIGUSR1 dump's section of the role (order 1648): the census
+    /// line, and its `tables` as the bytes the dump adds to its total.
+    /// `None` before the engine took one.
+    pub fn dump_section(&self) -> Option<(String, u64)> {
+        let census = self.latest().1?;
+        Some((
+            format!("{}\n", census.line()),
+            u64::try_from(census.tables()).unwrap_or(u64::MAX),
+        ))
     }
 
     /// Ask for a `PN_CENSUS` line at the engine's next tick.
@@ -462,6 +604,86 @@ mod tests {
         );
         assert!(line.contains(" dup=3 "), "{line}");
         assert!(line.contains(" tables=6 rss_kb=4 "), "{line}");
+    }
+
+    /// Order 1586: the line carries the transport block, and the detail
+    /// names every table with its fill and its ceiling.
+    #[test]
+    fn the_line_carries_the_transport_tables_and_their_bounds() {
+        let census = PnCensus {
+            transport: TransportCensus {
+                bytes: 4096,
+                tables: vec![
+                    ("known_identities", 812, Some(4096)),
+                    ("path_table", 5000, Some(4096)),
+                    ("remembered_at", 3, None),
+                ],
+            },
+            ..PnCensus::default()
+        };
+        let line = census.line();
+        assert!(
+            line.ends_with(
+                " transport=4096 transport_entries=5815 transport_unbounded=1 transport_over=1"
+            ),
+            "{line}"
+        );
+        assert_eq!(
+            census.transport.detail(),
+            "known_identities:812/4096,path_table:5000/4096,remembered_at:3/-"
+        );
+    }
+
+    /// The census of a real client storage: every table bounded, none
+    /// over (the local client profile, order 1585).
+    #[test]
+    fn a_client_storage_reports_every_table_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = leviculum_std::driver::StdStorage::new_with_caps(
+            dir.path(),
+            leviculum_core::memory_storage::TableCaps::local_client(),
+        )
+        .expect("storage");
+        let transport = TransportCensus::of(&storage);
+        assert!(transport.tables.len() > 10, "{transport:?}");
+        assert_eq!(transport.unbounded(), 0, "{}", transport.detail());
+        assert_eq!(transport.over(), 0);
+        assert!(
+            transport.detail().contains("known_identities:0/2048"),
+            "{}",
+            transport.detail()
+        );
+    }
+
+    /// Order 1648: the dump's section is the last census the engine took,
+    /// its line and its `tables`, and nothing before the first.
+    #[test]
+    fn the_dump_section_is_the_last_census_taken() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let handle = CensusHandle::new(&EventSender::from(tx));
+        assert_eq!(handle.latest().0, 0);
+        assert_eq!(handle.dump_section(), None);
+        for store_index in [10, 7000] {
+            handle.publish(&PnCensus {
+                store_index,
+                store_index_entries: store_index - 3,
+                store_index_spare: 3,
+                peers: 5,
+                ..PnCensus::default()
+            });
+        }
+        assert_eq!(handle.latest().0, 2);
+        let (line, bytes) = handle.dump_section().expect("a census was taken");
+        assert_eq!(bytes, 7005);
+        assert!(
+            line.starts_with("PN_CENSUS peers=5 store_index=7000 "),
+            "{line}"
+        );
+        assert!(
+            line.contains(" store_index_entries=6997 store_index_spare=3 "),
+            "{line}"
+        );
+        assert!(line.ends_with('\n'), "{line:?}");
     }
 
     #[test]
