@@ -2616,19 +2616,52 @@ fn report_name(
 /// The list is decided once and goes to every board found, like the
 /// telemetry target: a two-board bench is not two access-control
 /// decisions.
+///
+/// `only` narrows the session to the one board that owns that serial port
+/// (any of its CDC interfaces, by path or by a `/dev/serial/by-id` link):
+/// the other boards on the bus are not opened and get no frame. Without it
+/// the session talks to every running board, which is the right default
+/// for setting a list on a fresh batch and the wrong one on a bench where
+/// one board's list is the thing under test (the T114 kept a cell's
+/// identity on 2026-11-10 and the only way to read or clear just that
+/// board was a hand-written envelope script).
 pub fn set_mgmt(
     catalogue: &Catalogue,
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
     allowed: Option<&[crate::mgmt::IdentityHash]>,
+    only: Option<&Path>,
 ) -> Result<bool, Error> {
-    let reachable = reachable_boards(catalogue, sysfs, ui)?;
+    let mut reachable = reachable_boards(catalogue, sysfs, ui)?;
     if reachable.is_empty() {
         ui.say(
             "No running LNode on the bus. --management-identity talks to flashed boards; a board \
              in its bootloader has no allow-list to configure.",
         );
         return Ok(false);
+    }
+    if let Some(port) = only {
+        let tty_name = port_tty_name(port);
+        let listed = reachable
+            .boards
+            .iter()
+            .map(|b| format!("  {} ({})", b.port, b.tty.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        reachable.boards.retain(|b| {
+            tty_name
+                .as_deref()
+                .is_some_and(|t| device_owns_tty(&b.device, t))
+        });
+        // The boards left out on purpose are not this session's failures.
+        reachable.unreachable = 0;
+        if reachable.boards.is_empty() {
+            ui.say(&format!(
+                "{}: no running LNode owns this port, so nothing was sent. Running are:\n{listed}",
+                port.display()
+            ));
+            return Ok(false);
+        }
     }
     let mut all_took_it = reachable.unreachable == 0;
     for board in &reachable.boards {
@@ -2660,6 +2693,27 @@ pub fn set_mgmt(
         report_mgmt(ui, port, allowed, outcome);
     }
     Ok(all_took_it)
+}
+
+/// The kernel's name for the tty a port path names (`ttyACM3`), through
+/// any `/dev/serial/by-id` link. A path that does not resolve (a board
+/// unplugged since) is taken by its own file name, so it can still match a
+/// captured tree and otherwise matches nothing.
+fn port_tty_name(port: &Path) -> Option<String> {
+    let resolved = std::fs::canonicalize(port).unwrap_or_else(|_| port.to_path_buf());
+    resolved
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// True when one of this device's interfaces is bound to the tty `name`.
+/// Every CDC of the board counts, so the debug port (if00) a person
+/// usually has in hand selects the same board as its transport (if02).
+fn device_owns_tty(device: &Device, name: &str) -> bool {
+    device
+        .interfaces
+        .iter()
+        .any(|i| i.tty.as_deref() == Some(name))
 }
 
 /// Say what the board reported about who may read it.
@@ -4620,6 +4674,55 @@ mod tests {
 
     fn catalogue() -> Catalogue {
         Catalogue::builtin().unwrap()
+    }
+
+    fn lnode_with(ttys: &[(u8, &str)]) -> Device {
+        Device {
+            name: "3-2.4".into(),
+            id: UsbId::new(0x1209, 0x0001),
+            serial: Some("DEC9947DAD9D2869".into()),
+            manufacturer: None,
+            product: None,
+            interfaces: ttys
+                .iter()
+                .map(|(number, tty)| crate::usb::Interface {
+                    number: *number,
+                    class: 2,
+                    tty: Some((*tty).to_string()),
+                    block: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// `--port` with the management flags selects the board by any of its
+    /// CDC ttys: the debug port a person has in hand and the transport the
+    /// frame goes out on name the same board, and a neighbour's tty names
+    /// none of them.
+    #[test]
+    fn a_management_port_selects_the_board_by_any_of_its_ttys() {
+        let board = lnode_with(&[(0, "ttyACM3"), (2, "ttyACM4")]);
+        assert!(device_owns_tty(&board, "ttyACM3"));
+        assert!(device_owns_tty(&board, "ttyACM4"));
+        assert!(!device_owns_tty(&board, "ttyACM5"));
+        assert!(!device_owns_tty(&lnode_with(&[]), "ttyACM3"));
+    }
+
+    /// A by-id link resolves to the tty it points at; a path that no longer
+    /// exists is read by its own file name rather than refused, so the
+    /// session can still say "no running LNode owns this port".
+    #[test]
+    fn a_management_port_path_resolves_through_its_link() {
+        let dir = TempDir::new().unwrap();
+        let tty = dir.path().join("ttyACM7");
+        fs::write(&tty, b"").unwrap();
+        let link = dir.path().join("usb-leviculum_T114_DEC9947-if02");
+        std::os::unix::fs::symlink(&tty, &link).unwrap();
+        assert_eq!(port_tty_name(&link).as_deref(), Some("ttyACM7"));
+        assert_eq!(
+            port_tty_name(Path::new("/nonexistent/ttyACM9")).as_deref(),
+            Some("ttyACM9")
+        );
     }
 
     /// The reporter-less refusal is rendered as its own sentence, not as

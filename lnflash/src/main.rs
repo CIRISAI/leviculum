@@ -47,7 +47,7 @@ use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
 )]
 #[command(group(
     clap::ArgGroup::new("port_user")
-        .args(["home", "region", "regions"])
+        .args(["home", "region", "regions", "management_identity", "clear_management"])
         .multiple(false)
 ))]
 struct Cli {
@@ -540,6 +540,12 @@ struct Cli {
     /// to, such as /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 for the
     /// M9's CH340K. Opening it resets the board; the session waits for its
     /// boot.
+    ///
+    /// With --management-identity or --clear-management it narrows that
+    /// session to the one LNode owning this port (any of its CDC ports, a
+    /// by-id link works): `--management-identity --port P` lists that
+    /// board's allow-list, `--clear-management --port P` empties it, and
+    /// every other board on the bus is left untouched.
     #[arg(long, value_name = "TTY", requires = "port_user")]
     port: Option<PathBuf>,
 }
@@ -1044,7 +1050,13 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             Some(path) => Sysfs::new(path),
             None => Sysfs::new(SYSFS_USB_DEVICES),
         };
-        let all_took_it = flow::set_mgmt(&catalogue, &sysfs, ui, allowed.as_deref())?;
+        let all_took_it = flow::set_mgmt(
+            &catalogue,
+            &sysfs,
+            ui,
+            allowed.as_deref(),
+            cli.port.as_deref(),
+        )?;
         return Ok(if all_took_it {
             ExitCode::SUCCESS
         } else {
@@ -1433,6 +1445,25 @@ mod tests {
             cli.port.as_deref(),
             Some(std::path::Path::new("/dev/ttyUSB0"))
         );
+    }
+
+    /// 1660: `--port` narrows the management session to one board, in
+    /// all three forms (list, set, clear), and does not combine with the
+    /// M9 sessions that also take it.
+    #[test]
+    fn the_management_flags_take_one_port() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        let port = "/dev/serial/by-id/usb-leviculum_T114_DEC9947-if02";
+        let cli = parse(&["--management-identity", "--port", port]).expect("list");
+        assert_eq!(cli.port.as_deref(), Some(std::path::Path::new(port)));
+        assert_eq!(cli.management_identity, vec![String::new()]);
+        let cli = parse(&["--clear-management", "--port", port]).expect("clear");
+        assert!(cli.clear_management);
+        parse(&["--management-identity", HASH_A, "--port", port]).expect("set");
+        assert!(parse(&["--management-identity", "--home", "lqxh1a", "--port", port]).is_err());
+        assert!(parse(&["--clear-management", "--regions", "--port", port]).is_err());
     }
 
     /// 1477: `--region` (once per file) and `--regions` name their port,
