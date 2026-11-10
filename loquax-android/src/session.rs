@@ -39,6 +39,7 @@ use loquax::when::WallTime;
 
 use crate::links::{self, Book};
 use crate::mailbox;
+use crate::offline::Offline;
 use crate::pull_line::{PullLine, Say};
 use crate::schema::{self, Event, VERSION};
 
@@ -210,6 +211,9 @@ struct Inner {
     /// status line is told of the running one (1136).
     pull_asked: bool,
     pull_line: PullLine,
+    /// Whether the list says "no connection" (1448): the watching link
+    /// stayed down.
+    offline: Offline,
     finished_tx: Sender<Finished>,
     finished_rx: Receiver<Finished>,
     events: Sender<Event>,
@@ -2278,6 +2282,7 @@ impl Inner {
             pages_asking: None,
             pull_asked: false,
             pull_line: PullLine::default(),
+            offline: Offline::default(),
             finished_tx,
             finished_rx,
             events,
@@ -2484,6 +2489,8 @@ impl Inner {
             self.say(say);
         }
         self.watched(elapsed);
+        // The bar under the list's top bar (1448, walk finding 14).
+        self.dirty |= self.offline.look(self.watching, elapsed);
         // Applied, not quiet: a running share sends from the clock (1273).
         self.apply(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
@@ -2692,8 +2699,13 @@ impl Inner {
         }
     }
 
-    /// Tell the status line about a pull.
+    /// Tell the status line about a pull. Not while the list says "no
+    /// connection" (1448): "looking for messages" and its failure beside
+    /// it only say again that nothing gets through.
     fn say(&self, say: Say) {
+        if self.offline.offline() && !matches!(say, Say::Done(new) if new > 0) {
+            return;
+        }
         let (state, detail) = match say {
             Say::Running => ("running", String::new()),
             Say::Done(new) => ("done", new.to_string()),
@@ -3150,6 +3162,7 @@ impl Inner {
             archived: 0,
             home_client: self.model.home_client,
             home_link: self.watching,
+            offline: self.offline.offline(),
         }
     }
 

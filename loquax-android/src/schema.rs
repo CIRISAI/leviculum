@@ -1785,6 +1785,11 @@ pub struct Conversations {
     /// dot on the bar's avatar, green or grey (1199).
     #[serde(default)]
     pub home_link: bool,
+    /// Whether the list says "no connection" (1448, walk finding 14): the
+    /// watching link stayed down for a while, so nothing goes out or comes
+    /// in until it is up again. The bar under the top bar.
+    #[serde(default)]
+    pub offline: bool,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether

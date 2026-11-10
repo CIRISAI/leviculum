@@ -295,4 +295,6 @@
     <string name="profile_version">App version</string>
     <string name="add_contact">Add contact</string>
     <string name="add_contact_name">What do you call this contact?</string>
+    <!-- 1448: the list while the engine has no path to the mailbox. -->
+    <string name="offline_bar">No connection. Messages go out as soon as you are online again.</string>
 </resources>

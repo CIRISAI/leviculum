@@ -30,6 +30,7 @@ pub mod friends;
 pub mod links;
 pub mod mailbox;
 pub mod map;
+pub mod offline;
 pub mod pull_line;
 pub mod rooms;
 pub mod schema;

@@ -1978,18 +1978,33 @@ fn facade_shows_ugly(secs: u64) {
 /// Wait until the list's `home_link` (1199), the status dot, says `up`:
 /// the watching link came up or went down.
 fn facade_home_link(up: bool, secs: u64) {
+    facade_list(secs, &format!("home_link {up}"), |list| {
+        list.home_link == up
+    });
+}
+
+/// Wait until the list's `offline` (1448), the bar "no connection", says
+/// `shown`.
+fn facade_offline(shown: bool, secs: u64) {
+    facade_list(secs, &format!("offline {shown}"), |list| {
+        list.offline == shown
+    });
+}
+
+/// Wait until the list answers `what`, the pump turning meanwhile.
+fn facade_list(secs: u64, what: &str, done: impl Fn(&schema::Conversations) -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(secs);
     loop {
         let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
             &schema::encode(&schema::Query::Conversations { search: None }),
         ))
         .expect("Conversations");
-        if list.home_link == up {
+        if done(&list) {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the list's home_link never said {up} in {secs} s"
+            "the list never said {what} in {secs} s"
         );
         // The pump reads the watching link's word: let events flow.
         let _ = loquax_android::next_event(Duration::from_millis(200));
@@ -2079,6 +2094,8 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
         assert_eq!(answer.server.as_deref(), Some(expected.as_str()));
         link_event(true, 30);
         facade_home_link(true, 30);
+        // The link up: no bar (1448).
+        facade_offline(false, 1);
         facade_shows_ugly(60);
         send_through_facade(&to, "vor dem Ausfall", 60);
     })
@@ -2089,6 +2106,14 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     tokio::task::spawn_blocking(|| {
         link_event(false, 30);
         facade_home_link(false, 30);
+        // Down for a moment the list says nothing yet; down for good, the
+        // bar "no connection" (1448, walk finding 14).
+        let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
+            &schema::encode(&schema::Query::Conversations { search: None }),
+        ))
+        .expect("Conversations");
+        assert!(!list.offline, "the link went down just now");
+        facade_offline(true, 30);
     })
     .await
     .expect("the link goes down");
@@ -2100,6 +2125,8 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
         // The TCP client redials every 5 s, doubling after the third try.
         link_event(true, 90);
         facade_home_link(true, 60);
+        // Up again: the bar goes with the dot's turn.
+        facade_offline(false, 5);
         send_through_facade(&to, "nach dem Ausfall", 60);
     })
     .await

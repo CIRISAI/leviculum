@@ -809,10 +809,10 @@ fn conversations() -> impl Strategy<Value = Conversations> {
         text(),
         text(),
         u32s(),
-        any::<(bool, bool)>(),
+        any::<(bool, bool, bool)>(),
     )
         .prop_map(
-            |(v, conversations, address, initials, archived, (home_client, home_link))| {
+            |(v, conversations, address, initials, archived, (home_client, home_link, offline))| {
                 Conversations {
                     v,
                     conversations,
@@ -821,6 +821,7 @@ fn conversations() -> impl Strategy<Value = Conversations> {
                     archived,
                     home_client,
                     home_link,
+                    offline,
                 }
             },
         )

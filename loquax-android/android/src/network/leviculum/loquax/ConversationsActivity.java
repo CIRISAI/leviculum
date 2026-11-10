@@ -868,6 +868,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         Ui.showLine(status, text, true);
     }
 
+    /** Whether the bar "no connection" shows (1448). */
+    private boolean offlineShown;
+
     /** The answer the list on screen shows (1455). */
     private Map<String, Object> shownAnswer;
 
@@ -932,6 +935,15 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             own.dot(up);
             own.setContentDescription(getString(up ? R.string.mailbox_connected : R.string.mailbox_not_connected));
         }
+        // 1448, walk finding 14: the bar while the link stayed down, and
+        // the pull's line with it, which the library no longer sends then.
+        boolean offline = !archivedView && Core.bool(answer, "offline");
+        findViewById(R.id.offline_bar).setVisibility(offline ? View.VISIBLE : View.GONE);
+        if (offline && !offlineShown) {
+            // A "looking for messages" from before stays no longer.
+            Ui.showLine(status, "", true);
+        }
+        offlineShown = offline;
         homeClient = Core.bool(answer, "home_client");
         long archived = Core.num(answer, "archived");
         archivedRow.setVisibility(!archivedView && archived > 0 ? View.VISIBLE : View.GONE);

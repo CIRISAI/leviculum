@@ -78,6 +78,23 @@
             android:padding="12dp" />
     </LinearLayout>
 
+    <!-- 1448, walk finding 14: the engine has no path to the mailbox; the
+         list says so in words, not only by the avatar's grey dot. Text on
+         the bar's ground, 15.4:1. -->
+    <TextView
+        android:id="@+id/offline_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/bar"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:text="@string/offline_bar"
+        android:textColor="@color/text"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/status"
         android:layout_width="match_parent"
