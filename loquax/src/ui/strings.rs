@@ -197,7 +197,6 @@ leviculum_ui::catalogue! {
     MinutesAgo = "minutes_ago", "%1$d min", "%1$d Min.";
     HoursAgo = "hours_ago", "%1$d h", "%1$d Std.";
     DaysAgo = "days_ago", "%1$d d", "%1$d T.";
-    ListHours = "list_hours", "%1$dh", "%1$dh";
     Position = "position", "Position", "Position";
     Live = "live", "live", "live";
     LiveEvery = "live_every", "every %1$s", "alle %1$s";
@@ -650,6 +649,31 @@ leviculum_ui::catalogue! {
     October = "scene_october", "October", "Oktober";
     November = "scene_november", "November", "November";
     December = "scene_december", "December", "Dezember";
+    // The list's time (1449 item 4, walk 1 finding 10): one format on every
+    // target, "17:37" today, "Gestern", the weekday short within the week,
+    // else the date; never "17 Min." or "7h".
+    // The month is its short word, "Oct" in English and "10." in German.
+    ListDate = "scene_list_date", "%1$d %2$s", "%1$d.%2$s";
+    ListDateYear = "scene_list_date_year", "%1$d %2$s %3$d", "%1$d.%2$s%3$d";
+    JanuaryShort = "scene_january_short", "Jan", "1.";
+    FebruaryShort = "scene_february_short", "Feb", "2.";
+    MarchShort = "scene_march_short", "Mar", "3.";
+    AprilShort = "scene_april_short", "Apr", "4.";
+    MayShort = "scene_may_short", "May", "5.";
+    JuneShort = "scene_june_short", "Jun", "6.";
+    JulyShort = "scene_july_short", "Jul", "7.";
+    AugustShort = "scene_august_short", "Aug", "8.";
+    SeptemberShort = "scene_september_short", "Sep", "9.";
+    OctoberShort = "scene_october_short", "Oct", "10.";
+    NovemberShort = "scene_november_short", "Nov", "11.";
+    DecemberShort = "scene_december_short", "Dec", "12.";
+    MondayShort = "scene_monday_short", "Mon", "Mo.";
+    TuesdayShort = "scene_tuesday_short", "Tue", "Di.";
+    WednesdayShort = "scene_wednesday_short", "Wed", "Mi.";
+    ThursdayShort = "scene_thursday_short", "Thu", "Do.";
+    FridayShort = "scene_friday_short", "Fri", "Fr.";
+    SaturdayShort = "scene_saturday_short", "Sat", "Sa.";
+    SundayShort = "scene_sunday_short", "Sun", "So.";
     // A start with no daemon to attach to (1265, walk finding 5): one
     // sentence and the one command, the stack's detail behind --verbose.
     NeedsService = "needs_service", "Loquax needs its network service. Start it with: %1$s", "Loquax braucht seinen Netzwerkdienst. Starte ihn mit: %1$s";

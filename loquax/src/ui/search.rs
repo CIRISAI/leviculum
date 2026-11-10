@@ -29,7 +29,7 @@ use super::history::StoredHit;
 use super::layout::{painted, BAR};
 use super::{bold, push, Conversation, UiModel};
 use crate::names::Names;
-use crate::when::{list_time, WallTime};
+use crate::when::WallTime;
 
 /// The mark before a match.
 pub const OPEN: char = '«';
@@ -316,7 +316,7 @@ fn entry<B>(
         .and_then(|m| conversation.messages.get(m))
         .or(conversation.messages.last());
     let time = match (shown.and_then(|m| m.at), now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => super::scene::list_time(&at, &now).resolve(model.lang),
         _ => String::new(),
     };
     let label = model.names.label(&conversation.peer, model.lang);
@@ -365,7 +365,7 @@ fn stored_entry<B>(
     now: Option<WallTime>,
 ) -> [RLine; 2] {
     let time = match (hit.at, now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => super::scene::list_time(&at, &now).resolve(model.lang),
         _ => String::new(),
     };
     let label = model.names.label(&hit.peer, model.lang);

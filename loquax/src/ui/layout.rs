@@ -35,7 +35,7 @@ use super::scene::{PositionBadge, RecordingBar};
 use super::strings::{Arg, Lang, StrId, Text};
 use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Signature, UiModel};
 use crate::telemetry;
-use crate::when::{date_label, list_time, WallTime};
+use crate::when::{date_label, WallTime};
 
 /// What an empty conversation says (1447, walk 1 finding 22): "Noch keine
 /// Nachrichten", where it said "nothing earlier on this device", a sentence
@@ -836,7 +836,7 @@ fn entry<B>(
         .then_some(conversation.listing.as_ref())
         .flatten();
     let time = match (last.and_then(|m| m.at).or(listing.and_then(|l| l.at)), now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => super::scene::list_time(&at, &now).resolve(lang),
         _ => String::new(),
     };
     let mut top = RLine::default();

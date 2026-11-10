@@ -1097,7 +1097,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             sameName.setText(same);
             sameName.setVisibility(same.isEmpty() ? View.GONE : View.VISIBLE);
             TextView at = (TextView) view.findViewById(R.id.at);
-            at.setText(Ui.listTime(ConversationsActivity.this, Core.num(row, "at"), Ui.nowSecs()));
+            // The core's one format on every target (1449, scene::list_time).
+            at.setText(Core.str(row, "time"));
             at.setTextColor(getColor(unread > 0 ? R.color.accent : R.color.text_secondary));
             final String peer = Core.str(row, "peer");
             ((AvatarView) view.findViewById(R.id.avatar)).show(peer, row);
@@ -1125,8 +1126,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             TextView badge = (TextView) view.findViewById(R.id.unread);
             badge.setVisibility(unread > 0 ? View.VISIBLE : View.GONE);
             badge.setText(String.valueOf(unread));
-            // Under the time either the count or, ours being the last, its
-            // mark: the ticks cut into the list's ground.
+            // Ours being the last, its mark beside the last line (1449,
+            // walk finding 10), the count alone under the time.
             String state = Core.bool(row, "ours") ? Core.str(row, "state") : "";
             ImageView mark = (ImageView) view.findViewWithTag("mark");
             mark.setVisibility(unread == 0 && !state.isEmpty() ? View.VISIBLE : View.GONE);

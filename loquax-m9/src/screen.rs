@@ -30,7 +30,7 @@ use loquax::ui::chat::Mark;
 use loquax::ui::scene::{Avatar, LayoutClass, Lead, Row, Scene, ScreenId, TopBar};
 use loquax::ui::strings::{Lang, StrId, Text};
 use loquax::ui::{Pane, UiModel};
-use loquax::when::{list_time, WallTime};
+use loquax::when::WallTime;
 
 /// Cells across and rows of the large size's grid ([`crate::font`]): the
 /// map's; every other screen takes its grid from the reader's [`Size`].
@@ -404,7 +404,7 @@ fn top_bar(top: &TopBar, title: &Text, look: &Look, cols: usize) -> RLine {
 fn entry(row: &Row, look: &Look, cols: usize) -> [RLine; 2] {
     let shown = &row.row;
     let time = match (shown.at, look.now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => loquax::ui::scene::list_time(&at, &now).resolve(look.lang),
         _ => String::new(),
     };
     // The bar, the avatar, a gap; a cell at the right end.

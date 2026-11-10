@@ -3262,6 +3262,10 @@ impl Inner {
             .map(|same| same.resolve(self.lang))
             .unwrap_or_default();
         let row = row.row;
+        let time = match (row.at, self.model.now) {
+            (Some(at), Some(now)) => scene::list_time(&at, &now).resolve(self.lang),
+            _ => String::new(),
+        };
         schema::ConversationRow {
             peer: loquax::address::to_hex(&row.peer),
             name: row.name,
@@ -3269,6 +3273,7 @@ impl Inner {
             last: row.last,
             ours: row.ours,
             at: row.at.map_or(0, |at| at.unix_secs),
+            time,
             unread: u32::try_from(row.unread).unwrap_or(u32::MAX),
             initials: row.initials,
             icon_fg: row.icon.as_ref().map(|(fg, _)| fg.clone()),

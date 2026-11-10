@@ -2195,6 +2195,55 @@ pub fn day_words(at: &WallTime, now: Option<&WallTime>) -> Text {
     }
 }
 
+/// The conversation list's time (1449 item 4, walk 1 finding 10), the one
+/// rule of every target's list: the clock today (`17:37`), `Yesterday`,
+/// the weekday short within the six days before (`Do.`), else the date
+/// (`22.10.`, `22 Oct`), with the year when it is not this one. Never an
+/// age: "17 Min." and "7h" beside "Do." were three formats in one column.
+pub fn list_time(at: &WallTime, now: &WallTime) -> Text {
+    let c = at.civil();
+    match now.day() - at.day() {
+        ..=0 => return Text::Raw(at.hh_mm()),
+        1 => return Text::key(StrId::Yesterday),
+        2..=6 => return Text::key(WEEKDAYS_SHORT[c.weekday as usize % 7]),
+        _ => {}
+    }
+    let month = Text::key(MONTHS_SHORT[(c.month as usize).saturating_sub(1) % 12]);
+    let mut args = Vec::from([Arg::Int(i64::from(c.day)), Arg::Text(Box::new(month))]);
+    match c.year == now.civil().year {
+        true => Text::Key(StrId::ListDate, args),
+        false => {
+            args.push(Arg::Int(c.year));
+            Text::Key(StrId::ListDateYear, args)
+        }
+    }
+}
+
+const MONTHS_SHORT: [StrId; 12] = [
+    StrId::JanuaryShort,
+    StrId::FebruaryShort,
+    StrId::MarchShort,
+    StrId::AprilShort,
+    StrId::MayShort,
+    StrId::JuneShort,
+    StrId::JulyShort,
+    StrId::AugustShort,
+    StrId::SeptemberShort,
+    StrId::OctoberShort,
+    StrId::NovemberShort,
+    StrId::DecemberShort,
+];
+
+const WEEKDAYS_SHORT: [StrId; 7] = [
+    StrId::MondayShort,
+    StrId::TuesdayShort,
+    StrId::WednesdayShort,
+    StrId::ThursdayShort,
+    StrId::FridayShort,
+    StrId::SaturdayShort,
+    StrId::SundayShort,
+];
+
 const WEEKDAYS: [StrId; 7] = [
     StrId::Monday,
     StrId::Tuesday,
@@ -2845,6 +2894,39 @@ mod tests {
         assert_eq!(list_live(&live, now).resolve(Lang::De), "live");
         assert_eq!(ago(30).resolve(Lang::En), liveness::ago(30));
         assert_eq!(ago(4 * 86_400).resolve(Lang::En), liveness::ago(4 * 86_400));
+    }
+
+    /// 1449 item 4 (walk 1 finding 10): one format in the list's time
+    /// column on every target, in both languages; never an age.
+    #[test]
+    fn the_list_time_is_one_format_the_clock_yesterday_weekday_date() {
+        let at = |unix_secs| WallTime {
+            unix_secs,
+            offset_secs: 3600,
+        };
+        // 2026-10-30 10:00 local, a Friday.
+        let t = 1_793_350_800;
+        let now = at(t);
+        let both = |secs_before: i64| {
+            let shown = list_time(&at(t - secs_before), &now);
+            (shown.resolve(Lang::De), shown.resolve(Lang::En))
+        };
+        assert_eq!(
+            both(17 * 60),
+            ("09:43".into(), "09:43".into()),
+            "not 17 Min."
+        );
+        assert_eq!(both(7 * 3600), ("03:00".into(), "03:00".into()), "not 7h");
+        assert_eq!(both(86_400), ("Gestern".into(), "Yesterday".into()));
+        assert_eq!(both(2 * 86_400), ("Mi.".into(), "Wed".into()));
+        assert_eq!(both(6 * 86_400), ("Sa.".into(), "Sat".into()));
+        assert_eq!(both(8 * 86_400), ("22.10.".into(), "22 Oct".into()));
+        assert_eq!(
+            both(365 * 86_400),
+            ("30.10.2025".into(), "30 Oct 2025".into())
+        );
+        // A time ahead of the clock is today's.
+        assert_eq!(list_time(&at(t + 60), &now).resolve(Lang::De), "10:01");
     }
 
     #[test]

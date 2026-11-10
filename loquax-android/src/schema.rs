@@ -1672,6 +1672,11 @@ pub struct ConversationRow {
     pub ours: bool,
     /// When it was written or came, seconds since 1970 UTC; 0 for none.
     pub at: i64,
+    /// `at` as the list's time column says it, the core's one rule on every
+    /// target (1449 item 4, `scene::list_time`): `17:37`, `Gestern`, `Do.`,
+    /// `22.10.`; empty for none.
+    #[serde(default)]
+    pub time: String,
     /// Unread rows: a position report counts nothing (1209), so it raises
     /// no count and no notification; the raw count the read marks name is
     /// not here.

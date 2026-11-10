@@ -766,7 +766,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (liveness, cadence_s, last_fix_at),
                 (live, ring, pin, pin_label, draft),
                 sharing,
-                (group_members, group_words, _, group_invited, _),
+                (group_members, group_words, _, group_invited, time),
             )| ConversationRow {
                 peer,
                 same_name: last.clone(),
@@ -774,6 +774,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 last,
                 ours,
                 at,
+                time,
                 unread,
                 initials,
                 icon_fg,

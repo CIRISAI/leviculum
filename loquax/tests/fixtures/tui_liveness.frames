@@ -75,7 +75,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: stale ---
 ┌● tui───────────────────┐┌  them───────────────────────────────────── pos 1 d ┐
-│▌them               Mon ││                                                    │
+│▌them         Yesterday ││                                                    │
 │▌◎ position · 25 h ago  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │

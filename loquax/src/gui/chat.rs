@@ -49,7 +49,7 @@ use loquax::ui::scene::{
 };
 use loquax::ui::selection::{peer_key, position_line, preview_line, Part, RunKey};
 use loquax::ui::strings::{Arg, Lang, StrId, Text};
-use loquax::when::{list_time, WallTime};
+use loquax::when::WallTime;
 
 use super::{App, Message};
 
@@ -2596,7 +2596,7 @@ fn list_row<'a>(
     let content = &r.row;
     let unread = content.unread > 0;
     let when = match (content.at, now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => scene::list_time(&at, &now).resolve(lang),
         _ => String::new(),
     };
     let time_ink = match unread {
