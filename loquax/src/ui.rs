@@ -5991,6 +5991,9 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 /// Send `body` in the open conversation: the compose pane's text, or a
 /// frontend's ([`UiEvent::Write`]). Blank text sends nothing.
 fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
+    // Whitespace at the edges never travels (walk 1 #26): a trailing
+    // newline would draw a bubble with an empty line.
+    let body = outgoing(body);
     // A staged photo goes with the text as its caption (1270).
     if let Some(effects) = model.send_staged(body.clone()) {
         return effects;
@@ -6038,6 +6041,18 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
         body,
         fields: Vec::new(),
     }]
+}
+
+/// The text a send carries: `body` without leading and trailing
+/// whitespace or newlines (walk 1 #26), on every target, because every
+/// target's send passes through here, [`send_body`] and
+/// [`UiModel::reply_to`]. Inner lines stay as typed.
+pub fn outgoing(body: String) -> String {
+    let trimmed = body.trim();
+    match trimmed.len() == body.len() {
+        true => body,
+        false => trimmed.to_string(),
+    }
 }
 
 /// The glyph-table state a router state is shown as.
@@ -11307,6 +11322,40 @@ pub(crate) mod tests {
             .map(|row| row.trim().to_string())
             .filter(|row| !row.is_empty())
             .collect()
+    }
+
+    /// Walk 1 #26: whitespace and newlines at the edges never travel, on
+    /// every way a target sends (Write, Reply, the photo caption); the
+    /// inner newline stays, and a body of only whitespace sends nothing.
+    #[test]
+    fn a_send_trims_its_edges_on_every_path() {
+        let body_of = |effects: &[UiEffect]| -> Vec<String> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    UiEffect::Send { body, .. } => Some(body.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let body = String::from("  hi\nthere \n\n");
+        let effects = update(&mut model, UiEvent::Write { peer: PEER, body });
+        assert_eq!(body_of(&effects), ["hi\nthere"]);
+        let shown = model.conversations[0]
+            .messages
+            .last()
+            .map(|m| m.body.clone());
+        assert_eq!(shown.as_deref(), Some("hi\nthere"));
+        let body = String::from(" \n \t\n");
+        assert!(body_of(&update(&mut model, UiEvent::Write { peer: PEER, body })).is_empty());
+        let reply = UiEvent::Reply {
+            peer: PEER,
+            target: [7; 32],
+            body: String::from("\nyes\n"),
+        };
+        assert_eq!(body_of(&update(&mut model, reply)), ["yes"]);
+        assert_eq!(outgoing(String::from("as typed")), "as typed");
     }
 
     /// The terminal's column of the ladder (1232), a snapshot: five

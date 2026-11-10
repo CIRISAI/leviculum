@@ -122,7 +122,8 @@ impl<B> UiModel<B> {
         target: [u8; 32],
         body: String,
     ) -> Vec<UiEffect> {
-        if body.trim().is_empty() {
+        let body = super::outgoing(body);
+        if body.is_empty() {
             return Vec::new();
         }
         let index = self.conversation(peer);
