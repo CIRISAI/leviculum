@@ -221,3 +221,81 @@ fn a_turn_past_the_ring_says_the_newest_and_counts_the_rest() {
     assert_eq!(next, vec![(Op::Write, 70, ops)]);
     assert_eq!(log.lost(), 5);
 }
+
+/// 1630: window 25's forget (550 `park_ops`) drained in one call wrote
+/// 550 `[FLASH]` lines into a send ring of 8 KiB and 512 records, which
+/// the UART empties at 11.5 bytes a millisecond, and the ring dropped
+/// 388. Bounded by the ring's room, the drain says the same 550 records
+/// over several turns, oldest first, every one of them, and the ring a
+/// model of the board's never drops.
+#[test]
+fn a_forget_drains_whole_over_turns_and_the_send_ring_drops_nothing() {
+    use leviculum_serial_mux::tx::{Kind, TxRing};
+    use loquax_m9::oplog::{sayable, Body, RECORD_MAX};
+
+    const TX_RING: usize = 8 * 1024;
+    const TX_RECORDS: usize = 512;
+    let log: OpLog<KEEP> = OpLog::new();
+    let ops = 550u32;
+    for at in 0..ops {
+        let op = if at % 5 == 0 { Op::Erase } else { Op::Write };
+        log.keep(op, 40_000 + at, at);
+    }
+    let mut ring: Box<TxRing<TX_RING, TX_RECORDS>> = Box::default();
+    let mut said = Vec::new();
+    let mut turns = 0;
+    while log.waiting() > 0 {
+        turns += 1;
+        assert!(turns < 1000, "the drain never finished");
+        let free_bytes = TX_RING - ring.len();
+        let free_records = TX_RECORDS - ring.records();
+        let n = sayable(free_bytes, free_records);
+        let lost = log.take_at_most(n, |op, us, at| {
+            // The worst-case stamp: the line is at most RECORD_MAX.
+            let line = format!(
+                "\r\n[FLASH] {} t={}\r\n",
+                Body { op, us, at_ms: at },
+                u64::MAX
+            );
+            assert!(line.len() <= RECORD_MAX, "{} bytes", line.len());
+            assert!(ring.push(Kind::Line, line.as_bytes()));
+            said.push(at);
+        });
+        assert_eq!(lost, 0);
+        // The loop's own lossy lines: a window's `[IDLE]`, `[UART]` and
+        // `[LOOP]` lines and a frame, 800 bytes once a second (every 50th
+        // turn), under the reserve.
+        if turns % 50 == 1 {
+            for _ in 0..8 {
+                assert!(ring.push(Kind::Line, &[b'x'; 100]));
+            }
+        }
+        // A turn of 20 ms: 230 bytes of the line.
+        let mut carried = 0;
+        while carried < 230 && !ring.is_empty() {
+            let n = ring.peek().len().min(230 - carried);
+            ring.consume(n);
+            carried += n;
+        }
+    }
+    assert_eq!(said, (0..ops).collect::<Vec<_>>());
+    assert_eq!(ring.dropped(), 0);
+    assert_eq!(log.lost(), 0);
+    // A ring with less room than the reserve gets nothing.
+    assert_eq!(sayable(4 * 1024, 512), 0);
+    assert_eq!(sayable(8 * 1024, 256), 0);
+}
+
+/// The longest body the board can say fits [`RECORD_MAX`] with every
+/// field at its widest.
+#[test]
+fn the_widest_flash_line_fits_the_record_bound() {
+    use loquax_m9::oplog::{Body, RECORD_MAX};
+    let body = Body {
+        op: Op::Erase,
+        us: (1 << 31) - 1,
+        at_ms: u32::MAX,
+    };
+    let line = format!("\r\n[FLASH] {body} t={}\r\n", u64::MAX);
+    assert_eq!(line.len(), RECORD_MAX);
+}

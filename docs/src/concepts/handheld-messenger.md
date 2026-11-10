@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:1137`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:1170`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1378,7 +1378,7 @@ frames, the log, the keyboard's `KBRAW`/`KB` lines and the frame dump
 share it under the rules of `leviculum-nrf/serial-mux`, which were made
 for this board (1238): text is written in whole lines between frames and
 never carries a raw 0x7E, 0x7D, 0x11 or 0x13; every frame leaves with its
-XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1171`);
+XON and XOFF escaped (`UartLog::frame`, `leviculum-esp/src/lib.rs:1182`);
 the capability report states `serial_mux=1`, so lnsd escapes its own
 flow bytes and strips the line's. A frame that is not the control
 envelope is a packet for the node. The board sends no flow bytes: esp-hal
@@ -1952,7 +1952,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2810`).
+both (`thinknode_m9.rs:2856`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2023,7 +2023,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2822`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2868`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2056,7 +2056,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1043`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1076`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2130,7 +2130,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2883`), and the fold runs behind the list
+(`thinknode_m9.rs:2929`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2456,7 +2456,7 @@ entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
 (the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
 could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
 heap at every step, as the forget's reopen and a taken code do
-(`leviculum-esp/src/bin/thinknode_m9.rs:2044`). The held bytes live in
+(`leviculum-esp/src/bin/thinknode_m9.rs:2077`). The held bytes live in
 2 KiB blocks, at most 35 s of the line (`RxHeld`,
 `leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
 the pool for 256 KiB in one piece, and 22 s was shorter than the
@@ -2482,7 +2482,7 @@ owed, the reboot `rebuilt`).
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside
 the take stage, so the walks read takes of 1 to 6 s. The dump is now
 timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
-`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2561`); `m9-walk.py`
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2580`); `m9-walk.py`
 takes `dump=` as the dump's turn and holds the rest of that turn to the
 bar.
 
@@ -2677,6 +2677,41 @@ take stage, in `hold` before core 0 unmasks, and is bounded by the
 rings' 2048 and 1024 bytes; the `[FLASH]` record of an op includes it,
 and the erases it timed (34 to 42 ms) are the bare erases window 23
 measured.
+
+### The flash records drain as the line carries them (1630)
+
+Window 25 met 1622's bars but one: the forget's `[IDLE]` line said
+`park_ops=550` and the `[UART]` line `tx_drop=389
+tx_drop_kind=line:388`, and 162 `[FLASH]` lines arrived, 550 minus
+388. The loss had moved from the op ring into the send ring: one drain
+wrote 550 lines of 45 to 50 bytes into a ring of 8 KiB and 512
+records that UART0 empties at 11.5 bytes a millisecond. The same
+drain sat at the top of the loop, and the rebuild boot's first turn
+(not yet lossy, so it waits for room) wrote its 355 boot records
+there, filled the ring, and the census's screen lines behind them in
+the take waited 299 ms for it (`turn_ms=328 stage=take`), the 700 ms
+between `census=done` and the `[CENSUS] screen=` lines being the full
+ring's 0.7 s of line.
+
+Now the drain is bounded and runs at the turn's tail, outside the take
+(`[LOOP]`'s `flash=`): `OpLog::take_at_most` hands out no more than
+`oplog::sayable` allows for the send ring's free room past a reserve
+of half the ring (4 KiB and 256 records, pinned against `TX_RING` and
+`TX_RECORDS` at compile time) in records of the worst-case 72 bytes
+(`RECORD_MAX`), so neither the records nor the loop's own lossy lines
+after them make the ring drop. What does not fit waits in the op ring
+for the next turn; 550 records of 48 bytes leave in about 2.3 s of the line. It
+runs every turn, not only quiet ones: a pull's turns are busy, and the
+op ring would overflow behind them. `loquax-m9/tests/oplog.rs`
+(`a_forget_drains_whole_over_turns_and_the_send_ring_drops_nothing`)
+drains 550 records into the serial mux's own `TxRing` at the line's
+rate: all said in order, none dropped; drained whole as before, the
+same ring drops 427.
+
+`[LOOP]`'s `host=` has parts since: `read=` (the line's bytes read and
+deframed), `pkt=` (packets handed to the node) and `ctl=` (the rest:
+control verbs and frames), for the two chat opens a window that cost
+`host=` 40 to 44 ms.
 
 ### Tracks on the M9 (1385, not built)
 

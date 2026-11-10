@@ -950,6 +950,17 @@ impl<'d> UartLog<'d> {
         })
     }
 
+    /// The send ring's free bytes and free records (1630): what a writer
+    /// that must not make the ring drop sizes its burst by. `(0, 0)`
+    /// before the ring is up.
+    pub fn tx_room(&self) -> (usize, usize) {
+        critical_section::with(|cs| {
+            TX_BYTES.borrow_ref(cs).as_ref().map_or((0, 0), |ring| {
+                (TX_RING - ring.len(), TX_RECORDS - ring.records())
+            })
+        })
+    }
+
     /// The records the full ring dropped, by [`Kind`] in [`Kind::ALL`]'s
     /// order (1553).
     pub fn tx_dropped_kinds(&self) -> [u32; 3] {

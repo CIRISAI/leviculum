@@ -1246,7 +1246,7 @@ impl Board {
         self.log.line(
             "[LOOP] ",
             &format!(
-                "turn_ms={total} stage={slowest} host=0 node=0 take={take} draw={draw} keys={keys} entries={entries}"
+                "turn_ms={total} stage={slowest} host=0 read=0 pkt=0 ctl=0 node=0 take={take} draw={draw} keys={keys} entries={entries}"
             ),
         );
     }

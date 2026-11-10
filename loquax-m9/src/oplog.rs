@@ -99,7 +99,25 @@ impl<const N: usize> OpLog<N> {
     /// Say every op kept since the last call, `(op, us, at_ms)`, oldest
     /// first, and return how many were overwritten before this call
     /// could say them.
-    pub fn take(&self, mut say: impl FnMut(Op, u32, u32)) -> u32 {
+    pub fn take(&self, say: impl FnMut(Op, u32, u32)) -> u32 {
+        self.take_at_most(u32::MAX, say)
+    }
+
+    /// Records kept and not yet said, at most `N`.
+    pub fn waiting(&self) -> u32 {
+        let w = self.write.load(Ordering::Relaxed);
+        let r = self.read.load(Ordering::Relaxed);
+        w.wrapping_sub(r).min(N as u32)
+    }
+
+    /// Say at most `max` of the ops kept since the last call, oldest
+    /// first, as [`OpLog::take`] says them, and leave the rest for the
+    /// next call (1630). Window 25's forget handed 550 records to one
+    /// drain, which put them on the line faster than UART0 carries them,
+    /// and the send ring dropped 388; the board now asks for no more than
+    /// the ring has room for ([`sayable`]). What was overwritten before
+    /// this call is counted and returned as [`OpLog::take`] counts it.
+    pub fn take_at_most(&self, max: u32, mut say: impl FnMut(Op, u32, u32)) -> u32 {
         let w = self.write.load(Ordering::Relaxed);
         let mut r = self.read.load(Ordering::Relaxed);
         let behind = w.wrapping_sub(r);
@@ -109,7 +127,8 @@ impl<const N: usize> OpLog<N> {
             r = w.wrapping_sub(N as u32);
             self.lost.fetch_add(lost, Ordering::Relaxed);
         }
-        while r != w {
+        let end = r.wrapping_add(w.wrapping_sub(r).min(max));
+        while r != end {
             let slot = (r as usize) % N;
             let word = self.us[slot].load(Ordering::Relaxed);
             let op = match word & WRITE_BIT {
@@ -131,6 +150,55 @@ impl<const N: usize> OpLog<N> {
     /// deltas, as the `[IDLE]` line's `flash_lost=`.
     pub fn lost(&self) -> u32 {
         self.lost.load(Ordering::Relaxed)
+    }
+}
+
+/// The longest `[FLASH] op=` record the board writes, its stamp and line
+/// end included, and the line end a frame before it adds (1630): prefix
+/// 8, `op=erase` 8, ` ms=` and `2147483.647` 15, ` at=` and a `u32` 14,
+/// ` t=` and a `u64` 23, `\r\n` twice 4. Nothing in it is escaped. The
+/// bench's lines run 45 to 50 bytes (`[FLASH] op=write ms=0.312
+/// at=123456 t=123456`); the bound is the worst case, so the drain fits
+/// by construction, not by the typical line.
+pub const RECORD_MAX: usize = 72;
+
+/// What the drain leaves free of the send ring (1630): half the board's
+/// `TX_RING` (8 KiB) and half its `TX_RECORDS` (512), for the lines the
+/// loop writes lossy before the UART carried the records out (`[IDLE]`,
+/// `[UART]`, `[LOOP]`, a frame: under 1 KiB a turn). The firmware pins
+/// both halves against its ring at compile time.
+pub const RESERVE_BYTES: usize = 4 * 1024;
+/// The records of the send ring the drain leaves free, as
+/// [`RESERVE_BYTES`] leaves its bytes.
+pub const RESERVE_RECORDS: usize = 256;
+
+/// How many records a drain may write into a send ring with `free_bytes`
+/// and `free_records` of room so that none of them, and none of the
+/// loop's lines after them, makes the ring drop (1630): the room past
+/// the reserve, in worst-case records.
+pub fn sayable(free_bytes: usize, free_records: usize) -> u32 {
+    let by_bytes = free_bytes.saturating_sub(RESERVE_BYTES) / RECORD_MAX;
+    let by_records = free_records.saturating_sub(RESERVE_RECORDS);
+    u32::try_from(by_bytes.min(by_records)).unwrap_or(u32::MAX)
+}
+
+/// A record's `[FLASH]` body: `op=<kind> ms=<ms>.<frac> at=<ms>`.
+pub struct Body {
+    pub op: Op,
+    pub us: u32,
+    pub at_ms: u32,
+}
+
+impl core::fmt::Display for Body {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "op={} ms={}.{:03} at={}",
+            self.op.name(),
+            self.us / 1000,
+            self.us % 1000,
+            self.at_ms
+        )
     }
 }
 

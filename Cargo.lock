@@ -3563,6 +3563,7 @@ dependencies = [
  "leviculum-lxmf",
  "leviculum-map",
  "leviculum-mapfill",
+ "leviculum-serial-mux",
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-ratatui",

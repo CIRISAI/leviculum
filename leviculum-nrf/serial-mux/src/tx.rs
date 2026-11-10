@@ -132,6 +132,13 @@ impl<const N: usize, const R: usize> TxRing<N, R> {
         self.len
     }
 
+    /// Records waiting, a started one included (1630): with
+    /// [`TxRing::len`], the room a writer that must not make the ring
+    /// drop sizes its burst by.
+    pub fn records(&self) -> usize {
+        self.count
+    }
+
     /// Records dropped so far, the new ones that could not fit included.
     pub fn dropped(&self) -> u32 {
         self.dropped

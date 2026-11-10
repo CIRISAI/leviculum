@@ -767,10 +767,25 @@ static mut APP_CORE_STACK: Stack<UI_STACK> = Stack::new();
 /// the bar a key is answered within.
 const SLOW_TURN_MS: u64 = 100;
 
+// The `[FLASH]` drain's reserve (1630) is half the send ring the board
+// has: less than all of it, or the drain could never write, and no more
+// than the bench needs for a turn's own lines.
+#[cfg(m9_bench)]
+const _: () = assert!(
+    2 * loquax_m9::oplog::RESERVE_BYTES == leviculum_esp::TX_RING
+        && 2 * loquax_m9::oplog::RESERVE_RECORDS == leviculum_esp::TX_RECORDS
+);
+
 /// What one turn of the loop spent, by stage, in milliseconds.
 #[derive(Default)]
 struct Turn {
     host: u64,
+    /// Of `host` (1630): the line's bytes read and deframed, the packets
+    /// handed to the node; the rest of it is the control verbs and frames
+    /// (`ctl=`). Windows 23 to 25 had two chat opens a window at
+    /// `host=` 40 to 44 and could not say which.
+    read: u64,
+    pkt: u64,
     node: u64,
     take: u64,
     /// A screen dump's lines written out (1603): bench tooling, not the
@@ -778,13 +793,18 @@ struct Turn {
     dump: u64,
     draw: u64,
     keys: u64,
+    /// The bench image's `[FLASH]` records written at the turn's tail
+    /// (1630), bounded by the send ring's room: its own stage, not the
+    /// take's.
+    flash: u64,
 }
 
 impl Turn {
     /// Say the turn as a `[LOOP]` line when it took longer than
     /// [`SLOW_TURN_MS`].
     fn say(&self, log: &mut UartLog<'_>, entries: u64) {
-        let total = self.host + self.node + self.take + self.dump + self.draw + self.keys;
+        let total =
+            self.host + self.node + self.take + self.dump + self.draw + self.keys + self.flash;
         if total <= SLOW_TURN_MS {
             return;
         }
@@ -795,16 +815,29 @@ impl Turn {
             ("dump", self.dump),
             ("draw", self.draw),
             ("keys", self.keys),
+            ("flash", self.flash),
         ];
         let slowest = stages
             .iter()
             .max_by_key(|(_, ms)| *ms)
             .map_or("none", |(name, _)| name);
-        log.line(
+        // Whole, as a text line (1630): with the host's three parts and
+        // `flash=` the body outgrew the fixed line's 135 bytes, which
+        // would cut `entries=`.
+        log.text(
             "[LOOP] ",
-            format_args!(
-                "turn_ms={total} stage={slowest} host={} node={} take={} dump={} draw={} keys={} entries={entries}",
-                self.host, self.node, self.take, self.dump, self.draw, self.keys
+            &alloc::format!(
+                "turn_ms={total} stage={slowest} host={} read={} pkt={} ctl={} node={} take={} dump={} draw={} keys={} flash={} entries={entries}",
+                self.host,
+                self.read,
+                self.pkt,
+                self.host.saturating_sub(self.read + self.pkt),
+                self.node,
+                self.take,
+                self.dump,
+                self.draw,
+                self.keys,
+                self.flash
             ),
         );
     }
@@ -2158,23 +2191,6 @@ fn main() -> ! {
         wdt.feed();
         stall::turned(Core::Io);
         stall::stage(Core::Io, Stage::Host);
-        // The masked windows one by one (1613): the distribution the
-        // bench reads erase lengths from, beside the overruns they
-        // used to cause.
-        // Since 1622 a drain that found records overwritten says how
-        // many, so a window's distribution says what it misses.
-        #[cfg(m9_bench)]
-        {
-            let lost = leviculum_esp::flash::park::take_records(|op, us, at| {
-                log.text(
-                    "[FLASH] ",
-                    &alloc::format!("op={} ms={}.{:03} at={at}", op.name(), us / 1000, us % 1000),
-                );
-            });
-            if lost > 0 {
-                log.text("[FLASH] ", &alloc::format!("lost={lost}"));
-            }
-        }
         let now = uptime_ms();
         let mut turn = Turn::default();
         if now >= next_banner {
@@ -2279,6 +2295,7 @@ fn main() -> ! {
         }
         // Every loss on the line said when it happens (1440).
         log.say_rx_counts(false);
+        turn.read = uptime_ms().saturating_sub(t_host);
         let mut busy = n > 0;
         for data in requests {
             if matches!(
@@ -2292,7 +2309,9 @@ fn main() -> ! {
                     log.runt();
                 }
                 stall::stage(Core::Io, Stage::Packet);
+                let t_pkt = uptime_ms();
                 node.packet(&data, uptime_ms(), &mut stores, &mut log);
+                turn.pkt += uptime_ms().saturating_sub(t_pkt);
                 wdt.feed();
                 continue;
             }
@@ -2633,6 +2652,33 @@ fn main() -> ! {
 
         turn.take = uptime_ms().saturating_sub(t_take).saturating_sub(dump_ms);
         turn.dump = dump_ms;
+        // The masked windows one by one (1613): the distribution the
+        // bench reads erase lengths from, beside the overruns they
+        // used to cause. Since 1622 a drain that found records
+        // overwritten says how many. Since 1630 the drain is bounded by
+        // the send ring's room past a reserve (`oplog::sayable`) and runs
+        // here, at the turn's tail and outside the take: window 25's
+        // forget wrote 550 records in one drain and the ring dropped 388,
+        // and the rebuild boot's first turn waited 299 ms of its take for
+        // the ring the 355 boot records had filled. What does not fit
+        // waits in the op ring for the next turn.
+        #[cfg(m9_bench)]
+        {
+            stall::stage(Core::Io, Stage::Line);
+            let t_flash = uptime_ms();
+            let (free_bytes, free_records) = log.tx_room();
+            let max = loquax_m9::oplog::sayable(free_bytes, free_records);
+            let lost = leviculum_esp::flash::park::take_records(max, |op, us, at_ms| {
+                log.text(
+                    "[FLASH] ",
+                    &alloc::format!("{}", loquax_m9::oplog::Body { op, us, at_ms }),
+                );
+            });
+            if lost > 0 {
+                log.text("[FLASH] ", &alloc::format!("lost={lost}"));
+            }
+            turn.flash = uptime_ms().saturating_sub(t_flash);
+        }
         turn.say(&mut log, node.entries());
         if core::mem::take(&mut first_turn) {
             log.set_lossy(true);

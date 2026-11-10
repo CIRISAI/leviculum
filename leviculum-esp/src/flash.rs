@@ -114,9 +114,13 @@ pub mod park {
     /// first; returns how many were overwritten before this call could
     /// say them. The bench image's loop turns this into `[FLASH]` lines
     /// and a `[FLASH] lost=` line when it is not zero.
+    ///
+    /// Since 1630 at most `max` of them: window 25's forget handed 550
+    /// to one drain and the send ring dropped 388; the loop asks for no
+    /// more than the ring has room for (`loquax_m9::oplog::sayable`).
     #[cfg(m9_bench)]
-    pub fn take_records(say: impl FnMut(Op, u32, u32)) -> u32 {
-        RECORDS.take(say)
+    pub fn take_records(max: u32, say: impl FnMut(Op, u32, u32)) -> u32 {
+        RECORDS.take_at_most(max, say)
     }
 
     /// The records overwritten unsaid since boot, wrapping (1622): the

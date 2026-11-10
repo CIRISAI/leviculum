@@ -90,3 +90,5 @@ leviculum-core = { path = "../leviculum-core" }
 rand_core = { workspace = true, features = ["getrandom"] }
 tempfile = "3"
 png = "0.18"
+# 1630: tests/oplog.rs drains a forget into the board's send ring model.
+leviculum-serial-mux = { path = "../leviculum-nrf/serial-mux" }
