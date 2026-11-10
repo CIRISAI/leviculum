@@ -57,6 +57,7 @@
     <string name="rooms_linking">Connecting…</string>
     <string name="rooms_linking_for">Connecting… %1$d s</string>
     <string name="rooms_not_linked">Not connected yet.</string>
+    <string name="rooms_linked">Connected</string>
     <string name="rooms_connect">Connect</string>
     <string name="rooms_retry">Try again</string>
     <string name="rooms_on_hub">Rooms on %1$s</string>

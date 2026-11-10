@@ -1041,11 +1041,8 @@ pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
     let rooms = &model.rooms;
     let status = match rooms.state {
         _ if rooms.hub.is_none() => Some(Text::key(StrId::RoomsNoHub)),
-        // "Never asked" is not "connecting" (1652).
-        HubState::Off => Some(Text::key(StrId::RoomsNotLinked)),
-        HubState::Linking => Some(linking(rooms.linking_since, model.now)),
         HubState::Ready => None,
-        HubState::Down(why) => Some(down(why)),
+        _ => link_words(model),
     };
     let retry = match rooms.state {
         _ if rooms.hub.is_none() => None,
@@ -1096,6 +1093,22 @@ pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
 
 /// "Connecting…", with its seconds once there were more than
 /// [`LINKING_QUIET_SECS`] of them (1652).
+/// How the link to the hub in force stands, in the rooms screen's words
+/// (1652): "Not connected yet.", "Connecting… N s", "Connected", or why it
+/// is down; `None` without a hub. The settings' row of the hub in force
+/// says it too (1655, walk 9, 49).
+pub fn link_words<B>(model: &UiModel<B>) -> Option<Text> {
+    let rooms = &model.rooms;
+    rooms.hub?;
+    Some(match rooms.state {
+        // "Never asked" is not "connecting" (1652).
+        HubState::Off => Text::key(StrId::RoomsNotLinked),
+        HubState::Linking => linking(rooms.linking_since, model.now),
+        HubState::Ready => Text::key(StrId::RoomsLinked),
+        HubState::Down(why) => down(why),
+    })
+}
+
 fn linking(since: Option<i64>, now: Option<WallTime>) -> Text {
     match (since, now) {
         (Some(since), Some(now)) if now.unix_secs - since >= LINKING_QUIET_SECS => Text::Key(

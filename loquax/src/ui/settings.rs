@@ -538,9 +538,9 @@ fn say_suggestion(rooms: &super::rooms::Rooms) {
 }
 
 /// What a hub's row says beside its name: how far, "suggested" for the
-/// one [`suggested`] names, "no answer", and the mark on the one in
-/// force.
-fn offered_value(hub: &Offered, chosen: bool, suggested: bool) -> Option<Text> {
+/// one [`suggested`] names, "no answer", and on the one in force how its
+/// link stands (`link`, 1655) and the mark.
+fn offered_value(hub: &Offered, chosen: bool, suggested: bool, link: Option<Text>) -> Option<Text> {
     let mut parts = Vec::new();
     match hub.hops {
         Some(1) => parts.push(Text::key(StrId::RoomsHubHop)),
@@ -553,11 +553,17 @@ fn offered_value(hub: &Offered, chosen: bool, suggested: bool) -> Option<Text> {
     if suggested {
         parts.push(Text::key(StrId::RoomsHubSuggested));
     }
-    if hub.answered == Some(false) {
-        parts.push(Text::key(StrId::RoomsHubNoAnswer));
-    }
     if chosen {
+        // The rooms screen's words (1655, walk 9, 49: the row said no
+        // state), which say a silence themselves.
+        match link {
+            Some(link) => parts.push(link),
+            None if hub.answered == Some(false) => parts.push(Text::key(StrId::RoomsHubNoAnswer)),
+            None => {}
+        }
         parts.push(Text::Raw(alloc::string::String::from("\u{2713}")));
+    } else if hub.answered == Some(false) {
+        parts.push(Text::key(StrId::RoomsHubNoAnswer));
     }
     match parts.len() {
         0 => None,
@@ -608,7 +614,12 @@ pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
                 Some(name) => Text::Raw(name.clone()),
                 None => Text::key(StrId::RoomsHubUnnamed),
             },
-            value: offered_value(hub, chosen == Some(hub.hash), suggest == Some(hub.hash)),
+            value: offered_value(
+                hub,
+                chosen == Some(hub.hash),
+                suggest == Some(hub.hash),
+                super::rooms::link_words(model).filter(|_| chosen == Some(hub.hash)),
+            ),
             key,
             action: Some(Action::of(Intent::RoomsHub(HubPick::Hub(hub.hash)))),
         });
@@ -717,9 +728,10 @@ mod tests {
             said[1], "Server without a name: reachable over 2 stations",
             "a tie: the closer first"
         );
+        // The one in use says its link in the rooms screen's words (1655).
         assert_eq!(
             said[2],
-            "Villa: reachable over 4 stations · no answer · \u{2713}"
+            "Villa: reachable over 4 stations · The server does not answer. · \u{2713}"
         );
         // A server is in use: none is suggested (1621).
         assert_eq!(said[3], "HADARC: reachable over 4 stations");
@@ -757,6 +769,45 @@ mod tests {
 
     /// The order is the phone's, every section has its row in the table,
     /// and its key reads back.
+    /// The row of the server in use says how its link stands, in the
+    /// rooms screen's words (1655, walk 9, 49: name and tick only); the
+    /// other rows and what a tap does stay as they were.
+    #[test]
+    fn the_server_in_use_says_how_its_link_stands() {
+        use crate::ui::rooms::{Down, HubState};
+        let mut model = UiModel::<crate::ui::tests::Field>::new(&[]);
+        let shipped = crate::ui::hubs::shipped();
+        let before = hub_rows(&model, Target::Phone);
+        model.rooms.hub = Some(shipped[0].hash);
+        model.rooms.enabled = true;
+        let value = |model: &UiModel<crate::ui::tests::Field>| {
+            hub_rows(model, Target::Phone)[1]
+                .value
+                .as_ref()
+                .map(|v| v.resolve(Lang::De))
+        };
+        assert_eq!(
+            value(&model).as_deref(),
+            Some("Noch nicht verbunden. · \u{2713}")
+        );
+        model.rooms.state = HubState::Linking;
+        assert_eq!(value(&model).as_deref(), Some("Verbinde… · \u{2713}"));
+        model.rooms.state = HubState::Ready;
+        assert_eq!(value(&model).as_deref(), Some("Verbunden · \u{2713}"));
+        model.rooms.state = HubState::Down(Down::NoAnswer);
+        assert_eq!(
+            value(&model).as_deref(),
+            Some("Server antwortet nicht. · \u{2713}")
+        );
+        // The others: as before, and every row's tap is the same verb.
+        let after = hub_rows(&model, Target::Phone);
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(&after).skip(2) {
+            assert_eq!((&b.label, &b.action), (&a.label, &a.action));
+        }
+        assert_eq!(before[1].action, after[1].action);
+    }
+
     #[test]
     fn nine_sections_in_the_phones_order_each_placed_once() {
         let titles: Vec<&str> = SECTIONS.iter().map(|s| s.title().text(Lang::En)).collect();

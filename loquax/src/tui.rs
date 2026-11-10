@@ -3252,8 +3252,9 @@ mod tests {
             "{shown}"
         );
         assert!(
-            // Never heard here: no distance beside it (1629).
-            shown.contains(&format!("1  {}: \u{2713}", shipped[0].name)),
+            // Never heard here: no distance beside it (1629); the link's
+            // state in the rooms screen's words (1655, walk 9, 49).
+            shown.contains(&format!("1  {}: Connecting… · \u{2713}", shipped[0].name)),
             "{shown}"
         );
         update(&mut model, key('a'));

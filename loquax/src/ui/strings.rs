@@ -103,6 +103,7 @@ leviculum_ui::catalogue! {
     RoomsLinking = "rooms_linking", "Connecting…", "Verbinde…";
     RoomsLinkingFor = "rooms_linking_for", "Connecting… %1$d s", "Verbinde… %1$d s";
     RoomsNotLinked = "rooms_not_linked", "Not connected yet.", "Noch nicht verbunden.";
+    RoomsLinked = "rooms_linked", "Connected", "Verbunden";
     RoomsConnect = "rooms_connect", "Connect", "Verbinden";
     RoomsRetry = "rooms_retry", "Try again", "Erneut versuchen";
     RoomsOnHub = "rooms_on_hub", "Rooms on %1$s", "Räume auf %1$s";
