@@ -365,6 +365,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                         explore();
                     }
                 }
+
+                @Override
+                public void titled(String name) {
+                    // The page's name, not "Seiten" (1621, walk 2).
+                    if (onBrowse) {
+                        title.setText(name.isEmpty() ? getString(R.string.tab_browse) : name);
+                    }
+                }
             });
         }
         findViewById(R.id.pane_chats).setVisibility(View.GONE);

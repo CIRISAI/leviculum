@@ -193,12 +193,18 @@ MAP_CHROME_IDS = ["load", "fit", "theme"]
 # Explore (1578), three and no fourth.
 TABS = ["tab_chats", "tab_map", "tab_explore"]
 # Explore's list (1578): its field, its order's toggle, its list, and the
-# two section titles the library words. The titles are the catalogue's
-# (`explore_pages`, `explore_rooms`) in the phone's language, read from the
-# generated strings_scene.xml: English literals failed on the German Pixel
-# before they checked anything (1618, walk 15).
+# section titles the library words: "Pages", "Rooms" and, under it,
+# "Servers" (1621). The titles are the catalogue's (`explore_pages`,
+# `explore_rooms`, `explore_servers`) in the phone's language, read from
+# the generated strings_scene.xml: English literals failed on the German
+# Pixel before they checked anything (1618, walk 15).
 EXPLORE_IDS = ["explore_search", "explore_sort", "explore_list"]
-EXPLORE_TITLE_KEYS = ["explore_pages", "explore_rooms"]
+EXPLORE_TITLE_KEYS = ["explore_pages", "explore_rooms", "explore_servers"]
+# One scroll step of Explore's list (1621, walk 2): at most three quarters
+# of the list's height, dragged slowly enough that the list does not fling
+# on, so no section title passes unseen between two dumps.
+EXPLORE_SCROLL_SHARE = 0.75
+EXPLORE_SCROLL_MS = 1500
 ANDROID_RES = Path(__file__).resolve().parent.parent / "android" / "res"
 
 
@@ -1271,11 +1277,26 @@ def tab_ids(nodes: list[Node]) -> list[str]:
     return out
 
 
-def explore_problems(nodes: list[Node], titles: list[str] | None = None) -> list[str]:
-    """What is wrong with Explore's dump (1578): a missing field, toggle or
+def explore_scroll(box: tuple[int, int, int, int]) -> tuple[int, int, int, int, int]:
+    """One slow step down Explore's list in `box` (its bounds): the
+    swipe's x, from y, to y and its milliseconds, at most
+    [`EXPLORE_SCROLL_SHARE`] of the list's height (1621: a 250 ms swipe
+    over the whole list flung a section title past)."""
+    x = (box[0] + box[2]) // 2
+    reach = int((box[3] - box[1]) * EXPLORE_SCROLL_SHARE)
+    start = box[3] - (box[3] - box[1] - reach) // 2
+    return x, start, start - reach, EXPLORE_SCROLL_MS
+
+
+def explore_problems(
+    nodes: list[Node], titles: list[str] | None = None, first: list[Node] | None = None
+) -> list[str]:
+    """What is wrong with Explore's dumps (1578): a missing field, toggle or
     list, a section without its title (`titles`, the catalogue's in the
     phone's language; English without), or a tab bar other than exactly
-    Chats, Map and Explore."""
+    Chats, Map and Explore. `nodes` may be several dumps of the scrolled
+    list; the tabs are counted on `first`, the first dump alone (1621: over
+    13 dumps the bar counted 13 times), or on `nodes` without it."""
     problems = []
     for rid in EXPLORE_IDS:
         if not find(nodes, rid=rid):
@@ -1285,7 +1306,7 @@ def explore_problems(nodes: list[Node], titles: list[str] | None = None) -> list
     for title in titles:
         if not find(nodes, text=title):
             problems.append(f"no section {title!r}")
-    tabs = tab_ids(nodes)
+    tabs = tab_ids(nodes if first is None else first)
     if tabs != TABS:
         problems.append(f"tabs {tabs}, want {TABS}")
     return problems
@@ -4520,18 +4541,19 @@ class Walk:
         self.wait_id("explore_list", 10)
         titles = catalogue_words(phone_lang(dev), EXPLORE_TITLE_KEYS)
         nodes = dev.dump()
-        # The list draws only what is visible (1618): the rooms' title may
-        # be below; scroll for it, keeping every row seen.
+        # The list draws only what is visible (1618): the rooms' titles may
+        # be below; scroll for them slowly, a step at most three quarters
+        # of the list (1621), keeping every row seen.
         seen = list(nodes)
-        for _ in range(12):
-            if find(seen, text=titles[-1]):
+        for _ in range(24):
+            if all(find(seen, text=t) for t in titles):
                 break
             box = find(dev.dump(), rid="explore_list")[0]
-            x = (box.bounds[0] + box.bounds[2]) // 2
-            dev.swipe(x, box.bounds[3] - 40, x, box.bounds[1] + 40, 250)
+            x, y1, y2, ms = explore_scroll(box.bounds)
+            dev.swipe(x, y1, x, y2, ms)
             time.sleep(0.5)
             seen.extend(dev.dump())
-        problems = explore_problems(seen, titles)
+        problems = explore_problems(seen, titles, first=nodes)
         if problems:
             raise StepFailed("; ".join(problems))
         order = find(nodes, rid="explore_sort")[0].text
@@ -4543,7 +4565,7 @@ class Walk:
         dev.tap_node(find(dev.dump(), rid="explore_sort")[0])
         dev.key("KEYCODE_BACK")
         self.wait_id("write", 10)
-        return f"sections=2 order={order!r}->{turned!r} back=chats"
+        return f"sections={len(titles)} order={order!r}->{turned!r} back=chats"
 
     def screen_codes(self, name: str) -> list[str]:
         """The QR codes on screen, read by zbarimg from a screenshot kept

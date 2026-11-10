@@ -10,6 +10,7 @@ import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.InputType;
 import android.text.TextPaint;
 import android.text.method.LinkMovementMethod;
 import android.text.style.BackgroundColorSpan;
@@ -41,12 +42,20 @@ import java.util.Map;
  * naming the scene node it landed on. The page arrives laid out, a window
  * of lines of runs, and is drawn in a monospace grid: nothing here parses
  * micron or knows a link from its text.
+ *
+ * <p>1621 (walk 2): the page goes by its name, in the screen's title and
+ * in the address field, from the moment it is opened; the field shows the
+ * node's address only while it is edited. Back is always there: at the
+ * first page it gives the tab back to Explore.
  */
 final class BrowsePane {
     /** What the pane hands back to the Activity. */
     interface Host {
-        /** The tab gave way to a chat (a page's link to its operator). */
+        /** The tab gave way to a chat (a page's link to its operator), or to Explore. */
         void left();
+
+        /** The page's name, for the screen's title. */
+        void titled(String title);
     }
 
     private final Activity screen;
@@ -80,17 +89,44 @@ final class BrowsePane {
                 verb("back", "", "");
             }
         });
-        bar.addView(back);
+        // A glyph has no size of its own: the button gives it one (walk 2:
+        // a 61 px button with nothing drawn in it).
+        back.setTag("browse_back");
+        bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
         address = new EditText(activity);
         address.setSingleLine(true);
-        address.setTypeface(Typeface.MONOSPACE);
+        // An address is no word: no spelling marks under it (walk 2).
+        address.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         address.setImeOptions(EditorInfo.IME_ACTION_GO);
         address.setTag("address");
         address.setOnEditorActionListener(new TextView.OnEditorActionListener() {
             @Override
             public boolean onEditorAction(TextView v, int action, KeyEvent event) {
-                verb("go", "", v.getText().toString());
+                String typed = v.getText().toString().trim();
+                // The field still says the node's own address: nothing to go to.
+                if (!typed.isEmpty() && !typed.equals(Core.str(last, "dest"))) {
+                    verb("go", "", typed);
+                }
+                address.clearFocus();
                 return true;
+            }
+        });
+        // Edited, the field holds the node's address, chosen whole so a
+        // typed one replaces it; left, the page's name again.
+        address.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override
+            public void onFocusChange(View v, boolean focused) {
+                if (last == null) {
+                    return;
+                }
+                if (focused) {
+                    String dest = Core.str(last, "dest");
+                    address.setText(dest);
+                    address.selectAll();
+                } else {
+                    address.setText(Core.str(last, "address"));
+                }
             }
         });
         bar.addView(address, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -239,6 +275,7 @@ final class BrowsePane {
         if (!address.hasFocus()) {
             address.setText(Core.str(shown, "address"));
         }
+        host.titled(Core.str(shown, "title"));
         address.setHint(Core.str(shown, "address_hint"));
         status.setText(Core.str(shown, "status"));
         String toast = Core.str(shown, "toast");
@@ -396,6 +433,10 @@ final class BrowsePane {
                 })
                 .setNegativeButton(android.R.string.cancel, null)
                 .show();
+    }
+
+    private int dp(int value) {
+        return (int) (value * screen.getResources().getDisplayMetrics().density + 0.5f);
     }
 
     /** `#rrggbb` as a colour; a 256-colour index or nothing as none. */

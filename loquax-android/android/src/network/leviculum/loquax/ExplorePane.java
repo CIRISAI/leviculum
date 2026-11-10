@@ -53,6 +53,13 @@ import java.util.Map;
  * {@code typed} verb never writes it back, and an answer that comes while
  * a finger is on the list waits for the finger to lift
  * ({@link ExploreRows}).
+ *
+ * <p>Since 1621 (walk 2, 02e6984a) the list stands still between looking
+ * and tapping: an answer shows at once only when no row on screen moves,
+ * the first row on screen put back at its pixel; one that would move a
+ * row waits behind the chip "N neue Seiten" above the list, a tap on
+ * which shows it ({@link ExploreRows}). The rooms' section is "Räume"
+ * with the rooms the reader is in, then "Server" with every server.
  */
 final class ExplorePane {
     /** What the pane hands back to the Activity. */
@@ -98,7 +105,21 @@ final class ExplorePane {
     private final EditText field;
     private final TextView sort;
     private final ListView list;
-    private final ExploreRows<Row> rows = new ExploreRows<Row>();
+    /** The chip over the list: new pages wait behind it (1621). */
+    private final TextView fresh;
+    private final ExploreRows<Row> rows = new ExploreRows<Row>(new ExploreRows.Keys<Row>() {
+        @Override
+        public String key(Row row) {
+            return row.key;
+        }
+
+        @Override
+        public boolean counts(Row row) {
+            return row.kind == Row.PAGE;
+        }
+    });
+    /** The next answer is the reader's own verb's: shown at once. */
+    private boolean forced = true;
     private final Adapter adapter = new Adapter();
     /** The field's text as last sent: no echo of a draw back as a verb. */
     private String typed = "";
@@ -108,9 +129,11 @@ final class ExplorePane {
     private String drawnFor;
     /** What the tab showed last: Back decides by it. */
     private Map<String, Object> last;
-    /** The server's sheet on screen, and its server. */
+    /** The server's sheet on screen, its server, its body and what it shows. */
     private AlertDialog sheet;
     private String sheetFor = "";
+    private LinearLayout sheetBody;
+    private String sheetShows = "";
 
     ExplorePane(Activity activity, Host host) {
         this.screen = activity;
@@ -145,6 +168,7 @@ final class ExplorePane {
                 if (!now.equals(typed)) {
                     typed = now;
                     inFlight++;
+                    forced = true;
                     verb("typed", now, "", 0, true);
                 }
             }
@@ -157,24 +181,53 @@ final class ExplorePane {
             }
         });
         top.addView(field, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        // A fixed width: the field's never moves with the toggle's words
-        // (walk 13: 685 or 911 px).
+        // As wide as the longer of its two words, whole (walk 2: "Zuletzt
+        // gesehen zu…"), so the field's width never moves with them (walk
+        // 13 of 1618: 685 or 911 px).
         sort = new TextView(activity);
         sort.setTextSize(13);
         sort.setSingleLine(true);
-        sort.setEllipsize(TextUtils.TruncateAt.END);
         sort.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         sort.setPadding(dp(8), dp(8), dp(4), dp(8));
         sort.setTextColor(activity.getColor(R.color.accent));
         sort.setId(R.id.explore_sort);
+        float words = Math.max(
+                sort.getPaint().measureText(activity.getString(R.string.explore_sort_seen)),
+                sort.getPaint().measureText(activity.getString(R.string.explore_sort_az)));
+        sort.setMinWidth((int) Math.ceil(words) + sort.getPaddingLeft() + sort.getPaddingRight());
         sort.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                forced = true;
                 verb("az", "", "", Core.bool(last, "az") ? 0 : 1);
             }
         });
-        top.addView(sort, new LinearLayout.LayoutParams(dp(132), ViewGroup.LayoutParams.WRAP_CONTENT));
+        top.addView(sort, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         column.addView(top);
+
+        // New pages that would move a row on screen wait behind this chip
+        // (1621); a tap shows them, from the top.
+        fresh = new TextView(activity);
+        fresh.setTextSize(14);
+        fresh.setTypeface(null, Typeface.BOLD);
+        fresh.setTextColor(activity.getColor(R.color.accent));
+        fresh.setGravity(Gravity.CENTER);
+        fresh.setPadding(dp(16), dp(8), dp(16), dp(8));
+        fresh.setTag("explore_fresh");
+        fresh.setVisibility(View.GONE);
+        fresh.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (rows.apply()) {
+                    adapter.notifyDataSetChanged();
+                    list.setSelection(0);
+                }
+                chip();
+            }
+        });
+        column.addView(fresh, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         list = new ListView(activity) {
             @Override
@@ -209,6 +262,7 @@ final class ExplorePane {
 
     /** The tab came to the front: its list, nothing it opened. */
     void show() {
+        forced = true;
         verb("tab", "", "", 0);
     }
 
@@ -236,11 +290,47 @@ final class ExplorePane {
             rows.down();
             verb("touch", "", "", 1, false, false);
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-            if (rows.up()) {
-                adapter.notifyDataSetChanged();
+            int top = topOfFirst();
+            if (rows.up(firstOnScreen(), list.getLastVisiblePosition()) == ExploreRows.SHOWN) {
+                place(top);
             }
+            chip();
             verb("touch", "", "", 0);
         }
+    }
+
+    /** The first row on screen, or -1 while the list shows none. */
+    private int firstOnScreen() {
+        return list.getChildCount() == 0 ? -1 : list.getFirstVisiblePosition();
+    }
+
+    /** The pixel the first row on screen stands at. */
+    private int topOfFirst() {
+        View first = list.getChildAt(0);
+        return first == null ? 0 : first.getTop();
+    }
+
+    /** The rows shown: the first row on screen back at its pixel, where the rule says. */
+    private void place(int top) {
+        adapter.notifyDataSetChanged();
+        int anchor = rows.anchor();
+        if (anchor >= 0) {
+            list.setSelectionFromTop(anchor, top);
+        }
+    }
+
+    /** The chip: how many new pages wait, or gone. */
+    private void chip() {
+        if (!rows.waits()) {
+            fresh.setVisibility(View.GONE);
+            return;
+        }
+        int n = rows.fresh();
+        String words = n == 1 ? screen.getString(R.string.explore_fresh_one)
+                : n > 1 ? screen.getString(R.string.explore_fresh_many, n)
+                : screen.getString(R.string.explore_fresh_order);
+        fresh.setText(words);
+        fresh.setVisibility(View.VISIBLE);
     }
 
     private void tapped(Row row) {
@@ -279,12 +369,14 @@ final class ExplorePane {
                 if (id == R.string.explore_open) {
                     verb("open", "", dest, 0);
                 } else if (id == R.string.explore_bookmark) {
+                    forced = true;
                     verb("bookmark", "", dest, 0);
                 } else if (id == R.string.explore_copy_address) {
-                    String url = Core.str(page, "url");
+                    // The address, as the menu says (1621, walk 2 new 7):
+                    // the node's 32 hex, no page path.
                     ClipboardManager clip =
                             (ClipboardManager) screen.getSystemService(Context.CLIPBOARD_SERVICE);
-                    clip.setPrimaryClip(ClipData.newPlainText("address", url.isEmpty() ? dest : url));
+                    clip.setPrimaryClip(ClipData.newPlainText("address", dest));
                     Toast.makeText(screen, R.string.explore_copied, Toast.LENGTH_SHORT).show();
                 }
                 return true;
@@ -369,10 +461,16 @@ final class ExplorePane {
         }
         field.setHint(Core.str(shown, "placeholder"));
         sort.setText(Core.str(shown, "sort"));
-        if (rows.offer(flatten(shown))) {
-            adapter.notifyDataSetChanged();
+        boolean searched = drawnFor != null && !drawnFor.equals(query);
+        boolean own = forced || searched;
+        forced = false;
+        int top = topOfFirst();
+        int said = rows.offer(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(), own);
+        if (said == ExploreRows.SHOWN) {
+            place(top);
         }
-        if (drawnFor != null && !drawnFor.equals(query)) {
+        chip();
+        if (searched) {
             list.setSelection(0);
         }
         drawnFor = query;
@@ -396,24 +494,20 @@ final class ExplorePane {
             out.add(new Row(Row.PAGE, "page:" + Core.str(page, "dest"), Core.str(page, "label"), page, 0));
         }
         note(out, "pages_empty", Core.str(shown, "pages_empty"));
+        // "Räume": the rooms the reader is in, or one sentence; then
+        // "Server" with every server, or one sentence (1621).
         out.add(new Row(Row.TITLE, "title:rooms", Core.str(shown, "rooms_title"), null, 0));
         List<Map<String, Object>> joined = Core.list(shown, "joined");
         for (int i = 0; i < joined.size(); i++) {
             Map<String, Object> room = joined.get(i);
             out.add(new Row(Row.ROOM, "room:" + Core.str(room, "name"), Core.str(room, "name"), room, i));
         }
+        note(out, "joined_empty", Core.str(shown, "joined_empty"));
+        out.add(new Row(Row.HEADING, "heading:servers", Core.str(shown, "servers_title"), null, 0));
         for (Map<String, Object> hub : Core.list(shown, "hubs")) {
             out.add(new Row(Row.SERVER, "server:" + Core.str(hub, "dest"), Core.str(hub, "name"), hub, 0));
         }
-        List<Map<String, Object>> heard = Core.list(shown, "heard");
-        if (!heard.isEmpty()) {
-            String title = Core.str(shown, "heard_title");
-            out.add(new Row(Row.HEADING, "heading:heard", title, null, 0));
-            for (Map<String, Object> hub : heard) {
-                out.add(new Row(Row.SERVER, "heard:" + Core.str(hub, "dest"), Core.str(hub, "name"), hub, 0));
-            }
-        }
-        note(out, "rooms_empty", Core.str(shown, "rooms_empty"));
+        note(out, "servers_empty", Core.str(shown, "servers_empty"));
         return out;
     }
 
@@ -435,14 +529,47 @@ final class ExplorePane {
             closeSheet();
             return;
         }
+        String shows = Core.str(shown, "sheet_said") + "|" + Core.bool(shown, "sheet_chosen") + "|"
+                + Core.words(shown, "sheet_rooms") + "|" + Core.str(shown, "sheet_rooms_note");
         if (sheet != null && sheet.isShowing() && dest.equals(sheetFor)) {
+            // The server's answer came (1621): the same sheet, its rooms now.
+            if (!shows.equals(sheetShows)) {
+                sheetShows = shows;
+                sheetBody.removeAllViews();
+                fill(sheetBody, shown, dest);
+            }
             return;
         }
         closeSheet();
         sheetFor = dest;
+        sheetShows = shows;
         LinearLayout body = new LinearLayout(screen);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(24), dp(4), dp(24), dp(8));
+        sheetBody = body;
+        fill(body, shown, dest);
+        ScrollView scroll = new ScrollView(screen);
+        scroll.addView(body);
+        sheet = new AlertDialog.Builder(screen)
+                .setTitle(Core.str(shown, "sheet_name"))
+                .setView(scroll)
+                .setNegativeButton(Core.str(shown, "sheet_close"), null)
+                .create();
+        sheet.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface dialog) {
+                // Closed by the reader: the library closes it too.
+                if (dest.equals(sheetFor)) {
+                    sheetFor = "";
+                    verb("close", "", "", 0);
+                }
+            }
+        });
+        sheet.show();
+    }
+
+    /** The sheet's body: when it was heard, the button, its rooms and their sentence. */
+    private void fill(LinearLayout body, Map<String, Object> shown, final String dest) {
         String said = Core.str(shown, "sheet_said");
         if (!said.isEmpty()) {
             body.addView(words(said, 14, R.color.text_secondary));
@@ -484,28 +611,12 @@ final class ExplorePane {
             });
             body.addView(join);
         }
-        String none = Core.str(shown, "sheet_no_rooms");
-        if (!none.isEmpty()) {
-            body.addView(words(none, 14, R.color.text_secondary));
+        String note = Core.str(shown, "sheet_rooms_note");
+        if (!note.isEmpty()) {
+            TextView line = words(note, 14, R.color.text_secondary);
+            line.setTag("explore_sheet_note");
+            body.addView(line);
         }
-        ScrollView scroll = new ScrollView(screen);
-        scroll.addView(body);
-        sheet = new AlertDialog.Builder(screen)
-                .setTitle(Core.str(shown, "sheet_name"))
-                .setView(scroll)
-                .setNegativeButton(Core.str(shown, "sheet_close"), null)
-                .create();
-        sheet.setOnDismissListener(new DialogInterface.OnDismissListener() {
-            @Override
-            public void onDismiss(DialogInterface dialog) {
-                // Closed by the reader: the library closes it too.
-                if (dest.equals(sheetFor)) {
-                    sheetFor = "";
-                    verb("close", "", "", 0);
-                }
-            }
-        });
-        sheet.show();
     }
 
     /** The sheet off the screen, by the library's word: no verb back. */

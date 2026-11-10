@@ -2,13 +2,16 @@ package network.leviculum.loquax;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * The rules of the Explore pane that need no screen (1618, the walk of
- * 17024c3a), so the host runs them ({@code tests/java/ExploreRowsTest.java}):
- * the search field that never loses a character, and the rows that never
- * move under a finger.
+ * 17024c3a; 1621, the walk of 02e6984a), so the host runs them
+ * ({@code tests/java/ExploreRowsTest.java}): the search field that never
+ * loses a character, and the rows that never move between looking and
+ * tapping.
  *
  * <p>The field is the source of truth. Each change goes to the library as
  * a {@code typed} verb, and the library's answer carries the query back;
@@ -19,15 +22,47 @@ import java.util.List;
  * library has every character, and an answer that still differs is the
  * library's own word (a field it cleared).
  *
- * <p>The rows: an answer that arrives while a finger is down waits until
- * it lifts, so the row under the finger is the row the tap opens.
+ * <p>The rows (1621, as the chat apps do it): what is on screen never
+ * moves on its own. An answer is shown at once only when every row on
+ * screen keeps its neighbours in it; the row that stood first on screen
+ * is then put back at its pixel ({@link #anchor}, the pane's
+ * {@code setSelectionFromTop}), so rows that arrive above the screen
+ * slide in unseen. An answer that would move a row on screen, new pages
+ * landing at the top of "Today" while the reader aims, waits, and a chip
+ * says how many new pages wait ({@link #fresh}); a tap on it shows them
+ * ({@link #apply}). The reader's own verbs (the tab, a search, the order,
+ * a star) show their answer at once. A finger on the list holds every
+ * answer until it lifts (1618), and the lift offers it under the same
+ * rule.
  *
  * @param <T> one row as the pane draws it
  */
 final class ExploreRows<T> {
+    /** What the rule reads of a row. */
+    interface Keys<T> {
+        /** The row's stable key. */
+        String key(T row);
+
+        /** Whether the row counts as a new page for the chip. */
+        boolean counts(T row);
+    }
+
+    /** {@link #offer}: the answer is on screen now. */
+    static final int SHOWN = 0;
+    /** {@link #offer}: a finger is down; it waits for the lift. */
+    static final int HELD = 1;
+    /** {@link #offer}: it would move a row on screen; it waits behind the chip. */
+    static final int WAITING = 2;
+
+    private final Keys<T> keys;
     private List<T> shown = Collections.emptyList();
     private List<T> waiting;
     private boolean down;
+    private int anchor = -1;
+
+    ExploreRows(Keys<T> keys) {
+        this.keys = keys;
+    }
 
     /** Whether the field takes the library's {@code answer}: no verb in flight, and it differs. */
     static boolean echo(String answer, int inFlight, String field) {
@@ -49,15 +84,76 @@ final class ExploreRows<T> {
         return hash;
     }
 
-    /** New rows from the library: shown now (true), or held while a finger is down. */
+    /** New rows with nothing known of the screen: shown, unless a finger is down. */
     boolean offer(List<T> rows) {
+        return offer(rows, -1, -1, true) == SHOWN;
+    }
+
+    /**
+     * New rows from the library while the screen shows the rows
+     * {@code first} to {@code last} of the ones shown ({@code -1} when it
+     * shows none yet); {@code force} for the answer to the reader's own
+     * verb. {@link #SHOWN}, {@link #HELD} or {@link #WAITING}.
+     */
+    int offer(List<T> rows, int first, int last, boolean force) {
+        List<T> copy = new ArrayList<T>(rows);
         if (down) {
-            waiting = new ArrayList<T>(rows);
-            return false;
+            waiting = copy;
+            return HELD;
         }
-        shown = new ArrayList<T>(rows);
+        anchor = -1;
+        if (force || shown.isEmpty() || first < 0) {
+            show(copy);
+            return SHOWN;
+        }
+        int at = keeps(copy, first, last);
+        if (at >= 0) {
+            anchor = at;
+            show(copy);
+            return SHOWN;
+        }
+        waiting = copy;
+        return WAITING;
+    }
+
+    /**
+     * Where the screen's rows stand in {@code rows}: the new position of
+     * the first, when every row from {@code first} to {@code last} keeps
+     * its place after it; -1 when one would move.
+     */
+    private int keeps(List<T> rows, int first, int last) {
+        int end = Math.min(last, shown.size() - 1);
+        if (first > end) {
+            return 0;
+        }
+        String top = keys.key(shown.get(first));
+        int at = -1;
+        for (int i = 0; i < rows.size(); i++) {
+            if (keys.key(rows.get(i)).equals(top)) {
+                at = i;
+                break;
+            }
+        }
+        if (at < 0) {
+            return -1;
+        }
+        for (int i = first; i <= end; i++) {
+            int j = at + i - first;
+            if (j >= rows.size() || !keys.key(rows.get(j)).equals(keys.key(shown.get(i)))) {
+                return -1;
+            }
+        }
+        return at;
+    }
+
+    private void show(List<T> rows) {
+        shown = rows;
         waiting = null;
-        return true;
+    }
+
+    /** The row that stood first on screen, where it stands now; -1 to keep the scroll as it is. */
+    int anchor() {
+        return anchor;
     }
 
     /** A finger came down on the list. */
@@ -65,19 +161,65 @@ final class ExploreRows<T> {
         down = true;
     }
 
-    /** The finger lifted: true when rows that waited are shown now. */
+    /**
+     * The finger lifted: what waited for it is offered as the screen
+     * stands, {@link #SHOWN} or {@link #WAITING}; {@link #HELD} when
+     * nothing waited.
+     */
+    int up(int first, int last) {
+        down = false;
+        if (waiting == null) {
+            return HELD;
+        }
+        return offer(waiting, first, last, false);
+    }
+
+    /** The lift of the 1618 rule, the screen unknown: what waited shows. */
     boolean up() {
         down = false;
         if (waiting == null) {
             return false;
         }
-        shown = waiting;
-        waiting = null;
+        show(waiting);
+        anchor = -1;
         return true;
     }
 
     boolean held() {
         return down;
+    }
+
+    /** Whether an answer waits behind the chip. */
+    boolean waits() {
+        return waiting != null && !down;
+    }
+
+    /** How many new pages wait: the counted rows of the waiting answer not on the list now. */
+    int fresh() {
+        if (waiting == null) {
+            return 0;
+        }
+        Set<String> now = new HashSet<String>();
+        for (T row : shown) {
+            now.add(keys.key(row));
+        }
+        int n = 0;
+        for (T row : waiting) {
+            if (keys.counts(row) && !now.contains(keys.key(row))) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** The chip tapped: what waited is shown, from the top. */
+    boolean apply() {
+        if (waiting == null) {
+            return false;
+        }
+        show(waiting);
+        anchor = -1;
+        return true;
     }
 
     int size() {

@@ -112,13 +112,14 @@ class MapScreen(unittest.TestCase):
 
 
 # Explore's list as 1578 builds it: the field, the toggle, the list, the
-# two section titles, the three tabs.
+# section titles (1621: Rooms, then Servers), the three tabs.
 EXPLORE_SCREEN = [
     node("explore_search"),
-    node("explore_sort", "Last seen first"),
+    node("explore_sort", "Last seen"),
     node("explore_list"),
     node("", "Pages"),
-    node("", "Public rooms"),
+    node("", "Rooms"),
+    node("", "Servers"),
 ] + MAP_SCREEN[5:]
 
 
@@ -127,25 +128,42 @@ class ExploreScreen(unittest.TestCase):
         self.assertEqual(walk.explore_problems(EXPLORE_SCREEN), [])
 
     def test_a_missing_section_or_field_is_a_problem(self):
-        no_rooms = [n for n in EXPLORE_SCREEN if n.text != "Public rooms"]
-        self.assertEqual(walk.explore_problems(no_rooms), ["no section 'Public rooms'"])
+        no_rooms = [n for n in EXPLORE_SCREEN if n.text != "Rooms"]
+        self.assertEqual(walk.explore_problems(no_rooms), ["no section 'Rooms'"])
         no_field = [n for n in EXPLORE_SCREEN if not n.is_id("explore_search")]
         self.assertEqual(walk.explore_problems(no_field), ["no explore_search"])
 
     def test_the_titles_are_the_catalogues_in_the_phones_language(self):
         # 1618, walk 15: the German Pixel failed on English literals.
         de = walk.catalogue_words("de-DE", walk.EXPLORE_TITLE_KEYS)
-        self.assertEqual(de, ["Seiten", "Öffentliche Räume"])
+        self.assertEqual(de, ["Seiten", "Räume", "Server"])
         self.assertEqual(walk.catalogue_words("en-US", walk.EXPLORE_TITLE_KEYS),
-                         ["Pages", "Public rooms"])
+                         ["Pages", "Rooms", "Servers"])
         self.assertEqual(walk.catalogue_words("xx", walk.EXPLORE_TITLE_KEYS),
-                         ["Pages", "Public rooms"], "a language the app lacks: English")
-        german = [n for n in EXPLORE_SCREEN if n.text not in ("Pages", "Public rooms")] + [
-            node("", "Seiten"), node("", "Öffentliche Räume")]
+                         ["Pages", "Rooms", "Servers"], "a language the app lacks: English")
+        german = [n for n in EXPLORE_SCREEN if n.text not in ("Pages", "Rooms", "Servers")] + [
+            node("", "Seiten"), node("", "Räume"), node("", "Server")]
         self.assertEqual(walk.explore_problems(german, de), [])
         # The control: the English titles on the German screen.
         self.assertEqual(walk.explore_problems(german),
-                         ["no section 'Pages'", "no section 'Public rooms'"])
+                         ["no section 'Pages'", "no section 'Rooms'", "no section 'Servers'"])
+
+    def test_the_tabs_count_on_the_first_dump_only(self):
+        # 1621, walk 2: thirteen dumps of the scrolled list counted the bar
+        # thirteen times.
+        scrolled = EXPLORE_SCREEN * 13
+        self.assertEqual(walk.explore_problems(scrolled, first=EXPLORE_SCREEN), [])
+        # The control: the tabs over every dump.
+        self.assertTrue(walk.explore_problems(scrolled)[0].startswith("tabs ["))
+
+    def test_a_scroll_step_is_slow_and_at_most_three_quarters_of_the_list(self):
+        # 1621, walk 2: a 250 ms swipe over the whole list flung a title past.
+        x, y1, y2, ms = walk.explore_scroll((0, 400, 1080, 2000))
+        self.assertEqual(x, 540)
+        self.assertLessEqual(y1 - y2, int(1600 * 0.75))
+        self.assertGreater(y1 - y2, 0, "down the list")
+        self.assertTrue(400 <= y2 and y1 <= 2000, "inside the list")
+        self.assertGreaterEqual(ms, 1000, "a drag, no fling")
 
     def test_a_fourth_tab_is_a_problem(self):
         browse = EXPLORE_SCREEN + [node("tab_browse", desc="Browse")]

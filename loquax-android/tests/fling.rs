@@ -290,8 +290,11 @@ fn the_group_picker_is_the_people_list_with_check_marks() {
 /// `ExploreRows.java` run on the host with
 /// `tests/java/ExploreRowsTest.java`. 32 characters typed fast all stay
 /// in the field (the control, the rule before, loses some, as the Pixel
-/// lost 10 of 32), and a row under a finger stays while a new order
-/// arrives (the control lands on the walk's wrong row).
+/// lost 10 of 32), a row under a finger stays while a new order
+/// arrives (the control lands on the walk's wrong row), and (1621, walk 2)
+/// the row under a planned tap stays at its pixel across ten new pages,
+/// scrolled and at the top, the chip counting those that wait (the
+/// control, ListView by position, moves it).
 #[test]
 fn the_explore_field_keeps_every_character_and_rows_hold_under_a_finger() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

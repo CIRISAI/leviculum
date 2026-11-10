@@ -15,6 +15,12 @@ import java.util.List;
  * Walk 3: a finger comes down on the third row, a new order arrives; the
  * third row is still the one the finger came down on, and the new order
  * shows when it lifts.
+ *
+ * Walk 2 of 1621: between looking and tapping, ten new pages arrive, some
+ * above the screen, some on it; the row under a planned tap stays at its
+ * pixel through all ten, scrolled down and at the very top, and the chip
+ * counts the pages that wait. The control, the list as ListView keeps it
+ * by position, puts another row under the finger.
  */
 final class ExploreRowsTest {
     private static int checks;
@@ -29,7 +35,7 @@ final class ExploreRowsTest {
         check(ExploreRows.echo("", 0, "abc"), "a field the library cleared");
         check(!ExploreRows.echo("ab", 1, "abc"), "an older answer while a verb is on its way");
 
-        ExploreRows<String> rows = new ExploreRows<String>();
+        ExploreRows<String> rows = new ExploreRows<String>(KEYS);
         rows.offer(Arrays.asList("Radio RPi4", "Bergwacht", "IranTalk", "Werkstatt"));
         rows.down();
         boolean now = rows.offer(Arrays.asList("IranTalk", "Radio RPi4", "Bergwacht", "Werkstatt"));
@@ -39,10 +45,12 @@ final class ExploreRowsTest {
         check("IranTalk".equals(rows.at(0)), "the new order: " + rows.at(0));
         check(!rows.up(), "nothing waits after");
         // The control: without the hold the tap lands on the new third row.
-        ExploreRows<String> free = new ExploreRows<String>();
+        ExploreRows<String> free = new ExploreRows<String>(KEYS);
         free.offer(Arrays.asList("Radio RPi4", "Bergwacht", "IranTalk", "Werkstatt"));
         free.offer(Arrays.asList("IranTalk", "Radio RPi4", "Bergwacht", "Werkstatt"));
         check("Bergwacht".equals(free.at(2)), "the walk's mis-tap: " + free.at(2));
+
+        stillBetweenLookingAndTapping();
 
         check(ExploreRows.id("page:aa") == ExploreRows.id("page:aa"), "an id is stable");
         check(ExploreRows.id("page:aa") != ExploreRows.id("page:ab"), "two rows, two ids");
@@ -80,6 +88,140 @@ final class ExploreRowsTest {
         boolean take = ruleBefore ? ExploreRows.echoBefore(answer, field)
                 : ExploreRows.echo(answer, inFlight, field);
         return take ? answer : field;
+    }
+
+    /** A row's key is the row; a page counts for the chip. */
+    private static final ExploreRows.Keys<String> KEYS = new ExploreRows.Keys<String>() {
+        @Override
+        public String key(String row) {
+            return row;
+        }
+
+        @Override
+        public boolean counts(String row) {
+            return row.startsWith("page:");
+        }
+    };
+
+    /** The rows' heights in pixels, as the pane draws them at 2.75 density. */
+    private static int height(String row) {
+        if (row.startsWith("title:")) {
+            return 110;
+        }
+        if (row.startsWith("heading:")) {
+            return 66;
+        }
+        return 154;
+    }
+
+    /** The screen: the list's rows, the first on screen and its top's pixel. */
+    private static final class Screen {
+        List<String> rows;
+        int first;
+        int top;
+        final int height = 1800;
+
+        /** The row under pixel {@code y} of the list. */
+        String at(int y) {
+            int pixel = top;
+            for (int i = first; i < rows.size(); i++) {
+                int h = height(rows.get(i));
+                if (y >= pixel && y < pixel + h) {
+                    return rows.get(i);
+                }
+                pixel += h;
+            }
+            return null;
+        }
+
+        /** The last row on screen. */
+        int last() {
+            int pixel = top;
+            int i = first;
+            while (i < rows.size() - 1 && pixel + height(rows.get(i)) < height) {
+                pixel += height(rows.get(i));
+                i++;
+            }
+            return i;
+        }
+    }
+
+    /** The Explore list: its title, "Heute" and pages. */
+    private static List<String> explore(int pages) {
+        List<String> out = new ArrayList<String>();
+        out.add("title:pages");
+        out.add("heading:Heute");
+        for (int i = 0; i < pages; i++) {
+            out.add("page:" + i);
+        }
+        out.add("title:rooms");
+        return out;
+    }
+
+    private static void stillBetweenLookingAndTapping() {
+        for (boolean atTop : new boolean[] {false, true}) {
+            ExploreRows<String> rows = new ExploreRows<String>(KEYS);
+            Screen screen = new Screen();
+            screen.rows = explore(40);
+            rows.offer(screen.rows);
+            screen.first = atTop ? 0 : 14;
+            screen.top = atTop ? 0 : -40;
+            // The control: ListView by position, the same answers.
+            Screen control = new Screen();
+            control.rows = screen.rows;
+            control.first = screen.first;
+            control.top = screen.top;
+            int tap = 900;
+            String aimed = screen.at(tap);
+            check(aimed != null && aimed.startsWith("page:"), "a page under the tap: " + aimed);
+            List<String> next = new ArrayList<String>(screen.rows);
+            for (int n = 0; n < 10; n++) {
+                // Even ones at the top of "Heute", above the screen when
+                // it is scrolled; odd ones in the middle of the screen.
+                int where = n % 2 == 0 ? 2 : next.indexOf(aimed) - 1;
+                next.add(where, "page:new" + n);
+                int said = rows.offer(next, screen.first, screen.last(), false);
+                if (said == ExploreRows.SHOWN) {
+                    screen.rows = new ArrayList<String>(next);
+                    if (rows.anchor() >= 0) {
+                        screen.first = rows.anchor();
+                    }
+                }
+                check(aimed.equals(screen.at(tap)),
+                        (atTop ? "at the top" : "scrolled") + ", insert " + n + ": "
+                                + screen.at(tap) + " under the tap, not " + aimed);
+                control.rows = new ArrayList<String>(next);
+            }
+            // Scrolled, the first page lands above the screen and shows
+            // unseen; from the first one on screen on, every answer waits.
+            int waiting = atTop ? 10 : 9;
+            check(rows.fresh() == waiting, "the chip counts " + waiting + ": " + rows.fresh());
+            check(!aimed.equals(control.at(tap)), "the control moves the row: " + control.at(tap));
+            // The chip: everything shows, from the top.
+            check(rows.apply(), "the chip applies");
+            check(rows.size() == next.size(), "all of them: " + rows.size());
+            check(rows.fresh() == 0, "nothing waits after the chip");
+        }
+        // The reader's own verb shows at once, whatever it moves.
+        ExploreRows<String> own = new ExploreRows<String>(KEYS);
+        own.offer(explore(5));
+        check(own.offer(explore(9), 0, 6, true) == ExploreRows.SHOWN, "a search shows at once");
+        // A finger holds, and the lift offers under the same rule.
+        own.down();
+        List<String> newer = explore(9);
+        newer.addAll(2, Arrays.asList("page:a", "page:b", "page:c"));
+        check(own.offer(newer, 0, 6, false) == ExploreRows.HELD, "held under the finger");
+        check(own.up(0, 6) == ExploreRows.WAITING, "the lift: it would move rows on screen");
+        check(own.fresh() == 3, "three new: " + own.fresh());
+        // Pages after the screen's last row move nothing on it: shown.
+        ExploreRows<String> below = new ExploreRows<String>(KEYS);
+        below.offer(explore(9));
+        check(below.offer(explore(12), 0, 6, false) == ExploreRows.SHOWN, "below the screen");
+        // Only the line under a row changed: shown at once, nothing moves.
+        ExploreRows<String> same = new ExploreRows<String>(KEYS);
+        same.offer(explore(5));
+        check(same.offer(explore(5), 0, 6, false) == ExploreRows.SHOWN, "the same rows show");
+        check(same.anchor() == 0, "where they stood");
     }
 
     private static void check(boolean ok, String what) {
