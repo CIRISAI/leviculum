@@ -29,10 +29,12 @@ use iced::widget::{
 };
 use iced::{border, mouse, Alignment, Background, Border, Color, Element, Length, Theme};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use leviculum_ui_iced::chrome;
 pub use leviculum_ui_iced::chrome::RAIL;
+use leviculum_ui_iced::rows::{rows, Item};
 use leviculum_ui_iced::select::selectable;
 use leviculum_ui_iced::{avatar as face, control, drawing, Palette};
 pub use leviculum_ui_iced::{colour, rgb, Icon};
@@ -45,7 +47,7 @@ use loquax::ui::intent::{Intent, Switch};
 use loquax::ui::reactions::SIGNAL_QUICK;
 use loquax::ui::recording::Verb;
 use loquax::ui::scene::{
-    self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, RecordingBar, Row, Tab, TabId,
+    self, Action, BubbleNode, Chat, LayoutClass, Lead, RecordingBar, Row, Tab, TabId,
 };
 use loquax::ui::selection::{peer_key, position_line, preview_line, Part, RunKey};
 use loquax::ui::strings::{Arg, Lang, StrId, Text};
@@ -95,6 +97,83 @@ pub fn palette(t: Colours) -> Palette {
 /// A line of the chat's text, in pixels: a wheel's notch scrolls three
 /// (1431).
 pub const LINE: f32 = size::BODY * 1.3;
+
+/// A line of the open chat (1487): what the column of the chat held as
+/// one child, by the group and the bubble it belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatLine {
+    Day(usize),
+    Named(usize),
+    Note(usize, usize),
+    Gap(usize, usize),
+    Bubble(usize, usize),
+    Late(usize, usize),
+    Actions(usize, usize),
+    Foot,
+}
+
+/// `value` hashed: a line's stamp.
+fn stamp_of(value: impl Hash) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    value.hash(&mut h);
+    h.finish()
+}
+
+/// What of a bubble decides its height (1487), hashed: its words, its
+/// quote, what it carries, its position line, whether its time and mark
+/// show, its reactions. Its colours, corners and selection do not move
+/// it. The reader's language and the chat's width are the list's, mixed
+/// into every stamp in [`App::chat_lines`].
+fn bubble_stamp(node: &BubbleNode) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    let bubble = &node.bubble;
+    bubble.ours.hash(&mut h);
+    node.text.hash(&mut h);
+    bubble
+        .quote
+        .as_ref()
+        .map(|q| (q.ours, &q.text))
+        .hash(&mut h);
+    node.photo.is_some().hash(&mut h);
+    for file in &node.files {
+        (&file.name, &file.size).hash(&mut h);
+    }
+    node.voice
+        .as_ref()
+        .map(|v| (v.levels.len(), v.toggle.is_some(), &v.duration))
+        .hash(&mut h);
+    // An invitation's card, a position's line and its live words are rare
+    // enough to be hashed as they print.
+    if let Some(invite) = &node.invite {
+        format!("{invite:?}").hash(&mut h);
+    }
+    if bubble.fix.is_some() {
+        format!("{:?}{:?}{:?}", bubble.fix, node.position, node.live).hash(&mut h);
+    }
+    (node.place.meta, bubble.at.is_some(), node.mark.is_some()).hash(&mut h);
+    for chip in &bubble.chips {
+        (&chip.content, chip.count).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// What of a conversation's row decides its height (1487), hashed: the
+/// lines it has under the name and what stands beside them. Its lines do
+/// not wrap, so their words do not.
+fn row_stamp(r: &Row) -> u64 {
+    let c = &r.row;
+    stamp_of((
+        (
+            c.unread > 0,
+            c.mark.is_some(),
+            c.pinned,
+            c.muted,
+            c.draft.is_some(),
+        ),
+        (r.live.is_some(), r.position.is_some(), r.draft.is_some()),
+        (r.sharing, r.group.is_some(), r.same_name.is_some()),
+    ))
+}
 
 /// A list whose wheel scrolls softly (1431): a notch three lines eased
 /// over the frames that follow, a touchpad's pixels as they come
@@ -1396,10 +1475,31 @@ impl App {
         }
         let empty = (self.scene.list.as_ref()).is_none_or(|list| list.rows.is_empty());
         let picked = self.picked_ranges();
-        let rows = self.listed().into_iter().fold(column![], |rows, r| {
+        // Only the rows on screen are built and laid out (1487): a row
+        // and, under the one whose menu is open, its menu.
+        let listed = self.listed();
+        let lang = stamp_of(std::mem::discriminant(&self.lang));
+        let mut lines: Vec<(&Row, bool)> = Vec::with_capacity(listed.len());
+        let mut items = Vec::with_capacity(listed.len());
+        for r in listed {
+            lines.push((r, false));
+            items.push(Item {
+                key: stamp_of((r.id, false)),
+                stamp: row_stamp(r) ^ lang,
+            });
+            if self.menu == Some(r.id) {
+                lines.push((r, true));
+                items.push(Item {
+                    key: stamp_of((r.id, true)),
+                    stamp: lang,
+                });
+            }
+        }
+        let rows = rows(items, move |i| match lines[i] {
+            (r, true) => self.row_actions(r, t),
             // A right click opens the row's menu (1371), as a long press
             // does on the phone.
-            let item = mouse_area(list_row(
+            (r, false) => mouse_area(list_row(
                 r,
                 self.seen.now,
                 self.lang,
@@ -1407,12 +1507,8 @@ impl App {
                 &picked,
                 self.picking,
             ))
-            .on_right_press(Message::Intent(Intent::Menu(Some(r.id))));
-            let rows = rows.push(item);
-            match self.menu == Some(r.id) {
-                true => rows.push(self.row_actions(r, t)),
-                false => rows,
-            }
+            .on_right_press(Message::Intent(Intent::Menu(Some(r.id))))
+            .into(),
         });
         let words = (self.scene.list.as_ref()).map(|list| list.empty.resolve(self.lang));
         let body: Element<'_, Message> = match empty {
@@ -1773,13 +1869,16 @@ impl App {
     fn groups<'a>(&'a self, open: &'a Chat, t: Colours) -> Element<'a, Message> {
         let width = self.chat_width();
         let picked = self.picked_ranges();
-        let mut list = column![].padding([0, 12]);
-        for group in &open.groups {
-            list = self.group(list, open, group, width, &picked, t);
-        }
-        list = list.push(Space::new().height(size::GAP));
+        // Only the lines on screen are built and laid out (1487): each
+        // line of the chat named, the rows widget builds the ones in view.
+        let (lines, items) = self.chat_lines(open, width);
+        let body = rows(items, move |i| {
+            self.chat_line(open, lines[i], width, &picked, t)
+        })
+        .padding([0, 12])
+        .anchor_end();
         soft_picking(
-            scrollable(list)
+            scrollable(body)
                 .anchor_bottom()
                 .height(Length::Fill)
                 .width(Length::Fill)
@@ -1813,68 +1912,128 @@ impl App {
         .into()
     }
 
-    fn group<'a>(
+    /// The chat's lines in order, as the column of them was before 1487
+    /// (a day's line, a writer's name, the gap above a bubble, the bubble,
+    /// its late line and its menu, a group's own line, the gap at the
+    /// foot), each with its key and its stamp: what changes its height
+    /// moves the stamp, so a line measured once is not built again until
+    /// it changes.
+    fn chat_lines(&self, open: &Chat, width: f32) -> (Vec<ChatLine>, Vec<Item>) {
+        let mut lines = Vec::new();
+        let mut items = Vec::new();
+        let base = {
+            let mut h = std::hash::DefaultHasher::new();
+            std::mem::discriminant(&self.lang).hash(&mut h);
+            width.to_bits().hash(&mut h);
+            h.finish()
+        };
+        let mut push = |line: ChatLine, key: (u8, u64), stamp: u64| {
+            let mut k = std::hash::DefaultHasher::new();
+            key.hash(&mut k);
+            lines.push(line);
+            items.push(Item {
+                key: k.finish(),
+                stamp: stamp ^ base,
+            });
+        };
+        for (g, group) in open.groups.iter().enumerate() {
+            if let (Some(day), Some(first)) = (&group.day, group.bubbles.first()) {
+                push(
+                    ChatLine::Day(g),
+                    (1, first.bubble.key),
+                    stamp_of(day.at.unix_secs),
+                );
+            }
+            if group.named {
+                let mut h = std::hash::DefaultHasher::new();
+                group.id.hash(&mut h);
+                push(ChatLine::Named(g), (2, h.finish()), 0);
+            }
+            for (n, node) in group.bubbles.iter().enumerate() {
+                let key = node.bubble.key;
+                if node.bubble.note {
+                    push(ChatLine::Note(g, n), (3, key), stamp_of(&node.bubble.body));
+                    continue;
+                }
+                let place = &node.place;
+                let gap = match place.joins_before {
+                    true => size::GAP_GROUPED,
+                    false if place.day => 0.0,
+                    false => size::GAP,
+                };
+                push(ChatLine::Gap(g, n), (4, key), u64::from(gap.to_bits()));
+                push(ChatLine::Bubble(g, n), (5, key), bubble_stamp(node));
+                if node.bubble.late {
+                    push(ChatLine::Late(g, n), (6, key), 0);
+                }
+                if self.menu == Some(node.id) {
+                    push(ChatLine::Actions(g, n), (7, key), 0);
+                }
+            }
+        }
+        push(ChatLine::Foot, (8, 0), 0);
+        (lines, items)
+    }
+
+    /// Line `line` of the chat as it is drawn.
+    fn chat_line<'a>(
         &'a self,
-        mut list: iced::widget::Column<'a, Message>,
         open: &'a Chat,
-        group: &'a Group,
+        line: ChatLine,
         width: f32,
         picked: &HashMap<RunKey, Range<usize>>,
         t: Colours,
-    ) -> iced::widget::Column<'a, Message> {
-        if let (Some(day), Some(first)) = (&group.day, group.bubbles.first()) {
-            let key = RunKey::new(first.bubble.key, Part::Day);
-            list = list.push(
+    ) -> Element<'a, Message> {
+        let node = |g: usize, n: usize| &open.groups[g].bubbles[n];
+        match line {
+            ChatLine::Day(g) => {
+                let group = &open.groups[g];
+                let (Some(day), Some(first)) = (&group.day, group.bubbles.first()) else {
+                    return Space::new().into();
+                };
+                let key = RunKey::new(first.bubble.key, Part::Day);
                 container(self.quiet_line(day.words.resolve(self.lang), key, picked, t))
                     .center_x(Length::Fill)
-                    .padding(iced::Padding::ZERO.top(16).bottom(8)),
-            );
-        }
-        // A group's chat names the writer above a group of bubbles that
-        // is not the reader's (1307).
-        if group.named {
-            list = list.push(
-                container(
-                    text(group.sender.resolve(self.lang))
-                        .size(13)
-                        .color(colour(t.accent)),
-                )
-                .padding(iced::Padding::ZERO.top(size::GAP).left(12)),
-            );
-        }
-        for node in &group.bubbles {
+                    .padding(iced::Padding::ZERO.top(16).bottom(8))
+                    .into()
+            }
+            // A group's chat names the writer above a group of bubbles that
+            // is not the reader's (1307).
+            ChatLine::Named(g) => container(
+                text(open.groups[g].sender.resolve(self.lang))
+                    .size(13)
+                    .color(colour(t.accent)),
+            )
+            .padding(iced::Padding::ZERO.top(size::GAP).left(12))
+            .into(),
             // A group's own line, "Anna joined." (1307 G2): centred, as
             // the day line, no one's bubble.
-            if node.bubble.note {
+            ChatLine::Note(g, n) => {
+                let node = node(g, n);
                 let key = RunKey::new(node.bubble.key, Part::Note);
-                list = list.push(
-                    container(self.quiet_line(node.bubble.body.clone(), key, picked, t))
-                        .center_x(Length::Fill)
-                        .padding(iced::Padding::ZERO.top(8).bottom(4)),
-                );
-                continue;
+                container(self.quiet_line(node.bubble.body.clone(), key, picked, t))
+                    .center_x(Length::Fill)
+                    .padding(iced::Padding::ZERO.top(8).bottom(4))
+                    .into()
             }
-            let place = &node.place;
-            let gap = match place.joins_before {
-                true => size::GAP_GROUPED,
-                false if place.day => 0.0,
-                false => size::GAP,
-            };
-            list = list.push(Space::new().height(gap));
-            list = list.push(self.bubble(open, node, width, picked, t));
+            ChatLine::Gap(g, n) => {
+                let place = &node(g, n).place;
+                let gap = match place.joins_before {
+                    true => size::GAP_GROUPED,
+                    false if place.day => 0.0,
+                    false => size::GAP,
+                };
+                Space::new().height(gap).into()
+            }
+            ChatLine::Bubble(g, n) => self.bubble(open, node(g, n), width, picked, t),
             // A line that came after newer ones (1307 pass four).
-            if node.bubble.late {
-                list = list.push(
-                    text(self.word(StrId::GroupArrivedLate))
-                        .size(size::META)
-                        .color(colour(t.text_secondary)),
-                );
-            }
-            if self.menu == Some(node.id) {
-                list = list.push(self.actions(node, t));
-            }
+            ChatLine::Late(..) => text(self.word(StrId::GroupArrivedLate))
+                .size(size::META)
+                .color(colour(t.text_secondary))
+                .into(),
+            ChatLine::Actions(g, n) => self.actions(node(g, n), t),
+            ChatLine::Foot => Space::new().height(size::GAP).into(),
         }
-        list
     }
 
     /// The chat's width in logical pixels, for the bubbles' widest.

@@ -5497,7 +5497,12 @@ mod tests {
     /// The window over Anna's chat with `chat_model`'s messages and 3000
     /// more, open, `w` by `h` (1431, the window bench of 1441).
     pub(super) fn long_chat(w: u32, h: u32) -> App {
-        let model = long_chat_model();
+        long_chat_of(3000, w, h)
+    }
+
+    /// [`long_chat`] with `n` one-line bubbles (1487).
+    pub(super) fn long_chat_of(n: u32, w: u32, h: u32) -> App {
+        let model = long_chat_model_of(n);
         // The channel's receiver dropped: what the window tells the model
         // goes nowhere.
         let (tx, _) = tokio::sync::mpsc::unbounded_channel();
@@ -5509,8 +5514,13 @@ mod tests {
 
     /// [`long_chat`]'s model: Anna's chat with 3000 more, open.
     pub(super) fn long_chat_model() -> crate::shell::Model {
+        long_chat_model_of(3000)
+    }
+
+    /// [`long_chat_model`] with `n` more (1487).
+    pub(super) fn long_chat_model_of(n: u32) -> crate::shell::Model {
         let mut model = chat_model();
-        for i in 0..3000u32 {
+        for i in 0..n {
             let mut id = [7u8; 32];
             id[..4].copy_from_slice(&i.to_be_bytes());
             update(
