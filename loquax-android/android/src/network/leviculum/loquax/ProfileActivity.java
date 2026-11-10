@@ -44,7 +44,7 @@ import java.util.Map;
  * in place where the mailbox is on this phone; the address in a
  * monospaced, selectable row with Copy; the QR code of the contact code
  * `lxma://<address>:<key>` that Columba and Sideband read, on a white
- * card; Share (the code as text), Share as picture, Copy address; Scan a
+ * card; Share (the code as text), Share as picture; Scan a
  * contact's code, which adds a contact from an `lxma://` code or an
  * address alone and joins a mailbox from an `lqxh1` one (loquax::code); where the mailbox is, with the way to
  * another, and where it is on this phone, Link a device (1264), which shows the mailbox's join code
@@ -243,12 +243,8 @@ public class ProfileActivity extends Activity {
         });
         row.addView(copy);
         body.addView(row, matchWrap());
-        // The address in groups of four, to read out (1443, the scene's).
-        TextView fours = text(Core.str(words, "fours"), 14, R.color.text_secondary);
-        fours.setId(R.id.profile_fours);
-        fours.setTypeface(Typeface.MONOSPACE);
-        fours.setPadding(dp(16), 0, dp(16), dp(4));
-        body.addView(fours, matchWrap());
+        // The address once, with one Copy (1629, walk 3 new 9: it stood
+        // twice, whole and in fours, with two buttons that copied it).
     }
 
     /** The contact code's QR on a white card, and what it is for. */
@@ -277,7 +273,7 @@ public class ProfileActivity extends Activity {
         body.addView(caption, matchWrap());
     }
 
-    /** Share the code as text, as a picture, and copy the address. */
+    /** Share the code as text and as a picture; the address row above copies it. */
     private void share() {
         // "Share my address" (1443): the scene's one share, the phone's share sheet.
         Button text = wide(Core.str(words, "share"), R.id.profile_share);
@@ -297,13 +293,6 @@ public class ProfileActivity extends Activity {
                 sharePicture();
             }
         });
-        TextView copy = row(getString(R.string.profile_copy_address), R.id.profile_copy_address);
-        copy.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                copyAddress();
-            }
-        });
     }
 
     /** The scanner, for a contact's code or a mailbox's. */
@@ -312,6 +301,10 @@ public class ProfileActivity extends Activity {
             return;
         }
         TextView scan = row(getString(R.string.profile_scan), R.id.profile_scan);
+        // An action looks like one (1632, walk 4 new 19: plain text under
+        // two real buttons), as "Standort einschalten" does since 1629.
+        scan.setTextColor(getColor(R.color.accent));
+        scan.setTypeface(null, android.graphics.Typeface.BOLD);
         scan.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {

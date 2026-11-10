@@ -1,7 +1,7 @@
 === 80x24 ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown───────────────────────────────────────────┐
+│▌Unknown                ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -19,14 +19,14 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                  No messages yet                   │
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: folded ---
-┌● Loquax afbda7b3───────┐┌  them ·61dd───────────────────────────── pos 4 min ┐
-│▌them ·61dd       14:00 ││                                                    │
+┌● tui───────────────────┐┌  them─────────────────────────────────── pos 4 min ┐
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -39,21 +39,21 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                                                    │
+│                        ││                                                    │
 │                        ││                    ── Today ──                     │
 │                        ││ leaving the hut now  14:00                         │
 │                        ││                                                    │
-│                        ││ ◎ position 43.77310 N 11.25600 E ·                 │
-│                        ││ live · 4 min ago  14:00                            │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        ││ ◎ Live position  14:00                             │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: detail ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd───────────────────────────── pos 4 min ┐
-│▌them ·61dd       14:00 ││                                                    │
+┌  tui───────────────────┐┌● them─────────────────────────────────── pos 4 min ┐
+│▌them             14:00 ││                                                    │
 │▌┌ message ─────────────────────────────────────────────────────────────────┐ │
-│ │from them ·61dd to you                                                    │ │
+│ │from them to you                                                          │ │
 │ │peer   61ddb79ada973523799227bbaf41e204                                   │ │
 │ │id     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   │ │
 │ │size   0 bytes                                                            │ │
@@ -76,8 +76,8 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === 120x40 ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>─────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌<61ddb79a…>                      ││                                                                                  │
+┌● tui─────────────────────────────┐┌  Unknown─────────────────────────────────────────────────────────────────────────┐
+│▌Unknown                          ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -111,14 +111,14 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
-│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                 No messages yet                                  │
+│                                  │├  to Unknown────────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: folded ---
-┌● Loquax afbda7b3─────────────────┐┌  them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                                      │
+┌● tui─────────────────────────────┐┌  them────────────────────────────────────────────────────────────────────────────┐
+│▌them                       14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                                      │
 │▌◎ position · live             ⌖  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -148,18 +148,18 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
 │                                  ││ leaving the hut now  14:00                                                       │
 │                                  ││                                                                                  │
-│                                  ││ ◎ position 43.77310 N 11.25600 E · live · 4 min ago  14:00                       │
-│                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││ ◎ Live position  14:00                                                           │
+│                                  │├  to them───────────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: detail ---
-┌  Loquax afbda7b3─────────────────┐┌● them ·61dd──────────────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                                      │
+┌  tui─────────────────────────────┐┌● them────────────────────────────────────────────────────────────────────────────┐
+│▌them                       14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                                      │
 │▌◎ position · live             ⌖  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -169,7 +169,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 │                     ┌ message ─────────────────────────────────────────────────────────────────┐                     │
-│                     │from them ·61dd to you                                                    │                     │
+│                     │from them to you                                                          │                     │
 │                     │peer   61ddb79ada973523799227bbaf41e204                                   │                     │
 │                     │id     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   │                     │
 │                     │size   0 bytes                                                            │                     │
@@ -189,12 +189,12 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                     └────────────────────────────────────────────────────────────── Esc closes ┘                     │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                                   ── Today ──                                    │
 │                                  ││ leaving the hut now  14:00                                                       │
 │                                  ││                                                                                  │
-│                                  ││▌◎ position 43.77310 N 11.25600 E · live · 4 min ago  14:00                       │
-│                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││▌◎ Live position  14:00                                                           │
+│                                  │├  to them───────────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

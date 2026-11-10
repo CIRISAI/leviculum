@@ -2,7 +2,16 @@ package network.leviculum.loquax;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.DialogInterface;
+import android.view.Gravity;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.LinearLayout;
+import android.widget.PopupMenu;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.EditText;
 import android.widget.Toast;
 
@@ -105,66 +114,57 @@ final class GroupDialogs {
         });
     }
 
-    /** The friends to tick, then Next (a new group's name step) or Add. */
+    /**
+     * The people to tick, then Next (a new group's name step) or Add: the new conversation's list
+     * with check marks (1448, UI walk 1 finding 17), not a dialog of names. On that screen it turns
+     * into the picker; from another screen (a group's Add members) it opens as one.
+     */
     private static void picker(final Activity screen, final boolean adding) {
-        shown(screen, new Engine.Got<Map<String, Object>>() {
-            @Override
-            public void got(Map<String, Object> shown) {
-                picker(screen, adding, shown);
-            }
-        });
+        if (screen instanceof NewConversationActivity) {
+            ((NewConversationActivity) screen).pick(adding);
+            return;
+        }
+        screen.startActivity(new android.content.Intent(screen, NewConversationActivity.class)
+                .putExtra(NewConversationActivity.PICK, true)
+                .putExtra(NewConversationActivity.ADDING, adding));
     }
 
-    /** {@link #picker} as the library `shown` it. */
-    private static void picker(final Activity screen, final boolean adding,
-            final Map<String, Object> shown) {
-        final List<Map<String, Object>> rows = Core.list(shown, "rows");
-        String[] names = new String[rows.size()];
-        boolean[] picked = new boolean[rows.size()];
-        for (int i = 0; i < rows.size(); i++) {
-            names[i] = Core.str(rows.get(i), "name");
-            picked[i] = Core.bool(rows.get(i), "picked");
-        }
-        new AlertDialog.Builder(screen)
-                .setTitle(Core.str(shown, "title"))
-                .setMultiChoiceItems(names, picked, new DialogInterface.OnMultiChoiceClickListener() {
+    /** A person ticked or unticked in the picker; `after` reads the screen the verb left. */
+    static void pick(Activity screen, String peer, Runnable after) {
+        verb(screen, "pick", peer, after);
+    }
+
+    /** The picker given up: the draft closes. */
+    static void cancel(Activity screen) {
+        close(screen);
+    }
+
+    /**
+     * The picker's button: Next asks the name of a new group, Add asks the home (whose answer
+     * opens the member sheet). `over` runs when the picker is done with: after Add, after a name
+     * step given up, or when the library has no name step to show.
+     */
+    static void next(final Activity screen, final boolean adding, final Runnable over) {
+        verb(screen, "next", "", new Runnable() {
+            @Override
+            public void run() {
+                if (adding) {
+                    over.run();
+                    return;
+                }
+                shown(screen, new Engine.Got<Map<String, Object>>() {
                     @Override
-                    public void onClick(DialogInterface dialog, int which, boolean on) {
-                        verb(screen, "pick", Core.str(rows.get(which), "peer"), null);
+                    public void got(Map<String, Object> now) {
+                        if ("name".equals(Core.str(now, "step"))) {
+                            name(screen, now, over);
+                        } else {
+                            close(screen);
+                            over.run();
+                        }
                     }
-                })
-                .setPositiveButton(Core.str(shown, "go"), new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        verb(screen, "next", "", new Runnable() {
-                            @Override
-                            public void run() {
-                                if (adding) {
-                                    // The home is asked; its answer closes the
-                                    // picker and opens the member sheet.
-                                    return;
-                                }
-                                shown(screen, new Engine.Got<Map<String, Object>>() {
-                                    @Override
-                                    public void got(Map<String, Object> now) {
-                                        if ("name".equals(Core.str(now, "step"))) {
-                                            name(screen, now);
-                                        } else {
-                                            close(screen);
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    }
-                })
-                .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        close(screen);
-                    }
-                })
-                .show();
+                });
+            }
+        });
     }
 
     /** The name step: the field, the trust sentence, Create. */
@@ -172,13 +172,14 @@ final class GroupDialogs {
         shown(screen, new Engine.Got<Map<String, Object>>() {
             @Override
             public void got(Map<String, Object> shown) {
-                name(screen, shown);
+                name(screen, shown, null);
             }
         });
     }
 
-    /** {@link #name} as the library `shown` it. */
-    private static void name(final Activity screen, Map<String, Object> shown) {
+    /** {@link #name} as the library `shown` it; `cancelled`, if any, runs when it is given up. */
+    private static void name(final Activity screen, Map<String, Object> shown,
+            final Runnable cancelled) {
         final EditText field = new EditText(screen);
         field.setHint(Core.str(shown, "hint"));
         // The draft's name: empty for a new group, the old one when it
@@ -207,6 +208,9 @@ final class GroupDialogs {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         close(screen);
+                        if (cancelled != null) {
+                            cancelled.run();
+                        }
                     }
                 })
                 .show();
@@ -248,76 +252,115 @@ final class GroupDialogs {
         });
     }
 
-    /** {@link #memberSheet} as the library `shown` it. */
+    /**
+     * {@link #memberSheet} as the library `shown` it: a screen of its own,
+     * as the window's members screen draws it (1449, walk 1 finding 9). A
+     * row is the member's avatar, its name (two of one name told apart by
+     * their hash tails, in the library) and its role on the right; a tap on
+     * a row the admin may remove opens the row's menu with Remove, which
+     * asks before it acts, and a tap on any other does nothing. Add and
+     * "Start again" sit under the list; Leave and Delete red at the bottom.
+     */
     private static void memberSheet(final Activity screen, final String group, final Runnable after,
             Map<String, Object> shown) {
-        final List<Map<String, Object>> rows = Core.list(shown, "rows");
-        // The admin's "Delete group" (1307 pass four) is the list's last
-        // line: the dialog's three buttons are taken by Cancel, Add and
-        // Leave.
-        final String delete = Core.str(shown, "delete");
-        String[] lines = new String[rows.size() + (delete.isEmpty() ? 0 : 1)];
-        for (int i = 0; i < rows.size(); i++) {
-            Map<String, Object> row = rows.get(i);
-            String remove = Core.str(row, "remove");
-            lines[i] = Core.str(row, "name") + " · " + Core.str(row, "state")
-                    + (remove.isEmpty() ? "" : "  (" + remove + ")");
-        }
-        if (!delete.isEmpty()) {
-            lines[rows.size()] = delete;
-        }
-        AlertDialog.Builder dialog = new AlertDialog.Builder(screen)
-                .setTitle(Core.str(shown, "title") + " · " + Core.str(shown, "line"))
-                .setItems(lines, new DialogInterface.OnClickListener() {
+        final float dp = screen.getResources().getDisplayMetrics().density;
+        final Dialog dialog = new Dialog(screen, android.R.style.Theme_DeviceDefault_Light_NoActionBar);
+        LinearLayout page = new LinearLayout(screen);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setBackgroundColor(screen.getColor(R.color.background));
+        int pad = (int) (16 * dp);
+        page.setPadding(pad, pad, pad, pad);
+
+        LinearLayout head = new LinearLayout(screen);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout titles = new LinearLayout(screen);
+        titles.setOrientation(LinearLayout.VERTICAL);
+        titles.addView(text(screen, Core.str(shown, "title"), 20, R.color.text));
+        titles.addView(text(screen, Core.str(shown, "line"), 14, R.color.text_secondary));
+        head.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView close = text(screen, screen.getString(R.string.scene_close), 16, R.color.accent);
+        close.setPadding(pad, pad / 2, 0, pad / 2);
+        close.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+            }
+        });
+        head.addView(close);
+        page.addView(head);
+
+        LinearLayout list = new LinearLayout(screen);
+        list.setOrientation(LinearLayout.VERTICAL);
+        for (final Map<String, Object> row : Core.list(shown, "rows")) {
+            LinearLayout line = new LinearLayout(screen);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setMinimumHeight((int) (56 * dp));
+            AvatarView avatar = new AvatarView(screen, null);
+            avatar.show(Core.str(row, "peer"), row);
+            LinearLayout.LayoutParams side = new LinearLayout.LayoutParams((int) (40 * dp), (int) (40 * dp));
+            side.setMarginEnd(pad);
+            line.addView(avatar, side);
+            TextView name = text(screen, Core.str(row, "name"), 16, R.color.text);
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            line.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            line.addView(text(screen, Core.str(row, "state"), 14, R.color.text_secondary));
+            final String remove = Core.str(row, "remove");
+            if (!remove.isEmpty()) {
+                line.setBackgroundResource(android.R.drawable.list_selector_background);
+                line.setOnClickListener(new View.OnClickListener() {
                     @Override
-                    public void onClick(DialogInterface d, int which) {
-                        if (which == rows.size()) {
-                            verb(screen, "delete", group, new Runnable() {
-                                @Override
-                                public void run() {
-                                    ask(screen, "delete", group, "", after);
-                                }
-                            });
-                            return;
-                        }
-                        Map<String, Object> row = rows.get(which);
-                        if (Core.str(row, "remove").isEmpty()) {
-                            close(screen);
-                            return;
-                        }
-                        final String member = Core.str(row, "peer");
-                        verb(screen, "remove", group, member, "", false,
-                                new Runnable() {
+                    public void onClick(View v) {
+                        PopupMenu menu = new PopupMenu(screen, v, Gravity.END);
+                        menu.getMenu().add(remove);
+                        menu.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
+                            @Override
+                            public boolean onMenuItemClick(MenuItem item) {
+                                final String member = Core.str(row, "peer");
+                                dialog.setOnDismissListener(null);
+                                dialog.dismiss();
+                                verb(screen, "remove", group, member, "", false, new Runnable() {
                                     @Override
                                     public void run() {
                                         ask(screen, "remove", group, member, after);
                                     }
                                 });
-                    }
-                })
-                .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface d, int which) {
-                        close(screen);
+                                return true;
+                            }
+                        });
+                        menu.show();
                     }
                 });
+            }
+            list.addView(line);
+        }
+        ScrollView scroll = new ScrollView(screen);
+        scroll.addView(list);
+        page.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
         String add = Core.str(shown, "add");
         if (!add.isEmpty()) {
-            dialog.setNeutralButton(add, new DialogInterface.OnClickListener() {
+            page.addView(action(screen, add, R.color.accent, new Runnable() {
                 @Override
-                public void onClick(DialogInterface d, int which) {
+                public void run() {
+                    dialog.setOnDismissListener(null);
+                    dialog.dismiss();
                     addMembers(screen, group);
                 }
-            });
+            }));
         }
         // "Start again with the same people" (study 4.7), where Add never
         // is: a group the reader left or that ended. "New group" opens at
         // its name, the people ticked; its Create makes it.
         String again = Core.str(shown, "again");
         if (!again.isEmpty() && add.isEmpty()) {
-            dialog.setNeutralButton(again, new DialogInterface.OnClickListener() {
+            page.addView(action(screen, again, R.color.accent, new Runnable() {
                 @Override
-                public void onClick(DialogInterface d, int which) {
+                public void run() {
+                    dialog.setOnDismissListener(null);
+                    dialog.dismiss();
                     verb(screen, "again", group, new Runnable() {
                         @Override
                         public void run() {
@@ -325,13 +368,15 @@ final class GroupDialogs {
                         }
                     });
                 }
-            });
+            }));
         }
         String leave = Core.str(shown, "leave");
         if (!leave.isEmpty()) {
-            dialog.setPositiveButton(leave, new DialogInterface.OnClickListener() {
+            page.addView(action(screen, leave, R.color.failed_mark_on_panel, new Runnable() {
                 @Override
-                public void onClick(DialogInterface d, int which) {
+                public void run() {
+                    dialog.setOnDismissListener(null);
+                    dialog.dismiss();
                     verb(screen, "leave", group, new Runnable() {
                         @Override
                         public void run() {
@@ -339,9 +384,63 @@ final class GroupDialogs {
                         }
                     });
                 }
-            });
+            }));
         }
+        // The admin's "Delete group" (1307 pass four): red at the bottom,
+        // never a row of the member list.
+        String delete = Core.str(shown, "delete");
+        if (!delete.isEmpty()) {
+            page.addView(action(screen, delete, R.color.failed_mark_on_panel, new Runnable() {
+                @Override
+                public void run() {
+                    dialog.setOnDismissListener(null);
+                    dialog.dismiss();
+                    verb(screen, "delete", group, new Runnable() {
+                        @Override
+                        public void run() {
+                            ask(screen, "delete", group, "", after);
+                        }
+                    });
+                }
+            }));
+        }
+        dialog.setContentView(page);
+        dialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface d) {
+                close(screen);
+            }
+        });
         dialog.show();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+            dialog.getWindow().setBackgroundDrawable(
+                    new android.graphics.drawable.ColorDrawable(screen.getColor(R.color.background)));
+        }
+    }
+
+    /** A line of text in `size` sp and the colour `colour`. */
+    private static TextView text(Activity screen, String words, int size, int colour) {
+        TextView view = new TextView(screen);
+        view.setText(words);
+        view.setTextSize(size);
+        view.setTextColor(screen.getColor(colour));
+        view.setVisibility(words.isEmpty() ? View.GONE : View.VISIBLE);
+        return view;
+    }
+
+    /** A text button under the list, in `colour`. */
+    private static TextView action(Activity screen, String words, int colour, final Runnable tapped) {
+        TextView view = text(screen, words, 16, colour);
+        int pad = (int) (12 * screen.getResources().getDisplayMetrics().density);
+        view.setPadding(0, pad, 0, pad);
+        view.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                tapped.run();
+            }
+        });
+        return view;
     }
 
     /** The sheet's question before a Leave or a Remove, in the library's words. */

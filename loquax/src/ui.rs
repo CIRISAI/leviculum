@@ -98,6 +98,7 @@
 //! stays beside it. The shell draws the picture for the view the model
 //! makes; the model places the pins, so what a click hits is what is drawn.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -138,39 +139,61 @@ pub mod by_hand;
 pub mod chat;
 pub mod compose;
 pub mod contacts;
+pub mod copy_mode;
+pub mod counters;
+pub mod explore;
 pub mod files;
 pub mod group_scene;
 pub mod groups;
 pub mod history;
 pub mod hit;
+pub mod hubs;
+pub mod id_index;
 pub mod info;
 pub mod intent;
 pub mod inventory;
 pub mod layout;
+pub mod listing;
 pub mod liveness;
+pub mod mailbox_page;
 pub mod map;
+pub mod pager;
 pub mod photos;
 pub mod profile;
 pub mod radar;
 pub mod reactions;
 pub mod receipts;
 pub mod recording;
+pub mod relayed;
 pub mod replies;
 pub mod rooms;
 pub mod scene;
 pub mod search;
+pub mod selection;
+pub mod settings;
 pub mod share;
 pub mod state;
 pub mod strings;
+pub mod summary;
 pub mod tracks;
 pub mod verbs;
 pub mod viewload;
 pub mod voice;
 pub mod zoom;
 
+#[cfg(test)]
+mod late;
+
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
 /// seconds.
 pub const TOAST_TICKS: u64 = 12;
+
+/// The most toasts a model keeps (1603): only the newest is drawn
+/// ([`UiModel::current_toast`]), and a shell that never ticks (the M9
+/// sends no [`UiEvent::Tick`]) never ages one out, so every received
+/// message left its toast in the model: a rebuild of 4464 entries kept
+/// 4464 toasts and their texts, a reallocation of 4096 at a time.
+pub const TOAST_KEEP: usize = 8;
 
 /// Shell ticks in a second, for the leg's elapsed time on a row.
 const TICKS_PER_SECOND: u64 = 4;
@@ -421,13 +444,223 @@ pub struct NewRule {
     pub count: usize,
 }
 
+/// A revision mark beside the data it counts (1490): bumped when the data
+/// changed, compared by caches. Equal to every other, as
+/// [`summary::Summary`] is: it is a cache's key, and two models with the
+/// same content are the same model whatever their caches saw.
+#[derive(Clone, Copy, Debug, Default, Eq)]
+pub struct Rev(u64);
+
+impl Rev {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    fn at(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl PartialEq for Rev {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// FNV-1a, the change detectors' fingerprint (1490): cheap, `no_std`, and
+/// not security — a collision costs one stale frame, found by the next
+/// change.
+pub(crate) struct Fnv(u64);
+
+impl Fnv {
+    pub(crate) fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn byte(&mut self, byte: u8) {
+        self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.byte(byte);
+        }
+    }
+
+    pub(crate) fn word(&mut self, word: u64) {
+        self.bytes(&word.to_le_bytes());
+    }
+
+    pub(crate) fn done(self) -> u64 {
+        self.0
+    }
+}
+
+/// A conversation's place in the list, total over its parts: pinned
+/// first, the newest write first, then the activity, the index last so a
+/// re-placed mover lands exactly where the stable full sort puts it among
+/// equals.
+type OrderKey = (
+    core::cmp::Reverse<bool>,
+    core::cmp::Reverse<Option<i64>>,
+    core::cmp::Reverse<u64>,
+    usize,
+);
+
+/// The list's order as the last fold left it (1490): what
+/// [`UiModel::order`] answers from, what [`UiModel::note_changes`]
+/// maintains. Its truth is checked, never assumed: a read recomputes the
+/// cheap keys and compares ([`OrderCache::current`]), so a model changed
+/// outside [`update`] gets a fresh sort, never a stale list.
+#[derive(Clone, Debug)]
+struct OrderCache {
+    show_blocked: bool,
+    show_archived: bool,
+    look_rev: u64,
+    /// By conversation index: its key while the list shows it.
+    keys: Vec<Option<OrderKey>>,
+    /// The listed conversations, sorted by their keys.
+    order: Vec<usize>,
+}
+
+impl OrderCache {
+    fn fresh<B>(model: &UiModel<B>) -> Self {
+        let order = model.order_cold();
+        let mut keys: Vec<Option<OrderKey>> = vec![None; model.conversations.len()];
+        for &i in &order {
+            keys[i] = Some(model.order_key(i));
+        }
+        Self {
+            show_blocked: model.show_blocked,
+            show_archived: model.show_archived,
+            look_rev: model.look_rev,
+            keys,
+            order,
+        }
+    }
+
+    /// Whether the cache still describes `model`: the same conversations,
+    /// each listed as it would be and keyed as it would be. O(list), all
+    /// of it cheap reads ([`Conversation::last_written`] is O(1) while
+    /// the summary is fresh).
+    fn current<B>(&self, model: &UiModel<B>) -> bool {
+        self.keys.len() == model.conversations.len()
+            && self.show_blocked == model.show_blocked
+            && self.show_archived == model.show_archived
+            && (0..self.keys.len())
+                .all(|i| self.keys[i] == model.lists(i).then(|| model.order_key(i)))
+    }
+}
+
+/// What the target's screen shows of the list and the open chat (1490):
+/// the scene builds this many rows and bubbles in view plus as much
+/// again as margin, half a screen either side. The default is a phone's
+/// portrait screen; each target says its own ([`UiEvent::Viewing`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Viewing {
+    /// Conversation rows in view in the chats list.
+    pub list_rows: usize,
+    /// Bubble rows in view in the open chat.
+    pub chat_rows: usize,
+    /// The list is a screen of its own (the M9, the phone): the chat is
+    /// on screen only while the keys are in it, and is not built while
+    /// the list is the screen. The terminal and the window show both
+    /// panes at once and leave this off.
+    pub apart: bool,
+    /// The scene carries the tab bar (1532). A target whose keys reach
+    /// the map and the list directly (the M9's map and house keys) turns
+    /// it off and gets the row for content; the core keeps the tabs for
+    /// the targets that draw them.
+    pub tabs: bool,
+}
+
+impl Viewing {
+    /// A target that scrolls a scene it keeps whole (the window, until
+    /// its own step wires scrolling into the viewport): everything.
+    pub const ALL: Viewing = Viewing {
+        list_rows: usize::MAX / 4,
+        chat_rows: usize::MAX / 4,
+        apart: false,
+        tabs: true,
+    };
+}
+
+impl Default for Viewing {
+    fn default() -> Self {
+        Self {
+            list_rows: 14,
+            chat_rows: 24,
+            apart: false,
+            tabs: true,
+        }
+    }
+}
+
+/// The list's window as the last fold built it (1490).
+#[derive(Clone, Debug)]
+struct BuiltList {
+    /// The fingerprint of everything the rows were built from
+    /// ([`UiModel::list_stamp`]).
+    stamp: u64,
+    /// The first built row's place in the whole order, and the order's
+    /// length: the scroll geometry.
+    first: usize,
+    total: usize,
+    /// The first row on screen of a list apart (1546).
+    top: Option<usize>,
+    rows: Vec<scene::Row>,
+}
+
+/// The open conversation laid out, as the laid cache keeps it (1490).
+#[derive(Clone, Debug)]
+struct LaidCache {
+    key: u64,
+    /// The message the cursor was on when these rows were styled.
+    selected: Option<usize>,
+    laid: alloc::sync::Arc<layout::Laid>,
+}
+
+/// The stamps of the windows the last note left ([`UiModel::scene_owed`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SceneOwed {
+    list: Option<u64>,
+    chat: Option<(usize, u64)>,
+}
+
+/// The open chat's window as the last fold built it (1490).
+#[derive(Clone, Debug)]
+struct BuiltChat {
+    /// The fingerprint of everything the chat was built from
+    /// ([`UiModel::chat_stamp`]).
+    stamp: u64,
+    chat: scene::Chat,
+}
+
+/// A delivery state as one fingerprint word.
+fn delivery_word(state: Option<DeliveryState>) -> u64 {
+    match state {
+        None => 0,
+        Some(DeliveryState::Queued) => 1,
+        Some(DeliveryState::Stamping) => 2,
+        Some(DeliveryState::InFlight) => 3,
+        Some(DeliveryState::Sent) => 4,
+        Some(DeliveryState::InMailbox) => 5,
+        Some(DeliveryState::Arrived) => 6,
+        Some(DeliveryState::Delivered) => 7,
+        Some(DeliveryState::Read { at }) => 8 | (u64::from(at) << 8),
+        Some(DeliveryState::Rejected) => 9,
+        Some(DeliveryState::Failed) => 10,
+    }
+}
+
 /// One correspondent and the messages with them the screen loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {
     /// Their LXMF address.
     pub peer: [u8; 16],
-    /// Oldest first.
-    pub messages: Vec<Message>,
+    /// Oldest first, changed only through [`id_index::Messages`]'s
+    /// methods so the model's id index hears of every id (1600).
+    pub messages: id_index::Messages,
     /// Received messages not yet looked at: the list's badge.
     pub unread: usize,
     /// The `new` rule: set by the first message that arrives unread, kept
@@ -454,6 +687,24 @@ pub struct Conversation {
     pub earlier: usize,
     /// What was typed here and not sent (1219), kept in the store.
     pub draft: history::Draft,
+    /// What the chats list asks of it, kept up to its messages by
+    /// [`update`] (1463): a cache the readers check before they trust it.
+    pub summary: summary::Summary,
+    /// The row as the store last kept it (1490, schema 17): what the
+    /// list shows while no message is loaded. The loaded messages win
+    /// wherever they are present.
+    pub listing: Option<listing::Listing>,
+    /// The newest unread received ids while none of the messages is
+    /// loaded (1521, [`listing::Row::unread_ids`]): a read mark naming
+    /// one clears the badge here, as the store applies it to its rows.
+    pub unread_ids: id_index::KeptIds,
+    /// Bumped by [`update`] when anything a screen draws of this
+    /// conversation changed (1490): what every cache keyed by this
+    /// conversation asks before it reuses.
+    revision: Rev,
+    /// The fingerprint of the row state the last [`update`] saw
+    /// ([`Conversation::row_fingerprint`]).
+    stamp: Rev,
 }
 
 /// A line the conversation says between its messages, centred.
@@ -471,7 +722,21 @@ impl Conversation {
     /// the conversation has nothing else; a group's invitation or making
     /// counts by when it came ([`Conversation::touched`]). `None` while
     /// nothing has a time.
+    ///
+    /// A conversation listed from its kept row (1521) answers no earlier
+    /// than the row said (1591): reading its pages never moves it down
+    /// the list. Window 18's board decoded a preloaded page before it
+    /// knew the time, its messages came out with none, and every row the
+    /// ring's cursor reached sank to the list's end under the cursor.
     pub fn last_written(&self) -> Option<i64> {
+        let kept = self.listing.as_ref().and_then(|listing| listing.moved);
+        // Nothing loaded: the store's row answers (1490, schema 17).
+        if self.messages.is_empty() && self.listing.is_some() {
+            return kept.max(self.touched);
+        }
+        if let Some(newest) = self.summary.newest(&self.messages) {
+            return newest.max(self.touched).max(kept);
+        }
         let newest = |moves: bool| {
             self.messages
                 .iter()
@@ -479,13 +744,16 @@ impl Conversation {
                 .filter_map(|m| m.at.map(|at| at.unix_secs))
                 .max()
         };
-        newest(true).or_else(|| newest(false)).max(self.touched)
+        newest(true)
+            .or_else(|| newest(false))
+            .max(self.touched)
+            .max(kept)
     }
 
     fn new(peer: [u8; 16]) -> Self {
         Self {
             peer,
-            messages: Vec::new(),
+            messages: id_index::Messages::new(),
             unread: 0,
             new_rule: None,
             activity: 0,
@@ -495,13 +763,168 @@ impl Conversation {
             flags: history::Flags::default(),
             earlier: 0,
             draft: history::Draft::default(),
+            summary: summary::Summary::default(),
+            listing: None,
+            unread_ids: id_index::KeptIds::default(),
+            revision: Rev::default(),
+            stamp: Rev::default(),
         }
     }
 
-    /// Note one more unread message, the newest.
-    fn mark_new(&mut self) {
-        let at = self.messages.len().saturating_sub(1);
+    /// How often [`update`] saw this conversation change (1490): a cache
+    /// keyed by it reuses while it stands still. A model changed outside
+    /// `update` has not bumped it; the next `update` does.
+    pub fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
+    /// The fingerprint of what a list row or a bubble pane draws of this
+    /// conversation besides the messages the summary watches: the cheap
+    /// fields, and the newest message's mutable face (its delivery, its
+    /// id). Deeper in-place changes are caught by the fold's own change
+    /// sets ([`UiModel::note_changes`]).
+    fn row_fingerprint(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(self.unread as u64);
+        hash.word(u64::from(self.pinned));
+        hash.word(self.flags.muted_until.map_or(0, |at| at as u64));
+        hash.word(u64::from(self.flags.archived));
+        hash.word(u64::from(self.flags.verified));
+        hash.word(u64::from(self.flags.receipts));
+        hash.word(self.earlier as u64);
+        hash.word(self.touched.map_or(0, |at| at as u64));
+        hash.word(self.notes.len() as u64);
+        if let Some(rule) = self.new_rule {
+            hash.word(rule.at as u64);
+            hash.word(rule.count as u64);
+        }
+        hash.bytes(self.draft.text.as_bytes());
+        if let Some(reply) = self.draft.reply {
+            hash.bytes(&reply);
+        }
+        hash.word(self.messages.len() as u64);
+        if let Some(last) = self.messages.last() {
+            hash.word(delivery_word(last.delivery));
+            hash.word(u64::from(last.id.is_some()));
+        }
+        hash.done()
+    }
+
+    /// The messages that carry `id`, oldest first: the summary's index
+    /// (1463), brought up to the messages first (1521: a batch notes
+    /// once at its end, and until then every lookup walked the whole
+    /// conversation), or a walk, counted into `ops`, when it still is
+    /// not. Each one checked, so an index that missed a rename finds
+    /// nothing wrong, only nothing.
+    pub fn with_id(&mut self, id: &[u8; 32], ops: &counters::Ops) -> Vec<usize> {
+        self.summary.catch_up(self.peer, &self.messages);
+        let found: Vec<usize> = match self.summary.with_id(&self.messages, id) {
+            Some(indices) => indices.to_vec(),
+            None => {
+                ops.add(counters::Op::Walked, self.messages.len());
+                (0..self.messages.len()).collect()
+            }
+        };
+        found
+            .into_iter()
+            .filter(|&m| self.messages[m].id == Some(*id))
+            .collect()
+    }
+
+    /// The newest received icon appearance, foreground and background: the
+    /// avatar's colours (`chat::latest_appearance`).
+    pub fn appearance(&self) -> Option<(String, String)> {
+        if self.messages.is_empty() {
+            if let Some(listing) = &self.listing {
+                return listing.appearance.clone();
+            }
+        }
+        self.summary
+            .appearance(&self.messages)
+            .unwrap_or_else(|| chat::latest_appearance(&self.messages))
+    }
+
+    /// Note one more unread message, the one at `at` (1505: a late one
+    /// sits at its writer's time, not at the end). The rule stays where
+    /// the reader left off: above the first unread by arrival, so a
+    /// later arrival written earlier sits above it, read or not.
+    fn mark_new(&mut self, at: usize) {
         self.new_rule.get_or_insert(NewRule { at, count: 0 }).count += 1;
+    }
+
+    /// Where a message written at `written` (unix seconds) goes in the
+    /// body (1505): after every message written no later, so the body
+    /// runs in its writers' order and a tie keeps the arrival order. One
+    /// without a time goes last, and one already there without a time
+    /// is taken as written no later. Walks back over the newer messages
+    /// only: an arrival in order costs one comparison.
+    pub fn written_place(&self, written: Option<i64>) -> usize {
+        let mut place = self.messages.len();
+        let Some(written) = written else {
+            return place;
+        };
+        while place > 0 {
+            match self.messages[place - 1].at {
+                Some(at) if at.unix_secs > written => place -= 1,
+                _ => break,
+            }
+        }
+        place
+    }
+
+    /// Put the messages in their writers' order, a tie and a message
+    /// without a time (it keeps the place of the one before it) in the
+    /// order they are in (1505): a page the store hands out comes in
+    /// arrival order. Each old index's new one, or `None` when they were
+    /// in order already.
+    fn sort_written(&mut self) -> Option<Vec<usize>> {
+        let mut last = i64::MIN;
+        let keys: Vec<i64> = self
+            .messages
+            .iter()
+            .map(|m| {
+                if let Some(at) = m.at {
+                    last = at.unix_secs;
+                }
+                last
+            })
+            .collect();
+        if keys.windows(2).all(|w| w[0] <= w[1]) {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..keys.len()).collect();
+        order.sort_by_key(|&i| keys[i]);
+        let mut new_of = alloc::vec![0; keys.len()];
+        for (new, &old) in order.iter().enumerate() {
+            new_of[old] = new;
+        }
+        self.messages.reorder(&order);
+        self.summary.forget();
+        Some(new_of)
+    }
+
+    /// The lowest store key the screen holds (1505): where the store's
+    /// next page ends. The body's first message is the earliest written,
+    /// which a late arrival makes another than the earliest taken.
+    pub(crate) fn oldest_key(&self) -> Option<u64> {
+        self.messages.iter().map(|m| m.activity).min()
+    }
+
+    /// The received messages that have a row of their own, newest
+    /// arrival first (1505): the unread are the newest by arrival, which
+    /// the body's writers' order may scatter.
+    fn received_by_arrival(&self, aside: bool) -> Vec<usize> {
+        // From the end, so a tie (a model built by hand) keeps the body's
+        // order, newest last.
+        let mut received: Vec<usize> = (0..self.messages.len())
+            .rev()
+            .filter(|&i| {
+                let m = &self.messages[i];
+                !m.outbound && (aside || !m.is_aside())
+            })
+            .collect();
+        received.sort_by_key(|&i| core::cmp::Reverse(self.messages[i].activity));
+        received
     }
 
     /// The message after `index` that has a row of its own: reactions are
@@ -553,39 +976,61 @@ impl Conversation {
     /// The unread count as the screens show it: a position report counts
     /// nothing (1209), it is a state and no message. [`Conversation::unread`]
     /// stays the messages, which the home's read marks name one by one.
+    ///
+    /// Unread messages beyond the received ones loaded lie in the part
+    /// not loaded, a conversation listed from its kept row (1521) that a
+    /// live page reached since: each counts, as the kept row counted it.
+    /// Before 1563 the badge of a chat of 776 unread fell to the 96 a
+    /// pull had brought, on a board's live pull and on the boot that
+    /// folds a ring's tail after its summary.
     pub fn unread_rows(&self) -> usize {
-        self.unread_messages().len()
+        if self.messages.is_empty() {
+            if let Some(listing) = &self.listing {
+                return listing.unread_rows as usize;
+            }
+        }
+        let (rows, received) = match self.summary.unread_rows(&self.messages, self.unread) {
+            Some(rows) => (rows, self.summary.received_count()),
+            None => (
+                self.unread_messages().len(),
+                self.messages
+                    .iter()
+                    .filter(|m| !m.outbound && !m.is_aside())
+                    .count(),
+            ),
+        };
+        rows + self.unread.saturating_sub(received)
     }
 
     /// The unread messages that ask for attention, oldest first: the raw
     /// [`Conversation::unread`] newest received, less the reports.
     fn unread_messages(&self) -> Vec<usize> {
-        let mut left = self.unread;
-        let mut shown = Vec::new();
-        for (i, message) in self.messages.iter().enumerate().rev() {
-            if left == 0 {
-                break;
-            }
-            if message.outbound || message.is_aside() {
-                continue;
-            }
-            left -= 1;
-            if !message.is_report() {
-                shown.push(i);
-            }
+        if self.unread == 0 {
+            return Vec::new();
         }
-        shown.reverse();
+        let mut shown: Vec<usize> = self
+            .received_by_arrival(false)
+            .into_iter()
+            .take(self.unread)
+            .filter(|&i| !self.messages[i].is_report())
+            .collect();
+        shown.sort_unstable();
         shown
     }
 
     /// The `new` rule the raw unread count gives, as a restart sets it:
-    /// above the first unread message that is no report (1209).
+    /// above the first unread message that is no report (1209), the
+    /// first by arrival, where a running screen put it (1505).
     pub(crate) fn rule_from_unread(&self) -> Option<NewRule> {
         let shown = self.unread_messages();
-        shown.first().map(|&at| NewRule {
-            at,
-            count: shown.len(),
-        })
+        shown
+            .iter()
+            .copied()
+            .min_by_key(|&i| self.messages[i].activity)
+            .map(|at| NewRule {
+                at,
+                count: shown.len(),
+            })
     }
 
     /// Whether the peer's position is alive (1209), from the reports the
@@ -593,15 +1038,13 @@ impl Conversation {
     /// with a position: each at its fix's time (the receive time where the
     /// sender's clock claims the future), judged at `now`.
     pub fn liveness(&self, now: Option<i64>) -> liveness::Liveness {
-        // The newest few teach the cadence; older ones say nothing.
-        let fixes: Vec<Fix> = self
-            .messages
-            .iter()
-            .rev()
-            .filter(|m| m.is_report())
-            .filter_map(|m| message_fix(self.peer, m))
-            .take(liveness::CADENCE_GAPS + 1)
-            .collect();
+        // Nothing loaded: the store's row answers (1490).
+        if self.messages.is_empty() {
+            if let Some(listing) = &self.listing {
+                return listing.liveness(now);
+            }
+        }
+        let fixes = self.report_fixes();
         let times: Vec<i64> = fixes.iter().map(Fix::order_time).collect();
         // The newest report's share mark (1273): its promise, or its end.
         let mark = fixes
@@ -609,6 +1052,25 @@ impl Conversation {
             .map(|fix| leviculum_lxmf::telemetry::ShareMark::of_blob(&fix.telemetry))
             .unwrap_or_default();
         liveness::Liveness::of_marked(&times, mark, now)
+    }
+
+    /// The newest reports' fixes, newest first, the few the liveness is
+    /// judged from: by the summary's indices (1463), or a walk when it
+    /// is behind.
+    pub fn report_fixes(&self) -> Vec<Fix> {
+        match self.summary.reports(&self.messages) {
+            Some(newest) => newest
+                .filter_map(|i| message_fix(self.peer, &self.messages[i]))
+                .collect(),
+            None => self
+                .messages
+                .iter()
+                .rev()
+                .filter(|m| m.is_report())
+                .filter_map(|m| message_fix(self.peer, m))
+                .take(liveness::CADENCE_GAPS + 1)
+                .collect(),
+        }
     }
 
     /// The newest report with a position: the row that says whether the
@@ -633,12 +1095,16 @@ impl Conversation {
 }
 
 /// The mailbox as the header says it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MailboxShown {
     /// The selected node, once a run or the stored record named one.
     pub node: Option<[u8; 16]>,
     /// Named with `--pn`, not adopted.
     pub by_user: bool,
+    /// The name the selected node announced (`PN_META_NAME`), sanitised:
+    /// the header says the relay by it, "a relay" without one (1587). Only
+    /// the selected node's is kept, so it is learnt at its next announce.
+    pub name: Option<String>,
     /// When this session's last fetch finished.
     pub synced: Option<WallTime>,
 }
@@ -699,8 +1165,12 @@ pub struct UiModel<B> {
     pub compose: B,
     /// Where keys go.
     pub focus: Pane,
-    /// Notes floated over the content, newest last.
+    /// Notes floated over the content, newest last, at most
+    /// [`TOAST_KEEP`] of them.
     pub toasts: Vec<Toast>,
+    /// How many toasts were said (1603): what the redraw marks hash, as
+    /// a toast said at [`TOAST_KEEP`] leaves the count where it was.
+    toasts_said: u64,
     /// The palette, when open.
     pub palette: Option<Palette<B>>,
     /// Whether the help overlay is up.
@@ -716,6 +1186,10 @@ pub struct UiModel<B> {
     /// Whether the profile is up (1443): what a tap on the avatar and
     /// `my code` open, the scene's [`profile::ProfileScreen`] while it is.
     pub profile_open: bool,
+    /// The settings (1450): `Some(None)` their list of sections,
+    /// `Some(Some(section))` one section, as the terminal's detail view;
+    /// none while they are not up.
+    pub settings: Option<Option<settings::Section>>,
     /// What the shell knows of the reader for the profile: the name the
     /// announce carries, the mailbox, the devices.
     pub profile: profile::ProfileFacts,
@@ -760,6 +1234,16 @@ pub struct UiModel<B> {
     /// The conversation's first row on screen when the reader scrolled up;
     /// `None` keeps the newest at the bottom.
     pub scroll_top: Option<usize>,
+    /// The message on the first row on screen and how far into its block
+    /// the row is, while a fold splices a late bubble above it (1505):
+    /// the fold's end puts the view's top back on it
+    /// ([`UiModel::keep_top`]), after the `new` rule and anything else the
+    /// fold added above.
+    kept_top: Option<(u64, isize)>,
+    /// The same for a target that lays only a window of the chat (the M9,
+    /// 1529): the view's first row by the message it is in, so a window
+    /// that moves keeps the line. `None` keeps the newest at the bottom.
+    pub chat_anchor: Option<pager::Anchor>,
     /// The message whose detail view is up, as (conversation, message).
     pub detail: Option<(usize, usize)>,
     /// The detail view's first row on screen, back to the top whenever one
@@ -776,6 +1260,8 @@ pub struct UiModel<B> {
     pub footer_hover: Option<usize>,
     /// What a drag over the conversation selected.
     pub selection: Option<Selection>,
+    /// The copy mode's cursor and anchor while it is on (1475).
+    pub copy_mode: Option<copy_mode::CopyMode>,
     /// The button press a drag or a release belongs to.
     pub press: Option<Press>,
     /// The colour tier the screen is drawn in: monochrome until the shell
@@ -796,10 +1282,43 @@ pub struct UiModel<B> {
     /// instead of the others.
     pub show_archived: bool,
     /// Messages a fold changed, by conversation and key, for the store
-    /// ([`UiModel::take_writes`]).
+    /// ([`UiModel::take_writes`]). Only the running fold's: each
+    /// [`UiModel::note_changes`] moves them into the owed shadows, so a
+    /// fold's own changes are knowable without a diff (1490).
     changed: BTreeSet<([u8; 16], u64)>,
     /// Conversations whose own state (pin, unread) a fold changed.
     changed_peers: BTreeSet<[u8; 16]>,
+    /// Conversations made since the last note (1594): a note scoped to
+    /// what a batch named ([`Batch`]) refreshes them too.
+    made: Vec<[u8; 16]>,
+    /// The conversations the running batch's events named (1594,
+    /// [`Batch`]), and the scoped note's indices: kept between notes, so
+    /// a chunk's note allocates nothing for its scope.
+    note_scope: Vec<[u8; 16]>,
+    note_indices: Vec<usize>,
+    /// What earlier folds changed and the store has not drained
+    /// ([`UiModel::take_writes`] reads both halves): each note's set as
+    /// it was, merged only by the drain (1591: a merge per note was an
+    /// allocation per few entries of a pulled page folded in chunks).
+    owed_changed: Vec<BTreeSet<([u8; 16], u64)>>,
+    owed_peers: BTreeSet<[u8; 16]>,
+    owed_groups: BTreeSet<[u8; 16]>,
+    /// Conversations whose listing the store must relearn (1490): every
+    /// revision bump queues its peer here, take_writes derives the row.
+    listing_owed: BTreeSet<[u8; 16]>,
+    /// The note's list of the conversations it bumped, kept between
+    /// notes so a note allocates nothing for it (1591).
+    bumped: Vec<usize>,
+    /// The conversation whose first page was asked of the store and has
+    /// not come (1490): asked once per selection, cleared when it lands.
+    page_asked: Option<[u8; 16]>,
+    /// Read marks whose messages no loaded page holds yet (1490): the
+    /// store applied them; the page that brings their conversation
+    /// replays them here ([`history::READ_PENDING_MOST`]).
+    read_pending: Vec<[u8; 32]>,
+    /// Which conversation holds each message id (1600): what a read
+    /// mark asks instead of every conversation in turn.
+    ids: id_index::IdIndex,
     /// Deletions for the store, in the order they were made.
     forgotten: Vec<StoreWrite>,
     /// Whether this device is a client of a home node: what the reader
@@ -822,19 +1341,31 @@ pub struct UiModel<B> {
     /// Marks for the home node, in the order they were made
     /// ([`UiModel::take_marks`]).
     marks: Vec<crate::home::wire::Mark>,
-    /// Petnames for the home node, in the order they were set
-    /// ([`UiModel::take_petnames`]).
-    petnames: Vec<([u8; 16], Option<String>)>,
+    /// The petnames this device set that the home node has not taken
+    /// yet, the newest of each peer (1635, [`UiModel::take_petnames`]):
+    /// kept in the store until the home takes them, and the reader's word
+    /// on the peer over any entry a pull brings meanwhile.
+    pub(crate) owed_petnames: BTreeMap<[u8; 16], Option<String>>,
+    /// A hand of [`UiModel::take_petnames`] is under way: the next waits
+    /// for its [`UiEvent::PetnamesHanded`], so the home takes a peer's
+    /// petnames in the order they were set.
+    petnames_in_flight: bool,
+    /// [`Self::owed_petnames`] changed since the store last kept it.
+    owed_petnames_changed: bool,
+    /// The petnames the home took from this device until the next pull
+    /// ends, each with this device's clock when the home's answer came
+    /// (1635): a pull under way when the home took it may still bring an
+    /// older entry, which the home's stamp tells apart from a newer word.
+    taken_petnames: BTreeMap<[u8; 16], (Option<String>, i64)>,
     /// Peer states for the home node, in the order they were set
     /// ([`UiModel::take_peer_states`]).
     peer_states: Vec<([u8; 16], crate::home::wire::PeerState)>,
-    /// This device's petnames the home has not echoed back yet (1614): a
-    /// pulled petname for one of these peers is the home's older word,
+    /// This device's peer states the home has not echoed back yet (1614):
+    /// a pulled state for one of these peers is the home's older word,
     /// pulled before ours reached it, and is not taken; the echo of ours
-    /// settles it. So the name shown does not depend on whether a pull or
-    /// the hand-off arrives first.
-    owed_petnames: BTreeMap<[u8; 16], Option<String>>,
-    /// The same for peer states (1614).
+    /// settles it. So the state shown does not depend on whether a pull or
+    /// the hand-off arrives first. Petnames have their own, kept across a
+    /// restart (1635, [`Self::owed_petnames`]).
     owed_peer_states: BTreeMap<[u8; 16], crate::home::wire::PeerState>,
     /// A pull a send or a wake asked for while one was running, with its
     /// reason: started when that one ends, since it may have begun before
@@ -868,6 +1399,10 @@ pub struct UiModel<B> {
     /// width, 1375); `None` for the terminal's conversation pane. The fit,
     /// the pan's step and the pins' cells go by it ([`UiModel::map_area`]).
     pub map_picture: Option<Rect>,
+    /// The pane the map was opened from, which closing it returns to
+    /// (1531): the list on a screen that showed the list, the chat on one
+    /// that showed the chat.
+    pub map_from: Pane,
     /// The left button held down on the map, a click or a drag.
     pub map_press: Option<map::MapPress>,
     /// Whether going to a place loads its region by itself (`map_autoload`,
@@ -878,6 +1413,9 @@ pub struct UiModel<B> {
     pub map_theme: Option<ThemeFlag>,
     /// The word the map's title carries while a region loads.
     pub map_loading: Option<String>,
+    /// A load runs or waits for what is on screen (1527): the title says
+    /// [`MAP_LOADING_HERE`], the window's chip too.
+    pub map_here: bool,
     /// The glyph test pattern is over the map (`g`, 1093).
     pub map_glyph_test: bool,
     /// The tick until which the map's title names the way it is drawn,
@@ -937,10 +1475,90 @@ pub struct UiModel<B> {
     pub browse: browse::Browse,
     /// The Rooms tab: Reticulum Relay Chat on a hub (1379).
     pub rooms: rooms::Rooms,
+    /// The Explore tab (1578): the pages and the public rooms under one
+    /// button.
+    pub explore: explore::Explore,
     /// The language the model's own sentences from the catalogue are said
     /// in ([`strings::StrId`]): English unless the shell knows better, as
     /// the phone does.
     pub lang: strings::Lang,
+    /// The debug overlay (1447): the map's zoom and its count of pins in
+    /// view, which no user reads; `LOQUAX_FPS=1` turns it on with the
+    /// frame counter.
+    pub debug_overlay: bool,
+    /// What the presentation built since the last event (1489,
+    /// [`counters`]).
+    ops: counters::Ops,
+    /// Moves when a fold changed something a screen shows (1490, 1491):
+    /// every event but the clock's three ([`UiEvent::is_clock`]), and
+    /// those only when they moved what is shown (`UiModel::clock_marks`).
+    /// A cache that outlives one fold keys on it, and a target's loop
+    /// builds its view only when it moved ([`Presented`]), so a screen
+    /// left alone builds nothing while the clock runs.
+    pub revision: u64,
+    /// The list's order as the last [`update`] left it (1490):
+    /// [`UiModel::order`] reads it, [`UiModel::note_changes`] moves only
+    /// the conversations whose revision moved. `None` until the first
+    /// fold, and unused while one runs ([`UiModel::folding`]).
+    order_cache: Option<OrderCache>,
+    /// A fold is running: what it mutated is not yet noted, so caches
+    /// keyed by revisions stand aside until [`UiModel::note_changes`].
+    folding: bool,
+    /// What the target's screen shows (1490): how many list rows and how
+    /// many bubble rows are in view. The scene is built for this window
+    /// and a margin as big again, never for the whole model
+    /// ([`UiEvent::Viewing`] sets it; a window that scrolls itself asks
+    /// for everything with [`Viewing::ALL`]).
+    pub viewing: Viewing,
+    /// The list's window as the first scene read after the last fold
+    /// built it ([`scene::Scene`]'s list): checked against its stamp
+    /// before every reuse. Interior-mutable since 1591: the read builds
+    /// it, not the note ([`UiModel::scene_owed`]).
+    built_list: core::cell::RefCell<Option<BuiltList>>,
+    /// Where a list apart (the M9's compact list) last stood (1546): the
+    /// selected conversation's peer and its line in the rows on screen.
+    /// The cursor is the reader's: rows that move in the order move
+    /// around it, its row keeps the cursor and the cursor keeps its line
+    /// ([`UiModel::list_top`]). Interior-mutable: the scene's read keeps
+    /// it.
+    list_line: core::cell::Cell<Option<([u8; 16], usize)>>,
+    /// The open chat as the first scene read after the last fold built
+    /// it: the window of bubbles around the newest, or around the cursor
+    /// while the keys are in the chat. Interior-mutable as `built_list`.
+    built_chat: core::cell::RefCell<Option<BuiltChat>>,
+    /// The stamps the last note's windows have (1591): the list's, and
+    /// the open chat's with its conversation when one is shown. The
+    /// scene's read builds a window and keeps it only while its stamp is
+    /// the noted one, so what it keeps is what the note would have built;
+    /// a model changed outside [`update`] since reads cold, as before.
+    /// Before 1591 every note built both windows, and a pulled page
+    /// folded a budget at a time (1575) paid the rows once per batch,
+    /// dozens of times per page, for frames nobody drew (window 18:
+    /// `finish` 9.2 of 16.3 ms per entry); now they are paid once per
+    /// frame read, and not at all for a batch no frame follows.
+    scene_owed: SceneOwed,
+    /// The open conversation laid out as the terminal had it last
+    /// (1490), keyed by [`UiModel::laid_key`]: a key that only moved the
+    /// cursor restyles two blocks in place instead of laying thousands
+    /// of rows. Interior-mutable: a read warms it.
+    laid_cache: core::cell::RefCell<Option<LaidCache>>,
+    /// The whole terminal view of one turn ([`view`]), keyed by its
+    /// stamp: the viewport ask and the draw of one turn share a build,
+    /// and a turn in which nothing changed builds nothing.
+    view_cache: core::cell::RefCell<Option<(u64, View)>>,
+    /// The fingerprint of the model-wide look the last [`update`] saw
+    /// ([`UiModel::look_fingerprint`]), and how often it changed: part of
+    /// every conversation-keyed cache's key, so a name heard, a day
+    /// turned or a language set rebuilds what shows them.
+    look_stamp: u64,
+    look_rev: u64,
+    /// Moves when a list row may have changed (1491): a conversation's
+    /// revision, the look, a conversation come or gone. The phone makes
+    /// its two lists by it, not by [`UiModel::revision`], which a node
+    /// the Browse tab heard of moves too.
+    lists_rev: u64,
+    /// How many conversations the last fold left, for `lists_rev`.
+    lists_len: usize,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -971,6 +1589,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             compose: B::default(),
             focus: Pane::Conversations,
             toasts: Vec::new(),
+            toasts_said: 0,
             palette: None,
             help: false,
             help_scroll: 0,
@@ -990,9 +1609,12 @@ impl<B: InputBuffer + Default> UiModel<B> {
             now: None,
             screen: (80, 24),
             scroll_top: None,
+            kept_top: None,
+            chat_anchor: None,
             detail: None,
             own_code: None,
             profile_open: false,
+            settings: None,
             profile: profile::ProfileFacts::default(),
             detail_scroll: 0,
             mailbox: MailboxShown::default(),
@@ -1000,6 +1622,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             mouse: true,
             footer_hover: None,
             selection: None,
+            copy_mode: None,
             press: None,
             tier: Tier::Mono,
             theme: Theme::Dark,
@@ -1009,14 +1632,27 @@ impl<B: InputBuffer + Default> UiModel<B> {
             show_archived: false,
             changed: BTreeSet::new(),
             changed_peers: BTreeSet::new(),
+            made: Vec::new(),
+            note_scope: Vec::new(),
+            note_indices: Vec::new(),
+            owed_changed: Vec::new(),
+            owed_peers: BTreeSet::new(),
+            owed_groups: BTreeSet::new(),
+            listing_owed: BTreeSet::new(),
+            bumped: Vec::new(),
+            page_asked: None,
+            read_pending: Vec::new(),
+            ids: id_index::IdIndex::default(),
             forgotten: Vec::new(),
             home_client: false,
             history: false,
             list_apart: false,
             marks: Vec::new(),
-            petnames: Vec::new(),
-            peer_states: Vec::new(),
             owed_petnames: BTreeMap::new(),
+            petnames_in_flight: false,
+            owed_petnames_changed: false,
+            taken_petnames: BTreeMap::new(),
+            peer_states: Vec::new(),
             owed_peer_states: BTreeMap::new(),
             pull_owed: None,
             confirm: None,
@@ -1030,9 +1666,11 @@ impl<B: InputBuffer + Default> UiModel<B> {
             map_setup: map::MapSetup::default(),
             map_picture: None,
             map_press: None,
+            map_from: Pane::Messages,
             map_autoload: false,
             map_theme: None,
             map_loading: None,
+            map_here: false,
             map_glyph_test: false,
             map_named_until: None,
             map_wants: Vec::new(),
@@ -1055,7 +1693,24 @@ impl<B: InputBuffer + Default> UiModel<B> {
             groups_changed: BTreeSet::new(),
             browse: browse::Browse::default(),
             rooms: rooms::Rooms::default(),
+            explore: explore::Explore::default(),
             lang: strings::Lang::En,
+            debug_overlay: false,
+            ops: counters::Ops::new(),
+            revision: 0,
+            look_stamp: 0,
+            look_rev: 0,
+            lists_rev: 0,
+            lists_len: 0,
+            order_cache: None,
+            folding: false,
+            viewing: Viewing::default(),
+            built_list: core::cell::RefCell::new(None),
+            list_line: core::cell::Cell::new(None),
+            built_chat: core::cell::RefCell::new(None),
+            scene_owed: SceneOwed::default(),
+            laid_cache: core::cell::RefCell::new(None),
+            view_cache: core::cell::RefCell::new(None),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1135,15 +1790,42 @@ impl<B: InputBuffer> UiModel<B> {
 }
 
 impl<B> UiModel<B> {
-    /// Whether a detail view is up: a message's, or `my code`'s.
+    /// Whether a detail view is up: a message's, the profile's, or the
+    /// settings'.
     pub fn detail_open(&self) -> bool {
-        self.detail.is_some() || self.profile_open
+        self.detail.is_some() || self.profile_open || self.settings.is_some()
     }
 
-    /// Close the detail view up, whichever it is.
+    /// Close the detail view up, one step: a message's or the profile
+    /// over the settings goes and leaves the settings; a section goes
+    /// back to their list, the list closes them.
     pub fn close_detail(&mut self) {
+        self.detail_scroll = 0;
+        if self.detail.is_some() || self.profile_open {
+            self.detail = None;
+            self.profile_open = false;
+            return;
+        }
+        self.settings = match self.settings {
+            Some(Some(_)) => Some(None),
+            _ => None,
+        };
+    }
+
+    /// Open the settings (1450): their list with `None`, a section with
+    /// it, over whatever detail view was up.
+    pub fn show_settings(&mut self, at: Option<settings::Section>) -> Vec<UiEffect> {
         self.detail = None;
         self.profile_open = false;
+        self.detail_scroll = 0;
+        if at == Some(settings::Section::Profile) {
+            // The profile is a screen of its own (the phone's activity,
+            // the window's layer): the section opens it over the list.
+            self.settings = Some(None);
+            return self.show_profile(true);
+        }
+        self.settings = Some(at);
+        Vec::new()
     }
 
     /// `peer`'s message went out: its draft goes, from the store at once,
@@ -1235,6 +1917,8 @@ impl<B> UiModel<B> {
         match self.conversations.iter().position(|c| c.peer == peer) {
             Some(index) => index,
             None => {
+                self.names.meet(peer);
+                self.made.push(peer);
                 self.conversations.push(Conversation::new(peer));
                 self.conversations.len() - 1
             }
@@ -1242,6 +1926,11 @@ impl<B> UiModel<B> {
     }
 
     fn toast(&mut self, kind: ToastKind, text: String) {
+        if self.toasts.len() >= TOAST_KEEP {
+            let over = self.toasts.len() + 1 - TOAST_KEEP;
+            self.toasts.drain(..over);
+        }
+        self.toasts_said = self.toasts_said.wrapping_add(1);
         self.toasts.push(Toast {
             kind,
             text,
@@ -1271,8 +1960,14 @@ impl<B> UiModel<B> {
         }
         self.selected = index;
         self.scroll_top = None;
+        self.chat_anchor = None;
         self.selection = None;
-        self.read_out(index);
+        // Where the list stands beside the chat, selecting is seeing.
+        // Where the list is a screen of its own (1493: the phone, the
+        // M9), moving the cursor shows nothing: [`UiEvent::Open`] reads.
+        if !self.list_apart {
+            self.read_out(index);
+        }
         if let Some(conversation) = self.conversations.get(index) {
             self.message_cursor = conversation.messages.len().saturating_sub(1);
         }
@@ -1288,18 +1983,36 @@ impl<B> UiModel<B> {
             return;
         }
         let unread = core::mem::take(&mut conversation.unread);
+        // A chat opened before its page loaded (1546, a board's two
+        // cores): the row's kept ids name its unread, and its badge goes
+        // with the count. Before, the count went to 0 with no mark.
+        let kept = conversation.unread_ids.take();
+        if let Some(listing) = conversation.listing.as_mut() {
+            listing.unread_rows = 0;
+        }
         self.changed_peers.insert(conversation.peer);
         if !self.home_client {
             return;
         }
-        let ids: Vec<[u8; 32]> = conversation
-            .messages
-            .iter()
-            .rev()
-            .filter(|message| !message.outbound)
+        // The newest by arrival (1505), where the body's writers' order
+        // may have put a late one anywhere.
+        let mut ids: Vec<[u8; 32]> = conversation
+            .received_by_arrival(true)
+            .into_iter()
             .take(unread)
-            .filter_map(|message| message.id)
+            .filter_map(|m| conversation.messages[m].id)
             .collect();
+        // Newest first, the unloaded ones behind the loaded.
+        if ids.len() < unread {
+            let room = unread - ids.len();
+            let missing: Vec<[u8; 32]> = kept
+                .into_iter()
+                .rev()
+                .filter(|id| !ids.contains(id))
+                .take(room)
+                .collect();
+            ids.extend(missing);
+        }
         self.mark_out(crate::home::wire::MarkFlag::Read, ids);
     }
 
@@ -1313,6 +2026,440 @@ impl<B> UiModel<B> {
         }
     }
 
+    /// What the presentation built since the last event or reset (1489):
+    /// scenes, their nodes, list rows, bubbles, laid rows, sorts. `None`
+    /// in a release build without the `counters` feature ([`counters`]).
+    pub fn counters(&self) -> Option<counters::Counters> {
+        self.ops.read()
+    }
+
+    /// What the presentation built since the model was made, across every
+    /// event's fresh count (1514): what a batch of events cost together,
+    /// a restore or a page folded one [`update`] each or as one
+    /// [`Batch`]. `None` where [`UiModel::counters`] is.
+    pub fn total_counters(&self) -> Option<counters::Counters> {
+        self.ops.read_total()
+    }
+
+    /// Start the count afresh, as [`update`] does for every event: for a
+    /// test that measures a frame no event asked for.
+    pub fn reset_counters(&self) {
+        self.ops.reset();
+    }
+
+    /// Count `n` more of `op` ([`counters`]).
+    #[inline]
+    pub(crate) fn count(&self, op: counters::Op, n: usize) {
+        self.ops.add(op, n);
+    }
+
+    /// Note what the fold changed (1490), at the end of every [`update`]:
+    /// the summaries' new tails (1463), each changed conversation's
+    /// revision, the model-wide look. The fold's own change sets
+    /// (`changed`, `changed_peers`, `groups_changed`) poke their
+    /// conversations too, so an in-place change the summary cannot see (a
+    /// delivery tick deep in the pane) still bumps; they drain with the
+    /// store's writes, and a bump too many costs one rebuild, never a
+    /// stale frame. The fold's sets hold only this fold's entries: each
+    /// note moves them into the owed shadows the store drains, so the
+    /// poke costs the fold's changes, never what accumulated.
+    fn note_changes(&mut self) -> bool {
+        self.note_changes_in(false)
+    }
+
+    /// [`UiModel::note_changes`], refreshing only the conversations a
+    /// batch's events named when `scoped` (1594, [`Batch`]): those in
+    /// `note_scope`, with the fold's own sets, the conversations made
+    /// since the last note and the open one. The full walk refreshed the
+    /// summary and the row fingerprint of every conversation at every
+    /// note, 300 of them per chunk of a pulled page (window 19: 3.66 ms
+    /// per entry on the board, about 11 ms a chunk). A build with debug
+    /// assertions walks the rest as well, bumps what the scope missed,
+    /// and fails the assertion naming it: the tests compare the two.
+    fn note_changes_in(&mut self, scoped: bool) -> bool {
+        // The fold's own sets are asked in place (1591): a set of the
+        // poked peers built per note was the note's own allocations, paid
+        // once per batch however small the batch.
+        let changed = core::mem::take(&mut self.changed);
+        let peers = core::mem::take(&mut self.changed_peers);
+        let groups = core::mem::take(&mut self.groups_changed);
+        let poked = |peer: &[u8; 16]| {
+            peers.contains(peer)
+                || groups.contains(peer)
+                || changed
+                    .range((*peer, 0)..=(*peer, u64::MAX))
+                    .next()
+                    .is_some()
+        };
+        let mut bumped = core::mem::take(&mut self.bumped);
+        bumped.clear();
+        let mut named = core::mem::take(&mut self.note_scope);
+        let mut indices = core::mem::take(&mut self.note_indices);
+        indices.clear();
+        if scoped {
+            // The scope's conversations, each found once.
+            named.extend(peers.iter().chain(groups.iter()).chain(self.made.iter()));
+            let mut last = None;
+            for (peer, _) in changed.iter() {
+                if last != Some(*peer) {
+                    named.push(*peer);
+                    last = Some(*peer);
+                }
+            }
+            if let Some(open) = self.conversations.get(self.selected) {
+                named.push(open.peer);
+            }
+            named.sort_unstable();
+            named.dedup();
+            let conversations = &self.conversations;
+            indices.extend(
+                named
+                    .iter()
+                    .filter_map(|peer| conversations.iter().position(|c| c.peer == *peer)),
+            );
+            indices.sort_unstable();
+        }
+        named.clear();
+        self.note_scope = named;
+        self.made.clear();
+        let mut note = |index: usize, conversation: &mut Conversation, bumped: &mut Vec<usize>| {
+            let refreshed = conversation
+                .summary
+                .refresh(conversation.peer, &conversation.messages);
+            let stamp = conversation.row_fingerprint();
+            if refreshed || stamp != conversation.stamp.get() || poked(&conversation.peer) {
+                conversation.stamp = Rev::at(stamp);
+                conversation.revision = Rev::at(conversation.revision.get().wrapping_add(1));
+                self.listing_owed.insert(conversation.peer);
+                bumped.push(index);
+                return true;
+            }
+            false
+        };
+        if !scoped {
+            for (index, conversation) in self.conversations.iter_mut().enumerate() {
+                note(index, conversation, &mut bumped);
+            }
+        } else {
+            for &index in &indices {
+                note(index, &mut self.conversations[index], &mut bumped);
+            }
+            // The full walk beside it, in a build with debug assertions:
+            // a conversation the scope missed is bumped all the same and
+            // named.
+            #[cfg(debug_assertions)]
+            {
+                let mut missed = Vec::new();
+                for (index, conversation) in self.conversations.iter_mut().enumerate() {
+                    if indices.binary_search(&index).is_err()
+                        && note(index, conversation, &mut bumped)
+                    {
+                        missed.push(crate::address::to_hex(&conversation.peer));
+                    }
+                }
+                bumped.sort_unstable();
+                debug_assert!(
+                    missed.is_empty(),
+                    "a scoped note missed conversations a full walk bumps: {missed:?}"
+                );
+            }
+        }
+        self.note_indices = indices;
+        // Into the owed shadows the store drains: moved whole when they
+        // are drained already, no node copied.
+        fn owe<T: Ord>(owed: &mut BTreeSet<T>, more: BTreeSet<T>) {
+            match owed.is_empty() {
+                true => *owed = more,
+                false => owed.extend(more),
+            }
+        }
+        if !changed.is_empty() {
+            self.owed_changed.push(changed);
+        }
+        owe(&mut self.owed_peers, peers);
+        owe(&mut self.owed_groups, groups);
+        let look = self.look_fingerprint();
+        let looked = look != self.look_stamp;
+        if looked {
+            self.look_stamp = look;
+            self.look_rev = self.look_rev.wrapping_add(1);
+        }
+        // The fold is noted: the caches may stand on it again.
+        self.folding = false;
+        self.refresh_order(&bumped);
+        // The list's and the chat's windows are built by the next scene
+        // read ([`UiModel::built_list`]), not here (1591): only their
+        // stamps are taken now.
+        self.scene_owed = self.noted_stamps();
+        let rows = looked || !bumped.is_empty() || self.lists_len != self.conversations.len();
+        self.bumped = bumped;
+        if rows {
+            self.lists_len = self.conversations.len();
+            self.lists_rev = self.lists_rev.wrapping_add(1);
+        }
+        rows
+    }
+
+    /// How often a list row may have changed (1491): what a target that
+    /// makes only the lists, the phone's two, makes them again by.
+    pub fn lists_revision(&self) -> u64 {
+        self.lists_rev
+    }
+
+    /// What a clock event can move on a screen besides the
+    /// conversations and the look (1491): a toast that aged out, a
+    /// question, the fetch and the sends, the map's drawing named a
+    /// moment, the header's fetch word and next sync. Two equal marks around a clock event mean it moved nothing
+    /// shown. The tick itself is not here: only the terminal draws by it
+    /// ([`UiModel::animating`]), and its loop stamps it while it does.
+    fn clock_marks(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(self.toasts.len() as u64);
+        hash.word(self.toasts_said);
+        hash.word(u64::from(self.current_toast().is_some()));
+        hash.word(u64::from(self.confirm.is_some()));
+        hash.word(u64::from(self.fetching));
+        hash.word(self.sending.len() as u64);
+        hash.word(u64::from(self.history));
+        hash.word(u64::from(
+            self.map_named_until.is_some_and(|until| self.tick < until),
+        ));
+        // The header's two readings of the monotonic clock: a quiet pull
+        // said once it took a second, and the next sync's minute.
+        hash.word(u64::from(fetch_shown(self)));
+        hash.word(next_sync(self).map_or(u64::MAX, |at| at.unix_secs as u64));
+        hash.done()
+    }
+
+    /// Whether the terminal draws something by the tick now (1491): the
+    /// delivery spinner while a send or a fetch runs, a waveform playing,
+    /// a recording's bar. Its loop builds a frame per tick then, and none
+    /// otherwise.
+    pub fn animating(&self) -> bool {
+        !self.sending.is_empty()
+            || self.fetching
+            || self.playing.is_some()
+            || self.recording.phase != recording::Phase::Idle
+    }
+
+    /// A change made outside [`update`] (1491): a shell that sets the
+    /// model's fields itself (the window's abilities and viewport at its
+    /// start), hands the hosted browser an event of its own, or reads
+    /// history into the model, says so. The loops build once more, and
+    /// the fold's built list and chat are dropped, as their stamps see
+    /// only what a fold changes: the scene builds whole until the next
+    /// fold builds them again. Before, the window's plus stayed away
+    /// until the open chat changed (1490's cache kept the chat built
+    /// before `run` gave the window its chooser).
+    pub fn changed_outside(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        *self.built_list.get_mut() = None;
+        *self.built_chat.get_mut() = None;
+        self.scene_owed = SceneOwed::default();
+        *self.view_cache.borrow_mut() = None;
+    }
+
+    /// How often the model-wide look changed (1490): the names, the
+    /// language, the minute, what plays. Part of every
+    /// conversation-keyed cache's key.
+    pub fn look_rev(&self) -> u64 {
+        self.look_rev
+    }
+
+    /// The fingerprint behind [`UiModel::look_rev`]: everything a list
+    /// row or a bubble draws that belongs to no one conversation.
+    fn look_fingerprint(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(self.lang as u64);
+        if let Some(now) = self.now {
+            // To the minute: the rows' ago-words move by it.
+            hash.word((now.unix_secs.div_euclid(60)) as u64);
+            hash.word(now.offset_secs as u64);
+        }
+        hash.word(u64::from(self.home_client));
+        hash.word(u64::from(self.reading.on));
+        hash.word(u64::from(self.ascii));
+        hash.word(u64::from(self.show_blocked));
+        hash.word(u64::from(self.show_archived));
+        if let Some(playing) = &self.playing {
+            hash.bytes(&playing.peer);
+            hash.word(playing.key);
+        }
+        hash.word(self.voice_tracks.len() as u64);
+        for peer in self.shares.running.keys() {
+            hash.bytes(peer);
+        }
+        for peer in self.bar.staged.keys() {
+            hash.bytes(peer);
+        }
+        // The recording bar lives in the chat's compose node: its phase
+        // and its growing track move the look while one runs.
+        hash.bytes(&self.recording.peer);
+        hash.word(match self.recording.phase {
+            recording::Phase::Idle => 0,
+            recording::Phase::Held { since } => 1 ^ (since << 3),
+            recording::Phase::Locked { since } => 2 ^ (since << 3),
+            recording::Phase::Paused => 3,
+            recording::Phase::Preview => 4,
+            recording::Phase::Cancelled => 5,
+            recording::Phase::Sent => 6,
+        });
+        hash.word(self.recording.track.len() as u64);
+        hash.word(self.recording.slide.0 as u64);
+        hash.word(self.recording.slide.1 as u64);
+        hash.word(u64::from(self.recording.previewing));
+        hash.word(u64::from(self.recording.heard));
+        hash.word(u64::from(self.recording.said.is_some()));
+        self.names.fingerprint(&mut hash);
+        hash.done()
+    }
+
+    /// Conversation `peer`'s row as the store keeps it (1490, schema
+    /// 17), derived from its loaded messages as the list derives its
+    /// row; `None` while nothing is loaded (the store keeps or heals
+    /// its own then). A group the reader is invited to that no message
+    /// reached yet, and none waits unloaded, has the invitation's row
+    /// (1556): its line says "Einladung", from when the invitation came.
+    /// Before, it had none, and a device that lists from kept rows lost
+    /// it at every boot (1521c).
+    pub fn listing_for(&self, peer: &[u8; 16]) -> Option<listing::Listing> {
+        let conversation = self.conversations.iter().find(|c| c.peer == *peer)?;
+        if conversation.messages.is_empty() {
+            let invited = self
+                .group(peer)
+                .is_some_and(|g| g.standing == groups::Standing::Invited);
+            return (invited && conversation.earlier == 0).then(|| listing::Listing {
+                moved: conversation.touched,
+                line: strings::StrId::GroupInvitation.text(self.lang).into(),
+                ..listing::Listing::default()
+            });
+        }
+        let messages = &conversation.messages;
+        let last = messages.iter().rev().find(|m| !m.is_group_state());
+        let updates = match last.is_some_and(Message::is_report) {
+            true => conversation.run(messages.len().saturating_sub(1)).len(),
+            false => 0,
+        };
+        let fixes = conversation.report_fixes();
+        let mark = fixes
+            .first()
+            .map(|fix| leviculum_lxmf::telemetry::ShareMark::of_blob(&fix.telemetry))
+            .unwrap_or_default();
+        let line = last
+            .filter(|m| !m.is_report())
+            .map(|m| {
+                chat::invitation_line(self, m)
+                    .or_else(|| chat::reaction_line(self, peer, m))
+                    .unwrap_or_else(|| chat::preview(m, self.lang))
+            })
+            .unwrap_or_default();
+        Some(listing::Listing {
+            moved: conversation.last_written(),
+            line,
+            ours: last.is_some_and(|m| m.outbound),
+            at: last.and_then(|m| m.at),
+            kind: listing::LastKind::of_word(last.map_or("", |m| chat::kind(m))),
+            reaction: last
+                .filter(|m| m.is_reaction())
+                .and_then(|m| m.reaction())
+                .map(|(_, content)| content),
+            mark: last
+                .filter(|m| m.outbound)
+                .map(|m| chat::Mark::of(chat::shown(m.delivery, self))),
+            read_at: last.filter(|m| m.outbound).and_then(|m| {
+                match chat::shown(m.delivery, self) {
+                    Some(DeliveryState::Read { at }) => Some(at),
+                    _ => None,
+                }
+            }),
+            unread_rows: conversation.unread_rows() as u32,
+            updates: updates as u32,
+            appearance: conversation.appearance(),
+            report_times: fixes.iter().map(Fix::order_time).collect(),
+            share_every: mark.every,
+            share_ended: mark.ended,
+        })
+    }
+
+    /// Conversation `peer` as a device keeps it to list it at boot
+    /// (1521, [`listing::Row`]): its row derived from the loaded
+    /// messages, or the one it was restored with while none is loaded;
+    /// `None` for a conversation with neither.
+    pub fn row(&self, peer: &[u8; 16]) -> Option<listing::Row> {
+        let conversation = self.conversations.iter().find(|c| c.peer == *peer)?;
+        let listing = self
+            .listing_for(peer)
+            .or_else(|| conversation.listing.clone())?;
+        // The unread ids: those still unloaded, then the loaded ones,
+        // the newest `unread` of them.
+        let mut ids: Vec<[u8; 32]> = match conversation.earlier {
+            0 => Vec::new(),
+            _ => conversation.unread_ids.to_vec(),
+        };
+        ids.extend(
+            conversation
+                .messages
+                .iter()
+                .filter(|m| !m.outbound && !m.is_aside())
+                .filter_map(|m| m.id),
+        );
+        let keep = conversation.unread.min(listing::UNREAD_IDS);
+        let ids = ids.split_off(ids.len().saturating_sub(keep));
+        Some(listing::Row {
+            peer: *peer,
+            unread: u32::try_from(conversation.unread).unwrap_or(u32::MAX),
+            activity: conversation.activity,
+            unread_ids: ids,
+            listing,
+        })
+    }
+
+    /// The list from kept rows alone (1521), each with how many messages
+    /// the store holds for it, and the names heard: no message read, the conversations listed
+    /// as their rows say, the list ordered and the scene's window built
+    /// once. A conversation's messages load when it opens
+    /// (`UiModel::ask_page`). The counters are the restore's.
+    pub fn restore_rows(
+        &mut self,
+        rows: Vec<(listing::Row, usize)>,
+        names: Vec<([u8; 16], String)>,
+    ) {
+        self.ops.reset();
+        // The names the peers announced, as the fold of their entries
+        // would have heard them.
+        for (peer, name) in names {
+            let _ = self.names.heard(peer, Some(&name));
+        }
+        for (row, earlier) in rows {
+            let peer = row.peer;
+            self.restore_one(history::Restored {
+                peer,
+                pinned: false,
+                flags: history::Flags::default(),
+                unread: row.unread as usize,
+                messages: Vec::new(),
+                earlier,
+                draft: history::Draft::default(),
+                group: None,
+                listing: Some(row.listing),
+            });
+            if let Some(conversation) = self.conversations.iter_mut().find(|c| c.peer == peer) {
+                conversation.activity = row.activity;
+                conversation.unread_ids.set(row.unread_ids);
+                self.activity = self.activity.max(row.activity);
+            }
+        }
+        self.note_changes();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Give every message from here on a key above `floor` (1521): a
+    /// board keys the messages it loads from its ring by their entry's
+    /// sequence, and the ones it folds live must never meet them.
+    pub fn keys_above(&mut self, floor: u64) {
+        self.activity = self.activity.max(floor);
+    }
+
     /// The marks a fold made, for the shell to hand the home node.
     pub fn take_marks(&mut self) -> Vec<crate::home::wire::Mark> {
         core::mem::take(&mut self.marks)
@@ -1324,23 +2471,315 @@ impl<B> UiModel<B> {
     /// once keeps its order), then by when it came here; those without one
     /// after, in the order they came. Only those the list shows
     /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
+    ///
+    /// The last fold's cache answers when it is current (1490): a sort is
+    /// paid only when something moved, and only for what moved. A model
+    /// changed outside [`update`], or read during a fold, sorts afresh.
     pub fn order(&self) -> Vec<usize> {
-        // The blocked view lists the blocked, archived or not.
-        let mut order: Vec<usize> = (0..self.conversations.len())
-            .filter(|&i| {
-                let c = &self.conversations[i];
-                self.shows(&c.peer) && (self.show_blocked || c.flags.archived == self.show_archived)
-            })
-            .collect();
-        order.sort_by_key(|&i| {
-            let c = &self.conversations[i];
-            (
-                core::cmp::Reverse(c.pinned),
-                core::cmp::Reverse(c.last_written()),
-                core::cmp::Reverse(c.activity),
-            )
-        });
+        if !self.folding {
+            if let Some(cache) = self.order_cache.as_ref().filter(|c| c.current(self)) {
+                return cache.order.clone();
+            }
+        }
+        self.order_cold()
+    }
+
+    /// [`UiModel::order`] sorted afresh, the whole list counted.
+    fn order_cold(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = self.listed().collect();
+        self.count(counters::Op::Sorts, 1);
+        self.count(counters::Op::Sorted, order.len());
+        // Each key once (1463): `last_written` is a walk when the summary
+        // is behind.
+        order.sort_by_cached_key(|&i| self.order_key(i));
         order
+    }
+
+    /// Conversation `i`'s place in the list, total over the keys: the
+    /// index last, so the incremental insert lands exactly where the
+    /// stable full sort puts a mover among equals.
+    fn order_key(&self, i: usize) -> OrderKey {
+        let c = &self.conversations[i];
+        (
+            core::cmp::Reverse(c.pinned),
+            core::cmp::Reverse(c.last_written()),
+            core::cmp::Reverse(c.activity),
+            i,
+        )
+    }
+
+    /// Whether conversation `i` is in the list [`UiModel::order`] shows.
+    fn lists(&self, i: usize) -> bool {
+        let c = &self.conversations[i];
+        self.shows(&c.peer) && (self.show_blocked || c.flags.archived == self.show_archived)
+    }
+
+    /// Bring the order cache up to this fold (1490), `bumped` naming the
+    /// conversations whose revision moved: their keys are recomputed and
+    /// only they are re-placed, so a pull's page costs the page, not the
+    /// list. Anything structural (another count of conversations, a view
+    /// switched, the look moved — a block lives in the look) rebuilds
+    /// whole, counted as one full sort.
+    fn refresh_order(&mut self, bumped: &[usize]) {
+        let keep = self.order_cache.take().filter(|cache| {
+            cache.keys.len() == self.conversations.len()
+                && cache.show_blocked == self.show_blocked
+                && cache.show_archived == self.show_archived
+                && cache.look_rev == self.look_rev
+        });
+        let mut cache = match keep {
+            Some(cache) => cache,
+            None => {
+                self.order_cache = Some(OrderCache::fresh(self));
+                return;
+            }
+        };
+        let mut moved = 0usize;
+        for &i in bumped {
+            let key = self.lists(i).then(|| self.order_key(i));
+            if cache.keys[i] == key {
+                continue;
+            }
+            if cache.keys[i].is_some() {
+                if let Some(at) = cache.order.iter().position(|&o| o == i) {
+                    cache.order.remove(at);
+                }
+            }
+            if let Some(key) = key {
+                let to = cache
+                    .order
+                    .partition_point(|&o| cache.keys[o].is_some_and(|k| k < key));
+                cache.order.insert(to, i);
+            }
+            cache.keys[i] = key;
+            moved += 1;
+        }
+        if moved > 0 {
+            self.count(counters::Op::Sorts, 1);
+            self.count(counters::Op::Sorted, moved);
+        }
+        self.order_cache = Some(cache);
+    }
+
+    /// The slice of `order` the scene's list is built for (1490): the
+    /// rows in view and half a screen either side, the selected row
+    /// inside. `(first, how many, the first row on screen)`, the last for
+    /// a list apart only ([`UiModel::list_top`]).
+    ///
+    /// A list apart knows its first row on screen exactly (1546), so its
+    /// window is the rows in view and nothing else (1595): the selected
+    /// row is one of them, and every key or fold that moves the screen
+    /// moves the window's stamp, so a margin was built and never drawn
+    /// (1591: every row built is cloned into each scene the board draws).
+    pub(crate) fn list_window(&self, order: &[usize]) -> (usize, usize, Option<usize>) {
+        let visible = self.viewing.list_rows.max(1);
+        if self.viewing.apart {
+            let build = order.len().min(visible);
+            let top = self.list_top(order);
+            let first = top.min(order.len() - build);
+            return (first, build, Some(top));
+        }
+        let build = order.len().min(visible.saturating_mul(2));
+        let at = order.iter().position(|&i| i == self.selected).unwrap_or(0);
+        let first = at.saturating_sub(visible / 2).min(order.len() - build);
+        (first, build, None)
+    }
+
+    /// The first row of `order` a list apart shows (1546): the cursor's
+    /// own rule, one for every compact list. The cursor never moves by
+    /// itself: while the selected conversation stays selected it keeps
+    /// the line it stood on, and the rows a pull or an arrival reorders
+    /// move around it. A key that moves the selection moves the line by
+    /// as many rows as the selection moved in the order, kept on the
+    /// screen; the line gives way only where the list ends. A selection
+    /// never seen stands as low as the rows above it let it, at most on
+    /// the last line: the window the M9 had before 1546.
+    pub(crate) fn list_top(&self, order: &[usize]) -> usize {
+        let visible = self.viewing.list_rows.max(1);
+        let Some(at) = order.iter().position(|&i| i == self.selected) else {
+            return 0;
+        };
+        let peer = self.conversations[self.selected].peer;
+        let line = match self.list_line.get() {
+            Some((held, line)) if held == peer => line,
+            Some((held, line)) => match order
+                .iter()
+                .position(|&i| self.conversations[i].peer == held)
+            {
+                Some(was) => (line + at).saturating_sub(was),
+                None => at,
+            },
+            None => at,
+        };
+        let line = line.min(visible - 1).min(at);
+        let top = (at - line).min(order.len().saturating_sub(visible));
+        self.list_line.set(Some((peer, at - top)));
+        top
+    }
+
+    /// The fingerprint of everything the list's window is built from:
+    /// the look, the viewport, the whole order and the windowed
+    /// conversations' revisions.
+    fn list_stamp(&self, order: &[usize], first: usize, len: usize, top: Option<usize>) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(top.map_or(u64::MAX, |top| top as u64));
+        hash.word(self.look_rev);
+        hash.word(self.viewing.list_rows as u64);
+        hash.word(self.selected as u64);
+        hash.word(first as u64);
+        hash.word(len as u64);
+        for &i in order {
+            hash.word(i as u64);
+        }
+        for &i in &order[first..first + len] {
+            hash.word(self.conversations[i].revision());
+        }
+        hash.done()
+    }
+
+    /// Whether message `index` has a bubble row of its own: what the
+    /// chat's window counts ([`chat::bubbles`] builds notes and orphan
+    /// reactions besides, which the margin covers).
+    fn bubble_row(&self, c: usize, index: usize) -> bool {
+        let conversation = &self.conversations[c];
+        !conversation.messages[index].is_aside() && !conversation.report_folded(index)
+    }
+
+    /// The window of conversation `c`'s messages the chat is built for
+    /// (1490): the newest rows two screens deep, or the rows around the
+    /// cursor once the keys took it above them. `(from, to)`, message
+    /// indices.
+    fn chat_window(&self, c: usize) -> (usize, usize) {
+        let len = self.conversations[c].messages.len();
+        let target = self.viewing.chat_rows.max(1).saturating_mul(2);
+        let back = |end: usize, mut rows: usize| {
+            let mut from = end;
+            while from > 0 && rows > 0 {
+                from -= 1;
+                if self.bubble_row(c, from) {
+                    rows -= 1;
+                }
+            }
+            from
+        };
+        let mut from = back(len, target);
+        let mut to = len;
+        let cursor = self.message_cursor.min(len.saturating_sub(1));
+        if self.focus == Pane::Messages && cursor < from {
+            // The cursor climbed above the window: it follows, the
+            // cursor a quarter in from its top.
+            from = back(cursor + 1, (target / 4).max(1));
+            let mut rows = 0;
+            to = from;
+            while to < len && rows < target {
+                if self.bubble_row(c, to) {
+                    rows += 1;
+                }
+                to += 1;
+            }
+        }
+        (from, to)
+    }
+
+    /// The fingerprint of everything the open chat's window is built
+    /// from.
+    fn chat_stamp(&self, c: usize, from: usize, to: usize) -> u64 {
+        let conversation = &self.conversations[c];
+        let mut hash = Fnv::new();
+        hash.bytes(&conversation.peer);
+        hash.word(conversation.revision());
+        hash.word(self.look_rev);
+        hash.word(self.viewing.chat_rows as u64);
+        hash.word(from as u64);
+        hash.word(to as u64);
+        hash.done()
+    }
+
+    /// The stamps of the windows the fold left (1591, [`SceneOwed`]),
+    /// from the order the note just refreshed.
+    fn noted_stamps(&self) -> SceneOwed {
+        let list = self.order_cache.as_ref().map(|cache| {
+            let (first, len, top) = self.list_window(&cache.order);
+            self.list_stamp(&cache.order, first, len, top)
+        });
+        let shown = !self.viewing.apart || self.focus != Pane::Conversations;
+        let chat = (shown && self.conversations.get(self.selected).is_some()).then(|| {
+            let (from, to) = self.chat_window(self.selected);
+            (self.selected, self.chat_stamp(self.selected, from, to))
+        });
+        SceneOwed { list, chat }
+    }
+
+    /// The list's window as the fold left it (1490, 1591): the rows in
+    /// view and their margin, built once a fold was noted and kept while
+    /// its stamp is current; `None` while a fold runs or after the model
+    /// changed outside [`update`] (the scene builds whole then). Built by
+    /// the first read after a note, counted into the event that read it.
+    pub(crate) fn built_list(&self) -> Option<scene::List> {
+        if self.folding {
+            return None;
+        }
+        let order = self.order();
+        let (first, len, top) = self.list_window(&order);
+        let stamp = self.list_stamp(&order, first, len, top);
+        let current = self.built_list.borrow().as_ref().map(|b| b.stamp) == Some(stamp);
+        if !current {
+            if self.scene_owed.list != Some(stamp) {
+                return None;
+            }
+            let rows = scene::rows(self, order[first..first + len].to_vec());
+            *self.built_list.borrow_mut() = Some(BuiltList {
+                stamp,
+                first,
+                total: order.len(),
+                top,
+                rows,
+            });
+        }
+        let built = self.built_list.borrow();
+        let built = built.as_ref()?;
+        Some(scene::List {
+            id: scene::NodeId::List,
+            rows: built.rows.clone(),
+            first: built.first,
+            total: built.total,
+            top: built.top,
+            empty: strings::Text::key(strings::StrId::NoConversations),
+            a11y: scene::A11y::of(
+                scene::NodeId::List,
+                scene::Role::List,
+                strings::Text::key(strings::StrId::TabChats),
+            ),
+        })
+    }
+
+    /// Conversation `c`'s chat window as the fold left it (1490, 1591),
+    /// as [`UiModel::built_list`] keeps the list's.
+    pub(crate) fn built_chat(&self, c: usize) -> Option<scene::Chat> {
+        if self.folding {
+            return None;
+        }
+        let (from, to) = self.chat_window(c);
+        let stamp = self.chat_stamp(c, from, to);
+        let current = self.built_chat.borrow().as_ref().map(|b| b.stamp) == Some(stamp);
+        if !current {
+            if self.scene_owed.chat != Some((c, stamp)) {
+                return None;
+            }
+            let chat = scene::chat_in(self, c, from, to);
+            *self.built_chat.borrow_mut() = Some(BuiltChat { stamp, chat });
+        }
+        self.built_chat.borrow().as_ref().map(|b| b.chat.clone())
+    }
+
+    /// The conversations the list shows, in no order: [`UiModel::order`]
+    /// before its sort.
+    pub fn listed(&self) -> impl Iterator<Item = usize> + '_ {
+        // The blocked view lists the blocked, archived or not.
+        (0..self.conversations.len()).filter(|&i| {
+            let c = &self.conversations[i];
+            self.shows(&c.peer) && (self.show_blocked || c.flags.archived == self.show_archived)
+        })
     }
 
     fn bump(&mut self) -> u64 {
@@ -1412,29 +2851,124 @@ impl<B> UiModel<B> {
     }
 
     /// The open conversation laid out at the pane's width.
-    fn laid(&self) -> layout::Laid
+    fn laid(&self) -> alloc::sync::Arc<layout::Laid>
     where
         B: InputBuffer,
     {
         let selected = (self.focus == Pane::Messages).then_some(self.message_cursor);
-        match self.conversations.get(self.selected) {
-            Some(conversation) => layout::conversation(
-                conversation,
-                self.sizes().messages.0,
-                &layout::Draw {
-                    now: self.now,
-                    tick: self.tick,
-                    ascii: self.ascii,
-                    selected,
-                    tokens: self.tokens(),
-                    mark: self.query(),
-                    home_client: self.home_client,
-                    receipts: self.reading.on,
-                    tracks: Some(&self.voice_tracks),
-                },
-            ),
-            None => layout::Laid::empty(self.sizes().messages.0, self.tokens()),
+        let width = self.sizes().messages.0;
+        let Some(conversation) = self.conversations.get(self.selected) else {
+            let laid = alloc::sync::Arc::new(layout::Laid::empty(width, self.tokens(), self.lang));
+            self.count(counters::Op::RowsLaid, laid.rows.len());
+            return laid;
+        };
+        let key = self.laid_key(conversation, width);
+        let mut slot = self.laid_cache.borrow_mut();
+        if let Some(entry) = slot.as_mut().filter(|entry| entry.key == key) {
+            if entry.selected == selected {
+                return alloc::sync::Arc::clone(&entry.laid);
+            }
+            // Only the cursor moved (1490): the two blocks it left and
+            // took are restyled in place, nothing else is laid.
+            let draw = self.draw_context(selected);
+            let laid = alloc::sync::Arc::make_mut(&mut entry.laid);
+            let mut held = true;
+            let mut spliced = 0;
+            for (at, on) in [(entry.selected, false), (selected, true)] {
+                let Some(index) = at.filter(|&i| i < conversation.messages.len()) else {
+                    continue;
+                };
+                held &= layout::respan(laid, conversation, index, width, &draw, on);
+                spliced += laid.spans.get(index).map_or(0, |span| span.block.1);
+            }
+            if held {
+                entry.selected = selected;
+                self.count(counters::Op::RowsLaid, spliced);
+                return alloc::sync::Arc::clone(&entry.laid);
+            }
         }
+        let laid = alloc::sync::Arc::new(layout::conversation(
+            conversation,
+            width,
+            &self.draw_context(selected),
+        ));
+        self.count(counters::Op::RowsLaid, laid.rows.len());
+        *slot = Some(LaidCache {
+            key,
+            selected,
+            laid: alloc::sync::Arc::clone(&laid),
+        });
+        laid
+    }
+
+    /// What [`layout::conversation`] draws with, besides the
+    /// conversation: everything here is in the laid cache's key, or is
+    /// the selection the splice restyles.
+    fn draw_context(&self, selected: Option<usize>) -> layout::Draw<'_>
+    where
+        B: InputBuffer,
+    {
+        layout::Draw {
+            now: self.now,
+            tick: self.tick,
+            ascii: self.ascii,
+            selected,
+            tokens: self.tokens(),
+            mark: self.query(),
+            home_client: self.home_client,
+            receipts: self.reading.on,
+            tracks: Some(&self.voice_tracks),
+            lang: self.lang,
+            names: Some(&self.names),
+        }
+    }
+
+    /// The laid cache's key (1490): the conversation's identity and
+    /// revision, its content's cheap ends (so a fold that is still
+    /// running misses rather than answers stale), the pane's width and
+    /// the look. The cursor is not here: it is spliced.
+    fn laid_key(&self, conversation: &Conversation, width: usize) -> u64
+    where
+        B: InputBuffer,
+    {
+        let mut hash = Fnv::new();
+        hash.bytes(&conversation.peer);
+        hash.word(conversation.revision());
+        hash.word(conversation.messages.len() as u64);
+        for message in [conversation.messages.first(), conversation.messages.last()]
+            .into_iter()
+            .flatten()
+        {
+            hash.word(message.activity);
+            hash.word(message.at.map_or(0, |at| at.unix_secs as u64));
+        }
+        hash.word(conversation.notes.len() as u64);
+        hash.word(conversation.earlier as u64);
+        if let Some(rule) = conversation.new_rule {
+            hash.word(rule.at as u64);
+            hash.word(rule.count as u64);
+        }
+        // The suffix glyphs change in place: a sweep of words, far
+        // cheaper than a row, as insurance for a delivery set outside
+        // any fold.
+        for message in &conversation.messages {
+            hash.word(delivery_word(message.delivery));
+        }
+        hash.word(width as u64);
+        hash.word(self.look_stamp);
+        hash.word(u64::from(self.ascii));
+        hash.word(self.lang as u64);
+        hash.word(self.tier as u64);
+        hash.word(self.theme as u64);
+        if let Some(query) = self.query() {
+            hash.bytes(query.as_bytes());
+        }
+        // The delivery spinner and a playing waveform move with the
+        // tick; a still pane does not re-lay for it.
+        if !self.sending.is_empty() || self.fetching || self.playing.is_some() {
+            hash.word(self.tick);
+        }
+        hash.done()
     }
 
     /// The first row on screen of `total` laid-out rows.
@@ -1444,6 +2978,60 @@ impl<B> UiModel<B> {
     {
         let bottom = total.saturating_sub(self.message_rows());
         self.scroll_top.unwrap_or(bottom).min(bottom)
+    }
+}
+
+/// What a target's loop presented last (1491): it builds its view, scene
+/// or lists only when the stamp it asks with moved, the model's
+/// [`UiModel::revision`] and whatever of its own moves outside the model
+/// (a size, a map picture's epoch). Before 1491 the terminal and the
+/// window built their whole presentation fifty times a second with
+/// nothing changed, and only the present was skipped (1455).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Presented {
+    at: Option<u64>,
+    builds: u64,
+}
+
+impl Presented {
+    /// Whether the loop builds now: `stamp` moved since the last build,
+    /// or nothing was built yet. Counts the builds it allows.
+    pub fn due(&mut self, stamp: u64) -> bool {
+        if self.at == Some(stamp) {
+            return false;
+        }
+        self.at = Some(stamp);
+        self.builds += 1;
+        true
+    }
+
+    /// The next [`Presented::due`] says yes, whatever the stamp: an input
+    /// the loop handles outside the model (a map picture that landed, a
+    /// screen to clear) needs a frame.
+    pub fn owe(&mut self) {
+        self.at = None;
+    }
+
+    /// The frame just built shows the model at `stamp`: a fold the build
+    /// made itself (the terminal's viewport) is in it, and does not owe
+    /// another.
+    pub fn drawn(&mut self, stamp: u64) {
+        self.at = Some(stamp);
+    }
+
+    /// How many builds [`Presented::due`] allowed.
+    pub fn builds(&self) -> u64 {
+        self.builds
+    }
+
+    /// The stamp of `revision` and the loop's own `extra` words.
+    pub fn stamp(revision: u64, extra: &[u64]) -> u64 {
+        let mut hash = Fnv::new();
+        hash.word(revision);
+        for &word in extra {
+            hash.word(word);
+        }
+        hash.done()
     }
 }
 
@@ -1481,6 +3069,11 @@ pub enum UiEvent {
     HomeWake,
     /// The screen's size in cells.
     Resize { width: u16, height: u16 },
+    /// What the target's screen shows of the list and the open chat
+    /// (1490): the scene is built for this window plus a margin. Sent at
+    /// start and whenever the window changes; a target that keeps whole
+    /// scenes sends [`Viewing::ALL`].
+    Viewing(Viewing),
     /// A click, a wheel turn, a drag or a move, at a screen cell.
     Mouse(MouseEvent),
     /// The mailbox the stored record or a run selected.
@@ -1596,10 +3189,18 @@ pub enum UiEvent {
         text: String,
         reply: Option<[u8; 32]>,
     },
-    /// These bubbles of `peer`'s chat are on screen now, at least half of
-    /// each, by their keys ([`Message::activity`]): a frontend says it on
-    /// every change (1231, [`receipts`]).
+    /// These bubbles of `peer`'s chat are on screen now, by their keys
+    /// ([`Message::activity`]), by the frontend's rule (the terminal's
+    /// since 1529: a bubble whose last line is on screen): a frontend says
+    /// it on every change (1231, [`receipts`]).
     Viewport { peer: [u8; 16], keys: Vec<u64> },
+    /// A scroll key in the open chat on a target that lays its own window
+    /// of it (the M9, 1529): `cmd` over the target's lines, by the one
+    /// rule the terminal's keys take ([`pager::step`]).
+    Lines {
+        cmd: ScrollCmd,
+        window: pager::Window,
+    },
     /// The app is in front with the screen on, or went behind: an
     /// Android activity resumed or paused, a terminal's focus.
     Front(bool),
@@ -1621,7 +3222,12 @@ pub enum UiEvent {
     /// and Back from it.
     Profile { open: bool },
     /// What the shell knows of the reader for the profile, anew.
-    ProfileFacts(profile::ProfileFacts),
+    ProfileFacts(Box<profile::ProfileFacts>),
+    /// What the mailbox said of itself (1642, `/about`), or that it is too
+    /// old to say; the rest of the profile's facts stay.
+    MailboxTold(Box<mailbox_page::Told>),
+    /// How this device reaches its mailbox now (1642); the rest stays.
+    MailboxReach(Box<mailbox_page::Reach>),
     /// The profile's "Share my address" where the share is a copy: the
     /// window and the terminal ([`intent::Intent::ShareCode`]).
     ShareCode,
@@ -1746,6 +3352,11 @@ pub enum UiEvent {
     /// The home's answer to [`UiEffect::DeleteGroup`] (1307 pass four):
     /// the group, or why not.
     GroupDeleted(Result<[u8; 16], String>),
+    /// A hand of [`UiModel::take_petnames`] ended (1635): the petnames the
+    /// home node took. Those still owed go with the next hand.
+    PetnamesHanded {
+        taken: Vec<([u8; 16], Option<String>)>,
+    },
     /// A tab of the bar was chosen (1337): the Browse tab comes to the
     /// front, or leaves it for the chats or the map.
     Tab(scene::TabId),
@@ -1755,6 +3366,17 @@ pub enum UiEvent {
     /// What the Rooms are told (1379): what the hub said, and the
     /// reader's verbs in the Rooms tab.
     Rooms(rooms::RoomsEvent),
+    /// The reader's verbs in the Explore tab (1578).
+    Explore(explore::ExploreEvent),
+}
+
+impl UiEvent {
+    /// The clock's own events, which every loop folds several times a
+    /// second (1491): they move [`UiModel::revision`] only when they
+    /// moved what a screen shows.
+    pub fn is_clock(&self) -> bool {
+        matches!(self, Self::Clock(_) | Self::Tick | Self::Elapsed(_))
+    }
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1770,6 +3392,9 @@ pub enum MapLoad {
         want: map::MapWant,
         toast: Option<String>,
     },
+    /// Whether a load runs or waits for what is on screen (1527, the
+    /// loader's `loading_here`): "Loading the map of this area".
+    Here(bool),
 }
 
 /// What the shell is asked to do.
@@ -1850,6 +3475,13 @@ pub enum UiEffect {
         key: &'static str,
         value: &'static str,
     },
+    /// Write `key = <hash in hex>` to the config, or take the key out
+    /// with `None` (1577: `rooms_hub`, the public rooms' hub the settings
+    /// chose; `rooms_told`, the hub the reader was told about).
+    RememberHash {
+        key: &'static str,
+        hash: Option<[u8; 16]>,
+    },
     /// Show the photo of the message `key` of `peer`'s conversation whole
     /// (1220): the phone's viewer, the window's overlay. Its bytes are in
     /// the message's fields ([`photos::photo_bytes`]).
@@ -1912,6 +3544,206 @@ pub enum UiEffect {
 
 /// Fold one event into the model.
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
+    // Each event's work is counted on its own (1489).
+    model.ops.reset();
+    // The clock's events move the revision only when they moved what is
+    // shown (1491): fifty a second while nothing changes, before, and
+    // every loop built its whole view for each.
+    let clock = event.is_clock();
+    let marks = clock.then(|| model.clock_marks());
+    let mut effects = step(model, event);
+    let noted = model.note_changes();
+    model.keep_top();
+    if !clock || noted || !effects.is_empty() || marks != Some(model.clock_marks()) {
+        model.revision = model.revision.wrapping_add(1);
+    }
+    model.ask_page(&mut effects);
+    effects
+}
+
+/// Fold many events as one (1514): a restore, a pulled page. Each event
+/// takes every step [`update`] takes but the note: the changes of all of
+/// them are noted once at the end, so the list is ordered and the scene's
+/// window built once for the batch, not once per event (O(conversations)
+/// each, a restore of 4067 entries 17 minutes on the M9). The counters
+/// are the batch's. An empty batch changes nothing.
+pub fn update_all<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    events: impl IntoIterator<Item = UiEvent>,
+) -> Vec<UiEffect> {
+    let mut batch = Batch::new(model);
+    for event in events {
+        batch.fold(event);
+    }
+    batch.finish()
+}
+
+/// [`update_all`] fed one event at a time (1514): for a source that hands
+/// its events out by a callback, a store's restore, without holding them
+/// all first. Noted at [`Batch::finish`]; a batch dropped unfinished is
+/// noted then, so the model's caches never stand on an unnoted fold.
+pub struct Batch<'a, B: InputBuffer + Default> {
+    model: &'a mut UiModel<B>,
+    effects: Vec<UiEffect>,
+    folded: bool,
+    /// Whether every event folded so far named its conversations
+    /// (1594): the note then refreshes those
+    /// ([`UiModel::note_changes_in`], the names in the model's
+    /// `note_scope`), not all. False once an event whose reach the batch
+    /// cannot name was folded.
+    scoped: bool,
+}
+
+/// The conversations a home's entry names when folded (1594): the
+/// sender of a received message, the recipient of a sent one, the
+/// announcer of a name; a mark names none of its own (the messages it
+/// marks are in the fold's change sets). `None` for an event of another
+/// reach: its batch notes every conversation.
+fn named_by(event: &UiEvent) -> Option<Option<[u8; 16]>> {
+    match event {
+        UiEvent::Engine(OutboxEvent::Received { source, .. }) => Some(Some(*source)),
+        UiEvent::Engine(OutboxEvent::HomeSent { destination, .. }) => Some(Some(*destination)),
+        UiEvent::Engine(OutboxEvent::Announced { destination, .. }) => Some(Some(*destination)),
+        UiEvent::Engine(OutboxEvent::HomeMarked { .. }) => Some(None),
+        _ => None,
+    }
+}
+
+impl<'a, B: InputBuffer + Default> Batch<'a, B> {
+    /// A batch over `model`; its count starts afresh with its first
+    /// event, so an empty batch leaves the model as it was.
+    pub fn new(model: &'a mut UiModel<B>) -> Self {
+        Self {
+            model,
+            effects: Vec::new(),
+            folded: false,
+            scoped: true,
+        }
+    }
+
+    /// Fold `event`, its note owed to the end.
+    pub fn fold(&mut self, event: UiEvent) {
+        if !core::mem::replace(&mut self.folded, true) {
+            self.model.ops.reset();
+        }
+        match named_by(&event) {
+            // Each conversation once (1603): a set, sorted at the note;
+            // one per event grew with the batch, 4464 peers in a ring's
+            // rebuild, a reallocation of 8192 of them.
+            Some(Some(peer)) if self.scoped => {
+                let scope = &mut self.model.note_scope;
+                if scope.last() != Some(&peer) && !scope.contains(&peer) {
+                    scope.push(peer);
+                }
+            }
+            Some(_) => {}
+            None => self.scoped = false,
+        }
+        let effects = step(self.model, event);
+        self.effects.extend(effects);
+    }
+
+    /// Fold `event`, an entry the home recorded at `recorded_at` (unix
+    /// seconds, 0 for unknown), with the model's clock held to that time
+    /// for this event alone (1594, [`recorded_now`]): a message's time
+    /// then is the same whenever its entry is folded, by the pull, by a
+    /// page read later or by a boot, and reading a page never lifts its
+    /// conversation in the list.
+    pub fn fold_recorded(&mut self, event: UiEvent, recorded_at: i64) {
+        let now = self.model.now;
+        self.model.now = recorded_now(now, recorded_at);
+        self.fold(event);
+        self.model.now = now;
+    }
+
+    /// Take out the conversations the fold left with nothing to list
+    /// (1521c): no message and no row kept for one ([`UiModel::row`]), an
+    /// invitation's group no message reached or a chat whose every message
+    /// a mark deleted. A device that lists its conversations from kept rows
+    /// at the next boot has no row for them, so the boot that folded them
+    /// must not list them either. Noted with the batch; the conversations
+    /// taken out.
+    pub fn drop_rowless(&mut self) -> Vec<[u8; 16]> {
+        let rowless: Vec<[u8; 16]> = self
+            .model
+            .conversations
+            .iter()
+            .map(|c| c.peer)
+            .filter(|peer| self.model.row(peer).is_none())
+            .collect();
+        for peer in &rowless {
+            self.folded = true;
+            let _ = self.model.remove_conversation(*peer);
+        }
+        rowless
+    }
+
+    /// Note what the batch changed, once, and hand back what its events
+    /// asked for.
+    pub fn finish(mut self) -> Vec<UiEffect> {
+        self.note();
+        core::mem::take(&mut self.effects)
+    }
+
+    fn note(&mut self) {
+        if !core::mem::take(&mut self.folded) {
+            return;
+        }
+        self.model
+            .note_changes_in(core::mem::replace(&mut self.scoped, true));
+        self.model.keep_top();
+        self.model.revision = self.model.revision.wrapping_add(1);
+        self.model.ask_page(&mut self.effects);
+    }
+}
+
+impl<B: InputBuffer + Default> Drop for Batch<'_, B> {
+    fn drop(&mut self) {
+        self.note();
+    }
+}
+
+/// The clock a home's entry is folded under (1594): when the home
+/// recorded the entry (`recorded_at`, unix seconds; 0 or less for
+/// unknown), in the model's offset, so no message gets a time later
+/// than the home took it. A received message's shown time is its
+/// writer's held to the clock (`written_time`): folded under the model's
+/// own clock it was held to whenever the fold ran, so a writer whose
+/// clock ran ahead of ours got the pull's time in the row the pull kept
+/// and a later time when a page of it was read again (window 19: the
+/// preloaded row rose over a newer arrival to the list's top, and the
+/// cursor with it).
+///
+/// The recorded time stands even where the model's clock is behind it
+/// (1597): the board's day is the newest stamp it has seen, told to the
+/// model on the next second's tick, so a pulled page is folded in the
+/// turn it came under a clock that has not yet seen its stamp. Held to
+/// the earlier of the two, window 21's "mark control" came out at the
+/// stale day, 16 s before the home took it; the row kept said so, and
+/// the page read after a reboot, under a clock past the stamp, gave the
+/// message its recorded time and moved the row. Nor does it wait for
+/// the model to know a time at all: a boot's rebuild and a page read
+/// before the first stamp folded with none and gave the messages no
+/// time, where a pull that knew the day gave them theirs, so a row's
+/// time depended on when its entries happened to be folded. An entry
+/// the home recorded carries its time; one without (`recorded_at` 0)
+/// folds under the model's clock, `None` while it knows none.
+pub fn recorded_now(now: Option<WallTime>, recorded_at: i64) -> Option<WallTime> {
+    match recorded_at > 0 {
+        true => Some(WallTime {
+            unix_secs: recorded_at,
+            offset_secs: now.map_or(0, |now| now.offset_secs),
+        }),
+        false => now,
+    }
+}
+
+/// One event folded with what follows every fold, short of the note
+/// ([`UiModel::note_changes`]): the half [`update`] and [`update_all`]
+/// share.
+fn step<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
+    // Until the fold is noted, revision-keyed caches stand aside (1490).
+    model.folding = true;
     let mut effects = fold(model, event);
     effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
     // Whatever hid the open conversation, a block, the `blocked` view or a
@@ -1939,18 +3771,52 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // the switch is on, understands groups (1307) and acknowledges
     // propagated post (1395), always.
     receipts::mark_sends(&mut effects, groups::client_caps(model.reading.on));
+    // And names this device as the map's writer (1482).
+    receipts::name_writer(&mut effects, model.address);
+    // The list's summaries up to what the event did (1463), and the
+    // revisions over them (1490), are the caller's note: every change
+    // the fold made is noted there, so the caches keyed by a revision
+    // reuse everything else.
     effects
+}
+
+impl<B: InputBuffer + Default> UiModel<B> {
+    /// A selected conversation whose messages a restart deferred (1490):
+    /// its newest page, asked once, whatever event selected it.
+    fn ask_page(&mut self, effects: &mut Vec<UiEffect>) {
+        if let Some(conversation) = self.conversations.get(self.selected) {
+            if conversation.messages.is_empty()
+                && conversation.earlier > 0
+                && self.page_asked != Some(conversation.peer)
+            {
+                self.page_asked = Some(conversation.peer);
+                effects.push(UiEffect::Store(history::StoreRead::Earlier {
+                    peer: conversation.peer,
+                    before: u64::MAX,
+                    through: None,
+                }));
+            }
+        }
+    }
 }
 
 fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     match event {
         UiEvent::Tab(tab) => {
-            let mut effects = browse::tab(model, tab);
+            let mut effects = explore::tab(model, tab);
+            effects.extend(browse::tab(model, tab));
             effects.extend(rooms::tab(model, tab));
             effects
         }
-        UiEvent::Browse(event) => browse::fold(model, event),
+        UiEvent::Browse(event) => {
+            let effects = browse::fold(model, event);
+            // A page heard moves Explore's order, at most once a second
+            // and never under a finger (1618).
+            explore::settle(model, false);
+            effects
+        }
         UiEvent::Rooms(event) => rooms::fold(model, event),
+        UiEvent::Explore(event) => explore::fold(model, event),
         UiEvent::MapSetup(setup) => {
             if let Some(state) = model.map.as_mut() {
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
@@ -1980,6 +3846,12 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.touched();
             rooms::key(model, key)
         }
+        // The Explore tab's list in front: its search field and its
+        // cursor have the keys (1578).
+        UiEvent::Key(key) if explore::Explore::showing(model) => {
+            model.touched();
+            explore::key(model, key)
+        }
         UiEvent::Key(key) => {
             model.touched();
             on_key(model, key)
@@ -1999,10 +3871,15 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::Elapsed(ms) => {
             model.elapsed_ms = ms;
+            explore::settle(model, false);
             auto_sync(model)
         }
         UiEvent::Resumed => schedule(model, SyncEvent::Resume),
         UiEvent::HomeWake => pull_for(model, Reason::Wake),
+        UiEvent::Viewing(viewing) => {
+            model.viewing = viewing;
+            Vec::new()
+        }
         UiEvent::Resize { width, height } => {
             model.screen = (width, height);
             model.selection = None;
@@ -2025,8 +3902,14 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             effects
         }
         UiEvent::Viewport { peer, keys } => {
+            let earlier = model.earlier_shown(peer, &keys);
             model.set_viewport(peer, keys);
-            Vec::new()
+            earlier
+        }
+        UiEvent::Lines { cmd, window } => {
+            model.touched();
+            page_window(model, cmd, &window);
+            model.earlier_wanted()
         }
         UiEvent::Front(front) => {
             model.set_front(front);
@@ -2120,7 +4003,15 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::ShareFix { peer } => model.share_fix(peer),
         UiEvent::Profile { open } => model.show_profile(open),
         UiEvent::ProfileFacts(facts) => {
-            model.profile = facts;
+            model.profile = *facts;
+            Vec::new()
+        }
+        UiEvent::MailboxTold(told) => {
+            model.profile.told = *told;
+            Vec::new()
+        }
+        UiEvent::MailboxReach(reach) => {
+            model.profile.reach = *reach;
             Vec::new()
         }
         UiEvent::ShareCode => model.share_code(),
@@ -2147,6 +4038,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::MailboxChosen { node, by_user } => {
+            // Another node's name is not this one's.
+            if model.mailbox.node != Some(node) {
+                model.mailbox.name = None;
+            }
             model.mailbox.node = Some(node);
             model.mailbox.by_user = by_user;
             Vec::new()
@@ -2157,6 +4052,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::GroupMade(made) => model.group_made(made),
         UiEvent::MembersAdded(added) => model.members_added(added),
         UiEvent::GroupDeleted(deleted) => model.group_deleted(deleted),
+        UiEvent::PetnamesHanded { taken } => {
+            model.petnames_handed(taken);
+            Vec::new()
+        }
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -2183,6 +4082,9 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             messages,
             earlier,
         } => {
+            if model.page_asked == Some(peer) {
+                model.page_asked = None;
+            }
             model.on_earlier(peer, messages, earlier);
             Vec::new()
         }
@@ -2194,7 +4096,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::SendLeg(leg) => {
             let (tick, now) = (model.tick, model.now);
             if let Some(&(c, m)) = model.sending.front() {
-                if let Some(message) = model.message_mut(c, m) {
+                if let Some(mut message) = model.message_mut(c, m) {
                     message.leg = Some((leg, tick));
                     message.last_leg = Some(leg);
                     message.note(now, &format!("trying {}", leg_words(leg)));
@@ -2218,6 +4120,9 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Open { peer } => {
             let index = model.conversation(peer);
             model.select(index);
+            // Opening shows the chat wherever the list lives: read here
+            // and, through the mark, on the home's other devices.
+            model.read_out(index);
             Vec::new()
         }
         UiEvent::Close => {
@@ -2233,6 +4138,8 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Write { peer, body } => {
             let index = model.conversation(peer);
             model.select(index);
+            // Writing happens in an open chat: read as Open reads.
+            model.read_out(index);
             send_body(model, body)
         }
         UiEvent::React {
@@ -2278,6 +4185,9 @@ pub fn position_fields(location: leviculum_lxmf::telemetry::Location) -> Vec<Fie
 /// messages, and the first failure in a row, not every retry's.
 fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Vec<UiEffect> {
     model.fetching = false;
+    // A pull ended: the next began after every petname the home took so
+    // far, and brings nothing older than them (1635).
+    model.taken_petnames.clear();
     model.fetches_done += 1;
     let now = model.elapsed_ms;
     let failures = model.sync.as_mut().map_or(1, |sync| {
@@ -2417,6 +4327,10 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
         }
         return overlay_key(model, key);
     }
+    // The copy mode takes every key while it is on (1475).
+    if model.copy_mode.is_some() {
+        return copy_mode::key(model, key);
+    }
     let pane = model.focus;
     // A selection lasts until the next key: the copy row copies it.
     let selection = model.selection.take();
@@ -2473,11 +4387,23 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
         }
         return Vec::new();
     }
-    if model.detail_open() {
+    // A palette that asks over the settings (1577: another hub's
+    // address) takes the keys before the settings' rows do.
+    if model.detail_open() && model.palette.is_none() {
         // The profile's "Share my address" (1443): the code to the
         // clipboard, as the window's button does.
         if model.profile_open && key.code == KeyCode::Char('s') {
             return model.share_code();
+        }
+        // The settings' keys (1450), under no profile or message.
+        if let (Some(at), false, None, KeyCode::Char(c)) =
+            (model.settings, model.profile_open, model.detail, key.code)
+        {
+            if c != 'q' {
+                if let Some(effects) = settings_key(model, at, c) {
+                    return effects;
+                }
+            }
         }
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Enter) {
             model.close_detail();
@@ -2622,6 +4548,17 @@ fn act<B: InputBuffer + Default>(
         Action::Palette => model.palette = Some(Palette::default()),
         Action::QuitHint => return quit_hint(model),
         Action::Copy => return copy(model, None),
+        Action::CopyMode => {
+            let effects = copy_mode::enter(model);
+            // A Shift+arrow moves the cursor it put down at once.
+            return match key.modifiers.contains(KeyModifiers::SHIFT) && model.copy_mode.is_some() {
+                true => {
+                    let plain = KeyEvent::new(key.code, KeyModifiers::NONE);
+                    copy_mode::key(model, plain)
+                }
+                false => effects,
+            };
+        }
         Action::OpenResult => return open_result(model),
         Action::Match(forward) => match model.focus {
             Pane::Messages => step_match(model, forward),
@@ -2690,7 +4627,7 @@ fn peer_on_map<B: InputBuffer>(model: &mut UiModel<B>) {
     match model.positions.get(&peer).cloned() {
         Some(fix) => open_map_at(model, &fix),
         None => {
-            let who = model.names.label(&peer);
+            let who = model.names.label(&peer, model.lang);
             model.toast(ToastKind::Info, format!("no position from {who}"));
         }
     }
@@ -2711,6 +4648,7 @@ fn open_map_at<B: InputBuffer>(model: &mut UiModel<B>, fix: &Fix) {
         selected: Some(fix.peer),
     });
     model.map_press = None;
+    model.remember_map_from();
     model.focus = Pane::Map;
     model.selection = None;
     // Going to a place loads its region (1089): the map is shown at once
@@ -2733,7 +4671,7 @@ fn map_load<B: InputBuffer>(model: &mut UiModel<B>, load: MapLoad) {
             let area = model.map_area();
             let setup = model.map_setup.clone();
             if let Some(state) = model.map.as_mut() {
-                if want.reason == map::LoadReason::View || state.centre != want.centre {
+                if want.reason != map::LoadReason::Place || state.centre != want.centre {
                     return;
                 }
                 let (centre, zoom) = map::fit_at(want.centre, area, &setup);
@@ -2747,6 +4685,7 @@ fn map_load<B: InputBuffer>(model: &mut UiModel<B>, load: MapLoad) {
                 model.toast(ToastKind::Error, line);
             }
         }
+        MapLoad::Here(here) => model.map_here = here,
     }
 }
 
@@ -2769,6 +4708,7 @@ fn open_map<B: InputBuffer>(model: &mut UiModel<B>) {
         zoom,
         selected: pins.first().map(|p| p.peer),
     });
+    model.remember_map_from();
     model.focus = Pane::Map;
     model.selection = None;
     // Pins where no region is: their places load (1089).
@@ -2816,6 +4756,15 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
         }
         _ => Vec::new(),
     };
+    // Where the own fix is (1477): Enter with no pin chosen, or on the own
+    // pin, jumps there.
+    let own_at = model.bar.own_fix.map(|fix| {
+        leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(
+            fix.latitude_e6,
+            fix.longitude_e6,
+        ))
+    });
+    let own = model.address;
     let Some(state) = model.map.as_mut() else {
         return Vec::new();
     };
@@ -2854,16 +4803,26 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
                 }
             }
         }
-        MapCmd::Open => {
-            if let Some(peer) = state.selected {
-                return open_pin(model, peer);
+        MapCmd::Open => match (state.selected, own_at) {
+            // Jump to me (1477): no pin chosen, or the own pin, and a fix.
+            (None, Some(at)) => {
+                let (centre, zoom) = map::fit_at(at, area, &setup);
+                state.centre = centre;
+                state.zoom = zoom;
             }
-        }
+            (Some(peer), Some(at)) if Some(peer) == own => {
+                let (centre, zoom) = map::fit_at(at, area, &setup);
+                state.centre = centre;
+                state.zoom = zoom;
+            }
+            (Some(peer), _) => return open_pin(model, peer),
+            (None, None) => {}
+        },
         MapCmd::Close => {
             model.map = None;
             model.map_press = None;
             model.map_glyph_test = false;
-            model.focus = Pane::Messages;
+            model.focus = model.map_from;
         }
         MapCmd::Drawing(forward) => {
             let n = setup.drawings.len();
@@ -3038,6 +4997,12 @@ fn copy<B: InputBuffer>(model: &mut UiModel<B>, selection: Option<Selection>) ->
             .map(|m| m.body.clone())
             .unwrap_or_default(),
     };
+    copy_text(model, text)
+}
+
+/// `text` onto the clipboard (OSC 52 in the terminal), the toast saying
+/// how much; nothing for an empty one.
+fn copy_text<B>(model: &mut UiModel<B>, text: String) -> Vec<UiEffect> {
     if text.is_empty() {
         model.toast(ToastKind::Info, "nothing to copy".to_string());
         return Vec::new();
@@ -3060,7 +5025,11 @@ fn on_mouse<B: InputBuffer + Default>(model: &mut UiModel<B>, mouse: MouseEvent)
             model.footer_hover = hit::footer_slot_at(model, col, row);
             Vec::new()
         }
-        MouseEventKind::Down(MouseButton::Left) => click(model, col, row),
+        MouseEventKind::Down(MouseButton::Left) => {
+            // A click ends the copy mode (1475); the mouse selects its own.
+            copy_mode::leave(model);
+            click(model, col, row)
+        }
         MouseEventKind::Drag(MouseButton::Left) => {
             drag(model, col, row);
             Vec::new()
@@ -3357,7 +5326,7 @@ fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec
                 model.focus = Pane::Compose;
                 model.toast(
                     ToastKind::Info,
-                    format!("writing to {}", model.names.label(&peer)),
+                    format!("writing to {}", model.names.label(&peer, model.lang)),
                 );
                 Vec::new()
             }
@@ -3526,9 +5495,10 @@ fn scroll_list<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
     }
 }
 
-/// The cursor moves a message at a time, a page a pane's height of rows, and
-/// the view follows it just far enough to show its block. Back on the newest
-/// message with the bottom in view, the pane follows the newest again.
+/// The open chat read by the line (1529, [`pager`]): the terminal hands
+/// the rule its laid rows, each message's lines without the separators
+/// above it. Back on the newest message with the bottom in view, the pane
+/// follows the newest again.
 fn scroll_messages<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
     let count = model.messages_of_selected().len();
     if count == 0 {
@@ -3537,80 +5507,72 @@ fn scroll_messages<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
     let laid = model.laid();
     let rows = model.message_rows().max(1);
     let total = laid.rows.len();
+    let lines = lines_of(&laid);
+    let view = pager::View {
+        top: model.top_of(total),
+        selected: model.message_cursor.min(count - 1),
+    };
+    let to = pager::step(&lines, total, rows, view, cmd);
+    model.message_cursor = to.selected;
     let bottom = total.saturating_sub(rows);
-    let mut top = model.top_of(total);
-    let last = count - 1;
-    let at = model.message_cursor.min(last);
-    let step = match cmd {
-        ScrollCmd::HalfPageDown | ScrollCmd::HalfPageUp => (rows / 2).max(1),
-        _ => rows,
-    };
-    let cursor = match cmd {
-        ScrollCmd::LineDown => (at + 1).min(last),
-        ScrollCmd::LineUp => at.saturating_sub(1),
-        ScrollCmd::Top => 0,
-        ScrollCmd::Bottom => last,
-        ScrollCmd::PageDown | ScrollCmd::HalfPageDown => {
-            top = (top + step).min(bottom);
-            // The lowest block that starts in the new view.
-            laid.spans
-                .iter()
-                .rposition(|span| span.start < top + rows)
-                .unwrap_or(at)
-                .max(at)
-        }
-        ScrollCmd::PageUp | ScrollCmd::HalfPageUp => {
-            top = top.saturating_sub(step);
-            // The highest block that ends in the new view.
-            laid.spans
-                .iter()
-                .position(|span| span.end > top)
-                .unwrap_or(0)
-                .min(at)
-        }
-    };
-    // A report folded into the next one has no rows: the cursor goes on
-    // past it the way it moved, or back where nothing is drawn that way.
-    let forward = !matches!(
-        cmd,
-        ScrollCmd::LineUp | ScrollCmd::PageUp | ScrollCmd::HalfPageUp | ScrollCmd::Bottom
-    );
-    let cursor = drawn_near(&laid.spans, cursor, forward);
-    if let Some(span) = laid.spans.get(cursor) {
-        if span.end > top + rows {
-            top = span.end - rows;
-        }
-        // A block taller than the pane shows its start.
-        if span.start < top {
-            top = span.start;
-        }
-    }
-    model.message_cursor = cursor;
     // The newest drawn message: reactions after it have no rows.
-    let newest = laid.spans[cursor.min(laid.spans.len())..]
+    let newest = lines[to.selected.min(lines.len())..]
         .iter()
         .skip(1)
-        .all(|span| span.start == span.end);
-    model.scroll_top = match (cursor == last || newest) && top >= bottom {
+        .all(|l| !l.drawn());
+    model.scroll_top = match newest && to.top >= bottom {
         true => None,
-        false => Some(top),
+        false => Some(to.top),
     };
 }
 
-/// The message nearest `at` that has rows on screen, looking `forward`
-/// first and the other way after.
-fn drawn_near(spans: &[layout::Span], at: usize, forward: bool) -> usize {
-    let drawn = |i: &usize| spans.get(*i).is_some_and(|s| s.start < s.end);
-    if spans.get(at).is_none() || drawn(&at) {
-        return at;
-    }
-    let after = (at + 1..spans.len()).find(drawn);
-    let before = (0..at).rev().find(drawn);
-    match forward {
-        true => after.or(before),
-        false => before.or(after),
-    }
-    .unwrap_or(at)
+/// A scroll key over a target's own window of the open chat (1529, the
+/// M9): the rule is [`pager::step`], as the terminal's; the cursor goes to
+/// the message it selects and the view is kept by the message its first
+/// row is in. Back on the newest with the bottom in view, the chat follows
+/// the newest again.
+fn page_window<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd, window: &pager::Window) {
+    let c = model.selected;
+    let Some(conversation) = model.conversations.get(c) else {
+        return;
+    };
+    let cursor = conversation.messages.get(model.message_cursor);
+    let selected = cursor
+        .and_then(|m| window.keys.iter().position(|&k| k == m.activity))
+        .unwrap_or(window.keys.len());
+    let view = pager::View {
+        top: window.top,
+        selected,
+    };
+    let to = pager::step(&window.lines, window.total, window.rows, view, cmd);
+    let Some(&key) = window.keys.get(to.selected) else {
+        return;
+    };
+    let Some(index) = conversation.messages.iter().position(|m| m.activity == key) else {
+        return;
+    };
+    let newest = !(index + 1..conversation.messages.len()).any(|i| model.bubble_row(c, i));
+    model.message_cursor = index;
+    let bottom = window.total.saturating_sub(window.rows);
+    model.chat_anchor = match newest && to.top >= bottom {
+        true => None,
+        false => window.anchor(to.top),
+    };
+}
+
+/// The lines of each message among the laid rows (1529): its block and
+/// what hangs under it, the separators above it left out.
+fn lines_of(laid: &layout::Laid) -> Vec<pager::Lines> {
+    laid.spans
+        .iter()
+        .map(|span| match span.start < span.end {
+            true => pager::Lines {
+                start: span.block.0.clamp(span.start, span.end),
+                end: span.end,
+            },
+            false => pager::Lines::default(),
+        })
+        .collect()
 }
 
 /// Select the conversation `step` away in the list's order, or the next one
@@ -3896,6 +5858,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
         }
         PaletteCommand::Browse => browse::open(model),
         PaletteCommand::Rooms => rooms::open(model),
+        PaletteCommand::Explore => explore::tab(model, scene::TabId::Explore),
         PaletteCommand::MapDrawing => {
             if model.map_setup.drawings.is_empty() {
                 model.toast(ToastKind::Info, "the map is drawn one way here".to_string());
@@ -4039,6 +6002,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             confirmed: false,
         }),
         PaletteCommand::MyCode => model.show_profile(true),
+        PaletteCommand::Settings => model.show_settings(None),
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -4078,6 +6042,9 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 /// Send `body` in the open conversation: the compose pane's text, or a
 /// frontend's ([`UiEvent::Write`]). Blank text sends nothing.
 fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
+    // Whitespace at the edges never travels (walk 1 #26): a trailing
+    // newline would draw a bubble with an empty line.
+    let body = outgoing(body);
     // A staged photo goes with the text as its caption (1270).
     if let Some(effects) = model.send_staged(body.clone()) {
         return effects;
@@ -4108,7 +6075,9 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
     model.clear_draft(to);
     let activity = model.bump();
     model.conversations[model.selected].activity = activity;
-    model.conversations[model.selected].messages[index].activity = activity;
+    if let Some(mut message) = model.conversations[model.selected].messages.get_mut(index) {
+        message.activity = activity;
+    }
     model.touch(model.selected, index);
     // Signal's rule: what you send is where the view goes.
     model.message_cursor = index;
@@ -4123,6 +6092,18 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
         body,
         fields: Vec::new(),
     }]
+}
+
+/// The text a send carries: `body` without leading and trailing
+/// whitespace or newlines (walk 1 #26), on every target, because every
+/// target's send passes through here, `send_body` and
+/// `UiModel::reply_to`. Inner lines stay as typed.
+pub fn outgoing(body: String) -> String {
+    let trimmed = body.trim();
+    match trimmed.len() == body.len() {
+        true => body,
+        false => trimmed.to_string(),
+    }
 }
 
 /// The glyph-table state a router state is shown as.
@@ -4157,7 +6138,7 @@ fn gives_up(state: DeliveryState) -> bool {
     matches!(state, DeliveryState::Rejected | DeliveryState::Failed)
 }
 
-fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
+fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
     match event {
         OutboxEvent::Ready { address } => {
             model.address = Some(address);
@@ -4167,9 +6148,13 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
         OutboxEvent::NodeAnnounced {
             destination,
             status,
+            name,
         } => {
             model.pn_asker.announced(destination, status);
             if model.mailbox.node == Some(destination) {
+                // What the header says it by (1587); an announce without a
+                // name unnames it.
+                model.mailbox.name = name.as_deref().and_then(crate::names::sanitise);
                 return schedule(model, SyncEvent::Announce);
             }
         }
@@ -4183,7 +6168,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
         OutboxEvent::Queued { message_id } => {
             let now = model.now;
             if let Some(&(c, m)) = model.sending.front() {
-                if let Some(message) = model.message_mut(c, m) {
+                if let Some(mut message) = model.message_mut(c, m) {
                     // Named already by its pulled sent entry (`home_sent`),
                     // which is further along than queued.
                     if message.id == Some(message_id) {
@@ -4193,6 +6178,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                     message.delivery = Some(DeliveryState::Queued);
                     let id = to_hex(&message_id[..4]);
                     message.note(now, &format!("queued by the router as {id}"));
+                }
+                // Named in place: the summary's ids start over (1463).
+                if let Some(conversation) = model.conversations.get_mut(c) {
+                    conversation.summary.forget();
                 }
             }
         }
@@ -4228,16 +6217,13 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
         OutboxEvent::HomePetname {
             destination,
             petname,
-        } => return model.home_petname(destination, petname),
+            at,
+        } => return model.home_petname(destination, petname, at),
         OutboxEvent::HomePeerState { destination, state } => {
             return model.home_peer_state(destination, state)
         }
         OutboxEvent::HomeMarked { mark } => match mark.flag {
-            crate::home::wire::MarkFlag::Read => {
-                for id in &mark.ids {
-                    model.read_through(id);
-                }
-            }
+            crate::home::wire::MarkFlag::Read => model.read_marks(&mark.ids),
             crate::home::wire::MarkFlag::Deleted => {
                 for id in &mark.ids {
                     model.forget_by_id(id);
@@ -4263,8 +6249,23 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             location,
             name,
         } => model.mesh_position(identity, location, name.as_deref(), 0),
-        // Our own announce, echoed back, names nobody.
-        OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
+        OutboxEvent::HubAnnounced { hub } => {
+            explore::owe_hub(model, &hub);
+            model.rooms.heard.hear(hub);
+            settings::settle_suggestion(&mut model.rooms);
+        }
+        // Our own announce, echoed back, names nobody else: a name in it
+        // is the reader's own, which the mailbox announces and its archive
+        // hands every device (1449 item 2, walk 1 finding 8). It names the
+        // avatar and the profile, never a conversation; an echo without a
+        // name (a phone's node announces none) keeps the one heard.
+        OutboxEvent::Announced {
+            destination, name, ..
+        } if model.address == Some(destination) => {
+            if let Some(name) = name.as_deref().filter(|n| !n.trim().is_empty()) {
+                model.names.heard(destination, Some(name));
+            }
+        }
         OutboxEvent::Announced {
             destination, name, ..
         } => {
@@ -4295,7 +6296,18 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             sent_at,
             ..
         } => {
-            let lev = leviculum_lxmf::lev::Lev::from_fields(&fields);
+            // The source's own word only (1482): a relay's copy carries its
+            // writer's map, which says nothing of the relay.
+            let lev = leviculum_lxmf::relay::own_lev(&body, &fields, &source);
+            // What a relay hands back of a receipt it was sent (by a writer
+            // before 1482): the writer's name over no words, with the
+            // namespace alone. Nobody's post; nothing is kept.
+            if relayed::noise(&body, &fields, &source) {
+                return Vec::from([UiEffect::Log(format!(
+                    "relayed receipt from {} dropped: no words, no field but lev",
+                    crate::address::to_hex(&source)
+                ))]);
+            }
             // A receipt alone is a state, not a message (1230): it changes
             // the messages it names and nothing else.
             if lev
@@ -4314,10 +6326,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             }
             let open = index == model.selected && shown;
             let follow = model.scroll_top.is_none();
-            if model.conversations[index]
-                .messages
-                .iter()
-                .any(|m| !m.outbound && m.id == Some(message_id))
+            let conversation = &mut model.conversations[index];
+            if conversation
+                .with_id(&message_id, &model.ops)
+                .into_iter()
+                .any(|m| !conversation.messages[m].outbound)
             {
                 return Vec::new();
             }
@@ -4328,33 +6341,38 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let at = model.now;
             let shown = written_time(at, sent_at, lev.as_ref());
             let activity = model.bump();
-            let conversation = &mut model.conversations[index];
-            let first = conversation.messages.is_empty();
-            conversation.messages.push(Message {
-                outbound: false,
-                size: body.len(),
-                body: String::from_utf8_lossy(&body).into_owned(),
-                id: Some(message_id),
-                delivery: None,
-                signature: match verified {
-                    true => Signature::Verified,
-                    false => Signature::Unverified,
-                },
-                leg: None,
-                unproven: false,
-                at: shown,
-                ledger: vec![LedgerEntry::new(
-                    at,
-                    match verified {
-                        true => "received, signature verified",
-                        false => "received, signature NOT verified",
+            let first = model.conversations[index].messages.is_empty();
+            // At its writer's time (1505): a late one, written before what
+            // already shows, goes above it, not under the newest.
+            let placed = model.place(
+                index,
+                Message {
+                    outbound: false,
+                    size: body.len(),
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                    id: Some(message_id),
+                    delivery: None,
+                    signature: match verified {
+                        true => Signature::Verified,
+                        false => Signature::Unverified,
                     },
-                )],
-                last_leg: None,
-                activity,
-                fields,
-            });
-            let report = conversation.messages.last().is_some_and(Message::is_report);
+                    leg: None,
+                    unproven: false,
+                    at: shown,
+                    ledger: vec![LedgerEntry::new(
+                        at,
+                        match verified {
+                            true => "received, signature verified",
+                            false => "received, signature NOT verified",
+                        },
+                    )],
+                    last_leg: None,
+                    activity,
+                    fields,
+                },
+            );
+            let conversation = &mut model.conversations[index];
+            let report = conversation.messages[placed].is_report();
             // A position report is a state, not a message (1209): it moves
             // the conversation nowhere in the list, unless it is the first
             // the conversation has.
@@ -4362,13 +6380,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 conversation.activity = activity;
             }
             let peer = conversation.peer;
-            let reaction = conversation
-                .messages
-                .last()
+            let reaction = Some(&conversation.messages[placed])
                 .filter(|m| m.is_reaction())
                 .and_then(Message::reaction);
             model.changed.insert((peer, activity));
-            let mut effects = take_telemetry(model, index, message_id);
+            let mut effects = take_telemetry(model, index, placed, message_id);
             effects.extend(model.take_lev(source, lev.as_ref()));
             // A group's state (1307) is kept and stored, and asks for no
             // attention: no unread, no toast, no cursor. A group the
@@ -4385,7 +6401,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             // reader told; it is no unread message and moves no cursor.
             if let Some((_, content)) = reaction {
                 if !blocked {
-                    let from = model.names.label(&source);
+                    let from = model.names.label(&source, model.lang);
                     model.toast(ToastKind::Info, format!("{from} reacted {content}"));
                 }
                 return effects;
@@ -4431,7 +6447,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 model.changed_peers.insert(peer);
                 let conversation = &mut model.conversations[index];
                 conversation.unread += 1;
-                conversation.mark_new();
+                conversation.mark_new(placed);
                 if open && follow {
                     model.message_cursor = conversation.messages.len() - 1;
                 }
@@ -4442,10 +6458,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             } else {
                 // One reading earlier messages keeps the view, and the rule
                 // says where the new ones begin.
-                model.conversations[index].mark_new();
+                model.conversations[index].mark_new(placed);
             }
             if raise {
-                let from = model.names.label(&source);
+                let from = model.names.label(&source, model.lang);
                 model.toast(ToastKind::Info, format!("message from {from}"));
             }
             return effects;
@@ -4470,12 +6486,13 @@ fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 1
         return;
     };
     let peer = conversation.peer;
-    for message in &mut conversation.messages {
+    let changed = &mut model.changed;
+    conversation.messages.for_each_mut(|message| {
         if message.outbound
             || message.id != Some(message_id)
             || message.signature != Signature::Unverified
         {
-            continue;
+            return;
         }
         let (signature, line) = match valid {
             true => (
@@ -4489,10 +6506,10 @@ fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 1
         };
         message.signature = signature;
         message.note(now, line);
-        model.changed.insert((peer, message.activity));
-    }
+        changed.insert((peer, message.activity));
+    });
     if !valid {
-        let from = model.names.label(&source);
+        let from = model.names.label(&source, model.lang);
         model.toast(
             ToastKind::Error,
             format!("invalid signature on a message from {from}"),
@@ -4504,11 +6521,16 @@ fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 1
 /// received: each position into the peer's latest where it is newer, and
 /// into the store; each blob that did not decode named in `tui.log`, the
 /// bytes kept with the message.
-fn take_telemetry<B>(model: &mut UiModel<B>, index: usize, message_id: [u8; 32]) -> Vec<UiEffect> {
+fn take_telemetry<B>(
+    model: &mut UiModel<B>,
+    index: usize,
+    placed: usize,
+    message_id: [u8; 32],
+) -> Vec<UiEffect> {
     let Some(conversation) = model.conversations.get(index) else {
         return Vec::new();
     };
-    let Some(message) = conversation.messages.last() else {
+    let Some(message) = conversation.messages.get(placed) else {
         return Vec::new();
     };
     if !telemetry::has_telemetry(&message.fields) {
@@ -4586,10 +6608,11 @@ impl<B> UiModel<B> {
         }
         map::pins_of(
             &shown,
-            |peer| self.names.label(peer),
+            |peer| self.names.label(peer, self.lang),
             |peer| self.is_nearby(peer),
             self.address,
             self.now.map(|now| now.unix_secs),
+            self.lang,
         )
     }
 
@@ -4634,6 +6657,14 @@ impl<B> UiModel<B> {
         }
     }
 
+    /// Keep the pane the keys are in as the one the map returns to
+    /// (1531); a map opened over the map keeps the first one.
+    fn remember_map_from(&mut self) {
+        if self.focus != Pane::Map {
+            self.map_from = self.focus;
+        }
+    }
+
     /// The cells the map's picture covers: the shell's own place for it
     /// ([`UiModel::map_picture`]), else inside the conversation pane.
     pub fn map_area(&self) -> Rect
@@ -4666,7 +6697,7 @@ impl<B> UiModel<B> {
         // No region touches the view: the radar (1386), its pins labelled
         // by distance and compass point from the centre.
         let radar = match radar::shows(&viewport, &self.map_setup.regions) {
-            true => radar::radar(&shown, viewport_unit(&viewport), viewport.size()),
+            true => radar::radar(&shown, viewport_unit(&viewport), viewport.size(), self.lang),
             false => None,
         };
         if let Some(r) = &radar {
@@ -4745,7 +6776,14 @@ impl<B> UiModel<B> {
         let Some(now) = self.now else {
             return Vec::new();
         };
-        tracks::tracks(&self.track_input(), self.track_window, &now, unit, scale)
+        tracks::tracks(
+            &self.track_input(),
+            self.track_window,
+            &now,
+            unit,
+            scale,
+            self.lang,
+        )
     }
 
     /// The fixes the map draws tracks of: every peer's but a blocked
@@ -4859,7 +6897,11 @@ impl<B> UiModel<B> {
 impl<B> UiModel<B> {
     /// Message `message` of conversation `conversation`, to change: the
     /// store will learn of it.
-    fn message_mut(&mut self, conversation: usize, message: usize) -> Option<&mut Message> {
+    fn message_mut(
+        &mut self,
+        conversation: usize,
+        message: usize,
+    ) -> Option<id_index::MessageMut<'_>> {
         self.touch(conversation, message);
         self.conversations
             .get_mut(conversation)?
@@ -4874,6 +6916,7 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
     let running = model.sending.clone();
     let changed = &mut model.changed;
     let groups = &model.groups;
+    let ops = &model.ops;
     for (c, conversation) in model.conversations.iter_mut().enumerate() {
         // In a group (1307 pass four) the group's proof is one tick: the
         // group has it. Its status moves it on (1466: arrived once every
@@ -4884,8 +6927,12 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
             DeliveryState::Arrived if group => DeliveryState::InMailbox,
             other => other,
         };
-        for (m, message) in conversation.messages.iter_mut().enumerate() {
-            if !message.outbound || message.id != Some(id) {
+        // By the summary's index, not a walk over every message (1463).
+        for m in conversation.with_id(&id, ops) {
+            let Some(mut message) = conversation.messages.get_mut(m) else {
+                continue;
+            };
+            if !message.outbound {
                 continue;
             }
             if group
@@ -4938,12 +6985,14 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
 fn home_stalled<B>(model: &mut UiModel<B>, id: [u8; 32]) {
     let now = model.now;
     for conversation in &mut model.conversations {
-        for message in &mut conversation.messages {
+        let peer = conversation.peer;
+        let changed = &mut model.changed;
+        conversation.messages.for_each_mut(|message| {
             if message.outbound && message.id == Some(id) {
                 message.note(now, STALLED_NOTE);
-                model.changed.insert((conversation.peer, message.activity));
+                changed.insert((peer, message.activity));
             }
-        }
+        });
     }
 }
 
@@ -4979,7 +7028,7 @@ fn written_time(
     })
 }
 
-fn home_sent<B>(
+fn home_sent<B: InputBuffer>(
     model: &mut UiModel<B>,
     message_id: [u8; 32],
     destination: [u8; 16],
@@ -4996,7 +7045,11 @@ fn home_sent<B>(
     let now = model.now;
     let mut found = false;
     for conversation in &mut model.conversations {
-        for message in &mut conversation.messages {
+        // The messages that carry the id, by the summary's index (1463).
+        for m in conversation.with_id(&message_id, &model.ops) {
+            let Some(mut message) = conversation.messages.get_mut(m) else {
+                continue;
+            };
             if !message.outbound || message.id != Some(message_id) {
                 continue;
             }
@@ -5028,10 +7081,14 @@ fn home_sent<B>(
                 message.outbound && message.id.is_none() && message.body.as_bytes() == body
             });
         if running {
-            if let Some(message) = model.message_mut(c, m) {
+            if let Some(mut message) = model.message_mut(c, m) {
                 message.id = Some(message_id);
                 message.delivery = Some(DeliveryState::Sent);
                 message.note(now, "taken by the mailbox");
+            }
+            // Named in place: the summary's ids start over (1463).
+            if let Some(conversation) = model.conversations.get_mut(c) {
+                conversation.summary.forget();
             }
             return;
         }
@@ -5051,10 +7108,10 @@ fn home_sent<B>(
     message.note(now, "sent from another device, taken by the mailbox");
     message.activity = activity;
     message.fields = fields;
-    let conversation = &mut model.conversations[index];
-    conversation.activity = activity;
-    conversation.messages.push(message);
-    let peer = conversation.peer;
+    model.conversations[index].activity = activity;
+    // At the time the other device sent it (1505), among what shows.
+    model.place(index, message);
+    let peer = model.conversations[index].peer;
     model.changed.insert((peer, activity));
     if index == model.selected && model.scroll_top.is_none() {
         model.message_cursor = model.conversations[index].messages.len() - 1;
@@ -5083,7 +7140,7 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
             }
         };
     }
-    if let Some(message) = model.message_mut(c, m) {
+    if let Some(mut message) = model.message_mut(c, m) {
         message.leg = None;
     }
     let Err(detail) = result else {
@@ -5098,7 +7155,7 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
         .collect();
     let text = format!("not sent: {}", reasons.join("; "));
     let now = model.now;
-    if let Some(message) = model.message_mut(c, m) {
+    if let Some(mut message) = model.message_mut(c, m) {
         message.delivery = Some(DeliveryState::Failed);
         message.note(now, &text);
     }
@@ -5116,7 +7173,7 @@ fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> 
         return Vec::new();
     }
     let now = model.now;
-    if let Some(message) = model.message_mut(c, m) {
+    if let Some(mut message) = model.message_mut(c, m) {
         message.leg = None;
         message.unproven = true;
         message.note(now, "sent over a link, no delivery proof yet");
@@ -5281,6 +7338,13 @@ pub const MAP_NAMED_TICKS: u64 = 8;
 /// The map title's word while a region loads.
 pub const MAP_LOADING: &str = "loading map";
 
+/// The map title's words while a region loads for what is on screen
+/// (1527), the phone chip's "Loading the map of this area".
+pub const MAP_LOADING_HERE: &str = "loading the map of this area";
+
+/// The window's chip for the same (1527), the phone's words.
+pub const MAP_LOADING_HERE_WORDS: &str = "Loading the map of this area";
+
 /// The toast for `load map area` over an area loaded already.
 pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
 
@@ -5290,9 +7354,10 @@ pub const SHARE_CLICK: &str = "click to stop";
 /// The toast of a send that failed: the legs' reasons are in its details.
 pub const NOT_SENT: &str = "Not sent. Its details say why.";
 
-/// The empty conversations pane's line.
-pub const NO_CONVERSATIONS: &str =
-    "No conversations yet: :new conversation starts one with a friend's code.";
+/// The empty conversations pane's line, in the reader's language.
+fn no_conversations(lang: strings::Lang) -> &'static str {
+    strings::StrId::NoConversationsTyped.text(lang)
+}
 
 /// The `blocked` view's line while nothing is blocked.
 pub const NO_BLOCKED: &str = "Nothing blocked. :blocked returns.";
@@ -5336,7 +7401,7 @@ fn search_pane<B: InputBuffer>(
     let below = height.saturating_sub(search::FIELD_ROWS);
     match model.query() {
         None if model.conversations.is_empty() => {
-            rows.extend(wrap(&[plain(NO_CONVERSATIONS)], width, 0));
+            rows.extend(wrap(&[plain(no_conversations(model.lang))], width, 0));
         }
         None => rows.extend(layout::list(model, width, below)),
         Some(query) => {
@@ -5357,19 +7422,22 @@ pub fn short(address: &[u8; 16]) -> String {
 }
 
 /// The header's title: the peer as [`Names::label`] says it, its trust
-/// state in words, then whose name it shares and what it announces beside a
-/// petname. The default state, a peer the reader has not named, takes no
+/// state in words, what it announces beside a petname, and the sentence of
+/// a shared name (1452). The default state, a peer the reader has not named, takes no
 /// word (1279, walk finding 21): "unknown" on every new chat read as a
 /// warning about nothing.
-pub fn header_title(names: &Names, peer: &[u8; 16]) -> String {
+pub fn header_title(names: &Names, peer: &[u8; 16], lang: strings::Lang) -> String {
     let mut words = match names.trust(peer) {
         Trust::Unknown => Vec::new(),
         trust => vec![trust.as_str().to_string()],
     };
     words.extend(names.header_notes(peer));
+    // Two peers of one name say so (1452), after the tails that tell them
+    // apart.
+    words.extend(names.same_name(peer).map(|sentence| sentence.resolve(lang)));
     match words.is_empty() {
-        true => names.label(peer),
-        false => format!("{}  {}", names.label(peer), words.join(" · ")),
+        true => names.label(peer, lang),
+        false => format!("{}  {}", names.label(peer, lang), words.join(" · ")),
     }
 }
 
@@ -5413,7 +7481,7 @@ fn fetch_shown<B>(model: &UiModel<B>) -> bool {
 /// takes the first that fits. The word is long, so the narrower forms say
 /// `pn` (1153: "mailbox" now means the user's Loquax Mailbox).
 fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
-    let Some(node) = model.mailbox.node else {
+    if model.mailbox.node.is_none() {
         // Without a relay nothing is said until a send needs one (1279, walk
         // finding 21): "no propagation node" in every chat was the default
         // state worded as a fault.
@@ -5421,8 +7489,18 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
             true => vec!["no relay".to_string()],
             false => Vec::new(),
         };
-    };
-    let node = to_hex(&node[..4]);
+    }
+    // The relay by its announced name, else "a relay": never its hash on
+    // the screen (1587, the names rule of 1452); the hash is the CLI's and
+    // the log's `propagation node:` line.
+    let node = match &model.mailbox.name {
+        Some(name) => strings::Text::Key(
+            strings::StrId::RelayNamed,
+            Vec::from([strings::Arg::Str(name.clone())]),
+        ),
+        None => strings::Text::key(strings::StrId::RelayUnnamed),
+    }
+    .resolve(model.lang);
     let how = if model.mailbox.by_user {
         "chosen"
     } else {
@@ -5438,20 +7516,19 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
     let mut words = Vec::new();
     match (&sync, &next) {
         (Some(sync), Some(next)) => {
-            words.push(format!("propagation node {node} {how} · {sync} · {next}"));
+            words.push(format!("{node} {how} · {sync} · {next}"));
             words.push(format!("propagation node · {sync} · {next}"));
             words.push(format!("pn · {sync} · {next}"));
             words.push(format!("pn · {next}"));
         }
         (Some(only), None) | (None, Some(only)) => {
-            words.push(format!("propagation node {node} {how} · {only}"));
+            words.push(format!("{node} {how} · {only}"));
             words.push(format!("propagation node · {only}"));
             words.push(format!("pn · {only}"));
         }
-        (None, None) => words.push(format!("propagation node {node} {how}")),
+        (None, None) => words.push(format!("{node} {how}")),
     }
-    words.push(format!("propagation node {node}"));
-    words.push(format!("pn {node}"));
+    words.push(node);
     words.push("pn".to_string());
     words
 }
@@ -5509,7 +7586,7 @@ pub fn message_detail<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option
 fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> {
     let conversation = model.conversations.get(c)?;
     let message = conversation.messages.get(m)?;
-    let who = model.names.label(&conversation.peer);
+    let who = model.names.label(&conversation.peer, model.lang);
     let offset = message.at.or(model.now).map_or(0, |at| at.offset_secs);
     let mut rows = vec![
         match message.outbound {
@@ -5624,12 +7701,121 @@ fn profile_view(screen: &profile::ProfileScreen, lang: strings::Lang) -> DetailV
 /// The light margin a scanner needs around a QR code, in modules.
 const QR_QUIET: u32 = 4;
 
-/// The detail view up, the profile's or a message's.
+/// The detail view up: the profile's, a message's, or the settings'.
 fn shown_detail<B>(model: &UiModel<B>) -> Option<DetailView> {
-    match model.profile_screen() {
-        Some(screen) => Some(profile_view(&screen, model.lang)),
-        None => model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+    if let Some(screen) = model.profile_screen() {
+        return Some(profile_view(&screen, model.lang));
     }
+    if let Some(view) = model.detail.and_then(|(c, m)| detail_view(model, c, m)) {
+        return Some(view);
+    }
+    model.settings.map(|at| settings_view(model, at))
+}
+
+/// The settings in the terminal's detail view (1450): the nine sections
+/// of [`settings::SECTIONS`] numbered as the phone lists them, or one
+/// section's rows, each with the key that runs it and the value in force.
+fn settings_view<B>(model: &UiModel<B>, at: Option<settings::Section>) -> DetailView {
+    use settings::Section;
+    let lang = model.lang;
+    let screen = settings::screen(model, settings::Target::Terminal, at);
+    let mut rows = Vec::new();
+    let foot = match at {
+        None => {
+            for entry in &screen.entries {
+                rows.push(format!("{}  {}", entry.key, entry.title.resolve(lang)));
+                rows.push(format!("   {}", entry.summary.resolve(lang)));
+            }
+            "1-9 open a section · q close"
+        }
+        Some(section) => {
+            for row in &screen.rows {
+                let label = row.label.resolve(lang);
+                let value = row
+                    .value
+                    .as_ref()
+                    .map(|v| format!(": {}", v.resolve(lang)))
+                    .unwrap_or_default();
+                rows.push(match row.key {
+                    Some(key) => format!("{key}  {label}{value}"),
+                    None => format!("{label}{value}"),
+                });
+            }
+            match section {
+                // The section opens the profile itself; this is the line
+                // under it once the profile closes over the list.
+                Section::Profile => "p your profile · q back",
+                Section::Notifications | Section::Backup => "q back",
+                Section::Mailbox
+                | Section::Appearance
+                | Section::Chats
+                | Section::Privacy
+                | Section::Maps
+                | Section::Advanced => "a row's key runs it · q back",
+            }
+        }
+    };
+    rows.push(String::new());
+    rows.push(foot.to_string());
+    DetailView {
+        title: screen.title.resolve(lang),
+        rows,
+        fixed: Vec::new(),
+    }
+}
+
+/// A letter or a digit while the settings are the detail view up: a
+/// digit opens its section from the list, a row's key runs the row as
+/// its palette command does. What leaves for another screen (the
+/// blocked list, the map's drawing) closes the settings first.
+fn settings_key<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    at: Option<settings::Section>,
+    c: char,
+) -> Option<Vec<UiEffect>> {
+    let screen = settings::screen(model, settings::Target::Terminal, at);
+    if at.is_none() {
+        let entry = screen.entries.iter().find(|e| e.key == c)?;
+        return Some(model.show_settings(Some(entry.section)));
+    }
+    let row = screen.rows.iter().find(|r| r.key == Some(c))?;
+    let command = match row.action.as_ref()?.intent.clone() {
+        // The public rooms' hub (1577): a shipped one or none at once,
+        // another asked for in the palette.
+        intent::Intent::RoomsHub(rooms::HubPick::Paste) => {
+            model.palette = Some(Palette {
+                ask: Some(contacts::Ask::RoomsHub),
+                ..Palette::default()
+            });
+            return Some(Vec::new());
+        }
+        intent::Intent::RoomsHub(rooms::HubPick::Hub(hub)) => {
+            return Some(rooms::choose(model, rooms::HubChoice::Hub(hub)));
+        }
+        intent::Intent::RoomsHub(rooms::HubPick::None) => {
+            return Some(rooms::choose(model, rooms::HubChoice::None));
+        }
+        intent::Intent::RoomsHub(rooms::HubPick::More) => {
+            rooms::more(model);
+            return Some(Vec::new());
+        }
+        intent::Intent::Profile => PaletteCommand::MyCode,
+        intent::Intent::Theme => PaletteCommand::Theme,
+        intent::Intent::PhotoSize(_) => PaletteCommand::PhotoSize,
+        intent::Intent::SendOnEnter => PaletteCommand::SendOnEnter,
+        intent::Intent::ReadReceipts { .. } => PaletteCommand::ReadReceipts,
+        intent::Intent::Help => PaletteCommand::Help,
+        intent::Intent::ShowBlocked => {
+            model.settings = None;
+            PaletteCommand::Blocked
+        }
+        intent::Intent::MapDrawing => {
+            model.settings = None;
+            PaletteCommand::MapDrawing
+        }
+        _ => return None,
+    };
+    Some(run(model, command))
 }
 
 /// Why a message of ours shown delivered will not turn read (1233,
@@ -5656,6 +7842,95 @@ fn no_read_words<B>(
 
 /// The screen.
 pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
+    // One turn's builds are shared and an unchanged turn's reused
+    // (1490): the stamp covers every update (the revision moves with
+    // each) and the fields a shell or a test sets directly.
+    let stamp = view_stamp(model);
+    if let Some((at, view)) = model.view_cache.borrow().as_ref() {
+        if *at == stamp {
+            return view.clone();
+        }
+    }
+    let view = view_fresh(model);
+    *model.view_cache.borrow_mut() = Some((stamp, view.clone()));
+    view
+}
+
+/// The fingerprint of everything [`view_fresh`] reads that an update
+/// does not stamp by itself: the model's revision covers every fold,
+/// the rest covers direct mutation between folds.
+fn view_stamp<B: InputBuffer>(model: &UiModel<B>) -> u64 {
+    let mut hash = Fnv::new();
+    hash.word(model.revision);
+    hash.word(model.look_stamp);
+    hash.word(model.screen.0 as u64);
+    hash.word(model.screen.1 as u64);
+    hash.word(model.focus as u64);
+    hash.word(model.selected as u64);
+    hash.word(model.message_cursor as u64);
+    hash.word(model.scroll_top.map_or(u64::MAX, |at| at as u64));
+    if let Some(anchor) = model.chat_anchor {
+        hash.word(anchor.key);
+        hash.word(anchor.offset as u64);
+    }
+    hash.word(model.help_scroll as u64);
+    hash.word(u64::from(model.help));
+    hash.word(
+        model
+            .detail
+            .map_or(u64::MAX, |(c, m)| ((c as u64) << 24) ^ m as u64),
+    );
+    hash.word(model.detail_scroll as u64);
+    hash.word(model.footer_hover.map_or(u64::MAX, |at| at as u64));
+    hash.word(model.tick);
+    hash.word(model.tier as u64);
+    hash.word(model.theme as u64);
+    hash.word(u64::from(model.mouse));
+    hash.word(u64::from(model.ascii));
+    hash.word(u64::from(model.show_blocked));
+    hash.word(u64::from(model.show_archived));
+    hash.word(u64::from(model.fetching));
+    hash.word(u64::from(model.palette.is_some()));
+    hash.word(u64::from(model.search.is_some()));
+    hash.word(u64::from(model.map.is_some()));
+    hash.word(model.toasts.len() as u64);
+    hash.word(model.toasts_said);
+    hash.word(model.lang as u64);
+    hash.word(u64::from(model.debug_overlay));
+    hash.word(u64::from(model.enhanced));
+    hash.word(u64::from(model.send_on_enter));
+    hash.word(model.sending.len() as u64);
+    hash.word(model.map_named_until.unwrap_or(u64::MAX));
+    // The panes' content, swept cheaply: the folds bump the revision,
+    // this covers a model mutated directly (tests do).
+    for conversation in &model.conversations {
+        hash.word(conversation.revision());
+        hash.word(conversation.messages.len() as u64);
+        hash.word(conversation.unread as u64);
+        hash.word(u64::from(conversation.pinned));
+        if let Some(last) = conversation.messages.last() {
+            hash.word(last.activity);
+            hash.word(delivery_word(last.delivery));
+        }
+    }
+    if let Some(open) = model.conversations.get(model.selected) {
+        hash.word(model.laid_key(open, model.sizes().messages.0));
+    }
+    hash.bytes(model.compose.value().as_bytes());
+    if let Some(query) = model.query() {
+        hash.bytes(query.as_bytes());
+    }
+    if let Some(selection) = model.selection {
+        hash.word(selection.anchor.0 as u64);
+        hash.word(selection.anchor.1 as u64);
+        hash.word(selection.head.0 as u64);
+        hash.word(selection.head.1 as u64);
+    }
+    hash.done()
+}
+
+/// [`view`] built fresh.
+fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
     let sizes = model.sizes();
     let (conversations, search_cursor) = match (&model.search, model.order().is_empty()) {
         (Some(open), _) => {
@@ -5666,7 +7941,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             let empty = match (model.show_blocked, model.show_archived) {
                 (true, _) => NO_BLOCKED,
                 (false, true) => NO_ARCHIVED,
-                (false, false) => NO_CONVERSATIONS,
+                (false, false) => no_conversations(model.lang),
             };
             (wrap(&[plain(empty)], sizes.list.0, 0), None)
         }
@@ -5675,7 +7950,25 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let wide = sizes.messages.0 >= WIDE_HEADER;
     let peer = model.conversations.get(model.selected).map(|c| c.peer);
     let messages_title = match peer {
-        Some(peer) => header_title(&model.names, &peer),
+        // A relay's chat says it is a group via a relay (1482).
+        Some(peer)
+            if !model.groups.contains_key(&peer)
+                && model
+                    .conversations
+                    .get(model.selected)
+                    .is_some_and(relayed::is_relayed) =>
+        {
+            strings::Text::Key(
+                strings::StrId::RelayedGroup,
+                vec![strings::Arg::Str(header_title(
+                    &model.names,
+                    &peer,
+                    model.lang,
+                ))],
+            )
+            .resolve(model.lang)
+        }
+        Some(peer) => header_title(&model.names, &peer, model.lang),
         None => "messages".to_string(),
     };
     let mailbox = mailbox_words(model);
@@ -5693,7 +7986,9 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         .saturating_sub(leviculum_ui::text::fit_width(&messages_title) + 6);
     let short = position.as_ref().and_then(|words| words.last().cloned());
     let messages_title_right = match (wide, peer) {
-        (true, Some(peer)) => to_hex(&peer),
+        // Wide: the name alone (1452); the address is the detail view's
+        // and the profile's.
+        (true, Some(_)) => String::new(),
         // Narrow: the position's age before the mailbox, so the reader
         // knows there is one, then the mailbox alone where both do not fit.
         _ => {
@@ -5715,8 +8010,8 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         }
         _ => 0,
     };
-    let mut laid = model.laid();
-    let texts = core::mem::take(&mut laid.texts);
+    let laid = model.laid();
+    let texts = laid.texts.clone();
     let rows = model.message_rows();
     let top = model.top_of(laid.rows.len());
     let mut messages = Vec::with_capacity(sizes.messages.1);
@@ -5774,7 +8069,8 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let shown = laid.rows.len().saturating_sub(top).min(rows);
     messages.extend((shown..rows).map(|_| RLine::default()));
     let range = model.selection.map(|s| hit::ordered(&s));
-    for (at, mut row) in laid.rows.into_iter().enumerate().skip(top).take(shown) {
+    for (at, row) in laid.rows.iter().enumerate().skip(top).take(shown) {
+        let mut row = row.clone();
         // The selected text in inverse video, against whatever it was drawn
         // in: the selected block is reversed already.
         if let (Some((from, to)), Some(Some(text))) = (range, texts.get(at)) {
@@ -5787,7 +8083,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         messages.push(row);
     }
     let compose_title = match peer {
-        Some(peer) => format!("to {}", model.names.label(&peer)),
+        Some(peer) => format!("to {}", model.names.label(&peer, model.lang)),
         None => "compose".to_string(),
     };
     let ctx = model.ctx();
@@ -5836,20 +8132,30 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
                 strings::StrId::NearbyEnterAdds.text(strings::Lang::En)
             )
         });
+    // The screen's own load says so in words (1527), as the phone's chip
+    // does.
+    let loading_word = match model.map_here {
+        true => Some(MAP_LOADING_HERE.to_string()),
+        false => model.map_loading.clone(),
+    };
     let (messages_title, messages_title_right) = match &map {
         Some(shown) => (
             format!("{MAP_TITLE}{card}"),
-            match &model.map_loading {
-                Some(word) => format!(
+            // No zoom number and no count on screen (1447, walk 1 finding
+            // 22): the debug overlay alone shows them.
+            match (&loading_word, model.debug_overlay) {
+                (Some(word), true) => format!(
                     "{named}z{} · {} in view · {word}",
                     shown.viewport.zoom(),
                     shown.pins.len()
                 ),
-                None => format!(
+                (None, true) => format!(
                     "{named}z{} · {} in view",
                     shown.viewport.zoom(),
                     shown.pins.len()
                 ),
+                (Some(word), false) => format!("{named}{word}"),
+                (None, false) => named.trim_end_matches(" · ").to_string(),
             },
         ),
         None => (messages_title, messages_title_right),
@@ -5859,8 +8165,19 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             (true, _) => SEARCH_TITLE.to_string(),
             (false, _) if model.show_blocked => BLOCKED_TITLE.to_string(),
             (false, _) if model.show_archived => ARCHIVED_TITLE.to_string(),
-            (false, Some(address)) => format!("Loquax {}", &to_hex(&address)[..8]),
-            (false, None) => "Loquax (attaching)".to_string(),
+            // The own name, or "Loquax" alone while there is none (1447,
+            // walk 1 finding 22): never the address's hex.
+            (false, Some(address)) => {
+                let named = Some(model.profile.name.trim())
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| model.names.shown(&address).map(str::trim))
+                    .filter(|n| !n.is_empty());
+                match named {
+                    Some(name) => name.to_string(),
+                    None => strings::StrId::AppName.text(model.lang).to_string(),
+                }
+            }
+            (false, None) => strings::StrId::AppConnecting.text(model.lang).to_string(),
         },
         conversations_title_right: match (searching, model.show_blocked) {
             (true, _) => SEARCH_CLOSES.to_string(),
@@ -6235,6 +8552,30 @@ pub(crate) mod tests {
         update(model, key(KeyCode::Enter))
     }
 
+    /// 1603: a model that is never ticked (the M9's) keeps
+    /// [`TOAST_KEEP`] toasts, not one per message ever received, and a
+    /// toast said at the cap still changes what the redraw marks hash.
+    #[test]
+    fn a_model_never_ticked_keeps_a_few_toasts_and_shows_the_newest() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        for n in 0..TOAST_KEEP {
+            model.toast(ToastKind::Info, format!("toast {n}"));
+        }
+        let (view, clock) = (view_stamp(&model), model.clock_marks());
+        model.toast(ToastKind::Info, String::from("the newest"));
+        for n in 0..1000 {
+            model.toast(ToastKind::Info, format!("more {n}"));
+        }
+        model.toast(ToastKind::Info, String::from("the last"));
+        assert_eq!(model.toasts.len(), TOAST_KEEP);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("the last")
+        );
+        assert_ne!(view_stamp(&model), view, "a toast at the cap is drawn");
+        assert_ne!(model.clock_marks(), clock, "a toast at the cap is marked");
+    }
+
     #[test]
     fn tab_and_shift_tab_cycle_the_three_panes() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -6521,7 +8862,7 @@ pub(crate) mod tests {
                 })
                 .map(|(_, value)| value)
         };
-        let who = model.names.label(&PEER);
+        let who = model.names.label(&PEER, model.lang);
         assert_eq!(state_row(Lang::En), Some(format!("On {who}'s device")));
         assert_eq!(
             state_row(Lang::De),
@@ -6690,6 +9031,7 @@ pub(crate) mod tests {
             OutboxEvent::NodeAnnounced {
                 destination: PN,
                 status: Some(1),
+                name: None,
             },
         );
         // A round that failed found the node silent: nothing asked.
@@ -7405,7 +9747,7 @@ pub(crate) mod tests {
             .rposition(|m| m.outbound)
             .expect("ours");
         let rows = detail_view(&model, 0, m).expect("a detail view").rows;
-        let who = model.names.label(&PEER);
+        let who = model.names.label(&PEER, model.lang);
         assert!(
             rows.contains(&format!("{who} sends no read receipts")),
             "{rows:?}"
@@ -7949,6 +10291,55 @@ pub(crate) mod tests {
         }
     }
 
+    /// 1490: the laid cache's splice. Moving the cursor across every
+    /// message yields, row for row and cell for cell, the layout a fresh
+    /// pass draws with that cursor; the spliced rows count, the rest do
+    /// not.
+    #[test]
+    fn a_cursor_move_splices_the_same_rows_a_fresh_layout_draws() {
+        let mut model = UiModel::<Field>::new(&[]);
+        for n in 0..9u8 {
+            let mut id = [0x40; 32];
+            id[0] = n;
+            match n % 3 {
+                0 => engine(
+                    &mut model,
+                    received_from(OTHER, id, &"word ".repeat(n as usize * 7 + 1)),
+                ),
+                1 => {
+                    update(
+                        &mut model,
+                        UiEvent::Write {
+                            peer: OTHER,
+                            body: format!("reply {n}"),
+                        },
+                    );
+                }
+                _ => engine(&mut model, received_from(OTHER, id, "short")),
+            }
+        }
+        model.focus = Pane::Messages;
+        let len = model.conversations[model.selected].messages.len();
+        for cursor in (0..len).rev() {
+            model.message_cursor = cursor;
+            let cached = model.laid();
+            let fresh = layout::conversation(
+                &model.conversations[model.selected],
+                model.sizes().messages.0,
+                &model.draw_context(Some(cursor)),
+            );
+            assert_eq!(cached.rows.len(), fresh.rows.len(), "cursor {cursor}");
+            for (at, (a, b)) in cached.rows.iter().zip(&fresh.rows).enumerate() {
+                assert_eq!(
+                    format!("{:?}", a.cells),
+                    format!("{:?}", b.cells),
+                    "cursor {cursor}, row {at}"
+                );
+            }
+            assert_eq!(cached.spans, fresh.spans, "cursor {cursor}");
+        }
+    }
+
     /// On a client of a home node, opening a conversation marks its unread
     /// read for the other devices; a device that is no client marks nothing.
     #[test]
@@ -8121,6 +10512,93 @@ pub(crate) mod tests {
         assert!(model.take_marks().is_empty());
     }
 
+    /// A chat opened before its page is loaded (1546): a board's two
+    /// cores, the open said before the I/O core's page. The row's kept
+    /// unread ids are what the mark names, and the list's badge goes with
+    /// the count; before, the count went to 0 with no mark, and the home
+    /// and the summary log kept the 7.
+    #[test]
+    fn an_open_before_the_page_marks_the_kept_unread_ids() {
+        use crate::home::wire::MarkFlag;
+        let group = [0x47; 16];
+        let ids: Vec<[u8; 32]> = (1..=7u8).map(|n| [n; 32]).collect();
+        let mut model = UiModel::<Field>::new(&[]);
+        model.home_client = true;
+        model.list_apart = true;
+        model.restore_rows(
+            vec![(
+                listing::Row {
+                    peer: group,
+                    unread: 7,
+                    activity: 9,
+                    unread_ids: ids.clone(),
+                    listing: listing::Listing {
+                        line: String::from("gen! Ich habe"),
+                        moved: Some(9),
+                        unread_rows: 7,
+                        ..listing::Listing::default()
+                    },
+                },
+                500,
+            )],
+            Vec::new(),
+        );
+        assert!(model.conversations[0].messages.is_empty());
+        let _ = update(&mut model, UiEvent::Open { peer: group });
+        let marks = model.take_marks();
+        assert!(marks.iter().all(|m| m.flag == MarkFlag::Read));
+        let named: Vec<[u8; 32]> = marks.into_iter().flat_map(|m| m.ids).collect();
+        let newest_first: Vec<[u8; 32]> = ids.iter().rev().copied().collect();
+        assert_eq!(named, newest_first, "the kept ids, all of them");
+        let row = model.row(&group).expect("the group's row");
+        assert_eq!(row.unread, 0);
+        assert_eq!(row.listing.unread_rows, 0, "the badge goes too");
+        assert!(row.unread_ids.is_empty());
+    }
+
+    /// 1563: a chat listed from its kept row with 776 unread, none of its
+    /// messages loaded, takes a live message: its badge says 777, not the
+    /// one message loaded. Before, a board's pull and the boot that folds
+    /// a ring's tail showed the unread of the loaded messages alone.
+    #[test]
+    fn a_live_message_on_a_kept_row_counts_the_unloaded_unread() {
+        let peer = [0x52; 16];
+        let mut model = UiModel::<Field>::new(&[]);
+        model.home_client = true;
+        model.list_apart = true;
+        model.restore_rows(
+            vec![(
+                listing::Row {
+                    peer,
+                    unread: 776,
+                    activity: 9,
+                    unread_ids: Vec::new(),
+                    listing: listing::Listing {
+                        line: String::from("alt"),
+                        moved: Some(9),
+                        unread_rows: 776,
+                        ..listing::Listing::default()
+                    },
+                },
+                1700,
+            )],
+            Vec::new(),
+        );
+        assert_eq!(model.conversations[0].unread_rows(), 776);
+        // The list is up: no chat is on the panel (the board's take).
+        model.selected = NONE_OPEN;
+        engine(&mut model, received_from(peer, ID2, "neu"));
+        let conversation = &model.conversations[0];
+        assert_eq!(conversation.messages.len(), 1);
+        assert_eq!(conversation.unread, 777);
+        assert_eq!(conversation.unread_rows(), 777, "the badge keeps the 776");
+        assert_eq!(
+            model.row(&peer).map(|row| row.listing.unread_rows),
+            Some(777),
+            "and the row the summary log keeps says it"
+        );
+    }
+
     /// A frontend's text goes out as compose's does: a bubble of ours,
     /// queued, in the peer's conversation, opened; blank text sends
     /// nothing; and a reaction by peer and target is the picker's.
@@ -8218,6 +10696,176 @@ pub(crate) mod tests {
         assert!(model.take_marks().is_empty());
     }
 
+    /// 1600: the model's id index, after a pull's worth of arrivals,
+    /// sends named by the home, a deleted message, a deleted
+    /// conversation, kept rows and read marks, is what a rebuild reads
+    /// off the conversations; and it got there by its journals, not by
+    /// reading everything anew, except where a conversation went.
+    #[test]
+    fn the_id_index_is_a_rebuild_of_the_conversations_after_a_pull_with_marks() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let peers: Vec<[u8; 16]> = (0..40u8).map(|p| [p + 1; 16]).collect();
+        let id = |p: u8, n: u8| {
+            let mut id = [p; 32];
+            id[31] = n;
+            id
+        };
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        let exact = |model: &mut UiModel<Field>| {
+            let mut copy = model.conversations.clone();
+            let rebuilt = id_index::IdIndex::rebuild(&mut copy);
+            *model.id_index() == rebuilt
+        };
+        for n in 0..5u8 {
+            for (p, &peer) in peers.iter().enumerate() {
+                engine(&mut model, received_from(peer, id(p as u8 + 1, n), "hi"));
+            }
+            assert!(exact(&mut model), "after round {n}");
+        }
+        // Sends the home names as it takes them: an id appears in place.
+        for (p, &peer) in peers.iter().enumerate().take(10) {
+            engine(
+                &mut model,
+                OutboxEvent::HomeSent {
+                    message_id: id(p as u8 + 1, 200),
+                    destination: peer,
+                    sent_at: 0,
+                    body: b"back".to_vec(),
+                    fields: Vec::new(),
+                },
+            );
+        }
+        // A send from here, named in place when the router takes it.
+        let _ = update(&mut model, UiEvent::Open { peer: peers[0] });
+        say(&mut model, "named later");
+        engine(
+            &mut model,
+            OutboxEvent::Queued {
+                message_id: id(1, 201),
+            },
+        );
+        assert!(exact(&mut model));
+        assert!(model.id_index().holding(&id(1, 201)).next().is_some());
+        // Read marks, the store's way: 64 ids at a time.
+        let all: Vec<[u8; 32]> = (0..5u8)
+            .flat_map(|n| (1..=40u8).map(move |p| id(p, n)))
+            .collect();
+        for chunk in all.chunks(64) {
+            engine(
+                &mut model,
+                OutboxEvent::HomeMarked {
+                    mark: Mark {
+                        flag: MarkFlag::Read,
+                        ids: chunk.to_vec(),
+                    },
+                },
+            );
+        }
+        assert!(model.conversations.iter().all(|c| c.unread == 0));
+        // Another device deleted a message.
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Deleted,
+                    ids: vec![id(3, 0)],
+                },
+            },
+        );
+        assert!(exact(&mut model));
+        assert!(model.id_index().holding(&id(3, 0)).next().is_none());
+        assert_eq!(model.id_index().rebuilds(), 0, "the journals carried it");
+        // A conversation deleted: everything after it moved up a place.
+        update(
+            &mut model,
+            UiEvent::DeleteConversation {
+                peer: peers[5],
+                everywhere: false,
+            },
+        );
+        assert!(exact(&mut model));
+        assert!(model.id_index().holding(&id(6, 1)).next().is_none());
+        assert_eq!(model.id_index().rebuilds(), 1, "a place moved: read anew");
+        let at = model.conversations.iter().position(|c| c.peer == peers[7]);
+        assert_eq!(
+            model.id_index().holding(&id(8, 1)).collect::<Vec<_>>(),
+            at.into_iter().collect::<Vec<_>>()
+        );
+        // A kept row, none of its messages loaded (1521).
+        let row_peer = [0x99; 16];
+        let kept: Vec<[u8; 32]> = (1..=3u8).map(|n| id(0x99, n)).collect();
+        model.restore_rows(
+            vec![(
+                listing::Row {
+                    peer: row_peer,
+                    unread: 3,
+                    activity: 9,
+                    unread_ids: kept.clone(),
+                    listing: listing::Listing::default(),
+                },
+                500,
+            )],
+            Vec::new(),
+        );
+        assert!(exact(&mut model));
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Read,
+                    ids: vec![kept[1]],
+                },
+            },
+        );
+        let row = model.conversations.iter().find(|c| c.peer == row_peer);
+        assert_eq!(row.map(|c| c.unread), Some(1));
+        assert!(exact(&mut model));
+        assert!(model.id_index().keeping(&kept[0]).next().is_none());
+        assert_eq!(model.id_index().rebuilds(), 1);
+    }
+
+    /// 1600: a read mark asks the id index, not every conversation in
+    /// turn. 64 ids no conversation holds look into none and walk no
+    /// message; 64 that one holds each look into that one.
+    #[test]
+    fn a_read_mark_looks_only_into_the_conversations_that_hold_its_ids() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        let id = |p: u8, n: u8| {
+            let mut id = [p; 32];
+            id[31] = n;
+            id
+        };
+        for n in 0..64u8 {
+            for p in 1..=50u8 {
+                engine(&mut model, received_from([p; 16], id(p, n), "hi"));
+            }
+        }
+        let mark = |ids: Vec<[u8; 32]>| OutboxEvent::HomeMarked {
+            mark: Mark {
+                flag: MarkFlag::Read,
+                ids,
+            },
+        };
+        let unknown: Vec<[u8; 32]> = (0..64u8).map(|n| id(0xee, n)).collect();
+        let _ = update(&mut model, UiEvent::Engine(mark(unknown)));
+        let counted = model.counters().expect("this build counts");
+        assert_eq!((counted.probed, counted.walked), (0, 0), "{counted}");
+        let known: Vec<[u8; 32]> = (0..64u8).map(|n| id(7, n)).collect();
+        let _ = update(&mut model, UiEvent::Engine(mark(known)));
+        let counted = model.counters().expect("this build counts");
+        assert_eq!((counted.probed, counted.walked), (64, 0), "{counted}");
+        let seventh = model.conversations.iter().find(|c| c.peer == [7; 16]);
+        assert_eq!(seventh.map(|c| c.unread), Some(0));
+        assert!(model
+            .conversations
+            .iter()
+            .filter(|c| c.peer != [7; 16] && c.peer != PEER)
+            .all(|c| c.unread == 64));
+    }
+
     /// Another device deleted a message: off the screen and out of the
     /// store, by its id, whether this device shows it or not.
     #[test]
@@ -8238,7 +10886,7 @@ pub(crate) mod tests {
         assert_eq!(model.conversations[1].messages.len(), 1);
         assert_eq!(model.conversations[1].messages[0].id, Some(ID2));
         assert_eq!(
-            model.take_writes(),
+            washed(model.take_writes()),
             [
                 StoreWrite::ForgetId { id: ID },
                 StoreWrite::ForgetId { id: [0x99; 32] }
@@ -8741,6 +11389,40 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// Walk 1 #26: whitespace and newlines at the edges never travel, on
+    /// every way a target sends (Write, Reply, the photo caption); the
+    /// inner newline stays, and a body of only whitespace sends nothing.
+    #[test]
+    fn a_send_trims_its_edges_on_every_path() {
+        let body_of = |effects: &[UiEffect]| -> Vec<String> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    UiEffect::Send { body, .. } => Some(body.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let body = String::from("  hi\nthere \n\n");
+        let effects = update(&mut model, UiEvent::Write { peer: PEER, body });
+        assert_eq!(body_of(&effects), ["hi\nthere"]);
+        let shown = model.conversations[0]
+            .messages
+            .last()
+            .map(|m| m.body.clone());
+        assert_eq!(shown.as_deref(), Some("hi\nthere"));
+        let body = String::from(" \n \t\n");
+        assert!(body_of(&update(&mut model, UiEvent::Write { peer: PEER, body })).is_empty());
+        let reply = UiEvent::Reply {
+            peer: PEER,
+            target: [7; 32],
+            body: String::from("\nyes\n"),
+        };
+        assert_eq!(body_of(&update(&mut model, reply)), ["yes"]);
+        assert_eq!(outgoing(String::from("as typed")), "as typed");
+    }
+
     /// The terminal's column of the ladder (1232), a snapshot: five
     /// messages, one per rung, in Unicode and in ASCII, each glyph two
     /// cells, read and failed bold, read in its own tone.
@@ -8758,9 +11440,9 @@ pub(crate) mod tests {
             DeliveryState::Read { at: 1_800_000_000 },
             DeliveryState::Failed,
         ];
-        for (message, state) in model.conversations[0].messages.iter_mut().zip(states) {
-            message.delivery = Some(state);
-        }
+        model.conversations[0]
+            .messages
+            .for_each_indexed_mut(|m, message| message.delivery = Some(states[m]));
         model.sending.clear();
         let column = |model: &UiModel<Field>| -> Vec<String> {
             view(model)
@@ -8797,19 +11479,16 @@ pub(crate) mod tests {
     #[test]
     fn the_view_draws_the_glyph_and_says_nothing_is_earlier() {
         let mut model = UiModel::<Field>::new(&[PEER]);
-        assert_eq!(shown(&model), [layout::EARLIEST]);
-        assert_eq!(view(&model).messages_title, "<abababab…>");
+        assert_eq!(shown(&model), ["No messages yet"]);
+        assert_eq!(view(&model).messages_title, "Unknown");
         sent(&mut model, "hi");
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
-        assert_eq!(shown(&model), [layout::EARLIEST, "hi  ◷"]);
+        assert_eq!(shown(&model), ["hi  ◷"]);
         state(&mut model, ID, MessageState::Delivered);
-        assert_eq!(shown(&model)[1], "hi  ✓");
+        assert_eq!(shown(&model)[0], "hi  ✓");
         model.ascii = true;
-        assert_eq!(shown(&model)[1], "hi  v");
-        assert_eq!(
-            text(&view(&model).conversations[0]).trim_end(),
-            "▌<abababab…>"
-        );
+        assert_eq!(shown(&model)[0], "hi  v");
+        assert_eq!(text(&view(&model).conversations[0]).trim_end(), "▌Unknown");
         assert_eq!(text(&view(&model).conversations[1]).trim_end(), "▌you: hi");
         // 1381, finding 22: the terminal's list speaks the reader's language.
         model.lang = strings::Lang::De;
@@ -8866,10 +11545,7 @@ pub(crate) mod tests {
                 verified: true,
             },
         );
-        assert_eq!(
-            shown(&model),
-            [layout::EARLIEST, "first", "second  ◷", "back", "again"]
-        );
+        assert_eq!(shown(&model), ["first", "second  ◷", "back", "again"]);
     }
 
     #[test]
@@ -8970,7 +11646,11 @@ pub(crate) mod tests {
         let rows = rows(&model);
         let text_rows: Vec<&String> = rows
             .iter()
-            .filter(|r| !r.trim().is_empty() && !r.contains(layout::EARLIEST) && !r.contains("──"))
+            .filter(|r| {
+                !r.trim().is_empty()
+                    && !r.contains(layout::EARLIEST.text(strings::Lang::En))
+                    && !r.contains("──")
+            })
             .collect();
         let (ours, theirs) = text_rows.split_at(text_rows.len() / 2);
         // The text within the cap; the time closing the last row may reach
@@ -9029,7 +11709,6 @@ pub(crate) mod tests {
         assert_eq!(
             shown(&model),
             [
-                layout::EARLIEST,
                 "── Sunday 25 October ──",
                 "late  23:59",
                 "── Today ──",
@@ -9118,7 +11797,176 @@ pub(crate) mod tests {
         assert_eq!(now.iter().filter(|r| r.contains(" new ")).count(), 1);
     }
 
-    /// A page is the pane's height now that the model knows it.
+    /// The chat 1529 reads by the line: a short message, one over three
+    /// screens long, a short one, the long one's lines its own rows.
+    fn long_between_short() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        receive(&mut model, PEER, 1, "short before");
+        let lines = 3 * model.message_rows() + 5;
+        let long: Vec<String> = (1..=lines).map(|n| format!("line {n}")).collect();
+        receive(&mut model, PEER, 2, &long.join("\n"));
+        receive(&mut model, PEER, 3, "short after");
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Messages);
+        model
+    }
+
+    /// The view's first row of the open chat's `total` laid rows.
+    fn top_now(model: &UiModel<Field>) -> usize {
+        model.top_of(model.laid().rows.len())
+    }
+
+    /// 1529: Down from the top shows every laid row exactly once, never
+    /// more than one new a press; the selection stays on the long message
+    /// until its last line is on screen and moves to the short one under
+    /// it at the press that brings that one's first line on; the way back
+    /// up enters the long message at its end, a line a press, and a walk
+    /// into its middle and back lands on the line it left. Before 1529
+    /// Down jumped a message a press and skipped the long one's middle.
+    #[test]
+    fn a_chat_scrolls_by_the_line_and_the_selection_follows_the_lines() {
+        let mut model = long_between_short();
+        let laid = model.laid();
+        let total = laid.rows.len();
+        let rows = model.message_rows();
+        let long = laid.spans[1];
+        let after = laid.spans[2];
+        assert!(long.end - long.start > 3 * rows, "{long:?} over {rows}");
+        update(&mut model, key(KeyCode::Home));
+        assert_eq!((top_now(&model), model.message_cursor), (0, 0));
+        let mut seen = vec![0usize; total];
+        seen[..rows].iter_mut().for_each(|n| *n += 1);
+        let (mut moved_at, mut ready) = (None, None);
+        for press in 1..=total + 5 {
+            let (before, on) = (top_now(&model), model.message_cursor);
+            update(&mut model, key(KeyCode::Down));
+            let top = top_now(&model);
+            assert!(top - before <= 1, "press {press}: {before} to {top}");
+            seen[before + rows..top + rows]
+                .iter_mut()
+                .for_each(|n| *n += 1);
+            if on == 1 && before + rows < long.end {
+                assert_eq!(
+                    model.message_cursor, 1,
+                    "press {press}: its end not shown yet"
+                );
+            }
+            // The first press that finds the long one ended and the short
+            // one's first line on screen is the one that selects it.
+            if on == 1
+                && ready.is_none()
+                && before + rows >= long.end
+                && before + rows > after.block.0
+            {
+                ready = Some(press);
+            }
+            if model.message_cursor == 2 && moved_at.is_none() {
+                moved_at = Some(press);
+            }
+        }
+        assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
+        assert!(moved_at.is_some());
+        assert_eq!(moved_at, ready, "the selection moved at the right press");
+        assert!(
+            model.scroll_top.is_none(),
+            "following the newest at the end"
+        );
+        // Back up: the long one's end, not its start.
+        update(&mut model, key(KeyCode::Up));
+        let bottom = total - rows;
+        assert_eq!((top_now(&model), model.message_cursor), (bottom, 1));
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!((top_now(&model), model.message_cursor), (bottom - 1, 1));
+        // Into the middle, on, and back: the same line.
+        update(&mut model, key(KeyCode::Home));
+        for _ in 0..rows + 3 {
+            update(&mut model, key(KeyCode::Down));
+        }
+        let left = top_now(&model);
+        assert!(left > long.start && left + rows < long.end, "mid: {left}");
+        for _ in 0..4 {
+            update(&mut model, key(KeyCode::Down));
+        }
+        for _ in 0..4 {
+            update(&mut model, key(KeyCode::Up));
+        }
+        assert_eq!((top_now(&model), model.message_cursor), (left, 1));
+    }
+
+    /// 1529: Left and Right in the chat page a screen less a line, as the
+    /// page keys do; at the top the first message is selected, at the
+    /// bottom the newest and the pane follows. The list is untouched by
+    /// the rule: there Down is the next entry.
+    #[test]
+    fn left_and_right_page_the_chat_and_the_list_stays_by_entry() {
+        let mut model = long_between_short();
+        let total = model.laid().rows.len();
+        let rows = model.message_rows();
+        update(&mut model, key(KeyCode::Home));
+        update(&mut model, key(KeyCode::Right));
+        assert_eq!((top_now(&model), model.message_cursor), (rows - 1, 1));
+        update(&mut model, key(KeyCode::PageDown));
+        assert_eq!(top_now(&model), 2 * (rows - 1), "the page key the same");
+        update(&mut model, key(KeyCode::Left));
+        assert_eq!((top_now(&model), model.message_cursor), (rows - 1, 1));
+        update(&mut model, key(KeyCode::Left));
+        assert_eq!((top_now(&model), model.message_cursor), (0, 0));
+        for _ in 0..total / (rows - 1) + 1 {
+            update(&mut model, key(KeyCode::Right));
+        }
+        assert_eq!(model.message_cursor, 2);
+        assert!(model.scroll_top.is_none(), "following again");
+        // The list: an entry a press, Left and Right no page.
+        let mut list = UiModel::<Field>::new(&[PEER, OTHER, [0x5a; 16]]);
+        for (i, peer) in [PEER, OTHER, [0x5a; 16]].into_iter().enumerate() {
+            receive(&mut list, peer, 10 + i as u8, "hello");
+        }
+        list.focus = Pane::Conversations;
+        let order = list.order();
+        let at = order
+            .iter()
+            .position(|&c| c == list.selected)
+            .expect("in order");
+        update(&mut list, key(KeyCode::Down));
+        let next = order
+            .iter()
+            .position(|&c| c == list.selected)
+            .expect("in order");
+        assert_eq!(next, (at + 1).min(order.len() - 1));
+    }
+
+    /// 1529: a message is read when its last line was on screen, not when
+    /// half of it or a third of the pane showed: at the top of the long
+    /// message the viewport does not name it, with its end on screen it
+    /// does.
+    #[test]
+    fn the_long_message_is_read_when_its_last_line_is_on_screen() {
+        let mut model = long_between_short();
+        let key_of = |model: &UiModel<Field>, m: usize| {
+            model.conversations[model.selected].messages[m].activity
+        };
+        let long = key_of(&model, 1);
+        update(&mut model, key(KeyCode::Home));
+        let shown = hit::viewport(&model).expect("a chat").1;
+        assert!(shown.contains(&key_of(&model, 0)), "{shown:?}");
+        assert!(!shown.contains(&long), "its start only: {shown:?}");
+        let end = model.laid().spans[1].end;
+        while top_now(&model) + model.message_rows() < end {
+            update(&mut model, key(KeyCode::Down));
+        }
+        let shown = hit::viewport(&model).expect("a chat").1;
+        assert!(shown.contains(&long), "its last line: {shown:?}");
+    }
+
+    /// A page is the pane's height less a line of overlap (1529) now that
+    /// the model knows it.
     #[test]
     fn a_page_moves_the_view_by_the_panes_height() {
         let mut model = UiModel::<Field>::new(&[PEER]);
@@ -9129,7 +11977,7 @@ pub(crate) mod tests {
         let height = model.message_rows();
         let total = model.laid().rows.len();
         update(&mut model, key(KeyCode::PageUp));
-        assert_eq!(model.scroll_top, Some(total - 2 * height));
+        assert_eq!(model.scroll_top, Some(total - 2 * height + 1));
         update(&mut model, key(KeyCode::PageDown));
         assert_eq!(model.scroll_top, None, "back at the bottom");
         update(
@@ -9223,13 +12071,13 @@ pub(crate) mod tests {
         assert_eq!(
             detail.rows,
             [
-                "from you to <abababab…>",
+                "from you to Unknown",
                 "peer   abababababababababababababababab",
                 &format!("id     {}", "11".repeat(32)),
                 "size   5 bytes",
-                "state  arrived: <abababab…>'s mailbox or device has it",
+                "state  arrived: Unknown's mailbox or device has it",
                 // The peer never sent a message with the mark (1233).
-                "<abababab…> sends no read receipts",
+                "Unknown sends no read receipts",
                 "",
                 "on this device",
                 "14:02:00  queued",
@@ -9435,16 +12283,13 @@ pub(crate) mod tests {
                 by_user: false,
             },
         );
-        assert_eq!(
-            view(&model).messages_title_right,
-            "propagation node 9c9c9c9c adopted"
-        );
+        assert_eq!(view(&model).messages_title_right, "a relay adopted");
         clock(&mut model, 26, 14, 3);
         update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
         update(&mut model, UiEvent::FetchDone(Ok(0)));
         assert_eq!(
             view(&model).messages_title_right,
-            "propagation node · synced 14:03"
+            "a relay adopted · synced 14:03"
         );
         update(
             &mut model,
@@ -9454,13 +12299,64 @@ pub(crate) mod tests {
             },
         );
         let wide = view(&model);
-        assert_eq!(wide.messages_title_right, to_hex(&PEER));
+        // Wide, the right end names no address any more (1452).
+        assert_eq!(wide.messages_title_right, "");
         assert_eq!(
             text(&wide.messages[0]).trim(),
-            "propagation node 9c9c9c9c adopted · synced 14:03"
+            "a relay adopted · synced 14:03"
         );
         assert!(text(&wide.messages[1]).trim().chars().all(|c| c == '─'));
-        assert_eq!(wide.compose_title, "to <abababab…>");
+        assert_eq!(wide.compose_title, "to Unknown");
+    }
+
+    /// The header says the relay by the name its announce carries, "a
+    /// relay" without one, in the reader's language; its hash never (1587).
+    /// Another node's announce names nothing, a choice of another node
+    /// forgets the name, and an announce without a name unnames it.
+    #[test]
+    fn the_header_says_the_relay_by_its_name_never_its_hash() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let chosen = |model: &mut UiModel<Field>, node: [u8; 16]| {
+            update(
+                model,
+                UiEvent::MailboxChosen {
+                    node,
+                    by_user: false,
+                },
+            );
+        };
+        let announced = |model: &mut UiModel<Field>, node: [u8; 16], name: Option<&str>| {
+            engine_says(
+                model,
+                OutboxEvent::NodeAnnounced {
+                    destination: node,
+                    status: None,
+                    name: name.map(str::to_string),
+                },
+            );
+        };
+        let right = |model: &UiModel<Field>| view(model).messages_title_right;
+        chosen(&mut model, [0x9c; 16]);
+        assert_eq!(right(&model), "a relay adopted");
+        announced(&mut model, [0x42; 16], Some("Elsewhere"));
+        assert_eq!(right(&model), "a relay adopted", "another node's name");
+        announced(&mut model, [0x9c; 16], Some("Bern\u{7}"));
+        assert_eq!(right(&model), "relay Bern adopted", "sanitised");
+        assert!(!right(&model).contains("9c9c"));
+        model.lang = strings::Lang::De;
+        assert_eq!(right(&model), "Relais Bern adopted");
+        model.lang = strings::Lang::En;
+        chosen(&mut model, [0x9c; 16]);
+        assert_eq!(right(&model), "relay Bern adopted", "the same node");
+        chosen(&mut model, [0x77; 16]);
+        assert_eq!(right(&model), "a relay adopted", "another node");
+        model.lang = strings::Lang::De;
+        assert_eq!(right(&model), "ein Relais adopted");
+        model.lang = strings::Lang::En;
+        announced(&mut model, [0x77; 16], Some("Zug"));
+        assert_eq!(right(&model), "relay Zug adopted");
+        announced(&mut model, [0x77; 16], None);
+        assert_eq!(right(&model), "a relay adopted", "unnamed");
     }
 
     fn engine_says(model: &mut UiModel<Field>, event: OutboxEvent) -> Vec<UiEffect> {
@@ -9493,7 +12389,7 @@ pub(crate) mod tests {
         assert_eq!(model.fetch_reason, Some(Reason::Start));
         assert_eq!(
             view(&model).messages_title_right,
-            "propagation node · fetching"
+            "a relay adopted · fetching"
         );
         update(&mut model, UiEvent::Elapsed(1_000));
         assert!(
@@ -9522,7 +12418,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             text(&view(&model).messages[0]).trim(),
-            "propagation node 9c9c9c9c adopted · synced 14:05 · next 14:20"
+            "a relay adopted · synced 14:05 · next 14:20"
         );
         assert!(update(&mut model, UiEvent::Elapsed(899_999)).is_empty());
         let effects = update(&mut model, UiEvent::Elapsed(900_000));
@@ -9566,11 +12462,13 @@ pub(crate) mod tests {
         let other = OutboxEvent::NodeAnnounced {
             destination: [0x42; 16],
             status: None,
+            name: None,
         };
         assert!(engine_says(&mut model, other).is_empty());
         let ours = OutboxEvent::NodeAnnounced {
             destination: [0x9c; 16],
             status: None,
+            name: None,
         };
         assert_eq!(engine_says(&mut model, ours), [UiEffect::Fetch]);
         assert_eq!(model.fetch_reason, Some(Reason::Announce));
@@ -10385,12 +13283,12 @@ pub(crate) mod tests {
         let shown = list_rows(&model);
         assert!(shown[2].starts_with(" MESSAGES"), "{shown:#?}");
         assert!(shown[2].ends_with(" 4"), "{shown:#?}");
-        assert_eq!(shown[3], " ▌you to <cdcdcdcd…>        14:07");
+        assert_eq!(shown[3], " ▌you to Unknown ·cdcd      14:07");
         assert_eq!(shown[4], " ▌a «tripod», and a tripod again");
         assert_eq!(shown[7], "  the «tripod» stays in the van");
-        assert_eq!(shown[9], "  you to <abababab…>        14:06");
+        assert_eq!(shown[9], "  you to Unknown ·abab      14:06");
         assert_eq!(shown[10], "  the «Tripod» fits");
-        assert_eq!(shown[12], "  <abababab…>               14:05");
+        assert_eq!(shown[12], "  Unknown ·abab             14:05");
         assert_eq!(shown[13], "  and the small «tripod» if it f…");
         typed(&mut model, "s");
         assert_eq!(list_rows(&model)[2], format!(" {}", search::NO_MATCHES));
@@ -10400,8 +13298,8 @@ pub(crate) mod tests {
         }
         let shown = list_rows(&model);
         assert_eq!(shown[0], " /");
-        assert!(shown[2].starts_with("▌<cdcdcdcd…>"), "{shown:#?}");
-        assert!(shown[5].starts_with(" <abababab…>"), "{shown:#?}");
+        assert!(shown[2].starts_with("▌Unknown ·cdcd "), "{shown:#?}");
+        assert!(shown[5].starts_with(" Unknown ·abab "), "{shown:#?}");
     }
 
     /// `Enter` on a message opens its conversation at it: the block selected
@@ -10454,7 +13352,7 @@ pub(crate) mod tests {
         assert!(rows(&model).iter().all(|r| !r.contains('«')));
         assert!(list_rows(&model)
             .iter()
-            .any(|r| r.starts_with("▌<abababab…>")));
+            .any(|r| r.starts_with("▌Unknown ·abab")));
     }
 
     /// `Ctrl-s` opens the search from every pane, compose included; while it
@@ -10556,18 +13454,18 @@ pub(crate) mod tests {
         );
     }
 
-    /// Slice 5: a peer's announced name replaces its address in the list,
-    /// the header, the compose box, the detail view and the toasts, with
-    /// its short hash beside it.
+    /// Slice 5: a peer's announced name replaces "Unknown" in the list,
+    /// the header, the compose box, the detail view and the toasts, alone
+    /// (1452): no hash beside it while nobody shares the name.
     #[test]
-    fn an_announced_name_is_drawn_with_its_short_hash_everywhere() {
+    fn an_announced_name_is_drawn_alone_everywhere() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         model.screen = (80, 24);
         announced(&mut model, PEER, "Alice\u{202e}\u{200b}");
         let shown = view(&model);
-        assert_eq!(shown.messages_title, "Alice ·abab");
-        assert_eq!(shown.compose_title, "to Alice ·abab");
-        assert_eq!(text(&shown.conversations[0]).trim_end(), "▌Alice ·abab");
+        assert_eq!(shown.messages_title, "Alice");
+        assert_eq!(shown.compose_title, "to Alice");
+        assert_eq!(text(&shown.conversations[0]).trim_end(), "▌Alice");
         engine(
             &mut model,
             OutboxEvent::Received {
@@ -10582,14 +13480,14 @@ pub(crate) mod tests {
         );
         assert_eq!(
             model.current_toast().map(|t| t.text.as_str()),
-            Some("message from Alice ·abab")
+            Some("message from Alice")
         );
         let detail = detail_view(&model, 0, 0).expect("a message");
-        assert_eq!(detail.rows[0], "from Alice ·abab to you");
+        assert_eq!(detail.rows[0], "from Alice to you");
     }
 
-    /// Two peers announcing names that look alike are both marked, and the
-    /// header says whose name the open one shares.
+    /// Two peers announcing names that look alike both carry their hash
+    /// tail (1452), and the header says in words that two share the name.
     #[test]
     fn a_shared_name_marks_both_peers() {
         let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
@@ -10597,17 +13495,20 @@ pub(crate) mod tests {
         announced(&mut model, OTHER, "АLICE");
         assert_eq!(
             view(&model).messages_title,
-            "Alice ·abab ≈  same name as ·cdcd"
+            "Alice ·abab  Two contacts are called Alice"
         );
         let rows: Vec<String> = view(&model).conversations.iter().map(text).collect();
         assert!(
-            rows.iter().any(|r| r.contains("Alice ·abab ≈")),
+            rows.iter().any(|r| r.trim_end().ends_with("Alice ·abab")),
             "{rows:#?}"
         );
         assert!(
-            rows.iter().any(|r| r.contains("АLICE ·cdcd ≈")),
+            rows.iter().any(|r| r.trim_end().ends_with("АLICE ·cdcd")),
             "{rows:#?}"
         );
+        // The clash gone, both are their names alone again.
+        announced(&mut model, OTHER, "Bob");
+        assert_eq!(view(&model).messages_title, "Alice");
     }
 
     /// A name change is said once, in the conversation, where it happened;
@@ -10621,17 +13522,17 @@ pub(crate) mod tests {
         announced(&mut model, PEER, "Ally");
         assert_eq!(
             shown(&model),
-            [
-                layout::EARLIEST,
-                "hi  ◷",
-                "── was Alice, now announces Ally ──"
-            ]
+            ["hi  ◷", "── was Alice, now announces Ally ──"]
         );
-        assert_eq!(view(&model).messages_title, "Ally ·abab");
-        // Our own address names nobody.
+        assert_eq!(view(&model).messages_title, "Ally");
+        // Our own address names the reader alone (1449 item 2): the avatar
+        // and the profile, no conversation and no note.
         model.address = Some(OTHER);
+        let notes = model.conversations[0].notes.len();
         announced(&mut model, OTHER, "me");
-        assert_eq!(model.names.heard_count(), 1);
+        assert_eq!(model.names.shown(&OTHER), Some("me"));
+        assert!(model.conversations.iter().all(|c| c.peer != OTHER));
+        assert_eq!(model.conversations[0].notes.len(), notes);
         model.address = None;
         // A peer with no conversation gets no note, and none is invented.
         announced(&mut model, OTHER, "Carol");
@@ -10652,44 +13553,44 @@ pub(crate) mod tests {
             ))
             .expect("contacts"),
         );
-        assert_eq!(view(&model).messages_title, "Mum ·abab  known");
+        assert_eq!(view(&model).messages_title, "Mum  known");
         announced(&mut model, PEER, "Alice");
-        assert_eq!(
-            view(&model).messages_title,
-            "Mum ·abab  known · announces Alice"
-        );
-        assert_eq!(view(&model).compose_title, "to Mum ·abab");
+        assert_eq!(view(&model).messages_title, "Mum  known · announces Alice");
+        assert_eq!(view(&model).compose_title, "to Mum");
         // A blocked peer is opened from the `blocked` view.
         update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
         assert_eq!(model.selected, 1);
-        assert_eq!(view(&model).messages_title, "<cdcdcdcd…>  blocked");
+        assert_eq!(view(&model).messages_title, "Unknown  blocked");
     }
 
-    /// The search matches the name as shown and the short hash beside it.
+    /// The search matches the name as shown and the address in hex, which
+    /// the reader has from the contact info (1452).
     #[test]
-    fn the_search_matches_the_shown_name_and_the_short_hash() {
+    fn the_search_matches_the_shown_name_and_the_address() {
         let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
         announced(&mut model, PEER, "Alice");
         let order = model.order();
-        for query in ["alice", "ABAB", "e ·ab"] {
+        for query in ["alice", "ABAB", "abababab"] {
             assert_eq!(
                 search::hits(&model.conversations, &model.names, &order, query, &[]),
                 [search::Hit::Conversation(0)],
                 "{query}"
             );
         }
-        // The other has no name: its address form still matches.
+        // The other has no name: its address still matches.
         assert_eq!(
             search::hits(&model.conversations, &model.names, &order, "cdcdcdcd", &[]),
             [search::Hit::Conversation(1)]
         );
     }
 
-    /// A wide name is cut in cells on a narrow list row, the hash kept.
+    /// A wide name is cut in cells on a narrow list row; a colliding one
+    /// keeps its hash tail.
     #[test]
     fn a_wide_name_is_cut_in_cells_and_keeps_its_hash() {
-        let mut model = UiModel::<Field>::new(&[PEER]);
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
         announced(&mut model, PEER, &"龙".repeat(16));
+        announced(&mut model, OTHER, &"龙".repeat(16));
         let row = text(&view(&model).conversations[0]);
         let width = leviculum_ui::text::fit_width(&row);
         assert_eq!(width, usize::from(list_width(model.screen.0)) - 2, "{row}");
@@ -10727,7 +13628,17 @@ pub(crate) mod tests {
             earlier,
             draft: history::Draft::default(),
             group: None,
+            listing: None,
         }
+    }
+
+    /// `writes` without the listing rows every change also writes
+    /// (1490): for assertions that pin the other writes exactly.
+    fn washed(writes: Vec<StoreWrite>) -> Vec<StoreWrite> {
+        writes
+            .into_iter()
+            .filter(|write| !matches!(write, StoreWrite::Listing { .. }))
+            .collect()
     }
 
     fn message_writes(writes: &[StoreWrite]) -> Vec<u64> {
@@ -10770,7 +13681,11 @@ pub(crate) mod tests {
         assert_eq!(model.message_cursor, 2);
         assert_eq!(message_writes(&model.take_writes()), [7]);
         assert!(model.take_writes().is_empty(), "taken once");
-        assert!(shown(&model).contains(&layout::EARLIEST.to_string()));
+        assert!(
+            !shown(&model).iter().any(|r| r.contains("earlier")),
+            "{:?}",
+            shown(&model)
+        );
 
         model.focus = Pane::Compose;
         typed(&mut model, "after the restart");
@@ -10792,7 +13707,17 @@ pub(crate) mod tests {
         assert_eq!(message_writes(&model.take_writes()), first);
         state(&mut model, ID, MessageState::Delivered);
         let writes = model.take_writes();
-        match &writes[..] {
+        // The listing rides along once for the changed conversation
+        // (1490).
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|write| matches!(write, StoreWrite::Listing { .. }))
+                .count(),
+            1,
+            "{writes:?}"
+        );
+        match &washed(writes)[..] {
             [StoreWrite::Message { message, .. }] => {
                 assert_eq!(message.delivery, Some(DeliveryState::Arrived));
             }
@@ -10813,7 +13738,7 @@ pub(crate) mod tests {
         // Opening it reads it: the store learns the count is gone.
         update(&mut model, UiEvent::Run(PaletteCommand::NextUnread));
         assert_eq!(
-            model.take_writes(),
+            washed(model.take_writes()),
             [StoreWrite::Conversation {
                 peer: OTHER,
                 pinned: false,
@@ -10862,7 +13787,10 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(bodies, ["one", "three"]);
         assert_eq!(model.message_cursor, 1);
-        assert_eq!(model.take_writes(), [StoreWrite::ForgetMessage { key: 2 }]);
+        assert_eq!(
+            washed(model.take_writes()),
+            [StoreWrite::ForgetMessage { key: 2 }]
+        );
 
         // A send the runner still works on stays.
         model.focus = Pane::Compose;
@@ -10888,7 +13816,7 @@ pub(crate) mod tests {
         assert_eq!(model.conversations[model.selected].peer, OTHER);
         assert_eq!(model.message_cursor, 0);
         assert_eq!(
-            model.take_writes(),
+            washed(model.take_writes()),
             [StoreWrite::ForgetConversation { peer: PEER }]
         );
     }
@@ -10906,7 +13834,7 @@ pub(crate) mod tests {
         assert_eq!(model.conversations[model.selected].peer, OTHER);
         update(&mut model, UiEvent::Run(PaletteCommand::Pin));
         assert_eq!(
-            model.take_writes(),
+            washed(model.take_writes()),
             [StoreWrite::Conversation {
                 peer: OTHER,
                 pinned: true,
@@ -10934,6 +13862,73 @@ pub(crate) mod tests {
         update(&mut model, UiEvent::Run(PaletteCommand::Pin));
         let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
         assert!(list.iter().all(|row| !row.contains(layout::PIN_RULE)));
+    }
+
+    /// A viewport that shows the open chat's first loaded bubble asks for
+    /// the page above it (1496): the phone's only word that its list
+    /// reached the top. Negative: a viewport without that bubble, another
+    /// peer's, and a chat the store holds no more of ask nothing.
+    #[test]
+    fn a_viewport_at_the_first_loaded_bubble_loads_the_earlier_page() {
+        let mut model = UiModel::<Field>::new(&[]);
+        clock(&mut model, 26, 12, 0);
+        model.restore(vec![restored(
+            PEER,
+            vec![
+                stored(10, false, "ten", None),
+                stored(11, false, "eleven", None),
+            ],
+            9,
+        )]);
+        let below = update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![11],
+            },
+        );
+        assert!(below.is_empty(), "{below:?}");
+        let other = update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: [0x77; 16],
+                keys: vec![10, 11],
+            },
+        );
+        assert!(other.is_empty(), "{other:?}");
+        let effects = update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![10, 11],
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Store(StoreRead::Earlier {
+                peer: PEER,
+                before: 10,
+                through: None
+            })]
+        );
+        let older: Vec<Message> = (1..=9).map(|k| stored(k, false, "old", None)).collect();
+        update(
+            &mut model,
+            UiEvent::Earlier {
+                peer: PEER,
+                messages: older,
+                earlier: 0,
+            },
+        );
+        assert_eq!(model.messages_of_selected().len(), 11);
+        let all = update(
+            &mut model,
+            UiEvent::Viewport {
+                peer: PEER,
+                keys: vec![1, 2],
+            },
+        );
+        assert!(all.is_empty(), "the store holds no more: {all:?}");
     }
 
     /// The top of what is loaded says how much more the store holds;
@@ -10976,7 +13971,7 @@ pub(crate) mod tests {
         assert_eq!(model.messages_of_selected()[9].body, "ten");
         assert_eq!(
             text(&model.laid().rows[0]).trim(),
-            layout::EARLIEST,
+            "",
             "the top of the conversation is the top of the store now"
         );
         // Nothing more to ask for.
@@ -11138,10 +14133,9 @@ pub(crate) mod tests {
         assert_eq!(
             shown(&model),
             vec![
-                layout::EARLIEST.to_string(),
                 "── Today ──".to_string(),
-                "◎ position 43.77310 N 11.25600 E ·".to_string(),
-                "live · 4 min ago  14:00".to_string(),
+                // One sentence (1449 item 5); the coordinates are the Info's.
+                "◎ Live position  14:00".to_string(),
             ]
         );
         assert_eq!(view(&model).messages_title_right, "pos 4 min");
@@ -11195,14 +14189,15 @@ pub(crate) mod tests {
         let rows = shown(&model);
         let lines: Vec<&String> = rows.iter().filter(|r| r.contains('◎')).collect();
         assert_eq!(lines.len(), 1, "{rows:?}");
-        assert!(
-            lines[0].contains("◎ position 43.77350 N"),
-            "the latest: {rows:?}"
-        );
+        assert!(lines[0].contains("◎ Live position"), "the latest: {rows:?}");
         // The newest says whether the position is alive (1209): 13:50,
         // 13:55 and 13:59, so every 5 minutes, the last a minute ago.
-        assert!(
-            rows.join(" ").contains("· live · every 5 min · 1 min ago"),
+        // The bubble says one sentence (1449 item 5); the cadence stays
+        // the liveness's, which the list and the map read.
+        let now = model.now.map(|now| now.unix_secs);
+        assert_eq!(
+            model.conversations[0].liveness(now).cadence_s,
+            Some(300),
             "{rows:?}"
         );
         assert!(rows.contains(&"on my way  14:00".to_string()));
@@ -11228,9 +14223,11 @@ pub(crate) mod tests {
             2,
             "{rows:?}"
         );
-        // The older run says how many it stands for, since when (1184).
+        // The older run says when its newest fix was taken, one sentence
+        // (1449 item 5: "7 Meldungen seit 17:53" explained nothing); its
+        // reports stay folded, the long press lists them (1184).
         assert!(
-            rows.join(" ").contains("· 3 updates since 14:00"),
+            rows.join(" ").contains("◎ Position from today 13:59"),
             "{rows:?}"
         );
     }
@@ -11288,7 +14285,7 @@ pub(crate) mod tests {
         assert_eq!(row.unread, 2);
         assert_eq!(row.last, "📍 live", "{row:?}");
         let told: Vec<&str> = model.toasts.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(told, ["message from <cdcdcdcd…>"; 2], "the texts alone");
+        assert_eq!(told, ["message from Unknown ·cdcd"; 2], "the texts alone");
         // The messages stay whole: the home's read marks name every one.
         assert_eq!(model.conversations[c].messages.len(), 18);
         assert_eq!(model.conversations[c].unread, 18);
@@ -11311,11 +14308,11 @@ pub(crate) mod tests {
             .iter()
             .position(|r| r == "parked at the gate")
             .unwrap_or_else(|| panic!("{rows:?}"));
-        assert_eq!(rows[at + 1], "◎ position 52.00000 N 13.00000 E  14:00");
+        assert_eq!(rows[at + 1], "◎ Position from today 13:59  14:00");
         assert_eq!(model.positions[&PEER].location.latitude_e6, 52_000_000);
         assert_eq!(
             model.toasts.last().map(|t| t.text.as_str()),
-            Some("message from <abababab…>")
+            Some("message from Unknown")
         );
         let detail = detail_view(&model, 0, 0).expect("a detail view");
         assert!(
@@ -11447,10 +14444,7 @@ pub(crate) mod tests {
         assert_eq!(view(&model).messages_title_right, "pos ahead");
         // Its liveness counts from when it came, not from the claim (1209).
         let rows = shown(&model).join(" ");
-        assert!(
-            rows.contains("◎ position 1.00000 N 1.00000 E · live · now  14:00"),
-            "{rows:?}"
-        );
+        assert!(rows.contains("◎ Live position  14:00"), "{rows:?}");
         // An honest fix a minute later replaces it: the claim sorted at 14:00.
         clock(&mut model, 26, 14, 2);
         arrive(
@@ -11680,7 +14674,7 @@ pub(crate) mod tests {
         assert_eq!(nearby.len(), 1, "{pins:?}");
         assert_eq!(nearby[0].peer, peer);
         assert!(
-            nearby[0].label.starts_with("Wanderer "),
+            nearby[0].label.starts_with("Wanderer"),
             "{}",
             nearby[0].label
         );
@@ -11830,8 +14824,8 @@ pub(crate) mod tests {
         offered(&mut model, 0);
         update(&mut model, key(KeyCode::Char('M')));
         assert!(
-            view(&model).messages_title_right.starts_with("z"),
-            "named at start"
+            view(&model).messages_title_right.is_empty(),
+            "named at start, and no zoom number (1447)"
         );
         assert_eq!(
             update(&mut model, key(KeyCode::Char('t'))),
@@ -11853,12 +14847,17 @@ pub(crate) mod tests {
             "on from the last wraps to the first"
         );
         let title = view(&model).messages_title_right;
+        assert_eq!(title, "braille");
+        // The debug overlay (LOQUAX_FPS=1) adds the zoom and the count.
+        model.debug_overlay = true;
+        let title = view(&model).messages_title_right;
         assert!(title.starts_with("braille · z"), "{title}");
+        model.debug_overlay = false;
         for _ in 0..MAP_NAMED_TICKS {
             update(&mut model, UiEvent::Tick);
         }
         let title = view(&model).messages_title_right;
-        assert!(title.starts_with("z"), "{title}");
+        assert!(title.is_empty(), "{title}");
         // A shell with one way has nothing to cycle.
         let mut plain = mapped();
         update(&mut plain, key(KeyCode::Char('M')));
@@ -11956,8 +14955,8 @@ pub(crate) mod tests {
         // She is at the picture's right edge: her name is set left of her
         // marker, which stays on her cell.
         assert!(alice.stale, "{alice:?}");
-        assert_eq!(alice.text, "Alice ·cdcd · 3 h ◉");
-        assert!(alice.col + 19 <= map.area.x + map.area.width, "{alice:?}");
+        assert_eq!(alice.text, "Alice · 3 h ago ◉");
+        assert!(alice.col + 17 <= map.area.x + map.area.width, "{alice:?}");
         let last = map.pins.last().expect("pins");
         assert!(
             last.selected && last.text.contains('◉'),
@@ -11970,7 +14969,8 @@ pub(crate) mod tests {
         assert_eq!(selected_label(&model), "you");
         update(&mut model, key(KeyCode::Esc));
         assert!(model.map.is_none());
-        assert_eq!(model.focus, Pane::Messages);
+        // Back where it was opened from, the list (1531).
+        assert_eq!(model.focus, Pane::Conversations);
         assert!(view(&model).map.is_none());
     }
 
@@ -12309,6 +15309,53 @@ pub(crate) mod tests {
         assert!(model.map.is_some());
     }
 
+    /// Jump to me (1477): Enter on the map with no pin chosen centres on
+    /// the own fix at the deepest zoom a region holds there; Enter on the
+    /// own pin does the same instead of saying it is you. Control: without
+    /// a fix Enter leaves the view where it was.
+    #[test]
+    fn enter_without_a_chosen_pin_jumps_to_the_own_fix() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.address = Some([0x01; 16]);
+        update(
+            &mut model,
+            UiEvent::MapSetup(map::MapSetup {
+                cell_px: (2, 4),
+                zooms: (0, 20),
+                regions: vec![florence()],
+                ..map::MapSetup::default()
+            }),
+        );
+        update(&mut model, key(KeyCode::Char('M')));
+        let before = model.map.expect("open");
+        assert_eq!(before.selected, None);
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.map, Some(before), "control: no fix, no jump");
+        let here = fix_at(43_774_000, 11_258_000, 0)
+            .location
+            .expect("a location");
+        update(&mut model, UiEvent::OwnFix(Some(here)));
+        if let Some(state) = model.map.as_mut() {
+            state.selected = None;
+        }
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("still open");
+        let at = projected(43_774_000, 11_258_000);
+        let (centre, zoom) = map::fit_at(at, model.map_area(), &model.map_setup);
+        assert_eq!((state.centre, state.zoom), (centre, zoom));
+        assert_ne!(state.zoom, before.zoom, "it zoomed to the place");
+        // The own pin chosen: the same jump, no toast, the map stays.
+        if let Some(state) = model.map.as_mut() {
+            state.selected = Some([0x01; 16]);
+            state.zoom = 0;
+        }
+        model.toasts.clear();
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("still open");
+        assert_eq!((state.centre, state.zoom), (centre, zoom));
+        assert!(model.toasts.is_empty(), "{:?}", model.toasts);
+    }
+
     /// The peer's conversation with a text, an older report, a text and
     /// the latest report, on the Florence region at braille's cell (1076).
     fn reported() -> UiModel<Field> {
@@ -12375,10 +15422,10 @@ pub(crate) mod tests {
         assert_eq!(model.detail, Some((0, 0)));
         assert!(model.map.is_none());
         update(&mut model, key(KeyCode::Esc));
-        // `v` opens a report's detail view, with its sensor rows.
+        // `I` opens a report's detail view, with its sensor rows.
         update(&mut model, key(KeyCode::Down));
         assert_eq!(model.message_cursor, 1);
-        update(&mut model, key(KeyCode::Char('v')));
+        update(&mut model, key(KeyCode::Char('I')));
         assert_eq!(model.detail, Some((0, 1)));
         assert!(model.map.is_none());
         let detail = detail_view(&model, 0, 1).expect("a detail view");
@@ -12402,11 +15449,26 @@ pub(crate) mod tests {
         assert_eq!(
             shown(&model),
             vec![
-                layout::EARLIEST.to_string(),
                 "── Today ──".to_string(),
                 "at the bridge".to_string(),
-                "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
+                "◎ Position from today 13:56  14:00".to_string(),
             ]
+        );
+        // The coordinates and the accuracy are the Info's (1449 item 5).
+        let activity = model.conversations[0]
+            .messages
+            .last()
+            .map(|m| m.activity)
+            .expect("it");
+        let info = info::message_info(&model, PEER, activity).expect("its info");
+        let rows: Vec<(String, String)> = info
+            .rows
+            .iter()
+            .map(|r| r.resolve(strings::Lang::En))
+            .collect();
+        assert!(
+            rows.contains(&("Place".to_string(), "43.77310 N 11.25600 E".to_string())),
+            "{rows:?}"
         );
         assert!(model.message_fix(0, 0).is_some());
         update(&mut model, key(KeyCode::Tab));
@@ -12420,10 +15482,10 @@ pub(crate) mod tests {
         assert!(view(&model).map.is_some(), "the frame draws the map");
         update(&mut model, key(KeyCode::Esc));
         assert!(model.map.is_none());
-        update(&mut model, key(KeyCode::Char('v')));
+        update(&mut model, key(KeyCode::Char('I')));
         assert_eq!(model.detail, Some((0, 0)));
         update(&mut model, key(KeyCode::Esc));
-        let line = cell_of(&model, "◎ position 43.77310", 3);
+        let line = cell_of(&model, "◎ Position from", 3);
         press(&mut model, line);
         assert_eq!(
             model.map.expect("a click opens it too").centre,
@@ -12488,6 +15550,23 @@ pub(crate) mod tests {
         }
     }
 
+    /// The terminal says in words when a load runs for what is on
+    /// screen (1527), over the older "loading map", and goes back to it
+    /// once the screen's load is done while another still runs.
+    #[test]
+    fn the_terminal_says_the_map_of_this_area_loads() {
+        let mut model = frankfurt(true);
+        let effects = update(&mut model, key(KeyCode::Enter));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        update(&mut model, UiEvent::MapLoad(MapLoad::Started(want.clone())));
+        update(&mut model, UiEvent::MapLoad(MapLoad::Here(true)));
+        assert_eq!(view(&model).messages_title_right, MAP_LOADING_HERE);
+        update(&mut model, UiEvent::MapLoad(MapLoad::Here(false)));
+        assert_eq!(view(&model).messages_title_right, MAP_LOADING);
+    }
+
     /// Going to a place no region holds asks for its region once (1089):
     /// a 12 km box around it, z10 to z15. The title says it loads; the
     /// region landing fits the map to its deepest zoom; asked again, the
@@ -12513,7 +15592,7 @@ pub(crate) mod tests {
         assert!((b.north - b.south - 1_078_000).abs() < 2_000, "{b:?}");
         update(&mut model, UiEvent::MapLoad(MapLoad::Started(want.clone())));
         assert!(
-            view(&model).messages_title_right.ends_with("· loading map"),
+            view(&model).messages_title_right.ends_with("loading map"),
             "{}",
             view(&model).messages_title_right
         );
@@ -12631,6 +15710,9 @@ pub(crate) mod tests {
     #[test]
     fn a_click_on_a_report_or_the_header_position_opens_the_map() {
         let mut model = reported();
+        // Named, so the narrow header has room for its position: two
+        // nameless peers would say so there (1452).
+        announced(&mut model, PEER, "Alice");
         // A relay, so the header has its words to tell from the position.
         update(
             &mut model,
@@ -12639,7 +15721,7 @@ pub(crate) mod tests {
                 by_user: false,
             },
         );
-        let older = cell_of(&model, "◎ position 43.77310", 3);
+        let older = cell_of(&model, "◎ ", 3);
         let effects = press(&mut model, older);
         assert!(effects.is_empty(), "{effects:?}");
         let state = model.map.expect("open");
@@ -12677,11 +15759,7 @@ pub(crate) mod tests {
         let wide = cells(&model, |t| *t == hit::Target::Position);
         assert_eq!(wide.len(), shown.position_len, "{wide:?}");
         let mailbox = cells(&model, |t| *t == hit::Target::Mailbox);
-        assert_eq!(
-            mailbox.len(),
-            "propagation node 9c9c9c9c adopted".len(),
-            "{mailbox:?}"
-        );
+        assert_eq!(mailbox.len(), "a relay adopted".len(), "{mailbox:?}");
         let effects = press(&mut model, wide[wide.len() - 1]);
         assert!(effects.is_empty(), "no fetch: {effects:?}");
         assert_eq!(model.map.expect("open").centre, latest);
@@ -12699,6 +15777,11 @@ pub(crate) mod tests {
         assert_eq!(model.focus, Pane::Map);
         assert_eq!(model.map.expect("open").selected, Some(PEER));
         update(&mut model, key(KeyCode::Esc));
+        // Back in the compose line it was opened from (1531); its Esc
+        // leaves for the conversation.
+        assert_eq!(model.focus, Pane::Compose);
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.focus, Pane::Messages);
         // A peer without a position.
         update(
             &mut model,
@@ -12709,7 +15792,7 @@ pub(crate) mod tests {
         assert!(model.map.is_none());
         assert_eq!(
             model.toasts.last().map(|t| t.text.as_str()),
-            Some("no position from <cdcdcdcd…>")
+            Some("no position from Unknown")
         );
         assert!(cells(&model, |t| *t == hit::Target::Position).is_empty());
     }
@@ -12794,8 +15877,8 @@ pub(crate) mod tests {
         let v = view(&model);
         assert_eq!(v.conversations_title, BLOCKED_TITLE);
         assert_eq!(v.conversations_title_right, BLOCKED_RETURNS);
-        assert_eq!(v.messages_title, "<cdcdcdcd…>  blocked");
-        assert!(list_rows(&model).iter().any(|r| r.contains("cdcdcdcd")));
+        assert_eq!(v.messages_title, "Unknown  blocked");
+        assert!(list_rows(&model).iter().any(|r| r.contains("Unknown")));
         assert_eq!(model.messages_of_selected()[0].body, "still there? tripod");
         // Unblock: back in the list, open, with its history.
         let effects = palette(&mut model, "unblock");
@@ -12845,7 +15928,7 @@ pub(crate) mod tests {
         assert_eq!(model.order(), [1]);
         assert!(model
             .current_toast()
-            .is_some_and(|t| t.text.starts_with("blocked <abababab…>")));
+            .is_some_and(|t| t.text.starts_with("blocked Unknown ·abab")));
         // Again: said, not written.
         update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
         assert!(palette(&mut model, "block").is_empty());
@@ -12861,7 +15944,7 @@ pub(crate) mod tests {
         assert_eq!(view(&alone).messages_title, "messages");
         assert_eq!(
             list_rows(&alone).join(" ").trim_end(),
-            NO_CONVERSATIONS,
+            no_conversations(alone.lang),
             "the list is empty, wrapped"
         );
         assert!(palette(&mut alone, "block").is_empty());
@@ -12933,12 +16016,9 @@ pub(crate) mod tests {
         let facts = model.contact_facts(&PEER);
         assert_eq!(facts.last_received, model.now);
         assert_eq!(facts.last_sent.map(|(_, words)| words), Some("queued"));
-        let sent = model.conversations[0]
-            .messages
-            .iter_mut()
-            .rfind(|m| m.outbound)
-            .expect("sent");
-        sent.delivery = Some(DeliveryState::InMailbox);
+        let messages = &mut model.conversations[0].messages;
+        let last_sent = messages.iter().rposition(|m| m.outbound).expect("sent");
+        messages.get_mut(last_sent).expect("sent").delivery = Some(DeliveryState::InMailbox);
         assert_eq!(
             model.contact_facts(&PEER).last_sent.map(|(_, words)| words),
             Some("left at a propagation node")
@@ -13162,15 +16242,22 @@ pub(crate) mod tests {
                 blocked: false
             })]
         );
-        assert_eq!(
-            model.take_petnames(),
-            [(PEER, Some("Mama".to_string())), (PEER, None)]
+        // The newest of the peer is what is owed (1635).
+        assert_eq!(model.take_petnames(), [(PEER, None)]);
+        update(
+            &mut model,
+            UiEvent::PetnamesHanded {
+                taken: vec![(PEER, None)],
+            },
         );
+        assert!(model.take_petnames().is_empty(), "the home took it");
         // Pulled: the reader's word here, the file told, nothing queued.
+        // Taken by the home after this device's word (1635).
         let pulled = |petname: Option<&str>| {
             UiEvent::Engine(OutboxEvent::HomePetname {
                 destination: PEER,
                 petname: petname.map(str::to_string),
+                at: 1,
             })
         };
         // The home's echo of the clear first (1614): nothing to change.
@@ -13184,11 +16271,117 @@ pub(crate) mod tests {
                 blocked: false
             })]
         );
-        assert_eq!(model.names.label(&PEER), "Mutti ·abab");
+        assert_eq!(model.names.label(&PEER, model.lang), "Mutti");
         assert!(model.take_petnames().is_empty(), "never handed back");
         assert!(update(&mut model, pulled(Some("Mutti"))).is_empty());
         update(&mut model, pulled(None));
-        assert_eq!(model.names.label(&PEER), "Alice ·abab");
+        assert_eq!(model.names.label(&PEER, model.lang), "Alice");
+    }
+
+    /// 1635: a petname this device set and the home node has not taken
+    /// yet is the reader's newest word on the peer. The home stamps an
+    /// entry when it takes it, so the one this device still owes will be
+    /// the home's newest: an older entry a pull brings in the meantime,
+    /// the "Mum" the reader just cleared, changes nothing here.
+    #[test]
+    fn a_petname_owed_to_the_home_outlives_an_older_pulled_one() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        model.home_client = true;
+        let rename = |name: &str| UiEvent::Rename {
+            peer: PEER,
+            name: name.into(),
+        };
+        // Stamped by the home at `at`; this test's model has no clock, so
+        // a hand's answer came at 0.
+        let pulled_at = |petname: Option<&str>, at: i64| {
+            UiEvent::Engine(OutboxEvent::HomePetname {
+                destination: PEER,
+                petname: petname.map(str::to_string),
+                at,
+            })
+        };
+        let pulled = |petname: Option<&str>| pulled_at(petname, 0);
+        let handed = |taken: &[Option<&str>]| UiEvent::PetnamesHanded {
+            taken: taken
+                .iter()
+                .map(|name| (PEER, name.map(str::to_string)))
+                .collect(),
+        };
+        update(&mut model, rename("Mum"));
+        assert_eq!(model.take_petnames(), [(PEER, Some("Mum".to_string()))]);
+        // One hand at a time: the clearing waits for the first.
+        update(&mut model, rename(""));
+        assert!(model.take_petnames().is_empty(), "a hand is under way");
+        update(&mut model, handed(&[Some("Mum")]));
+        // The home took "Mum", and the clearing is owed: the pull's "Mum"
+        // is older than it and changes nothing.
+        assert!(update(&mut model, pulled(Some("Mum"))).is_empty());
+        assert_eq!(model.names.label(&PEER, model.lang), "Alice");
+        // Kept in the store, so a restart hands it again.
+        let owed = |writes: Vec<StoreWrite>| {
+            writes
+                .into_iter()
+                .filter_map(|write| match write {
+                    StoreWrite::OwedPetnames(owed) => Some(owed),
+                    _ => None,
+                })
+                .next_back()
+        };
+        let kept = owed(model.take_writes()).expect("the owed kept");
+        assert_eq!(kept, BTreeMap::from([(PEER, None)]));
+        // A restart: the owed handed first, and over the first pull.
+        let mut again = UiModel::<Field>::new(&[PEER]);
+        announced(&mut again, PEER, "Alice");
+        again.home_client = true;
+        again.restore_owed_petnames(kept);
+        assert_eq!(again.take_petnames(), [(PEER, None)]);
+        // A hand the home did not take: still owed, handed again.
+        update(&mut again, handed(&[]));
+        assert_eq!(again.take_petnames(), [(PEER, None)]);
+        assert!(update(&mut again, pulled(Some("Mum"))).is_empty());
+        assert_eq!(again.names.label(&PEER, again.lang), "Alice");
+        // The home's echo of the clearing: owed no more, kept so.
+        update(&mut again, pulled(None));
+        assert_eq!(owed(again.take_writes()), Some(BTreeMap::new()));
+        update(&mut again, handed(&[None]));
+        assert!(again.take_petnames().is_empty());
+        // A name another device set later is the reader's word here.
+        update(&mut again, pulled(Some("Mutti")));
+        assert_eq!(again.names.label(&PEER, again.lang), "Mutti");
+
+        // Taken: a pull under way when the home took the clearing may
+        // still bring the older "Mum" (the forge's pipeline #620); the
+        // home stamped it before the answer came, so it changes nothing.
+        // A name the home took after it does, and once a pull ended the
+        // next brings nothing older.
+        let mut taken = UiModel::<Field>::new(&[PEER]);
+        announced(&mut taken, PEER, "Alice");
+        taken.home_client = true;
+        update(&mut taken, rename("Mum"));
+        update(&mut taken, rename(""));
+        assert_eq!(taken.take_petnames(), [(PEER, None)]);
+        update(&mut taken, handed(&[None]));
+        assert!(update(&mut taken, pulled_at(Some("Mum"), 0)).is_empty());
+        assert_eq!(taken.names.label(&PEER, taken.lang), "Alice");
+        update(&mut taken, pulled_at(Some("Mutti"), 1));
+        assert_eq!(taken.names.label(&PEER, taken.lang), "Mutti");
+        update(&mut taken, rename(""));
+        assert_eq!(taken.take_petnames(), [(PEER, None)]);
+        update(&mut taken, handed(&[None]));
+        update(&mut taken, UiEvent::FetchDone(Ok(0)));
+        update(&mut taken, pulled_at(Some("Mum"), 0));
+        assert_eq!(taken.names.label(&PEER, taken.lang), "Mum");
+        // Off a home node nothing is owed.
+        let mut alone = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut alone,
+            UiEvent::Rename {
+                peer: PEER,
+                name: "Mum".into(),
+            },
+        );
+        assert!(owed(alone.take_writes()).is_none());
     }
 
     /// 1614: the home's word on a peer that a pull brings while this
@@ -13215,6 +16408,7 @@ pub(crate) mod tests {
                 UiEvent::Engine(OutboxEvent::HomePetname {
                     destination: PEER,
                     petname: petname.map(str::to_string),
+                    at: 0,
                 })
             };
             let mut seen = Vec::new();
@@ -13229,28 +16423,21 @@ pub(crate) mod tests {
                     name: String::new(),
                 },
             );
-            assert_eq!(
-                model.take_petnames(),
-                [(PEER, Some("Mum".to_string())), (PEER, None)]
-            );
-            seen.push(model.names.label(&PEER));
+            // Only the newest word of the peer is owed (1635).
+            assert_eq!(model.take_petnames(), [(PEER, None)]);
+            seen.push(model.names.label(&PEER, model.lang));
             // The pull that ran before the clear reached the home.
             update(&mut model, pulled(Some("Mum")));
-            seen.push(model.names.label(&PEER));
+            seen.push(model.names.label(&PEER, model.lang));
             // The clear's echo, then another device's name.
             update(&mut model, pulled(None));
-            seen.push(model.names.label(&PEER));
+            seen.push(model.names.label(&PEER, model.lang));
             update(&mut model, pulled(Some("Mutti")));
-            seen.push(model.names.label(&PEER));
+            seen.push(model.names.label(&PEER, model.lang));
             assert!(model.take_petnames().is_empty(), "never handed back");
             seen
         };
-        let expected = [
-            "Alice Schmidt ·abab",
-            "Alice Schmidt ·abab",
-            "Alice Schmidt ·abab",
-            "Mutti ·abab",
-        ];
+        let expected = ["Alice Schmidt", "Alice Schmidt", "Alice Schmidt", "Mutti"];
         assert_eq!(labels(false), expected);
         assert_eq!(labels(true), expected);
     }
@@ -13356,10 +16543,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             rows,
-            [
-                "your name for Alice ·abab",
-                "Enter sets it, empty clears it"
-            ]
+            ["your name for Alice", "Enter sets it, empty clears it"]
         );
         assert_eq!(view(&model).footer.len(), 2);
         typed(&mut model, "Mum ✓");
@@ -13375,11 +16559,11 @@ pub(crate) mod tests {
         assert!(model.palette.is_none());
         assert_eq!(
             view(&model).messages_title,
-            "Mum ? ·abab  known · announces Alice"
+            "Mum ?  known · announces Alice"
         );
         assert!(model
             .current_toast()
-            .is_some_and(|t| t.text == "named Mum ? ·abab"));
+            .is_some_and(|t| t.text == "named Mum ?"));
         // The palette holds the petname to edit; `Enter` unchanged writes
         // nothing.
         palette(&mut model, "rename");
@@ -13400,7 +16584,7 @@ pub(crate) mod tests {
                 blocked: false
             })]
         );
-        assert_eq!(view(&model).messages_title, "Alice ·abab");
+        assert_eq!(view(&model).messages_title, "Alice");
         // Nothing visible is refused, not written.
         palette(&mut model, "rename");
         typed(&mut model, "\u{200b}");
@@ -13531,7 +16715,7 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 model.current_toast().map(|t| t.text.clone()),
-                Some(format!("<abababab…> reacted {THUMBS}")),
+                Some(format!("Unknown reacted {THUMBS}")),
                 "{app}"
             );
             assert_eq!(
@@ -13570,9 +16754,16 @@ pub(crate) mod tests {
             panic!("one send: {effects:?}");
         };
         assert_eq!((*to, body.as_str()), (PEER, ""));
+        // The mark names its writer since 1482.
+        let mut expected = position_fields(location);
+        leviculum_lxmf::lev::Lev {
+            capabilities: Some(groups::client_caps(true)),
+            writer: Some(OTHER),
+            ..leviculum_lxmf::lev::Lev::default()
+        }
+        .put_into(&mut expected);
         assert_eq!(
-            *fields,
-            marked(position_fields(location)),
+            *fields, expected,
             "the Telemeter and the receipt mark alone"
         );
         let read = telemetry::read(OTHER, fields, None);
@@ -13625,11 +16816,33 @@ pub(crate) mod tests {
 
     /// A reaction whose target is not here yet is kept, drawn nowhere,
     /// and attaches when the target arrives.
+    /// 1447 (walk 1 finding 24): the list's line of a reaction someone
+    /// else sent names who, in the reader's language; without a name it
+    /// says what it said before.
+    #[test]
+    fn a_reaction_line_in_the_list_names_its_subject() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.lang = strings::Lang::De;
+        received(&mut model, ID, "lunch at noon?");
+        reacted(&mut model, ID2, "columba", ID, "❤️");
+        let line = |model: &UiModel<Field>| chat::list_row(model, &PEER).last;
+        assert_eq!(
+            line(&model),
+            "hat mit ❤️ reagiert",
+            "no name known: the control"
+        );
+        model.names.remember(PEER, "Lew Mobile");
+        assert_eq!(line(&model), "Lew Mobile hat mit ❤️ reagiert");
+        model.lang = strings::Lang::En;
+        assert_eq!(line(&model), "Lew Mobile reacted ❤️");
+    }
+
     #[test]
     fn a_reaction_before_its_target_attaches_when_the_target_arrives() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         reacted(&mut model, ID2, "columba", ID, THUMBS);
-        assert_eq!(shown(&model), [layout::EARLIEST]);
+        // The held reaction is a row of the conversation, drawn nowhere.
+        assert!(shown(&model).is_empty(), "{:?}", shown(&model));
         received(&mut model, ID, "lunch at noon?");
         let rows = shown(&model);
         assert_eq!(rows.last().unwrap(), THUMBS, "{rows:?}");
@@ -14046,7 +17259,7 @@ pub(crate) mod tests {
                 ids: vec![ID, ID2],
             }]
         );
-        assert_eq!(model.take_writes().len(), 2);
+        assert_eq!(washed(model.take_writes()).len(), 2);
         assert_eq!(
             model.current_toast().map(|t| t.text.clone()),
             Some(
@@ -14085,7 +17298,7 @@ pub(crate) mod tests {
         let said =
             |lang| -> Vec<(String, String)> { info.rows.iter().map(|r| r.resolve(lang)).collect() };
         let de = said(strings::Lang::De);
-        let name = model.names.label(&PEER);
+        let name = model.names.label(&PEER, model.lang);
         assert_eq!(de[0], ("Von".to_string(), name.clone()));
         // Written and taken at once here: both rows say so (1445).
         assert_eq!(de[1], ("Gesendet".to_string(), "Heute · 14:00".to_string()));
@@ -14177,7 +17390,7 @@ pub(crate) mod tests {
         update(&mut model, UiEvent::Run(PaletteCommand::Forward));
         let ask = model.palette.as_ref().and_then(|p| p.ask);
         assert_eq!(ask, Some(contacts::Ask::Forward { from: PEER, key: 5 }));
-        let label = model.names.label(&OTHER);
+        let label = model.names.label(&OTHER, model.lang);
         let none = model.answer_ask(ask.expect("asked"), "nobody at all".to_string());
         assert!(sends(&none).is_empty(), "control: no such friend");
         let forwarded = model.answer_ask(ask.expect("asked"), label);

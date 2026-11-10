@@ -345,15 +345,17 @@ pub async fn delete_group(client: HomeClient, group: [u8; 16], budget: Duration)
     UiEvent::GroupDeleted(deleted.map(|()| group).map_err(|error| error.to_string()))
 }
 
-/// The petnames a fold set, handed to the home node in order (1139): the
-/// screen and the contacts file have them already. One the home node did
-/// not take is said in the log; the other devices keep the name they had
-/// until this device sets one again.
+/// The petnames this device owes, handed to the home node in order (1139,
+/// [`crate::ui::UiModel::take_petnames`]): the screen and the contacts
+/// file have them already. The event the model folds names those the home
+/// took (1635); one it did not take is said in the log and stays owed,
+/// handed again with the next hand or after a restart.
 pub async fn hand_petnames(
     client: HomeClient,
     petnames: Vec<([u8; 16], Option<String>)>,
     budget: Duration,
-) {
+) -> UiEvent {
+    let mut taken = Vec::new();
     for (peer, petname) in petnames {
         let outcome = super::client::petname(
             &client.node,
@@ -364,10 +366,103 @@ pub async fn hand_petnames(
             budget,
         )
         .await;
-        let peer = crate::address::to_hex(&peer);
+        let hex = crate::address::to_hex(&peer);
         match outcome {
-            Ok(()) => tracing::info!("HOME petname peer={peer}"),
-            Err(error) => tracing::warn!("HOME petname peer={peer} not taken: {error}"),
+            Ok(()) => {
+                tracing::info!("HOME petname peer={hex}");
+                taken.push((peer, petname));
+            }
+            Err(error) => tracing::warn!("HOME petname peer={hex} not taken: {error}"),
+        }
+    }
+    UiEvent::PetnamesHanded { taken }
+}
+
+/// The bookmark changes a fold made (1579), handed to the home in order:
+/// the screen has them already. One the home did not take stays pending in
+/// the model and goes again before the next `/pages`.
+pub async fn hand_bookmarks(
+    client: HomeClient,
+    rows: Vec<super::pages::BookmarkRow>,
+    budget: Duration,
+) {
+    for row in rows {
+        let outcome = super::client::bookmark(
+            &client.node,
+            &client.public_key,
+            &client.device,
+            &row,
+            budget,
+        )
+        .await;
+        match outcome {
+            Ok(()) => tracing::info!("HOME bookmark deleted={} at={}", row.deleted, row.at),
+            Err(error) => tracing::warn!(
+                "HOME bookmark deleted={} at={} not taken: {error}",
+                row.deleted,
+                row.at
+            ),
+        }
+    }
+}
+
+/// The home's pages and bookmarks after `stamp` (1579): the changes still
+/// pending go first, so the answer carries their echo, then `/pages`. The
+/// event the model folds, `None` when the home did not answer (a home from
+/// before 1579 among them), and the device keeps the list it heard.
+pub async fn home_pages(
+    client: HomeClient,
+    pending: Vec<super::pages::BookmarkRow>,
+    stamp: u64,
+    budget: Duration,
+) -> Option<UiEvent> {
+    hand_bookmarks(client.clone(), pending, budget).await;
+    match super::client::pages(
+        &client.node,
+        &client.public_key,
+        &client.device,
+        stamp,
+        budget * 2,
+    )
+    .await
+    {
+        Ok(delta) => {
+            tracing::info!(
+                "HOME pages pulled rows={} stamp={}",
+                delta.rows.len(),
+                delta.stamp
+            );
+            Some(UiEvent::Browse(crate::ui::browse::BrowseEvent::Home(delta)))
+        }
+        Err(error) => {
+            tracing::warn!("HOME pages: {error}");
+            None
+        }
+    }
+}
+
+/// What the mailbox says of itself (1642, `/about`), as the event the
+/// model folds: its answer, or that it is too old to know the question;
+/// `None` when it did not answer, and the page keeps what it had.
+pub async fn home_about(client: HomeClient, budget: Duration) -> Option<UiEvent> {
+    use crate::ui::mailbox_page::Told;
+    match super::client::about(&client.node, &client.public_key, &client.device, budget).await {
+        Ok(about) => {
+            tracing::info!(
+                "HOME about host={:?} version={} devices={}",
+                about.host,
+                about.version,
+                about.devices.len()
+            );
+            Some(UiEvent::MailboxTold(Box::new(Told::Told(about))))
+        }
+        Err(super::ask::HomeError::Unsupported(_)) => {
+            tracing::info!("HOME about unsupported: the mailbox is older");
+            Some(UiEvent::MailboxTold(Box::new(Told::Older)))
+        }
+        Err(error) => {
+            tracing::warn!("HOME about: {error}");
+            None
         }
     }
 }
@@ -397,50 +492,44 @@ pub async fn hand_peer_states(
     }
 }
 
-/// A peer and the reader's name for it, `None` for none.
-pub type PetnameWord = ([u8; 16], Option<String>);
 /// A peer and the reader's word on it and its conversation.
 pub type PeerStateWord = ([u8; 16], super::wire::PeerState);
 
-/// The reader's words on peers a device owes its home node: petnames and
-/// peer states, as a fold set them.
+/// The reader's words on peers a device owes its home node on the lane,
+/// as a fold set them. Petnames are not among them: a petname is owed
+/// until the home answers that it took it, kept in the device's store
+/// across a restart and handed one hand at a time, whose answer the model
+/// folds ([`hand_petnames`], 1635), which a lane that only ends cannot say.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HandOff {
-    Petnames(Vec<PetnameWord>),
     PeerStates(Vec<PeerStateWord>),
 }
 
 /// The hand-offs taken off the lane at once, each peer's newest word only,
 /// in the order of each peer's newest: the home node keeps only a peer's
-/// newest entry of each kind, so an older one it would never keep.
-pub fn coalesce(offs: Vec<HandOff>) -> (Vec<PetnameWord>, Vec<PeerStateWord>) {
-    fn newest<T>(mut words: Vec<([u8; 16], T)>) -> Vec<([u8; 16], T)> {
-        let mut seen = std::collections::BTreeSet::new();
-        words.reverse();
-        words.retain(|(peer, _)| seen.insert(*peer));
-        words.reverse();
-        words
-    }
-    let mut petnames = Vec::new();
+/// newest entry, so an older one it would never keep.
+pub fn coalesce(offs: Vec<HandOff>) -> Vec<PeerStateWord> {
     let mut states = Vec::new();
     for off in offs {
         match off {
-            HandOff::Petnames(more) => petnames.extend(more),
             HandOff::PeerStates(more) => states.extend(more),
         }
     }
-    (newest(petnames), newest(states))
+    let mut seen = std::collections::BTreeSet::new();
+    states.reverse();
+    states.retain(|(peer, _)| seen.insert(*peer));
+    states.reverse();
+    states
 }
 
-/// One lane for a device's petnames and peer states to its home node
-/// (1614): one task hands them in the order they were set, so a rename
-/// and its taking back cannot reach the home node the other way round, as
-/// two tasks of their own could; and the frontend's end waits for the lane
+/// One lane for a device's peer states to its home node (1614): one task
+/// hands them in the order they were set, so a mute and its taking back
+/// cannot reach the home node the other way round, as two tasks of their
+/// own could; and the frontend's end waits for the lane
 /// ([`HandOffs::finish`]) before it closes the node, so a word the reader
 /// said just before leaving is not dropped with the runtime. A dropped one
 /// left the home node's older word in its archive, and the next start's
-/// pull brought that back over the reader's (the forge gate on 0a67952c,
-/// "Mum ·5a5a ≈" after the petname was cleared).
+/// pull brought that back over the reader's.
 pub struct HandOffs {
     tx: tokio::sync::mpsc::UnboundedSender<HandOff>,
     worker: tokio::task::JoinHandle<()>,
@@ -452,10 +541,7 @@ impl HandOffs {
         Self::with(runtime, move |offs| {
             let client = client.clone();
             async move {
-                let (petnames, states) = coalesce(offs);
-                if !petnames.is_empty() {
-                    hand_petnames(client.clone(), petnames, budget).await;
-                }
+                let states = coalesce(offs);
                 if !states.is_empty() {
                     hand_peer_states(client, states, budget).await;
                 }
@@ -550,17 +636,10 @@ pub fn keep_signature(store: &mut Store, event: &OutboxEvent) {
     }
 }
 
-/// A name an announce carried, kept for the next run; never the screen's
-/// own address.
-pub fn keep_name(
-    store: &mut Store,
-    names: &crate::names::Names,
-    own: Option<[u8; 16]>,
-    destination: [u8; 16],
-) {
-    if own == Some(destination) {
-        return;
-    }
+/// A name an announce carried, kept for the next run. The reader's own
+/// is kept too (1449 item 2): the mailbox's archive hands it once, and the
+/// avatar and the profile need it after a restart.
+pub fn keep_name(store: &mut Store, names: &crate::names::Names, destination: [u8; 16]) {
     let Some(name) = names.announced(&destination) else {
         return;
     };
@@ -585,19 +664,17 @@ mod tests {
             pinned: true,
             ..PeerState::default()
         };
-        let (petnames, states) = coalesce(vec![
-            HandOff::Petnames(vec![(A, Some("Mum".into())), (B, Some("Bob".into()))]),
-            HandOff::PeerStates(vec![(A, pinned)]),
-            HandOff::Petnames(vec![(A, None)]),
+        let states = coalesce(vec![
+            HandOff::PeerStates(vec![(A, pinned), (B, PeerState::default())]),
             HandOff::PeerStates(vec![(A, PeerState::default()), (B, pinned)]),
+            HandOff::PeerStates(vec![(A, pinned)]),
         ]);
-        assert_eq!(petnames, [(B, Some("Bob".to_string())), (A, None)]);
-        assert_eq!(states, [(A, PeerState::default()), (B, pinned)]);
+        assert_eq!(states, [(B, pinned), (A, pinned)]);
     }
 
     /// 1614: the lane hands its batches one after another, the second
     /// after the first has ended however long the first takes, and its end
-    /// waits for what it holds: the clear after "Mum" reaches the home
+    /// waits for what it holds: the unpin after the pin reaches the home
     /// node, and last.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_lane_hands_in_order_and_its_end_waits_for_it() {
@@ -605,32 +682,40 @@ mod tests {
         let seen = Arc::clone(&handed);
         let first = Arc::new(tokio::sync::Notify::new());
         let held = Arc::clone(&first);
+        let pinned = PeerState {
+            pinned: true,
+            ..PeerState::default()
+        };
         let lane = HandOffs::with(&tokio::runtime::Handle::current(), move |offs| {
             let seen = Arc::clone(&seen);
             let held = Arc::clone(&held);
             async move {
-                let (petnames, _) = coalesce(offs);
-                if petnames.iter().any(|(_, name)| name.is_some()) {
-                    // The first batch is slow: the clear is queued meanwhile.
+                let states = coalesce(offs);
+                if states.iter().any(|(_, state)| state.pinned) {
+                    // The first batch is slow: the unpin is queued meanwhile.
                     held.notified().await;
                 }
-                seen.lock().expect("the record").extend(petnames);
+                seen.lock().expect("the record").extend(states);
             }
         });
-        lane.hand(HandOff::Petnames(vec![(A, Some("Mum".into()))]));
+        lane.hand(HandOff::PeerStates(vec![(A, pinned)]));
         tokio::task::yield_now().await;
-        lane.hand(HandOff::Petnames(vec![(A, None)]));
+        lane.hand(HandOff::PeerStates(vec![(A, PeerState::default())]));
         first.notify_one();
         assert!(lane.finish(Duration::from_secs(10)).await);
         let handed = handed.lock().expect("the record").clone();
-        assert_eq!(handed.last(), Some(&(A, None)), "{handed:?}");
+        assert_eq!(
+            handed.last(),
+            Some(&(A, PeerState::default())),
+            "{handed:?}"
+        );
 
         // Negative: a lane whose hand-over never ends is given up at the
         // grace, and says so.
         let stuck = HandOffs::with(&tokio::runtime::Handle::current(), |_| {
             std::future::pending::<()>()
         });
-        stuck.hand(HandOff::Petnames(vec![(A, None)]));
+        stuck.hand(HandOff::PeerStates(vec![(A, PeerState::default())]));
         assert!(!stuck.finish(Duration::from_millis(50)).await);
     }
 }

@@ -183,6 +183,11 @@ final class Core {
         return query(map("t", "profile"));
     }
 
+    /** The settings' mailbox page (1642): `title`, `groups` of `title` and `lines` (`label`, `value`, `copy`, `action`, `note`), `copy_label`, `copied`; `error` when not. */
+    static Map<String, Object> mailboxPage() {
+        return query(map("t", "mailboxpage"));
+    }
+
     /** A fresh join code of the mailbox on this phone for another device (1264): `code`, `qr`, `qr_size`, `hours`; `error` when not. */
     static Map<String, Object> linkDevice() {
         return query(map("t", "linkdevice"));
@@ -275,6 +280,27 @@ final class Core {
     /** The Rooms tab as the library words it (1384). */
     static Map<String, Object> roomsScreen() {
         return query(map("t", "rooms"));
+    }
+
+    /**
+     * A verb of the Explore tab (1578): `tab`, `chats`, `typed` with the
+     * search field's text, `az` (index 1 for A to Z), `open` and
+     * `bookmark` with a page's destination, `address`, `room` with the
+     * index of a room the reader is in, `hub` with a hub's destination;
+     * the error in words, or null.
+     */
+    static String explore(String verb, String text, String dest, int index) {
+        return command(map("t", "explore", "verb", verb, "text", text, "dest", dest, "index", index));
+    }
+
+    /** The Explore tab as the library words it (1578). */
+    static Map<String, Object> exploreScreen() {
+        return query(map("t", "explore"));
+    }
+
+    /** The settings' sections (1450), the one list of every target: `sections` with `key`, `title`, `summary`. */
+    static Map<String, Object> settingsList() {
+        return query(map("t", "settings"));
     }
 
     /**
@@ -751,6 +777,14 @@ final class Core {
         return query(map("t", "archived", "search", search));
     }
 
+    /**
+     * The people a new conversation lists (1448): every person with a conversation, by name; with
+     * `search` (null for none) only those the library's search finds.
+     */
+    static Map<String, Object> people(String search) {
+        return search == null ? query(map("t", "people")) : query(map("t", "people", "search", search));
+    }
+
     static Map<String, Object> blocked() {
         return query(map("t", "blocked"));
     }
@@ -762,6 +796,15 @@ final class Core {
     /** A screen came to the front or left it: in front, a down watching link pulls every minute. */
     static String front(boolean front) {
         return command(map("t", "front", "front", front));
+    }
+
+    /**
+     * These bubbles of `peer`'s chat are on screen, at least half of each, by
+     * their keys (1231, 1496): the library decides from them, and from the
+     * front, what was read, and loads the page above the first loaded one.
+     */
+    static String viewport(String peer, List<Long> keys) {
+        return command(map("t", "viewport", "peer", peer, "keys", keys));
     }
 
     /**
@@ -839,6 +882,16 @@ final class Core {
      */
     static Map<String, Object> receipts(Boolean set) {
         Map<String, Object> request = map("t", "receipts");
+        if (set != null) request.put("set", set);
+        return query(request);
+    }
+
+    /**
+     * The Advanced page's public rooms' hub (1577): with `set` ("none", or
+     * a hub's address) chosen, the lines in force either way.
+     */
+    static Map<String, Object> roomsHub(String set) {
+        Map<String, Object> request = map("t", "roomshub");
         if (set != null) request.put("set", set);
         return query(request);
     }

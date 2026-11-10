@@ -1,0 +1,24 @@
+┌  Loquax────────────────┐┌● Anna──────────────────────────────────────────────┐
+│▌Anna             09:22 ││                                                    │
+│▌Super, bis morgen      ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││ Kommst du morgen mit zum Markt?  09:12             │
+│                        ││                                                    │
+│                        ││ ▣ photo · 185 KB  09:13                            │
+│                        ││                                                    │
+│                        ││                   Ja, um zehn am Brunnen  09:20 ✓  │
+│                        ││                                                 👍  │
+│                        ││                                                    │
+│                        ││▌Super, bis morgen  09:22                           │
+│                        │├  to Anna─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

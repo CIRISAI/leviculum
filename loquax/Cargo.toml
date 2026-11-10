@@ -3,7 +3,7 @@ name = "loquax"
 # Versioned independently of the leviculum stack, like lnomad: a messenger's
 # releases track its own UI and message handling, not the protocol core it
 # happens to be built from.
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -83,6 +83,28 @@ assets = [
 changelog = "../target/deb-changelog/loquax"
 maintainer-scripts = "../packaging/loquax/"
 
+# amd64 (1469, #474): the base's files and the same program built with
+# `-C target-cpu=x86-64-v3`, which plain `loquax` hands itself over to on a
+# CPU that runs it (loquax/src/cpu.rs). A variant rather than a step after
+# cargo-deb, so the file is in the package's md5sums and its list like every
+# other; arm64 keeps the base, NEON is its baseline. scripts/build-deb.sh
+# builds the second binary into its own target directory, pinned under this
+# repository's target/ as the manual pages are, because an asset path is
+# read relative to this manifest. Named explicitly, as the terminal variant
+# is, since cargo-deb would call it loquax-amd64.
+[package.metadata.deb.variants.amd64]
+name = "loquax"
+assets = [
+    ["target/release/loquax", "usr/bin/", "755"],
+    ["../target/x86-64-v3/x86_64-unknown-linux-gnu/release/loquax", "usr/lib/loquax/loquax-v3", "755"],
+    ["../target/man/loquax.1", "usr/share/man/man1/loquax.1", "644"],
+    ["../packaging/loquax/loquax.desktop", "usr/share/applications/loquax.desktop", "644"],
+    ["../packaging/loquax/loquax.png", "usr/share/icons/hicolor/256x256/apps/loquax.png", "644"],
+    ["README.md", "usr/share/doc/loquax/README.md", "644"],
+    ["../packaging/lintian/loquax", "usr/share/lintian/overrides/loquax", "644"],
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/loquax/THIRD-PARTY-NOTICES", "644"],
+]
+
 # armhf (1342): the musl-static build with the terminal alone, as before;
 # no desktop runs there. Named explicitly, since cargo-deb 3.7 would call it
 # loquax-terminal; only one of the two is built per architecture, so the
@@ -153,6 +175,15 @@ std = [
 # history of docs/src/concepts/loquax-storage.md. The terminal messenger
 # reads and writes it; the CLI does not yet.
 history = ["std", "dep:rusqlite"]
+# The operation counters (`loquax::ui::counters`, 1489) in a release build:
+# every debug build counts anyway, a release one only with this. Off, the
+# counters are a zero-sized type and `counters()` answers `None`.
+counters = []
+# The measured live heap beside the mailbox census's estimate (order 1585):
+# with it, the binary installs `leviculum_std::heap_accounting::CountingAllocator`
+# as lnpnd's heap-accounting build does, and `LEVICULUM_HEAP_SAMPLE` samples
+# the call sites. Off by default.
+heap-accounting = ["std", "leviculum-std/heap-accounting"]
 # The map's picture (`loquax::picture`): the region files and one view of
 # them drawn into a frame, for the terminal and the GUI alike.
 picture = [
@@ -350,7 +381,9 @@ codec2 = { version = "0.3.1", optional = true }
 # The history (`history`): bundled, so the musl-static binary carries its
 # SQLite and FTS5 (the build probe of loquax-storage.md, "Options", C), at
 # the version leviculum-cli already ships.
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"], optional = true }
+# `hooks` for the store's commit counter (1489): the commit hook is only
+# set where the counters are on.
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "hooks"], optional = true }
 # The structured event log (docs/src/structured-event-logs.md) is a tracing
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true
@@ -417,6 +450,12 @@ required-features = ["history"]
 name = "scene_golden"
 required-features = ["history"]
 
+# The bars of "only what is visible" and "O(1) per event" over the real
+# fixture (1489): the store's restart reads need the store.
+[[test]]
+name = "operation_counts"
+required-features = ["history"]
+
 # 1234: read receipts through the mailbox, over its store and its answers.
 [[test]]
 name = "mailbox_receipts"
@@ -425,6 +464,12 @@ required-features = ["history"]
 # 1462: the ticks tell the truth, the device receipt through the mailbox.
 [[test]]
 name = "device_receipts"
+required-features = ["history"]
+
+# 1482: a relay bot that passes its members' fields through gets no
+# receipts, and its posts show their writer.
+[[test]]
+name = "relay_group"
 required-features = ["history"]
 
 # The home node end to end: `--daemon` and `home` are the terminal build's.
@@ -440,6 +485,18 @@ required-features = ["history"]
 # 1266: `loquax mailbox setup`, the five steps, by flags and by typed answers.
 [[test]]
 name = "mailbox_setup"
+required-features = ["tui"]
+
+# The SIGUSR1 census of `loquax mailbox run` (1585), the real binary
+# beside an in-process shared instance.
+[[test]]
+name = "mailbox_census"
+required-features = ["tui"]
+
+# The mailbox's growth soak (1585): ignored, two hours by default,
+# `just mailbox-growth-soak`.
+[[test]]
+name = "mailbox_growth_soak"
 required-features = ["tui"]
 
 # A throwaway: the samples and cost table of

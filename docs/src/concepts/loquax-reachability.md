@@ -87,13 +87,13 @@ path's interface changes. Nothing medium-aware enters transport
   `hops=0`.
 - **What the code does today (read 2026-11-04, not yet measured).** A
   desktop Loquax that is a client of a mailbox attaches to the shared
-  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1534`;
-  `Upstream::Shared`, `loquax/src/engine/shell.rs:423`) and dials
+  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1799`;
+  `Upstream::Shared`, `loquax/src/engine/shell.rs:433`) and dials
   nothing: the only callers of the rendezvous rotation (`dial`,
-  `loquax/src/engine/shell.rs:606`) are the leaf, the phone's own
+  `loquax/src/engine/shell.rs:616`) are the leaf, the phone's own
   mailbox and the mailbox daemon. The daemon on a shared instance dials
   its rendezvous as a peer (`DaemonUpstream::Shared`,
-  `loquax/src/home/daemon.rs:370`), which it needs for devices that are
+  `loquax/src/home/daemon.rs:381`), which it needs for devices that are
   elsewhere, not for the one beside it. So on one lnsd the client should
   find the mailbox through the local interface with no rendezvous
   dialled. Slice 1 turns this reading into a cell before anything else
@@ -386,7 +386,7 @@ Not a way of its own: how the device learns 2b, 3 and 4.
   announce carries the list in its app data, signed as the announce is,
   so every way that delivers an announce teaches the device every direct
   way, and the rendezvous stays the bootstrap. `loquax.home` is announced
-  without app data today (`announce_home`, `loquax/src/home/daemon.rs:280`),
+  without app data today (`announce_home`, `loquax/src/home/daemon.rs:290`),
   and no Python program registers a handler for it, so a Python peer
   relays the announce and ignores the blob. The LXMF delivery announce
   is not touched: its app data is LXMF's.
@@ -460,7 +460,7 @@ the device keeps the most direct way that answers.
   The outbox's retries carry a send that was cut off; a message is never
   dropped by a change of way, and never sent twice: a send repeated
   after a cut is matched to the first by its client id
-  (`outbox_by_client`, `loquax/src/home/server.rs:155`).
+  (`outbox_by_client`, `loquax/src/home/server.rs:201`).
 - **The network change** (1298's `Network` word, below) restarts the
   race; the settle of 1298 folds a burst of callbacks into one race.
 - **The re-race.** A device kept on an indirect way (relayed or mesh)

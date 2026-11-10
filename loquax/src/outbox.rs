@@ -129,6 +129,9 @@ pub enum Command {
     /// was taken: a runner that waits for it knows the events those
     /// commands caused were handed out before it.
     Fence { token: u64 },
+    /// Answered with [`OutboxEvent::Census`]: the engine's own tables and
+    /// its router's, for the mailbox's `MAILBOX_CENSUS` (order 1585).
+    Census,
     /// Announce our own position on `lev.position` (1302,
     /// [`crate::mesh_position`]), registering the destination of our
     /// identity on first use: `loquax announce`, the device walk's seed of
@@ -165,16 +168,22 @@ pub enum Command {
     HomePnStatus {
         answers: Vec<([u8; 32], leviculum_lxmf::lev_status::MessageStatus)>,
     },
+    /// On a client: a hub the home heard announcing (1599,
+    /// [`crate::home::KIND_HUB`]); reported as [`OutboxEvent::HubAnnounced`],
+    /// as a hub the client heard itself would be.
+    HomeHub { hub: crate::ui::hubs::HeardHub },
     /// On a client: a name the home node heard a peer announce, pulled from
     /// the archive; reported as [`OutboxEvent::Announced`], as an announce
     /// the client heard itself would be.
     HomeName { destination: [u8; 16], name: String },
     /// On a client: the reader's name for a peer one of the home's devices
-    /// set, `None` for none, pulled from the archive (1139); reported as
+    /// set, `None` for none, pulled from the archive (1139), and when the
+    /// home took it, unix seconds on the home's clock (1635); reported as
     /// [`OutboxEvent::HomePetname`].
     HomePetname {
         destination: [u8; 16],
         petname: Option<String>,
+        at: i64,
     },
     /// On a client: the reader's word on a peer one of the home's devices
     /// set, pulled from the archive (1146); reported as
@@ -199,6 +208,26 @@ pub struct MailboxInput {
     /// Nodes that stopped answering ([`crate::mailbox::Unanswered`]): an
     /// adopted one among them is replaced, and none is adopted.
     pub excluded: Vec<[u8; 16]>,
+}
+
+/// One engine's own tables and its router's, by count and estimated heap
+/// bytes (order 1585). The messages behind the router's outbound entries
+/// are not followed, as in lnpnd's `PN_CENSUS mailbox=`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EngineCensus {
+    /// [`leviculum_lxmf::router::LxmfRouter::heap_bytes`]; 0 for a client,
+    /// which has no router of its own.
+    pub router_bytes: usize,
+    /// The engine's own maps and queues.
+    pub engine_bytes: usize,
+    /// Messages this run queued and not yet left.
+    pub tracked: usize,
+    /// Recipients of packed messages this run sent.
+    pub recipients: usize,
+    /// Senders whose messages wait on their key.
+    pub unheard: usize,
+    /// Events not yet taken by the daemon.
+    pub events_queued: usize,
 }
 
 /// What the engine reports back.
@@ -249,6 +278,7 @@ pub enum OutboxEvent {
     HomePetname {
         destination: [u8; 16],
         petname: Option<String>,
+        at: i64,
     },
     /// The reader's word on a peer, set on one of the home's devices
     /// ([`Command::HomePeerState`]).
@@ -348,9 +378,12 @@ pub enum OutboxEvent {
     /// `status` is the `/lev/status` version its announce says it answers
     /// (`{"lev": {"status": 1}}` under `PN_META_CUSTOM`, lnpnd); none for a
     /// stock node, which a sender never asks (1395).
+    /// `name` is the name it announces under `PN_META_NAME`, unsanitised:
+    /// what the screen says the relay by (1587).
     NodeAnnounced {
         destination: [u8; 16],
         status: Option<u64>,
+        name: Option<String>,
     },
     /// A propagation node proved the upload of the queued message
     /// `message_id`, which it stores under `transient_id`: what a sender
@@ -373,6 +406,19 @@ pub enum OutboxEvent {
         identity: [u8; 16],
         location: leviculum_lxmf::telemetry::Location,
         name: Option<String>,
+    },
+    /// A hub announced its `rrc.hub` destination (1599,
+    /// [`crate::ui::hubs`]): heard by this node, timed and with the hops of
+    /// the hearing, or pulled from the home ([`Command::HomeHub`]). The
+    /// screen lists it among the hubs ([`crate::ui::rooms::RoomsEvent::Heard`]);
+    /// a home keeps it for its devices.
+    HubAnnounced { hub: crate::ui::hubs::HeardHub },
+    /// A NomadNet node announced its pages (1579, `nomadnetwork.node`),
+    /// heard by this node, timed and with the hops of the hearing. A home
+    /// keeps it for its devices ([`crate::home::pages`]); a device's
+    /// Browse tab lists the nodes its own fetch hears.
+    PageAnnounced {
+        node: lnomad::discovery::DiscoveredNode,
     },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.
@@ -406,6 +452,8 @@ pub enum OutboxEvent {
     /// Every command before the [`Command::Fence`] with this token was
     /// taken.
     Fenced { token: u64 },
+    /// The engine's tables at the moment it took a [`Command::Census`].
+    Census(EngineCensus),
     /// The message just [`OutboxEvent::Received`], packed as it came, for a
     /// home node's archive. Only an engine asked for it hands it out
     /// ([`crate::engine::Engine::handing_out_packed`]), and that engine holds

@@ -72,11 +72,13 @@ impl Default for MapSetup {
 }
 
 /// Why a region is loaded (1089): the reader went to a place, or asked for
-/// the visible area.
+/// the visible area; or the scheduler asked for the screen itself at its
+/// zoom, which loads before anything else (1527, [`super::viewload`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadReason {
     Place,
     View,
+    Screen,
 }
 
 impl LoadReason {
@@ -85,6 +87,7 @@ impl LoadReason {
         match self {
             Self::Place => "place",
             Self::View => "view",
+            Self::Screen => "screen",
         }
     }
 }
@@ -259,6 +262,10 @@ pub struct PinCell {
     /// [`MapPin::nearby`].
     pub nearby: bool,
     pub selected: bool,
+    /// [`MapPin::own`]: the reader's own position, the blue dot alone as
+    /// the maps people know draw it, never a name or an avatar (1449 item 2,
+    /// walk 1 finding 8).
+    pub own: bool,
 }
 
 /// A pin's name set on a row of its own.
@@ -469,13 +476,16 @@ pub const MARKER: char = '●';
 /// screen show it, and a text frame does too.
 pub const SELECTED: char = '◉';
 
-/// The pins of `positions` (peer to fix) in `Tab` order, `own` named `you`.
+/// The pins of `positions` (peer to fix) in `Tab` order, `own` named `you`,
+/// each fix's age in the catalogue's words in `lang` ("vor 28 Std.", 1447):
+/// the one age a position has, the card's.
 pub fn pins_of(
     positions: &alloc::collections::BTreeMap<[u8; 16], telemetry::Fix>,
     label: impl Fn(&[u8; 16]) -> String,
     nearby: impl Fn(&[u8; 16]) -> bool,
     own: Option<[u8; 16]>,
     now: Option<i64>,
+    lang: super::strings::Lang,
 ) -> Vec<MapPin> {
     let all: Vec<MapPin> = positions
         .iter()
@@ -486,12 +496,12 @@ pub fn pins_of(
             ));
             let age = now
                 .filter(|_| !fix.ahead())
-                .map(|now| telemetry::span(now - fix.fix_time()));
+                .map(|now| super::scene::ago(now - fix.fix_time()).resolve(lang));
             MapPin {
                 peer: *peer,
                 at,
                 label: match Some(*peer) == own {
-                    true => "you".to_string(),
+                    true => super::strings::StrId::MapYou.text(lang).to_string(),
                     false => label(peer),
                 },
                 age,
@@ -661,8 +671,10 @@ pub fn place(
             let pin = pins.get(placed.index)?;
             let col = u16::try_from(placed.x / u32::from(setup.cell_px.0.max(1))).ok()?;
             let row = u16::try_from(placed.y / u32::from(setup.cell_px.1.max(1))).ok()?;
-            // A battery below a fifth after the name (1386).
+            // A battery below a fifth after the name (1386). Our own
+            // position is the dot alone, no name (1449 item 2).
             let words = match (pin.low_battery(), ascii) {
+                _ if pin.own => String::new(),
                 (false, _) => pin.words(),
                 (true, false) => format!("{} {BATTERY_GLYPH}", pin.words()),
                 (true, true) => format!("{} !", pin.words()),
@@ -707,6 +719,7 @@ pub fn place(
                 })
             };
             let (col, text, apart) = match side {
+                _ if pin.own => (col, marker.to_string(), None),
                 Some(Side::Right) => (col, format!("{marker} {words}"), None),
                 Some(Side::Left) => (
                     col.saturating_sub(len + 1),
@@ -726,6 +739,7 @@ pub fn place(
                 stale: pin.stale,
                 nearby: pin.nearby,
                 selected,
+                own: pin.own,
             }
         })
         .collect();

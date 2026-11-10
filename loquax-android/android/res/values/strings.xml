@@ -3,10 +3,12 @@
     <string name="app_name" translatable="false">Loquax</string>
     <string name="starting">Starting…</string>
     <string name="joining">Connecting to your mailbox…</string>
-    <string name="code_label">The code your mailbox shows, from loquax mailbox setup on the computer</string>
-    <string name="code_hint" translatable="false">lqxh1…</string>
+    <string name="code_label">The code your mailbox shows</string>
+    <!-- 1448, walk finding 4: placeholders that read as a request, never
+         as a value; the address field under Advanced. -->
+    <string name="code_hint">Paste the code here</string>
     <string name="server_label">Where your mailbox is: the computer\'s address and port</string>
-    <string name="server_hint" translatable="false">192.168.1.20:4242</string>
+    <string name="server_hint">for example 192.168.1.20:4242</string>
     <string name="join">Join</string>
     <string name="open">Open</string>
     <string name="address_hint">Address of a new conversation</string>
@@ -30,14 +32,14 @@
     <string name="battery_yes">Allow</string>
     <string name="battery_no">Not now</string>
     <string name="map_loading">Loading the map of this area…</string>
-    <!-- 1200: the map's state chips, its people, the card and the Friends sheet. -->
+    <!-- 1200: the map's state chips, its people, the card and the people sheet (1447: never "friends" for who sends a position). -->
     <string name="map_offline">Offline</string>
     <string name="map_no_map">No map here yet</string>
-    <string name="friends">Friends</string>
-    <string name="friends_search">Find a friend</string>
+    <string name="friends">People on the map</string>
+    <string name="friends_search">Find a person</string>
     <string name="friends_older">Older than a day</string>
-    <string name="friends_none">No friends on the map yet. When a friend shares their position with you, they appear here.</string>
-    <string name="friends_no_match">No friend by that name.</string>
+    <string name="friends_none">Nobody shares a position with you yet. When someone does, they appear here.</string>
+    <string name="friends_no_match">Nobody by that name.</string>
     <string name="card_chat">Chat</string>
     <string name="card_navigate">Navigate</string>
     <string name="card_ago">%1$s ago</string>
@@ -166,15 +168,19 @@
     <string name="where_computer">On a computer at home</string>
     <string name="where_computer_text">Messages arrive even when your phone is off. You need a computer or a Raspberry Pi that stays on.</string>
     <string name="where_later">You can move your mailbox later without losing anything.</string>
-    <string name="here_title">Your mailbox on this phone</string>
     <string name="here_background">Loquax keeps running in the background. It uses some battery.</string>
-    <string name="here_offline">When the phone is off or has no internet, messages wait in the network and arrive when you are back. The sender sees "delivered" only then.</string>
     <string name="here_backup">Your address lives on this phone. Save a backup, or a lost phone means a new address.</string>
-    <string name="use_this_phone">Use this phone</string>
     <string name="next">Continue</string>
     <string name="have_address">I already have a Loquax address</string>
     <string name="computer_title">Set up your mailbox on the computer</string>
-    <string name="computer_text">On your computer, run: loquax mailbox setup\nIt shows a code. Scan it here, or paste it. How to install it: leviculum.network/mailbox</string>
+    <!-- The computer's page (1448, walk finding 15): three steps, the
+         link tappable, the command a block of its own that copies. -->
+    <string name="computer_install">1. Install Loquax on the computer:</string>
+    <string name="computer_install_link" translatable="false">https://leviculum.network/mailbox</string>
+    <string name="computer_run">2. Run this there:</string>
+    <string name="computer_command" translatable="false">loquax mailbox setup</string>
+    <string name="computer_code">3. A code appears there. Scan it here, or paste it.</string>
+    <string name="computer_command_copied">Command copied.</string>
     <string name="paste_code">Paste a code</string>
     <string name="phone_until_then">Use this phone until then</string>
     <string name="background_title">Let Loquax run in the background</string>
@@ -182,6 +188,7 @@
     <string name="setting_up">Setting up your mailbox…</string>
     <string name="setup_failed">Your mailbox did not start: %1$s</string>
     <string name="try_again">Try again</string>
+    <string name="join_code_servers_failed">The servers in this code did not answer. Check the code, or ask for a new one.</string>
     <string name="address_title">Your address</string>
     <string name="address_text">Show this to people who should write to you.</string>
     <string name="write_message">Write a message</string>
@@ -207,12 +214,8 @@
     <string name="backup_file_head">Loquax backup of an address. Restore it at the first start with "I already have a Loquax address" and the passphrase.</string>
     <string name="backup_paper_head">Loquax: the backup of your address.\nRestore it at the first start with "I already have a Loquax address".\nYou need the passphrase too; keep it somewhere else.</string>
     <string name="print">Print</string>
-    <string name="mailbox">Mailbox</string>
     <string name="mailbox_here">Your mailbox is on this phone.</string>
     <string name="mailbox_away">Your mailbox is on another device; this phone reads it.</string>
-    <string name="advanced">Advanced</string>
-    <string name="propagation_node">Relay</string>
-    <string name="propagation_node_text">While your mailbox is offline, mail for you waits at a relay in the network, which Loquax chooses by itself.</string>
     <string name="here_running">Your mailbox is running on this phone</string>
     <string name="scan_code">Scan the code</string>
     <string name="scan_backup">Scan the paper backup</string>
@@ -222,26 +225,11 @@
     <!-- The main views and the settings (1199). -->
     <string name="help">Help</string>
     <string name="help_url">https://leviculum.network/help</string>
-    <string name="settings_profile">Profile</string>
-    <string name="settings_profile_summary">Name, address, QR code</string>
-    <string name="settings_mailbox_summary">Where it lives</string>
-    <string name="settings_appearance">Appearance</string>
-    <string name="settings_appearance_summary">Map: like the phone, light or dark</string>
-    <string name="settings_notifications">Notifications</string>
-    <string name="settings_notifications_summary">New messages, muted chats, the connection notice</string>
     <string name="settings_notifications_text">Loquax tells you of every new message. To mute one chat, hold it in the list, then Mute. Sound and vibration are in Android\'s settings for Loquax.</string>
     <!-- 1345: the row that opens the connection notice's channel page. -->
     <string name="connection_notice">Connection notice</string>
     <string name="connection_notice_text">Minimise it or turn it off in Android\'s settings; Loquax stays connected.</string>
-    <string name="settings_chats">Chats</string>
-    <string name="settings_chats_summary">Photo size</string>
-    <string name="settings_privacy">Privacy</string>
-    <string name="settings_privacy_summary">Read receipts, blocked contacts, positions you shared</string>
-    <string name="settings_maps_summary">Maps on this phone, automatic download</string>
-    <string name="settings_backup">Backup</string>
-    <string name="settings_backup_summary">Back up the mailbox</string>
     <string name="settings_backup_away">Your mailbox is on another device. Back it up there.</string>
-    <string name="settings_advanced_summary">Relay, map glide, stop the service</string>
     <string name="settings_map_theme">Map</string>
     <string name="map_theme_auto">Like the phone</string>
     <string name="map_theme_light">Light</string>
@@ -256,7 +244,6 @@
     <string name="location_off">Location is off</string>
     <string name="location_finding">Finding your position…</string>
     <string name="location_none">The phone does not know where you are yet. Try again outside.</string>
-    <string name="map_empty">No friends on the map yet</string>
     <string name="share_position">Share my position</string>
     <string name="card_share">Share mine</string>
     <string name="share_with">Share your position with</string>
@@ -315,4 +302,12 @@
     <string name="profile_version">App version</string>
     <string name="add_contact">Add contact</string>
     <string name="add_contact_name">What do you call this contact?</string>
+    <!-- 1448: the list while the engine has no path to the mailbox. -->
+    <string name="offline_bar">No connection. Messages go out as soon as you are online again.</string>
+    <!-- 1448: a new conversation's contact list without anyone in it. -->
+    <string name="people_none">No contacts yet. Add one with \"New contact\" above.</string>
+    <!-- The browser's buttons in words (1629, walk 3 new 7). -->
+    <string name="browse_places">Places</string>
+    <string name="browse_page_up">Page up</string>
+    <string name="browse_page_down">Page down</string>
 </resources>

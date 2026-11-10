@@ -370,32 +370,35 @@ async fn the_hourly_flush_leaves_the_core_lock_free() {
             .join("\n")
     );
 
-    // The production reader still reads what the flushes wrote. Memory
-    // keeps the newest `identity_cap` known destinations since order 1585
-    // and the file all of them, so the reader's ceiling is set above the
-    // field node's count: what it loads is what the file holds.
+    // The production reader still reads what the flushes wrote. Its memory
+    // keeps the newest `identity_cap` known destinations (order 1585,
+    // `newest_known_destinations` in leviculum-std/src/storage.rs), the
+    // file every one of them: a reader whose cap holds them all gets all.
+    let known_in = |storage: StdStorage| {
+        storage
+            .collection_counts()
+            .into_iter()
+            .find(|c| c.name == "known_dest_entries")
+            .map(|c| c.entries)
+    };
+    assert_eq!(
+        known_in(StdStorage::new(storage.path()).expect("storage reopens")),
+        Some(IDENTITY_CAP),
+        "memory keeps the newest identity_cap known destinations"
+    );
+    let all = leviculum_core::memory_storage::TableCaps {
+        identity_cap: KNOWN_DESTINATIONS,
+        ..Default::default()
+    };
+    assert_eq!(
+        known_in(StdStorage::new_with_caps(storage.path(), all).expect("storage reopens")),
+        Some(KNOWN_DESTINATIONS),
+        "every known destination must come back from the flushed file"
+    );
     let reader = NodeCoreBuilder::new().enable_transport(false).build(
         rand_core::OsRng,
         StdClock::new(),
-        StdStorage::new_with_caps(
-            storage.path(),
-            leviculum_core::memory_storage::TableCaps {
-                identity_cap: KNOWN_DESTINATIONS + 1,
-                ..leviculum_core::memory_storage::TableCaps::desktop()
-            },
-        )
-        .expect("storage reopens"),
-    );
-    let known = reader
-        .storage()
-        .collection_counts()
-        .into_iter()
-        .find(|c| c.name == "known_dest_entries")
-        .map(|c| c.entries);
-    assert_eq!(
-        known,
-        Some(KNOWN_DESTINATIONS),
-        "every known destination must come back from the flushed file"
+        StdStorage::new(storage.path()).expect("storage reopens"),
     );
     let recalled = paths
         .clone()

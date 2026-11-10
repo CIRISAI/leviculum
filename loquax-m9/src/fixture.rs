@@ -16,7 +16,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use leviculum_lxmf::telemetry::Location;
-use leviculum_map::region::Region;
 use leviculum_ui::delivery::DeliveryState;
 use loquax::telemetry::{Fix, Source};
 use loquax::ui::groups::{GroupInfo, GroupMember, Standing};
@@ -231,6 +230,7 @@ pub fn restored() -> Vec<Restored> {
             earlier: 0,
             draft: Draft::default(),
             group: None,
+            listing: None,
         });
     }
     out
@@ -241,6 +241,7 @@ pub fn restored() -> Vec<Restored> {
 /// pinned conversation under the cursor.
 pub fn model() -> UiModel<Field> {
     let mut model = UiModel::<Field>::new(&[]);
+    model.lang = crate::LANG;
     model.address = Some(OWN);
     for c in &CONVERSATIONS {
         model.names.remember(peer(c.seed), c.name);
@@ -249,6 +250,8 @@ pub fn model() -> UiModel<Field> {
     model.restore(restored());
     map(&mut model);
     model.focus = Pane::Conversations;
+    // The board's screen, as a home's model has it (1532): no tab bar.
+    model.viewing = crate::screen::viewing(crate::font::Size::DEFAULT);
     model
 }
 
@@ -323,10 +326,7 @@ fn location(at: &Place, secs_before_now: i64) -> Location {
 /// a pin is made of on every target: the shares the store kept, a node's
 /// `lev.position` announce, the board's own GNSS fix.
 fn map(model: &mut UiModel<Field>) {
-    if let Ok(region) = Region::from_bytes(crate::map::FIXTURE) {
-        update(model, UiEvent::MapSetup(crate::map::setup(region.header())));
-    }
-    model.map_picture = Some(crate::map::PICTURE);
+    crate::map::ready(model);
     let shares = SHARES
         .iter()
         .map(|(seed, at, ago)| Fix {
@@ -452,6 +452,7 @@ fn groups() -> Vec<Restored> {
                 earlier: 0,
                 draft: Draft::default(),
                 group: Some(info),
+                listing: None,
             }
         })
         .collect()

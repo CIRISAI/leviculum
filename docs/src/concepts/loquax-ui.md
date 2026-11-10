@@ -84,9 +84,9 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:1012-1049`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:1018-1055`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:1039-1049`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:1045-1055`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
@@ -268,6 +268,37 @@ look alike are both marked `≈`, a changed name is said once in the
 conversation, and the header says the trust state in words: `known`,
 `unknown` or `blocked`. Its section 5, "Built 2026-10-26, names", lists
 where it differs from the decision in [the mailbox page](loquax-mailbox.md).
+
+**Changed 2026-11-08 (1452): a name is a name.** Lew, on UI walk 1,
+finding 3: four hex digits after every name are noise nobody can remember.
+On every target (the window, the terminal, the phone, the M9), in lists,
+chats, bubbles, the map and the headers, a peer and a group are their name
+alone (`loquax/src/names.rs`, `Names::label`): the petname, else the
+address book's name, else the announced one. A peer without a name is
+"Unknown" ("Unbekannt"), its avatar a `?` in the colour its address gives,
+so two of them differ by colour; never hex. The own avatar takes the own
+name (the names' word for us, else the profile's from the mailbox).
+
+The short hash is a **collision marker, not an identifier**. It comes back
+only on the peers whose shown names collide (`Names::collisions`: the name
+the screen shows, petname, address book or announce, compared folded in
+case and white space, with the Cyrillic, Greek and digit look-alikes
+folded too), and two or more nameless peers with a conversation collide
+as well. Where they meet, the chat list's row and the chat header of each
+say it in words, "Zwei Kontakte heißen Lew" / "Two contacts are called
+Lew" (`Names::same_name`, catalogue strings `same_name_two`,
+`same_name_many`, `no_name_two`, `no_name_many`). The `≈` mark is gone. The
+window draws the sentence as a third line under the row and small under
+the header's name; the terminal and the M9, whose rows are one line of
+name, draw it after the name only when it fits whole, and the header
+always says it.
+
+**A peer is verified by its address, not by its tail.** The full address
+and its QR code live in the profile and the contact info, and a message's
+Info sheet names a relayed writer's short hash; that is where one looks a
+peer up and compares it, in full or by scanning the QR, never by four
+digits beside a name. The search still finds a conversation by its
+address in hex.
 
 ### Built 2026-10-27, history
 
@@ -527,6 +558,360 @@ Goldens: `loquax/tests/golden/gui-profile-light.png`,
 `loquax/tests/golden/scene-profile.json` and the phone's answer
 `loquax-android/tests/golden/profile-words.json`.
 
+### Built 2026-11-08, one settings structure
+
+Walk 1, finding 21: the phone had its settings in the ⋮ menu with nine
+sections, the window a gear with a flat page and a light/dark button in
+its bar, the terminal and the M9 none. Since 1450 the sections are one
+list in the core, `loquax/src/ui/settings.rs` (`SECTIONS`): Profile,
+Mailbox, Appearance, Chats, Notifications, Privacy, Maps, Backup,
+Advanced, in that order, their titles and summaries the catalogue's.
+Every target lists them from there and enters them its own way:
+
+- the phone: the ⋮ menu opens `SettingsActivity`, whose list is the
+  facade's `Query::Settings` (`session::settings_list`); each entry opens
+  its page by the section's key, the pages stay Android's;
+- the window: the gear opens the list, a section its page; light or dark
+  is Appearance's switch, the bar has no theme button any more;
+- the terminal: `S` (and the palette's `settings`) opens the list as a
+  detail view, `1` to `9` a section, a row's key runs it (`r` read
+  receipts, `t` light or dark, `f` the photo size and so on), `q` goes
+  back a step;
+- the M9: none yet, which `PLACES` says per section with what it takes
+  (a menu screen in `loquax-m9` and the key that opens it).
+
+`PLACES` in the same file says per section and target where it is drawn
+(a file and a token, as the inventory's cells) or why not; its test is
+the guard that every target draws every section it does not mark
+missing or n/a, and that a phone, a window and a terminal draw all nine.
+The inventory's `Settings` row points to it.
+
+### Built 2026-11-10, the mailbox page
+
+Lew, 2026-11-10, on the Fairphone (1642): Settings, Mailbox said only
+"Your mailbox is on another device", and nothing told which one. The
+page is now one scene in the core, `loquax/src/ui/mailbox_page.rs`,
+which the phone's `SettingsActivity`, the window's Mailbox section and
+the terminal's draw. For a mailbox on another device it has three
+groups:
+
+- **Which mailbox**: the name it announces, the address in full under
+  "Address" with a copy (the one place the no-hash rule yields, Lew asked
+  for it), the machine it runs on and its version;
+- **Connection**: connected or not since when, the last contact, the
+  server and port the device is on and whether that is the shielded
+  access-point port 4343 or the 4242 fallback, with a sentence on what
+  that means;
+- **Devices of this mailbox**: each device the mailbox admitted with when
+  it was last there, this one said as such, and "Show my code".
+
+The name, machine, version and devices come from the mailbox itself:
+`/about` (`loquax/src/home/about.rs`), answered to an admitted device;
+the mailbox keeps a device's last request since schema 20
+(`home_devices.last_seen`). A mailbox from before it stays silent on
+the path, and the page says it runs an older version. The phone asks on
+every connection and when the page is up and its word is older than a
+minute; the desktop after a pull, every ten minutes at most.
+
+Goldens: `gui-settings-mailbox-light.png`, `tui-settings-mailbox.txt`
+and its German twin, and the phone's answers
+`mailbox-page-reachable.json` and `mailbox-page-unreachable.json`, all
+from `loquax/tests/support/mailbox_page.rs`.
+
+### Built 2026-11-09, the public rooms' hubs
+
+Lew, 2026-11-08 (1577): Loquax offers the popular public room hubs, and
+a user never needs the protocol's name. The only community list (the
+Reticulum wiki's RRC page, last changed 2026-09-04) and four operators'
+pages published seven `rrc.hub` destinations; two warned a hash changes
+on a redeploy. So the list ships only what answered.
+
+**The measurement**, 2026-11-09 from the coder host, with
+`loquax/examples/rrc_hubs_probe.rs`: a node of its own dialled the
+shipped entry servers (leviculum.network, port 4242, and the
+Sauerland testnet, 38.242.217.238, port 4242), listened for `rrc.hub` announces in
+three windows of 560 s (06:41 to 07:09 CET, plus a 60 s smoke run
+before and the 120 s before the opening round), then opened each hub
+with Loquax's own hub link (`loquax::rooms_link`: path, link, Identify,
+HELLO until WELCOME, six seconds for the hub's notices, then it left;
+it joined no room and said nothing). A hub that did not answer was
+tried a second time (07:13), and `just rrc-hubs-check 60` ran the
+whole round a third time (07:50).
+
+| hub | destination | announce heard | hops | WELCOME | rooms the hub named | shipped |
+|---|---|---|---|---|---|---|
+| RNS Community | `28c7c1a6…` | yes (window 3) | 4 to 5 | yes, as `rnscommunity`, three of three | `general` ("/join general for the main room!") | yes |
+| ShadowLink (TSK-0) | `c3fd7454…` | yes (windows 1 and 3) | 3 to 6 | yes, as `ShadowLink TSK-0`, three of three | none named (published: `teskeslab`) | yes |
+| HADARC | `e7fd7f9e…` | yes (windows 1 and 3) | 4 | yes, as `HADARC_rrc`, three of three | none named (published: `general`) | yes |
+| RNS Moscow | `42a97b1b…` | no | 3 to 4 (path request) | yes, as `rns.moscow`, three of three | none named | yes |
+| Radio Oxford (OXMESH) | `5da9b708…` | no | 5 to 6 (path request) | no at 07:09, yes at 07:13 and 07:50, as `RADIOXFORD` | none named (published: `#radioxford`) | yes |
+| MichMesh | `1303a636…` | no | 4 to 6 (path request) | no, three of three | – | no: published, not reached on 2026-11-09 |
+| Amber Hubs on NomadNet | `085b5d6a…` | no | 5 to 8 (path request) | no, three of three | – | no: published, not reached on 2026-11-09 |
+
+MichMesh and Amber answer path requests (a path came back every time)
+but no link came up to a WELCOME within the link's budgets (30 s for
+the link, five HELLOs five seconds apart). They are recorded as
+`[[unreached]]` in the list, not offered, and the check tries them
+again.
+
+**Hubs the web does not know.** The windows heard 79 distinct `rrc.hub`
+announces; 76 are none of the seven, among them (by the name in their
+announce) Gothenburg SE, villa, Hollywood Chat, Cornwall UK, CTRS,
+Reticulum Community VIE, Chicago Offline, UTN Oregon, SoCal Public RRC,
+RMAP.WORLD RRC Hub, Chatsurfer-RRC, CascadiaRRC, Minuteman RRC,
+Save Europe, Colorado Mesh, meshage.me Chat Hub, viennahub, Le Salon FR,
+EuskalReticulum, Montreal, Whatcom County Mesh Chat and four without a
+name. The smoke run opened the three it had heard: Gothenburg and villa
+answered a WELCOME, Hollywood Chat did not. None shipped under 1577's
+rule (a hub joins the list with a source that publishes it, as the seven
+did); 1599 changed the rule, below. The full list with hashes and hops is
+the probe's output (`HEARD` lines), which `just rrc-hubs-check` writes
+to `target/tmp/rrc-hubs/probe.txt`.
+
+**The list is data**, `loquax/assets/hubs.toml` (name, hash, the rooms
+the hub's welcome named, the published rooms, the source, the day
+measured), compiled in by `loquax::ui::hubs`. `just rrc-hubs-check`
+(default 1800 s of listening) measures again and exits 1 on a shipped
+hub that did not answer or an unreached one that now does: a stale hash
+is a finding, not a surprise. No hub is connected to on its own; the
+list is what the settings offer.
+
+**The settings row**, in Advanced on the phone, the window and the
+terminal, from one function (`settings::hub_rows`): "Public rooms: hub"
+with the hub in force by its name, each hub by its name with a mark on
+the one in force (since 1599 the hubs heard first, ten a page, keys `1`
+to `9` and `0` on the terminal, below), "None" (`n` since 1599), "Another
+hub: paste its address" (`a`, the terminal's palette
+asks; the window has a field; the phone an `EditText`, through
+`Query::RoomsHub`), and "Your name is visible to everyone in the room."
+A pasted hub is named by the name its welcome gave, else "Your own
+hub", never by its hash. The config key stays `rooms_hub`; the Rooms tab
+appears as soon as a hub is chosen, and the hub link runs idle on every
+target until one is, so no restart is needed.
+
+**The word.** A joined room is listed with the globe and "public"
+("öffentlich") beside its name. The catalogue carries no "RRC" and no
+"Relay Chat" anywhere a user reads (`no_string_names_the_protocol`), nor
+does a shipped hub's name. The first time a user opens a hub, before
+the link, the toast says "Your name is visible to everyone in the room."
+(the hub learns the identity on Identify); the config's `rooms_told`
+keeps that it was said.
+
+Goldens: `loquax/tests/golden/tui-settings-advanced.txt`,
+`gui-settings-advanced-light.png`, and the room's row in
+`tui-rooms-room.txt`, `gui-rooms-room.png` and the phone's
+`loquax-android/tests/golden/rooms-room.json`.
+
+### Built 2026-11-09, hubs discovered from their announces
+
+Lew decided on 2026-11-09 (morning, 1599): well-reachable hubs ship even
+without a published source. **A hub ships when the measurement reached
+it and it answered a WELCOME; the source says where it was found, a
+publication or "heard on the mesh 2026-11-09". Nothing ships
+unmeasured.** And users discover hubs themselves: **hubs are discovered
+from their announces; the shipped list seeds a fresh install** that has
+heard nothing yet.
+
+The protocol has one discovery mechanism, the one 1577 measured with:
+every hub announces its `rrc.hub` destination with its name in the
+announce's app data, and every node of the mesh hears it. There is no
+registry and no room list inside a hub; a hub's rooms are what its
+welcome and notices name and what people join.
+
+**The measurement**, 2026-11-09 from the coder host, CET. The probe
+gained `--open heard` (every hub heard, closest first), `--seed` (the
+hubs an earlier window heard, 1577's `heard-union.txt`) and `--parallel`
+(that many hubs opened at once, each over a hub link of its own on the
+one node, so 81 hubs fit one command). Try 1 at 12:08: a 90 s listen
+plus the 79 hubs of 1577's windows, 24 at once, 81 hubs opened, 48
+WELCOMEs. Try 2 at 12:11: the 33 silent ones, 11 at once, 13 more. Try
+3 at 12:14: the 20 still silent, four at once, 5 more (ShadowLink among
+them). The two of 1577's five not heard (RNS Moscow, Radio Oxford) were
+opened from the list at 12:13 and answered; MichMesh and
+Amber again did not. The rooms are what the hub's notices named
+(`/join <room>`, `#room`); most hubs name none.
+
+| hub | destination | hops at first hearing | WELCOME (try 1/2/3) | rooms its notices named | shipped |
+|---|---|---|---|---|---|
+| Cascadia | `fcf451c9…` | 3 | yes/–/– | – | yes |
+| Chatsurfer | `0de5818c…` | 3 | yes/–/– | – | yes |
+| CTRS | `741da322…` | 3 | yes/–/– | – | yes |
+| Minuteman | `68dda18a…` | 3 | yes/–/– | #lobby | yes |
+| RMAP.WORLD Hub | `6ffeb457…` | 3 | yes/–/– | #test | yes |
+| Save Europe | `ceadff8d…` | 3 | yes/–/– | – | yes |
+| SoCal Public | `4f07b6e3…` | 3 | yes/–/– | – | yes |
+| UTN Oregon | `472c760a…` | 3 | yes/–/– | – | yes |
+| (unnamed) | `dd9313ae…` | 4 | yes/–/– | – | yes |
+| Chicago Offline | `215f9cc1…` | 4 | yes/–/– | – | yes |
+| Cornwall UK | `fd043546…` | 4 | no/yes/– | – | yes |
+| Defunct Hub | `a3369c93…` | 4 | no/yes/– | – | yes |
+| Gothenburg SE (Swe) | `54f16391…` | 4 | yes/–/– | #lobby | yes |
+| HADARC | `e7fd7f9e…` | 4 | yes/–/– | – | yes |
+| meshage.me Chat Hub | `0d4c8a03…` | 4 | yes/–/– | – | yes |
+| Pi4 | `247a5627…` | 4 | yes/–/– | – | yes |
+| Reticulum Community VIE | `bb750bf4…` | 4 | yes/–/– | – | yes |
+| villa | `c930a4f1…` | 4 | no/yes/– | #villa | yes |
+| (unnamed) | `32d9b180…` | 5 | yes/–/– | – | yes |
+| Cyberdelia Chat Hub | `a1831cc6…` | 5 | yes/–/– | – | yes |
+| Estonia | `1b9a8757…` | 5 | yes/–/– | – | yes |
+| Hub 42 | `53e3ae1c…` | 5 | yes/–/– | – | yes |
+| Meshchat neXt | `ef933cd2…` | 5 | yes/–/– | – | yes |
+| MeshChatX | `59ef1330…` | 5 | yes/–/– | – | yes |
+| RCC-Hub Rottbitze | `38ca57f1…` | 5 | yes/–/– | – | yes |
+| RNS Community | `28c7c1a6…` | 5 | yes/–/– | general | yes |
+| RootAccessChatHub | `e78ba2ad…` | 5 | yes/–/– | – | yes |
+| Whatcom County Mesh Chat | `4e66bb79…` | 5 | yes/–/– | – | yes |
+| NastyCanuck rrc | `e48e8764…` | 5 | no/no/no | – | no |
+| Woddy+x MAIN | `56898b13…` | 5 | no/no/no | – | no |
+| Юрьев польский | `f4ee2aaf…` | 5 | no/no/no | – | no |
+| (unnamed) | `6e018521…` | 6 | yes/–/– | – | yes |
+| FOXDPI | `0921dbd3…` | 6 | yes/–/– | – | yes |
+| library-socialism | `56690ed8…` | 6 | yes/–/– | – | yes |
+| Lipetsk Region | `d027d787…` | 6 | no/no/yes | – | yes |
+| Secret Society of Questionable Decisions | `d16092e7…` | 6 | yes/–/– | – | yes |
+| ShadowLink | `c3fd7454…` | 6 | no/no/yes | – | yes |
+| ValleiRug.nl Hub | `6f4fdb14…` | 6 | no/yes/– | – | yes |
+| (unnamed) | `be3af5a9…` | 7 | no/yes/– | – | yes |
+| Fenian Central | `d60db458…` | 7 | no/yes/– | – | yes |
+| Hispagatos HQ | `8d83c900…` | 7 | yes/–/– | – | yes |
+| SnakePitTest | `268f377e…` | 7 | no/no/yes | – | yes |
+| SPB RNS | `ead77c9b…` | 7 | yes/–/– | – | yes |
+| 3moelf | `7cfc227e…` | 8 | no/yes/– | – | yes |
+| Batumi hub | `dc5118c5…` | 8 | yes/–/– | – | yes |
+| Hollywood Chat | `bf7469d2…` | 8 | yes/–/– | – | yes |
+| jonto-hub | `194d9357…` | 8 | yes/–/– | – | yes |
+| mtenk-rns relay | `dc6b1e5b…` | 8 | no/yes/– | – | yes |
+| The Chili Line | `b7c5db39…` | 8 | yes/–/– | – | yes |
+| ValleyMesh Hub | `df572983…` | 8 | yes/–/– | #lobby | yes |
+| Montreal | `ea6d2b2e…` | 8 | no/no/no | – | no |
+| Le Salon FR | `ba7065c8…` | 9 | yes/–/– | #general, #radio | yes |
+| Rettui Hub | `7e1e788b…` | 9 | no/no/yes | – | yes |
+| LINUXIM GROUP RELAY CHAT | `808b5663…` | 9 | no/no/no | – | no |
+| Colorado Mesh | `d765e919…` | 10 | yes/–/– | – | yes |
+| NovasRedes Hub 1 | `060a6187…` | 10 | yes/–/– | – | yes |
+| nl1ctm | `e1fc264c…` | 10 | no/no/no | – | no |
+| NM-RNS Chat Relay | `e55699b4…` | 11 | yes/–/– | – | yes |
+| Три топора | `dd74d7d0…` | 11 | no/no/yes | #tri-topora | yes |
+| RandomTestHub | `91375df7…` | 11 | no/no/no | – | no |
+| MBUG HUB | `a394106e…` | 12 | yes/–/– | – | yes |
+| Permanet Chat | `082f8e42…` | 12 | no/yes/– | lobby | yes |
+| Casual Collapse Club | `5cb5c054…` | 14 | yes/–/– | – | yes |
+| VLADIMIR | `ba5744bf…` | 14 | yes/–/– | – | yes |
+| EuskalReticulum | `14d0b712…` | 16 | yes/–/– | – | yes |
+| Banana Boat | `7a37b0aa…` | 18 | yes/–/– | – | yes |
+| Berenklauw | `4663fa0e…` | 20 | no/yes/– | – | yes |
+| meshpi | `5866cdf2…` | 20 | no/yes/– | – | yes |
+| Lanaudiere | `fca7fe6d…` | 23 | yes/–/– | – | yes |
+| PalouseMesh | `d3f50137…` | 26 | no/yes/– | – | yes |
+| viennahub | `f5f4d4a5…` | 30 | yes/–/– | – | yes |
+| RedRiotRRC | `eac2f4a5…` | 31 | no/no/no | – | no |
+| rrc | `8c550ac0…` | 33 | no/no/no | – | no |
+| AlcoholicsAnonymousChat | `b56058ce…` | 35 | no/yes/– | – | yes |
+| QAF - Home Hub | `516bfb29…` | 35 | yes/–/– | – | yes |
+| Ratspeak hub | `d8e5e175…` | 35 | no/no/no | – | no |
+| Testing in SLC | `0f3c3b50…` | 37 | no/no/no | – | no |
+| MasCasa | `54ca8c9a…` | 49 | no/no/no | – | no |
+| Test Chat Hub | `1db4b767…` | 53 | no/no/no | – | no |
+| Sutemos hub | `0fa194ae…` | 62 | no/no/no | – | no |
+| Hub b11c289d | `2b95df64…` | 72 | no/no/no | – | no |
+
+**68 hubs ship**: the 66 heard ones that answered on one of the three
+tries and RNS Moscow and Radio Oxford, ordered by hops at first hearing
+(the two never heard by their path's hops), each with `hops`. The five
+of 1577 keep their names and sources; the others say "heard on the mesh
+2026-11-09". Names are cleaned of the protocol's word as 1577 did
+(`ui::hubs::shown_name`: "HADARC_rrc" is HADARC, "CascadiaRRC" Cascadia,
+"[SPB_RNS]_Relay_Chat_Service" "[SPB RNS] Service", which the list
+shortens by hand to "SPB RNS", and "RRC42" became "Hub 42" by hand); four hubs announce no name and welcome as "hub", and ship
+with an empty name, which the settings call "Unnamed hub". The fifteen
+that never answered neither ship nor are recorded: the check opens only
+the list. "Defunct Hub" and "SnakePitTest" answered, and ship by the rule.
+
+**A first try is not a verdict.** 33 of 81 hubs were silent on the first
+try and 18 of them answered a second or third, ShadowLink (shipped since
+1577) among them. Whether the 24 links at once or the internet's paths
+cost the first tries is not measured; `just rrc-hubs-check` therefore
+opens the list twelve at once and every silent hub once more, four at
+once, before a shipped hub that did not answer is a finding. Over the 68
+on 2026-11-09 at 12:18: 66 answered at once, two on the retry, exit 0.
+Its positive control (a list with a made-up hash as a shipped hub and
+RNS Community as an unreached one, `just rrc-hubs-check 5
+<list>`) reported both findings and exited 1.
+
+**Discovery.** The engine turns every `rrc.hub` announce its node hears
+into a heard hub (`OutboxEvent::HubAnnounced`: the hub, its name from
+the app data, cleaned, its hops, the time), on every device and on the
+home. The screen keeps them in `ui::hubs::Heard`: one entry a hub, its
+first hearing kept, the newest name and hops taken, last seen first and
+the closer first on a tie, at most 256 (`HEARD_BOUND`; the mesh had 79
+in half an hour), the one heard longest ago going first. The home keeps
+them for its devices as archive entries of kind `KIND_HUB` (14): a
+hub's newest only, appended when the hub is new, its name or hops
+changed, or an hour passed since the kept hearing
+(`HUB_REFRESH_SECS`), bounded the same; like a name it wakes nobody and
+rides with the next pull, and a device that pulls it lists the hub as
+one it heard itself. A hub opened that did not answer stays listed,
+marked "no answer"; nothing is removed for that.
+
+**The settings row** shows one list (`settings::offered_hubs`): the
+heard hubs by last seen, a shipped one among them marked "suggested",
+then the shipped ones not heard, closest first; each with how far it is
+("4 hops away", "1 hop away"), a nameless one as "Unnamed hub". Ten a
+page, then "More…": the terminal turns to the next ten (`m`, keys `1` to
+`9` and `0` for the ten, `n` for none), the window and the phone show
+every hub in their page's scroll. No hash on screen.
+
+**Not built in this pass, owed:** the Browse tab's "Hubs in your mesh"
+under its rooms section (the tab as 1578 sketched it is not in this
+tree), and a device without a home keeps its heard hubs in memory only:
+a restart forgets them until they are heard again. The home's list
+survives a restart in its archive, and a new device gets it on its
+first pull.
+
+### Built 2026-11-09, the pages list comes from the home (1579)
+
+Lew, 2026-11-08: the list of NomadNet pages a reader can open must not
+depend on the announces that happen to reach the phone. The Browse tab's
+list (and the Entdecken list 1578 builds on it) has two sources, folded
+into one lnomad registry (`lnomad::discovery::NomadNodeRegistry`):
+
+1. **What this device's own fetch hears**, `BrowseEvent::Node`, as
+   before. A device without a home (standalone, or lnomad itself) has
+   only this, as lnomad always had.
+2. **What the home heard**, `BrowseEvent::Home` (`loquax/src/ui/browse.rs`,
+   `home_pages`): after every pull from the home, the desktop shell
+   (`Shell::ask_pages`, `loquax/src/shell.rs`) and the phone's session
+   (`ask_pages`, `loquax-android/src/session.rs`) ask `/pages` with the
+   stamp the device holds (`Browse::shared`). The first ask of a run
+   brings the whole list, later ones the rows that changed. Each page
+   row becomes the same `DiscoveredNode` an announce would, so the list
+   does not know or show where a row came from. The stamp is held in
+   memory, as the registry is: a start asks for the whole list again.
+
+**Bookmarks are the identity's.** A bookmark the reader sets or clears
+on any device goes to the home (`Browse::outgoing`, handed by
+`runner::hand_bookmarks`) stamped with the device's clock, and comes back
+to every device in the next `/pages`. The newer stamp wins, a cleared
+bookmark travels as a tombstone (`loquax-mailbox.md`, section 4). A
+change the home has not echoed yet stays pending and is handed again
+before the next ask, and an older row from the home does not undo it.
+The desktop's `browse-bookmarks.toml`, lnomad's format, is the import:
+its bookmarks are handed with the time the file was written, so a newer
+word from another device wins.
+
+**What 1578 reads:** `model.browse.model.node_registry` (both sources,
+name, hops, first and last seen) and `model.browse.model.bookmarks` (the
+identity's, merged). lnomad's registry keeps 500 nodes
+(`lnomad::discovery::NODE_CAPACITY`), the oldest inserted going first, so
+a home list of more than that shows the 500 that changed last; raising it
+on the hosts with room is 1578's call.
+
+**Not built in this pass, owed:** the periculum cell
+`loquax_pages_from_home` (it lives in periculum, outside this tree); the
+M9's Browse tab asks no `/pages` yet; the phone keeps no bookmarks past
+the session itself, so its home is where they live; a pending change is
+held in memory and a restart before the home took it loses it.
+
 ### The intent inventory
 
 Every user action as the intent it raises, and per target whether it is
@@ -540,8 +925,9 @@ it). A missing cell is the next order.
 <!-- intent-inventory:begin (loquax/src/ui/inventory.rs) -->
 | intent | what the user does | phone | window | terminal | M9 |
 |---|---|---|---|---|---|
-| `Tab` | a tab of the bar (Chats, Map, Browse, Rooms) | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no key switches the tab |
+| `Tab` | a tab of the bar (Chats, Map, Explore) | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no key switches the tab |
 | `Browse` | a verb of the hosted browser in the Browse tab | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: the M9 has no Browse tab |
+| `Explore` | the Explore tab: search, order, open a page, bookmark it, open a room, pick a hub | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: the M9 has no third button; a key and a list screen for it (handheld page) |
 | `Back` | back: the bar's arrow, Esc, the M9's back key, leaving the profile | built (`session.rs`) | built (`gui.rs`) | built (key) | built (`keys.rs`) |
 | `OpenChat` | a tap or click on a conversation's row | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | built (`keys.rs`) |
 | `CloseChat` | leave the open chat for the list | built (`session.rs`) | built (`gui.rs`) | n/a: the list stands beside the chat; Back moves the keys to it | n/a: Back moves the keys to the list |
@@ -637,7 +1023,71 @@ it). A missing cell is the next order.
 | `Import` | import from another messenger | **missing**: the phone imports nothing | **missing**: the window imports nothing | built (palette) | n/a: the board takes its history from the home |
 | `ReadReceipts` | the switch "Send read receipts" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no settings on the M9 |
 | `DeleteAllRegions` | the Maps page's Delete all | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
+| `Settings` | the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (key) | **missing**: no menu screen and no key for it on the M9 (super::settings::PLACES) |
+| `RoomsHub` | the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577) | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: no settings on the M9 |
 <!-- intent-inventory:end -->
+
+### The goldens' index
+
+Every scene a golden pins, with its golden per target, so a walk that
+cannot run a target reads this list instead of guessing file names
+(1451, after UI walk 1 found scenes no golden showed). A file stands
+under the scene it shows; "not drawn" says the target has no such
+screen, with the reason, which is what a walk reports, not a missing
+golden. The window's pictures and the terminal's screens are in
+`loquax/tests/golden/` (`gui-*`, `tui-*`, the scenes `scene-*` and the
+tracks' cells `tracks-*`), the terminal's sessions in
+`loquax/tests/fixtures/` (`*.frames`, one file a session with every
+frame it asks for), the M9's frames in `loquax-m9/tests/golden/`, the
+phone's in `loquax-android/tests/golden/`; each directory's README or
+the test named in it says what a file shows. Every terminal golden has
+its German twin (`-de`, `_de`), drawn as a desktop under
+`LANG=de_DE.UTF-8` draws it; the style map `tui_chat.styles` has none,
+it pins colours, not words. `loquax/tests/golden_index.rs` refuses a
+name here with no file, a golden file with no name here, and a terminal
+golden without its German twin.
+
+<!-- goldens-index:begin -->
+| scene | window | terminal | terminal, German | M9 | phone | scene, every target |
+|---|---|---|---|---|---|---|
+| First start, before a mailbox | `gui-first-start.png`, `gui-first-start-profile.png` | `tui-first-start.txt`, `tui-first-start-profile.txt` | `tui-first-start-de.txt`, `tui-first-start-profile-de.txt` | `m9-fw-splash.png`, `m9-fw-pairing.png` | not pinned: the first start is `WelcomeActivity.java`'s own | |
+| Joining a mailbox with its code | not drawn: a desktop joins with `loquax mailbox join` | not drawn: a desktop joins with `loquax mailbox join` | | `m9-joining.png` | not pinned: the join form is `JoinForm.java`'s own | |
+| The mailbox out of reach, and back | not drawn: the desktop's shell never learns the mailbox's reach | not drawn: the desktop's shell never learns the mailbox's reach | | `m9-offline.png`, `m9-online.png` | not pinned: the offline bar is `ConversationsActivity.java`'s own | |
+| The chats list and an open chat | `gui-chat-light.png`, `gui-chat-dark.png` | `tui_session.frames`, `tui_chat.frames`, `tui_chat.styles`, `tui_layout.frames` | `tui_session_de.frames`, `tui_chat_de.frames`, `tui_layout_de.frames` | `m9-chats.png`, `m9-chats-cursor.png`, `m9-chat.png`, `m9-chat-cursor.png`, `m9-fw-chats.png`, `m9-fw-chat.png` | | `scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json` |
+| A narrow window | `gui-chat-compact-chat.png`, `gui-chat-compact-list.png` | | | | | |
+| The large type | | | | `m9-chats-large.png`, `m9-chat-large.png` | | |
+| The settings | `gui-settings-light.png`, `gui-settings-privacy-light.png`, `gui-settings-advanced-light.png` | `tui-settings.txt`, `tui-settings-advanced.txt` | `tui-settings-de.txt`, `tui-settings-advanced-de.txt` | `m9-settings.png`, `m9-settings-de.png` (the house key's overview, the M9's only settings) | | |
+| The mailbox page, which mailbox and how it is reached | `gui-settings-mailbox-light.png` | `tui-settings-mailbox.txt` | `tui-settings-mailbox-de.txt` | not drawn: the M9 has no settings screen | `mailbox-page-reachable.json`, `mailbox-page-unreachable.json` | |
+| The keys' help | not pinned: the shared overlay lnomad's window draws | not pinned: `?` | | not drawn: no key opens the help; the keys stand on their screens (`m9-fw-pairing.png`, `m9-map-hint.png`, the group's frames) | n/a: no keys | |
+| The keymap and the mouse | | `tui_keys.frames`, `tui_mouse.frames` | `tui_keys_de.frames`, `tui_mouse_de.frames` | | | |
+| Typing and sending | | | | `m9-compose.png`, `m9-sent.png` | | |
+| A reply, a reaction, a photo | `gui-reply-sent.png` | `tui-reply-sent.txt` | `tui-reply-sent-de.txt` | `m9-reply.png`, `m9-reaction.png` (the M9 draws no reaction), `m9-photo.png` | | `scene-reply.json` |
+| A reply being written | `gui-reply-compose.png` | `tui-reply-compose.txt` (the terminal draws no quote) | `tui-reply-compose-de.txt` | `m9-reply-compose.png` (the M9 says not what it answers) | | `scene-reply-compose.json` |
+| Reactions and their picker | | `tui_reactions.frames` | `tui_reactions_de.frames` | | | |
+| A long message read by the line | | `tui_long_message.frames` | `tui_long_message_de.frames` | `m9-chat-long-mid.png`, `m9-chat-long-back.png`, `m9-chat-top-held.png` | | |
+| Photos, files and voice in a chat | `gui-chat-media.png`, `gui-attach-sheet-light.png` | `tui_media.frames` | `tui_media_de.frames` | | | |
+| Recording a voice message | `gui-recording-held.png`, `gui-recording-locked.png`, `gui-recording-paused.png` | `tui_recording.frames` | `tui_recording_de.frames` | | | |
+| Selecting and copying text | `gui-chat-selected-light.png`, `gui-chat-selected-dark.png` | `tui-copy-mode.txt` | `tui-copy-mode-de.txt` | | | |
+| A late message at its sent time | `gui-late-message.png` | `tui-late-message.txt`, `tui_late.frames` | `tui-late-message-de.txt`, `tui_late_de.frames` | `m9-late-message.png` | `late-message.json` | |
+| Two contacts of one name | `gui-same-name.png` | `tui-same-name.txt`, `tui_names.frames` | `tui-same-name-de.txt`, `tui_names_de.frames` | `m9-same-name-list.png`, `m9-same-name-chat.png` | | |
+| The ticks and the receipts' ladder | | | | | | `scene-ladder.json` |
+| Search | | `tui_search.frames`, `tui_search_session.frames` | `tui_search_de.frames`, `tui_search_session_de.frames` | | | |
+| A new conversation from the palette | | `tui_palette_new.frames` | `tui_palette_new_de.frames` | | | |
+| A send's two legs in the toast | | `tui_toast_two_legs.frame` | `tui_toast_two_legs_de.frame` | | | |
+| History, drafts and an import | | `tui_history.frames`, `tui_draft.frames`, `tui_ugly.frames` | `tui_history_de.frames`, `tui_draft_de.frames`, `tui_ugly_de.frames` | | | |
+| The profile | `gui-profile-light.png` | `tui_profile.frames` | `tui_profile_de.frames` | | `profile-words.json` | `scene-profile.json` |
+| Groups: new, invited, the chat, its members | `gui-group-new.png`, `gui-group-invitation.png`, `gui-group-chat.png`, `gui-group-members.png` | | | `m9-group.png`, `m9-fw-groups.png`, `m9-fw-invite.png`, `m9-fw-members.png`, `m9-fw-admin.png`, `m9-fw-ask.png`, `m9-fw-name.png`, `m9-fw-pick.png` | | `scene-group-list.json`, `scene-group-new-name.json`, `scene-group-new-pick.json`, `scene-group-invitation.json`, `scene-group-invited-chat.json`, `scene-group-chat.json`, `scene-group-members.json`, `scene-group-members-leave.json` |
+| A group's one and two ticks | `gui-group-ticks.png` | `tui-group-ticks.txt` | `tui-group-ticks-de.txt` | `m9-group-ticks.png` | `group-ticks.json` | `scene-group-ticks.json` |
+| A relayed group | `gui-relay-group.png` | `tui-relay-group.txt` | `tui-relay-group-de.txt` | | `relay-group.json` | `scene-relay-group.json` |
+| A room | `gui-rooms-room.png` | `tui-rooms-room.txt` | `tui-rooms-room-de.txt` | not drawn: the M9 has no rooms | `rooms-room.json` | |
+| Explore | `gui-explore.png` | `tui-explore.txt`, `tui-explore-sheet.txt` | `tui-explore-de.txt`, `tui-explore-sheet-de.txt` | not drawn: the M9 has no Explore | | `scene-explore.json`, `scene-explore-search.json`, `scene-explore-sheet.json`, `scene-explore-wide.json` |
+| Browse, a NomadNet page | `gui-browse-list.png`, `gui-browse-page.png` | `tui-browse-list.txt`, `tui-browse-page.txt` | `tui-browse-list-de.txt`, `tui-browse-page-de.txt` | not drawn: the M9 has no Browse tab | | `scene-browse-list.json`, `scene-browse-page.json`, `scene-browse-form.json` |
+| The map with two peers, one selected | `gui-map-pins.png` | `tui-map-pins.txt` | `tui-map-pins-de.txt` | `m9-map-card.png` | | |
+| The map screen and its menu | `gui-map-window.png`, `gui-map-window-menu.png`, `gui-map-window-week.png`, `gui-map-uncovered-dark.png` | `tui_map.frames`, `tui_map_cycle.frames`, `tui_mapload.frames` | `tui_map_de.frames`, `tui_map_cycle_de.frames`, `tui_mapload_de.frames` | `m9-map-open.png`, `m9-map-hint.png`, `m9-map-no-region.png`, `m9-map-overview.png`, `m9-map-world-z2.png`, `m9-map-z13.png`, `m9-map-z16.png`, `m9-map-sky-fix.png`, `m9-map-sky-searching.png`, `m9-fw-map.png`, `m9-fw-pan.png` | | |
+| The map's picture: names and buildings | `gui-names-florence-z16.png`, `gui-buildings-light-z16.png`, `gui-buildings-dark-z16.png`, `gui-buildings-light-z17.png`, `gui-buildings-dark-z17.png` | | | | `map-florence-z16.png` | |
+| A position in a chat, shared and typed | `gui-position-sheet-light.png`, `gui-position-entry-light.png` | `tui_telemetry.frames`, `tui_liveness.frames`, `tui_share_chip.frames` | `tui_telemetry_de.frames`, `tui_liveness_de.frames`, `tui_share_chip_de.frames` | | | |
+| Tracks | `gui-tracks-hiking.png`, `gui-tracks-park.png`, `gui-tracks-park-dark.png`, `gui-tracks-convoy.png`, `gui-tracks-week-old.png`, `gui-tracks-outlier.png`, `gui-tracks-handbag.png`, `gui-tracks-radar.png`, `gui-tracks-way-back.png`, `gui-tracks-late.png`, `gui-tracks-battery.png`, `gui-tracks-fit-all.png` | `tracks-hiking.txt`, `tracks-park.txt`, `tracks-convoy.txt`, `tracks-week-old.txt`, `tracks-outlier.txt`, `tracks-handbag.txt`, `tracks-radar.txt`, `tracks-way-back.txt`, `tracks-late.txt`, `tracks-battery.txt`, `tracks-fit-all.txt` | `tracks-hiking-de.txt`, `tracks-park-de.txt`, `tracks-convoy-de.txt`, `tracks-week-old-de.txt`, `tracks-outlier-de.txt`, `tracks-handbag-de.txt`, `tracks-radar-de.txt`, `tracks-way-back-de.txt`, `tracks-late-de.txt`, `tracks-battery-de.txt`, `tracks-fit-all-de.txt` | | | |
+<!-- goldens-index:end -->
 
 ## 2. Decision: what honesty about delivery looks like
 
@@ -695,7 +1145,7 @@ method before the entry disappears. "The propagation node refused this message" 
 different fixes.
 
 **Handle the restart discontinuity honestly.** `restore` resets every
-queued message to `Outbound` (`leviculum-lxmf/src/router.rs:2333-2336`). So
+queued message to `Outbound` (`leviculum-lxmf/src/router.rs:2339-2342`). So
 after a restart, a message that was "sending" is "queued" again, and the UI
 must show that rather than a frozen progress bar. NomadNet's equivalent,
 forcing a stale mid-flight message to `FAILED` on load (NomadNet's

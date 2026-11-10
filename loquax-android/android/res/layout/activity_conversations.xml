@@ -11,6 +11,7 @@
     android:orientation="vertical">
 
     <LinearLayout
+        android:id="@+id/bar"
         android:layout_width="match_parent"
         android:layout_height="64dp"
         android:gravity="center_vertical"
@@ -40,6 +41,9 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="16dp"
             android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:singleLine="true"
             android:text="@string/tab_chats"
             android:textColor="@color/text"
             android:textSize="22sp" />
@@ -76,6 +80,23 @@
             android:contentDescription="@string/menu"
             android:padding="12dp" />
     </LinearLayout>
+
+    <!-- 1448, walk finding 14: the engine has no path to the mailbox; the
+         list says so in words, not only by the avatar's grey dot. Text on
+         the bar's ground, 15.4:1. -->
+    <TextView
+        android:id="@+id/offline_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/bar"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:text="@string/offline_bar"
+        android:textColor="@color/text"
+        android:textSize="14sp"
+        android:visibility="gone" />
 
     <TextView
         android:id="@+id/status"
@@ -145,6 +166,13 @@
         <!-- The Rooms (1384): Reticulum Relay Chat on the config's hub. -->
         <FrameLayout
             android:id="@+id/pane_rooms"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
+        <!-- Explore's list (1578): ExplorePane fills it in code. -->
+        <FrameLayout
+            android:id="@+id/pane_explore"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:visibility="gone" />
@@ -435,54 +463,30 @@
                 android:textSize="12sp" />
         </LinearLayout>
 
-        <!-- The Browse tab (1337): lnomad's browser hosted in Loquax. -->
+        <!-- Explore (1578): the pages and the public rooms under one
+             button, the bar's third and last; the browser and a hub's
+             rooms are opened from it. -->
         <LinearLayout
-            android:id="@+id/tab_browse"
+            android:id="@+id/tab_explore"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
             android:background="?android:attr/selectableItemBackground"
-            android:contentDescription="@string/tab_browse"
+            android:contentDescription="@string/tab_explore"
             android:gravity="center"
             android:orientation="vertical">
 
             <ImageView
-                android:id="@+id/tab_browse_icon"
+                android:id="@+id/tab_explore_icon"
                 android:layout_width="24dp"
                 android:layout_height="24dp"
                 android:importantForAccessibility="no" />
 
             <TextView
-                android:id="@+id/tab_browse_label"
+                android:id="@+id/tab_explore_label"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="@string/tab_browse"
-                android:textSize="12sp" />
-        </LinearLayout>
-
-        <!-- The Rooms tab (1384), there only where the config names a hub. -->
-        <LinearLayout
-            android:id="@+id/tab_rooms"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:background="?android:attr/selectableItemBackground"
-            android:contentDescription="@string/tab_rooms"
-            android:gravity="center"
-            android:orientation="vertical"
-            android:visibility="gone">
-
-            <ImageView
-                android:id="@+id/tab_rooms_icon"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:importantForAccessibility="no" />
-
-            <TextView
-                android:id="@+id/tab_rooms_label"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/tab_rooms"
+                android:text="@string/tab_explore"
                 android:textSize="12sp" />
         </LinearLayout>
     </LinearLayout>

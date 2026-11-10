@@ -556,6 +556,25 @@ impl PropagationNodeAnnounce {
         Ok(output)
     }
 
+    /// The name the node announces under
+    /// [`PN_META_NAME`](crate::propagation_node::PN_META_NAME), as UTF-8
+    /// bytes the way the reference writes it
+    /// (`reference/LXMF/LXMF/LXMRouter.py:328`, read back as
+    /// `metadata[PN_META_NAME].decode("utf-8")`); a msgpack string is read
+    /// too. `None` without one, or when the bytes are not UTF-8. The text is
+    /// the node's own, unsanitised.
+    pub fn name(&self) -> Option<alloc::string::String> {
+        let (_, raw) = self
+            .metadata
+            .iter()
+            .find(|(key, _)| *key == crate::propagation_node::PN_META_NAME)?;
+        let text = match msgpack::read_bin(raw, &mut 0) {
+            Ok(bytes) => core::str::from_utf8(bytes).ok()?,
+            Err(_) => msgpack::read_str(raw, &mut 0).ok()?,
+        };
+        Some(alloc::string::String::from(text))
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, PropagationError> {
         let mut position = 0;
         let field_count = msgpack::array_len(bytes, &mut position)?;

@@ -25,11 +25,18 @@
 //! palette's `read receipts` write it (1233). `photo_size`, `small`,
 //! `phone` (the default) or `original` (1220): how far a photo is scaled
 //! before it goes (`crate::photo`), which the settings' Chats page
-//! writes. `browse_tab`, `off` (the default) or `on` (1337, 1369):
-//! whether the phone, the window and the terminal show the Browse tab,
-//! held back until the tab's fetch has been seen on a device.
+//! writes. `browse_tab`, `on` (the default since 1618) or `off` (1337,
+//! 1369): whether the phone, the window and the terminal open the pages
+//! Explore lists; off is the opt-out.
+//! `explore_az`, `off` (the default) or `on` (1578): whether the Explore
+//! tab lists the pages A-Z instead of last seen first; its toggle writes it.
 //! `rooms_hub`, a hub's `rrc.hub` destination hash (1379): the Reticulum
 //! Relay Chat hub the Rooms tab links to; unset, there is no Rooms tab.
+//! The settings' Advanced section writes it (1577), from the shipped hubs
+//! (`loquax/assets/hubs.toml`) or an address pasted. `rooms_told`, the
+//! hub the reader was last told that their name is visible in its rooms,
+//! before the first link to it (1577). `rooms_suggested`, the hub
+//! "suggested" marked last, held across a restart (1632).
 //! And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
@@ -147,6 +154,12 @@ pub struct Config {
     /// `rooms_hub` (1379): the `rrc.hub` destination of the Reticulum
     /// Relay Chat hub the Rooms tab links to; unset, there is no tab.
     pub rooms_hub: Option<[u8; 16]>,
+    /// `rooms_told` (1577): the hub the reader was told, before the first
+    /// link to it, that their name is visible in its rooms.
+    pub rooms_told: Option<[u8; 16]>,
+    /// `rooms_suggested` (1632): the hub "suggested" held, so a restart
+    /// marks the same one while it still fits.
+    pub rooms_suggested: Option<[u8; 16]>,
     /// `send_on_enter`, when the file sets it; unset is on.
     pub send_on_enter: Option<bool>,
     /// `home_wake`, when the file sets it; unset is on.
@@ -179,11 +192,13 @@ pub struct Config {
     pub map_fling: Option<bool>,
     /// `read_receipts`, when the file sets it; unset is on.
     pub read_receipts: Option<bool>,
-    /// `browse_tab`, when the file sets it; unset is off (1337 pass two,
-    /// 1369): the Browse tab of the phone, the window and the terminal,
-    /// held back until its fetch has landed on a device, and switched on
-    /// by this key alone meanwhile.
+    /// `browse_tab`, when the file sets it; unset is on (1618; off before):
+    /// whether Explore opens the pages it lists, on the phone, the window
+    /// and the terminal.
     pub browse_tab: Option<bool>,
+    /// `explore_az`, when the file sets it; unset is off (1578): the
+    /// Explore tab's pages by last seen, the newest first.
+    pub explore_az: Option<bool>,
     /// `photo_size`, when the file sets it; unset is `phone`.
     pub photo_size: Option<crate::ui::photos::PhotoSize>,
     /// `map_drawing.<context>` lines: each context and the drawing
@@ -256,6 +271,12 @@ impl TcpLiveness {
 pub const MAP_DRAWING: &str = "map_drawing.";
 
 impl Config {
+    /// Whether Explore opens the pages it lists (1618): on unless the file
+    /// says `browse_tab = off`.
+    pub fn browse_on(&self) -> bool {
+        self.browse_tab.unwrap_or(true)
+    }
+
     /// The drawing remembered for `context`.
     pub fn map_drawing(&self, context: &str) -> Option<&str> {
         self.map_drawing
@@ -325,6 +346,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             ("map_fling", &mut config.map_fling),
             ("read_receipts", &mut config.read_receipts),
             ("browse_tab", &mut config.browse_tab),
+            ("explore_az", &mut config.explore_az),
             ("rendezvous_dial", &mut config.rendezvous_dial),
         ] {
             if key.trim() == name {
@@ -523,6 +545,8 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         for (name, slot) in [
             ("propagation_node", &mut config.propagation_node),
             ("rooms_hub", &mut config.rooms_hub),
+            ("rooms_told", &mut config.rooms_told),
+            ("rooms_suggested", &mut config.rooms_suggested),
         ] {
             if key.trim() != name {
                 continue;
@@ -607,6 +631,21 @@ impl core::error::Error for LoadError {}
 pub fn save(home: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
     let text = read_text(home)?;
     save_text(home, &set(&text, key, value))
+}
+
+/// Write `key = <hash in hex>` into `home/config`, or take `key` out with
+/// `None` (1577, `UiEffect::RememberHash`); the other lines kept.
+#[cfg(feature = "std")]
+pub fn save_hash(home: &std::path::Path, key: &str, hash: Option<[u8; 16]>) -> std::io::Result<()> {
+    let text = read_text(home)?;
+    let next = match hash {
+        Some(hash) => {
+            let hex: String = hash.iter().map(|b| alloc::format!("{b:02x}")).collect();
+            set(&text, key, &hex)
+        }
+        None => unset(&text, key),
+    };
+    save_text(home, &next)
 }
 
 /// `home/config`'s text, empty when there is no file.
@@ -739,6 +778,25 @@ mod tests {
         ));
     }
 
+    /// 1577: the settings' hub written and taken out again, the other
+    /// lines kept, and read back as the next start reads it.
+    #[test]
+    fn a_hub_is_saved_and_taken_out() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        save(dir.path(), "read_receipts", "off").expect("a line before");
+        let hub = [0x28u8; 16];
+        save_hash(dir.path(), "rooms_hub", Some(hub)).expect("save");
+        save_hash(dir.path(), "rooms_told", Some(hub)).expect("save");
+        let config = load(dir.path()).expect("load");
+        assert_eq!(config.rooms_hub, Some(hub));
+        assert_eq!(config.rooms_told, Some(hub));
+        save_hash(dir.path(), "rooms_hub", None).expect("unset");
+        let config = load(dir.path()).expect("load");
+        assert_eq!(config.rooms_hub, None);
+        assert_eq!(config.rooms_told, Some(hub), "the other hash kept");
+        assert_eq!(config.read_receipts, Some(false), "the other line kept");
+    }
+
     #[test]
     fn rooms_hub_is_a_hash_and_unset_is_none() {
         assert_eq!(parse_str("").expect("empty").rooms_hub, None);
@@ -754,13 +812,17 @@ mod tests {
         assert!(parse_str("rooms_hub = lab\n").is_err(), "the control");
     }
 
+    /// Explore opens pages unless the file says off (1618): the walk of
+    /// 17024c3a found every page listed and none openable.
     #[test]
-    fn browse_tab_is_off_unless_the_file_says_on() {
+    fn browse_tab_is_on_unless_the_file_says_off() {
         assert_eq!(parse_str("").expect("empty").browse_tab, None);
+        assert!(parse_str("").expect("empty").browse_on());
         assert_eq!(
             parse_str("browse_tab = on\n").expect("on").browse_tab,
             Some(true)
         );
+        assert!(!parse_str("browse_tab = off\n").expect("off").browse_on());
         assert!(parse_str("browse_tab = maybe\n").is_err(), "the control");
     }
 

@@ -152,6 +152,16 @@ impl<K> Default for Ledger<K> {
 }
 
 impl<K: Ord + Clone> Ledger<K> {
+    /// Device links and devices held, and their estimated heap bytes, for
+    /// the mailbox's census (order 1585).
+    pub fn census(&self) -> (usize, usize) {
+        use leviculum_core::heap_census::btree_map_bytes;
+        (
+            self.links.len() + self.costs.len(),
+            btree_map_bytes(&self.links) + btree_map_bytes(&self.costs),
+        )
+    }
+
     /// `device` asked on `link`, `bytes` of request and answer. `true` the
     /// first time for the link: the caller gives it the long keepalive.
     pub fn asked(&mut self, link: K, device: [u8; 16], bytes: u64) -> bool {

@@ -237,6 +237,18 @@ struct Unheard {
     path_requests: u32,
 }
 
+impl Unheard {
+    /// The held messages' heap: the list and every message's bytes.
+    fn heap_bytes(&self) -> usize {
+        self.messages.capacity() * core::mem::size_of::<([u8; 32], Vec<u8>)>()
+            + self
+                .messages
+                .iter()
+                .map(|(_, packed)| packed.capacity())
+                .sum::<usize>()
+    }
+}
+
 /// A selection waiting for the daemon's announce replays.
 struct PendingSelection {
     routes: Vec<Route>,
@@ -735,6 +747,10 @@ impl Engine {
                     }
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                Command::Census => {
+                    let census = self.census(ready.router.heap_bytes());
+                    self.emit(OutboxEvent::Census(census));
+                }
                 Command::AnnouncePosition { position } => {
                     self.announce_position(ready, core, &position, out)
                 }
@@ -747,6 +763,7 @@ impl Engine {
                 | Command::HomeStalled { .. }
                 | Command::HomePnStatus { .. }
                 | Command::HomeName { .. }
+                | Command::HomeHub { .. }
                 | Command::HomePetname { .. }
                 | Command::HomePeerState { .. } => {}
             }
@@ -946,6 +963,10 @@ impl Engine {
                     });
                 }
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                Command::Census => {
+                    let census = self.census(0);
+                    self.emit(OutboxEvent::Census(census));
+                }
                 // A client receives nothing over the mesh, so it holds no proof.
                 Command::Prove { .. } => {}
                 Command::HomeAccepted { message_id } => {
@@ -980,6 +1001,7 @@ impl Engine {
                 Command::HomeStalled { message_id } => {
                     self.emit(OutboxEvent::HomeStalled { message_id });
                 }
+                Command::HomeHub { hub } => self.emit(OutboxEvent::HubAnnounced { hub }),
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),
@@ -988,9 +1010,11 @@ impl Engine {
                 Command::HomePetname {
                     destination,
                     petname,
+                    at,
                 } => self.emit(OutboxEvent::HomePetname {
                     destination,
                     petname,
+                    at,
                 }),
                 Command::HomePeerState { destination, state } => {
                     self.emit(OutboxEvent::HomePeerState { destination, state })
@@ -1871,6 +1895,40 @@ impl Engine {
                 }
             }
         }
+        // A hub announcing (1599): every device lists the hubs its own node
+        // hears, and a home keeps them for its devices.
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if crate::ui::hubs::is_hub(announce.name_hash()) {
+                let at = i64::try_from(core.emission_secs()).unwrap_or(i64::MAX);
+                self.emit(OutboxEvent::HubAnnounced {
+                    hub: crate::ui::hubs::HeardHub {
+                        hash: *announce.destination_hash().as_bytes(),
+                        name: crate::ui::hubs::announced_name(announce.app_data()),
+                        hops: core.hops_to(announce.destination_hash()),
+                        first: at,
+                        last: at,
+                        answered: None,
+                    },
+                });
+            }
+        }
+        // A NomadNet node announcing its pages (1579): a home keeps it for
+        // its devices, so a device switched on lists every page the home
+        // heard (`crate::home::pages`).
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if lnomad::discovery::is_nomad_node_announce(announce) {
+                let at = core.emission_secs();
+                self.emit(OutboxEvent::PageAnnounced {
+                    node: lnomad::discovery::DiscoveredNode {
+                        dest_hash: *announce.destination_hash().as_bytes(),
+                        name: lnomad::discovery::decode_node_name(announce.app_data()),
+                        first_seen: at,
+                        last_seen: at,
+                        hops: core.hops_to(announce.destination_hash()).map(u32::from),
+                    },
+                });
+            }
+        }
         if matches!(self.state, State::Client(_)) {
             return out;
         }
@@ -1900,14 +1958,16 @@ impl Engine {
         }
         if let NodeEvent::AnnounceReceived { announce, .. } = event {
             if is_propagation_node(announce.name_hash()) {
+                let decoded = leviculum_lxmf::propagation::PropagationNodeAnnounce::decode(
+                    announce.app_data(),
+                )
+                .ok();
                 self.emit(OutboxEvent::NodeAnnounced {
                     destination: *announce.destination_hash().as_bytes(),
-                    status: leviculum_lxmf::propagation::PropagationNodeAnnounce::decode(
-                        announce.app_data(),
-                    )
-                    .ok()
-                    .as_ref()
-                    .and_then(leviculum_lxmf::lev_status::announced_version),
+                    status: decoded
+                        .as_ref()
+                        .and_then(leviculum_lxmf::lev_status::announced_version),
+                    name: decoded.as_ref().and_then(|d| d.name()),
                 });
             }
         }
@@ -1955,6 +2015,35 @@ impl Engine {
         let repeat = last.as_ref() == Some(random);
         *last = Some(*random);
         repeat.then_some(destination)
+    }
+
+    /// The engine's own tables beside `router_bytes`, its router's
+    /// (order 1585).
+    fn census(&self, router_bytes: usize) -> crate::outbox::EngineCensus {
+        use leviculum_core::heap_census::{btree_map_bytes, vec_deque_bytes};
+        let engine_bytes = vec_deque_bytes(&self.events)
+            + vec_deque_bytes(&self.commands)
+            + vec_deque_bytes(&self.stamps)
+            + vec_deque_bytes(&self.stamp_answers)
+            + self.resolves.capacity() * core::mem::size_of::<Resolve>()
+            + btree_map_bytes(&self.tracked)
+            + btree_map_bytes(&self.failures)
+            + btree_map_bytes(&self.mining)
+            + btree_map_bytes(&self.unheard)
+            + self
+                .unheard
+                .values()
+                .map(Unheard::heap_bytes)
+                .sum::<usize>()
+            + btree_map_bytes(&self.recipients);
+        crate::outbox::EngineCensus {
+            router_bytes,
+            engine_bytes,
+            tracked: self.tracked.len(),
+            recipients: self.recipients.len(),
+            unheard: self.unheard.len(),
+            events_queued: self.events.len(),
+        }
     }
 
     /// The periodic slot: commands, finished stamps, resolves and the
@@ -2320,6 +2409,115 @@ mod tests {
             hear(&mut engine, &mut core, &again),
             [false],
             "the member announced"
+        );
+    }
+
+    /// 1579: a NomadNet node's `nomadnetwork.node` announce reaches the seam
+    /// as the row lnomad's registry makes of the same announce (one type,
+    /// one decoder), named, with its hops; the control: another aspect of
+    /// the same name is no page.
+    #[test]
+    fn a_nomadnet_announce_reaches_the_seam_as_lnomads_row() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let pages = |events: &[OutboxEvent]| -> Vec<lnomad::discovery::DiscoveredNode> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::PageAnnounced { node } => Some(node.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let node = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&node, "nomadnetwork", &["node"], b"Marcel's node"),
+        );
+        let heard = pages(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        let mut registry = lnomad::NomadNodeRegistry::new();
+        assert!(registry.observe_parts(
+            &lnomad::nomad_node_name_hash(),
+            heard[0].dest_hash,
+            b"Marcel's node",
+            heard[0].hops,
+            heard[0].last_seen,
+        ));
+        assert_eq!(registry.nodes(), [&heard[0]]);
+        assert_eq!(heard[0].name.as_deref(), Some("Marcel's node"));
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        let other = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&other, "nomadnetwork", &["other"], b"x"),
+        );
+        assert!(pages(&events).is_empty(), "another aspect: {events:?}");
+    }
+
+    /// 1599: a hub's `rrc.hub` announce reaches the seam as a heard hub,
+    /// named by its app data without the protocol's word, with its hops;
+    /// the control: the same node's announce of another aspect is no hub.
+    #[test]
+    fn a_hub_announce_reaches_the_seam_as_a_heard_hub() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let hubs = |events: &[OutboxEvent]| -> Vec<crate::ui::hubs::HeardHub> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::HubAnnounced { hub } => Some(hub.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let salon = leviculum_std::generate_identity();
+        let app_data = leviculum_rrc::Value::Map(vec![(
+            leviculum_rrc::Value::Text("hub".into()),
+            leviculum_rrc::Value::Text("Le_Salon_FR RRC".into()),
+        )])
+        .encode();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&salon, "rrc", &["hub"], &app_data),
+        );
+        let heard = hubs(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        assert_eq!(heard[0].name.as_deref(), Some("Le Salon FR"));
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        assert_eq!(heard[0].first, heard[0].last);
+        let other = leviculum_std::generate_identity();
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&other, "rrc", &["room"], &app_data),
+        );
+        assert!(
+            hubs(&events).is_empty(),
+            "another aspect is no hub: {events:?}"
         );
     }
 

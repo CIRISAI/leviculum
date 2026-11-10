@@ -14,7 +14,7 @@
 //!
 //! A frame takes the tiles its view needs from the cache and draws the
 //! missing ones on worker threads, one [`Painter`] each, as many as the
-//! host has cores up to [`WORKERS`]. A frame may be told to draw only a
+//! process may run on ([`crate::picture::cores`]). A frame may be told to draw only a
 //! few ([`Frame::render_limit`]): the ones it leaves are taken from
 //! other zooms' tiles that are cached, scaled, so a pinch that crosses a
 //! step keeps showing the map until the new step's tiles land (1143): the
@@ -70,8 +70,6 @@ pub const TILE: u32 = 256;
 /// The cache's bound: 384 tiles of 256 KiB, a 1080 x 2400 screen with a
 /// quarter screen of margin three times over.
 pub const BUDGET_MB: usize = 96;
-/// The most worker threads a frame draws its missing tiles on.
-pub const WORKERS: usize = 8;
 /// A tile's bytes.
 pub const TILE_BYTES: usize = (TILE * TILE * 4) as usize;
 /// Tiles one view at rest prefetches at most (1135): 32 MB, about the
@@ -270,10 +268,7 @@ pub struct TileCache {
 impl TileCache {
     /// A cache over `maps` of at most `budget` bytes.
     pub fn new(maps: Maps, budget: usize) -> Self {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .clamp(1, WORKERS);
+        let workers = crate::picture::cores();
         Self {
             epoch: maps.epoch(),
             progress: maps.progress(),

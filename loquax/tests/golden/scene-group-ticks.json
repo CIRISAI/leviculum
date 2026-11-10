@@ -4,7 +4,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Familie ·5a5a"
+        "raw": "Familie"
       },
       "resource": "chat",
       "role": "chat",
@@ -14,7 +14,7 @@
       "a11y": {
         "enabled": true,
         "label": {
-          "raw": "Familie ·5a5a"
+          "raw": "Familie"
         },
         "resource": "chat_bar",
         "role": "bar",
@@ -44,7 +44,7 @@
         }
       },
       "title": {
-        "raw": "Familie ·5a5a"
+        "raw": "Familie"
       }
     },
     "compose": {
@@ -315,7 +315,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Familie ·5a5a"
+        "raw": "Familie"
       },
       "resource": "chat_bar",
       "role": "bar",
@@ -345,7 +345,7 @@
       }
     },
     "title": {
-      "raw": "Familie ·5a5a"
+      "raw": "Familie"
     }
   },
   "whereabouts": null

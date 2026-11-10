@@ -44,6 +44,7 @@ use loquax::send::{run_send_auto, AutoError, Leg, SendError, SendOptions};
 use loquax::store::Store;
 use loquax::ui::history::StoreRead;
 use loquax::ui::map::{MapSetup, MapWant};
+use loquax::ui::viewload::{ViewLoads, ViewWants};
 use loquax::ui::{update, MapLoad, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 use loquax::{display_name, identity};
@@ -212,6 +213,10 @@ pub(crate) struct Shell {
     /// shell started goes when it is dropped, after the engine detached.
     daemon: Option<leviculum_std::instance::Instance>,
     fanout: Fanout,
+    /// The engine's outbox is lent to the terminal's reader thread
+    /// ([`Shell::lend_engine`], 1492): the reads come in through
+    /// [`Shell::fold_read`], and [`Shell::poll`] reads none itself.
+    lent: bool,
     context: RunContext,
     /// Sends not yet started, oldest first. They run one at a time: the
     /// model names a queued message after the oldest running send.
@@ -225,7 +230,7 @@ pub(crate) struct Shell {
     fetch_task: Option<(tokio::task::JoinHandle<()>, &'static str)>,
     /// The tasks handing marks to the home node, waited for before leaving.
     mark_tasks: Vec<tokio::task::JoinHandle<()>>,
-    /// The petnames and peer states on their way to the home node, in the
+    /// The peer states on their way to the home node, in the
     /// order they were set (1614), waited for before leaving; opened with
     /// the first of them.
     hand_offs: Option<runner::HandOffs>,
@@ -255,6 +260,11 @@ pub(crate) struct Shell {
     pub(crate) maps: Maps,
     /// The autoload: regions the model asks for, one load at a time.
     loader: Loader,
+    /// The terminal's map pane's scheduler (1527, [`ViewLoads`]): every
+    /// frame of the open map is shown to it, and the screen at its zoom
+    /// loads first. `None` in the window, whose map keeps its own view and
+    /// sends the scheduler's decision ([`Shell::map_schedule`]).
+    pub(crate) map_drive: Option<ViewLoads>,
     /// The origin of the monotonic clock the mailbox schedule runs on.
     origin: tokio::time::Instant,
     /// On a client of a home node: the watching link's task, its word on
@@ -271,7 +281,21 @@ pub(crate) struct Shell {
     pub(crate) browsing: crate::browsing::Browsing,
     /// The Rooms' hub link (1379), where the config names a hub.
     rooming: loquax::rooms_link::Rooming,
+    /// On a client of a home node: the running `/pages` ask (1579), one at
+    /// a time.
+    pages_task: Option<tokio::task::JoinHandle<()>>,
+    /// On a client of a home node: the running `/about` ask (1642), and
+    /// when the last began on the shell's clock.
+    about_task: Option<tokio::task::JoinHandle<()>>,
+    about_at: Option<u64>,
+    /// How this device reaches its mailbox (1642), as the mailbox page
+    /// says it: the watching link up or down since when, the last contact.
+    reach: loquax::ui::mailbox_page::Reach,
 }
+
+/// How long the mailbox's word on itself stays fresh on a computer (1642):
+/// asked after a pull at most this often.
+const ABOUT_EVERY_MS: u64 = 10 * 60 * 1000;
 
 /// What the model asks of the terminal beyond drawing.
 #[derive(Debug, PartialEq, Eq)]
@@ -310,6 +334,8 @@ impl Shell {
     /// picture's, which no event of Loquax's carries.
     fn apply_app(&mut self, event: lnomad::AppEvent) {
         let effects = loquax::ui::browse::app(&mut self.model, event);
+        // Not through `update`: the loops are told the tab moved (1491).
+        self.model.changed_outside();
         self.run(effects);
     }
 
@@ -373,6 +399,7 @@ impl Shell {
                         effect,
                         &mut self.outputs,
                     ));
+                    self.model.changed_outside();
                 }
                 // The Rooms (1379): the hub link does it; what the hub says
                 // comes back on the pump.
@@ -536,6 +563,20 @@ impl Shell {
                 }
                 // A setting changed on screen (1233): the next start reads
                 // it; a file that would not take it is said.
+                UiEffect::RememberHash { key, hash } => {
+                    if let Err(error) = loquax::config::save_hash(&self.context.home, key, hash) {
+                        let line = format!(
+                            "{}: {key} not saved: {error}",
+                            self.context
+                                .home
+                                .join(loquax::config::CONFIG_FILE)
+                                .display()
+                        );
+                        tracing::warn!("{line}");
+                        self.afterwards.push(line.clone());
+                        answers.push(UiEvent::Notice(line));
+                    }
+                }
                 UiEffect::Remember { key, value } => {
                     if let Err(error) = loquax::config::save(&self.context.home, key, value) {
                         let line = format!(
@@ -648,7 +689,10 @@ impl Shell {
             out.push(UiEvent::Notice(lines.join("; ")));
         }
         match loquax::names::load_contacts(&self.context.home) {
-            Ok(contacts) => self.model.names.contacts = contacts,
+            Ok(contacts) => {
+                self.model.names.contacts = contacts;
+                self.model.changed_outside();
+            }
             Err(error) => tracing::warn!("IMPORT contacts not shown: {error}"),
         }
         self.show_imported(imported);
@@ -662,6 +706,14 @@ impl Shell {
         self.hand_marks();
         self.hand_petnames();
         self.hand_peer_states();
+        self.hand_bookmarks();
+        // What this device heard (1632): the next start lists it again.
+        let heard = loquax::ui::explore::take_heard(&mut self.model);
+        if heard != loquax::ui::explore::HeardOwed::default() {
+            if let Err(error) = loquax::heard::keep(&mut self.store, &self.context.home, heard) {
+                tracing::warn!("HEARD not kept: {error}");
+            }
+        }
         let writes = self.model.take_writes();
         if let Err(error) = self.store.write(&writes) {
             loquax::events::store_failed(&error.to_string());
@@ -676,17 +728,30 @@ impl Shell {
         }
     }
 
-    /// The petnames the reader set, handed to the home node in order on
-    /// the lane of [`runner::HandOffs`] (1139, 1614).
+    /// The petnames the reader set, handed to the home node in order on a
+    /// task of their own, as marks are (1139); what the home took comes
+    /// back as an event, the rest stays owed (1635).
     fn hand_petnames(&mut self) {
+        // Taken only with a client to hand them to: a take waits for its
+        // answer before the next (1635).
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
         let petnames = self.model.take_petnames();
-        if !petnames.is_empty() {
-            self.hand_off(runner::HandOff::Petnames(petnames));
+        if petnames.is_empty() {
+            return;
         }
+        self.mark_tasks.retain(|task| !task.is_finished());
+        let budget = self.context.timeout;
+        let done = self.done_tx.clone();
+        self.mark_tasks.push(tokio::spawn(async move {
+            let event = runner::hand_petnames(client, petnames, budget).await;
+            let _ = done.send(Finished::Event(event));
+        }));
     }
 
-    /// The peer states the reader set (1146), handed to the home node as
-    /// petnames are.
+    /// The peer states the reader set (1146), handed to the home node in
+    /// order on the lane of [`runner::HandOffs`] (1614).
     fn hand_peer_states(&mut self) {
         let states = self.model.take_peer_states();
         if !states.is_empty() {
@@ -774,12 +839,7 @@ impl Shell {
             runner::keep_signature(&mut self.store, &event);
             self.apply(UiEvent::Engine(event));
             if let Some(destination) = named {
-                runner::keep_name(
-                    &mut self.store,
-                    &self.model.names,
-                    self.model.address,
-                    destination,
-                );
+                runner::keep_name(&mut self.store, &self.model.names, destination);
             }
         }
     }
@@ -793,16 +853,12 @@ impl Shell {
     /// 4000 entries, the phone's measure (1446).
     pub(crate) fn poll(&mut self) {
         let mut slicing = loquax::fanout::Slicing::new(loquax::fanout::SLICE);
-        loop {
+        while !self.lent {
             match slicing.next(&mut self.fanout, &mut self.attached.outbox, false) {
                 Ok(Some(events)) => self.fold(events),
                 Ok(None) => break,
                 Err(gone) => {
-                    if !self.gone {
-                        self.gone = true;
-                        self.apply(UiEvent::Notice(gone.to_string()));
-                        self.afterwards.push(gone.to_string());
-                    }
+                    self.engine_gone(gone);
                     break;
                 }
             }
@@ -835,12 +891,69 @@ impl Shell {
         }
         let steps = self.loader.poll(self.elapsed_ms());
         self.map_steps(steps);
+        self.drive_map();
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
         self.listen();
         let browsed = self.browsing.told(&self.model);
         self.fold_browsed(browsed);
         for told in self.rooming.told() {
             self.apply(told);
+        }
+    }
+
+    /// The engine stopped answering: said once, on screen and after it.
+    fn engine_gone(&mut self, gone: OutboxGone) {
+        if !self.gone {
+            self.gone = true;
+            self.apply(UiEvent::Notice(gone.to_string()));
+            self.afterwards.push(gone.to_string());
+        }
+    }
+
+    /// Lend the engine's outbox to a reader on a thread of its own (1492):
+    /// the terminal reads the engine there, so an engine step that stalls
+    /// never holds a key back. `None` when it is lent already.
+    #[cfg(feature = "tui")]
+    pub(crate) fn lend_engine(
+        &mut self,
+    ) -> Option<loquax::fanout::Reader<loquax::engine::InProcessOutbox>> {
+        let outbox = std::mem::replace(
+            &mut self.attached.outbox,
+            loquax::engine::InProcessOutbox::severed(),
+        );
+        match self.fanout.lend(outbox) {
+            Ok(reader) => {
+                self.lent = true;
+                Some(reader)
+            }
+            Err(outbox) => {
+                self.attached.outbox = outbox;
+                None
+            }
+        }
+    }
+
+    /// The engine's outbox back from the reader: [`Shell::poll`] and
+    /// [`Shell::settle`] read it again.
+    #[cfg(feature = "tui")]
+    pub(crate) fn take_engine_back(
+        &mut self,
+        reader: loquax::fanout::Reader<loquax::engine::InProcessOutbox>,
+    ) {
+        self.attached.outbox = self.fanout.take_back(reader);
+        self.lent = false;
+    }
+
+    /// What the reader read, handed to the taps and folded as
+    /// [`Shell::poll`] folds what it reads itself.
+    #[cfg(feature = "tui")]
+    pub(crate) fn fold_read(&mut self, read: Result<Vec<OutboxEvent>, OutboxGone>) {
+        match read {
+            Ok(events) => {
+                self.fanout.deliver(&events);
+                self.fold(events);
+            }
+            Err(gone) => self.engine_gone(gone),
         }
     }
 
@@ -983,6 +1096,41 @@ impl Shell {
         self.map_steps(steps);
     }
 
+    /// The scheduler's decision for the screen (1527, 1292): the window's
+    /// map sends it, the terminal's pane makes it in [`Shell::drive_map`].
+    pub(crate) fn map_schedule(&mut self, wants: ViewWants) {
+        if !wants.here.is_empty() {
+            tracing::info!(
+                "MAPLOAD view share={:.2} here={} ahead={}",
+                wants.share,
+                wants.here.len(),
+                wants.ahead.len()
+            );
+        }
+        let steps = self
+            .loader
+            .schedule(wants.here, wants.ahead, self.elapsed_ms());
+        self.map_steps(steps);
+    }
+
+    /// The terminal's open map shown to the scheduler (1527): every pump
+    /// decides for the view the pane draws, a decision every
+    /// [`loquax::ui::viewload::DECIDE_MS`] while a drag moves it.
+    fn drive_map(&mut self) {
+        let Some(loads) = self.map_drive.as_mut() else {
+            return;
+        };
+        let Some(state) = self.model.map.as_ref().filter(|_| self.model.map_autoload) else {
+            return;
+        };
+        let view = loquax::ui::map::viewport(state, self.model.map_area(), &self.model.map_setup);
+        let moving = self.model.map_dragging();
+        let now = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Some(wants) = loads.decide(&view, &self.model.map_setup.regions, now, moving, None) {
+            self.map_schedule(wants);
+        }
+    }
+
     /// The regions on disk, told to the model's map setup.
     fn regions_changed(&mut self) {
         let regions = self.maps.headers();
@@ -1048,6 +1196,12 @@ impl Shell {
                 }
             }
         }
+        // Whether a load runs or waits for the screen (1527): the
+        // window's chip and the terminal's title say so.
+        let here = self.loader.loading_here();
+        if here != self.model.map_here {
+            self.apply(UiEvent::MapLoad(MapLoad::Here(here)));
+        }
     }
 
     /// What the watching link said: a wake past the cursor pulls, and while
@@ -1058,9 +1212,13 @@ impl Shell {
             return;
         };
         let mut wake = false;
+        let mut told_reach = None;
         while let Ok(event) = events.try_recv() {
             match event {
-                WatchEvent::Watching(up) => self.watching = up,
+                WatchEvent::Watching(up) => {
+                    self.watching = up;
+                    told_reach = Some(up);
+                }
                 WatchEvent::Wake(newest) => {
                     let cursor = loquax::home::client::load_cursor(&self.context.home);
                     wake |= watch::wants_pull(newest, cursor);
@@ -1071,9 +1229,57 @@ impl Shell {
             tracing::info!("SYNC the watching link is down; pulling");
             wake = true;
         }
+        if let Some(up) = told_reach {
+            self.reached(Some(up));
+        }
         if wake {
             self.apply(UiEvent::HomeWake);
         }
+    }
+
+    /// The mailbox page's connection (1642): `up` the watching link's
+    /// word, `None` for a pull that came back (a contact, the link as it
+    /// was). Told to the model when it moved.
+    fn reached(&mut self, up: Option<bool>) {
+        let now = leviculum_std::local_time::unix_now_secs();
+        let mut reach = self.reach.clone();
+        if let Some(up) = up {
+            if reach.up != Some(up) {
+                reach.up = Some(up);
+                reach.since = Some(now);
+            }
+        }
+        if up != Some(false) {
+            reach.last_contact = Some(now);
+        }
+        if reach != self.reach {
+            self.reach = reach.clone();
+            self.apply(UiEvent::MailboxReach(Box::new(reach)));
+        }
+    }
+
+    /// On a client of a home node, after a pull: the mailbox's word on
+    /// itself (1642), at most every [`ABOUT_EVERY_MS`], one ask at a time.
+    fn ask_about(&mut self) {
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        let now = self.elapsed_ms();
+        if self.about_task.as_ref().is_some_and(|t| !t.is_finished())
+            || self
+                .about_at
+                .is_some_and(|at| now.saturating_sub(at) < ABOUT_EVERY_MS)
+        {
+            return;
+        }
+        self.about_at = Some(now);
+        let budget = self.context.timeout;
+        let done = self.done_tx.clone();
+        self.about_task = Some(tokio::spawn(async move {
+            if let Some(event) = runner::home_about(client, budget).await {
+                let _ = done.send(Finished::Event(event));
+            }
+        }));
     }
 
     /// What a job starting now runs with: the nodes excluded at this moment.
@@ -1094,6 +1300,7 @@ impl Shell {
         // Once a pull settled, what arrives is live mail (1429).
         if end.cursor.is_some() {
             self.model.history = false;
+            self.model.changed_outside();
         }
         if end.imported > 0 {
             self.show_imported(end.imported);
@@ -1112,8 +1319,59 @@ impl Shell {
                 );
             }
         }
+        let pulled = end.result.is_ok();
         self.judge(&end);
         self.apply(UiEvent::FetchDone(end.result.map_err(|e| e.to_string())));
+        if pulled {
+            self.ask_pages();
+            if self.context.client.is_some() {
+                self.reached(None);
+                self.ask_about();
+            }
+        }
+    }
+
+    /// On a client of a home node, after a pull (1579): the pages the home
+    /// heard and the bookmarks of the identity after the stamp this device
+    /// holds, with the bookmark changes still pending handed first. One
+    /// ask at a time.
+    fn ask_pages(&mut self) {
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        if self
+            .pages_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
+        let pending = self.model.browse.shared.pending();
+        let stamp = self.model.browse.shared.stamp;
+        let budget = self.context.timeout;
+        let done = self.done_tx.clone();
+        self.pages_task = Some(tokio::spawn(async move {
+            if let Some(event) = runner::home_pages(client, pending, stamp, budget).await {
+                let _ = done.send(Finished::Event(event));
+            }
+        }));
+    }
+
+    /// The bookmark changes the reader made (1579), handed to the home on a
+    /// task of their own, as petnames are; a device without a home keeps
+    /// them to itself.
+    fn hand_bookmarks(&mut self) {
+        let rows = std::mem::take(&mut self.model.browse.outgoing);
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        if rows.is_empty() {
+            return;
+        }
+        self.mark_tasks.retain(|task| !task.is_finished());
+        let budget = self.context.timeout;
+        self.mark_tasks
+            .push(tokio::spawn(runner::hand_bookmarks(client, rows, budget)));
     }
 
     /// The history a pull or the palette's `import` wrote into the store,
@@ -1121,7 +1379,9 @@ impl Shell {
     /// it reads back is whole.
     fn show_imported(&mut self, imported: usize) {
         self.persist();
-        match runner::show_imported(&mut self.model, &self.store) {
+        let shown = runner::show_imported(&mut self.model, &self.store);
+        self.model.changed_outside();
+        match shown {
             Ok(()) => tracing::info!("SYNC imported rows={imported} shown"),
             Err(error) => tracing::warn!("SYNC imported rows={imported} not shown: {error}"),
         }
@@ -1390,7 +1650,7 @@ fn profile_facts(name: &str, client: bool) -> loquax::ui::profile::ProfileFacts 
         name: name.to_string(),
         mailbox: match client {
             true => Mailbox::Away {
-                host: None,
+                name: None,
                 rung: None,
                 word: None,
             },
@@ -1400,6 +1660,7 @@ fn profile_facts(name: &str, client: bool) -> loquax::ui::profile::ProfileFacts 
             name: String::new(),
             this: true,
         }],
+        ..Default::default()
     }
 }
 
@@ -1457,8 +1718,11 @@ pub(crate) async fn start(
     };
     let store =
         Store::open_in(&home, address).map_err(|error| crate::failure(error, "no-store"))?;
+    // The start reads the summaries, not the bodies (1490, schema 17):
+    // each conversation's page loads when it opens, through the same
+    // store reads the scrollback uses.
     let history = store
-        .restore()
+        .start()
         .and_then(|restored| {
             Ok((
                 restored,
@@ -1468,6 +1732,7 @@ pub(crate) async fn start(
                 store.unverified()?,
                 store.fixes_between(None, i64::MIN, i64::MAX)?,
                 store.pn_asks()?,
+                store.owed_petnames()?,
             ))
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
@@ -1560,8 +1825,14 @@ pub(crate) async fn start(
     model.history = model.home_client && loquax::home::client::history_owed(&home);
     model.own_code = own_code(&own_key);
     model.profile = profile_facts(&display_name.name, model.home_client);
-    model.names = loquax::names::Names::new(contacts);
-    let (restored, names, last_key, positions, unverified, track_fixes, pn_asks) = history;
+    // This device in the mailbox's list (1642): the identity it joined with.
+    model.profile.device = client.as_ref().map(|c| *c.device.hash());
+    model.profile.version = loquax::VERSION.to_string();
+    // Only the contacts: the names already know the peers `Model::new`
+    // opened conversations with (1452, two nameless ones collide).
+    model.names.contacts = contacts;
+    let (restored, names, last_key, positions, unverified, track_fixes, pn_asks, owed_petnames) =
+        history;
     // The messages an earlier run kept unverified: the engine checks each
     // once its sender's key is known, and asks for it until then.
     for (message_id, source, packed) in unverified {
@@ -1588,8 +1859,34 @@ pub(crate) async fn start(
     };
     update(&mut model, UiEvent::Clock(start));
     model.restore(restored);
+    // The open conversation's page, read here before the first frame
+    // (1490): the start read handed summaries alone, and the screen
+    // opens on a filled pane as it always did. Every later selection
+    // loads through the fold's own ask.
+    if let Some((peer, true)) = model
+        .conversations
+        .get(model.selected)
+        .map(|c| (c.peer, c.messages.is_empty() && c.earlier > 0))
+    {
+        match store.earlier(peer, u64::MAX, None) {
+            Ok((messages, earlier)) => {
+                update(
+                    &mut model,
+                    UiEvent::Earlier {
+                        peer,
+                        messages,
+                        earlier,
+                    },
+                );
+            }
+            Err(error) => return Err(crate::failure(error, "no-store")),
+        }
+    }
     // What the propagation node is still to be asked about (1409).
     model.pn_asker = loquax::pn_status::Asker::restore(pn_asks);
+    // The petnames the home node had not taken when loquax ended (1635):
+    // handed again, and the reader's word over what the first pull brings.
+    model.restore_owed_petnames(owed_petnames);
     model.restore_positions(positions);
     model.restore_tracks(track_fixes);
     model.activity = model.activity.max(last_key);
@@ -1598,27 +1895,36 @@ pub(crate) async fn start(
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
     model.reading.on = config.read_receipts.unwrap_or(true);
     model.photo_size = config.photo_size.unwrap_or_default();
-    // The Browse tab (1369), behind the config's `browse_tab` as on the
-    // phone: off unless the file says on. On, its fetch runs over the
-    // node attached above; off, the node is lent to nobody, as before.
-    let browse_tab = config.browse_tab.unwrap_or(false);
+    // The browser (1369), opened from Explore: on unless the config's
+    // `browse_tab` says off (1618: Explore is the browser's way in, and a
+    // tab that lists pages it cannot open is broken). On, its fetch runs
+    // over the node attached above; off, the node is lent to nobody.
+    let browse_tab = config.browse_on();
     crate::browsing::set_up(&mut model, &home, browse_tab);
     let browsing = match browse_tab {
         true => crate::browsing::Browsing::start(&attached, browse_identity.clone(), &home),
         false => crate::browsing::Browsing::off(),
     };
-    // The Rooms (1379): a tab and a hub link where the config names a hub,
-    // over the node attached above, identified with the reader's identity
-    // and shown by the reader's name; without one nothing is lent.
+    // The Rooms (1379): a tab where the config names a hub, and a hub
+    // link over the node attached above, identified with the reader's
+    // identity and shown by the reader's name. The link runs with no hub
+    // too, idle until asked (1577): the settings choose a hub while the
+    // app runs, and the tab appears at once.
     model.rooms.hub = config.rooms_hub;
     model.rooms.enabled = config.rooms_hub.is_some();
-    let rooming = match config.rooms_hub {
-        Some(_) => {
-            let nick = Some(display_name.name.clone()).filter(|n| !n.is_empty());
-            loquax::rooms_link::Rooming::start(&attached, browse_identity, nick)
+    model.rooms.told = config.rooms_told;
+    // The Explore tab's order (1578), per device.
+    model.explore.az = config.explore_az.unwrap_or(false);
+    // What this device heard before (1632): its pages, hubs and the
+    // suggestion, each with its old last seen.
+    match loquax::heard::load(&store) {
+        Ok((pages, hubs)) => {
+            loquax::ui::explore::restore_heard(&mut model, pages, hubs, config.rooms_suggested)
         }
-        None => loquax::rooms_link::Rooming::off(),
-    };
+        Err(error) => tracing::warn!("HEARD not read: {error}"),
+    }
+    let nick = Some(display_name.name.clone()).filter(|n| !n.is_empty());
+    let rooming = loquax::rooms_link::Rooming::start(&attached, browse_identity, nick);
     // The microphone (1276): the system's recorder, where it has one; the
     // window offers the microphone only then.
     let mic = crate::mic::Mic::of_process();
@@ -1699,6 +2005,7 @@ pub(crate) async fn start(
         attached,
         daemon,
         fanout: Fanout::default(),
+        lent: false,
         context: RunContext {
             home,
             config_dir,
@@ -1730,6 +2037,7 @@ pub(crate) async fn start(
         outputs: Vec::new(),
         maps,
         loader,
+        map_drive: Some(ViewLoads::new()),
         origin: tokio::time::Instant::now(),
         watch,
         watching: false,
@@ -1737,6 +2045,10 @@ pub(crate) async fn start(
         mic,
         browsing,
         rooming,
+        pages_task: None,
+        about_task: None,
+        about_at: None,
+        reach: loquax::ui::mailbox_page::Reach::default(),
     };
     Ok((shell, config))
 }

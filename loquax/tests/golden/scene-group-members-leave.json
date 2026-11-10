@@ -4,7 +4,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Familie ·5151"
+        "raw": "Familie"
       },
       "resource": "chat",
       "role": "chat",
@@ -14,7 +14,7 @@
       "a11y": {
         "enabled": true,
         "label": {
-          "raw": "Familie ·5151"
+          "raw": "Familie"
         },
         "resource": "chat_bar",
         "role": "bar",
@@ -44,7 +44,7 @@
         }
       },
       "title": {
-        "raw": "Familie ·5151"
+        "raw": "Familie"
       }
     },
     "compose": {
@@ -362,6 +362,12 @@
           "role": "row",
           "selected": false
         },
+        "avatar": {
+          "bg": "3d6fb6",
+          "fg": "ffffff",
+          "initials": "L",
+          "ring": null
+        },
         "id": "member_41414141414141414141414141414141",
         "name": {
           "raw": "Lew"
@@ -391,6 +397,12 @@
           "resource": "member_30303030303030303030303030303030",
           "role": "row",
           "selected": false
+        },
+        "avatar": {
+          "bg": "8e4b8a",
+          "fg": "ffffff",
+          "initials": "Y",
+          "ring": null
         },
         "id": "member_30303030303030303030303030303030",
         "name": {
@@ -422,6 +434,12 @@
           "role": "row",
           "selected": false
         },
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "A",
+          "ring": null
+        },
         "id": "member_42424242424242424242424242424242",
         "name": {
           "raw": "Anna"
@@ -447,7 +465,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "raw": "Familie ·5151"
+        "raw": "Familie"
       },
       "resource": "chat_bar",
       "role": "bar",
@@ -477,7 +495,7 @@
       }
     },
     "title": {
-      "raw": "Familie ·5151"
+      "raw": "Familie"
     }
   },
   "whereabouts": null

@@ -118,3 +118,27 @@ needed and none is claimed. The map names it on the view anyway, as the
 attribution line "Natural Earth", the way it names OpenStreetMap over a
 region. Chosen over the world file ratatui's `Map` shape draws, whose
 licence is unsettled (`docs/src/concepts/loquax-map.md`, section 7).
+
+## The world overview
+
+`../data/world-overview.lmr` is not a test fixture either but the region
+the ThinkNode M9 carries in its image so that any view at any place shows
+a map (1477, `loquax-m9/src/map.rs`, `WORLD`): the whole world at zooms 0
+to 3 under layer profile 1, coasts, land cover, the major roads and 183
+place names at z3 (no country borders: profile 1 has no boundary class) (`LMR1` version 4), 755,245 bytes, sha256
+`b4e5d8626a4e52537a23dde58a97ddb5ab2568ef5fab19605e3e5b9798b00b3c`. The
+board draws it down to z11 (the map core's overzoom of 8 past z3); a
+detailed region wins wherever one lies under the view. Cut with
+
+```sh
+leviculum-map-tool cut -o world-overview.lmr https://build.protomaps.com/20261108.pmtiles \
+    --bbox -180,-85,180,85 --min-zoom 0 --max-zoom 3 --locale de
+```
+
+from the Protomaps daily build of 2026-11-08 (Protomaps Basemap 4.15.2,
+OpenStreetMap data of 2026-11-08T04:00:00Z), which the bucket keeps for
+about a week; cutting it twice gave the same bytes. Zooms 0 to 4 would be
+1,950,000 bytes and 0 to 5 5,238,084 bytes, over the 1 MiB the image
+grants the world.
+
+The same ODbL notice as above applies; the file carries it inside itself.

@@ -108,6 +108,21 @@ pub struct Asker {
 }
 
 impl Asker {
+    /// Uploads still asked about and their estimated heap bytes, the four
+    /// maps and the ids in flight, for the mailbox's census (order 1585).
+    pub fn census(&self) -> (usize, usize) {
+        use leviculum_core::heap_census::btree_map_bytes;
+        let asking: usize = self.asking.values().map(|ids| ids.capacity() * 32).sum();
+        (
+            self.open.len(),
+            btree_map_bytes(&self.open)
+                + btree_map_bytes(&self.answering)
+                + btree_map_bytes(&self.asked_round)
+                + btree_map_bytes(&self.asking)
+                + asking,
+        )
+    }
+
     /// The asker a store kept.
     pub fn restore(state: AskerState) -> Self {
         Self {

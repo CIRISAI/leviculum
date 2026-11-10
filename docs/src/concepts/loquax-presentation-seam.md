@@ -20,7 +20,7 @@ Per frame the core hands up three things, and nothing else:
   `loquax/src/ui/scene.rs`, plus the selection 1444 adds — scene items,
   never pixels.
 - **The map**: finished RGBA tiles — `TILE` (`loquax/src/tiles.rs:69`),
-  256 px a side, `TILE_BYTES` (`loquax/src/tiles.rs:76`), 256 KiB each —
+  256 px a side, `TILE_BYTES` (`loquax/src/tiles.rs:74`), 256 KiB each —
   with the viewport transform (offset and scale, `ExactView`) and the
   ladder's choice of passes (`leviculum-map/src/ladder.rs`).
 - **The overlays**: pins, tracks and placed labels as scene items with
@@ -70,10 +70,10 @@ gesture never waits on the rasteriser.
   (`loquax/examples/map_eye_bench.baseline:1`).
 
 No GPU upload is measured yet; the benches give the stand-ins to beat.
-Handing a *fresh* map frame into the window costs 2.52 ms over holding
-it at 1276 x 2099 (present 4.01 fresh against 1.49 held, since 1442,
-`loquax/tests/window_bench.baseline:25`) — about 0.24 ms/MB, about
-0.06 ms per 256 KiB tile. The CPU compose the transform replaces is
+Handing a *fresh* map frame into the window costs 1.19 ms over holding
+it at 1276 x 2099 (present 2.50 fresh against 1.31 held, since 1468's
+word-wise conversion, `loquax/tests/window_bench.baseline:25`) — about
+0.11 ms/MB, about 0.03 ms per 256 KiB tile. The CPU compose the transform replaces is
 3.96–4.35 ms per phone frame
 (`loquax/examples/map_eye_bench.baseline:4`).
 
@@ -143,12 +143,18 @@ Each slice is measured by `just window-bench` and `just map-bench`
 against their committed baselines, and by the M9's flush measurement.
 
 - **S1 — the window on wgpu (1442, runs next and follows this note).**
-  A moving frame at Lew's 1276 x 2099 window averaged 9.3–13.0 ms and
-  averages 2.0–10.7 ms since 1442's CPU fast paths, most of it the
-  software present (map drag 1.94, `loquax/tests/window_bench.baseline:25`):
-  the frame *is* the present — enough for 60 Hz, not for 120 Hz. Target:
-  update + draw + present inside the detected rate's budget at
-  1276 x 2099, 8.3 ms on a 120 Hz display.
+  A moving frame at Lew's 1276 x 2099 window averaged 9.3–13.0 ms,
+  2.0–10.7 ms after 1442's CPU fast paths, and averages 0.8–2.4 ms
+  since 1468 and 1473 (map drag 1.65, map wheel 1.70,
+  `loquax/tests/window_bench.baseline:25`; every wheel, touchpad,
+  scrollbar and map gesture's p95 at or under 4.7 ms at 1276 and
+  1527 x 2099, see "The software present" below). Target: update +
+  draw + present inside the detected rate's budget at 1276 x 2099,
+  8.3 ms on a 120 Hz display — met on the software path for those. Not
+  for the drag on the messages, which selects text since the window's
+  text selection (`91c65908`): 0 to 15 frames a run, at 1276 x 2099
+  7.6 ms mean and 12.9 p95 (`loquax/tests/window_bench.baseline:34`),
+  open.
 - **S2 — phone compositing.** The host proxy for a phone frame: pan
   4.52–11.07 ms, zoom 18.18–22.32 ms
   (`loquax/examples/map_eye_bench.baseline:4`) — a zoom frame misses
@@ -173,6 +179,47 @@ against their committed baselines, and by the M9's flush measurement.
 The order is S1, S2, S4, S3: first the two compositors the rule names,
 then the no-GPU device's equivalent seam work, SIMD last and only where
 the benches still show it.
+
+### The software present (1468, 1473)
+
+The software path is the fallback wgpu leaves, and the path the golden
+tests and the terminal-less hosts draw on, so it got the CPU work the
+bench pointed at first. 1468 profiled a present under callgrind and
+took, in order: the glyph cache (half a chat frame was swash re-hinting
+spaces), the blend's rounding, the text clip, the opaque quad as a row
+fill, the scroll drawn as a shift of the frame plus the uncovered strip,
+and the map frame's conversion. 1473 replaced the last tiny-skia draw a
+gesture paid for: every frame of a wheel zoom draws the map's held
+picture scaled, through tiny-skia's high-precision pipeline (bilinear or
+gather, the clip's mask, load and store per pixel). Its own sampler
+(`fast::draw_scaled` in the vendored `iced_tiny_skia`) computes the same
+f32 arithmetic in the same order, byte for byte against tiny-skia over
+6200 random draws (`leviculum-ui-iced/src/fast_paths.rs`), clipped by the
+rectangle so the mask is never written. Map wheel at 1527 x 2099: present
+12.5–12.9 ms to 2.3–2.4, p95 16.1–17.8 to 3.4–3.5 (single gestures A/B
+at load 1.0–1.7); a full-window draw nearest 13.4 to 1.2 ms, bilinear
+29.2 to 17.6 ms.
+
+**Bands stay open, by measurement.** Rasterising the damage in
+horizontal bands on several cores (stage 4 of 1442) needs each band
+drawn into its own `PixmapMut` with a transform moved by the band's top,
+as tiny-skia has no strided sub-pixmap. 1468 measured that this changes
+pixels: of 400 random scaled draws drawn whole and as two bands, 30
+differed (bilinear by one at scattered pixels, the inverse transform
+rounding otherwise; nearest by up to 248 over a whole row), and glyph
+rows move by a pixel where a band starts inside a paragraph, since
+cosmic-text truncates glyph rows toward zero. Pixel-identical bands
+need every draw in absolute coordinates — the own blits (text, the
+picture copy, the sampler) are, tiny-skia's quads and paths are not.
+With every wheel, touchpad, scrollbar and map gesture's present under
+2.5 ms on one core there is no frame left that needs them; they are
+revisited when a case misses the budget (the selecting drag above is
+the first candidate to measure).
+
+**One core count.** The map's tile painters and the region loader run
+as many threads as the process may use, one `available_parallelism`
+value read once (`loquax::picture::cores`), without the painters' old
+cap of eight and without the loader's halving.
 
 ## 6. What stays as it is
 

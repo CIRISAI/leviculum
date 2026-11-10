@@ -317,6 +317,84 @@ fn the_group_screens_are_the_golden_scenes() {
     );
 }
 
+/// 1578: the Explore tab, the pages and the public rooms under one button,
+/// in both classes: a bookmark on top, the pages a home and the device
+/// heard by last seen under "Today", "This week" and "Older", the shipped
+/// hubs, and a hub heard on the mesh; then the same list A-Z and filtered
+/// by a short hash.
+#[test]
+fn the_explore_tab_is_the_golden_scene() {
+    use lnomad::DiscoveredNode;
+    use loquax::ui::browse::BrowseEvent;
+    use loquax::ui::explore::ExploreEvent;
+    use loquax::ui::scene::TabId;
+
+    const NOW: i64 = 1_800_000_000;
+    let node = |byte: u8, name: Option<&str>, ago: i64, hops| DiscoveredNode {
+        dest_hash: [byte; 16],
+        name: name.map(str::to_string),
+        first_seen: (NOW - ago) as u64,
+        last_seen: (NOW - ago) as u64,
+        hops,
+    };
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    model.browse.enabled = true;
+    model.now = Some(loquax::when::WallTime {
+        unix_secs: NOW,
+        offset_secs: 3_600,
+    });
+    for found in [
+        node(0x5a, Some("Marcel's node"), 600, Some(2)),
+        node(0x7c, Some("Relay Süd"), 2 * 86_400, Some(1)),
+        node(0x3d, None, 20 * 86_400, None),
+        node(0x41, Some("Bergwacht"), 5 * 3_600, Some(4)),
+    ] {
+        update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+    }
+    model.browse.model.bookmarks.add(lnomad::Bookmark {
+        url: format!("{}:/page/index.mu", "7c".repeat(16)),
+        title: "Relay Süd".to_string(),
+    });
+    update(
+        &mut model,
+        UiEvent::Rooms(loquax::ui::rooms::RoomsEvent::Heard(
+            loquax::ui::hubs::HeardHub {
+                hash: [0x99; 16],
+                name: Some("Werkstatt".to_string()),
+                hops: Some(3),
+                first: NOW - 60,
+                last: NOW - 60,
+                answered: None,
+            },
+        )),
+    );
+    update(&mut model, UiEvent::Tab(TabId::Explore));
+    check("scene-explore.json", &model.scene(LayoutClass::Compact));
+    check("scene-explore-wide.json", &model.scene(LayoutClass::Wide));
+    update(&mut model, UiEvent::Explore(ExploreEvent::Az(true)));
+    // A search finds a name, never a hash's letters (1618).
+    update(
+        &mut model,
+        UiEvent::Explore(ExploreEvent::Typed("marcel".to_string())),
+    );
+    check(
+        "scene-explore-search.json",
+        &model.scene(LayoutClass::Compact),
+    );
+    // A server's row opens its sheet and changes nothing (1618).
+    update(
+        &mut model,
+        UiEvent::Explore(ExploreEvent::Typed(String::new())),
+    );
+    update(&mut model, UiEvent::Explore(ExploreEvent::Hub([0x99; 16])));
+    assert_eq!(model.rooms.hub, None);
+    check(
+        "scene-explore-sheet.json",
+        &model.scene(LayoutClass::Compact),
+    );
+}
+
 /// 1337: the Browse tab as the phone and the M9 get it, lnomad's scene
 /// inside Loquax's: the list it opens on (two NomadNet nodes the announces
 /// named), a page from the first, and the same page with its form field
@@ -412,10 +490,10 @@ fn the_profile_is_the_golden_scene() {
     model.own_code = Some(loquax::ui::OwnCode::of(code, Some(qr)));
     update(
         &mut model,
-        UiEvent::ProfileFacts(ProfileFacts {
+        UiEvent::ProfileFacts(Box::new(ProfileFacts {
             name: "Mia Sander".to_string(),
             mailbox: Mailbox::Away {
-                host: Some("leviculum.network".to_string()),
+                name: Some("Mia's computer".to_string()),
                 rung: Some(Rung::Relayed),
                 word: Some(loquax::home::board::Word::Fetched {
                     taken: 3,
@@ -432,7 +510,8 @@ fn the_profile_is_the_golden_scene() {
                     this: false,
                 },
             ],
-        }),
+            ..Default::default()
+        })),
     );
     update(&mut model, UiEvent::Profile { open: true });
     let scene = model.scene(LayoutClass::Compact);
@@ -591,4 +670,110 @@ fn a_groups_one_and_two_ticks_are_the_golden_scene() {
     let words = Text::key(StrId::StateGroupDelivered);
     assert_eq!(words.resolve(Lang::En), "On the devices");
     check("scene-group-ticks.json", &scene);
+}
+
+mod relay_group {
+    include!("support/relay_group.rs");
+}
+
+/// 1482, a relayed post shows its writer: a relay bot's chat, each post
+/// under its writer and without the bot's prefix, the bar saying it is a
+/// group via a relay, a reaction to a message this device does not hold
+/// said in words, and a reply quoting a post by its writer. Every target
+/// draws what this scene says.
+#[test]
+fn a_relayed_group_is_the_golden_scene() {
+    use loquax::ui::strings::Lang;
+
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    relay_group::relay_group(&mut model, now().unix_secs, now().offset_secs);
+    let scene = model.scene(LayoutClass::Compact);
+    let chat = scene.chat.as_ref().expect("the chat");
+    let title = chat.bar.title.resolve(Lang::De);
+    assert!(
+        title.starts_with("ReticulumNet NL") && title.ends_with(" · Gruppe über Relais"),
+        "{title}"
+    );
+    let groups: Vec<(String, Vec<String>)> = chat
+        .groups
+        .iter()
+        .map(|g| {
+            (
+                g.sender.resolve(Lang::En),
+                g.bubbles.iter().map(|b| b.bubble.body.clone()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            ("Anna".to_string(), vec!["Hallo zusammen".to_string()]),
+            (
+                "Ben".to_string(),
+                vec![
+                    "Moin Anna".to_string(),
+                    "reacted 👍 to a message that is not here".to_string()
+                ]
+            ),
+            ("You".to_string(), vec!["Ich bin auch da".to_string()]),
+            (
+                "Anna".to_string(),
+                vec!["Schön, dass du da bist".to_string()]
+            ),
+        ]
+    );
+    let quote = chat
+        .groups
+        .last()
+        .and_then(|g| g.bubbles[0].bubble.quote.clone())
+        .map(|q| q.text);
+    assert_eq!(quote.as_deref(), Some("Ben: Moin Anna"));
+    check("scene-relay-group.json", &scene);
+}
+
+mod reply_scene {
+    include!("support/reply_scene.rs");
+}
+
+/// 1451, the walk's blind spots: Anna's chat of the shared fixture, our
+/// reply under the quote of her question, her thumbs up on it, her photo
+/// as its stand-in; then a reply to her last line being written, which the
+/// compose bar carries with the quote of the line it answers. Every
+/// target's golden of this chat is drawn from this scene.
+#[test]
+fn a_reply_a_reaction_and_a_photo_are_the_golden_scene() {
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    reply_scene::reply_scene(&mut model, now().unix_secs, now().offset_secs);
+    let scene = model.scene(LayoutClass::Compact);
+    let chat = scene.chat.as_ref().expect("the chat");
+    let bubbles: Vec<_> = chat.groups.iter().flat_map(|g| g.bubbles.iter()).collect();
+    let ours = bubbles
+        .iter()
+        .find(|b| b.bubble.ours)
+        .expect("our reply is in the chat");
+    assert_eq!(ours.bubble.body, "Ja, um zehn am Brunnen");
+    assert_eq!(
+        ours.bubble.quote.as_ref().map(|q| q.text.as_str()),
+        Some("Kommst du morgen mit zum Markt?"),
+        "our reply quotes her question"
+    );
+    assert_eq!(ours.bubble.chips.len(), 1, "her thumbs up on our reply");
+    assert!(
+        bubbles.iter().any(|b| b.photo.is_some()),
+        "her photo is a bubble of its own"
+    );
+    check("scene-reply.json", &scene);
+
+    reply_scene::reply_composing(&mut model);
+    let scene = model.scene(LayoutClass::Compact);
+    let compose = &scene.chat.as_ref().expect("the chat").compose;
+    assert_eq!(
+        compose.reply,
+        Some(reply_scene::REPLY_LAST),
+        "the compose bar carries the line it answers"
+    );
+    assert_eq!(compose.text, reply_scene::REPLY_DRAFT);
+    check("scene-reply-compose.json", &scene);
 }

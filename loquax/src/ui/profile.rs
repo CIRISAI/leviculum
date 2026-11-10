@@ -71,13 +71,15 @@ pub enum Mailbox {
     Unknown,
     /// On this device: it is the home.
     Here,
-    /// On another device, `host` the server the client talks to where
-    /// there is one (never a hash, `feedback_no_hashes_on_screen`);
-    /// `rung` how the link runs, `word` how the last ask went (the
-    /// board's word, `loquax::home::board::Word`: connected, fetched N of
-    /// M, unreachable).
+    /// On another device, `name` the name the mailbox announces where the
+    /// shell has heard it (never a hash, `feedback_no_hashes_on_screen`,
+    /// and never the server it is reached through: that is the
+    /// rendezvous, not where the mailbox is, 1447); `rung` how the link
+    /// runs, `word` how the last ask went (the board's word,
+    /// `loquax::home::board::Word`: connected, fetched N of M,
+    /// unreachable).
     Away {
-        host: Option<String>,
+        name: Option<String>,
         rung: Option<Rung>,
         word: Option<Word>,
     },
@@ -103,6 +105,16 @@ pub struct ProfileFacts {
     /// This identity's devices, this one among them; empty where the
     /// shell does not know them.
     pub devices: Vec<Device>,
+    /// What the mailbox said of itself (1642, `/about`).
+    pub told: super::mailbox_page::Told,
+    /// How this device reaches its mailbox now (1642).
+    pub reach: super::mailbox_page::Reach,
+    /// This device's RNS identity hash, which finds it in the mailbox's
+    /// list (1642); never shown.
+    pub device: Option<[u8; 16]>,
+    /// This device's build (`loquax::VERSION`), which the mailbox's is
+    /// held against (1642); empty where the shell did not say it.
+    pub version: String,
 }
 
 /// A QR code as the core's bitmap: `side` modules a side, row by row,
@@ -195,18 +207,27 @@ pub fn fours(address: &[u8; 16]) -> String {
     out
 }
 
-/// The mailbox's line and its state line.
+/// The mailbox's line and its state line: "Postfach: Lews Rechner
+/// (verbunden)" by the name it announces, the rung it is reached over only
+/// in the state line under it (1447, walk 1 finding 13).
 pub fn mailbox_words(mailbox: &Mailbox) -> (Text, Option<Text>) {
     match mailbox {
         Mailbox::Unknown => (Text::key(StrId::ProfileMailboxUnknown), None),
         Mailbox::Here => (Text::key(StrId::ProfileMailboxHere), None),
-        Mailbox::Away { host, rung, word } => {
-            let line = match host {
-                Some(host) => Text::Key(
+        Mailbox::Away { name, rung, word } => {
+            let line = match name.as_deref().map(str::trim) {
+                Some(name) if !name.is_empty() => Text::Key(
                     StrId::ProfileMailboxAway,
-                    Vec::from([Arg::Str(host.clone())]),
+                    Vec::from([Arg::Str(String::from(name))]),
                 ),
-                None => Text::key(StrId::ProfileMailboxElsewhere),
+                _ => Text::key(StrId::ProfileMailboxElsewhere),
+            };
+            let line = match word {
+                Some(Word::Connected) => Text::Key(
+                    StrId::ProfileMailboxConnected,
+                    Vec::from([Arg::Text(alloc::boxed::Box::new(line))]),
+                ),
+                _ => line,
             };
             let state = match (word, rung) {
                 // A pull under way says how far it came, whatever the rung.
@@ -268,7 +289,16 @@ pub fn profile<B>(model: &UiModel<B>) -> ProfileScreen {
         },
         name => Text::Raw(String::from(name)),
     };
-    let (mailbox, state) = mailbox_words(&model.profile.mailbox);
+    // A shell that has not heard the mailbox's name takes the one this
+    // identity's announce carries: the mailbox announces it (1447).
+    let mut facts = model.profile.mailbox.clone();
+    if let Mailbox::Away {
+        name: name @ None, ..
+    } = &mut facts
+    {
+        *name = model.names.announced(&own).map(String::from);
+    }
+    let (mailbox, state) = mailbox_words(&facts);
     let devices = model
         .profile
         .devices
@@ -358,6 +388,47 @@ mod tests {
     use super::*;
     use crate::ui::strings::Lang;
 
+    /// 1449 item 2 (walk 1 finding 8): the mailbox's archive hands the
+    /// reader's own name as an announce of the reader's own address; the
+    /// avatar's letters and the profile's name are it, never the address's
+    /// hex digits. An echo without a name keeps it.
+    #[test]
+    fn the_own_name_from_the_mailbox_names_the_avatar_and_the_profile() {
+        use crate::outbox::OutboxEvent;
+        use crate::ui::tests::Field;
+        use crate::ui::{update, UiEvent};
+        let own = [0x90; 16];
+        let mut model = UiModel::<Field>::new(&[]);
+        model.address = Some(own);
+        model.profile.mailbox = Mailbox::Away {
+            name: None,
+            rung: None,
+            word: None,
+        };
+        let before = profile(&model);
+        assert_ne!(before.avatar.initials, "LP", "the control: no name before");
+        assert_eq!(
+            before.name.resolve(Lang::De),
+            StrId::ProfileNameElsewhere.text(Lang::De)
+        );
+        let heard = |name: Option<&str>| {
+            UiEvent::Engine(OutboxEvent::Announced {
+                destination: own,
+                name: name.map(String::from),
+                path_response: false,
+            })
+        };
+        update(&mut model, heard(Some("Lew Palm")));
+        update(&mut model, heard(None));
+        let after = profile(&model);
+        assert_eq!(after.avatar.initials, "LP");
+        assert_eq!(after.name.resolve(Lang::De), "Lew Palm");
+        assert!(
+            model.conversations.is_empty(),
+            "the reader is no conversation"
+        );
+    }
+
     #[test]
     fn an_address_reads_in_groups_of_four() {
         let address: [u8; 16] = core::array::from_fn(|i| i as u8 * 17);
@@ -370,7 +441,7 @@ mod tests {
     #[test]
     fn the_mailbox_says_its_rung_its_pull_or_that_it_is_unreachable() {
         let away = |rung, word| Mailbox::Away {
-            host: Some(String::from("leviculum.network")),
+            name: Some(String::from("Lews Rechner")),
             rung,
             word,
         };
@@ -381,7 +452,7 @@ mod tests {
         assert_eq!(
             said(&away(Some(Rung::Relayed), Some(Word::Connected)), Lang::De),
             (
-                String::from("Postfach: auf leviculum.network"),
+                String::from("Postfach: Lews Rechner (verbunden)"),
                 Some(String::from("Verbunden über einen Vermittlungsserver"))
             )
         );
@@ -404,6 +475,20 @@ mod tests {
         );
         assert_eq!(said(&away(None, None), Lang::En).1, None);
         assert_eq!(said(&Mailbox::Here, Lang::En).0, "Mailbox: on this device");
+        // Without a name heard, another device; never the rendezvous.
+        let nameless = Mailbox::Away {
+            name: None,
+            rung: Some(Rung::Relayed),
+            word: Some(Word::Connected),
+        };
+        assert_eq!(
+            said(&nameless, Lang::De).0,
+            "Postfach: auf einem anderen Gerät (verbunden)"
+        );
+        assert_eq!(
+            said(&away(Some(Rung::Mesh), Some(Word::Unreachable)), Lang::En).0,
+            "Mailbox: Lews Rechner"
+        );
     }
 
     /// The half blocks of a 1x1 code with a quiet zone of one: light

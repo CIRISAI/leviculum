@@ -59,4 +59,11 @@
          timer in its last 30 s, 4.8:1 on the bar. -->
     <color name="rec_red">#c62828</color>
     <color name="rec_amber">#9a5b00</color>
+    <!-- A field's placeholder (1448, walk finding 4): lighter than any
+         written text, so an empty field never reads as filled; 3.3:1 on the background,
+         below text_secondary as a hint is meant to be. -->
+    <color name="hint">#8b8e95</color>
+    <!-- The own position on a map (1448): blue, as the maps people know
+         draw it; 4.5:1 on the background. -->
+    <color name="own_dot">#1a73e8</color>
 </resources>

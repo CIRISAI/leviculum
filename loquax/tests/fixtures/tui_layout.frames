@@ -1,9 +1,9 @@
 --- 80 x 24 ---
-┌  Loquax afafafaf───────┐┌  <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
-│▌<4f4f4f4f…>      14:06 ││                                                    │
+┌  Loquax────────────────┐┌  Alice──────────────────────────── a relay adopted ┐
+│▌Alice            14:06 ││                                                    │
 │▌you: the tripod fits   ││              yes, from ten. Shall I bring the T114 │
 │                        ││              and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││              enough for the hill?  14:02 ✓         │
+│ Bob              12:40 ││              enough for the hill?  14:02 ✓         │
 │ the antenna is in the… ││                                                    │
 │                        ││ long one, the hill eats signal  14:03              │
 │                        ││                                                    │
@@ -19,20 +19,20 @@
 │                        ││ if it fits in the bag  14:05                       │
 │                        ││                                                    │
 │                        ││                          the tripod fits  14:06 ⠋  │
-│                        │├● to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        │├● to Alice────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- 120 x 40 ---
-┌  Loquax afafafaf─────────────────┐┌  <4f4f4f4f…>─────────────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
-│▌<4f4f4f4f…>                14:06 ││                                                propagation node 9c9c9c9c adopted │
+┌  Loquax──────────────────────────┐┌  Alice───────────────────────────────────────────────────────────────────────────┐
+│▌Alice                      14:06 ││                                                                  a relay adopted │
 │▌you: the tripod fits             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
-│ <b7b7b7b7…>                12:40 ││                                                                                  │
+│ Bob                        12:40 ││                                                                                  │
 │ the antenna is in the van        ││                                                                                  │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
-│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                                                                  │
 │                                  ││                             ── Friday 23 October ──                              │
 │                                  ││ did the board come back from the soak?  19:40                                    │
 │                                  ││                                                                                  │
@@ -60,16 +60,16 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                                  ││ if it fits in the bag  14:05                                                     │
 │                                  ││                                                                                  │
 │                                  ││                                                        the tripod fits  14:06 ⠋  │
-│                                  │├● to <4f4f4f4f…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  │├● to Alice──────────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- cursor ---
-┌  Loquax afafafaf───────┐┌● <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
-│▌<4f4f4f4f…>      14:06 ││                                                    │
+┌  Loquax────────────────┐┌● Alice──────────────────────────── a relay adopted ┐
+│▌Alice            14:06 ││                                                    │
 │▌you: the tripod fits   ││             ▌yes, from ten. Shall I bring the T114 │
 │                        ││             ▌and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓         │
+│ Bob              12:40 ││             ▌enough for the hill?  14:02 ✓         │
 │ the antenna is in the… ││                                                    │
 │                        ││ long one, the hill eats signal  14:03              │
 │                        ││                                                    │
@@ -85,23 +85,23 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││ if it fits in the bag  14:05                       │
 │                        ││                                                    │
 │                        ││                          the tripod fits  14:06 ⠋  │
-│                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Alice────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- detail ---
-┌  Loquax afafafaf───────┐┌● <4f4f4f4f…>──── propagation node 9c9c9c9c adopted ┐
-│▌<4f4f4f4f…>      14:06 ││                                                    │
+┌  Loquax────────────────┐┌● Alice──────────────────────────── a relay adopted ┐
+│▌Alice            14:06 ││                                                    │
 │▌you: the tripod fits   ││             ▌yes, from ten. Shall I bring the T114 │
 │                        ││             ▌and the long antenna, or is the stick │
-│ <b7b7b7b7…>      12:40 ││             ▌enough for the hill?  14:02 ✓         │
+│ Bob              12:40 ││             ▌enough for the hill?  14:02 ✓         │
 │ ┌ message ─────────────────────────────────────────────────────────────────┐ │
-│ │from you to <4f4f4f4f…>                                                   │ │
+│ │from you to Alice                                                         │ │
 │ │peer   4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f                                   │ │
 │ │id     a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2   │ │
 │ │size   96 bytes                                                           │ │
-│ │state  arrived: <4f4f4f4f…>'s mailbox or device has it                    │ │
-│ │<4f4f4f4f…> sends no read receipts                                        │ │
+│ │state  arrived: Alice's mailbox or device has it                          │ │
+│ │Alice sends no read receipts                                              │ │
 │ │                                                                          │ │
 │ │on this device                                                            │ │
 │ │14:02:00  queued                                                          │ │
@@ -110,16 +110,16 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ │
 │                        ││                                                    │
 │                        ││                          the tripod fits  14:06 ⠋  │
-│                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
+│                        │├  to Alice────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- 60 x 20, narrow ---
-┌  Loquax afafafaf───────┐┌  <4f4f4f4f…>────── pn 9c9c9c9c ┐
-│▌<4f4f4f4f…>      14:06 ││ 14:03                          │
+┌  Loquax────────────────┐┌  Alice──────── a relay adopted ┐
+│▌Alice            14:06 ││ 14:03                          │
 │▌you: the tripod fits   ││                                │
 │                        ││          ── Today ──           │
-│ <b7b7b7b7…>      12:40 ││ on my way  you 09:12 ✓         │
+│ Bob              12:40 ││ on my way  you 09:12 ✓         │
 │ the antenna is in the… ││                                │
 │                        ││ stuck at the level crossing    │
 │                        ││ you 09:31 ◷                    │

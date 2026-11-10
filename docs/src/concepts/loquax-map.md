@@ -28,13 +28,13 @@ Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 `RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
 fields beside id, source, title, body and the verification
-(`loquax/src/engine.rs:503`, `loquax/src/outbox.rs:283`). The core reads
+(`loquax/src/engine.rs:515`, `loquax/src/outbox.rs:313`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:166`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:4507`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:3157`) and the positions in a table of
-their own (`SCHEMA_V2`, `loquax/src/store.rs:196`). The sender's timestamp
+`loquax/src/ui.rs:6524`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:3659`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:203`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
 change of its own and not the one line of plumbing the fields were.

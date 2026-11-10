@@ -28,7 +28,7 @@
         "key": "browser_address_hint"
       },
       "id": "address",
-      "value": "5a5a5a5a…:/page/index.mu"
+      "value": "Marcel's node"
     },
     "help": false,
     "names": null,
@@ -307,11 +307,15 @@
       ],
       "id": "top_bar",
       "lead": {
-        "me": {
-          "avatar": {
-            "me": ""
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "Back",
+            "label_key": "browser_back"
           },
-          "link": null
+          "avatar": {
+            "site": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+          }
         }
       },
       "title": {
@@ -337,7 +341,7 @@
       "role": "tab_bar",
       "selected": false
     },
-    "active": "Browse",
+    "active": "Explore",
     "id": "tabs",
     "items": [
       {
@@ -391,22 +395,22 @@
           "enabled": true,
           "label": {
             "args": [],
-            "key": "tab_browse"
+            "key": "tab_explore"
           },
-          "resource": "tab_browse",
+          "resource": "tab_explore",
           "role": "tab",
           "selected": true
         },
         "action": {
           "enabled": true,
-          "intent": "Tab(Browse)",
-          "label_key": "tab_browse"
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
         },
         "badge": null,
-        "id": "Browse",
+        "id": "Explore",
         "label": {
           "args": [],
-          "key": "tab_browse"
+          "key": "tab_explore"
         }
       }
     ]
@@ -415,8 +419,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "args": [],
-        "key": "tab_browse"
+        "raw": "Marcel's node"
       },
       "resource": "top_bar",
       "role": "bar",
@@ -429,7 +432,7 @@
         "avatar": {
           "bg": "8e4b8a",
           "fg": "ffffff",
-          "initials": "30",
+          "initials": "?",
           "ring": null
         },
         "link": null,
@@ -441,8 +444,7 @@
       }
     },
     "title": {
-      "args": [],
-      "key": "tab_browse"
+      "raw": "Marcel's node"
     }
   },
   "whereabouts": null

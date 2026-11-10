@@ -145,8 +145,18 @@ fn handover(
     })
 }
 
-/// How often the engine's events are read.
+/// How often the engine's events are read while there is work.
 const PUMP: Duration = Duration::from_millis(20);
+/// How often they are read once [`QUIET_PUMPS`] reads in a row found
+/// nothing (order 1585): the 20 ms read was 70 % of an idle mailbox's CPU
+/// (1.0 % of a core against 0.3 % at 250 ms, measured by
+/// `tests/mailbox_census.rs`), and on the field host the mailbox burned
+/// 23 % of a core with nothing to do. A device's request is not read by the
+/// pump and is answered at once; what waits up to this long is an engine
+/// event after a quiet spell, an arrival from the mesh among them.
+const PUMP_QUIET: Duration = Duration::from_millis(250);
+/// Reads in a row that found nothing before the pump slows: one second.
+const QUIET_PUMPS: u32 = 50;
 /// How often the outbox looks for a due retry or a passed horizon. Both are
 /// counted in seconds.
 const OUTBOX_TICK: Duration = Duration::from_secs(1);
@@ -325,6 +335,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
     let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
     backfill_contacts(&mut store, &home, archive_cap_bytes)?;
+    archive_own_name(&mut store, address, &own_name, archive_cap_bytes);
     let mut relations = relations_at_start(&store, &home)?;
     let signer = identity.clone();
     let mut outgoing = Outgoing::new(policy);
@@ -462,6 +473,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         cap_bytes: archive_cap_bytes,
         handover: None,
         groups: Some((&home, &owner_name)),
+        shown: super::server::Shown::here(&own_name),
     };
     let mut sender = Sender {
         cap_bytes: archive_cap_bytes,
@@ -471,6 +483,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         newest: 0,
         nodes: std::collections::HashMap::new(),
         proven: Vec::new(),
+        lines: Default::default(),
     };
     let mut groups = Vec::new();
     for hosted in group::hosted(&home, &store)? {
@@ -517,7 +530,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut engine_ready = false;
     let origin = tokio::time::Instant::now();
     let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let mut pump = tokio::time::interval(PUMP);
+    let mut next_pump = tokio::time::Instant::now();
+    let mut quiet_pumps: u32 = 0;
     let mut outbox_tick = tokio::time::interval(OUTBOX_TICK);
     let mut outside = tokio::time::interval(OUTSIDE_LOOK);
     // The first announce goes out with the engine's registration; the next
@@ -547,10 +561,34 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         ),
     };
     let mut stop = stop;
+    // The census (order 1585): every CENSUS_PERIOD into the log, and on
+    // SIGUSR1 with every node's transport census on stderr, once the
+    // engines answered or ANSWER_WAIT passed. The home engine's answer;
+    // the groups' are on their engines.
+    let mut census: Option<crate::outbox::EngineCensus> = None;
+    let mut next_census = tokio::time::Instant::now() + super::census::CENSUS_PERIOD;
+    let mut census_owed: Option<(tokio::time::Instant, bool)> = None;
+    let mut usr1 = match terminate {
+        Some(_) => Some(
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                .map_err(|e| format!("SIGUSR1 handler: {e}"))?,
+        ),
+        None => None,
+    };
+    #[cfg(feature = "heap-accounting")]
+    if usr1.is_some() {
+        tracing::info!(
+            "Heap accounting: on, SIGUSR1 reports measured live bytes beside the estimate"
+        );
+        leviculum_std::heap_accounting::configure_sampler_from_env();
+    }
 
     let outcome = loop {
         tokio::select! {
             Some(request) = requests.recv() => {
+                // A device is talking: its answers' events are read at once.
+                quiet_pumps = 0;
+                next_pump = tokio::time::Instant::now() + PUMP;
                 let (link, remote) = (request.link_id, request.remote);
                 serving.handover =
                     handover(&home, [&ratchet_file, &known_file], &own_name, &request.path);
@@ -680,11 +718,20 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     let _ = hosted.engine.submit(Command::Announce);
                 }
             }
-            _ = pump.tick() => {
+            _ = tokio::time::sleep_until(next_pump) => {
                 let events = match fanout.pump(&mut attached.outbox) {
                     Ok(events) => events,
                     Err(gone) => break Err(gone.to_string()),
                 };
+                // Busy while anything came or is in flight; quiet after a
+                // second of nothing (1585).
+                let busy = !events.is_empty()
+                    || fetch.is_some()
+                    || !pn_asks.is_empty()
+                    || census_owed.is_some();
+                quiet_pumps = if busy { 0 } else { quiet_pumps.saturating_add(1) };
+                next_pump = tokio::time::Instant::now()
+                    + if quiet_pumps >= QUIET_PUMPS { PUMP_QUIET } else { PUMP };
                 let mut unstarted = None;
                 for event in events {
                     match event {
@@ -732,6 +779,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::PnSelected { destination, .. } => {
                             selected_pn = Some(destination);
                         }
+                        OutboxEvent::Census(answer) => census = Some(answer),
                         // A node proved an upload (1409): asked about at the
                         // end of the next sync rounds.
                         OutboxEvent::Uploaded { message_id, transient_id, node: proved_by } => {
@@ -741,6 +789,14 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         OutboxEvent::PnUnavailable { detail } => {
                             tracing::info!("HOME no propagation node: {detail}");
+                        }
+                        OutboxEvent::HubAnnounced { hub } => {
+                            // For every device of the home (1599); it wakes nobody.
+                            archive_hub(&mut store, &hub, archive_cap_bytes);
+                        }
+                        OutboxEvent::PageAnnounced { node } => {
+                            // For every device of the home (1579): its `/pages`.
+                            keep_page(&mut store, &node);
                         }
                         OutboxEvent::Announced { destination, name, path_response } => {
                             if let Some(name) = name.filter(|_| destination != address) {
@@ -781,7 +837,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::Refused { detail } => {
                             tracing::info!("HOME outbox refused: {detail}");
                         }
-                        OutboxEvent::NodeAnnounced { destination, status } => {
+                        OutboxEvent::NodeAnnounced { destination, status, .. } => {
                             // Whether it answers `/lev/status` (1409).
                             asker.announced(destination, status);
                             if Some(destination) == selected_pn {
@@ -840,6 +896,32 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 for due in wakes.due(now_ms()) {
                     send_wake(&node, &mut store, &mut wakes, &mut costs, due).await;
                 }
+                if let Some((due, dump)) = census_owed {
+                    let answered = census.is_some() && groups.iter().all(|g| g.census.is_some());
+                    if answered || tokio::time::Instant::now() >= due {
+                        census_owed = None;
+                        let held = Held {
+                            outgoing: &outgoing,
+                            groups: &groups,
+                            sender: &sender,
+                            relations: &relations,
+                            asker: &asker,
+                            wakes: &wakes,
+                            costs: &costs,
+                            pn_asks: pn_asks.len(),
+                            home: census.take(),
+                            store: &store,
+                        };
+                        let line = held.census();
+                        line.log(if dump { "signal" } else { "period" });
+                        if dump {
+                            eprint!("{}", census_dump(&node, &groups, &line));
+                        }
+                        for hosted in &mut groups {
+                            hosted.census = None;
+                        }
+                    }
+                }
                 if fetch.is_none() {
                     if let Some(schedule) = &mut schedule {
                         if schedule.due(now_ms()).is_some() {
@@ -855,6 +937,15 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     break Err("the message engine stopped".to_string());
                 }
                 announce_home(&node, &home_destination).await;
+            }
+            _ = tokio::time::sleep_until(next_census) => {
+                next_census = tokio::time::Instant::now() + super::census::CENSUS_PERIOD;
+                ask_census(&attached, &groups);
+                census_owed.get_or_insert((tokio::time::Instant::now() + super::census::ANSWER_WAIT, false));
+            }
+            _ = user_signal(usr1.as_mut()) => {
+                ask_census(&attached, &groups);
+                census_owed = Some((tokio::time::Instant::now() + super::census::ANSWER_WAIT, true));
             }
             _ = signalled(terminate.as_mut()) => break Ok(()),
             _ = stopped(stop.as_mut()) => break Ok(()),
@@ -976,6 +1067,8 @@ struct GroupEngine<O> {
     /// membership and to prove and drop every later message, as a
     /// stranger's.
     ended: bool,
+    /// What its engine answered to the last census request (order 1585).
+    census: Option<crate::outbox::EngineCensus>,
 }
 
 /// Start the engine of one hosted group, announced with the group's name,
@@ -1040,6 +1133,7 @@ async fn attach_group(
         engine,
         selected_pn: None,
         ended: false,
+        census: None,
     })
 }
 
@@ -1068,6 +1162,7 @@ fn pump_group<O: Outbox>(
             }
         };
         match event {
+            OutboxEvent::Census(answer) => group.census = Some(answer),
             OutboxEvent::Packed {
                 message_id, packed, ..
             } if group.ended => {
@@ -1399,6 +1494,110 @@ async fn signalled(terminate: Option<&mut tokio::signal::unix::Signal>) {
 }
 
 /// The app said stop, or dropped its end; never for a home node with none.
+/// SIGUSR1, for a home node that listens for it; never for one inside an
+/// app, whose signals are the app's.
+async fn user_signal(usr1: Option<&mut tokio::signal::unix::Signal>) {
+    match usr1 {
+        Some(usr1) => {
+            usr1.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Ask every engine for its census (order 1585); the answers come back as
+/// [`OutboxEvent::Census`] through the pumps. An engine that went away is
+/// said by its pump.
+fn ask_census(home: &Attached, groups: &[GroupEngine<Attached>]) {
+    let _ = home.outbox.submit(Command::Census);
+    for hosted in groups {
+        let _ = hosted.engine.submit(Command::Census);
+    }
+}
+
+/// What the daemon's loop holds, for one census (order 1585).
+struct Held<'a, O> {
+    outgoing: &'a Outgoing,
+    groups: &'a [GroupEngine<O>],
+    sender: &'a Sender,
+    relations: &'a Relations,
+    asker: &'a crate::pn_status::Asker,
+    wakes: &'a Wakes<LinkId>,
+    costs: &'a Ledger<LinkId>,
+    pn_asks: usize,
+    home: Option<crate::outbox::EngineCensus>,
+    store: &'a Store,
+}
+
+impl<O> Held<'_, O> {
+    fn census(&self) -> super::census::MailboxCensus {
+        let (told_n, sender) = self.sender.census();
+        let (related_n, heard_n, relations) = self.relations.census();
+        let (asker_n, asker) = self.asker.census();
+        let (watchers_n, wakes) = self.wakes.census();
+        let (devices_n, costs) = self.costs.census();
+        let mut census = super::census::MailboxCensus {
+            outbox: self.outgoing.heap_bytes(),
+            outbox_n: self.outgoing.len(),
+            group_outbox: self.groups.iter().map(|g| g.outgoing.heap_bytes()).sum(),
+            group_outbox_n: self.groups.iter().map(|g| g.outgoing.len()).sum(),
+            sender,
+            told_n,
+            relations,
+            related_n,
+            heard_n,
+            asker,
+            asker_n,
+            wakes,
+            watchers_n,
+            costs,
+            devices_n,
+            pn_asks: self.pn_asks * std::mem::size_of::<([u8; 16], usize)>(),
+            rss_kb: leviculum_std::census::rss_kb(),
+            nodes: 1 + self.groups.len(),
+            archive_kb: self.store.archive_bytes().unwrap_or(0) / 1024,
+            ..Default::default()
+        };
+        for answer in self
+            .home
+            .iter()
+            .chain(self.groups.iter().filter_map(|g| g.census.as_ref()))
+        {
+            census.engine(answer);
+        }
+        census
+    }
+}
+
+/// The SIGUSR1 dump: the census line, every node's transport census under
+/// its name, and lnsd's process sections over all of it, then the
+/// measured live line in a build that can measure it.
+fn census_dump(
+    node: &ReticulumNode,
+    groups: &[GroupEngine<Attached>],
+    census: &super::census::MailboxCensus,
+) -> String {
+    let mut nodes = vec![("home".to_string(), node.diagnostic_dump())];
+    for hosted in groups {
+        nodes.push((
+            format!(
+                "group {}",
+                crate::address::to_hex(&hosted.hosted.group.address)
+            ),
+            hosted.engine.node().diagnostic_dump(),
+        ));
+    }
+    let own = format!("{}\n", census.line());
+    #[allow(unused_mut)]
+    let mut dump =
+        leviculum_std::census::compose_multi_node_dump(&nodes, &own, census.tables() as u64);
+    #[cfg(feature = "heap-accounting")]
+    dump.push_str(&leviculum_std::heap_accounting::measured_live_line(
+        "system",
+    ));
+    dump
+}
+
 async fn stopped(stop: Option<&mut tokio::sync::oneshot::Receiver<()>>) {
     match stop {
         Some(stop) => {
@@ -1521,6 +1720,59 @@ fn heard_name(
 fn related(store: &mut Store, relations: &mut Relations, peer: [u8; 16], cap: u64) -> Option<u64> {
     let name = relations.relate(peer)?;
     archive_name(store, peer, &name, cap)
+}
+
+/// Keep a hub the home heard announcing in the archive (1599), for the
+/// devices of the home: its sequence, when the entry says something new.
+fn archive_hub(store: &mut Store, hub: &crate::ui::hubs::HeardHub, cap: u64) -> Option<u64> {
+    match store.archive_hub(hub, cap) {
+        Ok(Some(seq)) => {
+            tracing::info!(
+                "HOME hub archived hub={} hops={} seq={seq}",
+                crate::address::to_hex(&hub.hash),
+                hub.hops.map_or(-1, i32::from)
+            );
+            Some(seq)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!("HOME archive: {error}");
+            None
+        }
+    }
+}
+
+/// Keep a NomadNet node the home heard announcing (1579,
+/// [`super::pages`]): its row's new stamp, when the hearing said something
+/// new; a hearing that only counted says nothing in the log.
+fn keep_page(store: &mut Store, node: &lnomad::discovery::DiscoveredNode) -> Option<u64> {
+    match store.page_heard(node) {
+        Ok(Some(stamp)) => {
+            tracing::info!(
+                "HOME page kept node={} hops={} stamp={stamp}",
+                crate::address::to_hex(&node.dest_hash),
+                node.hops.map_or(-1, i64::from)
+            );
+            Some(stamp)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!("HOME pages: {error}");
+            None
+        }
+    }
+}
+
+/// The owner's own name, for its devices (1449 item 2, walk 1 finding 8):
+/// a device never hears its identity's announce (its own node holds the
+/// destination), so the archive hands the name as it hands a peer's, and
+/// the pull's name entry names the avatar and the profile. Archived once
+/// per change: the same name again is no new entry, and no name is none.
+fn archive_own_name(store: &mut Store, address: [u8; 16], own_name: &str, cap: u64) -> Option<u64> {
+    match own_name.trim().is_empty() {
+        true => None,
+        false => archive_name(store, address, own_name, cap),
+    }
 }
 
 /// Keep a name a peer announced in the archive, for the clients that hear
@@ -1749,9 +2001,24 @@ struct Sender {
     /// The originals a copy's first proof was booked for, by group, whose
     /// writer's status the group's pump sends when due (1307 pass four).
     proven: Vec<([u8; 16], [u8; 32])>,
+    /// The `direct unanswered` lines, once a peer an hour (order 1585).
+    lines: super::outgoing::PeerLines,
 }
 
 impl Sender {
+    /// The messages told they have no node, the propagated legs' nodes and
+    /// the proofs owed, by count and estimated heap bytes (order 1585).
+    fn census(&self) -> (usize, usize) {
+        use leviculum_std::census::hash_table_bytes;
+        (
+            self.told.len(),
+            hash_table_bytes(self.told.capacity(), 32)
+                + hash_table_bytes(self.nodes.capacity(), 48)
+                + self.proven.capacity() * 48
+                + self.lines.census().1,
+        )
+    }
+
     /// The router let go of `id`: tell the outbox, and carry out what it
     /// says. `reason` is why a failed leg failed, as the engine said it
     /// (1328: a propagated leg that failed in 100 ms said nothing).
@@ -1772,17 +2039,24 @@ impl Sender {
                 Leg::Propagated => self.nodes.remove(id),
                 Leg::Direct => None,
             };
-            tracing::info!(
-                "{}",
-                left_line(
-                    leg,
-                    outcome,
-                    outgoing.unanswered(id).then_some(!outgoing.propagated(id)),
-                    id,
-                    node,
-                    reason
-                )
-            );
+            let unanswered = outgoing.unanswered(id).then_some(!outgoing.propagated(id));
+            // A recipient that does not answer is said at a message's first
+            // miss, and its retries once a peer an hour, not once an
+            // attempt (1585); every other end is said as it comes.
+            let held = match (leg, outcome, unanswered) {
+                (Leg::Direct, Outcome::Failed, Some(_)) if outgoing.misses(id) > 0 => {
+                    let peer = outgoing.destination(id).unwrap_or([0; 16]);
+                    self.lines.admit(peer, unix_now())
+                }
+                _ => Some(0),
+            };
+            if let Some(held) = held {
+                tracing::info!(
+                    "{}{}",
+                    left_line(leg, outcome, unanswered, id, node, reason),
+                    held_back(held)
+                );
+            }
         }
         let acts = outgoing.left(id, outcome, unix_now());
         self.carry_out(engine, store, outgoing, acts, selected_pn, held_pn);
@@ -1807,7 +2081,16 @@ impl Sender {
             match act {
                 Act::Record { id, change } => self.record(store, &id, change),
                 Act::Unanswered { id, offer } => {
-                    tracing::info!("{}", unanswered_line(&id, offer));
+                    // A message's first miss is said; its retries once a
+                    // peer an hour (1585).
+                    let peer = outgoing.destination(&id).unwrap_or([0; 16]);
+                    let held = match outgoing.misses(&id) {
+                        0 | 1 => Some(0),
+                        _ => self.lines.admit(peer, unix_now()),
+                    };
+                    if let Some(held) = held {
+                        tracing::info!("{}{}", unanswered_line(&id, offer), held_back(held));
+                    }
                     // As a stall's call-off: the router's end comes back as
                     // a Left the outbox ignores.
                     let _ = engine.submit(Command::Cancel { message_id: id });
@@ -1971,6 +2254,15 @@ fn unanswered_line(id: &[u8; 32], offer: bool) -> String {
         super::outgoing::ANSWER_SECS,
         unanswered_next(offer)
     )
+}
+
+/// The tail of a peer's line that was held back (1585): how many like it
+/// went unsaid since the last one.
+fn held_back(held: u32) -> String {
+    match held {
+        0 => String::new(),
+        n => format!(" ({n} more for this peer in the last hour not logged)"),
+    }
 }
 
 /// What follows an unanswered direct leg, as its lines say it.
@@ -2394,6 +2686,26 @@ mod tests {
             .collect()
     }
 
+    /// 1449 item 2 (walk 1 finding 8): the start archives the owner's own
+    /// name for its devices, once per change; a home without a name
+    /// archives none.
+    #[test]
+    fn the_start_archives_the_owners_own_name_for_its_devices() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        assert_eq!(archive_own_name(&mut store, US, "  ", u64::MAX), None);
+        assert!(names_archived(&store).is_empty(), "no name, no entry");
+        assert!(archive_own_name(&mut store, US, "Lew", u64::MAX).is_some());
+        assert_eq!(
+            archive_own_name(&mut store, US, "Lew", u64::MAX),
+            None,
+            "once"
+        );
+        assert!(archive_own_name(&mut store, US, "Lew P.", u64::MAX).is_some());
+        // The archive keeps a peer's newest name only, the owner's too.
+        assert_eq!(names_archived(&store), [(US, "Lew P.".to_string())]);
+    }
+
     /// 1159: a home node that imported before names travelled holds them in
     /// its contacts file alone. Its start archives each one the archive has
     /// no petname entry for; a name a device set, even a cleared one, wins;
@@ -2634,6 +2946,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
             ended: false,
+            census: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -2643,6 +2956,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         pump_group(&mut store, &mut sender, &mut engine, None);
         let commands = engine.engine.commands.take();
@@ -2752,6 +3066,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
             ended: false,
+            census: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -2761,6 +3076,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -2878,6 +3194,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: Some(PN),
             ended: false,
+            census: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -2887,6 +3204,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -2997,6 +3315,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: Some(PN),
             ended: false,
+            census: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -3006,6 +3325,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         pump_group(&mut store, &mut sender, &mut engine, Some(PN));
         let _ = engine.engine.commands.take();
@@ -3122,6 +3442,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         let sends = |commands: Vec<Command>| -> Vec<Vec<u8>> {
             let mut out: Vec<Vec<u8>> = commands
@@ -3144,6 +3465,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
             ended: false,
+            census: None,
         };
         let mut first_sender = sender();
         pump_group(&mut store, &mut first_sender, &mut engine, None);
@@ -3177,6 +3499,7 @@ mod tests {
                 outgoing: Outgoing::new(Policy::default()),
                 selected_pn: None,
                 ended: false,
+                census: None,
             };
             if resume {
                 resume_group(store, &mut engine, unix_now());
@@ -3305,6 +3628,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         let unpack = |packed: &[u8]| {
             leviculum_lxmf::Message::unpack(
@@ -3336,6 +3660,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
             ended: false,
+            census: None,
         };
         pump_group(&mut store, &mut sender(), &mut engine, None);
         let before = sends(engine.engine.commands.take());
@@ -3381,6 +3706,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: None,
             ended: false,
+            census: None,
         };
         assert_eq!(resume_group(&mut store, &mut engine, unix_now()), 2);
         let acts = engine.outgoing.tick(unix_now());
@@ -3465,6 +3791,7 @@ mod tests {
             newest: 0,
             nodes: std::collections::HashMap::new(),
             proven: Vec::new(),
+            lines: Default::default(),
         };
         let mut engine = GroupEngine {
             hosted: hosted.clone(),
@@ -3476,6 +3803,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: Some(PN),
             ended: false,
+            census: None,
         };
         let mut first = sender();
         pump_group(&mut store, &mut first, &mut engine, Some(PN));
@@ -3528,6 +3856,7 @@ mod tests {
             outgoing: Outgoing::new(Policy::default()),
             selected_pn: Some(PN),
             ended: false,
+            census: None,
         };
         assert_eq!(resume_group(&mut store, &mut engine, unix_now()), 2);
         let mut again = sender();

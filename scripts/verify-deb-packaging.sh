@@ -476,6 +476,72 @@ check_loquax_frontends() {
         fi
         ;;
     *)
+        ;;
+    esac
+    # 1469, #474: amd64's package carries the x86-64-v3 build beside the
+    # baseline, and the baseline hands itself over to it on a CPU that runs
+    # it (loquax/src/cpu.rs); `--version` of the v3 build ends in
+    # "(x86-64-v3)". No other architecture carries one.
+    local v3="$tmp/usr/lib/loquax/loquax-v3"
+    if [ "$ARCH" = amd64 ]; then
+        if [ -x "$v3" ]; then
+            pass "ships /usr/lib/loquax/loquax-v3"
+        else
+            fail "does not ship /usr/lib/loquax/loquax-v3"
+        fi
+        if grep -qaF '(x86-64-v3)' "$v3" 2>/dev/null; then
+            pass "loquax-v3 is the x86-64-v3 build"
+        else
+            fail "loquax-v3 is not the x86-64-v3 build (no '(x86-64-v3)')"
+        fi
+        if grep -qaF '(x86-64-v3)' "$tmp/usr/bin/loquax"; then
+            fail "/usr/bin/loquax is the x86-64-v3 build; it has to be the baseline"
+        else
+            pass "/usr/bin/loquax is the baseline build"
+        fi
+        local newest
+        newest="$(readelf --dyn-syms --wide "$v3" 2>/dev/null |
+            grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n1 || true)"
+        if [ -n "$newest" ] &&
+            [ "$(printf '%s\n' "$newest" GLIBC_2.31 | sort -V | tail -n1)" = GLIBC_2.31 ]; then
+            pass "loquax-v3 needs glibc 2.31 at most (newest symbol ${newest})"
+        else
+            fail "loquax-v3 needs a glibc past 2.31 (newest symbol ${newest:-none})"
+        fi
+        # The hand-over from the packaged bytes, where this host can run
+        # them: the extracted /usr/bin/loquax finds ../lib/loquax/loquax-v3
+        # as the installed one does.
+        if [ "$(dpkg --print-architecture 2>/dev/null || echo amd64)" != amd64 ]; then
+            skip "the amd64 starter cannot run on this host"
+        elif ! grep -qw avx2 /proc/cpuinfo || ! grep -qw bmi2 /proc/cpuinfo || ! grep -qw fma /proc/cpuinfo; then
+            local out
+            out="$(HOME="$tmp/home" "$tmp/usr/bin/loquax" --version 2>&1 || true)"
+            case "$out" in
+            *"(x86-64-v3)"*) fail "the starter handed over on a CPU without x86-64-v3: ${out}" ;;
+            *) pass "the starter keeps the baseline on a CPU without x86-64-v3" ;;
+            esac
+        else
+            local out
+            out="$(HOME="$tmp/home" "$tmp/usr/bin/loquax" --version 2>&1 || true)"
+            case "$out" in
+            *"(x86-64-v3)"*) pass "the starter hands over to loquax-v3 on this x86-64-v3 CPU" ;;
+            *) fail "the starter did not hand over to loquax-v3 on this x86-64-v3 CPU: ${out}" ;;
+            esac
+            out="$(HOME="$tmp/home" LOQUAX_CPU=baseline "$tmp/usr/bin/loquax" --version 2>&1 || true)"
+            case "$out" in
+            *"(x86-64-v3)"*) fail "LOQUAX_CPU=baseline still started loquax-v3: ${out}" ;;
+            *"loquax "*) pass "LOQUAX_CPU=baseline keeps the baseline build" ;;
+            *) fail "loquax --version under LOQUAX_CPU=baseline said: ${out}" ;;
+            esac
+        fi
+    elif [ -e "$v3" ]; then
+        fail "the ${ARCH} package carries loquax-v3, which only amd64 has"
+    else
+        pass "the ${ARCH} package carries no loquax-v3"
+    fi
+    case "$ARCH" in
+    amd64 | arm64) ;;
+    *)
         if grep -qaF 'The messenger in a window, as plain `loquax` on a desktop' "$tmp/usr/bin/loquax"; then
             fail "the ${ARCH} loquax carries a window, which its musl build cannot open"
         else

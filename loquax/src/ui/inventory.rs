@@ -95,7 +95,7 @@ const NO_RECEIVER: &str = "no position receiver";
 pub const INVENTORY: &[Row] = &[
     Row {
         intent: "Tab",
-        action: "a tab of the bar (Chats, Map, Browse, Rooms)",
+        action: "a tab of the bar (Chats, Map, Explore)",
         phone: at(JAVA_LIST, "R.id.tab_map"),
         window: at(GUI, "Intent::Tab"),
         terminal: PALETTE,
@@ -108,6 +108,14 @@ pub const INVENTORY: &[Row] = &[
         window: at(GUI, "Intent::Browse"),
         terminal: at(UI, "UiEvent::Browse(event)"),
         m9: missing("the M9 has no Browse tab"),
+    },
+    Row {
+        intent: "Explore",
+        action: "the Explore tab: search, order, open a page, bookmark it, open a room, pick a hub",
+        phone: at(SESSION, "R::Explore {"),
+        window: at(GUI, "Intent::Explore"),
+        terminal: at(UI, "explore::key(model, key)"),
+        m9: missing("the M9 has no third button; a key and a list screen for it (handheld page)"),
     },
     Row {
         intent: "Back",
@@ -880,6 +888,22 @@ pub const INVENTORY: &[Row] = &[
         terminal: PALETTE,
         m9: na("the board carries its regions"),
     },
+    Row {
+        intent: "Settings",
+        action: "the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn",
+        phone: at(JAVA_LIST, "SettingsActivity.class"),
+        window: at(GUI, "Intent::Settings"),
+        terminal: KEY,
+        m9: missing("no menu screen and no key for it on the M9 (super::settings::PLACES)"),
+    },
+    Row {
+        intent: "RoomsHub",
+        action: "the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577)",
+        phone: at(SESSION, "Query::RoomsHub"),
+        window: at(GUI, "Intent::RoomsHub"),
+        terminal: at(UI, "Intent::RoomsHub(rooms::HubPick::Paste)"),
+        m9: missing("no settings on the M9"),
+    },
 ];
 
 /// A cell as the page shows it.
@@ -1035,6 +1059,106 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// The arms of the phone's `session::decode`: each request's tag as
+    /// its schema spells it on the wire (lowercase), and the arm's text.
+    fn decoded_requests() -> Vec<(String, String)> {
+        let source = std::fs::read_to_string(root().join(SESSION)).expect("session.rs");
+        let start = source
+            .find("pub fn decode(request: schema::Request)")
+            .expect("the phone's decode");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("its end");
+        let mut arms: Vec<(String, String)> = Vec::new();
+        for line in body[..end].lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("R::") {
+                let tag: String = rest.chars().take_while(|c| c.is_alphanumeric()).collect();
+                arms.push((tag.to_lowercase(), String::new()));
+            }
+            if let Some((_, text)) = arms.last_mut() {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        arms
+    }
+
+    /// The tags the app's Java puts in its requests: every `"t", "<tag>"`
+    /// of its sources.
+    fn java_tags() -> BTreeSet<String> {
+        let dir = root().join("loquax-android/android/src/network/leviculum/loquax");
+        let mut tags = BTreeSet::new();
+        for entry in std::fs::read_dir(&dir).expect("the Java sources") {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_none_or(|e| e != "java") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a Java source");
+            for piece in text.split("\"t\", \"").skip(1) {
+                let tag: String = piece.chars().take_while(|c| *c != '"').collect();
+                tags.insert(tag);
+            }
+        }
+        tags
+    }
+
+    /// Whether `text` names `Intent::{name}` as a whole word.
+    fn names_intent(text: &str, name: &str) -> bool {
+        let needle = format!("Intent::{name}");
+        text.match_indices(&needle)
+            .any(|(at, _)| !text[at + needle.len()..].starts_with(|c: char| c.is_alphanumeric()))
+    }
+
+    /// The phone's built cells that the session handles (`Intent::X` in
+    /// `session.rs`) are reached from the app too (1496): a request the
+    /// phone's decode turns into that intent, and a Java builder that sends
+    /// its tag. The Viewport cell said built for a week because the guard
+    /// read only `session.rs`; no Java ever sent a viewport, so the phone
+    /// sent no read receipt to anyone.
+    #[test]
+    fn every_phone_cell_the_session_handles_is_sent_by_the_java() {
+        let (arms, tags) = (decoded_requests(), java_tags());
+        assert!(arms.len() > 40, "the decode's arms: {}", arms.len());
+        assert!(tags.contains("open"), "the Java's tags: {tags:?}");
+        let mut wrong = Vec::new();
+        for row in INVENTORY {
+            let Cell::Built(Via::At(SESSION, token)) = row.phone else {
+                continue;
+            };
+            let Some(name) = token.strip_prefix("Intent::") else {
+                continue;
+            };
+            let raised: Vec<&String> = arms
+                .iter()
+                .filter(|(_, text)| names_intent(text, name))
+                .map(|(tag, _)| tag)
+                .collect();
+            if raised.is_empty() {
+                wrong.push(format!("{}: no request decodes to it", row.intent));
+            } else if !raised.iter().any(|tag| tags.contains(*tag)) {
+                wrong.push(format!("{}: no Java sends {raised:?}", row.intent));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// The control for the guard above: a tag no Java sends is caught, and
+    /// the viewport's builder is seen.
+    #[test]
+    fn a_phone_cell_without_its_java_is_caught() {
+        let tags = java_tags();
+        assert!(tags.contains("viewport"), "Core.viewport sends it");
+        assert!(!tags.contains("nosuchrequest"));
+        let arms = decoded_requests();
+        let viewport: Vec<&String> = arms
+            .iter()
+            .filter(|(_, text)| names_intent(text, "Viewport"))
+            .map(|(tag, _)| tag)
+            .collect();
+        assert_eq!(viewport, ["viewport"]);
+        assert!(!names_intent("Intent::OpenChat", "Open"));
     }
 
     /// The control for the guard above: a cell that claims a key no chord

@@ -14,7 +14,10 @@
 //!      0    4  magic "LQXC"
 //!      4    1  version, 1
 //!      5    1  admission: 1 pending (a code typed, the join not done), 2 admitted
-//!      6    2  zero
+//!      6    1  the reader's settings (1532): bit 0 the large type on the
+//!                 M9; zero in a record written before, which reads as
+//!                 the small type, the default
+//!      7    1  zero
 //!      8   64  the device identity's private key
 //!     72   64  the home identity's public key
 //!    136   16  the admission token while pending, zero once admitted
@@ -45,6 +48,8 @@ const VERSION: u8 = 1;
 const PENDING: u8 = 1;
 const ADMITTED: u8 = 2;
 const SUMMED: usize = RECORD_LEN - 4;
+/// Byte 6's bit for the large type (1532).
+const LARGE_TYPE: u8 = 1;
 
 /// Where the device's admission stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +86,8 @@ pub struct ClientRecord {
     pub cursor: u64,
     /// The name the device joins under, at most [`NAME_MAX`] bytes.
     pub name: String,
+    /// The reader switched the board's type to the large size (1532).
+    pub large_type: bool,
 }
 
 impl ClientRecord {
@@ -100,6 +107,7 @@ impl ClientRecord {
             admission: Admission::Pending { token: code.token },
             cursor: 0,
             name: String::from(&name[..end]),
+            large_type: false,
         })
     }
 
@@ -151,6 +159,7 @@ impl ClientRecord {
         let mut out = [0u8; RECORD_LEN];
         out[..4].copy_from_slice(MAGIC);
         out[4] = VERSION;
+        out[6] = u8::from(self.large_type) & LARGE_TYPE;
         out[8..72].copy_from_slice(&self.device);
         out[72..136].copy_from_slice(&self.home);
         match self.admission {
@@ -210,9 +219,77 @@ impl ClientRecord {
             admission,
             cursor: u64::from_le_bytes(cursor),
             name: String::from(name),
+            large_type: bytes[6] & LARGE_TYPE != 0,
         };
         record.device_identity()?;
         Ok(Some(record))
+    }
+}
+
+/// The record across two flash sectors, copy-then-switch (1493): the old
+/// record stands until the new one's write checked. Each slot holds the
+/// record, a write counter and a checksum over both; a save goes into the
+/// slot that does NOT hold the newest record, so a power loss between
+/// erase and write leaves the other slot whole, and the boot takes the
+/// slot with the higher counter. A sector written before 1493 holds the
+/// bare record and reads as counter 0: the first save after the update
+/// goes to the other slot with counter 1.
+pub mod slots {
+    use super::*;
+
+    /// A slot: the record, the counter and the slot checksum.
+    pub const SLOT_LEN: usize = RECORD_LEN + 8;
+
+    /// Encode `record` under write `counter`.
+    pub fn encode(record: &ClientRecord, counter: u32) -> [u8; SLOT_LEN] {
+        let mut out = [0u8; SLOT_LEN];
+        out[..RECORD_LEN].copy_from_slice(&record.encode());
+        out[RECORD_LEN..RECORD_LEN + 4].copy_from_slice(&counter.to_le_bytes());
+        let sum = sha256(&out[..RECORD_LEN + 4]);
+        out[RECORD_LEN + 4..].copy_from_slice(&sum[..4]);
+        out
+    }
+
+    /// The record in a slot's bytes and its counter: a wrapped one as
+    /// [`encode`] wrote it, or a bare pre-1493 record as counter 0.
+    /// `None` for an erased slot or torn bytes of either shape.
+    pub fn decode(bytes: &[u8]) -> Option<(ClientRecord, u32)> {
+        if bytes.len() >= SLOT_LEN {
+            let summed = &bytes[..RECORD_LEN + 4];
+            if sha256(summed)[..4] == bytes[RECORD_LEN + 4..SLOT_LEN] {
+                if let Ok(Some(record)) = ClientRecord::decode(&bytes[..RECORD_LEN]) {
+                    let mut counter = [0u8; 4];
+                    counter.copy_from_slice(&bytes[RECORD_LEN..RECORD_LEN + 4]);
+                    return Some((record, u32::from_le_bytes(counter)));
+                }
+            }
+        }
+        match ClientRecord::decode(bytes) {
+            Ok(Some(record)) => Some((record, 0)),
+            _ => None,
+        }
+    }
+
+    /// The newest record of the two slots, with which slot holds it.
+    pub fn newest(a: &[u8], b: &[u8]) -> Option<(ClientRecord, u32, usize)> {
+        match (decode(a), decode(b)) {
+            (Some((ra, ca)), Some((rb, cb))) => Some(match cb > ca {
+                true => (rb, cb, 1),
+                false => (ra, ca, 0),
+            }),
+            (Some((ra, ca)), None) => Some((ra, ca, 0)),
+            (None, Some((rb, cb))) => Some((rb, cb, 1)),
+            (None, None) => None,
+        }
+    }
+
+    /// Where the next save goes and under which counter: the slot that
+    /// does not hold the newest record.
+    pub fn plan(a: &[u8], b: &[u8]) -> (usize, u32) {
+        match newest(a, b) {
+            Some((_, counter, held)) => (1 - held, counter.wrapping_add(1)),
+            None => (0, 1),
+        }
     }
 }
 
@@ -256,6 +333,31 @@ mod tests {
         assert_eq!(pull.page_bytes(), Some(412));
     }
 
+    /// The type's flag (1532) round-trips in byte 6 under the checksum; a
+    /// record written before it, byte 6 zero, reads as the small type, and
+    /// the bit flipped by hand without the checksum is a torn record.
+    #[test]
+    fn the_large_type_is_kept_and_an_older_record_reads_small() {
+        let device = Identity::generate(&mut rand_core::OsRng);
+        let mut record = ClientRecord::pending(&device, &code(), "M9").expect("record");
+        assert!(!record.large_type);
+        let small = record.encode();
+        assert_eq!(small[6], 0, "as a record before 1532 wrote it");
+        record.large_type = true;
+        let large = record.encode();
+        assert_eq!(large[6], 1);
+        let back = ClientRecord::decode(&large).expect("decode").expect("some");
+        assert!(back.large_type);
+        assert_eq!(back, record);
+        let back = ClientRecord::decode(&small).expect("decode").expect("some");
+        assert!(!back.large_type);
+        let mut forged = small;
+        forged[6] = 1;
+        assert_eq!(ClientRecord::decode(&forged), Err(RecordError::Torn));
+        let slot = slots::encode(&record, 3);
+        assert_eq!(slots::decode(&slot).map(|(r, _)| r.large_type), Some(true));
+    }
+
     /// An erased or empty sector is no record; a flipped byte anywhere is a
     /// torn write, not a different key; foreign bytes are named as such.
     #[test]
@@ -292,5 +394,60 @@ mod tests {
             .expect("decode")
             .expect("some");
         assert_eq!(back.name, record.name);
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::slots::*;
+    use super::*;
+
+    fn record(cursor: u64) -> ClientRecord {
+        let device = Identity::generate(&mut rand_core::OsRng);
+        let code = HomeCode {
+            public_key: Identity::generate(&mut rand_core::OsRng).public_key_bytes(),
+            token: [7; 16],
+        };
+        let mut record = ClientRecord::pending(&device, &code, "M9").expect("record");
+        record.cursor = cursor;
+        record
+    }
+
+    /// Copy-then-switch (1493): the save goes to the other slot under the
+    /// next counter, the boot takes the newer, and a save cut mid-write
+    /// leaves the previous record standing — before, the one sector was
+    /// erased first and a cut left the pairing screen.
+    #[test]
+    fn the_newer_slot_wins_and_a_cut_write_keeps_the_old_record() {
+        let erased = [0xFFu8; 4096];
+        assert_eq!(plan(&erased, &erased), (0, 1));
+        let first = record(1);
+        let a = encode(&first, 1);
+        assert_eq!(plan(&a, &erased), (1, 2));
+        let second = record(2);
+        let b = encode(&second, 2);
+        let (newest_record, counter, held) = newest(&a, &b).expect("two slots");
+        assert_eq!((newest_record.cursor, counter, held), (2, 2, 1));
+        assert_eq!(plan(&a, &b), (0, 3));
+        // The third write is cut halfway: slot A holds garbage, slot B
+        // still answers with the second record.
+        let third = encode(&record(3), 3);
+        let mut torn = [0xFFu8; SLOT_LEN];
+        torn[..SLOT_LEN / 2].copy_from_slice(&third[..SLOT_LEN / 2]);
+        let (kept, counter, held) = newest(&torn, &b).expect("the old record stands");
+        assert_eq!((kept.cursor, counter, held), (2, 2, 1));
+    }
+
+    /// A sector written before 1493 holds the bare record: it reads as
+    /// counter 0, and the first save after the update leaves it alone.
+    #[test]
+    fn a_bare_record_reads_as_counter_zero() {
+        let old = record(7);
+        let mut sector = [0xFFu8; 4096];
+        sector[..RECORD_LEN].copy_from_slice(&old.encode());
+        let erased = [0xFFu8; 4096];
+        let (kept, counter, held) = newest(&sector, &erased).expect("legacy record");
+        assert_eq!((kept.cursor, counter, held), (7, 0, 0));
+        assert_eq!(plan(&sector, &erased), (1, 1));
     }
 }

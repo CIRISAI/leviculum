@@ -383,6 +383,18 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
             Request::Front { front: true },
         ),
         (
+            "viewport",
+            java_map(&[
+                ("t", Java::Str("viewport")),
+                ("peer", Java::Str(PEER)),
+                ("keys", Java::Longs(&[KEY, 3])),
+            ]),
+            Request::Viewport {
+                peer: s(PEER),
+                keys: vec![KEY, 3],
+            },
+        ),
+        (
             "network",
             java_map(&[
                 ("t", Java::Str("network")),
@@ -574,6 +586,23 @@ fn commands() -> Vec<(&'static str, Vec<u8>, Request)> {
                 index: -1,
             },
         ),
+        // The Explore tab (1578): `Core.explore`.
+        (
+            "explore",
+            java_map(&[
+                ("t", Java::Str("explore")),
+                ("verb", Java::Str("open")),
+                ("text", Java::Str("")),
+                ("dest", Java::Str(PEER)),
+                ("index", Java::Long(0)),
+            ]),
+            Request::Explore {
+                verb: s("open"),
+                text: String::new(),
+                dest: s(PEER),
+                index: 0,
+            },
+        ),
     ]
 }
 
@@ -631,6 +660,7 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
         ),
         ("me", t("me"), Query::Me),
         ("profile", t("profile"), Query::Profile),
+        ("mailboxPage", t("mailboxpage"), Query::MailboxPage),
         ("linkDevice", t("linkdevice"), Query::LinkDevice),
         ("linked", t("linked"), Query::Linked),
         ("movePhone", t("movephone"), Query::MovePhone),
@@ -931,6 +961,16 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
             java_map(&[("t", Java::Str("rooms"))]),
             Query::Rooms,
         ),
+        (
+            "exploreScreen",
+            java_map(&[("t", Java::Str("explore"))]),
+            Query::Explore,
+        ),
+        (
+            "settingsList",
+            java_map(&[("t", Java::Str("settings"))]),
+            Query::Settings,
+        ),
     ]
 }
 
@@ -978,6 +1018,7 @@ fn every_request_java_builds_is_an_intent_or_the_phones_glue() {
         "browse",
         "browseSize",
         "rooms",
+        "explore",
     ];
     let mut wrong = Vec::new();
     for (name, bytes, _) in commands() {

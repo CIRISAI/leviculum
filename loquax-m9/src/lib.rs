@@ -9,8 +9,11 @@
 //! frames into [`frame::Frame`] and pins them as PNG goldens
 //! (`tests/golden.rs`); the board will draw them into its panel.
 //!
-//! - [`font`]: the 10 x 20 atlas the cells are set in, 32 x 12 of them,
-//!   and what a cell measures on the panel (1428).
+//! - [`font`]: the two atlases the cells are set in, 9 x 15 (35 x 16
+//!   cells, the default) and 10 x 20 (32 x 12), and what a cell measures
+//!   on the panel (1428, 1532).
+//! - [`house`]: the house key's overview, its type switch, and the held
+//!   house key that switches the size (1532).
 //! - [`screen`]: the scene as styled lines, 32 x 12 cells, the chats list
 //!   and the delivery marks on their ASCII ladder (the atlas has no tick),
 //!   and which scene and cursor a model shows.
@@ -38,12 +41,23 @@
 //! - [`map`]: the model's map drawn in pixels under the bar, its pins and
 //!   legend in the atlas, and the keys the M9 has none for (slice seven,
 //!   1375).
+//! - [`gnss`]: the board's own position from its AG3352, the map's sky
+//!   words and when the receiver is powered (1477).
+//! - [`splash`]: the logo from power-on until the UI's first frame, and
+//!   the order that lights the backlight only over a written panel (1485).
+//! - [`read`]: what the reader saw, said to the model as its viewport,
+//!   and the clocks its dwell runs on (1541).
 //! - [`census`]: what a screen costs where it is drawn, and its budget.
+//! - [`bench`](mod@bench): a message that arrives with no network, for the bench
+//!   image's walks (1540).
+//! - [`oplog`]: the bench image's ring of flash ops, said as `[FLASH]`
+//!   lines, and the ops it could not say counted (1613, 1622).
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod bench;
 pub mod census;
 pub mod chat;
 pub mod dump;
@@ -51,12 +65,31 @@ pub mod field;
 pub mod fixture;
 pub mod font;
 pub mod frame;
+pub mod gnss;
 pub mod group;
 pub mod home;
+pub mod house;
 pub mod kbraw;
 pub mod keyboard;
 pub mod keys;
 pub mod map;
+pub mod mspi;
+pub mod oplog;
+pub mod pace;
+pub mod page;
 pub mod pair;
+pub mod read;
 pub mod render;
 pub mod screen;
+pub mod splash;
+
+/// The language the board speaks (1447, walk 1 finding 23): German unless
+/// the build says otherwise with `LOQUAX_M9_LANG=en`. The board has no
+/// locale to read, and an English "You:" over a German message is what a
+/// German reader saw.
+pub const LANG: loquax::ui::strings::Lang = match option_env!("LOQUAX_M9_LANG") {
+    Some(tag) if tag.len() >= 2 && tag.as_bytes()[0] == b'e' && tag.as_bytes()[1] == b'n' => {
+        loquax::ui::strings::Lang::En
+    }
+    _ => loquax::ui::strings::Lang::De,
+};

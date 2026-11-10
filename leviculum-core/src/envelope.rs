@@ -419,6 +419,71 @@ pub const TYPE_HOME_CODE: u8 = 0x19;
 /// rendezvous list of a few `host:port` entries.
 pub const HOME_CODE_MAX: usize = 512;
 
+/// Host → board (order 1533): press a key on the board's keyboard, a test
+/// hook for the bench walk. The payload is the controller's key code, one
+/// byte, and optionally how long the key is held, milliseconds, two bytes
+/// big-endian: a held key answers again at the controller's repeat
+/// interval for that long. The board enqueues the code where its keyboard
+/// interrupt enqueues a polled answer, so everything from the queue to the
+/// panel is the path a finger takes. Code 0 (an idle answer) is refused
+/// [`REFUSE_VALUE`]. Only an image built for the bench accepts it (the
+/// M9's bench image, `scripts/build-m9-image.sh --bench`, banner
+/// `[BENCH] inject=on`); every release image refuses it as an unknown
+/// type.
+pub const TYPE_KEY_INJECT: u8 = 0x1A;
+
+/// The longest hold a [`TYPE_KEY_INJECT`] asks for: ten seconds, longer
+/// than any walk holds a key and short enough that a garbled length does
+/// not leave a key down for a minute.
+pub const KEY_INJECT_HOLD_MAX_MS: u16 = 10_000;
+
+/// Host → board (order 1540): owe the summary log every conversation's
+/// row again, and the ring's state with its marks, so the next open of a
+/// chat writes the flash while the UI core folds the page: the window the
+/// hang of 2026-11-07 was in, re-armed on demand. A test hook for the
+/// bench walk (`scripts/m9-walks/hang.walk`); without it every open after
+/// the first wrote nothing and the race was never under load. The board
+/// arms it and fires it at the next open, after the page read, so a quiet
+/// turn in between cannot use it up.
+///
+/// Payload is empty or one byte of flags: [`BENCH_OWE_ERASE_LOG`] closes
+/// the summary log's open sector first, so the write opens the next one
+/// with an erase; [`BENCH_OWE_ERASE_RING`] does the same to the message
+/// ring, which the open's read mark goes to. A flag outside
+/// [`BENCH_OWE_FLAGS`] is refused [`REFUSE_VALUE`], a longer payload
+/// [`REFUSE_MALFORMED`], a board without a message store
+/// [`REFUSE_UNSUPPORTED`]. Only the M9's bench image accepts it, as
+/// [`TYPE_KEY_INJECT`].
+pub const TYPE_BENCH_OWE: u8 = 0x1B;
+
+/// [`TYPE_BENCH_OWE`]: the summary log's write erases a sector.
+pub const BENCH_OWE_ERASE_LOG: u8 = 0x01;
+/// [`TYPE_BENCH_OWE`]: the ring's next write erases a sector.
+pub const BENCH_OWE_ERASE_RING: u8 = 0x02;
+/// Every flag [`TYPE_BENCH_OWE`] knows.
+pub const BENCH_OWE_FLAGS: u8 = BENCH_OWE_ERASE_LOG | BENCH_OWE_ERASE_RING;
+
+/// Host → board (orders 1540, 1562): a message arrives, with no network
+/// and no mailbox, so the next open has an unread to mark: Lew's case (an
+/// unread chat, Enter, the read mark and the rows written while the UI
+/// core folds). It comes from the bench's own synthetic peer into one
+/// conversation, "Bench", never into a real chat (1562; 1540 took a row
+/// of the list and wrote into that chat). The board keeps the message in
+/// its ring, flagged as the bench's, folds it as a pulled one, and puts
+/// the list's cursor on "Bench". Payload is empty; anything else is
+/// refused [`REFUSE_MALFORMED`] (1540's one-byte row among it). Only the
+/// M9's bench image accepts it.
+pub const TYPE_BENCH_ARRIVE: u8 = 0x1C;
+
+/// Host → board (order 1562): take the bench's arrivals out of the
+/// message store: the flagged ones, and 1540's unflagged ones (a zero
+/// signature and words that start `bench arrival `), with the read marks
+/// that name nothing else; then erase the summary log and restart, so the
+/// boot rebuilds the list from the ring. The board acks, says `[BENCH]
+/// forget=done ...` and restarts. Payload is empty; anything else is
+/// refused [`REFUSE_MALFORMED`]. Only the M9's bench image accepts it.
+pub const TYPE_BENCH_FORGET: u8 = 0x1D;
+
 // ---------------------------------------------------------------------------
 // Frame types: board -> host responses
 // ---------------------------------------------------------------------------
@@ -872,6 +937,67 @@ pub fn decode_frame_dump_payload(payload: &[u8]) -> Option<Option<u8>> {
 pub fn encode_home_code(code: &str) -> Option<Vec<u8>> {
     (!code.is_empty() && code.len() <= HOME_CODE_MAX)
         .then(|| encode_frame(TYPE_HOME_CODE, code.as_bytes()))
+}
+
+/// What one [`TYPE_KEY_INJECT`] asks (order 1533): the key code, and how
+/// long it is held; none is one press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyInject {
+    pub code: u8,
+    pub hold_ms: Option<u16>,
+}
+
+/// Encode a complete key-injection frame (order 1533).
+pub fn encode_key_inject(inject: KeyInject) -> Vec<u8> {
+    match inject.hold_ms {
+        None => encode_frame(TYPE_KEY_INJECT, &[inject.code]),
+        Some(ms) => {
+            let [hi, lo] = ms.to_be_bytes();
+            encode_frame(TYPE_KEY_INJECT, &[inject.code, hi, lo])
+        }
+    }
+}
+
+/// Decode a [`TYPE_KEY_INJECT`] payload: `None` (malformed) for any
+/// length but one or three bytes. Whether the code and the hold are
+/// values the board takes is [`KeyInject::valid`]'s to say.
+pub fn decode_key_inject_payload(payload: &[u8]) -> Option<KeyInject> {
+    match payload {
+        [code] => Some(KeyInject {
+            code: *code,
+            hold_ms: None,
+        }),
+        [code, hi, lo] => Some(KeyInject {
+            code: *code,
+            hold_ms: Some(u16::from_be_bytes([*hi, *lo])),
+        }),
+        _ => None,
+    }
+}
+
+impl KeyInject {
+    /// A key code that is a key (not 0, the idle answer) and a hold of at
+    /// most [`KEY_INJECT_HOLD_MAX_MS`].
+    pub fn valid(&self) -> bool {
+        self.code != 0 && self.hold_ms.is_none_or(|ms| ms <= KEY_INJECT_HOLD_MAX_MS)
+    }
+}
+
+/// Decode a [`TYPE_BENCH_OWE`] payload (order 1540): the flags, 0 for
+/// an empty payload; `None` (malformed) for more than one byte. Whether
+/// the flags are known is [`BENCH_OWE_FLAGS`]' to say.
+pub fn decode_bench_owe_payload(payload: &[u8]) -> Option<u8> {
+    match payload {
+        [] => Some(0),
+        [flags] => Some(*flags),
+        _ => None,
+    }
+}
+
+/// Whether a [`TYPE_BENCH_ARRIVE`] or [`TYPE_BENCH_FORGET`] payload
+/// reads (order 1562): it is empty.
+pub fn decode_bench_empty_payload(payload: &[u8]) -> Option<()> {
+    payload.is_empty().then_some(())
 }
 
 /// Decode a [`TYPE_HOME_CODE`] payload: the code's text, `None`
@@ -4734,6 +4860,95 @@ mod tests {
                 reason: REFUSE_UNKNOWN_TYPE,
             }
         );
+    }
+
+    /// 1533: a press and a hold round-trip; one byte, three bytes, nothing
+    /// else; code 0 and a hold over the cap are no values; and no board
+    /// that lists its types here takes it (only the M9's bench image does).
+    #[test]
+    fn a_key_injection_round_trips_and_no_other_board_takes_it() {
+        let press = KeyInject {
+            code: 0xb7,
+            hold_ms: None,
+        };
+        let hold = KeyInject {
+            code: 0xb5,
+            hold_ms: Some(500),
+        };
+        assert_eq!(
+            encode_key_inject(press),
+            [0xA4, 0xA5, TYPE_KEY_INJECT, 0, 1, 0xb7]
+        );
+        assert_eq!(
+            encode_key_inject(hold),
+            [0xA4, 0xA5, TYPE_KEY_INJECT, 0, 3, 0xb5, 0x01, 0xF4]
+        );
+        for inject in [press, hold] {
+            let frame = encode_key_inject(inject);
+            let decoded = decode_frame(&frame).expect("an envelope");
+            assert_eq!(decoded.frame_type, TYPE_KEY_INJECT);
+            assert_eq!(decode_key_inject_payload(decoded.payload), Some(inject));
+            assert!(inject.valid());
+        }
+        assert_eq!(decode_key_inject_payload(&[]), None);
+        assert_eq!(decode_key_inject_payload(&[1, 2]), None);
+        assert_eq!(decode_key_inject_payload(&[1, 2, 3, 4]), None);
+        let idle = KeyInject {
+            code: 0,
+            hold_ms: None,
+        };
+        assert!(!idle.valid(), "an idle answer is no key");
+        let long = KeyInject {
+            code: 0xb5,
+            hold_ms: Some(KEY_INJECT_HOLD_MAX_MS + 1),
+        };
+        assert!(!long.valid());
+        assert_eq!(
+            classify_control_frame(&encode_key_inject(press), ACCEPTED),
+            ControlAction::Refuse {
+                refused_type: TYPE_KEY_INJECT,
+                reason: REFUSE_UNKNOWN_TYPE,
+            }
+        );
+    }
+
+    /// 1540, 1562: the bench's owe, arrive and forget frames read their payloads, and
+    /// no board that lists its types here takes them.
+    #[test]
+    fn the_bench_owe_arrive_and_forget_frames_read_and_no_other_board_takes_them() {
+        assert_eq!(decode_bench_owe_payload(&[]), Some(0));
+        assert_eq!(
+            decode_bench_owe_payload(&[BENCH_OWE_ERASE_LOG]),
+            Some(BENCH_OWE_ERASE_LOG)
+        );
+        assert_eq!(decode_bench_owe_payload(&[1, 2]), None);
+        assert_eq!(BENCH_OWE_FLAGS & !0x03, 0);
+        // 1562: arrive and forget carry nothing; 1540's row is refused.
+        assert_eq!(decode_bench_empty_payload(&[]), Some(()));
+        assert_eq!(decode_bench_empty_payload(&[7]), None);
+        assert_eq!(decode_bench_empty_payload(&[1, 2]), None);
+        assert_eq!(
+            encode_frame(TYPE_BENCH_OWE, &[BENCH_OWE_ERASE_LOG]),
+            [0xA4, 0xA5, 0x1B, 0, 1, 0x01]
+        );
+        assert_eq!(
+            encode_frame(TYPE_BENCH_ARRIVE, &[]),
+            [0xA4, 0xA5, 0x1C, 0, 0]
+        );
+        assert_eq!(
+            encode_frame(TYPE_BENCH_FORGET, &[]),
+            [0xA4, 0xA5, 0x1D, 0, 0]
+        );
+        for frame_type in [TYPE_BENCH_OWE, TYPE_BENCH_ARRIVE, TYPE_BENCH_FORGET] {
+            assert!(!CAPABILITY_FACT_RANGE.contains(&frame_type));
+            assert_eq!(
+                classify_control_frame(&encode_frame(frame_type, &[0]), ACCEPTED),
+                ControlAction::Refuse {
+                    refused_type: frame_type,
+                    reason: REFUSE_UNKNOWN_TYPE,
+                }
+            );
+        }
     }
 
     #[test]

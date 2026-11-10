@@ -24,12 +24,16 @@
 //! its bar, as the phone stacks them.
 
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, text, text_editor, toggler, tooltip,
-    Space,
+    button, column, container, mouse_area, row, scrollable, text, text_editor, text_input, toggler,
+    tooltip, Space,
 };
 use iced::{border, mouse, Alignment, Background, Border, Color, Element, Length, Theme};
+use std::collections::HashMap;
+use std::ops::Range;
+
 use leviculum_ui_iced::chrome;
 pub use leviculum_ui_iced::chrome::RAIL;
+use leviculum_ui_iced::select::selectable;
 use leviculum_ui_iced::{avatar as face, control, drawing, Palette};
 pub use leviculum_ui_iced::{colour, rgb, Icon};
 
@@ -43,16 +47,23 @@ use loquax::ui::recording::Verb;
 use loquax::ui::scene::{
     self, Action, BubbleNode, Chat, Group, LayoutClass, Lead, RecordingBar, Row, Tab, TabId,
 };
+use loquax::ui::selection::{peer_key, position_line, preview_line, Part, RunKey};
 use loquax::ui::strings::{Arg, Lang, StrId, Text};
-use loquax::when::{list_time, WallTime};
+use loquax::when::WallTime;
 
 use super::{App, Message};
 
 /// The list's width, in logical pixels.
 pub const LIST_WIDTH: f32 = 340.0;
 
+/// A room's bubble's avatar, beside the first of another's run (1450).
+const ROOM_FACE: f32 = 28.0;
+
 /// The search field's id: the top bar's search focuses it.
 pub const SEARCH_FIELD: &str = "search";
+/// The Advanced section's field for another hub's address (1577), which a
+/// press on "Another hub: paste its address" focuses.
+pub const HUB_FIELD: &str = "rooms-hub";
 
 /// The position sheet's field's id (1371): "Type my position" focuses it.
 pub const POSITION_FIELD: &str = "position";
@@ -91,6 +102,22 @@ pub const LINE: f32 = size::BODY * 1.3;
 pub fn soft<'a>(list: iced::widget::Scrollable<'a, Message>) -> Element<'a, Message> {
     leviculum_ui_iced::smooth::smooth(list, LINE).into()
 }
+
+/// [`soft`], and while `picking` (a selection's drag is on, 1475) the
+/// pointer at its top or bottom edge scrolls it.
+fn soft_picking<'a>(
+    list: iced::widget::Scrollable<'a, Message>,
+    picking: bool,
+) -> Element<'a, Message> {
+    leviculum_ui_iced::smooth::smooth(list, LINE)
+        .edge_scroll(picking)
+        .into()
+}
+
+/// The compose field's padding, top and left: where a middle click's
+/// point lands in its text (1475).
+pub const COMPOSE_PAD_Y: f32 = 6.0;
+pub const COMPOSE_PAD_X: f32 = 4.0;
 
 fn mark_icon(mark: Mark) -> Icon {
     Icon::Glyph {
@@ -228,8 +255,8 @@ impl App {
     }
 
     /// The scene's top bar over the list: the reader's avatar with the
-    /// link's dot, the title, the bar's actions; then the window's own
-    /// theme toggle.
+    /// link's dot, the title, the bar's actions, and the gear. Light or
+    /// dark is the settings' Appearance since 1450, no button of the bar.
     fn top_bar<'a>(&'a self, t: Colours) -> Element<'a, Message> {
         let top = &self.scene.top;
         let lead = match &top.lead {
@@ -259,12 +286,6 @@ impl App {
             ));
         }
         actions.push(self.icon_action(
-            Icon::Theme,
-            self.word(Intent::Theme.label()),
-            Message::Intent(Intent::Theme),
-            t,
-        ));
-        actions.push(self.icon_action(
             Icon::Settings,
             self.word(StrId::Settings),
             Message::Settings,
@@ -292,6 +313,8 @@ impl App {
             // The Rooms (1379): talk, as the chats, until a room icon is
             // drawn.
             TabId::Rooms => Icon::Chats,
+            // Explore (1578): what one looks for, pages and rooms.
+            TabId::Explore => Icon::Search,
         };
         let badge = tab.badge.map(|count| {
             chrome::badge(count, size::BADGE_TEXT - 2.0, size::BADGE_CORNER, p).padding([0, 5])
@@ -315,8 +338,8 @@ impl App {
         let active = match self.screen {
             super::Screen::Chats | super::Screen::Settings => TabId::Chats,
             super::Screen::Map => TabId::Map,
-            super::Screen::Browse => TabId::Browse,
-            super::Screen::Rooms => TabId::Rooms,
+            // The browser and a hub's rooms are opened from Explore.
+            super::Screen::Browse | super::Screen::Rooms | super::Screen::Explore => TabId::Explore,
         };
         let items = tabs
             .items
@@ -326,11 +349,17 @@ impl App {
         Some(chrome::tabs(items, rail, palette(t)))
     }
 
-    /// The settings page (1233): a bar with its back, and the row the
-    /// phone's Privacy page has first, "Send read receipts" with its line
-    /// and the switch as the model holds it.
+    /// The settings (1233, one structure since 1450, walk 1 finding 21):
+    /// the nine sections of `loquax::ui::settings`, in the phone's order,
+    /// each its title over what it holds; a press opens its page, Back
+    /// goes to the list, then to the chats.
     pub(super) fn settings_pane(&self) -> Element<'_, Message> {
+        use loquax::ui::settings::{self, Target};
         let t = self.tokens();
+        let title = match self.settings_at {
+            Some(section) => self.word(section.title()),
+            None => self.word(StrId::Settings),
+        };
         let bar = row![
             self.icon_action(
                 Icon::Back,
@@ -338,26 +367,272 @@ impl App {
                 Message::Intent(Intent::Back),
                 t
             ),
-            text(self.word(StrId::Settings))
+            text(title)
                 .size(22)
                 .color(colour(t.text))
                 .width(Length::Fill),
         ]
         .spacing(12)
         .align_y(Alignment::Center);
+        let body: Element<'_, Message> = match self.settings_at {
+            None => settings::entries(Target::Window)
+                .into_iter()
+                .fold(column![], |list, entry| {
+                    let words = column![
+                        text(entry.title.resolve(self.lang))
+                            .size(16)
+                            .color(colour(t.text)),
+                        text(entry.summary.resolve(self.lang))
+                            .size(14)
+                            .color(colour(t.text_secondary)),
+                    ]
+                    .spacing(2);
+                    list.push(chrome::list_item(
+                        container(words).padding([10, 16]).width(Length::Fill),
+                        false,
+                        Message::Intent(entry.open.intent),
+                        palette(t),
+                    ))
+                })
+                .into(),
+            Some(section) => self.settings_page(section, t),
+        };
+        container(
+            column![
+                container(bar)
+                    .height(size::BAR)
+                    .padding([0, 12])
+                    .align_y(Alignment::Center),
+                scrollable(body).height(Length::Fill),
+            ]
+            .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(colour(t.background))),
+            ..container::Style::default()
+        })
+        .into()
+    }
+
+    /// One section's page in the window: its switches as the window has
+    /// them, the words the core says for the rest.
+    fn settings_page(
+        &self,
+        section: loquax::ui::settings::Section,
+        t: Colours,
+    ) -> Element<'_, Message> {
+        use loquax::ui::settings::Section;
+        let say = |words: String| {
+            container(text(words).size(15).color(colour(t.text)))
+                .padding([12, 16])
+                .width(Length::Fill)
+        };
+        let quiet = |words: String| {
+            container(text(words).size(14).color(colour(t.text_secondary)))
+                .padding([0, 16])
+                .width(Length::Fill)
+        };
+        match section {
+            Section::Profile => container(link(
+                self.word(StrId::ProfileTitle),
+                Message::Intent(Intent::Profile),
+                t,
+            ))
+            .padding([12, 16])
+            .into(),
+            Section::Mailbox => self.mailbox_page(t),
+            Section::Appearance => {
+                let switch = self.switch_row(
+                    self.word(StrId::SettingsDark),
+                    self.word(StrId::Theme),
+                    self.dark(),
+                    |_| Message::Intent(Intent::Theme),
+                    t,
+                );
+                column![switch].into()
+            }
+            Section::Chats => self.photo_rows(t),
+            Section::Notifications => {
+                say(self.word(StrId::SettingsNotificationsDesktop).to_string()).into()
+            }
+            Section::Privacy => self.switch_row(
+                self.word(StrId::ReadReceipts),
+                self.word(StrId::ReadReceiptsText),
+                self.seen.receipts,
+                |on| Message::Intent(Intent::ReadReceipts { on: Switch::of(on) }),
+                t,
+            ),
+            Section::Maps => self.maps_rows(t),
+            Section::Backup => say(self.word(StrId::SettingsBackupDesktop).to_string()).into(),
+            Section::Advanced => column![
+                say(self.word(StrId::PropagationNode).to_string()),
+                quiet(self.word(StrId::PropagationNodeText).to_string()),
+                self.hub_rows(t),
+                container(link(
+                    self.word(StrId::Help),
+                    Message::Intent(Intent::Help),
+                    t
+                ))
+                .padding([12, 16]),
+            ]
+            .into(),
+        }
+    }
+
+    /// The public rooms' hub (1577, 1599), the core's lines: which hub,
+    /// the hubs heard and shipped with how far each is and a mark on the
+    /// one in force, a press choosing it, "More…" for every hub in the
+    /// page's scroll, none, the field for another's address, and what a
+    /// hub learns.
+    /// The mailbox page (1642), the core's scene: a header per group in
+    /// the accent, a line per line with its value under it, a note
+    /// smaller, the address selectable and with "Copy", "Show my code" a
+    /// link to the profile.
+    fn mailbox_page(&self, t: Colours) -> Element<'_, Message> {
+        let lang = self.lang;
+        let Some(page) = &self.seen.mailbox else {
+            return column![].into();
+        };
+        let mut rows = column![].spacing(2).padding([4, 16]);
+        for group in &page.groups {
+            rows = rows.push(
+                container(
+                    text(group.title.resolve(lang))
+                        .size(14)
+                        .color(colour(t.accent)),
+                )
+                .padding(iced::Padding {
+                    top: 12.0,
+                    bottom: 4.0,
+                    ..iced::Padding::ZERO
+                }),
+            );
+            for line in &group.lines {
+                let label = line.label.resolve(lang);
+                if line.note {
+                    rows = rows.push(text(label).size(13).color(colour(t.text_secondary)));
+                    continue;
+                }
+                if let Some(action) = &line.action {
+                    rows = rows.push(link(&label, Message::Intent(action.intent.clone()), t));
+                    continue;
+                }
+                let mut words = column![text(label).size(15).color(colour(t.text))];
+                if let Some(value) = &line.value {
+                    words = words.push(
+                        text(value.resolve(lang))
+                            .size(14)
+                            .color(colour(t.text_secondary)),
+                    );
+                }
+                let mut shown = row![container(words).width(Length::Fill)]
+                    .spacing(8)
+                    .align_y(Alignment::Center);
+                if let Some(copy) = &line.copy {
+                    shown = shown.push(filled(
+                        &Text::key(StrId::MailboxCopy).resolve(lang),
+                        Some(Message::CopyText(copy.clone())),
+                        t,
+                    ));
+                }
+                rows = rows.push(container(shown).padding([4, 0]));
+            }
+        }
+        rows.into()
+    }
+
+    fn hub_rows(&self, t: Colours) -> Element<'_, Message> {
+        use loquax::ui::intent::Intent;
+        use loquax::ui::rooms::HubPick;
+        let lang = self.lang;
+        let mut rows = column![].spacing(4).padding([12, 16]);
+        for row in &self.seen.hubs {
+            let label = row.label.resolve(lang);
+            let value = row.value.as_ref().map(|v| v.resolve(lang));
+            match row.action.as_ref().map(|a| &a.intent) {
+                Some(Intent::RoomsHub(HubPick::Paste)) => {
+                    let words = match value {
+                        Some(own) => format!("● {label}: {own}"),
+                        None => format!("○ {label}"),
+                    };
+                    rows = rows.push(text(words).size(15).color(colour(t.text)));
+                    let field = text_input(
+                        &Text::key(StrId::RoomsHubPasteHint).resolve(lang),
+                        &self.hub_field,
+                    )
+                    .id(HUB_FIELD)
+                    .on_input(Message::HubTyped)
+                    .on_submit(Message::HubTake)
+                    .size(15)
+                    .padding([6, 10]);
+                    rows = rows.push(
+                        row![
+                            field,
+                            button(text("OK").size(15)).on_press(Message::HubTake)
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    );
+                }
+                Some(Intent::RoomsHub(HubPick::More)) => {
+                    rows = rows.push(link(
+                        &label,
+                        Message::Intent(Intent::RoomsHub(HubPick::More)),
+                        t,
+                    ));
+                }
+                Some(intent) => {
+                    // The core marks the hub in force with a check at the
+                    // value's end; the window says it with a filled dot.
+                    let value = value.unwrap_or_default();
+                    let said = value
+                        .trim_end_matches('\u{2713}')
+                        .trim_end_matches(loquax::ui::strings::JOIN)
+                        .trim();
+                    let mark = if value.ends_with('\u{2713}') {
+                        "●"
+                    } else {
+                        "○"
+                    };
+                    let words = match said {
+                        "" => format!("{mark} {label}"),
+                        said => format!("{mark} {label} · {said}"),
+                    };
+                    rows = rows.push(link(&words, Message::Intent(intent.clone()), t));
+                }
+                None if value.is_some() => {
+                    let words = format!("{label}: {}", value.unwrap_or_default());
+                    rows = rows.push(text(words).size(16).color(colour(t.text)));
+                }
+                None => {
+                    rows = rows.push(text(label).size(14).color(colour(t.text_secondary)));
+                }
+            }
+        }
+        rows.into()
+    }
+
+    /// A row of words and a switch, on in the accent as the phone's.
+    fn switch_row(
+        &self,
+        title: &str,
+        line: &str,
+        on: bool,
+        toggled: fn(bool) -> Message,
+        t: Colours,
+    ) -> Element<'_, Message> {
         let words = column![
-            text(self.word(StrId::ReadReceipts))
-                .size(16)
-                .color(colour(t.text)),
-            text(self.word(StrId::ReadReceiptsText))
+            text(title.to_string()).size(16).color(colour(t.text)),
+            text(line.to_string())
                 .size(14)
                 .color(colour(t.text_secondary)),
         ]
         .spacing(2)
         .width(Length::Fill);
-        let switch = toggler(self.seen.receipts)
-            .on_toggle(|on| Message::Intent(Intent::ReadReceipts { on: Switch::of(on) }))
-            // On in the accent, as the phone's switch; off as iced draws it.
+        let switch = toggler(on)
+            .on_toggle(toggled)
             .style(move |theme: &Theme, status| {
                 let mut style = toggler::default(theme, status);
                 // Every state toggled: before its first event iced calls
@@ -370,40 +645,557 @@ impl App {
                 }
                 style
             });
-        let receipts = row![words, switch]
+        row![words, switch]
             .spacing(12)
             .align_y(Alignment::Center)
-            .padding([12, 16]);
-        container(
-            column![
-                container(bar)
-                    .height(size::BAR)
-                    .padding([0, 12])
-                    .align_y(Alignment::Center),
-                receipts,
-                self.photo_rows(t),
-                self.maps_rows(t),
+            .padding([12, 16])
+            .into()
+    }
+
+    /// The Rooms tab (1379), a room as a chat (1450, walk 1 finding 20):
+    /// the rooms as list rows with their avatars beside the open room,
+    /// whose bar is a chat's (avatar, name, the people seen under it, a
+    /// press on it shows them, the menu with "Leave room"), its lines as
+    /// bubbles (another's run named once with the writer's avatar, ours
+    /// on the right in the accent) and the comings and goings as quiet
+    /// lines in the middle; the compose field with its hint once, and a
+    /// line under it only for a toast.
+    pub(super) fn rooms_pane(&self) -> Element<'_, Message> {
+        use loquax::ui::rooms::RoomsEvent;
+        let Some(node) = &self.seen.scene.rooms else {
+            return Space::new().into();
+        };
+        let t = self.tokens();
+        let lang = self.lang;
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let rows = node
+            .rows
+            .iter()
+            .enumerate()
+            .fold(column![].spacing(2), |list, (i, room)| {
+                // A room is public (1577): the globe and the word beside
+                // its name.
+                let mut line = row![
+                    avatar(&room.avatar, size::BAR_AVATAR, t),
+                    text(room.name.clone()).size(size::ROW_NAME).color(ink),
+                    text(format!(
+                        "{} {}",
+                        loquax::ui::rooms::PUBLIC_MARK,
+                        room.public.resolve(lang)
+                    ))
+                    .size(13)
+                    .color(quiet)
+                    .width(Length::Fill),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center);
+                if room.unread > 0 {
+                    line = line.push(chrome::badge(
+                        room.unread,
+                        size::BADGE_TEXT,
+                        size::BADGE_CORNER,
+                        palette(t),
+                    ));
+                }
+                list.push(chrome::list_item(
+                    container(line).padding([8, 12]),
+                    room.selected,
+                    Message::Rooms(RoomsEvent::Show(Some(i))),
+                    palette(t),
+                ))
+            });
+        let mut left = column![].spacing(6);
+        if let Some(status) = &node.status {
+            left = left
+                .push(container(text(status.resolve(lang)).size(14).color(quiet)).padding([8, 12]));
+        }
+        let left = container(left.push(scrollable(rows).height(Length::Fill)))
+            .width(Length::Fixed(260.0))
+            .height(Length::Fill)
+            .padding([8, 0]);
+        let room: Element<'_, Message> = match &node.open {
+            Some(open) => self.room_chat(open, t),
+            None => container(
+                text(
+                    node.empty
+                        .as_ref()
+                        .map(|e| e.resolve(lang))
+                        .unwrap_or_default(),
+                )
+                .size(17)
+                .color(quiet),
+            )
+            .center(Length::Fill)
+            .into(),
+        };
+        let field = text_input(&node.placeholder.resolve(lang), &node.input)
+            .on_input(|typed| Message::Rooms(RoomsEvent::Typed(typed)))
+            .on_submit(Message::Rooms(RoomsEvent::Submit))
+            .size(size::BODY)
+            .padding([10, 16])
+            .style(move |theme: &Theme, status| {
+                let mut style = text_input::default(theme, status);
+                style.background = Background::Color(colour(t.bar));
+                style.border = border::rounded(size::COMPOSE_CORNER);
+                style
+            });
+        let mut right = column![room, container(field).padding([8, 12])];
+        // A toast in the window's notice; nothing else under the field:
+        // its hint is said in it, once.
+        if let Some(notice) = &self.seen.notice {
+            right =
+                right.push(container(text(notice.clone()).size(13).color(quiet)).padding([0, 16]));
+        }
+        container(row![left, right.width(Length::Fill)].height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// The Explore tab (1578): the pages and the public rooms under one
+    /// button, one scroll. On top the search field, which also takes a
+    /// pasted address, and the order's toggle; the pages under their
+    /// headings, a press opens one, the star bookmarks it; then the rooms
+    /// the reader is in, the hubs Loquax ships and the reader's own, and
+    /// the hubs heard on the mesh. Each section says in one sentence when
+    /// it has nothing.
+    pub(super) fn explore_pane(&self) -> Element<'_, Message> {
+        use loquax::ui::explore::ExploreEvent;
+        let Some(node) = &self.seen.scene.explore else {
+            return Space::new().into();
+        };
+        let t = self.tokens();
+        let p = palette(t);
+        let lang = self.lang;
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let heading =
+            |words: String| container(text(words).size(13).color(quiet)).padding([10, 16]);
+        if let Some(sheet) = &node.sheet {
+            return self.server_sheet(sheet);
+        }
+        let pages = &node.pages;
+        let field = text_input(&pages.placeholder.resolve(lang), &pages.query)
+            .on_input(|typed| Message::Explore(ExploreEvent::Typed(typed)))
+            .on_submit(Message::Explore(ExploreEvent::OpenAddress))
+            .size(size::BODY)
+            .padding([10, 16])
+            .style(move |theme: &Theme, status| {
+                let mut style = text_input::default(theme, status);
+                style.background = Background::Color(colour(t.bar));
+                style.border = border::rounded(size::COMPOSE_CORNER);
+                style
+            });
+        let sort = button(text(pages.sort.resolve(lang)).size(13))
+            .on_press(Message::Explore(ExploreEvent::Az(!pages.az)))
+            .style(button::text);
+        let mut list = column![
+            container(
+                text(pages.title.resolve(lang))
+                    .size(size::ROW_NAME)
+                    .color(ink)
+            )
+            .padding([12, 16]),
+            container(row![field, sort].spacing(8).align_y(Alignment::Center)).padding([0, 12]),
+        ]
+        .spacing(2);
+        if let Some(off) = &pages.off {
+            list = list.push(heading(off.resolve(lang)));
+        }
+        if let Some((url, _)) = &pages.address {
+            let words = Text::Key(
+                StrId::ExploreOpenAddress,
+                Vec::from([Arg::Str(url.clone())]),
+            );
+            list = list.push(chrome::list_item(
+                container(text(words.resolve(lang)).size(size::ROW_NAME).color(ink))
+                    .padding([8, 16]),
+                false,
+                Message::Explore(ExploreEvent::OpenAddress),
+                p,
+            ));
+        }
+        for group in &pages.groups {
+            list = list.push(heading(group.heading.resolve(lang)));
+            for page in &group.rows {
+                let mut said = Vec::new();
+                if let Some(seen) = &page.seen {
+                    said.push(seen.resolve(lang));
+                }
+                if let Some(hops) = &page.hops {
+                    said.push(hops.resolve(lang));
+                }
+                let star = button(
+                    text(if page.bookmarked {
+                        "\u{2605}"
+                    } else {
+                        "\u{2606}"
+                    })
+                    .size(18),
+                )
+                .on_press(Message::Explore(ExploreEvent::Bookmark(page.dest)))
+                .style(button::text);
+                let line = row![
+                    column![
+                        text(page.label.resolve(lang))
+                            .size(size::ROW_NAME)
+                            .color(ink),
+                        text(said.join(" · ")).size(13).color(quiet),
+                    ]
+                    .width(Length::Fill),
+                    star,
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center);
+                list = list.push(chrome::list_item(
+                    container(line).padding([6, 16]),
+                    // The terminal's cursor is the terminal's: the pointer
+                    // marks nothing here.
+                    false,
+                    Message::Explore(ExploreEvent::OpenPage(page.dest)),
+                    p,
+                ));
+            }
+        }
+        if let Some(empty) = &pages.empty {
+            list = list.push(heading(empty.resolve(lang)));
+        }
+        let rooms = &node.rooms;
+        list = list.push(
+            container(
+                text(rooms.title.resolve(lang))
+                    .size(size::ROW_NAME)
+                    .color(ink),
+            )
+            .padding([16, 16]),
+        );
+        for (i, room) in rooms.joined.iter().enumerate() {
+            let mut line = row![
+                avatar(&room.avatar, size::BAR_AVATAR, t),
+                text(room.name.clone()).size(size::ROW_NAME).color(ink),
+                text(format!(
+                    "{} {}",
+                    loquax::ui::rooms::PUBLIC_MARK,
+                    room.public.resolve(lang)
+                ))
+                .size(13)
+                .color(quiet)
+                .width(Length::Fill),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center);
+            if room.unread > 0 {
+                line = line.push(chrome::badge(
+                    room.unread,
+                    size::BADGE_TEXT,
+                    size::BADGE_CORNER,
+                    p,
+                ));
+            }
+            list = list.push(chrome::list_item(
+                container(line).padding([8, 16]),
+                false,
+                Message::Explore(ExploreEvent::OpenRoom(i)),
+                p,
+            ));
+        }
+        let hub = |hub: &loquax::ui::explore::HubRow| {
+            let mut words = hub.name.resolve(lang);
+            if hub.chosen {
+                words.push_str(" \u{2713}");
+            }
+            // A server's row as a page's (1618): the name over when it was
+            // heard and how far.
+            let said = hub
+                .seen
+                .iter()
+                .chain(hub.value.iter())
+                .map(|v| v.resolve(lang))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            chrome::list_item(
                 container(
                     column![
-                        link(
-                            self.word(StrId::ProfileTitle),
-                            Message::Intent(Intent::Profile),
-                            t
-                        ),
-                        link(self.word(StrId::Help), Message::Intent(Intent::Help), t),
+                        text(words).size(size::ROW_NAME).color(ink),
+                        text(said).size(13).color(quiet),
                     ]
-                    .spacing(4)
+                    .width(Length::Fill),
                 )
-                .padding([12, 16]),
+                .padding([6, 16]),
+                false,
+                Message::Explore(ExploreEvent::Hub(hub.hash)),
+                p,
+            )
+        };
+        if let Some(empty) = &rooms.joined_empty {
+            list = list.push(heading(empty.resolve(lang)));
+        }
+        // The servers under their own heading (1621).
+        list = list.push(heading(rooms.servers_title.resolve(lang)));
+        for row in &rooms.hubs {
+            list = list.push(hub(row));
+        }
+        if let Some(empty) = &rooms.servers_empty {
+            list = list.push(heading(empty.resolve(lang)));
+        }
+        if let Some(notice) = &self.seen.notice {
+            list = list.push(heading(notice.clone()));
+        }
+        container(scrollable(list.padding([0, 0])).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// A server's sheet over Explore (1618): its name, when it was heard
+    /// and how far, the one button that makes it the public rooms' server
+    /// with what that tells it, and the rooms it named, a press joining
+    /// one. Nothing is chosen by opening it.
+    fn server_sheet<'a>(
+        &'a self,
+        sheet: &'a loquax::ui::explore::HubSheet,
+    ) -> Element<'a, Message> {
+        use loquax::ui::explore::ExploreEvent;
+        let t = self.tokens();
+        let p = palette(t);
+        let lang = self.lang;
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let said = sheet
+            .seen
+            .iter()
+            .chain(sheet.far.iter())
+            .map(|v| v.resolve(lang))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let mut list = column![
+            row![
+                text(sheet.name.resolve(lang))
+                    .size(size::BAR_NAME)
+                    .color(ink)
+                    .width(Length::Fill),
+                button(text(sheet.close.resolve(lang)).size(13))
+                    .on_press(Message::Explore(ExploreEvent::CloseSheet))
+                    .style(button::text),
             ]
-            .width(Length::Fill),
+            .align_y(Alignment::Center)
+            .padding([12, 16]),
+            container(text(said).size(13).color(quiet)).padding([0, 16]),
+        ]
+        .spacing(6);
+        if sheet.chosen {
+            list = list.push(
+                container(text(sheet.button.resolve(lang)).size(size::BODY).color(ink))
+                    .padding([10, 16]),
+            );
+        } else {
+            list = list.push(
+                container(
+                    button(text(sheet.button.resolve(lang)).size(size::BODY))
+                        .on_press(Message::Explore(ExploreEvent::UseHub(sheet.hash))),
+                )
+                .padding([10, 16]),
+            );
+            list = list.push(
+                container(text(sheet.notice.resolve(lang)).size(13).color(quiet)).padding([0, 16]),
+            );
+        }
+        list = list.push(
+            container(
+                text(sheet.rooms_title.resolve(lang))
+                    .size(size::ROW_NAME)
+                    .color(ink),
+            )
+            .padding([12, 16]),
+        );
+        for room in &sheet.rooms {
+            list = list.push(chrome::list_item(
+                container(text(room.clone()).size(size::ROW_NAME).color(ink)).padding([8, 16]),
+                false,
+                Message::Explore(ExploreEvent::JoinRoom(sheet.hash, room.clone())),
+                p,
+            ));
+        }
+        if let Some(none) = &sheet.rooms_note {
+            list = list
+                .push(container(text(none.resolve(lang)).size(13).color(quiet)).padding([4, 16]));
+        }
+        container(scrollable(list).height(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.background))),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// The open room as a chat: its bar, its people or its lines.
+    fn room_chat<'a>(
+        &'a self,
+        open: &'a loquax::ui::rooms::RoomView,
+        t: Colours,
+    ) -> Element<'a, Message> {
+        use loquax::ui::rooms::{RoomLineKind, RoomsEvent};
+        let lang = self.lang;
+        let ink = colour(t.text);
+        let quiet = colour(t.text_secondary);
+        let people_shown = open.people.is_some();
+        // The bar: a press on the avatar and the names shows the people,
+        // as a group's header does; the menu's verbs beside.
+        let head = flat(
+            row![
+                avatar(&open.avatar, size::BAR_AVATAR, t),
+                column![
+                    text(open.name.clone()).size(size::BAR_NAME).color(ink),
+                    text(open.subtitle.resolve(lang)).size(13).color(quiet),
+                ]
+                .spacing(2),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            Message::Rooms(RoomsEvent::People(!people_shown)),
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_: &Theme| container::Style {
-            background: Some(Background::Color(colour(t.background))),
-            ..container::Style::default()
-        })
+        .width(Length::Fill);
+        let mut bar = row![head].spacing(12).align_y(Alignment::Center);
+        for verb in &open.menu {
+            bar = bar.push(link(
+                &verb.label.resolve(lang),
+                Message::Rooms(verb.event.clone()),
+                t,
+            ));
+        }
+        let bar = container(bar)
+            .height(size::BAR)
+            .padding([0, 12])
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(colour(t.bar))),
+                ..container::Style::default()
+            });
+        if let Some(people) = &open.people {
+            let list = people.iter().fold(
+                column![text(open.people_note.resolve(lang)).size(14).color(quiet)].spacing(10),
+                |list, who| {
+                    let name = who.resolve(lang);
+                    list.push(
+                        row![
+                            avatar(&loquax::ui::rooms::avatar(&name), size::BAR_AVATAR, t),
+                            text(name).size(size::ROW_NAME).color(ink),
+                        ]
+                        .spacing(12)
+                        .align_y(Alignment::Center),
+                    )
+                },
+            );
+            return column![
+                bar,
+                scrollable(container(list).padding([16, 16])).height(Length::Fill)
+            ]
+            .into();
+        }
+        let width = self.chat_width() - 260.0;
+        let note = |words: String| {
+            container(text(words).size(size::DAY).color(quiet))
+                .center_x(Length::Fill)
+                .padding(iced::Padding::ZERO.top(8).bottom(4))
+        };
+        let mut list = column![note(open.live.resolve(lang))].padding([0, 12]);
+        for line in &open.lines {
+            if !line.bubble {
+                let said = line.text.resolve(lang);
+                list = list.push(note(match line.kind {
+                    RoomLineKind::Error => format!("! {said}"),
+                    _ => said,
+                }));
+                continue;
+            }
+            let ours = line.ours;
+            let (ground, ink, meta) = match ours {
+                true => (t.bubble_ours, t.bubble_ours_text, t.bubble_ours_meta),
+                false => (t.bubble_theirs, t.bubble_theirs_text, t.bubble_theirs_meta),
+            };
+            let (ground, ink, meta) = (colour(ground), colour(ink), colour(meta));
+            list = list.push(Space::new().height(match line.named || ours {
+                true => size::GAP,
+                false => size::GAP_GROUPED,
+            }));
+            if line.named {
+                list = list.push(
+                    container(
+                        text(line.who.resolve(lang))
+                            .size(13)
+                            .color(colour(t.accent)),
+                    )
+                    .padding(iced::Padding::ZERO.left(ROOM_FACE + 8.0)),
+                );
+            }
+            let action = matches!(
+                line.kind,
+                RoomLineKind::Said(leviculum_rrc::LineKind::Action)
+            );
+            let said = match action {
+                true => format!("{} {}", line.who.resolve(lang), line.text.resolve(lang)),
+                false => line.text.resolve(lang),
+            };
+            let mut words = text(said).size(size::BODY).color(ink);
+            if action {
+                words = words.font(iced::Font {
+                    style: iced::font::Style::Italic,
+                    ..iced::Font::DEFAULT
+                });
+            }
+            let mut inside = column![words].spacing(4);
+            if let Some(time) = &line.time {
+                inside = inside.push(
+                    container(text(time.clone()).size(size::META).color(meta))
+                        .align_right(Length::Shrink),
+                );
+            }
+            let shape = container(inside)
+                .padding([8, 12])
+                .max_width(width * size::BUBBLE_PART)
+                .style(move |_: &Theme| container::Style {
+                    background: Some(Background::Color(ground)),
+                    border: border::rounded(size::CORNER),
+                    ..container::Style::default()
+                });
+            // Another's bubble stands beside its writer's avatar, the
+            // first of a run; the rest of the run keeps its place.
+            let face: Element<'_, Message> = match (&line.avatar, ours) {
+                (_, true) => Space::new().into(),
+                (Some(a), false) => avatar(a, ROOM_FACE, t),
+                (None, false) => Space::new().width(ROOM_FACE).into(),
+            };
+            let side: Element<'_, Message> = match ours {
+                true => container(shape).align_right(Length::Fill).into(),
+                false => row![face, shape]
+                    .spacing(8)
+                    .align_y(Alignment::Start)
+                    .into(),
+            };
+            list = list.push(side);
+        }
+        list = list.push(Space::new().height(size::GAP));
+        column![
+            bar,
+            soft(
+                scrollable(list)
+                    .anchor_bottom()
+                    .height(Length::Fill)
+                    .width(Length::Fill)
+            ),
+        ]
         .into()
     }
 
@@ -525,11 +1317,19 @@ impl App {
             );
         }
         let empty = (self.scene.list.as_ref()).is_none_or(|list| list.rows.is_empty());
+        let picked = self.picked_ranges();
         let rows = self.listed().into_iter().fold(column![], |rows, r| {
             // A right click opens the row's menu (1371), as a long press
             // does on the phone.
-            let item = mouse_area(list_row(r, self.seen.now, self.lang, t))
-                .on_right_press(Message::Intent(Intent::Menu(Some(r.id))));
+            let item = mouse_area(list_row(
+                r,
+                self.seen.now,
+                self.lang,
+                t,
+                &picked,
+                self.picking,
+            ))
+            .on_right_press(Message::Intent(Intent::Menu(Some(r.id))));
             let rows = rows.push(item);
             match self.menu == Some(r.id) {
                 true => rows.push(self.row_actions(r, t)),
@@ -545,7 +1345,7 @@ impl App {
             )
             .padding(16)
             .into(),
-            false => soft(scrollable(rows).height(Length::Fill)),
+            false => soft_picking(scrollable(rows).height(Length::Fill), self.picking),
         };
         container(pane.push(body))
             .width(self.list_width())
@@ -826,10 +1626,7 @@ impl App {
         line = line.push(
             row![
                 avatar(avatar_of, size::BAR_AVATAR, t),
-                text(open.bar.title.resolve(self.lang))
-                    .size(size::BAR_NAME)
-                    .color(colour(t.text))
-                    .width(Length::Fill),
+                self.bar_title(&open.bar.title, t),
             ]
             .spacing(12)
             .align_y(Alignment::Center),
@@ -853,6 +1650,35 @@ impl App {
             .into()
     }
 
+    /// The chat bar's title: the name, and under it, small, the sentence of
+    /// a name two peers share (1452), which the scene joins to the name.
+    fn bar_title<'a>(&self, title: &Text, t: Colours) -> Element<'a, Message> {
+        let line = |words: String| {
+            text(words)
+                .size(size::BAR_NAME)
+                .color(colour(t.text))
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::None)
+        };
+        match title {
+            Text::Join(parts) if parts.len() == 2 => column![
+                line(parts[0].resolve(self.lang)),
+                text(parts[1].resolve(self.lang))
+                    .size(size::ROW_TIME)
+                    .color(colour(t.text_secondary))
+                    .wrapping(text::Wrapping::None),
+            ]
+            .width(Length::Fill)
+            .clip(true)
+            .into(),
+            title => text(title.resolve(self.lang))
+                .size(size::BAR_NAME)
+                .color(colour(t.text))
+                .width(Length::Fill)
+                .into(),
+        }
+    }
+
     /// A bar's back as a chevron.
     fn back<'a>(&self, back: &Action, t: Colours) -> Element<'a, Message> {
         self.icon_action(
@@ -868,12 +1694,13 @@ impl App {
     /// opened.
     fn groups<'a>(&'a self, open: &'a Chat, t: Colours) -> Element<'a, Message> {
         let width = self.chat_width();
+        let picked = self.picked_ranges();
         let mut list = column![].padding([0, 12]);
         for group in &open.groups {
-            list = self.group(list, open, group, width, t);
+            list = self.group(list, open, group, width, &picked, t);
         }
         list = list.push(Space::new().height(size::GAP));
-        soft(
+        soft_picking(
             scrollable(list)
                 .anchor_bottom()
                 .height(Length::Fill)
@@ -883,7 +1710,29 @@ impl App {
                     s.container.background = Some(Background::Color(colour(t.background)));
                     s
                 }),
+            self.picking,
         )
+    }
+
+    /// A line of the chat nobody wrote (a day, a group's own line) as it is
+    /// drawn, made selectable as the run `key` (1475).
+    fn quiet_line<'a>(
+        &self,
+        words: String,
+        key: RunKey,
+        picked: &HashMap<RunKey, Range<usize>>,
+        t: Colours,
+    ) -> Element<'a, Message> {
+        let ink = colour(t.text_secondary);
+        selectable(
+            text(words.clone()).size(size::DAY).color(ink),
+            words,
+            picked.get(&key).cloned(),
+            Color { a: 0.3, ..ink },
+            self.picking,
+            move |pick| Message::PickText(key, pick),
+        )
+        .into()
     }
 
     fn group<'a>(
@@ -892,17 +1741,15 @@ impl App {
         open: &'a Chat,
         group: &'a Group,
         width: f32,
+        picked: &HashMap<RunKey, Range<usize>>,
         t: Colours,
     ) -> iced::widget::Column<'a, Message> {
-        if let Some(day) = &group.day {
+        if let (Some(day), Some(first)) = (&group.day, group.bubbles.first()) {
+            let key = RunKey::new(first.bubble.key, Part::Day);
             list = list.push(
-                container(
-                    text(day.words.resolve(self.lang))
-                        .size(size::DAY)
-                        .color(colour(t.text_secondary)),
-                )
-                .center_x(Length::Fill)
-                .padding(iced::Padding::ZERO.top(16).bottom(8)),
+                container(self.quiet_line(day.words.resolve(self.lang), key, picked, t))
+                    .center_x(Length::Fill)
+                    .padding(iced::Padding::ZERO.top(16).bottom(8)),
             );
         }
         // A group's chat names the writer above a group of bubbles that
@@ -921,14 +1768,11 @@ impl App {
             // A group's own line, "Anna joined." (1307 G2): centred, as
             // the day line, no one's bubble.
             if node.bubble.note {
+                let key = RunKey::new(node.bubble.key, Part::Note);
                 list = list.push(
-                    container(
-                        text(node.bubble.body.clone())
-                            .size(size::DAY)
-                            .color(colour(t.text_secondary)),
-                    )
-                    .center_x(Length::Fill)
-                    .padding(iced::Padding::ZERO.top(8).bottom(4)),
+                    container(self.quiet_line(node.bubble.body.clone(), key, picked, t))
+                        .center_x(Length::Fill)
+                        .padding(iced::Padding::ZERO.top(8).bottom(4)),
                 );
                 continue;
             }
@@ -939,7 +1783,7 @@ impl App {
                 false => size::GAP,
             };
             list = list.push(Space::new().height(gap));
-            list = list.push(self.bubble(open, node, width, t));
+            list = list.push(self.bubble(open, node, width, picked, t));
             // A line that came after newer ones (1307 pass four).
             if node.bubble.late {
                 list = list.push(
@@ -969,6 +1813,7 @@ impl App {
         open: &'a Chat,
         node: &'a BubbleNode,
         width: f32,
+        picked: &HashMap<RunKey, Range<usize>>,
         t: Colours,
     ) -> Element<'a, Message> {
         let (bubble, place) = (&node.bubble, &node.place);
@@ -982,14 +1827,23 @@ impl App {
         if let Some(quote) = &bubble.quote {
             let who = match quote.ours {
                 Some(true) => Some(self.word(StrId::QuoteYou).to_string()),
-                Some(false) => Some(open.bar.title.resolve(self.lang)),
+                Some(false) => Some(loquax::ui::scene::peer_title(&open.bar).resolve(self.lang)),
                 None => None,
             };
             let mut said = column![];
             if let Some(who) = who {
                 said = said.push(text(who).size(13).color(meta));
             }
-            said = said.push(text(quote.text.clone()).size(14).color(meta));
+            // The quote selects (1475), its own run of the bubble.
+            let key = RunKey::new(bubble.key, Part::Quote);
+            said = said.push(selectable(
+                text(quote.text.clone()).size(14).color(meta),
+                quote.text.as_str(),
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..meta },
+                self.picking,
+                move |pick| Message::PickText(key, pick),
+            ));
             let stripe =
                 container(Space::new().width(3).height(Length::Fill)).style(move |_: &Theme| {
                     container::Style {
@@ -1049,25 +1903,19 @@ impl App {
         if let Some(invite) = &node.invite {
             inside = inside.push(self.invite_card(invite, !ours, t));
         } else if let Some(words) = &node.text {
-            inside = inside.push(text(words.clone()).size(size::BODY).color(ink));
+            // The words can be selected (1444): the selection under them
+            // in the ink, faint, which shows on either bubble's ground.
+            let key = RunKey::body(bubble.key);
+            inside = inside.push(selectable(
+                text(words.as_str()).size(size::BODY).color(ink),
+                words,
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..ink },
+                self.picking,
+                move |pick| Message::PickText(key, pick),
+            ));
         }
-        if let Some(fix) = &bubble.fix {
-            let mut words = loquax::telemetry::coordinates(&fix.location);
-            if let Some(accuracy) = loquax::telemetry::accuracy(&fix.location) {
-                words = format!("{words}  {accuracy}");
-            }
-            // The newest report says whether the position is alive
-            // (1209), in the scene's words; an older run its count.
-            match &node.live {
-                Some(live) => {
-                    words.push_str(" · ");
-                    words.push_str(&live.resolve(self.lang));
-                }
-                None => words.push_str(&loquax::telemetry::run_words(
-                    bubble.updates,
-                    bubble.since.as_ref(),
-                )),
-            }
+        if let (Some(fix), Some(words)) = (&bubble.fix, position_line(node, self.lang)) {
             let stale = self.seen.now.is_some_and(|now| {
                 fix.fix_time()
                     .saturating_add(loquax::telemetry::STALE_AFTER_SECS)
@@ -1077,8 +1925,20 @@ impl App {
                 true => meta,
                 false => ink,
             };
+            // A press opens the map; a drag or a double click selects
+            // the line (1475).
+            let key = RunKey::new(bubble.key, Part::Position);
+            let line = selectable(
+                text(words.clone()).size(size::BODY - 2.0).color(line_ink),
+                words,
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..line_ink },
+                self.picking,
+                move |pick| Message::PickText(key, pick),
+            )
+            .in_button();
             inside = inside.push(flat(
-                text(words).size(size::BODY - 2.0).color(line_ink),
+                line,
                 Message::Intent(Intent::ShowMap {
                     peer: Some(open.peer),
                 }),
@@ -1480,11 +2340,11 @@ impl App {
             .placeholder(format!(
                 "{} {}",
                 open.compose.hint.resolve(self.lang),
-                open.bar.title.resolve(self.lang)
+                loquax::ui::scene::peer_title(&open.bar).resolve(self.lang)
             ))
             .size(size::COMPOSE_TEXT)
             .height(Length::Shrink)
-            .padding([6, 4])
+            .padding(iced::Padding::from([COMPOSE_PAD_Y, COMPOSE_PAD_X]))
             .on_action(Message::Compose)
             .key_binding(move |press| {
                 let is_enter = matches!(
@@ -1503,6 +2363,11 @@ impl App {
                 value: colour(t.text),
                 selection: colour(t.selected_row),
             });
+        // A middle click on the field pastes the PRIMARY selection (1444).
+        // Where it clicked (1475): the pointer's place over the field.
+        let editor = mouse_area(editor)
+            .on_middle_press(Message::PastePrimary)
+            .on_move(Message::ComposePointer);
         let pill = container(row![face, editor, tail].align_y(Alignment::Center))
             .width(Length::Fill)
             .padding([0, 6])
@@ -1769,12 +2634,19 @@ impl App {
 
 /// One row of the list: a click is a hit on its node, which the scene
 /// turns into its opening ([`scene::Scene::action`]).
-fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> Element<'a, Message> {
+fn list_row<'a>(
+    r: &'a Row,
+    now: Option<WallTime>,
+    lang: Lang,
+    t: Colours,
+    picked: &HashMap<RunKey, Range<usize>>,
+    picking: bool,
+) -> Element<'a, Message> {
     let open = r.selected;
     let content = &r.row;
     let unread = content.unread > 0;
     let when = match (content.at, now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => scene::list_time(&at, &now).resolve(lang),
         _ => String::new(),
     };
     let time_ink = match unread {
@@ -1817,23 +2689,10 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
     }
     let side = side.push(under);
     // A report's line is the scene's words after the pin, as the phone
-    // sets it; a text of ours is said as ours.
-    // A message typed and not sent stands in for it, in italics (1219).
-    let invited = r
-        .group
-        .as_ref()
-        .filter(|g| content.last.is_empty() || g.standing == loquax::ui::groups::Standing::Invited);
-    let last = match (&r.draft, &r.live, content.ours && content.kind == "text") {
-        (Some(draft), _, _) => draft.resolve(lang),
-        // A group's row says it is an invitation, or how many are in it
-        // while nothing was written yet (1307).
-        (None, None, _) if invited.is_some() => {
-            invited.map(|g| g.words.resolve(lang)).unwrap_or_default()
-        }
-        (None, Some(live), _) => format!("{} {}", chat::PIN, live.resolve(lang)),
-        (None, None, true) => format!("{}: {}", StrId::QuoteYou.text(lang), content.last),
-        (None, None, false) => content.last.clone(),
-    };
+    // sets it; a text of ours is said as ours; a message typed and not
+    // sent stands in for it, in italics (1219). The core words it, which
+    // is also what a selection of it copies (1475).
+    let last = preview_line(r, lang);
     let style = match r.draft {
         Some(_) => iced::font::Style::Italic,
         None => iced::font::Style::Normal,
@@ -1843,15 +2702,42 @@ fn list_row<'a>(r: &'a Row, now: Option<WallTime>, lang: Lang, t: Colours) -> El
             .size(size::ROW_NAME)
             .color(colour(t.text))
             .wrapping(text::Wrapping::None),
-        text(last)
-            .size(size::ROW_LAST)
+        // The line selects (1475): a press opens the chat as before, a
+        // drag or a double click selects.
+        {
+            let key = RunKey::new(peer_key(&content.peer), Part::Preview);
+            let ink = colour(t.text_secondary);
+            selectable(
+                text(last.clone())
+                    .size(size::ROW_LAST)
+                    .color(ink)
+                    .font(iced::Font {
+                        style,
+                        ..iced::Font::DEFAULT
+                    })
+                    .wrapping(text::Wrapping::None),
+                last,
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..ink },
+                picking,
+                move |pick| Message::PickText(key, pick),
+            )
+            .in_button()
+        },
+    ]
+    // Two peers of one name (1452): a third line says so, quiet, whole;
+    // beside the name it would be cut mid-word at the list's width.
+    .extend(r.same_name.as_ref().map(|same| {
+        text(same.resolve(lang))
+            .size(size::ROW_TIME)
             .color(colour(t.text_secondary))
             .font(iced::Font {
-                style,
+                style: iced::font::Style::Italic,
                 ..iced::Font::DEFAULT
             })
-            .wrapping(text::Wrapping::None),
-    ]
+            .wrapping(text::Wrapping::None)
+            .into()
+    }))
     .spacing(2)
     .width(Length::Fill)
     .clip(true);

@@ -151,9 +151,23 @@ pub struct Budget {
     pub scene_held: usize,
     pub scene_peak: usize,
     pub scene_stack: usize,
+    /// What a draw may keep: nothing, but on a chat the renderer's record
+    /// of the bubbles whose last line it showed ([`SEEN_HELD`]).
+    pub draw_held: isize,
     pub draw_peak: usize,
     pub draw_stack: usize,
 }
+
+/// The renderer's record of the bubbles a chat's draw showed the last
+/// line of (`Renderer::seen`, ea3ffd02, 1541): a key of 8 bytes each,
+/// at most one per row of the chat. A chat's draw keeps it (window 15:
+/// `chat` +64 B with 8 keys, `chat-large` +32 B with 4), the next draw of
+/// another screen gives it back (`groups` -64, `groups-large` -32): the
+/// census walks its screens on one renderer. 128 B is a vector of 16
+/// keys, the capacity a push grows to for the 15 rows the default size's
+/// chat shows at most (`page_entries` is twice them); a test keeps the
+/// rows under it.
+pub const SEEN_HELD: isize = 128;
 
 /// The chats list: a list scene is rows, not the history (held under
 /// 60,000 B, peak 70,000 B, stack 100,000 B); a draw keeps nothing and
@@ -162,6 +176,7 @@ pub const CHATS: Budget = Budget {
     scene_held: 60_000,
     scene_peak: 70_000,
     scene_stack: 100_000,
+    draw_held: 0,
     draw_peak: 180_000,
     draw_stack: 16_000,
 };
@@ -173,6 +188,7 @@ pub const CHAT: Budget = Budget {
     scene_held: 250_000,
     scene_peak: 320_000,
     scene_stack: 160_000,
+    draw_held: SEEN_HELD,
     draw_peak: 180_000,
     draw_stack: 24_000,
 };
@@ -187,6 +203,7 @@ pub const SHEET: Budget = Budget {
     scene_held: 60_000,
     scene_peak: 140_000,
     scene_stack: 140_000,
+    draw_held: 0,
     draw_peak: 160_000,
     draw_stack: 18_000,
 };
@@ -202,6 +219,7 @@ pub const MAP: Budget = Budget {
     scene_held: 2_000,
     scene_peak: 6_000,
     scene_stack: 18_000,
+    draw_held: 0,
     draw_peak: 160_000,
     draw_stack: 32_000,
 };
@@ -216,14 +234,19 @@ pub const RENDERER_HELD: usize = 220_000;
 
 impl Budget {
     /// The first ceiling `census` passes, by its name; none when it keeps
-    /// them all. A draw that keeps anything is over too.
+    /// them all. A draw that keeps more than [`Budget::draw_held`] is over
+    /// too, and one that gives back more than a chat's draw kept
+    /// ([`SEEN_HELD`]): it freed what another step held.
     pub fn over(&self, census: &Census) -> Option<&'static str> {
         let held = |step: &Step| usize::try_from(step.held).unwrap_or(0);
         [
             ("scene_held", held(&census.scene) >= self.scene_held),
             ("scene_peak", census.scene.peak >= self.scene_peak),
             ("scene_stack", census.scene.stack >= self.scene_stack),
-            ("draw_held", census.draw.held != 0),
+            (
+                "draw_held",
+                census.draw.held > self.draw_held || census.draw.held < -SEEN_HELD,
+            ),
             ("draw_peak", census.draw.peak >= self.draw_peak),
             ("draw_stack", census.draw.stack >= self.draw_stack),
         ]
@@ -364,6 +387,15 @@ impl fmt::Display for SessionLine<'_> {
     }
 }
 
+/// A screen's name in a census line in `size` (1532): the default size's
+/// as before, the other's with its size after a dash, `chats-large`.
+pub fn screen_name(screen: &str, size: crate::font::Size) -> alloc::string::String {
+    match size == crate::font::Size::DEFAULT {
+        true => alloc::string::String::from(screen),
+        false => alloc::format!("{screen}-{}", size.name()),
+    }
+}
+
 /// The census line's words after the screen's name: what both steps cost
 /// and the verdict, `ok` or `over=<ceiling>`.
 pub struct Line<'a> {
@@ -419,9 +451,32 @@ mod tests {
         );
         census.draw.held = 8;
         assert_eq!(CHATS.over(&census), Some("draw_held"));
+        // 1556: a chat's draw keeps its seen record, the next list's
+        // gives it back; more either way is over.
+        census.draw.held = 64;
+        assert_eq!(CHAT.over(&census), None);
+        census.draw.held = SEEN_HELD + 8;
+        assert_eq!(CHAT.over(&census), Some("draw_held"));
+        census.draw.held = -64;
+        assert_eq!(CHATS.over(&census), None);
+        census.draw.held = -SEEN_HELD - 8;
+        assert_eq!(CHATS.over(&census), Some("draw_held"));
         census.draw.held = 0;
         census.scene.stack = 100_000;
         assert_eq!(CHATS.over(&census), Some("scene_stack"));
         assert_eq!(CHAT.over(&census), None);
+    }
+
+    /// [`SEEN_HELD`] holds the seen record of the longest chat a size
+    /// shows: one key a row, in the capacity a push grows to.
+    #[test]
+    fn the_seen_record_fits_its_budget() {
+        let rows = crate::font::Size::ALL
+            .iter()
+            .map(|&size| crate::screen::viewing(size).chat_rows)
+            .max()
+            .unwrap_or(1);
+        let held = 8 * rows.max(4).next_power_of_two();
+        assert!(held as isize <= SEEN_HELD, "{rows} rows hold {held} B");
     }
 }

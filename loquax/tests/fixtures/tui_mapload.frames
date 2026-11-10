@@ -1,6 +1,6 @@
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>───────────────────────────────────────┐
-│▌<61ddb79a…>            ││                                                    │
+┌● tui───────────────────┐┌  Unknown───────────────────────────────────────────┐
+│▌Unknown                ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -18,14 +18,14 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
-│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                  No messages yet                   │
+│                        │├  to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: before the load ---
-┌  Loquax afbda7b3───────┐┌● map──────────────── z15 · 1 in view · loading map ┐
-│▌them ·61dd       14:00 ││  ·        · ·                        · ·        ·  │
+┌  tui───────────────────┐┌● map───────────────── loading the map of this area ┐
+│▌them             14:00 ││  ·        · ·                        · ·        ·  │
 │▌◎ position · live   ⌖  ││ ·        ·             100 m            ·        · │
 │                        ││·       ·         · · ·      · · ·         ·       ·│
 │                        ││       ·        ·                  ·        ·       │
@@ -34,7 +34,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││    ·       ·       ·          ·       ·       ·    │
 │                        ││    ·      ·       ·            ·       ·      ·    │
 │                        ││    ·      ·      ·              ·      ·      ·    │
-│                        ││    ·      ·      ·       ◉ them ·61dd · 4 min ·    │
+│                        ││    ·      ·      ·       ◉ them · 4 min ago   ·    │
 │                        ││    ·      ·       ·            ·       ·      ·    │
 │                        ││    ·       ·       ··        ··       ·       ·    │
 │                        ││     ·       ·         · ·· ·         ·       ·     │
@@ -43,14 +43,14 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││·       ·         · · ·      · · ·         ·       ·│
 │                        ││ ·       ··             · ··             ··       · │
 │                        ││  ·         ·                          ·         ·  │
-│                        ││  radar on them ·61dd, no own position · rings 50 m │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        ││No map loaded for this area · Rings 50 m around them│
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: after the load ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
-│▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
+│▌them             14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
 │▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
 │                        ││            ⠈⠁         ⢣             ⠘⣷⡀           ⢀│
@@ -59,7 +59,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                         ⠈⣆             ⠈⢿⣾⠟⠁       │
 │                        ││                          ⠈⢆             ⠈⣿⡀        │
 │                        ││                           ⠈⠳⡀            ⢹⣇        │
-│                        ││                          ◉ them ·61dd · 4 min      │
+│                        ││                          ◉ them · 4 min ago        │
 │                        ││                              ⢸           ⣼⠏        │
 │                        ││                            ⢀⡠⠜         ⢀⣼⠟         │
 │                        ││                         ⣀⠤⠚⠉         ⢀⣴⡿⠋          │
@@ -69,13 +69,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││         ⣀⣤⡶⠟⠋⠁              ⣠⣾⠟⠁                   │
 │                        ││     ⢀⣤⣶⠟⠋⠁               ⢀⣤⡾⠋                      │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: held already ---
-┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
-│▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
+│▌them             14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
 │▌◎ position · live   ⌖  ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
 │                        ││            ⠈⠁         ⢣             ⠘⣷⡀           ⢀│
@@ -84,7 +84,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                         ⠈⣆             ⠈⢿⣾⠟⠁       │
 │                        ││                          ⠈⢆             ⠈⣿⡀        │
 │                        ││                           ⠈⠳⡀            ⢹⣇        │
-│                        ││                          ◉ them ·61dd · 4 min      │
+│                        ││                          ◉ them · 4 min ago        │
 │                        ││                              ⢸           ⣼⠏        │
 │                        ││                            ⢀⡠⠜         ⢀⣼⠟         │
 │                        ││                         ⣀⠤⠚⠉         ⢀⣴⡿⠋          │
@@ -94,13 +94,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││         ⣀⣤⡶⠟⠋⠁   ┌────────────────────────────────┐│
 │                        ││     ⢀⣤⣶⠟⠋⠁       │✓ the map here is loaded already││
 │                        ││                  └────────────────────────────────┘│
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: loading the area ---
-┌  Loquax afbda7b3───────┐┌● map───────────────── z9 · 1 in view · loading map ┐
-│▌them ·61dd       14:00 ││                                                    │
+┌  tui───────────────────┐┌● map───────────────── loading the map of this area ┐
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -109,7 +109,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                          ◉ them ·61dd · 4 min      │
+│                        ││                          ◉ them · 4 min ago        │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -119,13 +119,13 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                      Natural Earth │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: the area loaded ---
-┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z9 · 1 in view ┐
-│▌them ·61dd       14:00 ││                                                    │
+┌  tui───────────────────┐┌● map───────────────────────────────────────────────┐
+│▌them             14:00 ││                                                    │
 │▌◎ position · live   ⌖  ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -134,7 +134,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││                          ◉ them ·61dd · 4 min      │
+│                        ││                          ◉ them · 4 min ago        │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -144,7 +144,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                       © OpenStreetMap contributors │
-│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit

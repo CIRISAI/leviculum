@@ -16,8 +16,9 @@
 #
 #   M9_REPRO sha_tree=<sha256> sha_clone=<sha256> verdict=<same|DIFFERENT>
 #
-# Red when either build fails, when the bytes differ, or when an image names
-# a host path. A tree with tracked changes is not HEAD (its embedded dirty
+# Red when either build fails, when the bytes differ, when an image names
+# a host path, or when an image's [FW_BUILD] stamp is not HEAD's, clean
+# (1521b). A tree with tracked changes is not HEAD (its embedded dirty
 # flag alone differs), so then both builds are clones of HEAD at two paths.
 # Without the esp toolchain it says SKIP, as build-m9-image.sh does, unless
 # M9_IMAGE_REQUIRE_ESP=1; without unprivileged user namespaces too, because
@@ -63,6 +64,30 @@ verdict() {
     return "$rc"
 }
 
+# stamp_is_head <image> <head sha>: 1 unless the image's [FW_BUILD] stamp
+# names <head> and a clean tree (1521b). Window 7's image said
+# git_sha=c1003ed9, the parent of the commit it was flashed for: it was
+# built before that commit and nothing re-ran the build script.
+stamp_is_head() {
+    local img="$1" head="$2" stamp sha
+    stamp="$(grep -aoE 'git_sha=[0-9a-z]+ dirty=(true|false)' "$img" | head -n 1)"
+    sha="${stamp#git_sha=}"
+    sha="${sha%% *}"
+    if [ -z "$stamp" ]; then
+        echo "$TAG FAIL $img carries no git_sha stamp"
+        return 1
+    fi
+    if [ "${#sha}" -lt 7 ] || [ "${head#"$sha"}" = "$head" ]; then
+        echo "$TAG FAIL $img says $stamp, HEAD is $head"
+        return 1
+    fi
+    if [ "${stamp##* }" != "dirty=false" ]; then
+        echo "$TAG FAIL $img says $stamp: built from a tree with tracked changes"
+        return 1
+    fi
+    echo "$TAG stamp $stamp is HEAD"
+}
+
 selftest() {
     local dir rc=0
     mkdir -p "$ROOT/target/tmp"
@@ -79,8 +104,17 @@ selftest() {
     cp "$dir/b" "$dir/a"
     verdict "$dir/a" "$dir/b" /home/builder >/dev/null &&
         { echo "$TAG selftest FAIL: a host path leaked twice passed"; rc=1; }
+    # The stamp (1521b): HEAD's passes, its parent's and a dirty one do not.
+    printf 'x\0git_sha=1234abcd dirty=false version=0.1.5\0' >"$dir/a"
+    stamp_is_head "$dir/a" 1234abcdef0123456789 >/dev/null ||
+        { echo "$TAG selftest FAIL: HEAD's own stamp was refused"; rc=1; }
+    stamp_is_head "$dir/a" 9999abcdef0123456789 >/dev/null &&
+        { echo "$TAG selftest FAIL: another commit's stamp passed"; rc=1; }
+    printf 'x\0git_sha=1234abcd dirty=true version=0.1.5\0' >"$dir/a"
+    stamp_is_head "$dir/a" 1234abcdef0123456789 >/dev/null &&
+        { echo "$TAG selftest FAIL: a dirty stamp passed"; rc=1; }
     rm -rf "$dir"
-    [ "$rc" -eq 0 ] && echo "$TAG selftest ok: equal images pass, a differing or path-naming image is refused"
+    [ "$rc" -eq 0 ] && echo "$TAG selftest ok: equal images pass, a differing or path-naming image is refused, a stamp not HEAD's is refused"
     return "$rc"
 }
 
@@ -169,5 +203,7 @@ clone_build "$clone" clone || exit 1
 
 verdict "$work/tree.bin" "$work/clone.bin" "$first/" "$clone/" "$HOME/" /mnt/leviculum/
 rc=$?
+stamp_is_head "$work/tree.bin" "$head" || rc=1
+stamp_is_head "$work/clone.bin" "$head" || rc=1
 echo "$TAG $(($(date +%s) - start)) s for both builds"
 exit "$rc"

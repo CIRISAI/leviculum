@@ -29,6 +29,7 @@ pub mod home;
 pub mod ihex;
 pub mod infouf2;
 pub mod manifest;
+pub mod maps;
 pub mod media;
 pub mod mgmt;
 pub mod name;

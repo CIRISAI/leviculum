@@ -31,6 +31,9 @@ const WIDTH: usize = crate::screen::COLS - 1;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pairing {
     field: Field,
+    /// An error that is a state (1493): the code checked but flash would
+    /// not keep it. Shown in the verdict's place until the next key.
+    pub note: Option<&'static str>,
 }
 
 impl Pairing {
@@ -46,6 +49,7 @@ impl Pairing {
         if key.kind == KeyEventKind::Release {
             return None;
         }
+        self.note = None;
         if key.code == KeyCode::Enter {
             return match self.typing() {
                 Typing::Complete(Ok(code)) => Some(code),
@@ -82,7 +86,10 @@ impl Pairing {
             line.push_str(group);
         }
         lines.push(line);
-        lines.push(verdict(&self.typing()));
+        lines.push(match self.note {
+            Some(note) => String::from(note),
+            None => verdict(&self.typing()),
+        });
         lines
     }
 }

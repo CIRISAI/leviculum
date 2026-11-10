@@ -1,13 +1,15 @@
-//! The scene as styled lines on the M9's cell grid: 32 x 12 cells of the
-//! 10 x 20 atlas ([`crate::font`]) on the 320 x 240 panel. The chats list here,
+//! The scene as styled lines on the M9's cell grid: 35 x 16 cells of the
+//! 9 x 15 atlas or 32 x 12 of the 10 x 20, the reader's [`Size`]
+//! ([`crate::font`]), on the 320 x 240 panel. The chats list here,
 //! the open chat under its bar in [`crate::chat`].
 //!
 //! The scene is the one the phone and the window draw (`Scene`,
 //! `loquax::ui::scene`); this words and places it in cells, as the
 //! terminal's list does (`loquax::ui::layout::list`): two rows a
 //! conversation, the name and the time over the last line and its count.
-//! Its own lines are the top bar above and the tab bar below, which the
-//! terminal draws as pane borders and the M9 has no room for.
+//! Its own line is the top bar above, which the terminal draws as a pane
+//! border. The tab bar below is drawn only for a scene that carries one;
+//! the M9's does not (1532, [`viewing`]).
 //!
 //! The delivery marks stand on their ASCII ladder
 //! ([`leviculum_ui::delivery::DeliveryGlyph::ascii`]): the atlas has no
@@ -28,10 +30,11 @@ use loquax::ui::chat::Mark;
 use loquax::ui::scene::{Avatar, LayoutClass, Lead, Row, Scene, ScreenId, TopBar};
 use loquax::ui::strings::{Lang, StrId, Text};
 use loquax::ui::{Pane, UiModel};
-use loquax::when::{list_time, WallTime};
+use loquax::when::WallTime;
 
-/// Cells across and rows, the atlas's grid ([`crate::font`]).
-pub use crate::font::{COLS, ROWS};
+/// Cells across and rows of the large size's grid ([`crate::font`]): the
+/// map's; every other screen takes its grid from the reader's [`Size`].
+pub use crate::font::{Size, COLS, ROWS};
 
 /// Below this many cells a grid is narrow (1428), the M9's 32: the top
 /// bar gives the home's word the room its title does not use, the title
@@ -44,6 +47,62 @@ pub const NARROW_COLS: usize = loquax::ui::layout::NARROW;
 /// Rows a conversation takes: the name and time, the last line and its
 /// count or mark.
 pub const ENTRY_ROWS: usize = 2;
+
+/// What the board's loop drew last (1491): a turn whose pull brought
+/// nothing, or nothing new, draws nothing. The loop asks [`Drawn::due`]
+/// after it folded what the client drained, and says [`Drawn::drawn`]
+/// at the end of every turn: every other path of a turn that changes the
+/// model (a key, a control, the pairing) draws it there and then.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Drawn {
+    presented: loquax::ui::Presented,
+}
+
+impl Drawn {
+    /// Whether the turn draws: the model's revision moved since the last
+    /// frame.
+    pub fn due<B>(&mut self, model: &UiModel<B>) -> bool {
+        self.presented.due(Self::stamp(model))
+    }
+
+    /// The frame on the panel shows `model` as it is.
+    pub fn drawn<B>(&mut self, model: &UiModel<B>) {
+        self.presented.drawn(Self::stamp(model));
+    }
+
+    /// How many draws [`Drawn::due`] allowed.
+    pub fn builds(&self) -> u64 {
+        self.presented.builds()
+    }
+
+    fn stamp<B>(model: &UiModel<B>) -> u64 {
+        loquax::ui::Presented::stamp(model.revision, &[])
+    }
+}
+
+/// What the M9's screen shows in `size` (1490): the list's entries under
+/// the top bar, and in a chat at most one bubble row a cell row. The
+/// scene is built for this window and its margin, never for the whole
+/// store ([`loquax::ui::Viewing`]). No tab bar (1532): the M9 has a key
+/// for the map and one for the house, and the bar's row is the content's.
+pub fn viewing(size: Size) -> loquax::ui::Viewing {
+    let below = size.grid().1 - 1;
+    loquax::ui::Viewing {
+        list_rows: below / ENTRY_ROWS,
+        chat_rows: below,
+        apart: true,
+        tabs: false,
+    }
+}
+
+/// The size `model` is viewed in: the one whose [`viewing`] the board
+/// set on it (1532), [`Size::DEFAULT`] for a model no board set.
+pub fn size_of<B>(model: &UiModel<B>) -> Size {
+    Size::ALL
+        .into_iter()
+        .find(|&size| viewing(size) == model.viewing)
+        .unwrap_or(Size::DEFAULT)
+}
 
 /// The selection's bar in the margin, the terminal's (`layout::BAR`).
 pub const BAR: char = '▌';
@@ -63,6 +122,10 @@ pub struct Look {
     /// (`BubbleNode::bubble.key`), while the chat has the keys; none draws
     /// no bubble selected and the newest at the bottom.
     pub cursor: Option<u64>,
+    /// Where the chat's view stands when the reader scrolled it by the
+    /// line (1529, the model's `chat_anchor`); none draws the newest at
+    /// the bottom, or the cursor's bubble there when it stands above.
+    pub anchor: Option<loquax::ui::pager::Anchor>,
     /// The compose field's cursor, in characters, while it has the keys;
     /// none draws no caret, and the hint on an empty field.
     pub caret: Option<usize>,
@@ -73,6 +136,16 @@ pub struct Look {
     /// joining, fetched N of M, unreachable. None on a board that is no
     /// device of a home, which draws the bar as before.
     pub home: Option<loquax::home::board::Word>,
+    /// An error that is a state, not a log line (1493): a write that did
+    /// not reach the flash, a join the record could not keep. It takes
+    /// the home word's place at the bar's right end until it clears.
+    pub fault: Option<loquax::ui::strings::StrId>,
+    /// The type switch's word (1532, [`crate::house`]): for a moment it
+    /// takes the bar's right end, before the fault and the home's word.
+    pub note: Option<loquax::ui::strings::StrId>,
+    /// What the map shows over its picture (1531): the key hint and the
+    /// corner credit, which the board's clock says ([`crate::map::Chrome`]).
+    pub map: crate::map::Overlay,
 }
 
 impl Look {
@@ -83,9 +156,17 @@ impl Look {
             lang,
             now,
             cursor: None,
+            anchor: None,
             caret: None,
             row: 0,
             home: None,
+            fault: None,
+            note: None,
+            map: crate::map::Overlay {
+                hint: None,
+                credit: false,
+                sky: crate::gnss::Sky::Off,
+            },
         }
     }
 
@@ -102,6 +183,7 @@ impl Look {
         };
         Self {
             cursor,
+            anchor: model.chat_anchor.filter(|_| model.focus == Pane::Messages),
             caret: (model.focus == Pane::Compose).then(|| model.compose.cursor()),
             ..Self::m9(model.lang, model.now)
         }
@@ -115,11 +197,9 @@ impl Look {
 /// are in.
 pub fn scene<B>(model: &UiModel<B>) -> Scene {
     match model.focus {
+        // The list alone, no chat built for it (1463).
         Pane::Conversations => {
-            let mut scene = model.scene(LayoutClass::Wide);
-            scene.chat = None;
-            scene.sheet = None;
-            scene.whereabouts = None;
+            let mut scene = model.list_scene(LayoutClass::Wide);
             scene.screen = ScreenId::Chats;
             scene.in_class(LayoutClass::Compact)
         }
@@ -127,37 +207,116 @@ pub fn scene<B>(model: &UiModel<B>) -> Scene {
     }
 }
 
+/// Where the drawn screen stands in what it shows (1533): the list's
+/// selected row and first row on screen, as places in the whole order,
+/// and the open chat's topmost bubble on screen by its key. What the
+/// board's `[PAGE]` line says ([`crate::page`]); none of it is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Window {
+    /// The list's `(selected, first on screen)`, while the list is drawn.
+    pub list: Option<(usize, usize)>,
+    /// The key of the chat's topmost bubble on screen, while a chat is.
+    pub chat_top: Option<u64>,
+}
+
 /// The screen the scene is, `cols` x `rows` cells: the top bar, the list
 /// scrolled to show its selected row, the tab bar; or, with a chat open
 /// and no list, the chat's bar over the chat ([`crate::chat`]).
 pub fn lines(scene: &Scene, look: &Look, cols: usize, rows: usize) -> Vec<RLine> {
+    lines_at(scene, look, cols, rows).0
+}
+
+/// [`lines`], and where the screen stands ([`Window`]).
+pub fn lines_at(scene: &Scene, look: &Look, cols: usize, rows: usize) -> (Vec<RLine>, Window) {
+    let (lines, window, _) = lines_seen(scene, look, cols, rows);
+    (lines, window)
+}
+
+/// [`lines_at`], and the keys of the open chat's bubbles whose last line
+/// is on screen (1541, [`crate::read`]); none while no chat is drawn: the
+/// list, a group's sheet over the chat.
+pub fn lines_seen(
+    scene: &Scene,
+    look: &Look,
+    cols: usize,
+    rows: usize,
+) -> (Vec<RLine>, Window, Option<Vec<u64>>) {
+    let mut window = Window::default();
+    let mut seen = None;
     if let Some(sheet) = crate::group::lines(scene, look, cols, rows) {
-        return sheet;
+        return (sheet, window, seen);
     }
     let mut out = Vec::with_capacity(rows);
-    out.push(top_bar(&scene.top, look, cols));
-    let below = rows.saturating_sub(1 + usize::from(scene.tabs.is_some()));
+    // Two peers of one name (1587): 35 cells cut the bar's sentence to
+    // "Lew ·1e1e · Zwei Kontakte he…", so in a chat the bar says the name
+    // and the sentence takes a row of its own under it, whole; without a
+    // collision the chat keeps every row.
+    let same = match (&scene.list, &scene.chat) {
+        (None, Some(chat)) => chat.same_name.as_ref(),
+        _ => None,
+    };
+    let title = match (same, &scene.top.title) {
+        (Some(sentence), Text::Join(parts)) if parts.last() == Some(sentence) => {
+            match &parts[..parts.len() - 1] {
+                [only] => only.clone(),
+                rest => Text::Join(rest.to_vec()),
+            }
+        }
+        (_, title) => title.clone(),
+    };
+    out.push(top_bar(&scene.top, &title, look, cols));
+    if let Some(sentence) = same {
+        let words = cut(&sentence.resolve(look.lang), cols.saturating_sub(1));
+        out.push(line(
+            &[
+                (" ", RStyle::default()),
+                (
+                    &words,
+                    RStyle {
+                        italic: true,
+                        ..muted(look)
+                    },
+                ),
+            ],
+            cols,
+        ));
+    }
+    // The bar, and the sentence's row while there is one.
+    let head = out.len();
+    let below = rows.saturating_sub(head + usize::from(scene.tabs.is_some()));
     if let (None, Some(chat)) = (&scene.list, &scene.chat) {
-        out.extend(crate::chat::lines(chat, look, cols, below));
+        let (chat_lines, top, keys) = crate::chat::lines_at(chat, look, cols, below);
+        out.extend(chat_lines);
+        window.chat_top = top;
+        seen = Some(keys);
     }
     if let Some(list) = &scene.list {
         match list.rows.is_empty() {
             true => {
+                window.list = Some((0, 0));
                 let words = list.empty.resolve(look.lang);
                 out.push(line(&[(&cut(&words, cols), muted(look))], cols));
             }
             false => {
                 let shown = (below / ENTRY_ROWS).max(1);
                 let at = list.rows.iter().position(|r| r.selected).unwrap_or(0);
-                let first = (at + 1).saturating_sub(shown);
+                // The core's line for the cursor (1546): its row keeps it
+                // while a pull reorders the rows around it. Kept on the
+                // screen whatever the scene was built for.
+                let lowest = (at + 1).saturating_sub(shown);
+                let first = match list.top {
+                    Some(top) => top.saturating_sub(list.first).clamp(lowest, at),
+                    None => lowest,
+                };
+                window.list = Some((list.first + at, list.first + first));
                 for row in list.rows.iter().skip(first).take(shown) {
                     out.extend(entry(row, look, cols));
                 }
             }
         }
     }
-    out.truncate(1 + below);
-    while out.len() < 1 + below {
+    out.truncate(head + below);
+    while out.len() < head + below {
         out.push(line(&[], cols));
     }
     if let Some(tabs) = &scene.tabs {
@@ -177,11 +336,11 @@ pub fn lines(scene: &Scene, look: &Look, cols: usize, rows: usize) -> Vec<RLine>
         out.push(fill(bar, cols, painted(look.tokens.chrome)));
     }
     out.truncate(rows);
-    out
+    (out, window, seen)
 }
 
-/// The top bar: the reader's avatar (or the chat's), the title.
-fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
+/// The top bar: the reader's avatar (or the chat's), `title`.
+fn top_bar(top: &TopBar, title: &Text, look: &Look, cols: usize) -> RLine {
     let chrome = painted(look.tokens.chrome);
     let avatar = match &top.lead {
         Lead::Me { avatar, .. } | Lead::Back { avatar, .. } => avatar,
@@ -189,7 +348,7 @@ fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
     let mut bar = RLine::default();
     push(&mut bar, " ", chrome);
     push_avatar(&mut bar, avatar);
-    let title = top.title.resolve(look.lang);
+    let title = title.resolve(look.lang);
     let room = cols.saturating_sub(AVATAR + 2);
     let tight = cols < NARROW_COLS;
     // The home's word at the right end, the title cut before it. Wide,
@@ -200,9 +359,21 @@ fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
         false => (room * 2) / 3,
         true => room.saturating_sub(fit_width(&narrow(&title)).min(room / 3) + 1),
     };
+    // A fault outranks the home's word (1493): a write that did not
+    // land matters more than the fetch count.
     let word = look
-        .home
-        .map(|word| cut(&word.text().resolve(look.lang), budget))
+        .note
+        .or(look.fault)
+        .map(|fault| {
+            cut(
+                &loquax::ui::strings::Text::Key(fault, alloc::vec::Vec::new()).resolve(look.lang),
+                budget,
+            )
+        })
+        .or_else(|| {
+            look.home
+                .map(|word| cut(&word.text().resolve(look.lang), budget))
+        })
         .unwrap_or_default();
     let words = word.chars().count();
     let room = match (words, tight) {
@@ -233,7 +404,7 @@ fn top_bar(top: &TopBar, look: &Look, cols: usize) -> RLine {
 fn entry(row: &Row, look: &Look, cols: usize) -> [RLine; 2] {
     let shown = &row.row;
     let time = match (shown.at, look.now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => loquax::ui::scene::list_time(&at, &now).resolve(look.lang),
         _ => String::new(),
     };
     // The bar, the avatar, a gap; a cell at the right end.
@@ -252,6 +423,8 @@ fn entry(row: &Row, look: &Look, cols: usize) -> [RLine; 2] {
             ..RStyle::default()
         },
     );
+    // Two peers of one name (1452, 1587): the row keeps the name with its
+    // tail alone; the open chat says the sentence on its own row.
     let gap = room.saturating_sub(fit_width(&name) + fit_width(&time));
     push(&mut top, &" ".repeat(gap), RStyle::default());
     push(&mut top, &time, muted(look));
@@ -268,7 +441,7 @@ fn entry(row: &Row, look: &Look, cols: usize) -> [RLine; 2] {
         (_, Some(mark)) => {
             let row = glyph(state_of(mark));
             (
-                String::from(row.ascii.trim_end()),
+                mark_glyph(row),
                 RStyle {
                     fg: look.tokens.tones.of(row.tone),
                     bold: row.bold,
@@ -409,6 +582,15 @@ pub fn narrow(text: &str) -> String {
         .collect()
 }
 
+/// A delivery mark as the board draws it (1447, walk 1 finding 23): the
+/// ladder's own glyphs, which the 10 x 20 atlas has (◷, ✓, the braille
+/// spinner, !), but ✔, which it lacks: read is ✓✓ in the read tone and
+/// bold, as on every other target the tone tells it from delivered. Never
+/// the ASCII rung's "v" and "VV".
+pub(crate) fn mark_glyph(row: &leviculum_ui::delivery::DeliveryGlyph) -> String {
+    row.symbol(0, false).trim_end().replace('✔', "✓")
+}
+
 /// `text` [`narrow`]ed and cut to `cols` cells, an ellipsis where it was cut.
 pub(crate) fn cut(text: &str, cols: usize) -> String {
     truncate_to_cols(&narrow(text), cols)
@@ -416,7 +598,7 @@ pub(crate) fn cut(text: &str, cols: usize) -> String {
 
 /// `line` cut or padded to `cols` cells, the padding in `style`, one cell
 /// a character as [`narrow`] makes them.
-pub(crate) fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
+pub fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
     let mut out = RLine::default();
     for mut cell in line.cells {
         match fit_width(cell.ch.encode_utf8(&mut [0; 4])) {
@@ -434,7 +616,7 @@ pub(crate) fn fill(line: RLine, cols: usize, style: RStyle) -> RLine {
     out
 }
 
-pub(crate) fn push(line: &mut RLine, text: &str, st: RStyle) {
+pub fn push(line: &mut RLine, text: &str, st: RStyle) {
     line.cells.extend(text.chars().map(|ch| StyledChar {
         ch,
         st,
@@ -452,6 +634,30 @@ mod tests {
     fn every_mark_has_an_ascii_rung_the_atlas_draws() {
         let rungs: Vec<&str> = MARKS.iter().map(|&m| glyph(state_of(m)).ascii).collect();
         assert_eq!(rungs, [". ", ". ", "v ", "v ", "vv", "VV", "! "]);
+        // The board draws the glyphs, the atlas's (1447).
+        let drawn: Vec<String> = MARKS
+            .iter()
+            .map(|&m| mark_glyph(glyph(state_of(m))))
+            .collect();
+        assert_eq!(drawn, ["◷", "◷", "✓", "✓", "✓✓", "✓✓", "!"]);
+        // ✔ is the atlas's missing glyph, the control: whatever it maps
+        // to, every drawn mark maps elsewhere.
+        let atlas = crate::font::atlas();
+        let missing = atlas.glyph_mapping.index('✔');
+        assert_eq!(
+            missing,
+            atlas.glyph_mapping.index('\u{e000}'),
+            "the control"
+        );
+        for d in &drawn {
+            for ch in d.chars() {
+                assert_ne!(
+                    atlas.glyph_mapping.index(ch),
+                    missing,
+                    "{ch} is in the atlas"
+                );
+            }
+        }
         for (mark, rung) in MARKS.iter().zip(&rungs) {
             assert!(rung.is_ascii(), "{mark:?} is {rung:?}");
             assert_eq!(

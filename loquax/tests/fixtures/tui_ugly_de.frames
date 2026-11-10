@@ -1,0 +1,100 @@
+--- frame 1: list ---
+┌● tui───────────────────┐┌  Jürgen 🚲 ─────────────────── pos 155 d · no relay ┐
+│▌Jürgen 🚲         29.5. ││                                                    │
+│▌du: ok 👍               ││ Treffen wir uns um 18:00 am Bahnhof?               │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││ 01:46 · unverified                                 │
+│ Peer 17          29.5. ││                                                    │
+│ du: Grüße aus Köl… [3] ││    naïve façade, smörgåsbord, Ærøskøbing  01:56 ✓✓ │
+│                        ││                                                    │
+│ Unbekannt ·cd32  29.5. ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
+│ du: ja             [3] ││                                                    │
+│                        ││                  😀 🐀 🚲  drei Emoji am Stück  02:16 │
+│ Peer 15          29.5. ││                                                    │
+│ du: zwei           [3] ││ zwei                                               │
+│                        ││ Zeilen  02:26 · unverified                         │
+│ Unbekannt ·b305  29.5. ││                                                    │
+│ du: 😀 🐀 🚲  drei E… [3] ││                                       ja  02:36 ✓  │
+│                        ││                                                    │
+│ Peer 13          29.5. ││ Grüße aus Köln, die Straße ist nass                │
+│ du: 日 本 語 の テ キ …  [3] ││ 02:46 · unverified                                 │
+│                        ││                                                    │
+│ Unbekannt ·0d7c  29.5. ││                                     ok 👍   02:56 ◷ │
+│ du: naïve façade,… [3] │├  to Jürgen 🚲 ────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: bottom ---
+┌● tui───────────────────┐┌  Ratte Größe 🐀   known─────────────────── no relay ┐
+│ Peer 7           29.5. ││                                       ja  01:36 ✔✔ │
+│ du: zwei               ││                                                    │
+│                        ││ Grüße aus Köln, die Straße ist nass                │
+│ Unbekannt ·57b9  29.5. ││ 01:46 · unverified                                 │
+│ du: 😀 🐀 🚲  drei Emoji… ││                                                    │
+│                        ││                                     ok 👍   01:56 ✓✓│
+│ Peer 5           29.5. ││                                                    │
+│ du: 日 本 語 の テ キ ス ト も  ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
+│                        ││                                                    │
+│ Mum              29.5. ││    naïve façade, smörgåsbord, Ærøskøbing  02:16 !  │
+│ du: naïve façade, smö… ││                                                    │
+│                        ││ 日 本 語 の テ キ ス ト も   02:26 · unverified             │
+│ Zoë 💬  Ærø       29.5. ││                                                    │
+│ du: Treffen wir uns u… ││                  😀 🐀 🚲  drei Emoji am Stück  02:36 │
+│                        ││                                                    │
+│ Nomadin Ünal 29.5.2025 ││ zwei                                               │
+│ du: Grüße aus Köln, d… ││ Zeilen  02:46 · unverified                         │
+│                        ││                                                    │
+│▌Ratte Größe… 29.5.2025 ││                                       ja  02:56 ◷  │
+│▌du: ja                 │├  to Ratte Größe 🐀 ─ Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: opened ---
+┌  tui───────────────────┐┌● Ratte Größe 🐀   known─────────────────── no relay ┐
+│ Peer 7           29.5. ││                                       ja  01:36 ✔✔ │
+│ du: zwei               ││                                                    │
+│                        ││ Grüße aus Köln, die Straße ist nass                │
+│ Unbekannt ·57b9  29.5. ││ 01:46 · unverified                                 │
+│ du: 😀 🐀 🚲  drei Emoji… ││                                                    │
+│                        ││                                     ok 👍   01:56 ✓✓│
+│ Peer 5           29.5. ││                                                    │
+│ du: 日 本 語 の テ キ ス ト も  ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
+│                        ││                                                    │
+│ Mum              29.5. ││    naïve façade, smörgåsbord, Ærøskøbing  02:16 !  │
+│ du: naïve façade, smö… ││                                                    │
+│                        ││ 日 本 語 の テ キ ス ト も   02:26 · unverified             │
+│ Zoë 💬  Ærø       29.5. ││                                                    │
+│ du: Treffen wir uns u… ││                  😀 🐀 🚲  drei Emoji am Stück  02:36 │
+│                        ││                                                    │
+│ Nomadin Ünal 29.5.2025 ││ zwei                                               │
+│ du: Grüße aus Köln, d… ││ Zeilen  02:46 · unverified                         │
+│                        ││                                                    │
+│▌Ratte Größe… 29.5.2025 ││                                      ▌ja  02:56 ◷  │
+│▌du: ja                 │├  to Ratte Größe 🐀 ─ Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 4: oldest ---
+┌  tui───────────────────┐┌● Ratte Größe 🐀   known─────────────────── no relay ┐
+│ Peer 7           29.5. ││                                                    │
+│ du: zwei               ││            ── Wednesday 28 May 2025 ──             │
+│                        ││▌Grüße aus Köln, die Straße ist nass                │
+│ Unbekannt ·57b9  29.5. ││▌20:26 · unverified                                 │
+│ du: 😀 🐀 🚲  drei Emoji… ││                                                    │
+│                        ││                                     ok 👍   20:36 ✓✓│
+│ Peer 5           29.5. ││                                                    │
+│ du: 日 本 語 の テ キ ス ト も  ││ Treffen wir uns um 18:00 am Bahnhof?               │
+│                        ││ 20:46 · unverified                                 │
+│ Mum              29.5. ││                                                    │
+│ du: naïve façade, smö… ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│                        ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│ Zoë 💬  Ærø       29.5. ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│ du: Treffen wir uns u… ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│                        ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│ Nomadin Ünal 29.5.2025 ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│ du: Grüße aus Köln, d… ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│                        ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│▌Ratte Größe… 29.5.2025 ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│▌du: ja                 │├  to Ratte Größe 🐀 ─ Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

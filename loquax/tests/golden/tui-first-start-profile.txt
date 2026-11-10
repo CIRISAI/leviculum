@@ -1,0 +1,24 @@
+┌● Mia───────────────────┐┌  messages──────────────────────────────────────────┐
+│No conversations yet:   ││                                                    │
+│:new conversation starts││                                                    │
+│one with a contact's    ││                                                    │
+│code.                   ││                                                    │
+│                        ││                                                    │
+│ ┌ Your profile ────────────────────────────────────────────────────────────┐ │
+│ │Mia                                                                       │ │
+│ │                                                                          │ │
+│ │Your address                                                              │ │
+│ │4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c 4c4c                                   │ │
+│ │                                                                          │ │
+│ │Mailbox: not set up yet                                                   │ │
+│ │                                                                          │ │
+│ │Your devices                                                              │ │
+│ │  This device                                                             │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  No messages yet                   │
+│                        │├  compose─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

@@ -132,10 +132,32 @@ which has no proof the sender ever sees
 ([receipts for propagated post](loquax-propagation-receipts.md)); since
 1462 for every message on the device, direct, propagated or pulled from the
 recipient's mailbox. The recipient's device sends it, not switchable, only
-to a sender whose message set bit 2. A client of a mailbox holds no
+to a sender whose message set bit 2. Every message is acknowledged that
+way except a bare receipt, one with no text and no field but the `lev`
+pair, so an answer that carries a receipt gets its own. A client of a mailbox holds no
 identity, so it hands its mailbox an arrived mark and the mailbox signs the
 receipt; the mailbox never sends one on its own, archiving is no device.
 Section 6 says why the proof is not enough.
+
+### The writer key and relays
+
+Key `0x08`, `bin16 writer` (1482), names the address that wrote the map.
+Every map a Loquax device sends carries it, and a mailbox names itself
+in the receipts it signs. A reader takes a map as the word of the
+message's source only when the writer is that source. A map without the
+key, from a writer before 1482, still counts as the source's, unless the
+text starts with a relay's prefix `Name\n<hash>\n` naming another
+address (`leviculum-lxmf/src/relay.rs`, `own_lev`).
+
+Why: a relay bot such as LXMF-Tools' `lxmf_distribution_group_extended`
+passes a member's fields through unchanged into the copies it signs itself.
+Taken as the bot's, the member's mark would make every Loquax member send
+the bot device and read receipts, and the bot would hand each of them back
+to everyone as an empty post. So a relay gets no receipt, and a ticket
+passed through is not remembered as the relay's (`router.rs`,
+`remember_verified_ticket`). The capability was not moved into the announce
+(see "What was not chosen"): a mark naming its writer is enough to tell a
+relay's copy apart.
 
 ### The group keys
 

@@ -345,6 +345,10 @@ pub struct DrawnFrame {
     pub update_ms: f64,
     pub draw_ms: f64,
     pub present_ms: f64,
+    /// The drive's thread's time on a CPU over the same three parts, in
+    /// milliseconds, where [`measure_cpu`] asked for it and the kernel
+    /// tells it (1473): what the frame cost, whatever else the host ran.
+    pub cpu_ms: Option<f64>,
     pub damage: f32,
     pub rebuilt: bool,
     /// The program marked it ([`Program::marked`]).
@@ -354,6 +358,47 @@ pub struct DrawnFrame {
 impl DrawnFrame {
     pub fn total_ms(&self) -> f64 {
         self.update_ms + self.draw_ms + self.present_ms
+    }
+}
+
+std::thread_local! {
+    static CPU: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a [`drive`] on this thread measures each frame's CPU time
+/// too ([`DrawnFrame::cpu_ms`], 1473); off unless asked, as reading it
+/// costs a system call a part.
+pub fn measure_cpu(on: bool) {
+    CPU.with(|c| c.set(on));
+}
+
+/// The calling thread's time on a CPU so far, nanoseconds, by its own
+/// clock (`CLOCK_THREAD_CPUTIME_ID`); `None` where there is none. Not
+/// `/proc/thread-self/schedstat`: for a running thread it moves only at
+/// the scheduler's ticks, 4 ms steps on the host.
+#[cfg(unix)]
+pub fn thread_cpu_ns() -> Option<u64> {
+    use rustix::time::{clock_gettime, ClockId};
+    let t = clock_gettime(ClockId::ThreadCPUTime);
+    let secs = u64::try_from(t.tv_sec).ok()?;
+    let nanos = u64::try_from(t.tv_nsec).ok()?;
+    secs.checked_mul(1_000_000_000)?.checked_add(nanos)
+}
+
+/// The calling thread's time on a CPU: not told on this target.
+#[cfg(not(unix))]
+pub fn thread_cpu_ns() -> Option<u64> {
+    None
+}
+
+/// The CPU time since `from` ([`thread_cpu_ns`]) added to `frame`.
+fn add_cpu(frame: &mut DrawnFrame, from: Option<u64>) {
+    let Some(from) = from else {
+        return;
+    };
+    if let Some(now) = thread_cpu_ns() {
+        let ms = now.saturating_sub(from) as f64 / 1e6;
+        frame.cpu_ms = Some(frame.cpu_ms.unwrap_or(0.0) + ms);
     }
 }
 
@@ -586,6 +631,8 @@ fn drive_with<P: Program>(
     let mut messages: Vec<P::Message> = Vec::new();
     clock.start();
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let measure = CPU.with(|c| c.get());
+    let cpu = || measure.then(thread_cpu_ns).flatten();
     let wants = |state: &State, redraw_at: &mut Option<Instant>| match state {
         State::Outdated => true,
         State::Updated { redraw_request, .. } => match redraw_request {
@@ -598,9 +645,11 @@ fn drive_with<P: Program>(
         },
     };
     loop {
+        let c = cpu();
         let built = Instant::now();
         let mut ui = UserInterface::build(program.view(), size, cache, &mut renderer);
         pending.draw_ms += ms(built.elapsed());
+        add_cpu(&mut pending, c);
         pending.rebuilt = true;
         run.views += 1;
         let mut done = false;
@@ -619,6 +668,7 @@ fn drive_with<P: Program>(
                             }
                         }
                         run.events += events.len();
+                        let c = cpu();
                         let t = Instant::now();
                         let (state, _) = ui.update(
                             &events,
@@ -628,6 +678,7 @@ fn drive_with<P: Program>(
                             &mut messages,
                         );
                         pending.update_ms += ms(t.elapsed());
+                        add_cpu(&mut pending, c);
                         want |= wants(&state, &mut redraw_at);
                         if matches!(state, State::Outdated) && messages.is_empty() {
                             break;
@@ -648,6 +699,7 @@ fn drive_with<P: Program>(
                 want = true;
             }
             if want {
+                let c = cpu();
                 let t = Instant::now();
                 let (state, _) = ui.update(
                     &[Event::Window(iced::window::Event::RedrawRequested(t))],
@@ -657,11 +709,13 @@ fn drive_with<P: Program>(
                     &mut messages,
                 );
                 pending.update_ms += ms(t.elapsed());
+                add_cpu(&mut pending, c);
                 if !messages.is_empty() || matches!(state, State::Outdated) {
                     break;
                 }
                 want = wants(&state, &mut redraw_at);
                 let (theme, text, background) = program.style();
+                let c = cpu();
                 let t = Instant::now();
                 ui.draw(
                     &mut renderer,
@@ -670,9 +724,12 @@ fn drive_with<P: Program>(
                     cursor,
                 );
                 pending.draw_ms += ms(t.elapsed());
+                add_cpu(&mut pending, c);
+                let c = cpu();
                 let t = Instant::now();
                 pending.damage = surface.present(&mut renderer, background);
                 pending.present_ms = ms(t.elapsed());
+                add_cpu(&mut pending, c);
                 let at = clock.now();
                 pending.at = at.as_secs_f64();
                 if let Some(twin) = &mut twin {
@@ -735,11 +792,13 @@ fn drive_with<P: Program>(
             break;
         }
         run.messages += messages.len();
+        let c = cpu();
         let t = Instant::now();
         for message in messages.drain(..) {
             program.update(message);
         }
         pending.update_ms += ms(t.elapsed());
+        add_cpu(&mut pending, c);
         want = true;
     }
     run.rgb = surface.rgb();
@@ -749,7 +808,60 @@ fn drive_with<P: Program>(
 /// A left click at `at` on `element` laid out on `w` by `h`: the pointer
 /// moves there, the button goes down and comes up. The messages the
 /// widgets published, in order; `None` without a renderer.
-pub fn click<M>(mut element: Element<'_, M>, at: Point, w: u32, h: u32) -> Option<Vec<M>> {
+pub fn click<M>(element: Element<'_, M>, at: Point, w: u32, h: u32) -> Option<Vec<M>> {
+    clicks(element, at, 1, w, h)
+}
+
+/// `n` left clicks in a row at `at` on `element` laid out on `w` by `h`,
+/// as quickly as a double or a triple click (1444): the pointer moves
+/// there, the button goes down and comes up `n` times. The messages the
+/// widgets published, in order; `None` without a renderer.
+pub fn clicks<M>(element: Element<'_, M>, at: Point, n: usize, w: u32, h: u32) -> Option<Vec<M>> {
+    let presses = (0..n).flat_map(|_| {
+        [
+            (mouse::Event::ButtonPressed(mouse::Button::Left), at),
+            (mouse::Event::ButtonReleased(mouse::Button::Left), at),
+        ]
+    });
+    let steps: Vec<_> = std::iter::once((mouse::Event::CursorMoved { position: at }, at))
+        .chain(presses)
+        .collect();
+    gesture(element, &steps, w, h)
+}
+
+/// The left button pressed at `from`, the pointer moved to `to` in
+/// `steps` even steps with it held, and released there (1475): a drag on
+/// `element` laid out on `w` by `h`. The messages, in order.
+pub fn drag<M>(
+    element: Element<'_, M>,
+    from: Point,
+    to: Point,
+    steps: usize,
+    w: u32,
+    h: u32,
+) -> Option<Vec<M>> {
+    let mut script = vec![
+        (mouse::Event::CursorMoved { position: from }, from),
+        (mouse::Event::ButtonPressed(mouse::Button::Left), from),
+    ];
+    for n in 1..=steps.max(1) {
+        let f = n as f32 / steps.max(1) as f32;
+        let at = Point::new(from.x + (to.x - from.x) * f, from.y + (to.y - from.y) * f);
+        script.push((mouse::Event::CursorMoved { position: at }, at));
+    }
+    script.push((mouse::Event::ButtonReleased(mouse::Button::Left), to));
+    gesture(element, &script, w, h)
+}
+
+/// The mouse events of `script` on `element` laid out once on `w` by `h`,
+/// each with the pointer where it says (1475). The messages the widgets
+/// published, in order; `None` without a renderer.
+pub fn gesture<M>(
+    mut element: Element<'_, M>,
+    script: &[(mouse::Event, Point)],
+    w: u32,
+    h: u32,
+) -> Option<Vec<M>> {
     let renderer = software(iced::Font::DEFAULT)?;
     let size = Size::new(w as f32, h as f32);
     let mut tree = Tree::new(&element);
@@ -759,19 +871,14 @@ pub fn click<M>(mut element: Element<'_, M>, at: Point, w: u32, h: u32) -> Optio
         &layout::Limits::new(Size::ZERO, size),
     );
     let viewport = Rectangle::with_size(size);
-    let cursor = mouse::Cursor::Available(at);
     let mut messages = Vec::new();
-    for event in [
-        mouse::Event::CursorMoved { position: at },
-        mouse::Event::ButtonPressed(mouse::Button::Left),
-        mouse::Event::ButtonReleased(mouse::Button::Left),
-    ] {
+    for (event, at) in script {
         let mut shell = Shell::new(&mut messages);
         element.as_widget_mut().update(
             &mut tree,
-            &Event::Mouse(event),
+            &Event::Mouse(*event),
             Layout::new(&node),
-            cursor,
+            mouse::Cursor::Available(*at),
             &renderer,
             &mut clipboard::Null,
             &mut shell,

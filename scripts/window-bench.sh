@@ -4,6 +4,8 @@
 # own (a round is about 5 min on schneckenschreck, the whole recipe 20).
 #
 #   window-bench.sh prepare BASE   build both benches, decide A/B or A/A
+#   window-bench.sh prepare-v3     this tree's bench as BASE, the same built
+#                                  for x86-64-v3 as this (1469)
 #   window-bench.sh round I        round I: BASE's bench, then this tree's
 #   window-bench.sh compare        the table and the verdict
 #   window-bench.sh clean          remove BASE's worktree
@@ -79,6 +81,21 @@ prepare)
     echo "window-bench: $mode, BASE $base, this $(git rev-parse HEAD)$(git diff --quiet HEAD || echo ' with changes')" | tee "$out/exes.txt"
     python3 -I scripts/window-bench-compare.py --check-exes "$mode" "$out/base-bench" "$out/this-bench" | tee -a "$out/exes.txt"
     ;;
+prepare-v3)
+    # The package's two loquax builds compared (1469): this tree's bench,
+    # baseline, as BASE, and the same sources built with
+    # -C target-cpu=x86-64-v3 into build-deb.sh's v3 target directory as
+    # this. An A/B: the exes must differ. Both read this tree's fixtures.
+    mkdir -p "$out"
+    rm -f "$out"/base-*.txt "$out"/this-*.txt "$out"/base-*.log "$out"/this-*.log "$out/load.txt" "$out/mode" "$out/exes.txt"
+    clean
+    cp "$(build)" "$out/base-bench"
+    v3_exe="$(CARGO_TARGET_DIR="$(realpath -m target/x86-64-v3)" CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v3" build)"
+    cp "$v3_exe" "$out/this-bench"
+    echo ab > "$out/mode"
+    echo "window-bench: v3, base = this tree's baseline bench, this = the same built for x86-64-v3, $(git rev-parse HEAD)$(git diff --quiet HEAD || echo ' with changes')" | tee "$out/exes.txt"
+    python3 -I scripts/window-bench-compare.py --check-exes ab "$out/base-bench" "$out/this-bench" | tee -a "$out/exes.txt"
+    ;;
 round)
     i="${2:?round number}"
     for side in base this; do
@@ -99,7 +116,7 @@ clean)
     clean
     ;;
 *)
-    sed -n '2,12p' "$0" >&2
+    sed -n '2,14p' "$0" >&2
     exit 2
     ;;
 esac

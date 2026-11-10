@@ -79,6 +79,8 @@
 //! | (new) the profile's "Share my address" (1443) | `ShareCode` |
 //! | `Command::ReadReceipts`, the settings' row, `UiEvent::ReadReceipts` | `ReadReceipts` |
 //! | the Maps page's last row (1290), `Request::DeleteRegions` | `DeleteAllRegions` (`confirmed` tells the asked from the asking) |
+//! | the window's gear (`Message::Settings`), the phone's ⋮ menu, `Command::Settings`, `S` (1450) | `Settings` |
+//! | the Advanced section's hub lines, `Query::RoomsHub` (1577) | `RoomsHub` |
 //! | `keys::Action::Scroll`, `ScrollMessages` | the same names |
 //! | `keys::Action::Edit`, `Message::Compose` | `Edit` |
 //! | `keys::Action::Newline`, `ClearDraft` | the same names |
@@ -170,6 +172,10 @@ pub enum Intent {
     /// intent, carried, never one of Loquax's arms. A frontend hands it to
     /// the model as [`super::UiEvent::Browse`].
     Browse(lnomad::Intent),
+    /// A verb of the Explore tab (1578): the search field, the order, a
+    /// page's row, its bookmark, a room, a hub. A frontend hands it to the
+    /// model as [`super::UiEvent::Explore`].
+    Explore(super::explore::ExploreEvent),
     /// Back out one level: compose to messages to the list, an overlay
     /// closes, the map gives the conversation back.
     Back,
@@ -490,6 +496,12 @@ pub enum Intent {
     DeleteAllRegions {
         confirmed: bool,
     },
+    /// The settings (1450): the list of the nine sections with `None`,
+    /// one of them opened with its section (`super::settings`).
+    Settings(Option<super::settings::Section>),
+    /// The public rooms' hub (1577), a line of the Advanced section: a
+    /// shipped hub, none, or another to paste.
+    RoomsHub(super::rooms::HubPick),
 }
 
 impl Intent {
@@ -509,6 +521,9 @@ impl Intent {
             keys::Action::Palette => Intent::Palette,
             keys::Action::QuitHint => Intent::QuitHint,
             keys::Action::Copy => Intent::Copy,
+            // The copy mode is the terminal's cursor on the text (1475); a
+            // target that selects with the pointer copies the message.
+            keys::Action::CopyMode => Intent::Copy,
             keys::Action::OpenResult => Intent::OpenResult,
             keys::Action::Match(next) => Intent::Match(next),
             keys::Action::CloseSearch => Intent::CloseSearch,
@@ -531,6 +546,7 @@ impl Intent {
             Intent::Tab(TabId::Map) => StrId::Map,
             Intent::Tab(TabId::Browse) | Intent::Browse(_) => StrId::TabBrowse,
             Intent::Tab(TabId::Rooms) => StrId::TabRooms,
+            Intent::Tab(TabId::Explore) | Intent::Explore(_) => StrId::TabExplore,
             Intent::Back => StrId::Back,
             Intent::OpenChat { .. } => StrId::Open,
             Intent::CloseChat => StrId::Close,
@@ -671,6 +687,12 @@ impl Intent {
             Intent::Import => StrId::Import,
             Intent::ReadReceipts { .. } => StrId::ReadReceipts,
             Intent::DeleteAllRegions { .. } => StrId::DeleteAllRegionsYes,
+            Intent::Settings(None) => StrId::Settings,
+            Intent::Settings(Some(section)) => section.title(),
+            Intent::RoomsHub(super::rooms::HubPick::None) => StrId::RoomsHubNone,
+            Intent::RoomsHub(super::rooms::HubPick::Hub(_)) => StrId::RoomsHub,
+            Intent::RoomsHub(super::rooms::HubPick::Paste) => StrId::RoomsHubPaste,
+            Intent::RoomsHub(super::rooms::HubPick::More) => StrId::RoomsHubMore,
         }
     }
 }
@@ -727,6 +749,7 @@ impl From<Command> for Intent {
             Command::MapDrawing => Intent::MapDrawing,
             Command::Browse => Intent::Tab(TabId::Browse),
             Command::Rooms => Intent::Tab(TabId::Rooms),
+            Command::Explore => Intent::Tab(TabId::Explore),
             Command::Rename => Intent::Rename {
                 peer: Target::Open,
                 name: None,
@@ -819,6 +842,7 @@ impl From<Command> for Intent {
             Command::SharePosition => Intent::ShareFix { peer: [0; 16] },
             Command::StopSharing => Intent::StopShare { peer: [0; 16] },
             Command::DeleteAllMaps => Intent::DeleteAllRegions { confirmed: false },
+            Command::Settings => Intent::Settings(None),
             Command::SendPicture => Intent::SendPhoto {
                 peer: [0; 16],
                 data: Vec::new(),

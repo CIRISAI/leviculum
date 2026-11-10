@@ -47,7 +47,7 @@ settles the conflicts.
 **How the conflicts are actually resolved.** Three layers, in this order.
 
 1. *Global escapes*, before any mode dispatch
-   (`update_key`, `lnomad/src/app/event.rs:460-492`; `pane`,
+   (`update_key`, `lnomad/src/app/event.rs:497-529`; `pane`,
    `lnomad/src/app/keys.rs:339`): any key dismisses the
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
@@ -55,8 +55,8 @@ settles the conflicts.
    (`lnomad/src/app/model.rs:101-120`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
-   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:499`,
-   whitelist at `lnomad/src/app/event.rs:509-515`).
+   leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:536`,
+   whitelist at `lnomad/src/app/event.rs:546-552`).
 3. *Modifier discrimination*. Nearly every single-letter binding is guarded
    `&& !ctrl && !alt`, which is what lets `f` (hint mode) and `Ctrl-f`
    (page down), `d` (places) and `Ctrl-d` (half page), `n` (next match) and
@@ -106,7 +106,7 @@ slices (`spawn_discovery`, `lnomad/src/transfer.rs:207-229`), and a
 (`lnomad/src/tui.rs:1454-1456`). The main loop has five arms
 (`lnomad/src/tui.rs:1358-1461`), and the timer arm is conditionally enabled
 (`, if animate` at `:2229`, driven by `needs_tick()` at
-`lnomad/src/app/model.rs:875-878`) so an idle browser does not wake eight
+`lnomad/src/app/model.rs:881-884`) so an idle browser does not wake eight
 times a second.
 
 **Persistence.** Three small files under
@@ -139,11 +139,11 @@ shared styled text model of `leviculum-ui` since 984, is a vector of
 (`leviculum-ui/src/style.rs:95-116`): already wrapped, aligned and indented,
 one `RLine` per output row, every cell carrying its resolved style and its
 owning link index. That IR feeds either the scene's page, a window of
-runs the TUI draws as spans (`page_line`, `lnomad/src/app/scene.rs:447`,
+runs the TUI draws as spans (`page_line`, `lnomad/src/app/scene.rs:468`,
 since 1255), or `emit_ansi`
 (`lnomad/src/render.rs:230-236`) for `--print`. Scrolling is a slice, not a
 widget scroll, because the page is pre-wrapped
-(`lnomad/src/app/scene.rs:423-427`), and there is one scroll rule shared by
+(`lnomad/src/app/scene.rs:444-448`), and there is one scroll rule shared by
 every scrollable window (`scrolled`, `leviculum-ui/src/keymap.rs:639-653`),
 which Loquax's help and detail view scroll by too.
 
@@ -152,7 +152,7 @@ character count rather than display width (`wrap`,
 `lnomad/src/render.rs:778-805`), which will overflow on CJK and emoji. No
 test covering that was found, so whether it is a known limitation or an
 oversight is unclear. And the whole page is laid out eagerly on every
-relayout (`lnomad/src/app/model.rs:753-777`), including on every keystroke in a
+relayout (`lnomad/src/app/model.rs:759-783`), including on every keystroke in a
 form field (`:1657-1660`).
 
 **Scriptability, and the absence of settings.** `--print` fetches, renders
@@ -175,9 +175,9 @@ colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1535-1538`). The messenger is the natural target of that
+`lnomad/src/app/event.rs:1576-1579`). The messenger is the natural target of that
 handoff: hosted as Loquax's Browse tab (1337) the browser hands the address
-over instead (`lnomad/src/app/event.rs:1531-1534`), and Loquax opens that chat.
+over instead (`lnomad/src/app/event.rs:1572-1575`), and Loquax opens that chat.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not
 
@@ -193,7 +193,7 @@ Note that `LxmfRouter`, `RouterEvent`, `RouterOutput`, `RouterConfig` and
 `MessageState` are *not* re-exported at the crate root — the crate root
 exports only `BuiltResource`, `DeliveryStampRequest`, `InboundStampRequest`,
 `PendingResourceBuild` and `PropagationStampRequest` from that module
-(`leviculum-lxmf/src/lib.rs:138-141`) — so they are reachable as
+(`leviculum-lxmf/src/lib.rs:139-142`) — so they are reachable as
 `leviculum_lxmf::router::*` only.
 
 ### Events are return values, not a channel
@@ -245,7 +245,7 @@ peer as a live one does, but says nothing of whether the peer is there.
 
 `Sending` does arrive, on the event every verdict travels on:
 `RouterEvent::MessageState`, from all three sites that enter the state —
-the composed send (`leviculum-lxmf/src/router.rs:2078-2083`), the
+the composed send (`leviculum-lxmf/src/router.rs:2084-2089`), the
 built-transfer commit (`leviculum-lxmf/src/router.rs:1201-1206`) and the
 upload the transport reports through `UploadSubmitted`
 (`leviculum-lxmf/src/router/propagation_runtime.rs:415-427`) — and on the
@@ -275,7 +275,7 @@ pub enum MessageState {          // leviculum-lxmf/src/router.rs:60-69
 Discriminants are the Python `LXMessage` constants. Four traps:
 
 1. **`Generating` is dead.** It is only ever produced by snapshot decoding
-   (`leviculum-lxmf/src/router.rs:2578`); nothing assigns it.
+   (`leviculum-lxmf/src/router.rs:2584`); nothing assigns it.
 2. **`Sent` means two different things and never applies to direct
    delivery.** For opportunistic messages it means the packet was handed to
    Reticulum unproven, and the message is still queued and still retryable
@@ -365,7 +365,7 @@ What the router will not do:
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
-  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2348-2365`).
+  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2354-2371`).
   The client must persist and replay them via
   `restore_known_propagation_node`
   (`leviculum-lxmf/src/router/propagation_runtime.rs:1528`). The selected
@@ -411,12 +411,12 @@ crate is `no_std`.
 The router writes exactly one key, `b"lxmf/router-state"`
 (`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:65`), holding the
 outbound queue, delivered and processed ID windows, stamp costs, tickets
-and the ignore set (`leviculum-lxmf/src/router.rs:2348-2365`). A client
+and the ignore set (`leviculum-lxmf/src/router.rs:2354-2371`). A client
 should stay off the `lxmf/` prefix and is otherwise free.
 
 Restore resets every queued message to `Outbound` with
 `next_attempt_ms = 0` and `progress = 0.01`
-(`leviculum-lxmf/src/router.rs:2333-2336`), because in-flight correlation
+(`leviculum-lxmf/src/router.rs:2339-2342`), because in-flight correlation
 is expressed in a process-local monotonic clock that does not survive a
 restart. A UI therefore cannot show a stable "sending" progress across
 restarts, and must not pretend to.
@@ -810,7 +810,7 @@ Three specific things `lnomad` does that must change:
    scrolled up. NomadNet gets this wrong: it resets to the bottom on every
    refresh (NomadNet's `Conversations.py`, line 2287).
 2. **Windowed layout.** `lnomad` re-lays out the whole page on every
-   relayout (`lnomad/src/app/model.rs:753-777`). A ten-thousand-message
+   relayout (`lnomad/src/app/model.rs:759-783`). A ten-thousand-message
    conversation must not do that, and a compose buffer must not trigger it
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.
@@ -818,7 +818,7 @@ Three specific things `lnomad` does that must change:
    (`lnomad/src/tui.rs:1457`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
-   (`leviculum-lxmf/src/router.rs:2279`).
+   (`leviculum-lxmf/src/router.rs:2285`).
 
 Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/transfer.rs:53-85`), the tick-counted
@@ -964,7 +964,7 @@ not a list of open work.
    correct for a sans-IO crate, but it means every client invents its own
    policy.
 5. **Known propagation nodes and the selection are not in the snapshot**
-   (`leviculum-lxmf/src/router.rs:2348-2365`), so every client writes its
+   (`leviculum-lxmf/src/router.rs:2354-2371`), so every client writes its
    own persistence and replay.
 6. **No stamp cancellation or deadline.** `generate` loops until success
    (`leviculum-lxmf/src/stamp.rs:366-376`) and `StampError::Cancelled` is

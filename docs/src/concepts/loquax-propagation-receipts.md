@@ -128,7 +128,7 @@ fields[0xFC] = map {
   would. Waiting for the first device to pull it, as the study proposed,
   would make the receipt depend on a phone being online, which a
   transport proof does not. A client of a home node acknowledges nothing
-  (`loquax/src/ui/arrival.rs:279`, `arrival_step`, returns at
+  (`loquax/src/ui/arrival.rs:282`, `arrival_step`, returns at
   `home_client`); the devices take the receipt that comes back from the
   peer as any device does.
 
@@ -136,20 +136,21 @@ fields[0xFC] = map {
 
 - **Bit 2 on every send**: `groups::client_caps`
   (`loquax/src/ui/groups.rs:77`), which `mark_sends` puts on every
-  message (`loquax/src/ui.rs:1937-1941`); not switchable.
+  message (`loquax/src/ui.rs:3769-3773`); not switchable.
 - **The arrival**: the router hands a collected message on as
   `DeliveryMethod::Propagated`; the engine says so after the message
-  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:590`).
-- **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:177`):
-  bit 2 in the message's own mark (since 1462 however it came), no
-  receipt of either kind, no group copy.
+  with `OutboxEvent::Propagated` (`loquax/src/engine.rs:602`).
+- **The rule**: `arrival::acknowledges` (`loquax/src/ui/arrival.rs:182`):
+  bit 2 in the message's own mark (since 1462 however it came), and not a
+  bare receipt of either kind; an answer a receipt rides on is a message
+  and is acknowledged (1486), and so is a group's copy (1466).
 - **On a device that is its own node**: `arrived_here`
-  (`loquax/src/ui/arrival.rs:223`) owes it, once per message (the ledger
+  (`loquax/src/ui/arrival.rs:226`) owes it, once per message (the ledger
   line `arrival acknowledged to the sender`); `arrival_step`
-  (`loquax/src/ui/arrival.rs:269`) sends it after the read receipt's
+  (`loquax/src/ui/arrival.rs:272`) sends it after the read receipt's
   batch window, 5 s after the first arrival, alone or riding on the next
   message to that sender. Read wins: an id seen while read receipts go to
-  that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:385`).
+  that peer is dropped (`drop_read`, `loquax/src/ui/arrival.rs:388`).
 - **On a home node** (since 1462): the home acknowledges nothing on its
   own; archiving is no device. A device that pulled the message hands the
   home an arrived mark (`MarkFlag::Arrived`), and the home's `arrived`
@@ -162,8 +163,8 @@ fields[0xFC] = map {
   came. A proof is signed by the recipient's identity, which its mailbox
   holds, so only this receipt says the device has it
   ([the read-receipts page](loquax-read-receipts.md), section 6).
-- **Taking it**: `take_lev` (`loquax/src/ui/receipts.rs:192`) hands a
-  `0x07` to `apply_arrival` (`loquax/src/ui/arrival.rs:413`) before the
+- **Taking it**: `take_lev` (`loquax/src/ui/receipts.rs:212`) hands a
+  `0x07` to `apply_arrival` (`loquax/src/ui/arrival.rs:416`) before the
   read-receipts switch is looked at. A `0x07` alone carries no mark and
   does not change what the peer is believed to say about read receipts.
 
@@ -197,7 +198,7 @@ a line (`on the recipient's device: its receipt`, before 1462 `delivered
 via the propagation network`, `collected from the
 propagation network`, `not collected at the propagation node; perhaps via
 another`), so the words survive a restart; `arrival::witness`
-(`loquax/src/ui/arrival.rs:103`) reads it, and a proof that came first
+(`loquax/src/ui/arrival.rs:104`) reads it, and a proof that came first
 keeps the device's words. The mark itself is the delivered rung of
 `DELIVERY_GLYPHS`, unchanged.
 
@@ -357,14 +358,14 @@ other key in either map (`lev_status::announced_version`).
   reached `collected`, `delivered` or a receipt is never asked again.
   Built as `pn_status::Asker` (`loquax/src/pn_status.rs`): a node is
   asked only after its announce said `{"lev": {"status": _}}`
-  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1910`);
+  (`OutboxEvent::NodeAnnounced.status`, read at `loquax/src/engine.rs:1969`);
   the ids come from the upload's proof (`RouterEvent::PropagationUploaded`
   → `OutboxEvent::Uploaded`); at most 64 ids a request, oldest first;
   `collected`, `delivered`, `expired` and `evicted` close an id, `held`
   and `unknown` leave it open; each answer logs
   `PN_STATUS_ASKED ids=N answered=N`, where answered counts the ids the
   node named with a word other than `unknown`. The answers fold into the
-  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:441`).
+  marks with `UiModel::pn_answered` (`loquax/src/ui/arrival.rs:444`).
 
 ### Asking, as built (1409)
 

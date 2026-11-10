@@ -41,6 +41,13 @@ pub enum PhotoSize {
 impl PhotoSize {
     pub const ALL: [PhotoSize; 3] = [PhotoSize::Small, PhotoSize::Phone, PhotoSize::Original];
 
+    /// The size after this one, the last one's the first: what a press
+    /// on the settings' row sets.
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
+    }
+
     /// The longest edge in pixels it scales to, and the JPEG quality;
     /// `None` for the original.
     pub fn target(self) -> Option<(u32, u8)> {

@@ -70,6 +70,9 @@ pub enum Command {
     /// Bring the Rooms tab, Reticulum Relay Chat on a hub, to the front
     /// (Loquax 1379), where the host has it.
     Rooms,
+    /// Bring the Explore tab, the pages and the public rooms under one
+    /// button, to the front (Loquax 1578).
+    Explore,
     /// Choose how the map is drawn, from the ways the frontend offers.
     MapDrawing,
     /// Give the open conversation's peer a name of the reader's own, or
@@ -155,6 +158,9 @@ pub enum Command {
     /// Read a friend's code from a picture of its QR: the palette takes
     /// the picture's path.
     CodeFromPicture,
+    /// The settings' nine sections (Loquax 1450), as the phone's menu and
+    /// the window's gear open them.
+    Settings,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -169,7 +175,7 @@ pub struct PaletteEntry {
 /// The table, in the order the palette lists it unfiltered. A first user's
 /// two commands stand right under `send`, where an open palette shows them
 /// (1263), and the code a friend adds us by right after them (1279).
-pub const COMMANDS: [PaletteEntry; 59] = [
+pub const COMMANDS: [PaletteEntry; 61] = [
     entry("send", Command::Send),
     entry("new conversation", Command::NewConversation),
     entry("add contact", Command::AddContact),
@@ -198,6 +204,7 @@ pub const COMMANDS: [PaletteEntry; 59] = [
     entry("map drawing", Command::MapDrawing),
     entry("browse", Command::Browse),
     entry("rooms", Command::Rooms),
+    entry("explore", Command::Explore),
     entry("rename", Command::Rename),
     entry("react", Command::React),
     entry("block", Command::Block),
@@ -229,6 +236,7 @@ pub const COMMANDS: [PaletteEntry; 59] = [
     entry("send picture", Command::SendPicture),
     entry("send file", Command::SendFile),
     entry("code in a picture", Command::CodeFromPicture),
+    entry("settings", Command::Settings),
 ];
 
 /// The entry that runs `command`.

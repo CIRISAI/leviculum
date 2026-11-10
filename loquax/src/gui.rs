@@ -31,7 +31,8 @@
 //!
 //! The map's autoload (1089) runs in the shell: the window decides what to
 //! ask with the model's own rules ([`want_pins`] when the pins first arrive,
-//! [`want_view`] on `d`) and sends it over; the shell's [`Seen`] carries the
+//! [`want_view`] on `d`, and every frame the core's scheduler,
+//! [`ViewLoads`], 1527: the screen at its zoom first) and sends it over; the shell's [`Seen`] carries the
 //! loading word and the maps directory's epoch, and a new epoch reads the
 //! regions again and paints the view anew.
 
@@ -39,8 +40,15 @@
 mod bench;
 pub mod chat;
 #[cfg(test)]
+mod counts;
+/// The first-tile measurement's archive and disk (1527), the phone's too.
+#[cfg(test)]
+#[path = "../tests/support/first_tile.rs"]
+mod first_tile;
+#[cfg(test)]
 mod idle;
 pub mod map;
+mod select;
 #[cfg(test)]
 mod smooth;
 pub mod trace;
@@ -53,9 +61,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::advanced::image::{FilterMethod, Handle};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
-use iced::widget::{
-    button, column, container, row, scrollable, stack, text, text_editor, text_input, Space,
-};
+use iced::widget::{button, column, container, row, scrollable, stack, text, text_editor, Space};
 use iced::{
     keyboard, mouse, window, Color, Element, Length, Point, Rectangle, Renderer, Size,
     Subscription, Task, Theme,
@@ -77,7 +83,8 @@ use loquax::ui::intent::{Intent, Messages, Target};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
 use loquax::ui::scene::{LayoutClass, NodeId, Scene, TabId};
 use loquax::ui::strings::{Lang, StrId};
-use loquax::ui::{Pane, UiEvent, MAP_LOADED_ALREADY};
+use loquax::ui::viewload::{ViewLoads, ViewWants};
+use loquax::ui::{Pane, UiEvent, MAP_LOADED_ALREADY, MAP_LOADING_HERE_WORDS};
 use loquax::when::WallTime;
 
 use crate::desktop;
@@ -128,6 +135,9 @@ pub struct Seen {
     pub receipts: bool,
     /// The reader's photo size (1220), the settings' row (1371).
     pub photo_size: loquax::ui::photos::PhotoSize,
+    /// The settings' Mailbox section (1450, 1642): the core's mailbox
+    /// page, which mailbox, how it is reached, which devices use it.
+    pub mailbox: Option<loquax::ui::mailbox_page::MailboxPage>,
     /// The photo a press on a bubble's photo last asked to see whole
     /// (1269), decoded by the shell: a new one opens the viewer.
     pub photo: Option<viewer::Picture>,
@@ -137,6 +147,9 @@ pub struct Seen {
     /// The newest text the browser copied, with its serial (1369): a new
     /// one goes to the window's clipboard.
     pub copied: Option<(u64, String)>,
+    /// The public rooms' hub lines of the Advanced section (1577), as the
+    /// core says them ([`loquax::ui::settings::hub_rows`]).
+    pub hubs: Vec<loquax::ui::settings::PageRow>,
 }
 
 /// The hosted browser as the window draws it (1369): lnomad's model as
@@ -172,33 +185,104 @@ impl std::fmt::Debug for Browsed {
     }
 }
 
+/// The mailbox page (1642), as the phone and the terminal draw it.
+fn mailbox_lines(model: &crate::shell::Model) -> Option<loquax::ui::mailbox_page::MailboxPage> {
+    Some(loquax::ui::mailbox_page::page(model))
+}
+
 impl Seen {
     fn of(shell: &Shell) -> Self {
+        Self::of_model(&shell.model, shell.maps.epoch(), &shell.browsing)
+    }
+
+    /// What the window shows of `model`, the maps directory at `maps`,
+    /// the hosted browser's pictures in `browsing`: [`Seen::of`] without
+    /// the rest of the shell, which the idle tests have none of.
+    fn of_model(
+        model: &crate::shell::Model,
+        maps: u64,
+        browsing: &crate::browsing::Browsing,
+    ) -> Self {
         Self {
-            pins: shell.model.map_pins(),
-            tracks: shell.model.track_input(),
-            track_window: shell.model.track_window,
-            notice: shell.model.toasts.last().map(|t| t.text.clone()),
-            loading: shell.model.map_loading.clone(),
-            maps: shell.maps.epoch(),
-            autoload: shell.model.map_autoload,
-            style: Style::SCREEN.in_theme(map_theme(shell.model.map_theme, None)),
-            scene: shell.model.scene(LayoutClass::Wide),
-            now: shell.model.now,
-            receipts: shell.model.reading.on,
-            photo_size: shell.model.photo_size,
+            pins: model.map_pins(),
+            tracks: model.track_input(),
+            track_window: model.track_window,
+            notice: model.toasts.last().map(|t| t.text.clone()),
+            // The screen's own load in the phone chip's words (1527).
+            loading: match model.map_here {
+                true => Some(MAP_LOADING_HERE_WORDS.to_string()),
+                false => model.map_loading.clone(),
+            },
+            maps,
+            autoload: model.map_autoload,
+            style: Style::SCREEN.in_theme(map_theme(model.map_theme, None)),
+            scene: model.scene(LayoutClass::Wide),
+            now: model.now,
+            receipts: model.reading.on,
+            photo_size: model.photo_size,
+            mailbox: mailbox_lines(model),
             photo: None,
-            browse: match (shell.model.browse.showing(), &shell.browsing.pictures) {
+            browse: match (model.browse.showing(), &browsing.pictures) {
                 (true, Some(pictures)) => Some(Browsed {
-                    model: Arc::new(shell.model.browse.model.clone()),
-                    scene: shell.model.browse.model.scene(),
+                    model: Arc::new(model.browse.model.clone()),
+                    scene: model.browse.model.scene(),
                     pictures: Arc::clone(pictures),
-                    epoch: shell.browsing.epoch,
+                    epoch: browsing.epoch,
                 }),
                 _ => None,
             },
-            copied: shell.browsing.copied.clone(),
+            copied: browsing.copied.clone(),
+            hubs: loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Window),
         }
+    }
+
+    /// What [`Seen::of_model`] is built from (1491): the model's
+    /// revision, the maps directory's epoch, the browser's pictures and
+    /// copies, the photo the viewer shows. The drive builds a state only
+    /// when it moved.
+    fn stamp(
+        model: &crate::shell::Model,
+        maps: u64,
+        browsing: &crate::browsing::Browsing,
+        photo: Option<&viewer::Picture>,
+    ) -> u64 {
+        loquax::ui::Presented::stamp(
+            model.revision,
+            &[
+                maps,
+                browsing.epoch,
+                browsing.copied.as_ref().map_or(0, |(serial, _)| *serial),
+                photo.map_or(0, |p| p.serial),
+            ],
+        )
+    }
+}
+
+/// The drive's half of a pass (1491): the state the window is sent,
+/// built only when its stamp moved and sent only when the window would
+/// show it differently ([`Sent`]). Before 1491 the drive built the whole
+/// scene, the pins and the tracks on every pass, fifty times a second,
+/// and [`Sent`] threw the build away.
+#[derive(Default)]
+struct Driving {
+    presented: loquax::ui::Presented,
+    sent: Sent,
+}
+
+impl Driving {
+    /// The state for the window, when one is owed: `build` runs only when
+    /// `stamp` moved.
+    fn pass(&mut self, stamp: u64, build: impl FnOnce() -> Seen) -> Option<Seen> {
+        if !self.presented.due(stamp) {
+            return None;
+        }
+        self.sent.offer(build())
+    }
+
+    /// How many states the drive built.
+    #[cfg(test)]
+    fn builds(&self) -> u64 {
+        self.presented.builds()
     }
 }
 
@@ -207,6 +291,8 @@ impl Seen {
 #[derive(Clone, Debug)]
 pub enum Want {
     Map(MapWant),
+    /// The core scheduler's decision for the map's frame (1527).
+    MapView(ViewWants),
     Ui(UiEvent),
     /// A gesture or a button of the recording (1276), timed by the shell
     /// on the clock the model's recording counts by.
@@ -234,15 +320,23 @@ pub async fn run(options: ShellOptions) -> ExitCode {
         Ok(started) => started,
         Err(code) => return code,
     };
+    // The window scrolls scenes it keeps whole (1490): the viewport rule
+    // reaches it with its own plan step, which wires the scroll offsets
+    // into the model; until then it asks for everything.
+    shell.model.viewing = loquax::ui::Viewing::ALL;
     // The desktop's portal is the window's picker (1341): Gallery and
     // File in the plus, as on the phone.
     shell.model.bar.abilities.picker = true;
     // No receiver on a desktop (1371): the position sheet takes it by
     // hand, typed or the map's centre.
     shell.model.bar.abilities.manual = true;
+    // Set here, not folded: the scene the start built is dropped (1491).
+    shell.model.changed_outside();
     // The Browse tab's pictures (1369): lnomad's window code holds them in
     // the shell, which the window draws them from.
     shell.browsing.pictures = Some(Arc::default());
+    // The window's map runs the scheduler itself (1527), on its own view.
+    shell.map_drive = None;
     let frames = Frames::new(shell.maps.clone());
     let (seen_tx, seen_rx) = unbounded();
     let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -276,9 +370,10 @@ async fn drive(
     // words the model says itself, a group's notes and a digest's
     // left-out lines among them (1348), are the window's too.
     shell.model.lang = locale();
+    shell.model.changed_outside();
     shell.apply(UiEvent::Clock(local_now()));
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
-    let mut sent = Sent::default();
+    let mut driving = Driving::default();
     let mut photo: Option<viewer::Picture> = None;
     let mut notices = desktop::Notices::default();
     let mut front = true;
@@ -314,9 +409,17 @@ async fn drive(
                 tracing::warn!("could not open {}: {error}", path.display());
             }
         }
-        let mut now = Seen::of(&shell);
-        now.photo = photo.clone();
-        if let Some(now) = sent.offer(now) {
+        let stamp = Seen::stamp(
+            &shell.model,
+            shell.maps.epoch(),
+            &shell.browsing,
+            photo.as_ref(),
+        );
+        let offered = driving.pass(stamp, || Seen {
+            photo: photo.clone(),
+            ..Seen::of(&shell)
+        });
+        if let Some(now) = offered {
             if seen.unbounded_send(now).is_err() {
                 break;
             }
@@ -338,6 +441,7 @@ async fn drive(
             _ = &mut leave => break,
             Some(want) = asks.recv() => match want {
                 Want::Map(want) => shell.map_ask(want),
+                Want::MapView(wants) => shell.map_schedule(wants),
                 Want::Ui(event) => shell.apply(event),
                 Want::Record { peer, input } => shell.record(peer, input),
                 Want::Attach { peer, path, photo } => shell.attach(peer, &path, photo),
@@ -507,6 +611,10 @@ pub enum Message {
     NewAddress(String),
     /// What the new group's name field holds now (1307).
     GroupName(String),
+    /// What the Advanced section's hub field holds now (1577).
+    HubTyped(String),
+    /// The hub field's address taken (its button, or `Enter`).
+    HubTake,
     /// What the position sheet's field holds now (1371).
     Position(String),
     /// What the row menu's rename field holds now (1371).
@@ -520,6 +628,9 @@ pub enum Message {
     Intent(Intent),
     /// The top bar's gear: the settings page (1233).
     Settings,
+    /// A "Copy" on the mailbox page (1642): the words onto the clipboard,
+    /// and the notice that says so.
+    CopyText(String),
     /// A time window chosen in the map's menu (1385, 1419).
     TrackWindow(loquax::ui::tracks::TrackWindow),
     /// The map bar's More: its menu open, or closed again (1419).
@@ -559,6 +670,23 @@ pub enum Message {
     /// The Rooms tab said this (1379): the input's text, its Enter, a
     /// room chosen.
     Rooms(loquax::ui::rooms::RoomsEvent),
+    /// The Explore tab said this (1578): the search field's text, the
+    /// order, a page, a bookmark, a room, a hub.
+    Explore(loquax::ui::explore::ExploreEvent),
+    /// The left button on a text that selects (1444, 1475): a press, a
+    /// drag over it, the release.
+    PickText(
+        loquax::ui::selection::RunKey,
+        leviculum_ui_iced::select::Pick,
+    ),
+    /// A middle click on the compose field (1444): paste the PRIMARY
+    /// selection where it clicked (1475).
+    PastePrimary,
+    /// The pointer over the compose field, in the field (1475): where a
+    /// middle click pastes.
+    ComposePointer(iced::Point),
+    /// What the PRIMARY selection held, for the compose field.
+    PrimaryText(Option<String>),
 }
 
 impl Message {
@@ -588,6 +716,7 @@ impl Message {
                 | Message::Probed
                 | Message::Browse(_)
                 | Message::Rooms(_)
+                | Message::Explore(_)
         )
     }
 }
@@ -604,6 +733,8 @@ pub enum Screen {
     Browse,
     /// The Rooms tab (1379), while the model has it in front.
     Rooms,
+    /// The Explore tab's list (1578), while the model has it in front.
+    Explore,
 }
 
 /// Thousandths of a step a line of the wheel zooms: a notch is a step.
@@ -798,6 +929,9 @@ struct App {
     /// The tracks last derived, and at what.
     track_cache: std::cell::RefCell<Option<(TrackKey, Vec<loquax::ui::tracks::Track>)>>,
     asks: Option<Asks>,
+    /// The core's scheduler over the map's frames (1527): the screen at its
+    /// zoom loads first.
+    loads: ViewLoads,
     /// The view the last fit chose: a region landing under it fits again.
     fitted_at: Option<(World, u32)>,
     frames: Arc<Mutex<Frames>>,
@@ -845,6 +979,8 @@ struct App {
     search: String,
     /// The new conversation's field while it is open.
     new_address: Option<String>,
+    /// The Advanced section's field for another hub's address (1577).
+    hub_field: String,
     /// The position sheet's field while it is open (1371).
     position: Option<String>,
     /// The row menu's rename field while it is open (1371): whose, and
@@ -872,11 +1008,27 @@ struct App {
     /// delete was asked once.
     menu: Option<NodeId>,
     deleting: Option<NodeId>,
+    /// The text selected in the open chat (1444), and whether the left
+    /// button that began it is still held.
+    picked: Option<loquax::ui::selection::TextSelection>,
+    picking: bool,
+    /// The release of a selection's drag on a text in a button (a list
+    /// row, a position line) came (1475): the button's open, which the
+    /// same release sends right after, is dropped. Reset by every view,
+    /// so it never outlives the event that set it.
+    drop_open: std::cell::Cell<bool>,
+    /// The pointer's last place over the compose field (1475).
+    compose_pointer: Option<iced::Point>,
+    /// The test clipboard (1444): what went onto which buffer.
+    #[cfg(test)]
+    clips: Vec<(select::Buffer, String)>,
     /// The settings' Maps rows (1290): how many regions and their bytes,
     /// read as the page opens and after a delete, and whether "Delete
     /// all downloaded maps" was asked once.
     maps_usage: (usize, u64),
     maps_asked: bool,
+    /// The settings' open section (1450), none for their list.
+    settings_at: Option<loquax::ui::settings::Section>,
     /// The language the scene's words are said in: the desktop's locale.
     lang: Lang,
     /// The scene of [`Seen`] in the window's class: what is drawn.
@@ -898,6 +1050,8 @@ struct App {
     /// The reader left the Rooms tab (1379) and the model has not said so
     /// yet, as [`App::browse_left`].
     rooms_left: bool,
+    /// The reader left the Explore tab (1578), as [`App::browse_left`].
+    explore_left: bool,
 }
 
 impl App {
@@ -937,9 +1091,11 @@ impl App {
                 now: None,
                 receipts: true,
                 photo_size: loquax::ui::photos::PhotoSize::default(),
+                mailbox: None,
                 photo: None,
                 browse: None,
                 copied: None,
+                hubs: Vec::new(),
             },
             asks,
             track_cache: std::cell::RefCell::new(None),
@@ -963,6 +1119,7 @@ impl App {
             focused: true,
             prefetching: false,
             motion: Motion::default(),
+            loads: ViewLoads::new(),
             origin: Instant::now(),
             screen: Screen::Chats,
             window: Size::new(WINDOW.0, WINDOW.1),
@@ -970,6 +1127,7 @@ impl App {
             flipped: false,
             search: String::new(),
             new_address: None,
+            hub_field: String::new(),
             position: None,
             renaming: None,
             map_shown: false,
@@ -982,8 +1140,15 @@ impl App {
             emoji: false,
             menu: None,
             deleting: None,
+            picked: None,
+            picking: false,
+            drop_open: std::cell::Cell::new(false),
+            compose_pointer: None,
+            #[cfg(test)]
+            clips: Vec::new(),
             maps_usage: (0, 0),
             maps_asked: false,
+            settings_at: None,
             lang: Lang::En,
             scene: empty,
             viewer: None,
@@ -993,6 +1158,7 @@ impl App {
             probe: None,
             browse_left: false,
             rooms_left: false,
+            explore_left: false,
         }
     }
 
@@ -1106,6 +1272,15 @@ impl App {
             Message::GroupName(typed) => {
                 self.tell(UiEvent::Group(loquax::ui::groups::Verb::Name(typed)));
             }
+            Message::HubTyped(typed) => self.hub_field = typed,
+            Message::HubTake => {
+                let typed = core::mem::take(&mut self.hub_field);
+                if !typed.trim().is_empty() {
+                    self.tell(UiEvent::Rooms(loquax::ui::rooms::RoomsEvent::Hub(
+                        loquax::ui::rooms::HubChoice::Address(typed),
+                    )));
+                }
+            }
             Message::NewGo => {
                 let typed = self.new_address.clone().unwrap_or_default();
                 // The one reader every frontend asks (1263): a contact
@@ -1129,6 +1304,10 @@ impl App {
             | Message::RecCursor(_)
             | Message::RecRelease
             | Message::RecOverLock(_) => self.rec_mouse(message),
+            Message::PickText(key, pick) => return self.pick_text(key, pick),
+            Message::PastePrimary => return self.paste_primary(),
+            Message::ComposePointer(at) => self.compose_pointer = Some(at),
+            Message::PrimaryText(text) => self.primary_text(text),
             Message::Compose(action) => {
                 let edit = action.is_edit();
                 self.compose.perform(action);
@@ -1163,6 +1342,9 @@ impl App {
             return;
         }
         self.compose_for = open;
+        // A selection is the open chat's (1444).
+        self.picked = None;
+        self.picking = false;
         let Some(chat) = self.seen.scene.chat.as_ref() else {
             self.compose = text_editor::Content::new();
             self.reply = None;
@@ -1292,8 +1474,18 @@ impl App {
                     self.deleting = None;
                 }
                 (None, Screen::Settings) if self.maps_asked => self.maps_asked = false,
+                // A section goes back to the settings' list (1450).
+                (None, Screen::Settings) if self.settings_at.is_some() => self.settings_at = None,
                 (None, Screen::Map | Screen::Settings) => self.screen = Screen::Chats,
+                // The browser and a hub's rooms go back to Explore, which
+                // opened them (1578); Explore goes back to the chats.
                 (None, Screen::Browse | Screen::Rooms) => {
+                    self.browse_left = true;
+                    self.rooms_left = true;
+                    self.explore_left = false;
+                    self.tell(UiEvent::Tab(TabId::Explore));
+                }
+                (None, Screen::Explore) => {
                     self.leave_browse();
                     self.screen = Screen::Chats;
                 }
@@ -1307,6 +1499,23 @@ impl App {
                 }
             },
             Intent::Theme => self.flipped = !self.flipped,
+            // The settings (1450): the gear's list, a section from it.
+            // Profile is the avatar's layer, opened over the list.
+            Intent::Settings(at) => {
+                self.screen = Screen::Settings;
+                self.menu = None;
+                self.maps_asked = false;
+                match at {
+                    Some(loquax::ui::settings::Section::Profile) => {
+                        self.settings_at = None;
+                        self.tell(UiEvent::Profile { open: true });
+                    }
+                    _ => {
+                        self.settings_at = at;
+                        self.maps_usage = self.maps().usage();
+                    }
+                }
+            }
             // The group verbs (1307) are the model's own; the window draws
             // the picker and the sheet from the scene.
             Intent::Group(verb) => {
@@ -1318,6 +1527,24 @@ impl App {
             }
             Intent::ReadReceipts { on } => {
                 self.tell(UiEvent::ReadReceipts(on.apply(self.seen.receipts)));
+            }
+            // The public rooms' hub (1577): a shipped one or none at once,
+            // another from the field, which a press on its line focuses.
+            Intent::RoomsHub(pick) => {
+                use loquax::ui::rooms::{HubChoice, HubPick, RoomsEvent};
+                let choice = match pick {
+                    HubPick::Hub(hub) => HubChoice::Hub(hub),
+                    HubPick::None => HubChoice::None,
+                    HubPick::Paste => {
+                        return iced::widget::operation::focus(chat::HUB_FIELD);
+                    }
+                    // "More…" (1599): every hub, in the page's scroll.
+                    HubPick::More => {
+                        self.tell(UiEvent::Rooms(RoomsEvent::More));
+                        return Task::none();
+                    }
+                };
+                self.tell(UiEvent::Rooms(RoomsEvent::Hub(choice)));
             }
             Intent::DeleteAllRegions { confirmed: false } => {
                 self.maps_usage = self.maps().usage();
@@ -1404,7 +1631,20 @@ impl App {
                 self.rooms_left = false;
                 self.tell(UiEvent::Tab(TabId::Rooms));
             }
+            // Explore (1578): the model brings its list to the front, and
+            // what it opens (the browser, a hub's rooms) the window follows.
+            Intent::Tab(TabId::Explore) => {
+                self.explore_left = false;
+                self.browse_left = false;
+                self.rooms_left = false;
+                self.tell(UiEvent::Tab(TabId::Explore));
+            }
             Intent::Browse(intent) => self.tell(UiEvent::Browse(BrowseEvent::Intent(intent))),
+            Intent::Explore(said) => {
+                self.browse_left = false;
+                self.rooms_left = false;
+                self.tell(UiEvent::Explore(said));
+            }
             Intent::Menu(id) => {
                 self.menu = id;
                 self.deleting = None;
@@ -1647,8 +1887,9 @@ impl App {
         let key = leviculum_ui_iced::key::chord(event)?;
         let pane = match (self.screen, self.scene.top.id) {
             (Screen::Map, _) => Pane::Map,
-            // The Rooms' input field has the keys while it is in front.
-            (Screen::Browse | Screen::Rooms, _) => return None,
+            // The Rooms' input field has the keys while it is in front,
+            // and Explore's search field (1578).
+            (Screen::Browse | Screen::Rooms | Screen::Explore, _) => return None,
             (Screen::Chats, NodeId::ChatBar) => Pane::Messages,
             (Screen::Chats | Screen::Settings, _) => Pane::Conversations,
         };
@@ -1714,10 +1955,15 @@ impl App {
                 .map(|(_, text)| iced::clipboard::write(text.clone())),
             _ => None,
         };
+        // The open a selection's drag on a button's text ended in (1475).
+        if self.drop_open.replace(false) && matches!(message, Message::Intent(_)) {
+            return copy.unwrap_or_else(Task::none);
+        }
         let start = Instant::now();
         let task = self.update_inner(message);
         self.browse_sync();
         self.rooms_sync();
+        self.explore_sync();
         leviculum_ui_iced::fps::update(start, start.elapsed());
         match copy {
             Some(copy) => Task::batch([copy, task]),
@@ -1791,6 +2037,31 @@ impl App {
         if self.screen == Screen::Rooms || self.seen.scene.rooms.is_some() {
             self.rooms_left = true;
             self.tell(UiEvent::Tab(TabId::Chats));
+        }
+        if self.screen == Screen::Explore || self.seen.scene.explore.is_some() {
+            self.explore_left = true;
+            self.tell(UiEvent::Tab(TabId::Chats));
+        }
+    }
+
+    /// The window follows the model's Explore list (1578), but for a
+    /// [`Seen`] from before the reader left it; the browser and a hub's
+    /// rooms it opens are their own screens ([`App::browse_sync`],
+    /// [`App::rooms_sync`]).
+    fn explore_sync(&mut self) {
+        match (self.seen.scene.explore.is_some(), self.screen) {
+            (false, _) => {
+                self.explore_left = false;
+                if self.screen == Screen::Explore {
+                    self.screen = Screen::Chats;
+                }
+            }
+            (true, Screen::Explore) => {}
+            (true, _) if self.explore_left => {}
+            (true, _) => {
+                self.screen = Screen::Explore;
+                self.menu = None;
+            }
         }
     }
 
@@ -1918,6 +2189,9 @@ impl App {
                 self.tell(UiEvent::Rooms(said));
                 return Task::none();
             }
+            Message::Explore(said) => {
+                return self.intent(Intent::Explore(said));
+            }
             // The Browse tab in front has the keys, as the model routes
             // them (1369).
             Message::Key(event) if self.screen == Screen::Browse => {
@@ -1935,18 +2209,26 @@ impl App {
                 self.map_menu = !self.map_menu;
                 return Task::none();
             }
+            Message::CopyText(words) => {
+                self.seen.notice = Some(StrId::MailboxCopied.text(self.lang).to_string());
+                return iced::clipboard::write(words);
+            }
             Message::Settings => {
                 self.screen = Screen::Settings;
+                self.settings_at = None;
                 self.menu = None;
                 self.maps_asked = false;
                 self.maps_usage = self.maps().usage();
                 return Task::none();
             }
             Message::Key(event) => {
+                if let Some(task) = self.selection_key(&event) {
+                    return task;
+                }
                 return match self.key(&event) {
                     Some(intent) => self.intent(intent),
                     None => Task::none(),
-                }
+                };
             }
             _ => {}
         }
@@ -2051,10 +2333,34 @@ impl App {
         true
     }
 
+    /// The map's view shown to the core's scheduler at every frame asked
+    /// (1527): what it decides goes to the shell's loader, the screen at
+    /// its zoom first. The platform only downloads what the core ranked.
+    fn drive_loads(&mut self) {
+        if !self.seen.autoload || self.screen != Screen::Map || self.size.is_none() {
+            return;
+        }
+        let Some(asks) = &self.asks else {
+            return;
+        };
+        let view = self.view.at_zoom(self.view.tile_zoom());
+        let now = self.now_ms();
+        let heading = self.motion.heading(now);
+        let moving = self.moving();
+        if let Some(wants) = self
+            .loads
+            .decide(&view, &self.setup.regions, now, moving, heading)
+        {
+            let _ = asks.send(Want::MapView(wants));
+        }
+    }
+
     /// The worker's next job, when it is free: the frame the view asks
     /// for unless it is on screen and owes nothing, else a prefetch batch
     /// while the frame on screen rests and the window has the focus.
     fn next_job(&mut self) -> Option<Job> {
+        // Every frame the view is shown to the scheduler, busy or not.
+        self.drive_loads();
         if self.busy || self.screen != Screen::Map {
             return None;
         }
@@ -2120,7 +2426,7 @@ impl App {
         let mut pins = self.seen.pins.clone();
         let at_rest = self.view.at_zoom(self.view.tile_zoom());
         let shown = match radar::shows(&at_rest, &self.setup.regions) {
-            true => radar::radar(&pins, self.view.unit(), self.view.size()),
+            true => radar::radar(&pins, self.view.unit(), self.view.size(), self.lang),
             false => None,
         };
         if let Some(r) = &shown {
@@ -2163,6 +2469,7 @@ impl App {
             &now,
             unit,
             self.scale,
+            self.lang,
         );
         *cache = Some((key, tracks.clone()));
         tracks
@@ -2428,6 +2735,8 @@ impl App {
     /// The window, and the frame meter's numbers over it while it
     /// measures (`--fps`, 1441).
     fn view(&self) -> Element<'_, Message> {
+        // The event that set it is over.
+        self.drop_open.set(false);
         let window = self.window_view();
         match leviculum_ui_iced::fps::enabled() {
             true => stack![window, leviculum_ui_iced::fps::overlay()].into(),
@@ -2443,6 +2752,7 @@ impl App {
             (Screen::Map, _, _) => self.map_view(),
             (Screen::Browse, _, _) => self.browse_view(),
             (Screen::Rooms, _, _) => self.rooms_view(),
+            (Screen::Explore, _, _) => self.explore_pane(),
             (Screen::Settings, _, _) => self.settings_pane(),
             // A group's screens (1307) take the chat's place, or the
             // whole stack's on a narrow window.
@@ -2479,6 +2789,26 @@ impl App {
     ) -> Element<'a, Message> {
         let t = self.tokens();
         let lang = self.lang;
+        // The address and the code select (1475), as runs of their own.
+        let picked = self.picked_ranges();
+        let selects = |words: String, part: loquax::ui::selection::Part, size: f32| {
+            let key = loquax::ui::selection::RunKey::new(0, part);
+            let ink = chat::colour(t.text);
+            leviculum_ui_iced::select::selectable(
+                text(words.clone())
+                    .size(size)
+                    .font(iced::Font::MONOSPACE)
+                    .align_x(iced::Alignment::Center)
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .color(ink),
+                words,
+                picked.get(&key).cloned(),
+                Color { a: 0.3, ..ink },
+                self.picking,
+                move |pick| Message::PickText(key, pick),
+            )
+        };
         let said = |words: &loquax::ui::strings::Text, size: f32, ink: u32| {
             text(words.resolve(lang))
                 .size(size)
@@ -2491,12 +2821,11 @@ impl App {
             chat::avatar_of(&profile.avatar, 64.0, t),
             said(&profile.name, 20.0, t.text),
             said(&profile.address_label, 13.0, t.text_secondary),
-            text(profile.fours.clone())
-                .size(13)
-                .font(iced::Font::MONOSPACE)
-                .align_x(iced::Alignment::Center)
-                .width(Length::Fill)
-                .color(chat::colour(t.text)),
+            selects(
+                profile.fours.clone(),
+                loquax::ui::selection::Part::Address,
+                13.0
+            ),
             said(&profile.mailbox, 14.0, t.text),
         ]
         .spacing(6)
@@ -2541,6 +2870,13 @@ impl App {
                     .height(QR_SIDE),
                     said(&profile.caption, 13.0, t.text_secondary),
                 ]
+                // The code the QR holds, as words to select and copy (1475).
+                .extend(
+                    profile
+                        .code
+                        .clone()
+                        .map(|code| selects(code, loquax::ui::selection::Part::Code, 11.0).into()),
+                )
                 .spacing(6)
                 .width(QR_SIDE),
             );
@@ -2605,94 +2941,10 @@ impl App {
         lnomad::gui::view(&browsed.model, &pictures).map(Message::Browse)
     }
 
-    /// The Rooms tab (1379): the hub's line, the rooms beside the open
-    /// room, its one line on what a room is not over its lines, and the
-    /// input with what it does under it. Drawn from the scene's Rooms node.
+    /// The Rooms tab (1379), a room as a chat since 1450: drawn by
+    /// [`App::rooms_pane`] from the scene's Rooms node.
     fn rooms_view(&self) -> Element<'_, Message> {
-        use loquax::ui::rooms::{RoomLineKind, RoomsEvent};
-        let Some(node) = &self.seen.scene.rooms else {
-            return Space::new().into();
-        };
-        let t = self.tokens();
-        let lang = self.lang;
-        let ink = chat::colour(t.text);
-        let quiet = chat::colour(t.text_secondary);
-        let rows = node
-            .rows
-            .iter()
-            .enumerate()
-            .fold(column![].spacing(2), |list, (i, room)| {
-                let label = match room.unread {
-                    0 => room.name.clone(),
-                    n => format!("{}  {n}", room.name),
-                };
-                // The list's own row, its selection the chats' (1379).
-                list.push(leviculum_ui_iced::chrome::list_item(
-                    container(text(label).size(15).color(ink)).padding([6, 10]),
-                    room.selected,
-                    Message::Rooms(RoomsEvent::Show(Some(i))),
-                    chat::palette(t),
-                ))
-            });
-        let list = container(scrollable(rows))
-            .width(Length::Fixed(200.0))
-            .height(Length::Fill)
-            .padding(8);
-        let room: Element<'_, Message> = match &node.open {
-            Some(open) => {
-                let lines = open.lines.iter().fold(column![].spacing(4), |lines, line| {
-                    let who = line.who.resolve(lang);
-                    let said = line.text.resolve(lang);
-                    let words = match line.kind {
-                        RoomLineKind::Said(leviculum_rrc::LineKind::Msg) => {
-                            format!("{who}: {said}")
-                        }
-                        RoomLineKind::Said(leviculum_rrc::LineKind::Action) => {
-                            format!("* {who} {said}")
-                        }
-                        RoomLineKind::Said(leviculum_rrc::LineKind::Notice) => {
-                            format!("-{who}- {said}")
-                        }
-                        RoomLineKind::Error => format!("! {said}"),
-                        _ => format!("— {said}"),
-                    };
-                    let colour = match line.kind {
-                        RoomLineKind::Said(_) => ink,
-                        _ => quiet,
-                    };
-                    lines.push(text(words).size(15).color(colour))
-                });
-                column![
-                    text(open.name.clone()).size(18).color(ink),
-                    text(open.live.resolve(lang)).size(13).color(quiet),
-                    scrollable(lines).height(Length::Fill),
-                ]
-                .spacing(8)
-                .into()
-            }
-            None => container(text(node.hint.resolve(lang)).size(15).color(quiet))
-                .center(Length::Fill)
-                .into(),
-        };
-        let input = text_input(&node.hint.resolve(lang), &node.input)
-            .on_input(|typed| Message::Rooms(RoomsEvent::Typed(typed)))
-            .on_submit(Message::Rooms(RoomsEvent::Submit))
-            .size(15)
-            .padding(8);
-        let foot = self
-            .seen
-            .notice
-            .clone()
-            .unwrap_or_else(|| node.hint.resolve(lang));
-        column![
-            text(node.hub.resolve(lang)).size(15).color(quiet),
-            row![list, container(room).width(Length::Fill).padding(8)].height(Length::Fill),
-            input,
-            text(foot).size(13).color(quiet),
-        ]
-        .spacing(6)
-        .padding(10)
-        .into()
+        self.rooms_pane()
     }
 
     fn map_view(&self) -> Element<'_, Message> {
@@ -2730,7 +2982,7 @@ impl App {
                 list.push(button)
             });
         let list: Element<'_, Message> = match self.seen.pins.is_empty() {
-            true => text("no positions yet").size(14).into(),
+            true => Space::new().into(),
             false => chat::soft(scrollable(list)),
         };
         let credit = self
@@ -2763,7 +3015,11 @@ impl App {
             .width(Length::Fill)
             .align_right(Length::Fill)
             .clip(true),
-            line(format!("  z{:.1}", self.view.zoom())),
+            // The zoom is a debug overlay's, with the frame counter (1447).
+            line(match leviculum_ui_iced::fps::enabled() {
+                true => format!("  z{:.1}", self.view.zoom()),
+                false => String::new(),
+            }),
             // The map's menu (1419): the time window, rarely needed, is
             // in it and not on the map.
             button(text(StrId::Menu.text(self.lang)).size(13))
@@ -2790,8 +3046,21 @@ impl App {
             true => self.map_menu(),
             false => Space::new().into(),
         };
+        // Nobody else's position (1447, walk 1 finding 18): one sentence
+        // in the middle of the map, which shows the own area where there
+        // is an own position and the theme's ground where there is none.
+        let empty: Element<'_, Message> = match self.seen.pins.iter().all(|p| p.own) {
+            true => container(
+                text(StrId::MapEmpty.text(self.lang))
+                    .size(16)
+                    .color(chat::colour(self.tokens().text_secondary)),
+            )
+            .center(Length::Fill)
+            .into(),
+            false => Space::new().into(),
+        };
         let map = container(
-            stack![picture, canvas, menu]
+            stack![picture, canvas, empty, menu]
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
@@ -3072,8 +3341,13 @@ impl canvas::Program<Message> for MapCanvas<'_> {
                 .filter(|_| !pin.nearby)
                 .map(|[r, g, b]| Color::from_rgb8(r, g, b));
             let blue = hue.unwrap_or(Color::from_rgb8(0x20, 0x50, 0xc0));
+            let [or, og, ob] = map::OWN_DOT;
             let ink = match (pin.selected, pin.nearby, pin.stale) {
                 (true, ..) => Color::from_rgb8(0xd0, 0x30, 0x30),
+                // Our own position, the blue dot (1449 item 2).
+                (false, _, stale) if pin.own => {
+                    Color::from_rgb8(or, og, ob).scale_alpha(if stale { 0.45 } else { 1.0 })
+                }
                 // A node nearby that is no contact (1302): a neutral grey.
                 (false, true, false) => Color::from_rgb8(0x80, 0x80, 0x80),
                 (false, true, true) => Color::from_rgba8(0x80, 0x80, 0x80, 0.45),
@@ -3222,9 +3496,11 @@ mod tests {
             now: None,
             receipts: true,
             photo_size: loquax::ui::photos::PhotoSize::default(),
+            mailbox: None,
             photo: None,
             browse: None,
             copied: None,
+            hubs: Vec::new(),
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -3327,6 +3603,382 @@ mod tests {
         assert!(differ > 1000, "without names: {differ} pixels differ");
     }
 
+    /// The scheduler's decisions the window sent the shell.
+    fn decisions(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Want>) -> Vec<ViewWants> {
+        let mut out = Vec::new();
+        while let Ok(want) = rx.try_recv() {
+            if let Want::MapView(wants) = want {
+                out.push(wants);
+            }
+        }
+        out
+    }
+
+    /// A pan into the empty asks the loader (1527): the window shows its
+    /// map's frames to the core's scheduler as the phone does, and a drag
+    /// four screens east of the Florence region sends the shell the
+    /// screen's own box at its zoom first, holding the screen, then the
+    /// cells. The control: with the autoload off the same drag sends
+    /// nothing.
+    #[test]
+    fn a_pan_into_the_empty_asks_the_loader() {
+        for autoload in [true, false] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = window_over_florence(Vec::new(), 16 * MILLI);
+            app.asks = Some(tx);
+            app.seen.autoload = autoload;
+            run(&mut app);
+            // The start is the fixture's edge: an eighth of it uncovered.
+            let held = decisions(&mut rx);
+            assert_eq!(held.len(), usize::from(autoload), "{held:?}");
+            app.apply(Message::Pointer(Pointer::Down(Point::new(400.0, 150.0))));
+            for x in (0..40).rev() {
+                app.apply(Message::Pointer(Pointer::Move(Point::new(
+                    x as f32 * 10.0,
+                    150.0,
+                ))));
+            }
+            for _ in 0..4 {
+                app.apply(Message::Pointer(Pointer::Up));
+                app.apply(Message::Pointer(Pointer::Down(Point::new(400.0, 150.0))));
+                app.apply(Message::Pointer(Pointer::Move(Point::new(0.0, 150.0))));
+            }
+            app.apply(Message::Pointer(Pointer::Up));
+            run(&mut app);
+            let sent = decisions(&mut rx);
+            if !autoload {
+                assert!(held.is_empty() && sent.is_empty(), "{sent:?}");
+                continue;
+            }
+            let last = sent.last().expect("a decision at rest");
+            assert_eq!(last.share, 1.0, "in the empty");
+            let first = &last.here[0];
+            assert_eq!(
+                first.reason,
+                loquax::ui::map::LoadReason::Screen,
+                "{last:?}"
+            );
+            assert_eq!(first.zooms, (14, 15));
+            let screen = app.view.at_zoom(app.view.tile_zoom()).bounds();
+            assert!(first.bounds.holds(&screen), "{:?} {screen:?}", first.bounds);
+            assert!(last.here[1..]
+                .iter()
+                .all(|w| w.reason == loquax::ui::map::LoadReason::View));
+        }
+    }
+
+    use super::first_tile;
+
+    /// The window's first-tile walk (1527): the map at Lew's phone size
+    /// (1527 x 2099, a density of one) over the start region of
+    /// [`first_tile::start_region`], the synthetic Grunewald archive
+    /// served throttled, the shell's map half (the loader) run here. The
+    /// window draws no frame: what it would draw is read from the disk,
+    /// the next frame over the screen draws a tile that is there.
+    struct WindowWalk {
+        _serve: leviculum_mapcut::serve::Serve,
+        _dir: tempfile::TempDir,
+        app: App,
+        rx: tokio::sync::mpsc::UnboundedReceiver<Want>,
+        loader: loquax::mapload::Loader,
+        maps: loquax::picture::Maps,
+        start: Instant,
+        start_region: leviculum_map::region::Header,
+        uncovered_ms: Option<u64>,
+        loading_ms: Option<u64>,
+        on_disk_ms: Option<u64>,
+        cell_ms: Option<u64>,
+        /// The loader's steps on the walk's clock (1616): the order the
+        /// bar is read from.
+        steps: Vec<first_tile::Stepped>,
+    }
+
+    const WALK_SIZE: (u32, u32) = (1527, 2099);
+
+    impl WindowWalk {
+        fn new() -> Self {
+            use leviculum_mapcut::serve::Serve;
+            let serve = Serve::start(vec![("p.pmtiles".into(), first_tile::first_tile_archive())])
+                .expect("serve");
+            let dir = tempfile::tempdir().expect("home");
+            let path = dir.path().join("maps");
+            std::fs::create_dir_all(&path).expect("maps");
+            let at = project(LatLon::from_degrees(
+                first_tile::FIRST_TILE_AT.0,
+                first_tile::FIRST_TILE_AT.1,
+            ));
+            let url = serve.url("p.pmtiles");
+            let start_region = first_tile::start_region(&path, &url, at, WALK_SIZE);
+            serve.throttle(first_tile::FIRST_TILE_RATE, Duration::from_millis(20));
+            let maps = loquax::picture::Maps::new(Some(path));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(Frames::new(maps.clone()), Some(tx));
+            app.screen = Screen::Map;
+            let (w, h) = WALK_SIZE;
+            app.apply(Message::MapSize(Size::new(w as f32, h as f32)));
+            let mut seen = app.seen.clone();
+            seen.autoload = true;
+            seen.maps = maps.epoch();
+            app.apply(Message::Seen(Box::new(seen)));
+            app.view = ExactView::new(at, 16 * MILLI, w, h);
+            app.hold();
+            // The walk's view is the reader's: a region landing fits
+            // nothing again.
+            app.fitted = true;
+            // No frame is drawn: the walk reads the disk.
+            app.busy = true;
+            let loader = loquax::mapload::Loader::new(
+                maps.clone(),
+                loquax::mapload::Source::Url(url),
+                1 << 30,
+            );
+            let mut walk = Self {
+                _serve: serve,
+                _dir: dir,
+                app,
+                rx,
+                loader,
+                maps,
+                start: Instant::now(),
+                start_region,
+                uncovered_ms: None,
+                loading_ms: None,
+                on_disk_ms: None,
+                cell_ms: None,
+                steps: Vec::new(),
+            };
+            walk.step();
+            assert!(!walk.loader.loading_here(), "the start is held");
+            walk
+        }
+
+        fn now_ms(&self) -> u64 {
+            self.start.elapsed().as_millis() as u64
+        }
+
+        /// One frame interval: the window asks its frame (and shows the
+        /// view to the scheduler), the shell's half takes what it sent and
+        /// polls the loads, a region landed is seen, the disk is read.
+        fn step(&mut self) {
+            let t = self.now_ms();
+            self.app.tick(Instant::now());
+            self.app.next_job();
+            let mut steps = Vec::new();
+            while let Ok(want) = self.rx.try_recv() {
+                match want {
+                    Want::MapView(w) => {
+                        steps.extend(self.loader.schedule(w.here, w.ahead, t));
+                    }
+                    Want::Map(w) => {
+                        steps.extend(self.loader.ask(w, t));
+                    }
+                    _ => {}
+                }
+            }
+            let polled = self.loader.poll(t);
+            self.steps.extend(
+                steps
+                    .iter()
+                    .chain(&polled)
+                    .filter(|s| s.kind() != loquax::mapload::StepKind::Skipped)
+                    .map(|s| (t, s.kind(), s.want().clone())),
+            );
+            if polled
+                .iter()
+                .any(|s| matches!(s, loquax::mapload::Step::Done { .. }))
+            {
+                let mut seen = self.app.seen.clone();
+                seen.maps = self.maps.epoch();
+                self.app.apply(Message::Seen(Box::new(seen)));
+            }
+            self.look(t);
+            let next = t + 16;
+            let now = self.now_ms();
+            if next > now {
+                std::thread::sleep(Duration::from_millis(next - now));
+            }
+        }
+
+        fn look(&mut self, t: u64) {
+            let view = self.app.view.at_zoom(self.app.view.tile_zoom());
+            let maps = self.maps.dir().expect("dir").to_path_buf();
+            if self.uncovered_ms.is_none()
+                && loquax::ui::viewload::uncovered(&view, &[self.start_region]) > 0.10
+            {
+                self.uncovered_ms = Some(t);
+            }
+            if self.uncovered_ms.is_some()
+                && self.loading_ms.is_none()
+                && self.loader.loading_here()
+            {
+                self.loading_ms = Some(t);
+            }
+            let start = ["start.lmr".to_string()];
+            if self.on_disk_ms.is_none()
+                && first_tile::arrived(&maps, &start, &view, view.zoom().min(15))
+            {
+                self.on_disk_ms = Some(t);
+            }
+            if self.cell_ms.is_none()
+                && first_tile::region_files(&maps)
+                    .iter()
+                    .any(|(name, z, _)| z.1 - z.0 >= 2 && name != "start.lmr")
+            {
+                self.cell_ms = Some(t);
+            }
+        }
+
+        /// A drag from `from` by `dx` a frame for `frames` frames, the
+        /// pointer held down.
+        fn drag(&mut self, from: f32, dx: f32, frames: u32) {
+            let y = WALK_SIZE.1 as f32 / 2.0;
+            self.app
+                .apply(Message::Pointer(Pointer::Down(Point::new(from, y))));
+            for k in 1..=frames {
+                self.app.apply(Message::Pointer(Pointer::Move(Point::new(
+                    from + dx * k as f32,
+                    y,
+                ))));
+                self.step();
+            }
+        }
+
+        /// The pointer still down at `at`, moved on by `dx` a frame.
+        fn drag_on(&mut self, at: f32, dx: f32, frames: u32) {
+            let y = WALK_SIZE.1 as f32 / 2.0;
+            for k in 1..=frames {
+                self.app.apply(Message::Pointer(Pointer::Move(Point::new(
+                    at + dx * k as f32,
+                    y,
+                ))));
+                self.step();
+            }
+        }
+
+        fn release(&mut self) {
+            self.app.apply(Message::Pointer(Pointer::Up));
+        }
+
+        /// At rest until a tile of the screen is there and, when asked
+        /// for, a cell, at most `limit_ms`.
+        fn rest(&mut self, limit_ms: u64, cell: bool) {
+            let until = self.now_ms() + limit_ms;
+            while self.now_ms() < until
+                && (self.on_disk_ms.is_none() || cell && self.cell_ms.is_none())
+            {
+                self.step();
+            }
+        }
+
+        fn row(&self, name: &str) -> String {
+            let after = |t: Option<u64>| match (self.uncovered_ms, t) {
+                (Some(u), Some(t)) => format!("{}", t as i64 - u as i64),
+                _ => "never".to_string(),
+            };
+            format!(
+                "| {name} | {} | {} | {} | {} |",
+                self.uncovered_ms
+                    .map_or("never".to_string(), |u| u.to_string()),
+                after(self.loading_ms),
+                after(self.on_disk_ms),
+                after(self.cell_ms),
+            )
+        }
+    }
+
+    /// The screen at its zoom loads first in the window too (1527): the
+    /// gestures of the phone's walk the window has (no coast on a desk;
+    /// a drag released at speed stops), from the frame that first leaves a
+    /// tenth of the screen uncovered by the start region: when a load for
+    /// the screen was said, when a tile of the screen at the zoom viewed
+    /// was on disk (`first_tile_ms`: the next frame draws it), and when a
+    /// cell's first byte showed. The bar is the loader's order (1616,
+    /// [`first_tile::out_of_order`]): a tile of the screen arrives, and a
+    /// cell started after the uncovered frame starts only once no box of
+    /// the screen runs and every one asked since landed. The disk times
+    /// are reported, not asserted: a starved host writes the file of a
+    /// cell the pan's ahead started before the uncovered frame after it.
+    #[test]
+    fn the_screen_at_its_zoom_draws_first_in_the_window() {
+        let mut rows = Vec::new();
+        let mut late = Vec::new();
+        let blob = first_tile::first_tile_blob();
+        let mut check = |walk: &WindowWalk, name: &str| {
+            rows.push(walk.row(name));
+            // The archive's bytes of each load: its tiles, each a blob of
+            // the tile and its pad.
+            let maps = walk.maps.dir().expect("dir").to_path_buf();
+            for (file, zooms, _) in first_tile::region_files(&maps) {
+                if file == "start.lmr" {
+                    continue;
+                }
+                let opened = std::fs::File::open(maps.join(&file)).expect("open");
+                let tiles = leviculum_map::region::Region::open(opened)
+                    .expect("region")
+                    .header()
+                    .tiles;
+                eprintln!(
+                    "{name}: load z{}-{}: {tiles} tiles, {} archive bytes",
+                    zooms.0,
+                    zooms.1,
+                    u64::from(tiles) * blob
+                );
+            }
+            let Some(u) = walk.uncovered_ms else {
+                late.push(format!("{name}: the screen was never uncovered"));
+                return;
+            };
+            first_tile::print_steps(name, &walk.steps, u);
+            if walk.on_disk_ms.is_none() {
+                late.push(format!("{name}: no tile of the screen at its zoom arrived"));
+            }
+            late.extend(
+                first_tile::out_of_order(&walk.steps, u)
+                    .into_iter()
+                    .map(|why| format!("{name}: {why}")),
+            );
+        };
+        let w = WALK_SIZE.0 as f32;
+        // A drag of a screen and a half east (the view goes east, the
+        // pointer west) in 36 frames, then at rest.
+        let mut walk = WindowWalk::new();
+        walk.drag(w - 50.0, -(w * 1.5) / 36.0, 36);
+        walk.release();
+        walk.rest(15_000, true);
+        check(&walk, "pan, then rest");
+        // The same drag, then on slowly for two seconds, held.
+        let mut walk = WindowWalk::new();
+        walk.drag(w - 50.0, -(w * 1.5) / 36.0, 36);
+        let at = w - 50.0 - w * 1.5;
+        walk.drag_on(at, -2.0, 125);
+        walk.release();
+        walk.rest(15_000, true);
+        check(&walk, "pan, on slowly");
+        // Two notches of the wheel out about the middle in eight frames.
+        let mut walk = WindowWalk::new();
+        let middle = Point::new(w / 2.0, WALK_SIZE.1 as f32 / 2.0);
+        for _ in 0..8 {
+            walk.app
+                .apply(Message::Pointer(Pointer::Wheel(middle, -250)));
+            walk.step();
+        }
+        for _ in 0..30 {
+            walk.step();
+        }
+        walk.app.apply(Message::WheelRest);
+        walk.rest(15_000, true);
+        check(&walk, "zoom out two steps");
+        eprintln!("| gesture | uncovered at ms | loading after ms | first_tile_ms (on disk) | cell after ms |");
+        eprintln!("|---|---|---|---|---|");
+        for row in &rows {
+            eprintln!("{row}");
+        }
+        assert!(
+            late.is_empty(),
+            "a cell before the screen's box, or no tile of the screen: {late:?}"
+        );
+    }
+
     /// A fractional wheel zoom stays where it ends (1144): a touchpad's
     /// 0.37 of a step about a point keeps the world point there and the
     /// zoom between the steps. It glides there (1431): right after the
@@ -3385,7 +4037,9 @@ mod tests {
         );
     }
 
+    use leviculum_ui_iced::select::Pick;
     use loquax::outbox::OutboxEvent;
+    use loquax::ui::selection::{Part, RunKey};
     use loquax::ui::update;
 
     pub(super) const ANNA: [u8; 16] = [0x3a; 16];
@@ -3417,6 +4071,8 @@ mod tests {
     /// conversation is open.
     pub(super) fn chat_model() -> crate::shell::Model {
         let mut model = crate::shell::Model::new(&[]);
+        // The window keeps its scenes whole, as `run` sets it (1490).
+        update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
         model.address = Some(OWN);
         model.names.remember(OWN, "Mia Sander");
         model.names.remember(ANNA, "Anna Schulz");
@@ -3474,9 +4130,11 @@ mod tests {
             now: model.now,
             receipts: model.reading.on,
             photo_size: model.photo_size,
+            mailbox: mailbox_lines(model),
             photo: None,
             browse: None,
             copied: None,
+            hubs: loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Window),
         }
     }
 
@@ -3491,6 +4149,7 @@ mod tests {
         let (w, h) = (900, 560);
         let mut model = chat_model();
         model.bar.abilities = loquax::ui::compose::Abilities::desktop();
+        model.changed_outside();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
         app.window = Size::new(w as f32, h as f32);
@@ -3610,7 +4269,7 @@ mod tests {
         ProfileFacts {
             name: "Mia Sander".to_string(),
             mailbox: Mailbox::Away {
-                host: Some("leviculum.network".to_string()),
+                name: Some("Mia's computer".to_string()),
                 rung: Some(Rung::Relayed),
                 word: Some(loquax::home::board::Word::Connected),
             },
@@ -3624,6 +4283,7 @@ mod tests {
                     this: false,
                 },
             ],
+            ..Default::default()
         }
     }
 
@@ -4188,9 +4848,667 @@ mod tests {
         map::tests::same_as("gui-chat-dark.png", &dark, w, h);
     }
 
+    /// 1452: a second Bert writes, so both Berts carry their hash tail and
+    /// the sentence beside the name in the list; the open Bert's header
+    /// says it after the tail. Anna, whose name nobody shares, is her name
+    /// alone.
+    #[test]
+    fn a_shared_name_is_the_windows_golden() {
+        let (w, h) = (900, 560);
+        let other_bert = [0xbe; 16];
+        let mut model = chat_model();
+        model.names.remember(other_bert, "bert");
+        update(&mut model, UiEvent::Clock(at(30, 9, 50)));
+        received(
+            &mut model,
+            other_bert,
+            5,
+            "Which relay, the one by the lake?",
+        );
+        update(&mut model, UiEvent::Open { peer: BERT });
+        let scene = model.scene(LayoutClass::Wide);
+        let list = scene.list.as_ref().expect("the list");
+        let names: Vec<&str> = list.rows.iter().map(|r| r.row.name.as_str()).collect();
+        assert!(names.contains(&"Anna Schulz"), "{names:?}");
+        assert!(names.iter().any(|n| n.starts_with("Bert ·")), "{names:?}");
+        assert!(names.iter().any(|n| n.starts_with("bert ·")), "{names:?}");
+        let said: Vec<String> = list
+            .rows
+            .iter()
+            .filter_map(|r| r.same_name.as_ref().map(|t| t.resolve(Lang::En)))
+            .collect();
+        assert_eq!(said.len(), 2, "{said:?}");
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), None);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app.window = Size::new(w as f32, h as f32);
+        let shot = shoot(&app, w, h);
+        map::tests::same_as("gui-same-name.png", &shot, w, h);
+    }
+
+    /// A key pressed with Ctrl, or alone (1444).
+    fn chord(key: keyboard::Key, ctrl: bool) -> Message {
+        Message::Key(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: match ctrl {
+                true => keyboard::Modifiers::CTRL,
+                false => keyboard::Modifiers::empty(),
+            },
+            text: None,
+            repeat: false,
+        })
+    }
+
+    /// The presses `n` clicks at `at` on the window's view made, as the
+    /// bubble's key and the press.
+    fn presses(app: &App, at: Point, n: usize, w: u32, h: u32) -> Vec<(RunKey, Pick)> {
+        leviculum_ui_iced::headless::clicks(app.view(), at, n, w, h)
+            .expect("a renderer")
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::PickText(key, pick) => Some((key, pick)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where on the 900 x 560 window a single click lands in Anna's
+    /// "Good morning!" on the word `word`: her bubbles are at the chat's
+    /// left, so a column just inside them is walked down to the bubble,
+    /// then its line to the right to the word.
+    fn spot_of(app: &App, word: &str) -> Point {
+        let (w, h) = (900, 560);
+        let runs = app.text_runs();
+        let text_of = |key: RunKey| {
+            runs.iter()
+                .find(|r| r.key == key)
+                .map(|r| r.text.clone())
+                .unwrap_or_default()
+        };
+        let x0 = chat::RAIL + chat::LIST_WIDTH + 30.0;
+        for y in (60..h - 60).step_by(3) {
+            let y = y as f32;
+            let Some((key, Pick::Press { .. })) =
+                presses(app, Point::new(x0, y), 1, w, h).first().copied()
+            else {
+                continue;
+            };
+            if text_of(key) != "Good morning!" {
+                continue;
+            }
+            for x in (0..300).step_by(3) {
+                let at = Point::new(x0 + x as f32, y);
+                if let Some((key, Pick::Press { at: byte, .. })) =
+                    presses(app, at, 1, w, h).first().copied()
+                {
+                    let text = text_of(key);
+                    if &text[loquax::ui::selection::word_at(&text, byte)] == word {
+                        return at;
+                    }
+                }
+            }
+        }
+        panic!("no \"{word}\" in Anna's bubble");
+    }
+
+    /// A double click on a word of a bubble selects the word (1444): the
+    /// word goes onto the PRIMARY selection at once, Ctrl+C puts it on the
+    /// clipboard, both read from the test clipboard. A triple click is the
+    /// bubble's line; a plain click clears, and Ctrl+C then copies
+    /// nothing; Escape clears too.
+    #[test]
+    fn a_double_click_on_a_word_selects_it_and_ctrl_c_copies_it() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        app.rescene();
+        let at = spot_of(&app, "morning");
+        for (key, pick) in presses(&app, at, 2, w, h) {
+            let _ = app.update(Message::PickText(key, pick));
+        }
+        assert_eq!(
+            app.clips,
+            vec![(select::Buffer::Primary, "morning".to_string())]
+        );
+        assert!(!app.picking, "the release ended the press");
+        let _ = app.update(chord(keyboard::Key::Character("c".into()), true));
+        assert_eq!(
+            app.clips.last(),
+            Some(&(select::Buffer::Clipboard, "morning".to_string()))
+        );
+        // A triple click: the whole line.
+        app.clips.clear();
+        for (key, pick) in presses(&app, at, 3, w, h) {
+            let _ = app.update(Message::PickText(key, pick));
+        }
+        assert_eq!(
+            app.clips.last(),
+            Some(&(select::Buffer::Primary, "Good morning!".to_string()))
+        );
+        // A plain click clears: Ctrl+C has nothing to copy, and the key
+        // goes on to the keymap.
+        for (key, pick) in presses(&app, at, 1, w, h) {
+            let _ = app.update(Message::PickText(key, pick));
+        }
+        app.clips.clear();
+        let _ = app.update(chord(keyboard::Key::Character("c".into()), true));
+        assert!(app.clips.is_empty(), "{:?}", app.clips);
+        // Escape clears a selection and is spent on it; without one it
+        // goes on.
+        let _ = app.update(chord(keyboard::Key::Character("a".into()), true));
+        assert!(app.picked.is_some());
+        let escape = keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        assert!(app.selection_key(&escape).is_some());
+        assert_eq!(app.picked, None);
+        assert!(app.selection_key(&escape).is_none());
+    }
+
+    /// A press in one bubble and a drag into a later one selects across
+    /// them in reading order (1444); the PRIMARY selection follows each
+    /// change, and the copy names the writer and the time on each line.
+    /// Shift+click moves the end; Ctrl+A is the whole conversation.
+    #[test]
+    fn a_drag_across_bubbles_copies_one_line_per_bubble() {
+        let (mut app, _rx) = chat_window();
+        let runs: Vec<_> = (app.text_runs().into_iter())
+            .filter(|r| r.key.part == Part::Body)
+            .collect();
+        let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Are you coming to the market tomorrow?",
+                "Good morning!",
+                "We meet at the fountain at ten, the stall with the apples.",
+                "Yes, see you there",
+            ]
+        );
+        let (first, second, third) = (runs[0].key, runs[1].key, runs[2].key);
+        let _ = app.update(Message::PickText(
+            first,
+            Pick::Press {
+                at: 22,
+                clicks: 1,
+                shift: false,
+            },
+        ));
+        assert!(app.clips.is_empty(), "a caret selects nothing");
+        let _ = app.update(Message::PickText(second, Pick::Drag { at: 4 }));
+        let _ = app.update(Message::PickText(third, Pick::Drag { at: 7 }));
+        let _ = app.update(Message::PickText(first, Pick::Release));
+        let (_, last) = app.clips.last().cloned().expect("a primary write");
+        let anna = &runs[0].who;
+        let line = |n: usize| format!("{anna}, {}", runs[n].at.clone().unwrap_or_default());
+        assert_eq!(
+            last,
+            format!(
+                "{}: market tomorrow?\nToday\n{}: Good morning!\n{}: We meet",
+                line(0),
+                line(1),
+                line(2)
+            ),
+            "the day line between selects too (1475), alone on its line"
+        );
+        assert_eq!(app.clips.len(), 2, "one write per change: {:?}", app.clips);
+        // After the release a drag no longer moves it.
+        let _ = app.update(Message::PickText(third, Pick::Drag { at: 20 }));
+        assert_eq!(app.clips.len(), 2);
+        // Shift+click moves the end back into the first bubble.
+        let _ = app.update(Message::PickText(
+            first,
+            Pick::Press {
+                at: 28,
+                clicks: 1,
+                shift: true,
+            },
+        ));
+        assert_eq!(app.clips.last().map(|c| c.1.as_str()), Some("market"));
+        // Ctrl+A: every bubble.
+        let _ = app.update(chord(keyboard::Key::Character("a".into()), true));
+        let (_, all) = app.clips.last().cloned().expect("a write");
+        let days = (app.text_runs().iter())
+            .filter(|r| r.key.part == Part::Day)
+            .count();
+        assert_eq!(all.lines().count(), 4 + days, "{all}");
+        assert!(all.ends_with("Yes, see you there"), "{all}");
+    }
+
+    /// The chat with a selection drawn (1444), pixel for pixel the golden,
+    /// light: "morning" picked in Anna's bubble, the drag from "market"
+    /// into the next. Without a selection it is the chat's own golden.
+    #[test]
+    fn a_selection_is_drawn_under_the_words_as_the_golden() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        app.rescene();
+        let plain = shoot(&app, w, h);
+        map::tests::same_as("gui-chat-light.png", &plain, w, h);
+        let runs: Vec<_> = (app.text_runs().into_iter())
+            .filter(|r| r.key.part == Part::Body)
+            .collect();
+        let _ = app.update(Message::PickText(
+            runs[0].key,
+            Pick::Press {
+                at: 22,
+                clicks: 1,
+                shift: false,
+            },
+        ));
+        let _ = app.update(Message::PickText(runs[1].key, Pick::Drag { at: 12 }));
+        let _ = app.update(Message::PickText(runs[0].key, Pick::Release));
+        let picked = shoot(&app, w, h);
+        assert_ne!(picked, plain);
+        map::tests::same_as("gui-chat-selected-light.png", &picked, w, h);
+    }
+
+    /// The same selection in the dark theme (1475): the highlight is the
+    /// bubble's ink, faint, and shows on the dark grounds too.
+    #[test]
+    fn a_selection_is_drawn_in_the_dark_theme_as_the_golden() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Intent(Intent::Theme));
+        assert!(app.dark());
+        app.rescene();
+        let plain = shoot(&app, w, h);
+        let runs: Vec<_> = (app.text_runs().into_iter())
+            .filter(|r| r.key.part == Part::Body)
+            .collect();
+        let _ = app.update(Message::PickText(
+            runs[0].key,
+            Pick::Press {
+                at: 22,
+                clicks: 1,
+                shift: false,
+            },
+        ));
+        let _ = app.update(Message::PickText(runs[1].key, Pick::Drag { at: 12 }));
+        let _ = app.update(Message::PickText(runs[0].key, Pick::Release));
+        let picked = shoot(&app, w, h);
+        assert_ne!(picked, plain, "the highlight shows on the dark grounds");
+        map::tests::same_as("gui-chat-selected-dark.png", &picked, w, h);
+    }
+
+    /// `chat_window` with more kinds of text (1475): Anna's last bubble
+    /// quotes her first, "Good morning!" carries a position, and a
+    /// group's own line stands after it. The scene is the model's,
+    /// changed where the model has no quick way to say it.
+    fn rich_window() -> (App, tokio::sync::mpsc::UnboundedReceiver<Want>) {
+        let (mut app, rx) = chat_window();
+        let chat = app.seen.scene.chat.as_mut().expect("Anna's chat");
+        let mut note = None;
+        for group in &mut chat.groups {
+            for node in &mut group.bubbles {
+                match node.text.as_deref() {
+                    Some("We meet at the fountain at ten, the stall with the apples.") => {
+                        node.bubble.quote = Some(loquax::ui::replies::Quoted {
+                            text: "Are you coming to the market tomorrow?".to_string(),
+                            ours: Some(false),
+                            to: [1; 32],
+                        });
+                    }
+                    Some("Good morning!") => {
+                        let location = leviculum_lxmf::telemetry::Location {
+                            latitude_e6: 52_520_000,
+                            longitude_e6: 13_405_000,
+                            altitude_e2: 0,
+                            speed_e2: 0,
+                            bearing_e2: 0,
+                            accuracy_e2: 500,
+                            last_update: 0,
+                        };
+                        let fix = loquax::telemetry::Fix {
+                            peer: ANNA,
+                            via: ANNA,
+                            message: None,
+                            received_at: None,
+                            location,
+                            telemetry: Vec::new(),
+                            source: loquax::telemetry::Source::Telemetry,
+                        };
+                        // The scene's sentence with it (1449 item 5).
+                        node.position = Some(loquax::ui::scene::position_words(&fix, false, None));
+                        node.bubble.fix = Some(fix);
+                        let mut line = node.clone();
+                        line.bubble.note = true;
+                        line.bubble.key = 990;
+                        line.bubble.body = "Bert joined.".to_string();
+                        note = Some(line);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let note = note.expect("Good morning");
+        let group = (chat.groups.iter_mut())
+            .find(|g| {
+                g.bubbles
+                    .iter()
+                    .any(|n| n.text.as_deref() == Some("Good morning!"))
+            })
+            .expect("its group");
+        let at = (group.bubbles.iter())
+            .position(|n| n.text.as_deref() == Some("Good morning!"))
+            .expect("it");
+        group.bubbles.insert(at + 1, note);
+        app.window = Size::new(900.0, 560.0);
+        app.rescene();
+        (app, rx)
+    }
+
+    /// Where on the window a double click lands on a text of `part`, and
+    /// the run and the byte it pressed: a few columns walked down, the
+    /// list's and the chat's left, middle and right (1475).
+    fn find_part(app: &App, part: Part, w: u32, h: u32) -> (Point, RunKey, usize) {
+        let list = chat::RAIL + 90.0;
+        let chat = chat::RAIL + chat::LIST_WIDTH;
+        let width = w as f32 - chat;
+        let columns = [
+            list,
+            chat + 30.0,
+            chat + 60.0,
+            chat + width / 2.0 - 10.0,
+            chat + width / 2.0,
+            chat + width - 120.0,
+            chat + width - 60.0,
+        ];
+        for x in columns {
+            for y in (40..h - 40).step_by(3) {
+                let at = Point::new(x, y as f32);
+                let hit =
+                    presses(app, at, 2, w, h)
+                        .into_iter()
+                        .find_map(|(key, pick)| match pick {
+                            Pick::Press {
+                                at: byte,
+                                clicks: 2,
+                                ..
+                            } if key.part == part => Some((key, byte)),
+                            _ => None,
+                        });
+                // On a word, not on the blank between two.
+                if let Some((key, byte)) = hit.filter(|(key, byte)| on_a_word(app, *key, *byte)) {
+                    return (at, key, byte);
+                }
+            }
+        }
+        panic!("no {part:?} on the window");
+    }
+
+    /// Whether byte `byte` of the run `key` is in a word.
+    fn on_a_word(app: &App, key: RunKey, byte: usize) -> bool {
+        (app.text_runs().iter().find(|r| r.key == key)).is_some_and(|run| {
+            !run.text[loquax::ui::selection::word_at(&run.text, byte)]
+                .trim()
+                .is_empty()
+        })
+    }
+
+    /// Every kind of text in the window selects on a double click and
+    /// copies (1475): the list's last line, the day line, the quote, the
+    /// words, the position line and a group's own line. The word goes onto
+    /// PRIMARY, Ctrl+C onto the clipboard, both read from the test
+    /// clipboard; what is copied is the run's word, as the core says.
+    #[test]
+    fn every_kind_of_window_text_selects_on_a_double_click_and_copies() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = rich_window();
+        let parts = [
+            Part::Preview,
+            Part::Day,
+            Part::Quote,
+            Part::Body,
+            Part::Position,
+            Part::Note,
+        ];
+        for part in parts {
+            app.picked = None;
+            app.clips.clear();
+            let (at, key, byte) = find_part(&app, part, w, h);
+            let runs = app.text_runs();
+            let run = runs.iter().find(|r| r.key == key).expect("its run");
+            let word = run.text[loquax::ui::selection::word_at(&run.text, byte)].to_string();
+            assert!(
+                !word.trim().is_empty(),
+                "{part:?}: {word:?} in {:?}",
+                run.text
+            );
+            for (key, pick) in presses(&app, at, 2, w, h) {
+                let _ = app.update(Message::PickText(key, pick));
+            }
+            assert_eq!(
+                app.clips.last(),
+                Some(&(select::Buffer::Primary, word.clone())),
+                "{part:?} at {at:?}"
+            );
+            let _ = app.update(chord(keyboard::Key::Character("c".into()), true));
+            assert_eq!(
+                app.clips.last(),
+                Some(&(select::Buffer::Clipboard, word.clone())),
+                "{part:?}"
+            );
+        }
+        // The texts are the scene's: the day, the quote, the line.
+        let runs = app.text_runs();
+        let of = |part: Part| -> Vec<String> {
+            (runs.iter())
+                .filter(|r| r.key.part == part)
+                .map(|r| r.text.clone())
+                .collect()
+        };
+        assert_eq!(
+            of(Part::Quote),
+            vec!["Are you coming to the market tomorrow?"]
+        );
+        assert_eq!(of(Part::Note), vec!["Bert joined."]);
+        // One sentence (1449 item 5); the coordinates are the Info's.
+        assert!(
+            of(Part::Position)[0].contains("osition") && !of(Part::Position)[0].contains("52.52"),
+            "{:?}",
+            of(Part::Position)
+        );
+        assert_eq!(
+            of(Part::Preview).len(),
+            2,
+            "both rows: {:?}",
+            of(Part::Preview)
+        );
+    }
+
+    /// A list row and a position line are buttons (1475): a plain click
+    /// opens as before and selects nothing; a drag along the line selects
+    /// and its release opens nothing, the button's open the release sent
+    /// dropped; and the drop does not outlive that release.
+    #[test]
+    fn a_click_on_a_row_opens_and_a_drag_on_its_line_selects() {
+        let (w, h) = (900, 560);
+        let (mut app, mut rx) = rich_window();
+        for part in [Part::Preview, Part::Position] {
+            let (at, _, _) = find_part(&app, part, w, h);
+            let _ = told(&mut rx);
+            // A click: the button's open, no selection.
+            let click =
+                leviculum_ui_iced::headless::clicks(app.view(), at, 1, w, h).expect("a renderer");
+            assert!(
+                !click.iter().any(|m| matches!(m, Message::PickText(..))),
+                "{part:?}"
+            );
+            let opens = click
+                .iter()
+                .filter(|m| matches!(m, Message::Intent(_)))
+                .count();
+            assert_eq!(opens, 1, "{part:?}: the click opens");
+            // A drag of 40 pixels along it.
+            let to = Point::new(at.x + 40.0, at.y);
+            let drag =
+                leviculum_ui_iced::headless::drag(app.view(), at, to, 8, w, h).expect("a renderer");
+            let picks = drag
+                .iter()
+                .filter(|m| matches!(m, Message::PickText(..)))
+                .count();
+            assert!(picks >= 3, "{part:?}: a press, a drag, the release");
+            app.clips.clear();
+            let mut opened = false;
+            for message in drag {
+                let intent = matches!(message, Message::Intent(_));
+                let before = app.screen;
+                let _ = app.update(message);
+                opened |= intent && app.screen != before;
+            }
+            assert!(!opened, "{part:?}: the drag's release opened");
+            let (others, _) = told_apart(&mut rx);
+            assert!(others.is_empty(), "{part:?}: {others:?}");
+            let (buffer, words) = app.clips.last().cloned().expect("a selection");
+            assert_eq!(buffer, select::Buffer::Primary);
+            assert!(!words.is_empty(), "{part:?}");
+            // The drop is gone with the view after it: a click opens.
+            let _ = app.view();
+            for message in click {
+                let _ = app.update(message);
+            }
+            let (others, _) = told_apart(&mut rx);
+            let mapped = app.screen == Screen::Map;
+            assert!(
+                !others.is_empty() || mapped,
+                "{part:?}: the click opened nothing"
+            );
+            // Back to the chat for the next part.
+            app.screen = Screen::Chats;
+            app.picked = None;
+        }
+    }
+
+    /// The address and the code in the profile select (1475): a double
+    /// click on the address takes a four, Ctrl+A takes both, and the
+    /// address is copied without the blanks between its fours.
+    #[test]
+    fn the_profiles_address_and_code_select_and_copy() {
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), None);
+        app.window = Size::new(w as f32, h as f32);
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key).expect("a code");
+        model.own_code = Some(loquax::ui::OwnCode::of(
+            code.clone(),
+            loquax::home::qr::verbatim_modules(&code).ok(),
+        ));
+        model.profile = profile_facts();
+        update(&mut model, UiEvent::Profile { open: true });
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let profile = app.scene.profile.clone().expect("the profile");
+        let runs = app.text_runs();
+        assert_eq!(
+            runs.iter().map(|r| r.key.part).collect::<Vec<_>>(),
+            vec![Part::Address, Part::Code],
+            "the profile's texts alone, nothing under it"
+        );
+        for part in [Part::Address, Part::Code] {
+            let (at, key, byte) = find_profile_part(&app, part, w, h);
+            let run = runs.iter().find(|r| r.key == key).expect("its run");
+            let word = run.text[loquax::ui::selection::word_at(&run.text, byte)].to_string();
+            app.clips.clear();
+            for (key, pick) in presses(&app, at, 2, w, h) {
+                let _ = app.update(Message::PickText(key, pick));
+            }
+            assert_eq!(
+                app.clips.last(),
+                Some(&(select::Buffer::Primary, word.clone())),
+                "{part:?}"
+            );
+        }
+        let _ = app.update(chord(keyboard::Key::Character("a".into()), true));
+        let _ = app.update(chord(keyboard::Key::Character("c".into()), true));
+        assert_eq!(
+            app.clips.last(),
+            Some(&(
+                select::Buffer::Clipboard,
+                format!("{}\n{code}", profile.fours.replace(' ', ""))
+            ))
+        );
+    }
+
+    /// [`find_part`] over the profile in the window's middle.
+    fn find_profile_part(app: &App, part: Part, w: u32, h: u32) -> (Point, RunKey, usize) {
+        for x in (100..w - 100).step_by(20) {
+            for y in (20..h - 20).step_by(3) {
+                let at = Point::new(x as f32, y as f32);
+                let hit =
+                    presses(app, at, 2, w, h)
+                        .into_iter()
+                        .find_map(|(key, pick)| match pick {
+                            Pick::Press {
+                                at: byte,
+                                clicks: 2,
+                                ..
+                            } if key.part == part => Some((key, byte)),
+                            _ => None,
+                        });
+                if let Some((key, byte)) = hit {
+                    return (at, key, byte);
+                }
+            }
+        }
+        panic!("no {part:?} in the profile");
+    }
+
+    /// A middle click on the compose field pastes the PRIMARY selection
+    /// where it clicked (1475): at the field's start the words go before
+    /// what was typed. The control: with no pointer known the paste goes
+    /// where the cursor was, after it.
+    #[test]
+    fn a_middle_click_pastes_where_it_clicked() {
+        let (mut app, _rx) = chat_window();
+        type_into(&mut app, "hello world");
+        let _ = app.update(Message::PrimaryText(Some("X".to_string())));
+        assert_eq!(app.compose.text().trim_end(), "hello worldX", "the control");
+        let (mut app, _rx) = chat_window();
+        type_into(&mut app, "hello world");
+        // The field laid out, as the window has it before any click.
+        let _ = shoot(&app, 900, 560);
+        let _ = app.update(Message::ComposePointer(Point::new(
+            chat::COMPOSE_PAD_X,
+            chat::COMPOSE_PAD_Y + 2.0,
+        )));
+        let _ = app.update(Message::PastePrimary);
+        let _ = app.update(Message::PrimaryText(Some("X".to_string())));
+        assert_eq!(app.compose.text().trim_end(), "Xhello world");
+    }
+
     /// The window over Anna's chat with `chat_model`'s messages and 3000
     /// more, open, `w` by `h` (1431, the window bench of 1441).
     pub(super) fn long_chat(w: u32, h: u32) -> App {
+        let model = long_chat_model();
+        // The channel's receiver dropped: what the window tells the model
+        // goes nowhere.
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app
+    }
+
+    /// [`long_chat`]'s model: Anna's chat with 3000 more, open.
+    pub(super) fn long_chat_model() -> crate::shell::Model {
         let mut model = chat_model();
         for i in 0..3000u32 {
             let mut id = [7u8; 32];
@@ -4210,13 +5528,7 @@ mod tests {
             );
         }
         update(&mut model, UiEvent::Open { peer: ANNA });
-        // The channel's receiver dropped: what the window tells the model
-        // goes nowhere.
-        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
-        app.window = Size::new(w as f32, h as f32);
-        app.apply(Message::Seen(Box::new(seen_of(&model))));
-        app
+        model
     }
 
     /// The window over Anna's chat shaped like Lew's real ones (1456): not
@@ -4389,12 +5701,16 @@ mod tests {
     fn a_long_chat_scrolls_without_building_the_view() {
         let (w, h) = (900u32, 560u32);
         let app = long_chat(w, h);
-        let bubbles: usize = app
-            .scene
-            .chat
-            .as_ref()
-            .map_or(0, |c| c.groups.iter().map(|g| g.bubbles.len()).sum());
-        assert!(bubbles > 3000, "{bubbles} bubbles");
+        // The chat holds more than 3000 messages: the model's count, not
+        // the scene's (1489, review finding 14). A scene that builds only
+        // the bubbles on screen is the goal, not a break of this test.
+        let held = long_chat_model()
+            .conversations
+            .iter()
+            .find(|c| c.peer == ANNA)
+            .map_or(0, |c| c.messages.len());
+        assert!(held > 3000, "{held} messages");
+        assert!(app.scene.chat.is_some(), "the chat open");
         let (text, ground) = (
             chat::colour(app.tokens().text),
             chat::colour(app.tokens().background),
@@ -4427,7 +5743,7 @@ mod tests {
         assert_ne!(before, after, "the notch scrolled the messages");
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         for (viewed, laid, raster) in &built {
-            println!("LONG_CHAT {bubbles} bubbles: view built {viewed:.2} ms, laid out {laid:.2} ms, rasterised {raster:.2} ms");
+            println!("LONG_CHAT {held} messages: view built {viewed:.2} ms, laid out {laid:.2} ms, rasterised {raster:.2} ms");
         }
         let frames: Vec<String> = times[1..]
             .iter()
@@ -4451,6 +5767,7 @@ mod tests {
         let (w, h) = (900, 560);
         let mut model = chat_model();
         model.bar.abilities.picker = true;
+        model.changed_outside();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
         app.window = Size::new(w as f32, h as f32);
@@ -4801,6 +6118,81 @@ mod tests {
         assert_eq!(create.intent, Intent::Group(Verb::Create));
     }
 
+    mod late_message {
+        include!("../tests/support/late_message.rs");
+    }
+
+    mod mailbox_page {
+        include!("../tests/support/mailbox_page.rs");
+    }
+
+    /// 1642, the mailbox page names the mailbox: the gear and Mailbox open
+    /// the core's page for the fixture's mailbox on miauhaus (the golden,
+    /// light, 900 x 700); its "Copy" puts the address on the clipboard and
+    /// says so; "Show my code" opens the profile.
+    #[test]
+    fn the_mailbox_page_names_the_mailbox_and_copies_its_address() {
+        use loquax::ui::settings::Section;
+        let (w, h) = (900, 700);
+        let mut model = chat_model();
+        mailbox_page::mailbox_told(&mut model, true);
+        let (mut app, mut rx) = chat_window();
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Settings);
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Mailbox))));
+        assert_eq!(app.settings_at, Some(Section::Mailbox));
+        let page = app.seen.mailbox.clone().expect("the page");
+        assert_eq!(page.groups.len(), 3, "which, how, who");
+        map::tests::same_as("gui-settings-mailbox-light.png", &shoot(&app, w, h), w, h);
+        let address = loquax::address::to_hex(&mailbox_page::MAILBOX_ADDRESS);
+        let _ = app.update(Message::CopyText(address));
+        assert_eq!(
+            app.seen.notice.as_deref(),
+            Some("The mailbox's address is on the clipboard")
+        );
+        let _ = app.update(Message::Intent(Intent::Profile));
+        assert_eq!(told(&mut rx), [UiEvent::Profile { open: true }]);
+    }
+
+    /// 1505, a late message sits at its sent time: the window draws Anna's
+    /// chat of the shared fixture, the message she wrote last night at
+    /// 22:10 that came today at 14:05 second under last night's day, the
+    /// `new` rule above it, today's two below; pixel for pixel the golden,
+    /// light, 900 x 560.
+    #[test]
+    fn a_late_message_is_the_windows_golden() {
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        late_message::late_message(&mut model, 1_799_971_200, 3600);
+        model.toasts.clear();
+        let (w, h) = (900, 560);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let bodies: Vec<String> = app
+            .scene
+            .chat
+            .as_ref()
+            .expect("the chat")
+            .groups
+            .iter()
+            .flat_map(|g| &g.bubbles)
+            .map(|b| b.bubble.body.clone())
+            .collect();
+        assert_eq!(
+            bodies,
+            [
+                "Gute Nacht",
+                "Kommst du morgen mit?",
+                "Bis gleich am Bahnhof",
+                "Bin unterwegs"
+            ]
+        );
+        map::tests::same_as("gui-late-message.png", &shoot(&app, w, h), w, h);
+    }
+
     mod group_ticks {
         include!("../tests/support/group_ticks.rs");
     }
@@ -4843,6 +6235,289 @@ mod tests {
             ]
         );
         map::tests::same_as("gui-group-ticks.png", &shoot(&app, w, h), w, h);
+    }
+
+    mod relay_group {
+        include!("../tests/support/relay_group.rs");
+    }
+
+    /// 1482, a relayed post shows its writer: the window draws the relay's
+    /// chat of `scene-relay-group.json`, each post under its writer without
+    /// the bot's prefix, the bar naming it a group via a relay; pixel for
+    /// pixel the golden, light, 900 x 560.
+    #[test]
+    fn a_relayed_group_is_the_windows_golden() {
+        let mut model = crate::shell::Model::new(&[]);
+        model.address = Some(OWN);
+        relay_group::relay_group(&mut model, 1_800_000_000, 3600);
+        update(
+            &mut model,
+            UiEvent::Open {
+                peer: relay_group::RELAY,
+            },
+        );
+        model.toasts.clear();
+        let (w, h) = (900, 560);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let writers: Vec<_> = app
+            .scene
+            .chat
+            .as_ref()
+            .expect("the chat")
+            .groups
+            .iter()
+            .filter(|g| g.named)
+            .map(|g| g.sender.resolve(Lang::En))
+            .collect();
+        assert_eq!(writers, ["Anna", "Ben", "Anna"]);
+        map::tests::same_as("gui-relay-group.png", &shoot(&app, w, h), w, h);
+    }
+
+    mod reply_scene {
+        include!("../tests/support/reply_scene.rs");
+    }
+
+    /// The window over the shared reply fixture's model, light, `w` x `h`.
+    fn reply_window(model: &crate::shell::Model, w: u32, h: u32) -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(model))));
+        app
+    }
+
+    /// Anna's chat of `reply_scene.rs` with the shared clock: today's
+    /// midnight of a fixed day, an hour east of UTC, as the window keeps
+    /// its scenes (whole).
+    fn reply_model() -> crate::shell::Model {
+        let mut model = crate::shell::Model::new(&[]);
+        update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
+        model.address = Some(OWN);
+        reply_scene::reply_scene(&mut model, 1_800_000_000 - 1_800_000_000 % 86_400, 3600);
+        model.toasts.clear();
+        model
+    }
+
+    /// 1451, the walk's blind spots: a reply, a reaction and a photo in the
+    /// window. Anna's chat of the shared fixture: her question, her photo,
+    /// our reply "Ja, um zehn am Brunnen" quoting her question with her
+    /// thumbs up as a chip under it, and her last line; pixel for pixel the
+    /// golden, light, 900 x 560.
+    #[test]
+    fn a_reply_with_its_reaction_is_the_windows_golden() {
+        let (w, h) = (900, 560);
+        let model = reply_model();
+        let app = reply_window(&model, w, h);
+        let chat = app.scene.chat.as_ref().expect("Anna's chat");
+        assert_eq!(chat.peer, reply_scene::REPLY_ANNA);
+        let ours = chat
+            .groups
+            .iter()
+            .flat_map(|g| &g.bubbles)
+            .find(|b| b.bubble.id == Some(reply_scene::REPLY_OURS))
+            .expect("our reply");
+        assert_eq!(ours.bubble.body, "Ja, um zehn am Brunnen");
+        assert_eq!(
+            ours.bubble.quote.as_ref().map(|q| q.text.as_str()),
+            Some("Kommst du morgen mit zum Markt?")
+        );
+        let chips: Vec<_> = ours
+            .bubble
+            .chips
+            .iter()
+            .map(|c| (c.content.as_str(), c.count, c.ours))
+            .collect();
+        assert_eq!(chips, [("\u{1F44D}", 1, false)]);
+        assert!(
+            chat.groups
+                .iter()
+                .flat_map(|g| &g.bubbles)
+                .any(|b| b.bubble.id == Some(reply_scene::REPLY_PHOTO) && b.bubble.photo.is_some()),
+            "her photo"
+        );
+        // Control: nothing is being written yet.
+        assert_eq!(app.reply, None);
+        assert_eq!(app.compose.text().trim(), "");
+        map::tests::same_as("gui-reply-sent.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// 1451: the same chat while a second reply is written, to Anna's last
+    /// line. The window takes the draft and the reply back from the scene
+    /// as when the reader's Reply had started it: the reply bar quoting
+    /// "Super, bis morgen" over the field holding "Ich bring Kaffee mit";
+    /// pixel for pixel the golden, light, 900 x 560.
+    #[test]
+    fn a_reply_being_written_is_the_windows_golden() {
+        let (w, h) = (900, 560);
+        let mut model = reply_model();
+        reply_scene::reply_composing(&mut model);
+        let app = reply_window(&model, w, h);
+        assert_eq!(
+            app.reply,
+            Some((reply_scene::REPLY_LAST, "Super, bis morgen".to_string()))
+        );
+        assert_eq!(
+            app.compose.text().trim_end_matches('\n'),
+            reply_scene::REPLY_DRAFT
+        );
+        // The sent reply keeps its quote and its chip above the bar.
+        let ours = app
+            .scene
+            .chat
+            .iter()
+            .flat_map(|c| &c.groups)
+            .flat_map(|g| &g.bubbles)
+            .find(|b| b.bubble.id == Some(reply_scene::REPLY_OURS))
+            .expect("our reply");
+        assert!(ours.bubble.quote.is_some() && !ours.bubble.chips.is_empty());
+        map::tests::same_as("gui-reply-compose.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// The model at the window's very first start (1451): an address and
+    /// its code, the profile's facts as the shell gives a messenger without
+    /// a mailbox (`shell::profile_facts` with no client: `Mailbox::Unknown`
+    /// and this one device), no conversation.
+    fn first_start_model() -> crate::shell::Model {
+        use loquax::ui::profile::{Device, Mailbox, ProfileFacts};
+        let mut model = crate::shell::Model::new(&[]);
+        update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
+        model.address = Some(OWN);
+        update(&mut model, UiEvent::Clock(at(29, 9, 30)));
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key).expect("a code");
+        model.own_code = Some(loquax::ui::OwnCode::of(
+            code.clone(),
+            loquax::home::qr::verbatim_modules(&code).ok(),
+        ));
+        model.profile = ProfileFacts {
+            name: "Mia Sander".to_string(),
+            mailbox: Mailbox::Unknown,
+            devices: vec![Device {
+                name: String::new(),
+                this: true,
+            }],
+            ..Default::default()
+        };
+        model.toasts.clear();
+        model
+    }
+
+    /// 1451, the window at its very first start, before any mailbox: no
+    /// conversation in the list, no chat open; pixel for pixel the golden.
+    /// The avatar opens the profile, which says the mailbox is not set up
+    /// yet, the golden too; both light, 900 x 560.
+    #[test]
+    fn the_first_start_and_its_profile_are_the_windows_goldens() {
+        let (w, h) = (900, 560);
+        let mut model = first_start_model();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(model.conversations.is_empty());
+        assert!(app.listed().is_empty(), "no conversation");
+        assert!(app.scene.chat.is_none(), "no chat open");
+        assert!(app.scene.profile.is_none(), "control: closed");
+        map::tests::same_as("gui-first-start.png", &shoot(&app, w, h), w, h);
+        let open = app
+            .scene
+            .action(NodeId::Me)
+            .expect("the avatar does something")
+            .intent
+            .clone();
+        assert_eq!(open, Intent::Profile);
+        let _ = app.update(Message::Intent(open));
+        for event in told(&mut rx) {
+            update(&mut model, event);
+        }
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let profile = app.scene.profile.as_ref().expect("the profile");
+        assert_eq!(profile.mailbox.resolve(Lang::En), "Mailbox: not set up yet");
+        assert_eq!(profile.state, None);
+        assert_eq!(profile.devices.len(), 1);
+        map::tests::same_as("gui-first-start-profile.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// 1451, the map in the window with two peers' pins: Anna and Ben
+    /// shared their positions in Florence's centre, inside the committed
+    /// region, five and eight minutes ago, the window shows the map screen over the
+    /// committed Florence region, Anna selected, her card marked in the
+    /// list and the view centred on her; pixel for pixel the golden,
+    /// light, 900 x 560.
+    #[test]
+    fn two_pins_with_one_selected_are_the_windows_map_golden() {
+        use leviculum_lxmf::telemetry::Location;
+        const BEN: [u8; 16] = [0xbe; 16];
+        let (w, h) = (900, 560);
+        let mut model = crate::shell::Model::new(&[]);
+        update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
+        model.address = Some(OWN);
+        model.names.remember(ANNA, "Anna");
+        model.names.remember(BEN, "Ben");
+        let now = at(29, 9, 30);
+        update(&mut model, UiEvent::Clock(now));
+        let mut report = |peer: [u8; 16], id: u8, lat: i32, lon: i32, ago: i64| {
+            let fix = Location {
+                latitude_e6: lat,
+                longitude_e6: lon,
+                altitude_e2: 5_000,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: now.unix_secs - ago,
+            };
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: now.unix_secs - ago,
+                    message_id: [id; 32],
+                    source: peer,
+                    title: Vec::new(),
+                    body: Vec::new(),
+                    fields: loquax::ui::position_fields(fix),
+                    verified: true,
+                }),
+            );
+        };
+        report(ANNA, 1, 43_775_630, 11_260_220, 300);
+        report(BEN, 2, 43_774_030, 11_255_720, 480);
+        model.toasts.clear();
+        let frames = map::tests::florence();
+        let maps = frames.painter().epoch();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(frames, Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let mut seen = seen_of(&model);
+        seen.maps = maps;
+        app.apply(Message::Seen(Box::new(seen)));
+        let _ = app.update(Message::Intent(Intent::ShowMap { peer: None }));
+        assert_eq!(app.screen, Screen::Map);
+        let _ = told(&mut rx);
+        // The map's canvas in a 900 x 560 window: right of the rail and
+        // the list, above the bar.
+        app.apply(Message::MapSize(Size::new(568.0, 539.0)));
+        app.apply(Message::Select(ANNA));
+        let (shown, _) = run(&mut app);
+        assert!(shown.is_some(), "a frame of Florence at rest");
+        let labels: Vec<_> = app.seen.pins.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("Anna")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("Ben")), "{labels:?}");
+        assert_eq!(app.selected, Some(ANNA));
+        let anna = app
+            .seen
+            .pins
+            .iter()
+            .find(|p| p.peer == ANNA)
+            .expect("Anna's pin");
+        assert_eq!(app.view.centre, anna.at, "the view is on Anna");
+        map::tests::same_as("gui-map-pins.png", &shoot(&app, w, h), w, h);
     }
 
     /// `pcm` as the microphone's levels for Anna's recording, a window
@@ -5162,19 +6837,94 @@ mod tests {
         assert_eq!(app.scene.top.id, NodeId::TopBar);
     }
 
-    /// The settings page (1233): the gear opens it, its read receipts
-    /// row shows the model's switch, a toggle tells the model the other
-    /// value, the model's answer turns the row, and Back returns to the
-    /// chats. Pixel for pixel the golden, light.
+    /// 1577, 1599: Advanced holds the public rooms' hub (the golden): the
+    /// closest ten hubs by name and how far, "More…", the mark on none; a
+    /// press on one tells the model, the model's answer moves the mark,
+    /// "More…" tells the model, and the field's address goes to the model
+    /// as typed. No hash on the page.
+    #[test]
+    fn advanced_chooses_the_public_rooms_hub() {
+        use loquax::ui::rooms::{HubChoice, HubPick, RoomsEvent};
+        use loquax::ui::settings::Section;
+        let (w, h) = (900, 700);
+        let (mut app, mut rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Settings);
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Advanced))));
+        assert_eq!(app.settings_at, Some(Section::Advanced));
+        // The line, ten hubs, More, none, paste, the note.
+        assert_eq!(app.seen.hubs.len(), 15, "{:?}", app.seen.hubs);
+        map::tests::same_as("gui-settings-advanced-light.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::RoomsHub(HubPick::More)));
+        assert_eq!(told(&mut rx), [UiEvent::Rooms(RoomsEvent::More)]);
+        let community = loquax::ui::hubs::shipped()[0].hash;
+        let _ = app.update(Message::Intent(Intent::RoomsHub(HubPick::Hub(community))));
+        assert_eq!(
+            told(&mut rx),
+            [UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Hub(community)))]
+        );
+        let mut model = chat_model();
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Hub(community))),
+        );
+        let _ = app.update(Message::Seen(Box::new(seen_of(&model))));
+        let chosen: Vec<bool> = app
+            .seen
+            .hubs
+            .iter()
+            .map(|r| {
+                r.value
+                    .as_ref()
+                    .is_some_and(|v| v.resolve(app.lang).ends_with('\u{2713}'))
+            })
+            .collect();
+        assert_eq!(
+            chosen[..3],
+            [false, true, false],
+            "the line names it, the mark is on the first hub"
+        );
+        let _ = app.update(Message::HubTyped(
+            " 07070707070707070707070707070707 ".into(),
+        ));
+        let _ = app.update(Message::HubTake);
+        assert_eq!(
+            told(&mut rx),
+            [UiEvent::Rooms(RoomsEvent::Hub(HubChoice::Address(
+                " 07070707070707070707070707070707 ".into()
+            )))]
+        );
+        assert!(app.hub_field.is_empty(), "the field empties");
+        let _ = app.update(Message::HubTake);
+        assert!(told(&mut rx).is_empty(), "an empty field tells nothing");
+    }
+
+    /// The settings page (1233, one structure since 1450): the gear opens
+    /// the list of the nine sections (the golden), Privacy holds read
+    /// receipts (its golden): the row shows the model's switch, a toggle
+    /// tells the model the other value, the model's answer turns the row;
+    /// Back goes to the list, then to the chats. Appearance holds light
+    /// or dark, which the bar no longer does.
     #[test]
     fn the_settings_page_switches_read_receipts_in_the_model() {
+        use loquax::ui::settings::Section;
         let (w, h) = (900, 560);
         let (mut app, mut rx) = chat_window();
         app.window = Size::new(w as f32, h as f32);
         let _ = app.update(Message::Settings);
         assert_eq!(app.screen, Screen::Settings);
-        assert!(app.seen.receipts, "on by default");
+        assert_eq!(app.settings_at, None, "the list");
         map::tests::same_as("gui-settings-light.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Appearance))));
+        assert_eq!(app.settings_at, Some(Section::Appearance));
+        assert!(!app.dark());
+        let _ = app.update(Message::Intent(Intent::Theme));
+        assert!(app.dark(), "Appearance's switch");
+        let _ = app.update(Message::Intent(Intent::Theme));
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Privacy))));
+        assert_eq!(app.settings_at, Some(Section::Privacy));
+        assert!(app.seen.receipts, "on by default");
+        map::tests::same_as("gui-settings-privacy-light.png", &shoot(&app, w, h), w, h);
         let _ = app.update(Message::Intent(Intent::ReadReceipts {
             on: loquax::ui::intent::Switch::Off,
         }));
@@ -5194,6 +6944,16 @@ mod tests {
             on: loquax::ui::intent::Switch::Toggle,
         }));
         assert_eq!(told(&mut rx), [UiEvent::ReadReceipts(true)]);
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert_eq!(
+            (app.screen, app.settings_at),
+            (Screen::Settings, None),
+            "a section goes back to the list"
+        );
+        // Profile opens the avatar's layer over the list.
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Profile))));
+        assert_eq!(told(&mut rx), [UiEvent::Profile { open: true }]);
+        assert_eq!(app.settings_at, None);
         let _ = app.update(Message::Intent(Intent::Back));
         assert_eq!(app.screen, Screen::Chats);
     }
@@ -5216,6 +6976,9 @@ mod tests {
         app.seen.autoload = true;
         assert_eq!(app.setup.regions.len(), 3);
         let _ = app.update(Message::Settings);
+        let _ = app.update(Message::Intent(Intent::Settings(Some(
+            loquax::ui::settings::Section::Maps,
+        ))));
         assert_eq!(app.maps_usage, (3, 3 * len));
         assert!(!app.maps_asked);
 
@@ -5326,7 +7089,7 @@ mod tests {
             RoomsEvent::Line {
                 room: "#lab".into(),
                 kind: LineKind::Msg,
-                text: "rrc line, thirty-one bytes long".into(),
+                text: "a line, twenty-five bytes".into(),
                 nick: Some("bob".into()),
                 ours: false,
                 ts_ms: 1_793_702_757_876,
@@ -5350,12 +7113,27 @@ mod tests {
         let _ = app.update(Message::Rooms(RoomsEvent::Typed("hi".into())));
         let _ = app.update(Message::Rooms(RoomsEvent::Submit));
         let _ = app.update(Message::Rooms(RoomsEvent::Show(Some(0))));
+        // 1450: the room's menu is the scene's, "Leave room" among it.
+        let menu = app
+            .seen
+            .scene
+            .rooms
+            .as_ref()
+            .and_then(|r| r.open.as_ref())
+            .map(|o| o.menu.clone())
+            .expect("the open room's menu");
+        let leave = menu
+            .iter()
+            .find(|v| v.event == RoomsEvent::Leave)
+            .expect("Leave room");
+        let _ = app.update(Message::Rooms(leave.event.clone()));
         assert_eq!(
             told(&mut rx),
             vec![
                 UiEvent::Rooms(RoomsEvent::Typed("hi".into())),
                 UiEvent::Rooms(RoomsEvent::Submit),
                 UiEvent::Rooms(RoomsEvent::Show(Some(0))),
+                UiEvent::Rooms(RoomsEvent::Leave),
             ]
         );
 
@@ -5370,6 +7148,95 @@ mod tests {
         let _ = app.update(Message::Seen(seen(&model)));
         assert_eq!(app.screen, Screen::Chats);
         assert!(app.seen.scene.rooms.is_none());
+    }
+
+    /// 1578: Explore beside the rail, one scroll for the pages and the
+    /// public rooms, the golden: a bookmark, a page heard today and one
+    /// older, the hubs. A press on a page is the model's verb, and the
+    /// window follows the model into the browser and back to the list;
+    /// Chats leaves it, and a picture from before does not bring it back.
+    #[test]
+    fn explore_is_one_scroll_beside_the_rail() {
+        use lnomad::DiscoveredNode;
+        use loquax::ui::browse::BrowseEvent;
+        use loquax::ui::explore::ExploreEvent;
+        const NOW: i64 = 1_800_000_000;
+        let node = |byte: u8, name: &str, ago: i64, hops| DiscoveredNode {
+            dest_hash: [byte; 16],
+            name: Some(name.to_string()),
+            first_seen: (NOW - ago) as u64,
+            last_seen: (NOW - ago) as u64,
+            hops: Some(hops),
+        };
+        let (w, h) = (1100u32, 640u32);
+        let mut model = chat_model();
+        model.browse.enabled = true;
+        model.now = Some(loquax::when::WallTime {
+            unix_secs: NOW,
+            offset_secs: 0,
+        });
+        for found in [
+            node(0x5a, "Marcel's node", 600, 2),
+            node(0x7c, "Relay Süd", 2 * 86_400, 1),
+            node(0x3d, "Bergwacht", 20 * 86_400, 4),
+        ] {
+            update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+        }
+        model.browse.model.bookmarks.add(lnomad::Bookmark {
+            url: format!("{}:/page/index.mu", "7c".repeat(16)),
+            title: "Relay Süd".to_string(),
+        });
+        // The browser rides in the picture as the shell sends it.
+        let pictures: crate::browsing::Pictures = Arc::default();
+        let seen = |model: &crate::shell::Model| {
+            let mut seen = seen_of(model);
+            seen.browse = model.browse.showing().then(|| Browsed {
+                model: Arc::new(model.browse.model.clone()),
+                scene: model.browse.model.scene(),
+                pictures: Arc::clone(&pictures),
+                epoch: 1,
+            });
+            Box::new(seen)
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Seen(seen(&model)));
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Explore)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Explore)]);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Explore);
+        let list = shoot(&app, w, h);
+        map::tests::same_as("gui-explore.png", &list, w, h);
+
+        let _ = app.update(Message::Explore(ExploreEvent::OpenPage([0x5a; 16])));
+        assert_eq!(
+            told(&mut rx),
+            vec![UiEvent::Explore(ExploreEvent::OpenPage([0x5a; 16]))]
+        );
+        update(
+            &mut model,
+            UiEvent::Explore(ExploreEvent::OpenPage([0x5a; 16])),
+        );
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Browse, "the browser it opened");
+        // The browser is told the window's theme and cells, as ever.
+        let _ = told(&mut rx);
+        // The browser's quit gives the list back.
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Intent(lnomad::Intent::Quit)),
+        );
+        let _ = app.update(Message::Seen(seen(&model)));
+        assert_eq!(app.screen, Screen::Explore);
+
+        let stale = seen(&model);
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Chats)));
+        assert_eq!(told(&mut rx), vec![UiEvent::Tab(TabId::Chats)]);
+        assert_eq!(app.screen, Screen::Chats);
+        let _ = app.update(Message::Seen(stale));
+        assert_eq!(app.screen, Screen::Chats, "a picture from before");
     }
 
     #[test]

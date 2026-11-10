@@ -24,6 +24,7 @@ use super::tests::{long_chat, real_chat, real_chat_grown, seen_of, window_over_f
 use super::*;
 use iced::advanced::Layout;
 use leviculum_ui_iced::headless::{self, DrawnFrame, Program};
+use loquax::host_load::HostLoad;
 use std::sync::mpsc;
 
 /// The window sizes: the one the goldens use, Lew's three (2026-11-06,
@@ -733,6 +734,49 @@ fn the_benchs_gestures_move_the_window() {
     }
 }
 
+/// How far a channel of an anti-aliased edge's pixel may lie from the
+/// twin's: a quarter of full coverage, one of the four rows tiny-skia
+/// samples a pixel's row in.
+const EDGE: u8 = 64;
+
+/// How many pixels of a frame may lie more than one step from the twin's.
+const EDGE_PIXELS: usize = 4;
+
+/// A program driven with the host's load sampled at every pump.
+pub(super) struct Watched<'a, P> {
+    pub(super) inner: &'a mut P,
+    pub(super) host: &'a HostLoad,
+}
+
+impl<P: Program> Program for Watched<'_, P> {
+    type Message = P::Message;
+
+    fn view(&self) -> Element<'_, P::Message> {
+        self.inner.view()
+    }
+
+    fn update(&mut self, message: P::Message) {
+        self.inner.update(message);
+    }
+
+    fn pump(&self, drawn: bool) -> Vec<P::Message> {
+        self.host.sample();
+        self.inner.pump(drawn)
+    }
+
+    fn idle(&self) -> bool {
+        self.inner.idle()
+    }
+
+    fn style(&self) -> (Theme, Color, Color) {
+        self.inner.style()
+    }
+
+    fn marked(&self) -> bool {
+        self.inner.marked()
+    }
+}
+
 /// A scroll drawn as a shift of the frame on the window (1468) is the
 /// scroll drawn as the damage says, frame for frame, up to the partial
 /// pixels of anti-aliased edges: the chat's wheel, touchpad and scrollbar
@@ -758,14 +802,6 @@ fn the_benchs_gestures_move_the_window() {
 /// drew the wheel's 40 notches in 2 frames, 20 notches past a 560-pixel
 /// pane, so nothing shifted and the control failed on the machine's
 /// speed, not on the renderer.
-/// How far a channel of an anti-aliased edge's pixel may lie from the
-/// twin's: a quarter of full coverage, one of the four rows tiny-skia
-/// samples a pixel's row in.
-const EDGE: u8 = 64;
-
-/// How many pixels of a frame may lie more than one step from the twin's.
-const EDGE_PIXELS: usize = 4;
-
 #[test]
 fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
     let optimised = !cfg!(debug_assertions);
@@ -805,6 +841,8 @@ fn a_scroll_drawn_as_a_shift_is_the_scroll_drawn_whole() {
             assert!(run.past_one <= EDGE_PIXELS, "{what}");
             // A scrollbar's drag over 3000 messages moves them further
             // than the pane is high with every report: nothing to keep.
+            // The gestures are paced by the window's redraws (1472, 1619),
+            // so how many frames they draw does not hang on the host's load.
             if !matches!(case, Case::ChatScrollbar(_)) {
                 assert!(run.shifted > 0, "{what}");
             }
@@ -871,6 +909,12 @@ impl Program for Pulling {
 /// comes. Every state arrives and the last frame shows the whole chat;
 /// in an optimised build no frame of the pull takes longer than
 /// [`REFRESH_BUDGET_MS`] (6.5 to 10 ms each at 900 by 560 on the host).
+/// Counted in the drive's thread's CPU time (1473), where the wall clock
+/// counted the host's other work too (590 ms frames at load 18, 1469),
+/// and only on a quiet host ([`HostLoad`]): two tests beside it doubled
+/// even the CPU time (9.8 to 18.2 ms, cores and caches shared), so under
+/// load it prints that it did not measure. Where the thread's clock is
+/// not told, the wall clock on the quiet host.
 /// Unoptimised, a view of these 300 long paragraphs shaped takes longer
 /// than a frame (as [`the_benchs_gestures_move_the_window`] says), so
 /// the frame times are only printed there.
@@ -902,8 +946,17 @@ fn a_first_pull_never_costs_a_frame_over_the_budget() {
         states: std::cell::RefCell::new(states),
     };
     let mut script = |now: Duration| (now < SETTLE).then(Vec::new);
+    // A frame's cost is the drive's thread's time on a CPU (1473): the
+    // wall clock counted the host too, 590 ms frames at load 18 (1469).
+    headless::measure_cpu(true);
+    let host = HostLoad::start();
+    let mut watched = Watched {
+        inner: &mut pulling,
+        host: &host,
+    };
     let run =
-        headless::drive(&mut pulling, w, h, &mut script, SETTLE).expect("the software renderer");
+        headless::drive(&mut watched, w, h, &mut script, SETTLE).expect("the software renderer");
+    headless::measure_cpu(false);
     // The pull's frames: the first frame is the window opening on the
     // chat before the pull's first state, its present a fresh surface's
     // (14.6 ms of its 20.7 in the release run that set the budget).
@@ -913,9 +966,16 @@ fn a_first_pull_never_costs_a_frame_over_the_budget() {
         .skip(1)
         .map(DrawnFrame::total_ms)
         .fold(0.0, f64::max);
+    // The CPU time where the kernel tells it, else the wall clock.
+    let cpu: Option<f64> = run
+        .frames
+        .iter()
+        .skip(1)
+        .map(|f| f.cpu_ms)
+        .try_fold(0.0, |most: f64, ms| ms.map(|ms| most.max(ms)));
     let views = run.frames.iter().filter(|f| f.rebuilt).count();
     println!(
-        "FIRST_PULL states={slices} frames={} views={views} longest_ms={longest:.2}",
+        "FIRST_PULL states={slices} frames={} views={views} longest_ms={longest:.2} longest_cpu_ms={cpu:?}",
         run.frames.len()
     );
     assert!(
@@ -938,10 +998,14 @@ fn a_first_pull_never_costs_a_frame_over_the_budget() {
         views >= slices - 1,
         "a view per state: {views} for {slices}"
     );
-    if !cfg!(debug_assertions) {
+    if !cfg!(debug_assertions) && host.measured("the first pull's frames") {
+        let (ms, clock) = match cpu {
+            Some(cpu) => (cpu, "of CPU"),
+            None => (longest, "by the wall clock"),
+        };
         assert!(
-            longest < REFRESH_BUDGET_MS,
-            "a frame of the first pull took {longest:.2} ms (budget {REFRESH_BUDGET_MS:.1} ms)"
+            ms < REFRESH_BUDGET_MS,
+            "a frame of the first pull took {ms:.2} ms {clock} (budget {REFRESH_BUDGET_MS:.1} ms)"
         );
     }
 }

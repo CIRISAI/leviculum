@@ -22,7 +22,7 @@ use super::liveness::Liveness;
 use super::reactions;
 use super::replies::Quoted;
 use super::strings::{Arg, Lang, StrId, Text};
-use super::{Message, UiModel};
+use super::{Conversation, Message, UiModel};
 use crate::telemetry::Fix;
 use crate::when::WallTime;
 
@@ -62,7 +62,7 @@ pub enum Mark {
 }
 
 /// `state` as the screen shows it ([`super::shown_delivery`]).
-fn shown<B>(state: Option<DeliveryState>, model: &UiModel<B>) -> Option<DeliveryState> {
+pub(crate) fn shown<B>(state: Option<DeliveryState>, model: &UiModel<B>) -> Option<DeliveryState> {
     state.map(|state| super::shown_delivery(state, model.home_client, model.reading.on))
 }
 
@@ -222,9 +222,10 @@ pub fn list_ink(mark: Mark, colours: &Colours) -> u32 {
 }
 
 /// The initials for a peer (1129): the first letter of the name's first
-/// word and of its last, one letter for a name of one word, and the
-/// address's first two hex digits for a peer without a name.
-pub fn initials(name: Option<&str>, peer: &[u8; 16]) -> String {
+/// word and of its last, one letter for a name of one word, and `?` for a
+/// peer without a name (1452: never hex; its colour, from the address,
+/// tells two of them apart).
+pub fn initials(name: Option<&str>, _peer: &[u8; 16]) -> String {
     let first_letter = |word: &str| {
         word.chars()
             .find(|c| c.is_alphanumeric())
@@ -242,7 +243,7 @@ pub fn initials(name: Option<&str>, peer: &[u8; 16]) -> String {
             .collect(),
     };
     if letters.is_empty() {
-        return crate::address::to_hex(&peer[..1]).to_uppercase();
+        return "?".to_string();
     }
     letters.into_iter().flat_map(char::to_uppercase).collect()
 }
@@ -315,6 +316,37 @@ pub fn kind(message: &Message) -> &'static str {
     }
 }
 
+/// The list's line for a reaction someone else sent, with its subject
+/// (1447, walk 1 finding 24): "Lew Mobile hat mit ❤️ reagiert", where the
+/// line said "hat mit ❤️ reagiert" and nobody knew who. In a group the
+/// subject is the member whose copy it is; `None` where no name is known,
+/// and for our own reaction, whose line says "Du" already.
+pub fn reaction_line<B>(model: &UiModel<B>, peer: &[u8; 16], message: &Message) -> Option<String> {
+    let (_, content) = message.reaction().filter(|_| !message.outbound)?;
+    let name = match model.group(peer) {
+        Some(info) => {
+            let (address, name, _) =
+                super::groups::copy_of(&message.body, &message.fields, Some(info))?;
+            match model.names.shown(&address) {
+                Some(shown) => shown.to_string(),
+                None if !name.is_empty() => name.to_string(),
+                None => info
+                    .member(&address)
+                    .filter(|m| !m.name.is_empty())
+                    .map(|m| m.name.clone())?,
+            }
+        }
+        None => model.names.shown(peer)?.to_string(),
+    };
+    Some(
+        Text::Key(
+            StrId::ReactedBy,
+            Vec::from([Arg::Str(name), Arg::Str(content)]),
+        )
+        .resolve(model.lang),
+    )
+}
+
 /// The list's line for a conversation's last message, in `lang`: what
 /// the phone's notification says too, so a word Loquax puts there itself
 /// is the catalogue's (1377), never an English one under a German list.
@@ -347,13 +379,20 @@ pub fn preview(message: &Message, lang: Lang) -> String {
             .resolve(lang);
         }
     }
+    // A relay's post (1482): its writer and the first line of its words,
+    // not the writer's name alone.
+    if let Some(writer) = leviculum_lxmf::relay::prefix(&message.body).filter(|_| !message.outbound)
+    {
+        let first = writer.text.lines().next().unwrap_or_default();
+        return alloc::format!("{}: {first}", writer.name);
+    }
     message.body.lines().next().unwrap_or_default().to_string()
 }
 
 /// The list's line for an invitation: the card's title in the reader's
 /// language ("Anna lädt dich zu Verein ein"), not the English sentence
 /// the wire carries for stock clients with the group's code in it (1377).
-fn invitation_line<B>(model: &UiModel<B>, message: &Message) -> Option<String> {
+pub(crate) fn invitation_line<B>(model: &UiModel<B>, message: &Message) -> Option<String> {
     let group = leviculum_lxmf::lev::Lev::from_fields(&message.fields)?
         .invite?
         .group;
@@ -416,7 +455,43 @@ pub fn rows<B>(model: &UiModel<B>, order: Vec<usize>) -> Vec<ListRow> {
 /// The row for `peer`, empty when it has no conversation: a blocked peer
 /// is listed whether it wrote or not.
 pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
+    model.count(super::counters::Op::RowsBuilt, 1);
     let conversation = model.conversations.iter().find(|c| c.peer == *peer);
+    // Nothing loaded: the store's row answers (1490, schema 17), its
+    // liveness and its position words judged fresh at this clock.
+    if let Some((c, listing)) = conversation
+        .filter(|c| c.messages.is_empty())
+        .and_then(|c| Some((c, c.listing.as_ref()?)))
+    {
+        let liveness = model.liveness(peer);
+        let now = model.now.map(|now| now.unix_secs);
+        return ListRow {
+            peer: *peer,
+            name: model.names.label(peer, model.lang),
+            last: match listing.kind {
+                super::listing::LastKind::Position => {
+                    format!("{PIN} {}", liveness.list_words(now))
+                }
+                _ => listing.line.clone(),
+            },
+            ours: listing.ours,
+            at: listing.at,
+            unread: listing.unread_rows as usize,
+            updates: listing.updates as usize,
+            initials: initials(model.names.shown(peer), peer),
+            icon: listing.appearance.clone(),
+            kind: listing.kind.word(),
+            reaction: listing.reaction.clone(),
+            mark: listing.mark,
+            read_at: listing.read_at,
+            pinned: c.pinned,
+            muted: model.muted(peer),
+            liveness,
+            draft: Some(c)
+                .filter(|c| model.conversations.get(model.selected).map(|o| o.peer) != Some(c.peer))
+                .and_then(|c| c.draft.line()),
+        };
+    }
     let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
     // A group's state (1307) is no line of the list.
     let last = messages.iter().rev().find(|m| !m.is_group_state());
@@ -429,11 +504,13 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
     let now = model.now.map(|now| now.unix_secs);
     ListRow {
         peer: *peer,
-        name: model.names.label(peer),
+        name: model.names.label(peer, model.lang),
         last: last
             .map(|m| match m.is_report() {
                 true => format!("{PIN} {}", liveness.list_words(now)),
-                false => invitation_line(model, m).unwrap_or_else(|| preview(m, model.lang)),
+                false => invitation_line(model, m)
+                    .or_else(|| reaction_line(model, peer, m))
+                    .unwrap_or_else(|| preview(m, model.lang)),
             })
             .unwrap_or_default(),
         ours: last.is_some_and(|m| m.outbound),
@@ -441,7 +518,7 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         unread: conversation.map_or(0, |c| c.unread_rows()),
         updates,
         initials: initials(model.names.shown(peer), peer),
-        icon: latest_appearance(messages),
+        icon: conversation.and_then(Conversation::appearance),
         kind: last.map_or("", kind),
         reaction: last
             .filter(|m| m.is_reaction())
@@ -557,7 +634,28 @@ pub struct Bubble {
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
 /// the bubble it names, not a bubble, and a run of reports is one bubble,
 /// its newest, as the terminal folds it ([`super::Conversation::run`]).
+/// In a relayed chat a reaction whose target is not on this device is a
+/// bubble that says so (1482), never a chip on nothing: the target never
+/// comes, a relay's copies carry their own ids. In a relayed chat
+/// ([`super::relayed::is_relayed`]) each post is drawn under its writer,
+/// without the relay's prefix.
 pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
+    let to = model.conversations.get(c).map_or(0, |c| c.messages.len());
+    bubbles_in(model, c, 0, to)
+}
+
+/// The bubbles of messages `from..to` alone (1490): what the scene's
+/// chat window builds. A reaction chip finds its target wherever the
+/// reaction lies; a group line's dedupe sees the window only, so a
+/// digest twin older than the window can show again beside it.
+pub fn bubbles_in<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bubble> {
+    let bubbles = bubbles_of(model, c, from, to);
+    model.count(super::counters::Op::BubblesBuilt, bubbles.len());
+    bubbles
+}
+
+/// [`bubbles_in`], uncounted.
+fn bubbles_of<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bubble> {
     let Some(conversation) = model.conversations.get(c) else {
         return Vec::new();
     };
@@ -566,6 +664,15 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
     let liveness = newest_report.map(|_| model.liveness(&conversation.peer));
     let info = model.group(&conversation.peer);
     let group = info.is_some();
+    let relayed = !group && super::relayed::is_relayed(conversation);
+    // A reaction to a message this device does not hold (1482).
+    // Only in a relay's chat: elsewhere a reaction that came before its
+    // target waits for it, drawn nowhere until it arrives.
+    let orphan = |message: &Message| {
+        relayed
+            .then(|| super::relayed::orphan_reaction(conversation, message))
+            .flatten()
+    };
     // A group's lines by their writer and the writer's clock (study 6.2):
     // one already shown, alone or in a digest, is not shown again, and one
     // older than a line shown before it arrived late (6.1).
@@ -586,12 +693,17 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
         None => info
             .and_then(|g| g.member(address))
             .filter(|m| !m.name.is_empty())
-            .map_or_else(|| model.names.label(address), |m| m.name.clone()),
+            .map_or_else(
+                || model.names.label(address, model.lang),
+                |m| m.name.clone(),
+            ),
     };
-    conversation
-        .messages
+    let to = to.min(conversation.messages.len());
+    let from = from.min(to);
+    conversation.messages[from..to]
         .iter()
         .enumerate()
+        .map(|(m, message)| (m + from, message))
         .map(|(m, message)| {
             let note = group
                 .then(|| {
@@ -606,7 +718,8 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
             (m, message, note)
         })
         .filter(|(m, message, note)| {
-            (!message.is_aside() || note.is_some()) && !conversation.report_folded(*m)
+            (!message.is_aside() || note.is_some() || orphan(message).is_some())
+                && !conversation.report_folded(*m)
         })
         .flat_map(|(m, message, note)| {
             let fix = model.message_fix(c, m);
@@ -619,7 +732,18 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 .filter(|_| group && !message.outbound);
             // The reader's own word for the writer, else the admin's
             // (1307); the bare name, as a group's sender line has it.
-            let writer = copy.map(|(address, name, _)| (address, writer_name(&address, name)));
+            let relay = relayed
+                .then(|| super::relayed::writer_of(message, &conversation.peer))
+                .flatten()
+                .filter(|_| !message.outbound);
+            let writer = match &relay {
+                Some(w) => Some((w.address, model.relayed_name(w))),
+                None => copy.map(|(address, name, _)| (address, writer_name(&address, name))),
+            };
+            let elsewhere = orphan(message).map(|content| {
+                Text::Key(StrId::ReactedElsewhere, Vec::from([Arg::Str(content)]))
+                    .resolve(model.lang)
+            });
             let lev = (group && !message.outbound)
                 .then(|| leviculum_lxmf::lev::Lev::from_fields(&message.fields))
                 .flatten();
@@ -644,6 +768,8 @@ pub fn bubbles<B>(model: &UiModel<B>, c: usize) -> Vec<Bubble> {
                 late,
                 body: match (message.is_report(), &fix, copy) {
                     _ if note.is_some() => note.clone().unwrap_or_default(),
+                    _ if elsewhere.is_some() => elsewhere.clone().unwrap_or_default(),
+                    _ if relay.is_some() => relay.as_ref().map_or("", |w| w.text).to_string(),
                     (true, Some(_), _) => String::new(),
                     (true, None, _) => "position report".to_string(),
                     (false, _, Some((_, _, text))) => text.to_string(),
@@ -737,7 +863,7 @@ pub fn open<B>(model: &UiModel<B>) -> Option<Open> {
     let bubbles = bubbles(model, c);
     Some(Open {
         peer,
-        name: model.names.label(&peer),
+        name: model.names.label(&peer, model.lang),
         initials: initials(model.names.shown(&peer), &peer),
         icon: latest_appearance(&conversation.messages),
         placements: placements(&bubbles),
@@ -845,11 +971,17 @@ pub struct Colours {
     /// so 4.5:1 on the background is their floor.
     pub rec_red: u32,
     pub rec_amber: u32,
+    /// A field's placeholder (1448, walk finding 4): lighter than any
+    /// written text, so an empty field never reads as filled.
+    pub hint: u32,
+    /// The own position on a map (1448, walk findings 8 and 16): blue, as
+    /// the maps people know draw it. A mark, so 3:1 is its floor.
+    pub own_dot: u32,
 }
 
 impl Colours {
     /// Each colour by its name, in the table's order.
-    pub fn named(&self) -> [(&'static str, u32); 29] {
+    pub fn named(&self) -> [(&'static str, u32); 31] {
         [
             ("background", self.background),
             ("text", self.text),
@@ -880,6 +1012,8 @@ impl Colours {
             ("status_down", self.status_down),
             ("rec_red", self.rec_red),
             ("rec_amber", self.rec_amber),
+            ("hint", self.hint),
+            ("own_dot", self.own_dot),
         ]
     }
 }
@@ -915,6 +1049,8 @@ pub const LIGHT: Colours = Colours {
     status_down: 0xff80848c,
     rec_red: 0xffc62828,
     rec_amber: 0xff9a5b00,
+    hint: 0xff8b8e95,
+    own_dot: 0xff1a73e8,
 };
 
 /// The dark theme.
@@ -948,6 +1084,8 @@ pub const DARK: Colours = Colours {
     status_down: 0xff7d8087,
     rec_red: 0xffee6464,
     rec_amber: 0xffffb74d,
+    hint: 0xff7c7f86,
+    own_dot: 0xff8ab4f8,
 };
 
 /// The sizes of a pixel screen, in the phone's dp and sp, which the
@@ -1013,9 +1151,10 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_without_a_name_shows_its_address() {
-        assert_eq!(initials(None, &PEER), "3F");
-        assert_eq!(initials(Some("   "), &PEER), "3F");
+    fn a_peer_without_a_name_shows_no_hex() {
+        // 1452: never the address; the avatar's colour tells two apart.
+        assert_eq!(initials(None, &PEER), "?");
+        assert_eq!(initials(Some("   "), &PEER), "?");
     }
 
     fn icon(name: &str, fg: &[u8], bg: &[u8]) -> Field {

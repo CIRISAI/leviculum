@@ -60,6 +60,9 @@ rand_core = { workspace = true, features = ["getrandom"] }
 # The runtime the leaf node and the session's runners run on.
 tokio.workspace = true
 tracing.workspace = true
+# The session's lock (1496): fair handoff between the pump's thread and a
+# screen's call, no poisoning. Already in the lock.
+parking_lot = "0.12"
 # The JNI payloads (src/schema.rs): msgpack maps, as the study chose.
 serde.workspace = true
 rmp-serde.workspace = true

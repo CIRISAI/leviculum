@@ -478,6 +478,29 @@ impl<B> UiModel<B> {
         self.groups.get(peer)
     }
 
+    /// The people a new conversation lists (1448, walk finding 17), as a
+    /// messenger's contact list: every conversation with a person, the
+    /// list's and the archived ones, by the name every screen gives them,
+    /// ignoring case; no group and not the reader. Conversation indices.
+    pub fn people(&self) -> Vec<usize> {
+        let mut people: Vec<(String, usize)> = self
+            .order()
+            .into_iter()
+            .chain(self.archived_order())
+            .filter(|&c| {
+                let peer = self.conversations[c].peer;
+                !self.groups.contains_key(&peer) && self.address != Some(peer)
+            })
+            .map(|c| {
+                let name = self.names.label(&self.conversations[c].peer, self.lang);
+                (name.to_lowercase(), c)
+            })
+            .collect();
+        people.sort();
+        people.dedup_by_key(|(_, c)| *c);
+        people.into_iter().map(|(_, c)| c).collect()
+    }
+
     /// The friends the "New group" picker lists: every conversation the
     /// list shows that is no group, in the list's order.
     pub fn group_candidates(&self) -> Vec<[u8; 16]> {
@@ -501,18 +524,37 @@ impl<B> UiModel<B> {
     /// banner asks only then: a group is not a person, and an invitation
     /// card is the group's, not its sender's.
     pub fn heard_from_a_person(&self, peer: &[u8; 16]) -> bool {
-        if self.groups.contains_key(peer) {
-            return false;
-        }
+        self.words_from_a_person(peer).next().is_some()
+    }
+
+    /// When the person `peer` first wrote, by the writer's clock (1448,
+    /// walk finding 12): the earliest of the messages
+    /// [`Self::heard_from_a_person`] counts that carries a time. The
+    /// phone asks to save a contact only when this falls after the
+    /// device began, so a history a new device pulls asks nothing.
+    /// `None` when no such message carries a time.
+    pub fn first_word_from_a_person(&self, peer: &[u8; 16]) -> Option<crate::when::WallTime> {
+        self.words_from_a_person(peer)
+            .filter_map(|m| m.at)
+            .min_by_key(|at| at.unix_secs)
+    }
+
+    /// The messages a person wrote in `peer`'s conversation: none for a
+    /// group, and neither a group's state nor an invitation card.
+    fn words_from_a_person<'a>(
+        &'a self,
+        peer: &'a [u8; 16],
+    ) -> impl Iterator<Item = &'a crate::ui::Message> + 'a {
+        let person = !self.groups.contains_key(peer);
         self.conversations
             .iter()
-            .find(|c| c.peer == *peer)
-            .is_some_and(|c| {
-                c.messages.iter().any(|m| {
-                    !m.outbound
-                        && !m.is_group_state()
-                        && Lev::from_fields(&m.fields).is_none_or(|lev| lev.invite.is_none())
-                })
+            .filter(move |c| person && c.peer == *peer)
+            .take(1)
+            .flat_map(|c| c.messages.iter())
+            .filter(|m| {
+                !m.outbound
+                    && !m.is_group_state()
+                    && Lev::from_fields(&m.fields).is_none_or(|lev| lev.invite.is_none())
             })
     }
 
@@ -731,7 +773,7 @@ impl<B> UiModel<B> {
                     .member(&rung.member)
                     .map(|m| m.name.clone())
                     .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| self.names.label(&rung.member));
+                    .unwrap_or_else(|| self.names.label(&rung.member, self.lang));
                 (name, rung)
             })
             .collect()
@@ -759,7 +801,7 @@ impl<B> UiModel<B> {
         let now = self.now;
         let at = now.map_or(0, |n| u32::try_from(n.unix_secs).unwrap_or(0));
         let next = status_rung(status, at);
-        let Some(message) = self.message_mut(c, m) else {
+        let Some(mut message) = self.message_mut(c, m) else {
             return;
         };
         message.note(now, &status_line(status));
@@ -789,6 +831,7 @@ impl<B> UiModel<B> {
     fn forget_group(&mut self, group: [u8; 16]) {
         self.groups.remove(&group);
         self.groups_changed.remove(&group);
+        self.owed_groups.remove(&group);
         if self.group_sheet.is_some_and(|s| s.group == group) {
             self.group_sheet = None;
         }
@@ -1204,7 +1247,7 @@ impl<B> UiModel<B> {
         let names = |peers: &[[u8; 16]]| {
             peers
                 .iter()
-                .map(|p| self.names.label(p))
+                .map(|p| self.names.label(p, self.lang))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -1216,7 +1259,9 @@ impl<B> UiModel<B> {
                     .map(|d| names(&d.picked))
                     .unwrap_or_default();
                 let mut rows = alloc::vec![
-                    "tick friends: type a name, Enter ticks or unticks it".to_string(),
+                    super::strings::StrId::AskGroupTick
+                        .text(self.lang)
+                        .to_string(),
                     "Enter on an empty line goes on to the name".to_string(),
                 ];
                 if !picked.is_empty() {
@@ -1242,15 +1287,15 @@ impl<B> UiModel<B> {
             }
             Ask::LeaveGroup(group) => alloc::vec![alloc::format!(
                 "leave {}? Enter leaves, Esc stays",
-                self.names.label(&group)
+                self.names.label(&group, self.lang)
             ),],
             Ask::DeleteGroup(group) => alloc::vec![alloc::format!(
                 "delete {} for everyone? Enter deletes, Esc keeps it",
-                self.names.label(&group)
+                self.names.label(&group, self.lang)
             ),],
             Ask::RemoveMember(group) => alloc::vec![alloc::format!(
                 "remove whom from {}? type a name, Enter",
-                self.names.label(&group)
+                self.names.label(&group, self.lang)
             ),],
             _ => Vec::new(),
         }
@@ -1265,7 +1310,7 @@ impl<B> UiModel<B> {
         match self.names.shown(&member.address) {
             Some(shown) => shown.to_string(),
             None if !member.name.is_empty() => member.name.clone(),
-            None => self.names.label(&member.address),
+            None => self.names.label(&member.address, self.lang),
         }
     }
 }
@@ -1310,7 +1355,11 @@ impl<B: Default> UiModel<B> {
                     }
                     None => self.toast(
                         leviculum_ui::toast::ToastKind::Info,
-                        alloc::format!("no friend called {typed}"),
+                        super::strings::Text::Key(
+                            super::strings::StrId::NoContactCalled,
+                            alloc::vec![super::strings::Arg::Str(typed.to_string())],
+                        )
+                        .resolve(self.lang),
                     ),
                 }
                 self.palette = Some(Palette {
@@ -1368,9 +1417,12 @@ impl<B: Default> UiModel<B> {
     /// the list's order.
     fn find_candidate(&self, typed: &str) -> Option<[u8; 16]> {
         let lower = typed.to_lowercase();
-        self.group_candidates()
-            .into_iter()
-            .find(|peer| self.names.label(peer).to_lowercase().contains(&lower))
+        self.group_candidates().into_iter().find(|peer| {
+            self.names
+                .label(peer, self.lang)
+                .to_lowercase()
+                .contains(&lower)
+        })
     }
 
     /// Create: the home is asked, once, with the ticked friends under the
@@ -1512,7 +1564,9 @@ impl<B: Default> UiModel<B> {
                 })
                 .chain(draft.picked.iter().map(|peer| GroupMember {
                     address: *peer,
-                    name: self.names.label(peer),
+                    // The member's name as the reader shows it, no tail and
+                    // no "Unknown": it travels in the group's state (1452).
+                    name: self.names.shown(peer).unwrap_or_default().to_string(),
                     admin: false,
                     joined: false,
                     left: false,
@@ -1536,7 +1590,7 @@ impl<B: Default> UiModel<B> {
     pub(super) fn group_deleted(&mut self, deleted: Result<[u8; 16], String>) -> Vec<UiEffect> {
         match deleted {
             Ok(group) => {
-                let name = self.names.label(&group);
+                let name = self.names.label(&group, self.lang);
                 self.forget_group(group);
                 self.toast(
                     leviculum_ui::toast::ToastKind::Info,
@@ -1773,7 +1827,10 @@ mod tests {
         assert!(model.group_draft.is_none());
         let open = &model.conversations[model.selected];
         assert_eq!(open.peer, GROUP);
-        assert_eq!(model.names.label(&GROUP).split(' ').next(), Some("Familie"));
+        assert_eq!(
+            model.names.label(&GROUP, model.lang).split(' ').next(),
+            Some("Familie")
+        );
         let info = model.group(&GROUP).expect("the group");
         assert!(info.ours);
         assert_eq!(info.standing, Standing::Joined);
@@ -1960,6 +2017,54 @@ mod tests {
         let bubbles = super::super::chat::bubbles(&model, b);
         assert_eq!(bubbles[0].body, "Lew: forged");
         assert!(bubbles[0].writer.is_none());
+    }
+
+    /// 1449 item 3 (walk 1 finding 9): two members of one name are told
+    /// apart on the sheet by their hash tails, every row has its avatar's
+    /// letters, and the reader is "You". Control: a name only one member
+    /// has carries no tail.
+    #[test]
+    fn the_member_sheet_tells_two_of_one_name_apart_and_shows_avatars() {
+        let mut model = reader(&[LEW]);
+        arrive(&mut model, LEW, 1, "invite", invite("Lew"));
+        arrive(
+            &mut model,
+            GROUP,
+            2,
+            "",
+            members(
+                2,
+                &[
+                    (LEW, "lew", 2 | 4),
+                    (ME, "Me", 4),
+                    (ANNA, "lew", 4),
+                    (BOB, "Bob", 4),
+                ],
+            ),
+        );
+        verb(
+            &mut model,
+            Verb::Members {
+                group: Target::Peer(GROUP),
+            },
+        );
+        let sheet = super::super::group_scene::member_sheet(&model).expect("sheet");
+        let names: Vec<String> = sheet
+            .rows
+            .iter()
+            .map(|r| r.name.resolve(Lang::En))
+            .collect();
+        let lew = format!("lew {}", crate::names::hash_suffix(&LEW));
+        let anna = format!("lew {}", crate::names::hash_suffix(&ANNA));
+        assert_eq!(names, [lew.as_str(), "You", anna.as_str(), "Bob"]);
+        assert_ne!(lew, anna);
+        let letters: Vec<&str> = sheet
+            .rows
+            .iter()
+            .map(|r| r.avatar.initials.as_str())
+            .collect();
+        assert_eq!(letters[3], "B", "{letters:?}");
+        assert!(letters.iter().all(|l| !l.is_empty()), "{letters:?}");
     }
 
     /// The member sheet (study 4.4, 4.6): it opens from the header, Leave
@@ -2398,6 +2503,7 @@ mod tests {
             earlier: 40,
             draft: Default::default(),
             group,
+            listing: None,
         };
         let mut again = reader(&[]);
         again.restore(vec![row(Some(kept[0].clone()))]);
@@ -2407,7 +2513,7 @@ mod tests {
         assert_eq!(group.name, "Familie");
         assert!(again.conversations.iter().any(|c| c.peer == GROUP));
         assert_eq!(
-            again.names.label(&GROUP).split(' ').next(),
+            again.names.label(&GROUP, again.lang).split(' ').next(),
             Some("Familie"),
             "listed under its name, not its address"
         );
@@ -2431,10 +2537,11 @@ mod tests {
                 pinned: false,
                 flags: Default::default(),
                 unread: 0,
-                messages: c.messages.clone(),
+                messages: c.messages.to_vec(),
                 earlier: 0,
                 draft: Default::default(),
                 group: None,
+                listing: None,
             })
             .collect();
         let mut again = reader(&[]);
@@ -2555,6 +2662,103 @@ mod tests {
         arrive(&mut model, LEW, 6, "Kommst du?", Lev::default());
         assert!(model.heard_from_a_person(&LEW), "the inviter, writing");
         assert!(!model.heard_from_a_person(&BOB), "nobody wrote");
+    }
+
+    /// 1448 (walk finding 17): a new conversation lists the people by
+    /// name, ignoring case, the archived ones too; a group and the reader
+    /// are no one to start a conversation with there.
+    #[test]
+    fn the_people_are_every_person_by_name() {
+        let mut model = reader(&[LEW, ANNA, BOB]);
+        arrive(
+            &mut model,
+            LEW,
+            1,
+            "Lew invited you to Familie",
+            invite("Lew"),
+        );
+        arrive(&mut model, ANNA, 2, "Hallo", Lev::default());
+        arrive(
+            &mut model,
+            GROUP,
+            3,
+            "",
+            members(1, &[(LEW, "Lew", 2 | 4), (ME, "Me", 4)]),
+        );
+        arrive(&mut model, GROUP, 4, "Lew: Brot ist da", copy(LEW));
+        model.names.remember(LEW, "lew");
+        model.names.remember(ANNA, "Anna");
+        model.names.remember(BOB, "bob");
+        let names = |model: &UiModel<Line>| -> Vec<String> {
+            model
+                .people()
+                .into_iter()
+                .map(|c| model.names.label(&model.conversations[c].peer, model.lang))
+                .collect()
+        };
+        assert!(model.group(&GROUP).is_some());
+        assert_eq!(names(&model), ["Anna", "bob", "lew"]);
+        let bob = model
+            .conversations
+            .iter()
+            .position(|c| c.peer == BOB)
+            .expect("bob's conversation");
+        model.conversations[bob].flags.archived = true;
+        assert_eq!(
+            names(&model),
+            ["Anna", "bob", "lew"],
+            "the archived one too"
+        );
+    }
+
+    /// 1448 (walk finding 12): the person's first word carries its
+    /// writer's time, the earliest of what it wrote, so the phone can tell
+    /// a history it pulled from a contact met after it began. An
+    /// invitation card and a group are no word of a person's; a model
+    /// without a clock knows no time. Control: the later line does not
+    /// move the first.
+    #[test]
+    fn a_persons_first_word_is_the_earliest_it_wrote() {
+        const T: i64 = 1_790_000_000;
+        let mut model = reader(&[LEW, ANNA]);
+        arrive(&mut model, ANNA, 1, "ohne Uhr", Lev::default());
+        assert_eq!(model.first_word_from_a_person(&ANNA), None, "no clock yet");
+        update(
+            &mut model,
+            UiEvent::Clock(crate::when::WallTime {
+                unix_secs: T,
+                offset_secs: 0,
+            }),
+        );
+        let at = |model: &mut UiModel<Line>, from, id, sent_at, lev: Lev| {
+            update(
+                model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    sent_at,
+                    message_id: [id; 32],
+                    source: from,
+                    title: Vec::new(),
+                    body: b"Hallo".to_vec(),
+                    fields: lev_fields(lev),
+                    verified: true,
+                }),
+            );
+        };
+        at(&mut model, LEW, 2, T - 500, invite("Lew"));
+        assert_eq!(model.first_word_from_a_person(&LEW), None, "an invitation");
+        at(&mut model, LEW, 3, T - 300, Lev::default());
+        at(&mut model, LEW, 4, T - 100, Lev::default());
+        assert_eq!(
+            model.first_word_from_a_person(&LEW).map(|w| w.unix_secs),
+            Some(T - 300)
+        );
+        at(&mut model, ANNA, 5, T - 50, Lev::default());
+        assert_eq!(
+            model.first_word_from_a_person(&ANNA).map(|w| w.unix_secs),
+            Some(T - 50),
+            "the line without a clock carries no time"
+        );
+        assert_eq!(model.first_word_from_a_person(&BOB), None, "nobody wrote");
     }
 
     /// 1307 pass six: the admin's member sheet says where each invitation

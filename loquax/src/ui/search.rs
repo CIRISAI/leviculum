@@ -29,7 +29,7 @@ use super::history::StoredHit;
 use super::layout::{painted, BAR};
 use super::{bold, push, Conversation, UiModel};
 use crate::names::Names;
-use crate::when::{list_time, WallTime};
+use crate::when::WallTime;
 
 /// The mark before a match.
 pub const OPEN: char = '«';
@@ -111,6 +111,15 @@ pub fn mark_first(text: &str, query: &str) -> String {
 /// What `query` finds among the `conversations` the list shows: those whose
 /// name matches, in `order` (the list's, most recent first), then every
 /// message of theirs whose text matches, `stored` among them, the most
+/// Whether `query` finds the conversation with `peer` by its name: the name
+/// the screen shows, or the address in hex for a reader who has it from the
+/// contact info (1452: the short hash is no part of the name any more).
+fn names_match(names: &Names, peer: &[u8; 16], query: &str) -> bool {
+    names
+        .shown(peer)
+        .is_some_and(|name| find(name, query).is_some())
+        || find(&crate::address::to_hex(peer), query).is_some()
+}
 /// recent first. Nothing for an empty query.
 pub fn hits(
     conversations: &[Conversation],
@@ -124,7 +133,7 @@ pub fn hits(
     }
     let mut out: Vec<Hit> = order
         .iter()
-        .filter(|&&c| find(&names.label(&conversations[c].peer), query).is_some())
+        .filter(|&&c| names_match(names, &conversations[c].peer, query))
         .map(|&c| Hit::Conversation(c))
         .collect();
     // Only the conversations the list shows: a blocked peer's messages are
@@ -307,10 +316,10 @@ fn entry<B>(
         .and_then(|m| conversation.messages.get(m))
         .or(conversation.messages.last());
     let time = match (shown.and_then(|m| m.at), now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => super::scene::list_time(&at, &now).resolve(model.lang),
         _ => String::new(),
     };
-    let label = model.names.label(&conversation.peer);
+    let label = model.names.label(&conversation.peer, model.lang);
     let who = match (message, shown) {
         (None, _) => mark_first(&label, query),
         (Some(_), Some(m)) if m.outbound => format!("you to {label}"),
@@ -356,10 +365,10 @@ fn stored_entry<B>(
     now: Option<WallTime>,
 ) -> [RLine; 2] {
     let time = match (hit.at, now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+        (Some(at), Some(now)) => super::scene::list_time(&at, &now).resolve(model.lang),
         _ => String::new(),
     };
-    let label = model.names.label(&hit.peer);
+    let label = model.names.label(&hit.peer, model.lang);
     let who = match hit.outbound {
         true => format!("you to {label}"),
         false => label,

@@ -115,7 +115,9 @@ impl Slicing {
 pub struct Fanout {
     taps: Vec<Sender<OutboxEvent>>,
     commands_tx: Sender<Command>,
-    commands_rx: Receiver<Command>,
+    /// The taps' commands; lent with the engine's outbox to a
+    /// [`Reader`] while one reads on a thread of its own.
+    commands_rx: Option<Receiver<Command>>,
     ready: Option<OutboxEvent>,
 }
 
@@ -125,7 +127,7 @@ impl Default for Fanout {
         Self {
             taps: Vec::new(),
             commands_tx,
-            commands_rx,
+            commands_rx: Some(commands_rx),
             ready: None,
         }
     }
@@ -164,20 +166,85 @@ impl Fanout {
         outbox: &mut impl Outbox,
         max: usize,
     ) -> Result<Vec<OutboxEvent>, OutboxGone> {
-        // The fan-out holds a sender itself, so the queue is never
-        // disconnected: an error is the empty queue.
-        while let Ok(command) = self.commands_rx.try_recv() {
-            outbox.submit(command)?;
+        if let Some(commands) = &self.commands_rx {
+            submit_waiting(commands, outbox)?;
         }
         let mut events = Vec::new();
         while events.len() < max {
             let Some(event) = outbox.try_next_event()? else {
                 break;
             };
-            if matches!(event, OutboxEvent::Ready { .. }) {
-                self.ready = Some(event.clone());
-            }
-            self.taps.retain(|tap| tap.send(event.clone()).is_ok());
+            self.deliver_one(&event);
+            events.push(event);
+        }
+        Ok(events)
+    }
+
+    /// Lend the engine's end to a [`Reader`] on another thread (1492): it
+    /// reads the engine and hands the taps' commands on, and the screen's
+    /// side hands what it read to the taps with [`Fanout::deliver`] as it
+    /// folds it. The outbox back as the error while a reader holds it
+    /// already.
+    pub fn lend<O: Outbox>(&mut self, outbox: O) -> Result<Reader<O>, O> {
+        match self.commands_rx.take() {
+            Some(commands) => Ok(Reader { outbox, commands }),
+            None => Err(outbox),
+        }
+    }
+
+    /// The engine's end back from its [`Reader`]: [`Fanout::pump`] hands
+    /// the taps' commands on again.
+    pub fn take_back<O>(&mut self, reader: Reader<O>) -> O {
+        self.commands_rx = Some(reader.commands);
+        reader.outbox
+    }
+
+    /// What a [`Reader`] read, copied to every live tap as
+    /// [`Fanout::pump`] copies it, when the screen takes it: a tap holds
+    /// no more than the screen took (1446).
+    pub fn deliver(&mut self, events: &[OutboxEvent]) {
+        for event in events {
+            self.deliver_one(event);
+        }
+    }
+
+    fn deliver_one(&mut self, event: &OutboxEvent) {
+        if matches!(event, OutboxEvent::Ready { .. }) {
+            self.ready = Some(event.clone());
+        }
+        self.taps.retain(|tap| tap.send(event.clone()).is_ok());
+    }
+}
+
+/// The taps' commands waiting, handed to the engine. The fan-out holds a
+/// sender itself, so the queue is never disconnected: an error is the
+/// empty queue.
+fn submit_waiting(commands: &Receiver<Command>, outbox: &impl Outbox) -> Result<(), OutboxGone> {
+    while let Ok(command) = commands.try_recv() {
+        outbox.submit(command)?;
+    }
+    Ok(())
+}
+
+/// The engine's end of a [`Fanout`], lent to a thread that only reads
+/// (1492): the terminal reads the engine there, so an engine step that
+/// stalls never stands between a key and the model.
+pub struct Reader<O> {
+    outbox: O,
+    commands: Receiver<Command>,
+}
+
+impl<O: Outbox> Reader<O> {
+    /// The taps' commands handed to the engine, then at most `max` of the
+    /// engine's events, for the screen's side to fold and
+    /// [`Fanout::deliver`].
+    pub fn read_at_most(&mut self, max: usize) -> Result<Vec<OutboxEvent>, OutboxGone> {
+        submit_waiting(&self.commands, &self.outbox)?;
+        let mut events = Vec::new();
+        while events.len() < max {
+            let Some(event) = self.outbox.try_next_event()? else {
+                break;
+            };
             events.push(event);
         }
         Ok(events)
@@ -363,5 +430,53 @@ mod tests {
         drop(fanout.tap());
         fanout.pump(&mut engine).expect("pump");
         assert!(fanout.taps.is_empty());
+    }
+
+    /// 1492: a lent reader takes the engine's events and hands the taps'
+    /// commands on; a tap holds an event only once the screen's side
+    /// delivered it, and the fan-out pumps again once it has it back.
+    #[test]
+    fn a_lent_reader_reads_and_a_tap_sees_only_what_was_delivered() {
+        let queued = |n: u8| OutboxEvent::Queued {
+            message_id: [n; 32],
+        };
+        let engine = FakeOutbox::new((0..3).map(queued).collect());
+        let mut fanout = Fanout::default();
+        let mut tap = fanout.tap();
+        tap.submit(Command::Resolve {
+            destination: ADDRESS,
+        })
+        .expect("live");
+        let Ok(mut reader) = fanout.lend(engine) else {
+            panic!("the first lend")
+        };
+        assert!(
+            fanout.lend(FakeOutbox::new(Vec::new())).is_err(),
+            "lent once"
+        );
+        let read = reader.read_at_most(2).expect("read");
+        assert_eq!(read, [queued(0), queued(1)]);
+        assert_eq!(
+            *reader.outbox.commands.borrow(),
+            [Command::Resolve {
+                destination: ADDRESS
+            }]
+        );
+        assert_eq!(tap.try_next_event().expect("live"), None, "not delivered");
+        fanout.deliver(&read);
+        assert_eq!(tap.try_next_event().expect("live"), Some(queued(0)));
+        assert_eq!(tap.try_next_event().expect("live"), Some(queued(1)));
+        let mut engine = fanout.take_back(reader);
+        tap.submit(Command::Resolve {
+            destination: ADDRESS,
+        })
+        .expect("live");
+        assert_eq!(fanout.pump(&mut engine).expect("pump"), [queued(2)]);
+        assert_eq!(
+            engine.commands.borrow().len(),
+            2,
+            "commands handed on again"
+        );
+        assert_eq!(tap.try_next_event().expect("live"), Some(queued(2)));
     }
 }

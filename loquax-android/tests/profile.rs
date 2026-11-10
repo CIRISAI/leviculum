@@ -38,10 +38,10 @@ fn phone() -> (tempfile::TempDir, UiModel<session::Line>) {
     model.own_code = Some(loquax::ui::OwnCode::of(code, Some(qr)));
     update(
         &mut model,
-        UiEvent::ProfileFacts(ProfileFacts {
+        UiEvent::ProfileFacts(Box::new(ProfileFacts {
             name: String::new(),
             mailbox: Mailbox::Away {
-                host: Some("leviculum.network".to_string()),
+                name: Some("Lews Rechner".to_string()),
                 rung: Some(Rung::Relayed),
                 word: Some(loquax::home::board::Word::Connected),
             },
@@ -49,7 +49,8 @@ fn phone() -> (tempfile::TempDir, UiModel<session::Line>) {
                 name: String::new(),
                 this: true,
             }],
-        }),
+            ..Default::default()
+        })),
     );
     (home, model)
 }

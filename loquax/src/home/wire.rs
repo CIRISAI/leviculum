@@ -662,6 +662,49 @@ pub fn name_entry_prefix(peer: &[u8; 16]) -> Vec<u8> {
     out
 }
 
+/// A hub entry's bytes (1599, [`super::KIND_HUB`]): the hub's `rrc.hub`
+/// destination, then its name (empty for none), its hops (255 for
+/// unknown), and when it was first and last heard, unix seconds. Its
+/// first bytes are [`name_entry_prefix`]'s, so the store keeps a hub's
+/// newest entry only, as it does a peer's name.
+pub fn hub_entry(hub: &crate::ui::hubs::HeardHub) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::bin(&mut out, &hub.hash);
+    msgpack::array(&mut out, 4);
+    msgpack::string(&mut out, hub.name.as_deref().unwrap_or_default());
+    msgpack::uint(&mut out, u64::from(hub.hops.unwrap_or(u8::MAX)));
+    msgpack::int(&mut out, hub.first);
+    msgpack::int(&mut out, hub.last);
+    out
+}
+
+/// A hub entry ([`hub_entry`]); its name is cleaned again, as an announce's.
+pub fn read_hub_entry(data: &[u8]) -> Result<crate::ui::hubs::HeardHub, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    let hash = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    if msgpack::array_len(data, &mut p)? < 4 {
+        return Err(Malformed);
+    }
+    let name = crate::ui::hubs::shown_name(msgpack::read_str(data, &mut p)?);
+    let hops = u8::try_from(msgpack::read_uint(data, &mut p)?)
+        .ok()
+        .filter(|h| *h != u8::MAX);
+    let first = msgpack::read_int(data, &mut p)?;
+    let last = msgpack::read_int(data, &mut p)?;
+    Ok(crate::ui::hubs::HeardHub {
+        hash,
+        name,
+        hops,
+        first,
+        last,
+        answered: None,
+    })
+}
+
 /// A name entry, which has a join request's shape: sixteen bytes and a
 /// string.
 pub fn read_name_entry(data: &[u8]) -> Result<([u8; 16], alloc::string::String), Malformed> {

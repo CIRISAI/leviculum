@@ -111,16 +111,13 @@ them all and added three refinements, marked *settled by the pictures*.
    bearing, or along the last two fixes when the field carries none. In
    the terminal an arrow in the cell beside the pin, eight ways.
 
-8. **Quiet peer.** A peer whose fixes came at a median interval *m* over
-   the window and who has been silent longer than max(3 *m*, **1 h**)
-   gets the line "no fix for 3 h" under the pin; it stays until the next
-   fix.
+8. **Quiet peer.** Retired by 1447 (walk 1 finding 7): a position has
+   one age on the screen, the card's, in the reader's words ("vor 28
+   Std."). The line "no fix for 3 h" under the pin was a second age in
+   another language and is drawn on no target any more; how long a peer
+   has been silent is that one age.
 
-   *Settled by the pictures:* fewer than two fixes in the window have no
-   interval, so a position shared once gets no quiet line: it is no
-   stream that went quiet, and its pin's age already says how old it is.
-
-9. **Privacy sentence.** The share flow is to say plainly that friends
+9. **Privacy sentence.** The share flow is to say plainly that contacts
    who see the position also see the way. No new permission; the
    receiver holds the fixes anyway. Not built in 1385 (see "Not yet").
 
@@ -186,8 +183,7 @@ and the primary key's index repeats them. In memory the model keeps a
 places of every peer first, under everything; then per peer its lines,
 oldest step first, at 3 logical pixels, its dwells as a filled disc with
 a rim, its dots, its wedge, each peer's layer blended once so two
-segments meeting at a fix do not darken it; the quiet line on a light
-ground under the pin; the pins last. The window draws its pins on its
+segments meeting at a fix do not darken it; the pins last. The window draws its pins on its
 own canvas in the same hue.
 
 **The terminal:** the lines as braille dots, two by four a cell, over

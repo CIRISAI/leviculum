@@ -44,6 +44,13 @@ tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
 # version in the lock through iced and the programs' tests.
 png = "0.18"
 
+# A frame's CPU time in the emulated window (`headless::thread_cpu_ns`,
+# 1473): the thread's own clock (CLOCK_THREAD_CPUTIME_ID), which a test's
+# frame budget counts so a loaded host does not stretch it; the crate
+# forbids unsafe code, and rustix calls it safely. The version in the lock.
+[target.'cfg(all(unix, not(target_env = "musl")))'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "time"] }
+
 # The desktop's light or dark on Linux (`desktop`, 1310): the freedesktop
 # colour scheme over D-Bus, the reader iced's `linux-theme-detection` uses.
 # Not that feature: with it iced blocks the window's start on the portal

@@ -5,8 +5,6 @@ import android.util.Log;
 import android.view.View;
 import android.widget.TextView;
 import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.Calendar;
 import java.util.Date;
 import java.util.Locale;
 import java.util.Map;
@@ -17,25 +15,6 @@ final class Ui {
     static final String NOT_STARTED = "not started";
 
     private Ui() {}
-
-    /** Whole days from `then` to `now` by the calendar, 0 for the same day. */
-    static int daysBetween(long thenSecs, long nowSecs) {
-        Calendar a = Calendar.getInstance();
-        a.setTimeInMillis(thenSecs * 1000);
-        Calendar b = Calendar.getInstance();
-        b.setTimeInMillis(nowSecs * 1000);
-        int days = 0;
-        while (a.get(Calendar.YEAR) < b.get(Calendar.YEAR)
-                || a.get(Calendar.DAY_OF_YEAR) < b.get(Calendar.DAY_OF_YEAR)
-                && a.get(Calendar.YEAR) == b.get(Calendar.YEAR)) {
-            a.add(Calendar.DAY_OF_YEAR, 1);
-            days++;
-            if (days > 7) {
-                return days;
-            }
-        }
-        return days;
-    }
 
     /** A time of day, in the phone's locale: 18:34 or 6:34 PM. */
     /**
@@ -78,41 +57,6 @@ final class Ui {
             return context.getString(R.string.hours_ago, (int) (secs / 3600));
         }
         return context.getString(R.string.days_ago, (int) (secs / 86_400));
-    }
-
-    /**
-     * The conversation list's time (1130): now under a minute, minutes
-     * under an hour, hours under a day, then the weekday within the week,
-     * then the date, the year only when it is not this one. A time ahead of
-     * the phone's clock is now.
-     */
-    static String listTime(Context context, long unixSecs, long nowSecs) {
-        if (unixSecs <= 0) {
-            return "";
-        }
-        long secs = nowSecs - unixSecs;
-        if (secs < 60) {
-            return context.getString(R.string.just_now);
-        }
-        if (secs < 3600) {
-            return context.getString(R.string.minutes_ago, (int) (secs / 60));
-        }
-        if (secs < 86_400) {
-            return context.getString(R.string.list_hours, (int) (secs / 3600));
-        }
-        Date at = new Date(unixSecs * 1000);
-        if (daysBetween(unixSecs, nowSecs) < 7) {
-            return new SimpleDateFormat("EEE", Locale.getDefault()).format(at);
-        }
-        Calendar then = Calendar.getInstance();
-        then.setTime(at);
-        Calendar now = Calendar.getInstance();
-        now.setTimeInMillis(nowSecs * 1000);
-        if (then.get(Calendar.YEAR) == now.get(Calendar.YEAR)) {
-            String pattern = android.text.format.DateFormat.getBestDateTimePattern(Locale.getDefault(), "dMMM");
-            return new SimpleDateFormat(pattern, Locale.getDefault()).format(at);
-        }
-        return DateFormat.getDateInstance(DateFormat.SHORT).format(at);
     }
 
     /**

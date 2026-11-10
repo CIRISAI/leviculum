@@ -1,5 +1,5 @@
-┌  Loquax (attaching)────┐┌  <abababab…>───────────────────────────── no relay ┐
-│▌<abababab…>            ││                                                    │
+┌  Loquax (connecting)───┐┌  Unknown───────────────────────────────── no relay ┐
+│▌Unknown                ││                                                    │
 │▌you: hi                ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -16,9 +16,9 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                  ┌────────────────────────────────┐│
-│                        ││           nothing│⚠ Not sent. Its details say why.││
+│                        ││                  │⚠ Not sent. Its details say why.││
 │                        ││                  └────────────────────────────────┘│
-│                        │├● to <abababab…>──── Enter send · Alt-Enter newline ┤
+│                        │├● to Unknown──────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

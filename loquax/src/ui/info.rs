@@ -55,19 +55,47 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
         .iter()
         .position(|m| m.activity == key)?;
     let message = &conversation.messages[m];
-    let who = model.names.label(&conversation.peer);
+    let who = model.names.label(&conversation.peer, model.lang);
     let name = || Arg::Str(who.clone());
     let group = model.groups.contains_key(&conversation.peer);
     let mut rows = Vec::new();
-    rows.push(match message.outbound {
-        true => InfoRow::new(StrId::InfoTo, Text::Raw(who.clone())),
-        false => InfoRow::new(StrId::InfoFrom, Text::Raw(who.clone())),
+    // A relayed post (1482) is from its writer, via the relay: the
+    // writer's name, its address's 4-hex tail (1452: here and nowhere
+    // else on screen) and the relay's name.
+    let relayed = (!message.outbound && !group && super::relayed::is_relayed(conversation))
+        .then(|| super::relayed::writer_of(message, &conversation.peer))
+        .flatten();
+    rows.push(match (message.outbound, relayed) {
+        (true, _) => InfoRow::new(StrId::InfoTo, Text::Raw(who.clone())),
+        (false, Some(writer)) => InfoRow::new(
+            StrId::InfoFrom,
+            Text::Key(
+                StrId::InfoRelayedFrom,
+                Vec::from([
+                    Arg::Str(model.relayed_name(&writer)),
+                    Arg::Str(crate::names::hash_suffix(&writer.address)),
+                    Arg::Str(who.clone()),
+                ]),
+            ),
+        ),
+        (false, None) => InfoRow::new(StrId::InfoFrom, Text::Raw(who.clone())),
     });
     // Sent is when it was written, ours or theirs; Received is when this
     // device took it, the first line of its ledger (1445): a history pulled
     // at once shows its writers' days and says when it came here.
     if let Some(at) = message.at {
         rows.push(InfoRow::new(StrId::InfoSent, when(&at, model.now.as_ref())));
+    }
+    // A shared position's coordinates and accuracy live here, not in the
+    // bubble, which says one sentence (1449 item 5, walk 1 finding 11).
+    if let Some(fix) = super::message_fix(conversation.peer, message) {
+        rows.push(InfoRow::new(
+            StrId::InfoPlace,
+            Text::Raw(crate::telemetry::coordinates(&fix.location)),
+        ));
+        if let Some(accuracy) = crate::telemetry::accuracy(&fix.location) {
+            rows.push(InfoRow::new(StrId::InfoAccuracy, Text::Raw(accuracy)));
+        }
     }
     // The ladder's times of ours (1462): when its proof came (the
     // recipient's mailbox or device), when the device said it has it, when

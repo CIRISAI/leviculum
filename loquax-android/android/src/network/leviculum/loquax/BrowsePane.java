@@ -4,13 +4,16 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.InputType;
 import android.text.TextPaint;
+import android.text.TextUtils;
 import android.text.method.LinkMovementMethod;
 import android.text.style.BackgroundColorSpan;
 import android.text.style.ClickableSpan;
@@ -22,11 +25,13 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -41,12 +46,20 @@ import java.util.Map;
  * naming the scene node it landed on. The page arrives laid out, a window
  * of lines of runs, and is drawn in a monospace grid: nothing here parses
  * micron or knows a link from its text.
+ *
+ * <p>1621 (walk 2): the page goes by its name, in the screen's title and
+ * in the address field, from the moment it is opened; the field shows the
+ * node's address only while it is edited. Back is always there: at the
+ * first page it gives the tab back to Explore.
  */
 final class BrowsePane {
     /** What the pane hands back to the Activity. */
     interface Host {
-        /** The tab gave way to a chat (a page's link to its operator). */
+        /** The tab gave way to a chat (a page's link to its operator), or to Explore. */
         void left();
+
+        /** The page's name, for the screen's title. */
+        void titled(String title);
     }
 
     private final Activity screen;
@@ -55,8 +68,20 @@ final class BrowsePane {
     private final EditText address;
     private final TextView page;
     private final LinearLayout rows;
+    /**
+     * The places sheet's own scroll, a layer over the page (1639, walk 5
+     * new 23): sheet and page shared one scroll, so past the sheet's last
+     * entry the page followed and the sheet counted as open while it was
+     * off screen. Shown exactly while the library says a sheet is open.
+     */
+    private final ScrollView sheetScroll;
     private final TextView status;
+    /** The loading state over an empty page (1632, walk 4 new 12). */
+    private final LinearLayout loadingState;
+    private final TextView loadingWords;
     private int cols;
+    /** The cells said again once for a page laid out wider: never a loop. */
+    private int resentAt = -1;
     private int lines;
 
     BrowsePane(Activity activity, Host host) {
@@ -80,22 +105,61 @@ final class BrowsePane {
                 verb("back", "", "");
             }
         });
-        bar.addView(back);
+        // A glyph has no size of its own: the button gives it one (walk 2:
+        // a 61 px button with nothing drawn in it).
+        back.setTag("browse_back");
+        bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
         address = new EditText(activity);
         address.setSingleLine(true);
-        address.setTypeface(Typeface.MONOSPACE);
+        // An address is no word: no spelling marks under it (walk 2).
+        address.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         address.setImeOptions(EditorInfo.IME_ACTION_GO);
         address.setTag("address");
         address.setOnEditorActionListener(new TextView.OnEditorActionListener() {
             @Override
             public boolean onEditorAction(TextView v, int action, KeyEvent event) {
-                verb("go", "", v.getText().toString());
+                String typed = v.getText().toString().trim();
+                // The field still says the node's own address: the page
+                // again, unless it is on its way already (1629, walk 3: a
+                // page that never came could not be asked for again).
+                if (!typed.isEmpty() && !typed.equals(Core.str(last, "dest"))) {
+                    verb("go", "", typed);
+                } else if (!typed.isEmpty() && !Core.bool(last, "loading")) {
+                    verb("reload", "", "");
+                }
+                address.clearFocus();
+                // The load starts: the keyboard goes, as opening a page
+                // from the search does (1632, walk 4 new 13).
+                InputMethodManager keyboard =
+                        (InputMethodManager) screen.getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (keyboard != null) {
+                    keyboard.hideSoftInputFromWindow(address.getWindowToken(), 0);
+                }
                 return true;
+            }
+        });
+        // Edited, the field holds the node's address, chosen whole so a
+        // typed one replaces it; left, the page's name again.
+        address.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override
+            public void onFocusChange(View v, boolean focused) {
+                if (last == null) {
+                    return;
+                }
+                if (focused) {
+                    String dest = Core.str(last, "dest");
+                    address.setText(dest);
+                    address.selectAll();
+                } else {
+                    address.setText(Core.str(last, "address"));
+                }
             }
         });
         bar.addView(address, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button places = new Button(activity);
-        places.setText("☰");
+        // A word, not a grey "☰" (1629, walk 3 new 7).
+        places.setText(R.string.browse_places);
         places.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -110,24 +174,75 @@ final class BrowsePane {
         body.setOrientation(LinearLayout.VERTICAL);
         rows = new LinearLayout(activity);
         rows.setOrientation(LinearLayout.VERTICAL);
-        body.addView(rows);
+        sheetScroll = new ScrollView(activity);
+        sheetScroll.setTag("browse_sheet");
+        sheetScroll.setBackgroundColor(activity.getColor(R.color.background));
+        sheetScroll.setFillViewport(true);
+        sheetScroll.addView(rows);
+        sheetScroll.setVisibility(View.GONE);
         page = new TextView(activity);
         page.setTypeface(Typeface.MONOSPACE);
         page.setTextSize(13);
         page.setTextColor(activity.getColor(R.color.text));
         page.setMovementMethod(LinkMovementMethod.getInstance());
         page.setTag("page");
+        // A gutter on both sides (1632, walk 4 new 16: the text stood at
+        // x 0), and one wrap: the library lays the page out on the cells
+        // the view holds ({@link #size}); the view breaks no line again,
+        // which turned each long line into a long and a short one.
+        page.setPadding(dp(16), dp(8), dp(16), dp(8));
+        page.setHorizontallyScrolling(true);
         body.addView(page);
         scroll.addView(body);
-        column.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        FrameLayout stage = new FrameLayout(activity);
+        stage.addView(scroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        stage.addView(sheetScroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // While a page with nothing to show yet is on its way: a spinner
+        // and "Lade <name> …" in the middle, not a black screen with a
+        // grey line in its corner (1632, walk 4 new 12).
+        loadingState = new LinearLayout(activity);
+        loadingState.setOrientation(LinearLayout.VERTICAL);
+        loadingState.setGravity(Gravity.CENTER);
+        loadingState.setBackgroundColor(activity.getColor(R.color.background));
+        loadingState.setTag("browse_loading");
+        loadingState.setClickable(true);
+        ProgressBar spinner = new ProgressBar(activity);
+        spinner.setIndeterminate(true);
+        loadingState.addView(spinner, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        loadingWords = new TextView(activity);
+        loadingWords.setTextSize(16);
+        loadingWords.setTextColor(activity.getColor(R.color.text));
+        loadingWords.setGravity(Gravity.CENTER);
+        loadingWords.setPadding(dp(24), dp(16), dp(24), 0);
+        loadingState.addView(loadingWords, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        loadingState.setVisibility(View.GONE);
+        stage.addView(loadingState, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        column.addView(stage, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         LinearLayout foot = new LinearLayout(activity);
         foot.setGravity(Gravity.CENTER_VERTICAL);
         status = new TextView(activity);
         status.setTextColor(activity.getColor(R.color.text_secondary));
-        foot.addView(status, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        foot.addView(scrollButton("▲", "pageup"));
-        foot.addView(scrollButton("▼", "pagedown"));
+        // One line in a frame, cut with an ellipsis (1632, walk 4 new 12:
+        // a long name wrapped it, and it stood without an edge).
+        status.setSingleLine(true);
+        status.setEllipsize(TextUtils.TruncateAt.END);
+        status.setPadding(dp(12), dp(6), dp(12), dp(6));
+        android.graphics.drawable.GradientDrawable frame =
+                new android.graphics.drawable.GradientDrawable();
+        frame.setCornerRadius(dp(12));
+        frame.setStroke(dp(1), activity.getColor(R.color.text_secondary));
+        status.setBackground(frame);
+        LinearLayout.LayoutParams statusAt =
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        statusAt.setMargins(dp(8), dp(4), dp(4), dp(4));
+        foot.addView(status, statusAt);
+        foot.addView(scrollButton("▲", "pageup", R.string.browse_page_up));
+        foot.addView(scrollButton("▼", "pagedown", R.string.browse_page_down));
         column.addView(foot);
 
         // The page is laid out on the cells the view holds.
@@ -139,12 +254,22 @@ final class BrowsePane {
         });
     }
 
-    private Button scrollButton(String label, final String how) {
+    private Button scrollButton(String label, final String how, int words) {
         Button button = new Button(screen);
         button.setText(label);
+        // An arrow that says what it does, not a grey box (1629, walk 3 new 7).
+        button.setContentDescription(screen.getString(words));
+        button.setBackground(null);
+        button.setTextColor(screen.getColor(R.color.accent));
         button.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                // With the sheet up the arrows scroll the sheet, as the
+                // finger does; the page under it stays (1639).
+                if (sheetScroll.getVisibility() == View.VISIBLE) {
+                    sheetScroll.pageScroll("pageup".equals(how) ? View.FOCUS_UP : View.FOCUS_DOWN);
+                    return;
+                }
                 verb("scroll", "", how);
             }
         });
@@ -153,6 +278,25 @@ final class BrowsePane {
 
     /** The tab came to the front. */
     void show() {
+        show("");
+    }
+
+    /**
+     * The tab came to the front for the page named {@code name} (empty
+     * when not known): the loading state stands at once, before the
+     * library's first answer (1632, walk 4 new 12: the first frame said
+     * "Seiten" over an empty field).
+     */
+    void show(String name) {
+        if (!name.isEmpty()) {
+            if (!address.hasFocus()) {
+                address.setText(name);
+            }
+            loadingWords.setText(screen.getString(R.string.browse_loading, name));
+            loadingState.setVisibility(View.VISIBLE);
+            page.setText("");
+            status.setVisibility(View.GONE);
+        }
         verb("tab", "", "");
     }
 
@@ -239,8 +383,21 @@ final class BrowsePane {
         if (!address.hasFocus()) {
             address.setText(Core.str(shown, "address"));
         }
+        host.titled(Core.str(shown, "title"));
         address.setHint(Core.str(shown, "address_hint"));
-        status.setText(Core.str(shown, "status"));
+        String loading = Core.str(shown, "loading_words");
+        loadingWords.setText(loading);
+        loadingState.setVisibility(loading.isEmpty() ? View.GONE : View.VISIBLE);
+        String said = Core.str(shown, "status");
+        status.setText(said);
+        // The status line says what the loading state does not: a cached
+        // copy standing while the fresh one comes, a download.
+        status.setVisibility(said.isEmpty() || !loading.isEmpty() ? View.INVISIBLE : View.VISIBLE);
+        // The seconds count while a page is on its way.
+        page.removeCallbacks(redraw);
+        if (Core.bool(shown, "loading")) {
+            page.postDelayed(redraw, 1000);
+        }
         String toast = Core.str(shown, "toast");
         if (!toast.isEmpty()) {
             Toast.makeText(screen, toast, Toast.LENGTH_SHORT).show();
@@ -252,22 +409,104 @@ final class BrowsePane {
             TextView title = new TextView(screen);
             title.setText(sheet);
             title.setTypeface(null, Typeface.BOLD);
-            title.setPadding(16, 16, 16, 8);
+            title.setTextColor(screen.getColor(R.color.text));
+            title.setPadding(dp(16), dp(16), dp(16), dp(8));
             rows.addView(title);
         }
+        // A line between two entries (1639, walk 5 new 24).
+        boolean item = false;
         for (Map<String, Object> row : Core.list(shown, "rows")) {
+            boolean next = "item".equals(Core.str(row, "kind"));
+            if (item && next) {
+                View line = new View(screen);
+                line.setBackgroundColor(screen.getColor(R.color.bar));
+                LinearLayout.LayoutParams at = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+                at.setMargins(dp(16), 0, dp(16), 0);
+                rows.addView(line, at);
+            }
+            item = next;
             rows.addView(row(row));
+        }
+        // The sheet is on screen exactly while the library has it open; a
+        // sheet that opens starts at its top.
+        boolean opens = !sheet.isEmpty() && sheetScroll.getVisibility() != View.VISIBLE;
+        sheetScroll.setVisibility(sheet.isEmpty() ? View.GONE : View.VISIBLE);
+        if (opens) {
+            sheetScroll.scrollTo(0, 0);
         }
 
         SpannableStringBuilder text = new SpannableStringBuilder();
+        int widest = 0;
         for (Map<String, Object> line : Core.list(shown, "lines")) {
+            int start = text.length();
             for (Map<String, Object> run : Core.list(line, "runs")) {
                 append(text, run);
             }
+            widest = Math.max(widest, text.length() - start);
             text.append('\n');
         }
+        fitCells(text);
         page.setText(text);
+        // A page laid out wider than the view holds was laid out on cells
+        // the library never heard of this view (a size said before the
+        // session ran): say them again.
+        if (cols > 0 && widest > cols && resentAt != cols) {
+            resentAt = cols;
+            cols = 0;
+            size();
+        }
     }
+
+    /** What each character measures, in cells of the page's monospace font. */
+    private final java.util.HashMap<Integer, Float> cellScale = new java.util.HashMap<Integer, Float>();
+
+    /**
+     * Every character drawn on the grid's cells (1639, walk 5 new 22: on
+     * RU3AID the block graphics came from a wider fallback font and
+     * "последние замеры" was cut on the right). The monospace font has no
+     * glyph for some characters; the system draws them from another font,
+     * at that font's width. A character that does not measure a whole
+     * number of cells is scaled to the nearest one (at least one), so the
+     * line stays as wide as the library laid it out; colours, background,
+     * underline and links stay on it.
+     */
+    private void fitCells(SpannableStringBuilder text) {
+        Paint paint = page.getPaint();
+        float cell = paint.measureText("M");
+        if (cell <= 0) {
+            return;
+        }
+        int i = 0;
+        while (i < text.length()) {
+            int point = Character.codePointAt(text, i);
+            int size = Character.charCount(point);
+            if (point >= 0x80 && point != '\n') {
+                Float scale = cellScale.get(point);
+                if (scale == null) {
+                    float width = paint.measureText(new String(Character.toChars(point)));
+                    float cells = Math.max(1, Math.round(width / cell));
+                    scale = width <= 0 ? 1f : cells * cell / width;
+                    cellScale.put(point, scale);
+                }
+                if (Math.abs(scale - 1f) > 0.01f) {
+                    text.setSpan(new android.text.style.ScaleXSpan(scale), i, i + size,
+                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
+            }
+            i += size;
+        }
+    }
+
+    /** The next second of a load: the tab drawn again. */
+    private final Runnable redraw = new Runnable() {
+        @Override
+        public void run() {
+            if (!screen.isDestroyed() && last != null && Core.bool(last, "loading")) {
+                draw();
+            }
+        }
+    };
 
     /**
      * What the library hands out once with the screen (1337 pass two): a
@@ -318,7 +557,7 @@ final class BrowsePane {
     private View row(Map<String, Object> row) {
         TextView view = new TextView(screen);
         view.setText(Core.str(row, "text"));
-        view.setPadding(16, 12, 16, 12);
+        view.setPadding(dp(16), dp(12), dp(16), dp(12));
         String kind = Core.str(row, "kind");
         final String node = Core.str(row, "node");
         if ("heading".equals(kind)) {
@@ -396,6 +635,10 @@ final class BrowsePane {
                 })
                 .setNegativeButton(android.R.string.cancel, null)
                 .show();
+    }
+
+    private int dp(int value) {
+        return (int) (value * screen.getResources().getDisplayMetrics().density + 0.5f);
     }
 
     /** `#rrggbb` as a colour; a 256-colour index or nothing as none. */

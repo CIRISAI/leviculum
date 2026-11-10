@@ -83,32 +83,44 @@ fn the_phone_works_a_room_through_the_schema() {
     let (_home, mut model) = phone(Some(HUB));
     assert!(!screen(&model).open, "closed until the tab is tapped");
 
-    // The tab asks the hub link to link, once.
-    let effects = tap(&mut model, "tab", "", 0);
+    // The tab links nothing (1578); the first join links, once, and the
+    // first time the reader is told their name is visible, and the config
+    // keeps that (1577). The join waits for the hub's welcome.
+    assert!(
+        tap(&mut model, "tab", "", 0).is_empty(),
+        "opening links nothing"
+    );
+    let effects = tap(&mut model, "say", "#lab", 0);
     assert_eq!(
         effects,
-        [UiEffect::Rooms(RoomAsk::Open { hub: HUB })],
+        [
+            UiEffect::RememberHash {
+                key: "rooms_told",
+                hash: Some(HUB)
+            },
+            UiEffect::Rooms(RoomAsk::Open { hub: HUB })
+        ],
         "{effects:?}"
     );
     assert!(tap(&mut model, "tab", "", 0).is_empty(), "linking already");
     // Before the welcome a line is not sent, and stays in the field.
-    assert!(tap(&mut model, "say", "#lab", 0).is_empty());
-    assert_eq!(screen(&model).input, "#lab");
+    assert!(tap(&mut model, "say", "hello", 0).is_empty());
+    assert_eq!(screen(&model).input, "hello");
 
-    hub(
+    let effects = update(
         &mut model,
-        RoomsEvent::Welcomed {
+        UiEvent::Rooms(RoomsEvent::Welcomed {
             name: Some("periculum".to_string()),
             body_limit: 350,
-        },
+        }),
     );
-    let effects = tap(&mut model, "say", "#lab", 0);
     assert_eq!(
         effects,
         [UiEffect::Rooms(RoomAsk::Join {
             room: "#lab".to_string(),
             key: None
-        })]
+        })],
+        "the welcome sends the join that linked"
     );
     hub(
         &mut model,
@@ -128,6 +140,8 @@ fn the_phone_works_a_room_through_the_schema() {
         &mut model,
         line("marcel", LineKind::Msg, "Moin aus Kiel", false),
     );
+    // The room is listed as public, in the phone's language (1577).
+    assert_eq!(screen(&model).rows[0].public, "öffentlich");
     let effects = tap(&mut model, "say", "/me winkt", 0);
     assert_eq!(
         effects,
@@ -152,6 +166,40 @@ fn the_phone_works_a_room_through_the_schema() {
     assert_eq!(shown.input, long);
     tap(&mut model, "say", "", 0);
     check("rooms-room.json", &screen(&model));
+
+    // 1450: a room is a chat. The people under its name, their list
+    // behind the header, and "Leave room" in its menu, which parts it as
+    // `/part` does.
+    let shown = screen(&model);
+    assert_eq!(shown.subtitle, "marcel, du");
+    assert!(shown.status.is_empty(), "a link that is up says nothing");
+    assert_eq!(shown.placeholder, "Nachricht");
+    let named: Vec<&str> = shown
+        .lines
+        .iter()
+        .filter(|l| l.named)
+        .map(|l| l.who.as_str())
+        .collect();
+    assert_eq!(named, ["marcel"], "another's run named once");
+    tap(&mut model, "people", "", 1);
+    let shown = screen(&model);
+    assert!(shown.people_shown);
+    assert_eq!(shown.people, ["marcel", "du"]);
+    tap(&mut model, "people", "", 0);
+    assert!(!screen(&model).people_shown);
+    let leave = shown
+        .menu
+        .iter()
+        .find(|m| m.verb == "leave")
+        .expect("Leave room in the menu");
+    assert_eq!(leave.label, "Raum verlassen");
+    let effects = tap(&mut model, &leave.verb, "", leave.index);
+    assert_eq!(
+        effects,
+        [UiEffect::Rooms(RoomAsk::Part {
+            room: "#lab".to_string()
+        })]
+    );
 
     // The list, then the room again, then the chats.
     tap(&mut model, "show", "", -1);
@@ -178,9 +226,12 @@ fn without_a_hub_there_is_no_tab() {
     let tabs = model.scene(LayoutClass::Compact).tabs.expect("the tab bar");
     assert!(tabs.items.iter().all(|tab| tab.id != TabId::Rooms));
 
+    // The rooms are Explore's (1578): with a hub or without, the bar is
+    // the same three buttons.
     let (_home, model) = phone(Some(HUB));
     let tabs = model.scene(LayoutClass::Compact).tabs.expect("the tab bar");
-    assert!(tabs.items.iter().any(|tab| tab.id == TabId::Rooms));
+    assert!(tabs.items.iter().all(|tab| tab.id != TabId::Rooms));
+    assert!(tabs.items.iter().any(|tab| tab.id == TabId::Explore));
 }
 
 #[test]

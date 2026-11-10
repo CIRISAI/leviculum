@@ -17,7 +17,7 @@
 //! operator ([`lnomad::Effect::Write`]) opens that chat, and the browser's
 //! quit leaves the tab for the chats.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use leviculum_ui::input::InputBuffer;
@@ -45,7 +45,32 @@ pub struct Browse {
     pub open: bool,
     /// lnomad's model, hosted ([`Model::hosted`]).
     pub model: Model,
+    /// On a device of a home (1579): the stamp of the page rows it holds
+    /// and the bookmarks it shares with the home
+    /// ([`crate::home::pages::Shared`]).
+    pub shared: crate::home::pages::Shared,
+    /// Bookmark changes the reader made, for the shell to hand the home
+    /// (`/bookmark`); empty on a device without a home, whose shell never
+    /// takes them.
+    pub outgoing: Vec<crate::home::pages::BookmarkRow>,
+    /// When the page on its way was asked for, on the browser's wall
+    /// clock (1632): the loading state counts the seconds after three.
+    pub loading_since: Option<u64>,
 }
+
+/// How long a page loads before its loading state says the seconds
+/// (1632, walk 4 new 12: six to nine black seconds read as a hang).
+pub const LOADING_SECS_AFTER: u64 = 3;
+
+/// How many NomadNet nodes the hosted browser keeps (1578): as many as a
+/// home remembers on a desktop and a phone, which have the memory, so the
+/// Explore list a home hands over is whole; lnomad's own
+/// [`lnomad::discovery::NODE_CAPACITY`] on the M9, whose heap is counted.
+pub const REGISTRY: usize = if cfg!(feature = "std") {
+    4096
+} else {
+    lnomad::discovery::NODE_CAPACITY
+};
 
 /// The browser's cells before the platform says its size: the M9's 53 by
 /// 24 (section 2.2 of the concept page).
@@ -59,10 +84,14 @@ impl Default for Browse {
             ..Model::default()
         };
         model.relayout(usize::from(CELLS.0).saturating_sub(1).max(1));
+        model.node_registry.set_capacity(REGISTRY);
         Browse {
             enabled: false,
             open: false,
             model,
+            shared: crate::home::pages::Shared::new(),
+            outgoing: Vec::new(),
+            loading_since: None,
         }
     }
 }
@@ -72,12 +101,57 @@ impl Browse {
     /// yet: it shows its start screen with the places panel open over it,
     /// the bookmarks and the NomadNet nodes the announces named, which is
     /// the list the terminal's browser opens on.
+    ///
+    /// A page asked for is no "first time" (1629, walk 3 new 1): Explore's
+    /// open clears the title and starts the fetch, and the phone's pane
+    /// says this verb right after. The start screen goes through the load
+    /// path, which would take that fetch as its own: the loading line
+    /// gone, the places list under the page's name, and the start screen
+    /// cached under the page's address.
     pub fn show(&mut self, lang: Lang) {
         self.open = true;
         self.model.lang = lang;
-        if self.model.title.is_empty() {
+        if self.model.title.is_empty() && !self.model.is_loading() {
             show_start_screen(&mut self.model);
         }
+    }
+
+    /// Start or stop the loading clock as the browser says a page is on
+    /// its way or not.
+    pub fn note_loading(&mut self) {
+        match (self.model.is_loading(), self.loading_since) {
+            (true, None) => self.loading_since = Some(self.model.wall_now()),
+            (false, Some(_)) => self.loading_since = None,
+            _ => {}
+        }
+    }
+
+    /// The loading state's sentence (1632, walk 4 new 12): `Lade <name>
+    /// …`, with the seconds after [`LOADING_SECS_AFTER`]; `None` when no
+    /// page is on its way or a cached copy stands while it comes, which
+    /// the status line says.
+    pub fn loading_words(&self, lang: Lang) -> Option<String> {
+        if !self.model.is_loading() || self.model.cached_view {
+            return None;
+        }
+        let name = self.shown_name(lang)?;
+        let secs = self
+            .loading_since
+            .map_or(0, |since| self.model.wall_now().saturating_sub(since));
+        let text = match secs >= LOADING_SECS_AFTER {
+            true => super::strings::Text::Key(
+                super::strings::StrId::BrowseLoadingSecs,
+                Vec::from([
+                    super::strings::Arg::Str(name),
+                    super::strings::Arg::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
+                ]),
+            ),
+            false => super::strings::Text::Key(
+                super::strings::StrId::BrowseLoading,
+                Vec::from([super::strings::Arg::Str(name)]),
+            ),
+        };
+        Some(text.resolve(lang))
     }
 
     /// The tab is on this host and in front: the browser has the keys.
@@ -90,11 +164,71 @@ impl Browse {
         lnomad::update(&mut self.model, event)
     }
 
-    /// Open the tab at `url`: a NomadNet page a chat linked to.
+    /// Open the tab at `url`: a page Explore lists, or one a chat linked
+    /// to. The page before and its trail go at once (1621, walk 2: the old
+    /// page stood 45 s under "loading"), so the first Back from this one
+    /// returns to where the reader came from; the history is the in-page
+    /// Back's, from here on.
     pub fn go(&mut self, url: String, lang: Lang) -> Vec<Effect> {
-        self.show(lang);
-        self.model.show_places = false;
-        self.fold(AppEvent::Intent(BrowseIntent::Go { url: Some(url) }))
+        self.open = true;
+        self.model.lang = lang;
+        let mut effects = lnomad::app::start_trail(&mut self.model);
+        effects.extend(self.fold(AppEvent::Intent(BrowseIntent::Go { url: Some(url) })));
+        // A page from the cache shows at once and is asked for again
+        // (1629, walk 3 new 2): a cached "Request Not Allowed" stood as if
+        // it were the page. The line says it is the cache's while the
+        // fresh copy comes.
+        if self.model.cached_view && !self.model.is_loading() {
+            effects.extend(self.fold(AppEvent::Intent(BrowseIntent::Reload)));
+        }
+        effects
+    }
+
+    /// The node of the page shown or loading: the fetch's while one is
+    /// out, else the history's.
+    pub fn shown_dest(&self) -> Option<[u8; 16]> {
+        let model = &self.model;
+        model
+            .pending
+            .as_ref()
+            .map(|p| p.target.dest_hash)
+            .or_else(|| model.history.current().map(|t| t.dest_hash))
+    }
+
+    /// The name the page goes by (1621, walk 2: the bar said "Pages" and
+    /// the field a hash): the name its node announced, else a bookmark's
+    /// title on it, else "Unnamed page", as Explore lists it; `None` on
+    /// the start screen.
+    pub fn shown_name(&self, lang: Lang) -> Option<String> {
+        let dest = self.shown_dest()?;
+        let model = &self.model;
+        let announced = model
+            .node_registry
+            .get_by_hash(&dest)
+            .and_then(|n| n.name.clone())
+            .filter(|n| !n.trim().is_empty());
+        let marked = || {
+            model
+                .bookmarks
+                .list()
+                .iter()
+                .find(|b| {
+                    lnomad::parse_url(&b.url, None).is_ok_and(|t| t.dest_hash == dest)
+                        && !b.title.trim().is_empty()
+                })
+                .map(|b| b.title.clone())
+        };
+        Some(announced.or_else(marked).unwrap_or_else(|| {
+            super::strings::StrId::ExploreUnnamedPage
+                .text(lang)
+                .to_string()
+        }))
+    }
+
+    /// The browser told the name its page goes by ([`Browse::shown_name`]),
+    /// for its bar, its address field and its loading line.
+    pub fn relabel(&mut self, lang: Lang) {
+        self.model.label = self.shown_name(lang);
     }
 }
 
@@ -127,6 +261,10 @@ pub enum BrowseEvent {
     DownloadFailed(Text),
     /// An announce named a NomadNet node (`nomadnetwork.node`).
     Node(DiscoveredNode),
+    /// The home's `/pages` answer (1579): the nodes it heard, listed as
+    /// nodes this device heard itself, and the bookmarks of the identity,
+    /// applied by stamp ([`crate::home::pages::Shared::apply`]).
+    Home(crate::home::pages::Delta),
     /// The page's area in cells, columns by rows.
     Resize { cols: u16, rows: u16 },
     /// The platform draws in this theme now (the window's light or dark,
@@ -160,6 +298,7 @@ impl BrowseEvent {
             },
             BrowseEvent::Failed(why) => AppEvent::LoadFailed(why),
             BrowseEvent::Node(node) => AppEvent::NodeDiscovered(node),
+            BrowseEvent::Home(delta) => return Err(Aside::Home(delta)),
             BrowseEvent::Resize { cols, rows } => AppEvent::Resize(cols, rows),
             BrowseEvent::Address(value) => return Err(Aside::Typed(value)),
             BrowseEvent::Theme(theme) => return Err(Aside::Theme(theme)),
@@ -171,6 +310,7 @@ impl BrowseEvent {
 /// What a [`BrowseEvent`] is when it is no event of the browser's.
 enum Aside {
     Identify([u8; 16], bool),
+    Home(crate::home::pages::Delta),
     Typed(String),
     Theme(leviculum_ui::theme::Theme),
 }
@@ -180,7 +320,7 @@ pub(super) fn tab<B: InputBuffer + Default>(model: &mut UiModel<B>, tab: TabId) 
     match tab {
         TabId::Browse if model.browse.enabled => model.browse.show(model.lang),
         TabId::Browse => {}
-        TabId::Chats | TabId::Map | TabId::Rooms => model.browse.open = false,
+        TabId::Chats | TabId::Map | TabId::Rooms | TabId::Explore => model.browse.open = false,
     }
     Vec::new()
 }
@@ -192,16 +332,20 @@ pub(super) fn fold<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     event: BrowseEvent,
 ) -> Vec<UiEffect> {
-    if !model.browse.enabled && !matches!(event, BrowseEvent::Node(_)) {
+    if !model.browse.enabled && !matches!(event, BrowseEvent::Node(_) | BrowseEvent::Home(_)) {
         return Vec::new();
     }
     model.browse.model.lang = model.lang;
+    if let BrowseEvent::Node(node) = &event {
+        super::explore::owe_page(model, node);
+    }
     let effects = match event.into_app() {
         Ok(event) => model.browse.fold(event),
         Err(Aside::Identify(dest, on)) => {
             model.browse.model.note_identify(dest, on);
             Vec::new()
         }
+        Err(Aside::Home(delta)) => home_pages(model, delta),
         Err(Aside::Typed(value)) => lnomad::app::type_address(&mut model.browse.model, &value),
         Err(Aside::Theme(theme)) => {
             if model.browse.model.theme != theme {
@@ -210,7 +354,36 @@ pub(super) fn fold<B: InputBuffer + Default>(
             Vec::new()
         }
     };
+    model.browse.relabel(model.lang);
     effects_of(model, effects)
+}
+
+/// The home's rows into the browser (1579): every node into its list, the
+/// bookmarks by stamp, saved when they changed. The stamp moves to the
+/// answer's.
+fn home_pages<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    delta: crate::home::pages::Delta,
+) -> Vec<Effect> {
+    let browse = &mut model.browse;
+    let mut effects = Vec::new();
+    for node in delta.nodes() {
+        effects.extend(browse.fold(AppEvent::NodeDiscovered(node.clone())));
+    }
+    // What the home heard stays on this device too (1632): a restart
+    // out of the home's reach still lists it.
+    for node in delta.nodes() {
+        super::explore::owe_page(model, node);
+    }
+    let browse = &mut model.browse;
+    if browse
+        .shared
+        .apply(&mut browse.model.bookmarks, delta.bookmarks())
+    {
+        effects.push(Effect::SaveBookmarks);
+    }
+    browse.shared.stamp = delta.stamp;
+    effects
 }
 
 /// Fold one of lnomad's own events into the hosted browser: a key or the
@@ -222,6 +395,7 @@ pub fn app<B: InputBuffer + Default>(model: &mut UiModel<B>, event: AppEvent) ->
     }
     model.browse.model.lang = model.lang;
     let effects = model.browse.fold(event);
+    model.browse.relabel(model.lang);
     effects_of(model, effects)
 }
 
@@ -245,6 +419,7 @@ pub(super) fn open_page<B: InputBuffer + Default>(
     url: String,
 ) -> Vec<UiEffect> {
     let effects = model.browse.go(url, model.lang);
+    model.browse.relabel(model.lang);
     effects_of(model, effects)
 }
 
@@ -255,6 +430,7 @@ pub fn effects_of<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     effects: Vec<Effect>,
 ) -> Vec<UiEffect> {
+    model.browse.note_loading();
     let mut out = Vec::new();
     for effect in effects {
         match effect {
@@ -264,11 +440,23 @@ pub fn effects_of<B: InputBuffer + Default>(
                     model.select(index);
                     model.focus = Pane::Compose;
                     model.browse.open = false;
+                    model.explore.open = false;
                 }
             }
             Effect::Quit => {
                 model.browse.model.quit = false;
                 model.browse.open = false;
+            }
+            Effect::SaveBookmarks => {
+                // A change the reader made goes to the home (1579); one the
+                // home brought is no change here.
+                let at = i64::try_from(model.browse.model.wall_now())
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(1000);
+                let browse = &mut model.browse;
+                let rows = browse.shared.local(&browse.model.bookmarks, at);
+                browse.outgoing.extend(rows);
+                out.push(UiEffect::Browse(Effect::SaveBookmarks));
             }
             other => out.push(UiEffect::Browse(other)),
         }
@@ -335,6 +523,77 @@ mod tests {
         }))
     }
 
+    /// 1579: the home's answer lists its nodes beside the one this device
+    /// heard, applies the identity's bookmarks and saves them, and moves
+    /// the stamp; what the home brought is no change to hand back. A
+    /// bookmark the reader adds is. The standalone arm: a device that never
+    /// hears its home lists the nodes its own announces named, and its
+    /// stamp stays 0.
+    #[test]
+    fn the_homes_pages_and_bookmarks_join_the_list_and_only_a_local_change_goes_back() {
+        use crate::home::pages::{BookmarkRow, Delta, PageRow, Row};
+        let alone = phone();
+        assert_eq!(alone.browse.model.node_registry.len(), 1);
+        assert_eq!(alone.browse.shared.stamp, 0);
+        let mut model = phone();
+        model.browse.model.clock = Some(1_800_000_100);
+        let set = BookmarkRow {
+            url: "7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c:/page/index.mu".into(),
+            title: "Relay Süd".into(),
+            at: 1_800_000_000_000,
+            deleted: false,
+        };
+        let effects = update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 9,
+                more: false,
+                rows: vec![
+                    Row::Page(PageRow {
+                        node: node([0x7c; 16], "Relay Süd"),
+                        count: 4,
+                    }),
+                    Row::Bookmark(set.clone()),
+                ],
+            })),
+        );
+        assert_eq!(effects, [UiEffect::Browse(Effect::SaveBookmarks)]);
+        assert_eq!(model.browse.model.node_registry.len(), 2);
+        assert!(model.browse.model.bookmarks.contains(&set.url));
+        assert_eq!(model.browse.shared.stamp, 9);
+        assert!(model.browse.outgoing.is_empty(), "the home's own row");
+        model.browse.model.bookmarks.add(lnomad::Bookmark {
+            url: "5a5a:/page/index.mu".into(),
+            title: "Marcel's node".into(),
+        });
+        let effects = effects_of(&mut model, vec![Effect::SaveBookmarks]);
+        assert_eq!(effects, [UiEffect::Browse(Effect::SaveBookmarks)]);
+        assert_eq!(
+            model.browse.outgoing,
+            [BookmarkRow {
+                url: "5a5a:/page/index.mu".into(),
+                title: "Marcel's node".into(),
+                at: 1_800_000_100_000,
+                deleted: false,
+            }]
+        );
+        assert_eq!(model.browse.shared.pending().len(), 1);
+        // A host without the tab still keeps the home's list for later.
+        let mut off = UiModel::<Buffer>::new(&[]);
+        update(
+            &mut off,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 3,
+                more: false,
+                rows: vec![Row::Page(PageRow {
+                    node: node(NODE, "Marcel's node"),
+                    count: 1,
+                })],
+            })),
+        );
+        assert_eq!(off.browse.model.node_registry.len(), 1);
+    }
+
     #[test]
     fn the_tab_opens_on_the_nodes_the_announces_named() {
         let mut model = phone();
@@ -342,7 +601,11 @@ mod tests {
         let scene = model.scene(LayoutClass::Compact);
         assert_eq!(scene.screen, ScreenId::Browse);
         let tabs = scene.tabs.expect("the tab bar");
-        assert_eq!(tabs.active, TabId::Browse);
+        assert_eq!(
+            tabs.active,
+            TabId::Explore,
+            "the browser is Explore's (1578)"
+        );
         let browser = scene.browse.expect("the browser's scene");
         let places = browser.places.expect("the places panel");
         assert!(
@@ -361,12 +624,15 @@ mod tests {
 
     #[test]
     fn a_host_without_the_tab_has_none_and_drops_its_verbs() {
-        // The control of every test here: a host whose config leaves
-        // `browse_tab` off, the default on every target.
+        // The control of every test here: a host whose config turns
+        // `browse_tab` off (on is the default since 1618).
         let mut model = UiModel::<Buffer>::new(&[]);
         update(&mut model, UiEvent::Tab(TabId::Browse));
         let scene = model.scene(LayoutClass::Compact);
-        assert_eq!(scene.screen, ScreenId::Chats);
+        // No browser: Explore's list, which says pages cannot be opened.
+        assert_eq!(scene.screen, ScreenId::Explore);
+        let explore = scene.explore.expect("Explore's list");
+        assert!(explore.pages.off.is_some());
         let tabs = scene.tabs.expect("the tab bar");
         assert!(tabs.items.iter().all(|tab| tab.id != TabId::Browse));
         assert!(browse(&mut model, BrowseIntent::Places).is_empty());
@@ -383,11 +649,26 @@ mod tests {
         let model = phone();
         let tabs = model.scene(LayoutClass::Compact).tabs.expect("tabs");
         let ids: Vec<_> = tabs.items.iter().map(|tab| tab.id).collect();
-        assert_eq!(ids, [TabId::Chats, TabId::Map, TabId::Browse]);
+        // Three buttons and no fourth (1578): the pages are Explore's.
+        assert_eq!(ids, [TabId::Chats, TabId::Map, TabId::Explore]);
         assert_eq!(
-            LoquaxNode::Tab(TabId::Browse).resource(),
-            "tab_browse",
+            LoquaxNode::Tab(TabId::Explore).resource(),
+            "tab_explore",
             "the device walk finds it"
+        );
+        let off = UiModel::<Buffer>::new(&[]);
+        let ids: Vec<_> = off
+            .scene(LayoutClass::Compact)
+            .tabs
+            .expect("tabs")
+            .items
+            .iter()
+            .map(|tab| tab.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [TabId::Chats, TabId::Map, TabId::Explore],
+            "never gone"
         );
     }
 
@@ -688,6 +969,16 @@ mod tests {
         update(&mut model, key('q'));
         assert!(!model.browse.open, "its quit leaves the tab");
         assert!(!model.quit);
+        // Explore's list, which opened it, is in front again (1578); its
+        // Esc leaves for the chats.
+        assert!(crate::ui::explore::Explore::showing(&model));
+        update(
+            &mut model,
+            UiEvent::Key(leviculum_ui::input::KeyEvent::new(
+                leviculum_ui::input::KeyCode::Esc,
+                leviculum_ui::input::KeyModifiers::NONE,
+            )),
+        );
         // Behind, `?` is the messenger's help.
         update(&mut model, key('?'));
         assert!(model.help);

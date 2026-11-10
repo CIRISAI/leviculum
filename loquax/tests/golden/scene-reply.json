@@ -1,0 +1,503 @@
+{
+  "card": null,
+  "chat": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Anna"
+      },
+      "resource": "chat",
+      "role": "chat",
+      "selected": false
+    },
+    "bar": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "raw": "Anna"
+        },
+        "resource": "chat_bar",
+        "role": "bar",
+        "selected": false
+      },
+      "actions": [
+        {
+          "enabled": true,
+          "intent": "OpenMapAt { peer: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]) }",
+          "label_key": "map"
+        }
+      ],
+      "id": "chat_bar",
+      "lead": {
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "CloseChat",
+            "label_key": "scene_close"
+          },
+          "avatar": {
+            "bg": "b0503a",
+            "fg": "ffffff",
+            "initials": "A",
+            "ring": null
+          }
+        }
+      },
+      "title": {
+        "raw": "Anna"
+      }
+    },
+    "compose": {
+      "a11y": {
+        "enabled": true,
+        "label": {
+          "args": [],
+          "key": "compose_hint"
+        },
+        "resource": "compose",
+        "role": "text_field",
+        "selected": false
+      },
+      "buttons": [
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "scene_emoji"
+            },
+            "resource": "emoji",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Emoji",
+            "label_key": "scene_emoji"
+          },
+          "id": "emoji",
+          "inside": true
+        },
+        {
+          "a11y": {
+            "enabled": true,
+            "label": {
+              "args": [],
+              "key": "send"
+            },
+            "resource": "send",
+            "role": "button",
+            "selected": false
+          },
+          "action": {
+            "enabled": true,
+            "intent": "Send { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), body: None }",
+            "label_key": "send"
+          },
+          "id": "send",
+          "inside": false
+        }
+      ],
+      "hint": {
+        "args": [],
+        "key": "compose_hint"
+      },
+      "id": "compose",
+      "record": {
+        "enabled": true,
+        "intent": "SendVoice { peer: [122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122], pcm: [], rate: 0 }",
+        "label_key": "record_voice"
+      },
+      "recording": null,
+      "reply": null,
+      "round": "send",
+      "send": {
+        "enabled": true,
+        "intent": "Send { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), body: None }",
+        "label_key": "send"
+      },
+      "staged": null,
+      "text": ""
+    },
+    "groups": [
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Anna"
+          },
+          "resource": "group_1",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Kommst du morgen mit zum Markt?"
+              },
+              "resource": "bubble_1",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), target: [193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), target: Some([193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193, 193]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122], keys: [1] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780140060,
+            "body": "Kommst du morgen mit zum Markt?",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_1",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": true,
+              "joins_after": true,
+              "joins_before": false,
+              "meta": false
+            },
+            "quote": null,
+            "since": null,
+            "text": "Kommst du morgen mit zum Markt?",
+            "updates": 0,
+            "voice": null
+          },
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "args": [
+                  "185 KB"
+                ],
+                "key": "scene_photo"
+              },
+              "resource": "bubble_2",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), target: [194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), target: Some([194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194, 194]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122], keys: [2] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780140120,
+            "body": "",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_2",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+            "ours": false,
+            "photo": {
+              "bytes": 184320,
+              "format": "jpg",
+              "id": "photo_2",
+              "open": {
+                "enabled": true,
+                "intent": "ViewPhoto { peer: [122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122], key: 2 }",
+                "label_key": "scene_view_photo"
+              },
+              "words": {
+                "args": [
+                  "185 KB"
+                ],
+                "key": "scene_photo"
+              }
+            },
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": true,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": null,
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": {
+          "at": 1780140060,
+          "words": {
+            "args": [],
+            "key": "today"
+          }
+        },
+        "id": "group_1",
+        "ours": false,
+        "sender": {
+          "raw": "Anna"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "quote_you"
+          },
+          "resource": "group_3",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Ja, um zehn am Brunnen"
+              },
+              "resource": "bubble_3",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), target: [195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), target: Some([195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122], keys: [3] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780140540,
+            "body": "Ja, um zehn am Brunnen",
+            "chips": [
+              {
+                "content": "👍",
+                "count": 1,
+                "ours": false
+              }
+            ],
+            "files": [],
+            "fix": null,
+            "id": "bubble_3",
+            "live": null,
+            "liveness": null,
+            "mark": "arrived",
+            "mark_node": {
+              "activate": null,
+              "mark": "arrived",
+              "resource": "state_tick",
+              "words": {
+                "args": [],
+                "key": "state_arrived"
+              }
+            },
+            "msg_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+            "ours": true,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": {
+              "ours": false,
+              "text": "Kommst du morgen mit zum Markt?",
+              "to": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+            },
+            "since": null,
+            "text": "Ja, um zehn am Brunnen",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_3",
+        "ours": true,
+        "sender": {
+          "args": [],
+          "key": "quote_you"
+        }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "raw": "Anna"
+          },
+          "resource": "group_5",
+          "role": "group",
+          "selected": false
+        },
+        "bubbles": [
+          {
+            "a11y": {
+              "enabled": true,
+              "label": {
+                "raw": "Super, bis morgen"
+              },
+              "resource": "bubble_5",
+              "role": "bubble",
+              "selected": false
+            },
+            "actions": [
+              {
+                "enabled": true,
+                "intent": "Reply { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), target: [197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197], body: None }",
+                "label_key": "action_reply"
+              },
+              {
+                "enabled": true,
+                "intent": "React { to: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]), target: Some([197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197, 197]), content: None }",
+                "label_key": "scene_react"
+              },
+              {
+                "enabled": true,
+                "intent": "Copy",
+                "label_key": "action_copy"
+              },
+              {
+                "enabled": true,
+                "intent": "Delete { messages: Keys { peer: [122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122], keys: [5] }, confirmed: false }",
+                "label_key": "action_delete"
+              }
+            ],
+            "at": 1780140660,
+            "body": "Super, bis morgen",
+            "chips": [],
+            "files": [],
+            "fix": null,
+            "id": "bubble_5",
+            "live": null,
+            "liveness": null,
+            "mark": null,
+            "mark_node": null,
+            "msg_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+            "ours": false,
+            "photo": null,
+            "place": {
+              "day": false,
+              "joins_after": false,
+              "joins_before": false,
+              "meta": true
+            },
+            "quote": null,
+            "since": null,
+            "text": "Super, bis morgen",
+            "updates": 0,
+            "voice": null
+          }
+        ],
+        "day": null,
+        "id": "group_5",
+        "ours": false,
+        "sender": {
+          "raw": "Anna"
+        }
+      }
+    ],
+    "id": "chat",
+    "peer": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+    "share": null
+  },
+  "chips": [],
+  "class": "Compact",
+  "list": null,
+  "screen": {
+    "chat": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+  },
+  "sheet": null,
+  "tabs": null,
+  "top": {
+    "a11y": {
+      "enabled": true,
+      "label": {
+        "raw": "Anna"
+      },
+      "resource": "chat_bar",
+      "role": "bar",
+      "selected": false
+    },
+    "actions": [
+      {
+        "enabled": true,
+        "intent": "OpenMapAt { peer: Peer([122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122, 122]) }",
+        "label_key": "map"
+      }
+    ],
+    "id": "chat_bar",
+    "lead": {
+      "back": {
+        "action": {
+          "enabled": true,
+          "intent": "CloseChat",
+          "label_key": "scene_close"
+        },
+        "avatar": {
+          "bg": "b0503a",
+          "fg": "ffffff",
+          "initials": "A",
+          "ring": null
+        }
+      }
+    },
+    "title": {
+      "raw": "Anna"
+    }
+  },
+  "whereabouts": null
+}

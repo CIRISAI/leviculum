@@ -1,0 +1,175 @@
+--- frame 1: attached ---
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd        ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: reading ---
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             09:12 ││                                                    │
+│▌du: on my way          ││                                                    │
+│                        ││                                                    │
+│ Unbekannt              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││             ── Saturday 24 October ──              │
+│                        ││▌are you at the field site tomorrow?  13:58         │
+│                        ││                                                    │
+│                        ││              yes, from ten. Shall I bring the T114 │
+│                        ││              and the long antenna?  14:02 ✓        │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 3: first reply ---
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             14:04 ││                                                    │
+│▌ok, bring the T114.    ││                                                    │
+│                        ││                                                    │
+│ Unbekannt              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││             ── Saturday 24 October ──              │
+│                        ││▌are you at the field site tomorrow?  13:58         │
+│                        ││                                                    │
+│                        ││              yes, from ten. Shall I bring the T114 │
+│                        ││              and the long antenna?  14:02 ✓        │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 1 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 4: new while reading ---
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             14:05 ││                                                    │
+│▌and the small tripod   ││                                                    │
+│                        ││                                                    │
+│ Unbekannt              ││                                                    │
+│                        ││                                                    │
+│                        ││             ── Saturday 24 October ──              │
+│                        ││▌are you at the field site tomorrow?  13:58         │
+│                        ││                                                    │
+│                        ││              yes, from ten. Shall I bring the T114 │
+│                        ││              and the long antenna?  14:02 ✓        │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││ and the small tripod                               │
+│                        ││ if it fits in the bag  14:05                       │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 5: newest ---
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             14:05 ││                                                    │
+│▌and the small tripod   ││                                                    │
+│                        ││                                                    │
+│ Unbekannt              ││                                                    │
+│                        ││                                                    │
+│                        ││             ── Saturday 24 October ──              │
+│                        ││ are you at the field site tomorrow?  13:58         │
+│                        ││                                                    │
+│                        ││              yes, from ten. Shall I bring the T114 │
+│                        ││              and the long antenna?  14:02 ✓        │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││▌and the small tripod                               │
+│                        ││▌if it fits in the bag  14:05                       │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 6: replied ---
+┌  tui───────────────────┐┌  them──────────────────────────────────────────────┐
+│▌them             14:06 ││                                                    │
+│▌du: the tripod fits    ││                                                    │
+│                        ││                                                    │
+│ Unbekannt              ││             ── Saturday 24 October ──              │
+│                        ││ are you at the field site tomorrow?  13:58         │
+│                        ││                                                    │
+│                        ││              yes, from ten. Shall I bring the T114 │
+│                        ││              and the long antenna?  14:02 ✓        │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││ and the small tripod                               │
+│                        ││ if it fits in the bag  14:05                       │
+│                        ││                                                    │
+│                        ││                          the tripod fits  14:06 ✓  │
+│                        │├● to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 7: detail ---
+┌  tui───────────────────┐┌● them──────────────────────────────────────────────┐
+│▌them             14:06 ││                                                    │
+│▌du: the tripod fits    ││                                                    │
+│                        ││                                                    │
+│ ┌ message ─────────────────────────────────────────────────────────────────┐ │
+│ │from you to them                                                          │ │
+│ │peer   61ddb79ada973523799227bbaf41e204                                   │ │
+│ │id     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   │ │
+│ │size   59 bytes                                                           │ │
+│ │state  arrived: them's mailbox or device has it                           │ │
+│ │them sends no read receipts                                               │ │
+│ │                                                                          │ │
+│ │on this device                                                            │ │
+│ │14:02:00  queued                                                          │ │
+│ │14:02:00  trying direct                                                   │ │
+│ │14:02:00  queued by the router as xxxxxxxx                                │ │
+│ │14:02:00  in flight (direct)                                              │ │
+│ │14:02:00  arrived: proof received (direct)                                │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                          the tripod fits  14:06 ✓  │
+│                        │├  to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

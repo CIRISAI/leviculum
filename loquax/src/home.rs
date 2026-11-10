@@ -17,6 +17,9 @@
 //!   `/watch`, their answers, and the wake.
 //! - [`wake`]: which watching link is owed a wake, on the home node.
 //! - [`relation`]: which announced names the home node archives.
+//! - [`about`]: what a mailbox says of itself, `/about` (1642).
+//! - [`pages`]: the NomadNet pages the home heard and the identity's
+//!   bookmarks, `/pages` and `/bookmark` (1579).
 //! - `watch`: a client's watching link, kept up while it runs.
 //! - [`outgoing`]: the home node's outbox policy, direct at once, a
 //!   propagated copy on failure, direct retries for seven days.
@@ -32,6 +35,7 @@ use alloc::string::String;
 
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
+pub mod about;
 #[cfg(feature = "history")]
 pub mod admit;
 pub mod ask;
@@ -40,11 +44,14 @@ pub mod board;
 pub mod code;
 pub mod keepalive;
 pub mod outgoing;
+pub mod pages;
 pub mod record;
 pub mod relation;
 pub mod wake;
 pub mod wire;
 
+#[cfg(feature = "history")]
+pub mod census;
 #[cfg(feature = "std")]
 pub mod client;
 #[cfg(feature = "history")]
@@ -197,6 +204,23 @@ pub const GROUP_ADD_PATH: &str = "/groupadd";
 /// 1307 pass four: the admin deletes a group the home hosts, for everyone.
 pub const GROUP_DELETE_PATH: &str = "/groupdelete";
 
+/// The NomadNet pages the home heard and the identity's bookmarks that
+/// changed after a stamp (1579, [`pages`]): the device's stamp in, the
+/// rows after it out. Not archive entries: a page row changes on every
+/// hour of announces and a mesh holds thousands, so they keep a table and
+/// a stamp of their own and never move a message cursor.
+pub const PAGES_PATH: &str = "/pages";
+
+/// A bookmark a device set or cleared (1579, [`pages::BookmarkRow`]): the
+/// row in, a status out. The home keeps the newer by stamp, and every
+/// device of the identity gets it with its next `/pages`.
+pub const BOOKMARK_PATH: &str = "/bookmark";
+
+/// What the mailbox says of itself (1642, [`about`]): nothing in, its
+/// name, its machine, its version and its devices out, to an admitted
+/// device. A home from before it has no handler and stays silent.
+pub const ABOUT_PATH: &str = "/about";
+
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;
 /// A message a client handed in with `/send`, packed as the home node
@@ -255,6 +279,19 @@ pub const KIND_GROUP: u8 = 12;
 /// and `evicted`. A client from before it skips it as a kind it cannot
 /// show.
 pub const KIND_PN_STATUS: u8 = 13;
+/// A hub the home heard announcing (1599, `crate::ui::hubs`): its bytes
+/// are [`wire::hub_entry`], the hub's address, name, hops and first and
+/// last hearing. Only a hub's newest is kept, at most
+/// [`crate::ui::hubs::HEARD_BOUND`] hubs, the one heard longest ago going
+/// first, and a hub heard again is appended again only when its name or
+/// hops changed or [`HUB_REFRESH_SECS`] passed. Like a name it wakes
+/// nobody. A client from before it skips it as a kind it cannot show.
+pub const KIND_HUB: u8 = 14;
+
+/// How long a hub heard again goes before its entry is appended again with
+/// the later hearing (1599): a hub announces about every few minutes, and
+/// a device needs its last seen to the hour, not each announce.
+pub const HUB_REFRESH_SECS: i64 = 3600;
 
 /// The word `loquax mailbox archive` prints for an entry kind (1305); a
 /// kind this program does not know is its number.
@@ -274,6 +311,7 @@ pub fn kind_word(kind: u8) -> alloc::borrow::Cow<'static, str> {
         KIND_STALLED => "stalled",
         KIND_GROUP => "group",
         KIND_PN_STATUS => "pn-status",
+        KIND_HUB => "hub",
         other => return alloc::borrow::Cow::Owned(alloc::format!("{other}")),
     })
 }

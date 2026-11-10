@@ -3,6 +3,17 @@
 //! regions the view needs now and which it needs next. The frontend only
 //! downloads, in the order given (`crate::mapload::Loader::schedule`).
 //!
+//! - The screen itself at its zoom loads first (1527, Lew's rule: the
+//!   exact area looked at, at the zoom looked at, before anything else):
+//!   the box under the uncovered part of the screen, a half tile past it
+//!   and rounded out to the tiles of the view's zoom, at that zoom and the
+//!   one above it ([`screen_want`]). It is small, so it lands before the
+//!   cell around it starts; then the cell follows. It is asked while the
+//!   view moves too: a box the view left runs on (a load cannot stop),
+//!   two loads at most run, and a box the view left that waits is
+//!   dropped (`crate::mapload`), so the box of the view it stops on is
+//!   never more than one load behind (measured against a speed gate,
+//!   which brought the screen's first tile later, 1527).
 //! - The view is cut into cells, the tiles of a zoom [`CELL_ABOVE`] steps
 //!   above the view's, so a pan asks for the same boxes again and a region
 //!   that landed is never asked for twice.
@@ -106,12 +117,21 @@ fn need_zoom(view: &Viewport) -> u8 {
     view.zoom().min(DEEPEST_LOAD)
 }
 
+/// Whether `h` is a region still arriving (1291): written in place, its
+/// length 0 until the file is complete. Its box holds nothing yet for the
+/// scheduler, so a screen under it stays asked for and the chip says it
+/// loads until the file is whole (1527).
+fn arriving(h: &Header) -> bool {
+    h.streamed && h.len == 0
+}
+
 /// Whether a region of `regions` holds `at` at `zoom`.
 fn held(regions: &[Header], at: World, zoom: u8) -> bool {
     let p = unproject(at);
     regions.iter().any(|h| {
         let b = &h.bounds;
-        h.min_zoom <= zoom
+        !arriving(h)
+            && h.min_zoom <= zoom
             && h.max_zoom >= zoom
             && (b.west..=b.east).contains(&p.lon_e7)
             && (b.south..=b.north).contains(&p.lat_e7)
@@ -185,11 +205,67 @@ fn want(cell: &Cell, zoom: u8) -> MapWant {
     }
 }
 
+/// The screen's own load (1527): the box under the uncovered samples of
+/// `view`, each sample's patch whole, grown by half a tile of the view's
+/// zoom and rounded out to that zoom's tile grid, so a pan inside a tile
+/// asks for the same box again; at the view's zoom and the one above it,
+/// for a zoom out, the deepest never lowered. `None` when nothing is
+/// uncovered, or the box would cross the date line (the cells load it).
+pub fn screen_want(view: &Viewport, regions: &[Header]) -> Option<MapWant> {
+    let zoom = need_zoom(view);
+    let (w, h) = view.size();
+    let n = SAMPLES;
+    let mut span: Option<(i64, i64, i64, i64)> = None;
+    for j in 0..n {
+        for i in 0..n {
+            let px = i64::from((2 * i + 1) * w / (2 * n));
+            let py = i64::from((2 * j + 1) * h / (2 * n));
+            if held(regions, view.to_world(px as i32, py as i32), zoom) {
+                continue;
+            }
+            span = Some(match span {
+                None => (px, py, px, py),
+                Some((x0, y0, x1, y1)) => (x0.min(px), y0.min(py), x1.max(px), y1.max(py)),
+            });
+        }
+    }
+    let (x0, y0, x1, y1) = span?;
+    // A sample stands for its patch; half a tile of the zoom loaded, in
+    // view pixels, past that.
+    let tile_px = 256i64 << (view.zoom() - zoom);
+    let (gx, gy) = (
+        i64::from(w / (2 * n)) + tile_px / 2,
+        i64::from(h / (2 * n)) + tile_px / 2,
+    );
+    let px = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    let nw = Cell::of(view.to_world(px(x0 - gx), px(y0 - gy)), zoom);
+    let se = Cell::of(view.to_world(px(x1 + gx), px(y1 + gy)), zoom);
+    if se.x < nw.x || se.y < nw.y {
+        return None;
+    }
+    let ((west, _), (north, _)) = nw.span();
+    let ((_, east), (_, south)) = se.span();
+    let at = |v: u64| v.min(u64::from(u32::MAX)) as u32;
+    Some(MapWant {
+        bounds: Bounds {
+            west: lon_of_x(at(west)),
+            south: lat_of_y(at(south)),
+            east: lon_of_x(at(east)),
+            north: lat_of_y(at(north)),
+        },
+        zooms: (zoom.saturating_sub(1), zoom),
+        floor: zoom,
+        reason: LoadReason::Screen,
+        centre: view.centre,
+    })
+}
+
 /// One decision: what the screen needs, in order, and what it needs next.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewWants {
-    /// The cells under the uncovered part of the screen, nearest its
-    /// centre first; none when the gap is [`GAP_SHARE`] or less.
+    /// The screen's own load first ([`screen_want`], 1527), then the
+    /// cells under the uncovered part of the screen, nearest its centre
+    /// first; none when the gap is [`GAP_SHARE`] or less.
     pub here: Vec<MapWant>,
     /// The uncovered cells next to the screen, ahead of the pan first.
     pub ahead: Vec<MapWant>,
@@ -241,8 +317,15 @@ pub fn wants(
         });
         ahead_cells = next.into_iter().map(|(c, _)| c).collect();
     }
+    let screen = match here_cells.is_empty() {
+        true => None,
+        false => screen_want(view, regions),
+    };
     ViewWants {
-        here: here_cells.iter().map(|c| want(c, zoom)).collect(),
+        here: screen
+            .into_iter()
+            .chain(here_cells.iter().map(|c| want(c, zoom)))
+            .collect(),
         ahead: ahead_cells.iter().map(|c| want(c, zoom)).collect(),
         share,
     }
@@ -254,7 +337,9 @@ pub fn wants(
 pub struct ViewLoads {
     decided_ms: Option<u64>,
     decided: Option<(World, u8, (u32, u32))>,
-    regions: usize,
+    /// The regions of the last decision, and how many of them were
+    /// complete: a region that finished arriving decides again (1527).
+    regions: (usize, usize),
 }
 
 impl ViewLoads {
@@ -274,7 +359,11 @@ impl ViewLoads {
         heading: Option<(f64, f64)>,
     ) -> Option<ViewWants> {
         let key = (view.centre, view.zoom(), view.size());
-        if self.decided == Some(key) && self.regions == regions.len() {
+        let count = (
+            regions.len(),
+            regions.iter().filter(|h| !arriving(h)).count(),
+        );
+        if self.decided == Some(key) && self.regions == count {
             return None;
         }
         if moving
@@ -286,7 +375,7 @@ impl ViewLoads {
         }
         self.decided_ms = Some(now_ms);
         self.decided = Some(key);
-        self.regions = regions.len();
+        self.regions = count;
         Some(wants(view, regions, moving, heading))
     }
 
@@ -300,7 +389,7 @@ impl ViewLoads {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::mercator::{project, x_of_lon as x_of, LatLon};
 
     /// A region of `bounds` at `zooms`, a header and nothing else.
     fn region(bounds: Bounds, zooms: (u8, u8)) -> Header {
@@ -352,10 +441,109 @@ mod tests {
                 && (first.south..=first.north).contains(&c.lat_e7),
             "the cell under the centre first: {first:?}"
         );
-        for want in &w.here {
+        // The screen itself first (1527): its box around the screen, at
+        // the view's load zoom and the one above; then the cells.
+        let screen = &w.here[0];
+        assert_eq!(screen.reason, LoadReason::Screen);
+        assert_eq!((screen.zooms, screen.floor), ((14, 15), 15));
+        let vb = view.bounds();
+        assert!(
+            screen.bounds.holds(&vb),
+            "the screen box holds the screen: {:?} {vb:?}",
+            screen.bounds
+        );
+        for want in &w.here[1..] {
+            assert_eq!(want.reason, LoadReason::View);
             assert_eq!(want.zooms, (12, 15));
             assert_eq!(want.floor, 15);
         }
+    }
+
+    /// The screen's box is the screen, a half tile past it, rounded out
+    /// to the tiles of the zoom it loads (1527): far smaller than the cell
+    /// it lies in, the same box for a pan inside a tile, and only the
+    /// uncovered part of a half-held screen.
+    #[test]
+    fn the_screens_box_is_the_screen_at_its_zoom_not_the_cell() {
+        let (r, at) = florence();
+        let mut view = Viewport::new(Cell::of(at, 13).centre(), 16, 480, 320);
+        view.pan(4 * 480, 0);
+        let screen = screen_want(&view, &[r]).expect("uncovered");
+        // z15 tiles: the screen is 240 x 160 of them in pixels, so with
+        // a half tile each side and rounding out, at most 3 x 3 tiles of
+        // the cell's 4 x 4 at z15 (a z13 cell is 4 z15 tiles across).
+        let tile = |lon: i32| x_of(lon) >> (32 - 15);
+        let across = tile(screen.bounds.east - 1) - tile(screen.bounds.west) + 1;
+        assert!(across <= 3, "{across} tiles across");
+        let cell = Cell::of(view.centre, 13).bounds();
+        let area = |b: &Bounds| {
+            (f64::from(b.east) - f64::from(b.west)) * (f64::from(b.north) - f64::from(b.south))
+        };
+        assert!(
+            area(&screen.bounds) < area(&cell) / 1.7,
+            "smaller than its cell"
+        );
+        // Panned 20 px: the same box asked again.
+        let mut moved = view;
+        moved.pan(20, 0);
+        assert_eq!(
+            screen_want(&moved, &[r]).map(|w| w.bounds),
+            Some(screen.bounds)
+        );
+        // Half the screen held: the box covers the uncovered half only.
+        let cell = Cell::of(at, 13);
+        let ((_, x1), _) = cell.span();
+        let unit = 1u64 << (32 - 16 - 8);
+        // The phone's screen (1527x2099): half of it is more than a tile.
+        let half = Viewport::new(
+            World {
+                x: x1 as u32,
+                y: cell.centre().y,
+            },
+            16,
+            1527,
+            2099,
+        );
+        let part = screen_want(&half, &[r]).expect("half uncovered");
+        let whole = screen_want(&half, &[]).expect("nothing held");
+        assert_eq!(part.bounds.east, whole.bounds.east);
+        assert!(
+            part.bounds.west > whole.bounds.west,
+            "the held half is not asked again: {:?} {:?}",
+            part.bounds,
+            whole.bounds
+        );
+        // Its west edge within a tile and a half of the held edge.
+        assert!(u64::from(x_of(part.bounds.west)) + 3 * 256 * unit >= x1);
+        // Held: nothing.
+        let held = Viewport::new(Cell::of(at, 13).centre(), 16, 480, 320);
+        assert_eq!(screen_want(&held, &[r]), None);
+    }
+
+    /// A region still arriving holds nothing for the scheduler (1527): the
+    /// screen under it stays asked for, and its landing decides again.
+    #[test]
+    fn a_region_still_arriving_holds_nothing_yet() {
+        let (r, at) = florence();
+        let arriving = Header {
+            streamed: true,
+            len: 0,
+            ..r
+        };
+        let view = Viewport::new(Cell::of(at, 13).centre(), 16, 480, 320);
+        assert_eq!(uncovered(&view, &[arriving]), 1.0);
+        let mut loads = ViewLoads::new();
+        assert!(loads.decide(&view, &[arriving], 0, false, None).is_some());
+        assert!(loads.decide(&view, &[arriving], 10, false, None).is_none());
+        let whole = Header {
+            len: 4096,
+            ..arriving
+        };
+        let landed = loads.decide(&view, &[whole], 20, false, None);
+        assert!(
+            landed.is_some_and(|w| w.share == 0.0),
+            "landed: decided again"
+        );
     }
 
     #[test]

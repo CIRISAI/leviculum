@@ -28,6 +28,9 @@ import android.view.Gravity;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.AbsListView;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
@@ -474,6 +477,17 @@ public class ChatActivity extends Activity implements Events.Listener {
         list = (ListView) findViewById(R.id.list);
         adapter = new Adapter();
         list.setAdapter(adapter);
+        // What is on screen, to the library on every change (1496): the
+        // read receipts and the page above come from it.
+        list.setOnScrollListener(new AbsListView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(AbsListView view, int state) {}
+
+            @Override
+            public void onScroll(AbsListView view, int first, int visible, int total) {
+                tellViewport();
+            }
+        });
         list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
@@ -627,6 +641,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         recordingBar.leave();
         player.stop();
         resumed = false;
+        told = new ArrayList<>();
         Engine.run(new Engine.Call() {
             @Override
             public String run() {
@@ -656,18 +671,39 @@ public class ChatActivity extends Activity implements Events.Listener {
         super.onDestroy();
     }
 
-    /** Back closes a sheet first, then a selection, then a reply being written, then the screen. */
+    /**
+     * Back closes a sheet first, then a selection, then the keyboard, then
+     * the screen ({@link BackRule}, walk finding 5). A reply being written
+     * stays until its "x" or Send, as WhatsApp has it; leaving keeps it in
+     * the draft.
+     */
     @Override
     public void onBackPressed() {
-        if (sheet != null) {
-            closeSheet();
-        } else if (selection != null) {
-            select(null);
-        } else if (replyTo != null) {
-            replyTo(null);
-        } else {
-            super.onBackPressed();
+        switch (BackRule.next(sheet != null, selection != null, keyboardShown(), replyTo != null)) {
+            case SHEET:
+                closeSheet();
+                break;
+            case SELECTION:
+                select(null);
+                break;
+            case KEYBOARD:
+                InputMethodManager keys = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (keys != null) {
+                    keys.hideSoftInputFromWindow(compose.getWindowToken(), 0);
+                }
+                break;
+            default:
+                super.onBackPressed();
         }
+    }
+
+    /** Whether the keyboard is up; a phone below API 30 closes it before Back reaches the screen. */
+    private boolean keyboardShown() {
+        if (Build.VERSION.SDK_INT < 30) {
+            return false;
+        }
+        WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+        return insets != null && insets.isVisible(WindowInsets.Type.ime());
     }
 
     private void say(String error) {
@@ -955,6 +991,7 @@ public class ChatActivity extends Activity implements Events.Listener {
                     public void onFinger() {}
                 });
                 map.setId(R.id.sheet_map);
+                map.ownOnly();
                 long lat = Core.num(answer, "fix_lat_e6");
                 long lon = Core.num(answer, "fix_lon_e6");
                 map.centreAt(lat, lon, 16_000);
@@ -982,6 +1019,13 @@ public class ChatActivity extends Activity implements Events.Listener {
             line.setGravity(Gravity.CENTER_VERTICAL);
             line.setPadding(pad, 0, pad, 0);
             line.setBackgroundResource(android.R.drawable.list_selector_background);
+            if (id.equals("sheet_location_on")) {
+                // An action, not a sentence (1629, walk 3 new 10: "Standort
+                // einschalten" read as plain text under "Loquax weiß noch
+                // nicht, wo du bist").
+                line.setTextColor(getColor(R.color.accent));
+                line.setTypeface(null, android.graphics.Typeface.BOLD);
+            }
             int viewId = getResources().getIdentifier(id, "id", getPackageName());
             if (viewId != 0) {
                 line.setId(viewId);
@@ -1187,10 +1231,19 @@ public class ChatActivity extends Activity implements Events.Listener {
     /** The bar's menu: the contact, search, the map, the address book and the name. */
     private void showMenu(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
-        popup.getMenu().add(0, R.string.contact_info, 0, R.string.contact_info);
+        // A group's menu names the group (1449, walk 1 finding 9): its info
+        // is the members screen, and no entry speaks of a contact.
+        boolean group = Core.num(header, "group_members") > 0;
+        if (group) {
+            popup.getMenu().add(0, R.string.group_info, 0, R.string.group_info);
+        } else {
+            popup.getMenu().add(0, R.string.contact_info, 0, R.string.contact_info);
+        }
         popup.getMenu().add(0, R.string.chat_search, 0, R.string.chat_search);
         popup.getMenu().add(0, R.string.map, 1, R.string.map);
-        if (Core.bool(header, "linked")) {
+        if (group) {
+            // Nothing of the address book for a group.
+        } else if (Core.bool(header, "linked")) {
             popup.getMenu().add(0, R.string.open_contact, 2, R.string.open_contact);
             Object others = header.get("others");
             if (others instanceof List && !((List<?>) others).isEmpty()) {
@@ -1201,10 +1254,6 @@ public class ChatActivity extends Activity implements Events.Listener {
             popup.getMenu().add(0, R.string.add_to_contacts, 2, R.string.add_to_contacts);
         }
         popup.getMenu().add(0, R.string.rename, 5, R.string.rename);
-        // A group's members (1307), its Leave and the admin's Remove.
-        if (Core.num(header, "group_members") > 0) {
-            popup.getMenu().add(0, R.string.group_members, 0, R.string.group_members);
-        }
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
@@ -1234,7 +1283,8 @@ public class ChatActivity extends Activity implements Events.Listener {
                     choose();
                 } else if (id == R.string.rename) {
                     rename();
-                } else if (id == R.string.group_members) {
+                } else if (id == R.string.group_info) {
+                    // The members screen (1307), its Leave and the admin's Remove.
                     GroupDialogs.members(ChatActivity.this, peer, again);
                 }
                 return true;
@@ -2182,9 +2232,8 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     /**
      * The bubble's text: the body, and under it, for a message that carries
-     * a position, its line (1132): a pin, the coordinates, the accuracy
-     * when the sender gave one, how old the fix is; dimmed once it is
-     * stale. A report has no body: its line is the bubble.
+     * a position, its line (1132): a pin and the library's sentence (1449);
+     * dimmed once it is stale. A report has no body: its line is the bubble.
      */
     private CharSequence text(Map<String, Object> row, boolean ours, long now) {
         String body = Core.str(row, "body");
@@ -2199,26 +2248,10 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (row.get("place") == null) {
             return body;
         }
-        StringBuilder line = new StringBuilder("\uD83D\uDCCD ").append(Core.str(row, "place"));
-        String accuracy = Core.str(row, "accuracy");
-        if (!accuracy.isEmpty()) {
-            line.append(" \u00B7 ").append(accuracy);
-        }
-        String live = Core.str(row, "live");
-        if (!live.isEmpty()) {
-            // The newest report says whether the position is alive (1209),
-            // in the library's words (1217).
-            line.append(" \u00B7 ").append(live);
-        } else if (row.get("fix_at") != null) {
-            line.append(" \u00B7 ").append(Ui.age(this, Core.num(row, "fix_at"), now));
-        }
-        // An older run stands for all of it (1184): how many, since when.
-        long updates = Core.num(row, "updates");
-        if (updates > 1 && live.isEmpty()) {
-            String since = android.text.format.DateFormat.getTimeFormat(this)
-                    .format(new java.util.Date(Core.num(row, "since") * 1000));
-            line.append(" \u00B7 ").append(getString(R.string.run_updates, (int) updates, since));
-        }
+        // One sentence, the library's (1449, walk 1 finding 11): "Live-
+        // Position" or "Position von gestern 21:46"; the coordinates and the
+        // accuracy are the Info's.
+        StringBuilder line = new StringBuilder("\uD83D\uDCCD ").append(Core.str(row, "position_words"));
         SpannableStringBuilder out = new SpannableStringBuilder(body);
         if (out.length() > 0) {
             out.append('\n');
@@ -2663,6 +2696,47 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
     }
 
+    /** The keys last said as the viewport; empty after a pause, so the next resume says them again. */
+    private List<Long> told = new ArrayList<>();
+
+    /**
+     * The bubbles on screen, at least half of each, to the library when they
+     * changed (1231, 1496). Before 1496 the phone never said them: it sent no
+     * read receipt to anyone and its chat ended after the first page.
+     */
+    private void tellViewport() {
+        if (peer == null || !resumed) {
+            return;
+        }
+        int first = list.getFirstVisiblePosition();
+        int top = list.getPaddingTop();
+        int bottom = list.getHeight() - list.getPaddingBottom();
+        List<Long> keys = new ArrayList<>();
+        for (int i = 0; i < list.getChildCount(); i++) {
+            int position = first + i;
+            View child = list.getChildAt(i);
+            if (position < 0 || position >= rows.size() || child == null) {
+                continue;
+            }
+            int shown = Math.min(child.getBottom(), bottom) - Math.max(child.getTop(), top);
+            if (shown * 2 >= child.getHeight()) {
+                keys.add(Core.num(rows.get(position), "key"));
+            }
+        }
+        if (keys.isEmpty() || keys.equals(told)) {
+            return;
+        }
+        told = keys;
+        final String of = peer;
+        final List<Long> said = new ArrayList<>(keys);
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.viewport(of, said);
+            }
+        });
+    }
+
     /** A question for the chat is with the engine, and another is owed after it. */
     private boolean asking;
     private boolean askOwed;
@@ -2701,6 +2775,16 @@ public class ChatActivity extends Activity implements Events.Listener {
                     refresh();
                 }
             }
+        }, new Runnable() {
+            @Override
+            public void run() {
+                // The question threw (1496): the next event asks again.
+                asking = false;
+                if (askOwed && !isDestroyed()) {
+                    askOwed = false;
+                    refresh();
+                }
+            }
         });
     }
 
@@ -2711,8 +2795,28 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         header = answer;
         // The verified mark after the name (1146), once the identity was compared.
-        title.setText(Core.str(answer, "name")
-                + (Core.bool(answer, "verified") ? " \u2714" : ""));
+        // A relay's chat says it is a group via a relay (1482).
+        String relayed = Core.str(answer, "relayed");
+        String named = (relayed.isEmpty() ? Core.str(answer, "name") : relayed)
+                + (Core.bool(answer, "verified") ? " \u2714" : "");
+        // Two peers of one name (1452): the library's sentence under the
+        // name, small and quiet.
+        String same = Core.str(answer, "same_name");
+        if (same.isEmpty()) {
+            title.setMaxLines(1);
+            title.setText(named);
+        } else {
+            android.text.SpannableStringBuilder both = new android.text.SpannableStringBuilder(named);
+            both.append('\n');
+            int from = both.length();
+            both.append(same);
+            both.setSpan(new android.text.style.RelativeSizeSpan(0.65f), from, both.length(),
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            both.setSpan(new android.text.style.ForegroundColorSpan(getColor(R.color.text_secondary)),
+                    from, both.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            title.setMaxLines(2);
+            title.setText(both);
+        }
         avatar.show(peer, answer);
         banner.setVisibility(Core.bool(answer, "ask_link") ? View.VISIBLE : View.GONE);
         // The share's chip (1273): the library's words, or none.
@@ -2730,8 +2834,26 @@ public class ChatActivity extends Activity implements Events.Listener {
             invitationShown = true;
             GroupDialogs.invitation(this, peer, invited, Core.str(answer, "invite_trust"), again);
         }
+        // Rows that came above the bubble the reader looks at keep it where
+        // it was: a page above (1496), a late message spliced in at its
+        // writer's time (1505). Anything else is the list's own transcript
+        // mode.
+        int at = list.getFirstVisiblePosition();
+        View atChild = list.getChildAt(0);
+        Long anchor = at >= 0 && at < rows.size() && atChild != null
+                ? Long.valueOf(Core.num(rows.get(at), "key")) : null;
+        int anchorTop = atChild == null ? 0 : atChild.getTop();
         rows.clear();
         rows.addAll(Core.list(answer, "messages"));
+        int keep = -1;
+        if (anchor != null) {
+            for (int i = 0; i < rows.size(); i++) {
+                if (anchor.equals(Core.num(rows.get(i), "key"))) {
+                    keep = i == at ? -1 : i;
+                    break;
+                }
+            }
+        }
         if (selection != null) {
             // What another device deleted is no longer selected.
             Set<Long> here = new LinkedHashSet<>();
@@ -2747,6 +2869,15 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         showPinned();
         adapter.notifyDataSetChanged();
+        if (keep >= 0) {
+            list.setSelectionFromTop(keep, anchorTop);
+        }
+        list.post(new Runnable() {
+            @Override
+            public void run() {
+                tellViewport();
+            }
+        });
         if (draftOwed) {
             draftOwed = false;
             mirrorDraft(answer);
@@ -2905,7 +3036,11 @@ public class ChatActivity extends Activity implements Events.Listener {
                 mark.setImageDrawable(new Glyph(kind, ink,
                         getColor(R.color.failed_ground), getColor(R.color.failed_mark)));
                 mark.setId(Glyph.resource(kind));
-                mark.setContentDescription(Ui.state(ChatActivity.this, state, Core.num(row, "read_at")));
+                // The scene's words (1449 item 7): a group's two ticks say
+                // the devices, as the Info does.
+                String markWords = Core.str(row, "state_words");
+                mark.setContentDescription(markWords.isEmpty()
+                        ? Ui.state(ChatActivity.this, state, Core.num(row, "read_at")) : markWords);
                 if (kind == Glyph.Kind.FAILED) {
                     final long key = Core.num(row, "key");
                     mark.setOnClickListener(new View.OnClickListener() {

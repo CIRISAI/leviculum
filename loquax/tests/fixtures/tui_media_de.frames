@@ -1,0 +1,50 @@
+--- photo, file, voice alone ---
+┌● Loquax (verbindet)────┐┌  Unbekannt─────────────────────────────────────────┐
+│▌Unbekannt        12:21 ││                                                    │
+│▌Sprachnachricht, 0:00  ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││ ▣ photo · 313 KB  12:01                            │
+│                        ││                                                    │
+│                        ││ ▤ report.pdf · 2 KB  12:11                         │
+│                        ││                                                    │
+│                        ││ ♪ voice message · 0:00  12:21                      │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- ours, then words under a photo ---
+┌● Loquax (verbindet)────┐┌  Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt        12:41 ││                                                    │
+│▌the view from the hill ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││ ▣ photo · 313 KB  12:01                            │
+│                        ││                                                    │
+│                        ││ ▤ report.pdf · 2 KB  12:11                         │
+│                        ││                                                    │
+│                        ││ ♪ voice message · 0:00  12:21                      │
+│                        ││                                                    │
+│                        ││                            ▣ photo · 3 B  12:31 ◷  │
+│                        ││                                                    │
+│                        ││ ▣ photo · 1 KB                                     │
+│                        ││ the view from the hill  12:41                      │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

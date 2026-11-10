@@ -1,0 +1,24 @@
+┌● Loquax (connecting)───┐┌  Lew ·1e1e  Two contacts are called Lew────────────┐
+│▌Lew ·1e1e              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ lew ·e1e1              ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Anna                   ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                  No messages yet                   │
+│                        │├  to Lew ·1e1e────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

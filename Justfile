@@ -350,7 +350,7 @@ nrf-shellcheck:
         scripts/tmp-leftovers.sh scripts/test-tmp-leftovers.sh \
         scripts/check-nrf-evt-max-size.sh \
         scripts/check-nrf-store-gap.sh scripts/check-nrf-flash-budget.sh \
-        scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh \
+        scripts/nrf-elf.sh scripts/nrf-rustflags.sh scripts/build-m9-image.sh scripts/check-m9-reproducible.sh scripts/check-m9-bench-off.sh scripts/m9-bench-home.sh \
         scripts/nrf-flash.sh scripts/check-nrf-reproducible.sh \
         scripts/check-nrf-board-pins.sh \
         scripts/check-nrf-gap-device-name.sh \
@@ -1567,7 +1567,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest m9-walk-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links loquax-name m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1599,7 +1599,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets deb-features-check citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest version-guard lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest window-bench-selftest m9-walk-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports test-retry-guard no-printf-grep-pipes check-ignored-source check-just-docs check-guards-subset check-standard-integ check-python-test-prerequisites check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-flash-budget m9-reproducible nrf-reproducible nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links loquax-name core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate loquax-core-no-std map-core-no-std lnomad-core-no-std m9-render-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets deb-features-check citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2147,10 +2147,19 @@ _require-cargo-sweep:
 # What this must never touch is the sccache directory: that cache is what
 # makes the rebuild after a sweep cheap, and it bounds itself
 # (SCCACHE_CACHE_SIZE).
-[doc('Trim both target directories to a budget, keeping the newest')]
-sweep budget="30GB" fw_budget="4GB": _require-cargo-sweep
+#
+# Three more target directories nest under the root's and are not the root
+# workspace's to cargo-sweep, which sweeps by `cargo metadata` and so only the
+# directory cargo names: the benches' BASE builds (window-bench, map-bench;
+# 1.3 GB measured 2026-11-07, 1470) and the x86-64-v3 loquax build-deb.sh
+# packages for amd64 (1469). Each is swept as the root workspace's under
+# CARGO_TARGET_DIR, which `cargo metadata` honours (dry run verified
+# 2026-11-07); one that does not exist is a warning, not a failure.
+[doc('Trim the target directories to a budget, keeping the newest')]
+sweep budget="30GB" fw_budget="4GB" side_budget="2GB": _require-cargo-sweep
     cargo sweep --maxsize {{budget}} .
     cargo sweep --maxsize {{fw_budget}} leviculum-nrf
+    for dir in target/window-bench/base-target target/map-bench/base-target target/x86-64-v3; do CARGO_TARGET_DIR="{{justfile_directory()}}/$dir" cargo sweep --maxsize {{side_budget}} . || exit 1; done
 
 # Runs the recipe above against a stub cargo, so the assertion costs no
 # build and deletes nothing. ~1 s.
@@ -2450,6 +2459,19 @@ site-check:
 site-unpack-docs-selftest:
     @bash scripts/test-site-unpack-docs.sh
 
+# 1585: loquax-mailbox's growth soak. `loquax mailbox run` (release) beside
+# an in-process shared instance that hears `rate` new named lxmf.delivery
+# destinations a second, as a field home hears the network's announces; a
+# SIGUSR1 census every `sample` seconds and, at the end, the slope of every
+# census table, the node tables and RSS plus swap after the warm-up third
+# (`MAILBOX_GROWTH`). Red above `limit` kB/min (`MAILBOX_SOAK_VERDICT`);
+# the field mailbox grew 366 kB/min. Two hours by default: a reviewer's
+# window job, never a coder pass's (loquax/tests/mailbox_growth_soak.rs).
+[doc('Soak loquax mailbox run under network announce load and judge its growth')]
+mailbox-growth-soak secs="7200" sample="600" rate="2" limit="20":
+    MAILBOX_SOAK_SECS={{secs}} MAILBOX_SOAK_SAMPLE_SECS={{sample}} MAILBOX_SOAK_RATE={{rate}} MAILBOX_SOAK_MAX_KB_PER_MIN={{limit}} \
+        cargo test --release -p loquax --features tui,history --test mailbox_growth_soak -- --ignored --nocapture
+
 # 1515 (LV-1000): lnpnd's growth soak, the minimal test for "what keeps
 # growing". The release daemon on a store prefilled to `messages` (the field's
 # 300 000 by default, cached under the soak directory so a rerun skips the
@@ -2681,7 +2703,11 @@ m9-render-no-std:
 # need `history` too; in-process, no sockets. `loquax mailbox setup`
 # (`loquax/tests/mailbox_setup.rs`, 1266) is the terminal build's command;
 # it spawns the binary over a temporary home, no daemon. The ticks' cells
-# (`loquax/tests/device_receipts.rs`, 1462) need `history`; in-process.
+# (`loquax/tests/device_receipts.rs`, 1462) need `history`; in-process. So
+# do the relay's cells (`loquax/tests/relay_group.rs`, 1482). The bars of
+# "only what is visible" and "O(1) per event" over the real fixture
+# (`loquax/tests/operation_counts.rs`, 1489) need `history` for the
+# store's restart; counted, in-process, 4 s.
 # The forge runs this recipe and has no reference submodule, so the home node
 # tests that start the Python peer go out there by the names
 # scripts/integ-prerequisites.txt declares (scripts/with-prerequisites.sh,
@@ -2691,7 +2717,7 @@ m9-render-no-std:
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui: build-integ-bins
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh loquax/device_receipts -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts
+    {{manifest}} loquax-tui -- bash scripts/with-prerequisites.sh loquax/tui_snapshot loquax/home_node loquax/import loquax/wire_props loquax/scene_golden loquax/mailbox_receipts loquax/mailbox_setup loquax/mailbox_mesh loquax/device_receipts loquax/relay_group loquax/operation_counts loquax/mailbox_census loquax/mailbox_growth_soak -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node --test import --test wire_props --test scene_golden --test mailbox_receipts --test mailbox_setup --test mailbox_mesh --test device_receipts --test relay_group --test operation_counts --test mailbox_census --test mailbox_growth_soak
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile
@@ -2734,6 +2760,55 @@ lnomad-gui:
 loquax-strings:
     LOQUAX_WRITE_STRINGS=1 cargo test -p loquax --lib ui::strings::tests::the_phone_reads_the_catalogue
 
+# 1577, 1599, #232: the public rooms' hubs Loquax offers, measured again. The
+# probe (`loquax/examples/rrc_hubs_probe.rs`) dials the shipped entry servers,
+# listens `listen` seconds for `rrc.hub` announces, then opens every hub of
+# `loquax/assets/hubs.toml` with Loquax's own hub link (HELLO until WELCOME,
+# then it leaves; it joins nothing and says nothing), twelve at once. A hub
+# that did not answer is opened once more, four at once: on 2026-11-09 33 of
+# 81 hubs were silent on a first try and 18 of them answered a second or third
+# (1599's measurement). A shipped hub silent on both tries, or an unreached
+# one that now answers, is a finding and the recipe exits 1: the list is data,
+# and a stale hash is a finding, not a surprise. The probe's lines and the
+# announces heard land in `target/tmp/rrc-hubs/`. Needs the internet; about
+# `listen` seconds plus up to 100 s a round of hubs that do not answer. `hubs`
+# names another list, for the check's own positive control.
+[doc('Measure the shipped public room hubs again (#232)')]
+rrc-hubs-check listen="1800" hubs="loquax/assets/hubs.toml":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=target/tmp/rrc-hubs
+    mkdir -p "$out"
+    cargo run -q -p loquax --example rrc_hubs_probe -- --listen {{listen}} --open listed --parallel 12 --hubs {{hubs}} > "$out/probe.txt" 2> "$out/probe.err"
+    grep '^HUB ' "$out/probe.txt" | grep -v ' welcome=yes ' | sed 's/.* hash=\([0-9a-f]*\) .*/[[hub]]\nhash = "\1"/' > "$out/silent.toml" || true
+    : > "$out/retry.txt"
+    if [ -s "$out/silent.toml" ]; then
+        cargo run -q -p loquax --example rrc_hubs_probe -- --listen 10 --open listed --parallel 4 --hubs "$out/silent.toml" > "$out/retry.txt" 2> "$out/retry.err"
+    fi
+    awk '/^\[\[hub\]\]/ {k="hub"} /^\[\[unreached\]\]/ {k="unreached"} /^hash *=/ {gsub(/[" ]/, "", $0); split($0, h, "="); print h[2], k}' {{hubs}} > "$out/listed.txt"
+    findings=0
+    while read -r hash kind; do
+        line="$(grep -F "HUB hash=$hash " "$out/retry.txt" | grep -F ' welcome=yes ' || grep -F "HUB hash=$hash " "$out/probe.txt" || true)"
+        welcome="$(sed -n 's/.* welcome=\([^ ]*\).*/\1/p' <<< "$line")"
+        case "$kind:$welcome" in
+            hub:yes|unreached:yes) echo "ANSWERED $kind $line" ;;
+            hub:*) echo "FINDING shipped hub did not answer twice: ${line:-HUB hash=$hash (not probed)}"; findings=$((findings + 1)) ;;
+            unreached:*) echo "STILL-UNREACHED $line" ;;
+        esac
+        if [ "$kind:$welcome" = "unreached:yes" ]; then
+            echo "FINDING an unreached hub answers now: $line"
+            findings=$((findings + 1))
+        fi
+    done < "$out/listed.txt"
+    shipped="$(grep -c ' hub$' "$out/listed.txt" || true)"
+    heard="$(grep -c '^HEARD' "$out/probe.txt" || true)"
+    echo "SHIPPED $shipped hubs; HEARD $heard rrc.hub announces in {{listen}} s (the list is in $out/probe.txt)"
+    if [ "$findings" -gt 0 ]; then
+        echo "rrc-hubs-check: $findings finding(s): update {{hubs}} and the page's measurement"
+        exit 1
+    fi
+    echo "rrc-hubs-check: the list is as measured"
+
 # 1147, #232: the messenger is Loquax in prose (Lew, 2026-10-30); `loquax` is
 # the command, the package, the crate and every path, so in the docs it is code,
 # a path, a hyphenated page name or a man page's bold command. Refuses a bare
@@ -2771,7 +2846,7 @@ build-m9:
 # 230400 baud its CH340K holds (lnflash/src/esp.rs, the bench notes of
 # 2026-10-25), with the M9's partition table (`leviculum-esp/
 # partitions-m9.csv`: the identity and the Loquax client record beside the
-# application, 1414). The port is the bridge's tty; espflash resets the
+# application, 1414, and the message store, 1476). The port is the bridge's tty; espflash resets the
 # board into the loader and back.
 [doc('Flash the ThinkNode M9 Loquax image over its CH340 (port: the tty)')]
 flash-m9 port:
@@ -2780,8 +2855,12 @@ flash-m9 port:
     export PATH="$HOME/.cargo/bin:$PATH"
     elf=leviculum-esp/target/xtensa-esp32s3-none-elf/release/thinknode_m9
     test -f "$elf" || { echo "no $elf: run just build-m9 first"; exit 1; }
+    # DIO at 80 MHz, as the vendor's image on this flash (ZD25Q128) has it
+    # in its header: espflash's default is 40 MHz, and the M9 runs its code
+    # from flash through a 32 KB cache, so every miss took twice as long
+    # (1463; build-m9-image.sh writes the same into the image).
     espflash flash --chip esp32s3 --port {{port}} --baud 230400 \
-        --non-interactive --flash-size 16mb \
+        --non-interactive --flash-size 16mb --flash-mode dio --flash-freq 80mhz \
         --partition-table leviculum-esp/partitions-m9.csv "$elf"
 
 # The M9 image is the same bytes from any clone of the same commit (1458,
@@ -2797,6 +2876,43 @@ flash-m9 port:
 m9-reproducible:
     bash scripts/check-m9-reproducible.sh --selftest
     bash scripts/check-m9-reproducible.sh
+
+# The M9 gates of every coder pass that moves leviculum-esp/src or a crate
+# the M9 links (1574, #474): the release image and the bench image, each
+# with its FLASH_HEADROOM and two STACK_HEADROOM lines and red below a
+# floor, then m9-reproducible. 1569 ran check and clippy on both variants
+# but never the image script, and its bench image's stack FAIL was first
+# seen on the bench. The report quotes the headroom lines of both images.
+# Not in a gate for the same reason as build-m9 (the Xtensa fork is
+# optional per host); each image build says SKIP without it.
+[doc('Build both M9 images with their headroom, then m9-reproducible')]
+m9-gates:
+    bash scripts/build-m9-image.sh
+    LEVICULUM_M9_BENCH=1 bash scripts/build-m9-image.sh --bench
+    just m9-reproducible
+
+# The M9 image's stack frames and deepest static call chains (1582): the
+# `entry` frames of the Xtensa windowed ABI read out of the linked ELF,
+# the call graph walked from core 0's main, the UI core's ui_main and the
+# interrupt handlers. A report, not a gate: the floors in
+# scripts/build-m9-image.sh are the board's measured peaks plus a reserve
+# this sizes. Reads the ELF build-m9 left (or the one named); without
+# the Xtensa fork it says SKIP.
+[doc('Print the M9 image largest stack frames and deepest static call chains')]
+m9-stack-frames elf="":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    python3 -I scripts/m9-stack-frames.py --selftest || exit 1
+    if [ ! -f "$HOME/export-esp.sh" ]; then
+        echo "[m9-stack-frames] SKIP no esp toolchain on this host (~/export-esp.sh)"
+        exit 0
+    fi
+    # shellcheck disable=SC1091
+    source "$HOME/export-esp.sh" >/dev/null
+    source scripts/cargo-target-dir.sh
+    elf="{{elf}}"
+    [ -n "$elf" ] || elf="$(cargo_target_dir leviculum-esp)/xtensa-esp32s3-none-elf/release/thinknode_m9"
+    python3 -I scripts/m9-stack-frames.py "$elf"
 
 # The nRF images are the same bytes from any clone of the same commit (1460,
 # #474): builds the T114 image in this tree and in a clone of HEAD under a
@@ -2917,12 +3033,131 @@ window-bench BASE="" ROUNDS="3":
     done
     bash scripts/window-bench.sh compare
 
+# 1469, #474: the amd64 package's two loquax builds measured against each
+# other, as window-bench measures two commits: this tree's bench as BASE,
+# and the same built with -C target-cpu=x86-64-v3 (build-deb.sh's v3 target
+# directory) as this tree; the verdict rules are window-bench's, so a v3 row
+# slower than the baseline is a REGRESSION. The table lands in
+# target/window-bench/table.md. A measuring tool, never in `guards`.
+[doc('Measure the window frames of the baseline and the x86-64-v3 build (#474)')]
+window-bench-v3 ROUNDS="3":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'bash scripts/window-bench.sh clean' EXIT
+    bash scripts/window-bench.sh prepare-v3
+    for i in $(seq 1 {{ROUNDS}}); do
+        bash scripts/window-bench.sh round "$i"
+    done
+    bash scripts/window-bench.sh compare
+
 # 1470: the window bench's verdicts (regression, noise, load SKIP, too few
 # rounds, the exes' bytes) on synthetic rounds, each with its positive
 # control. ~0.1 s, no build.
 [doc('Check the window-bench verdict rules on synthetic rounds')]
 window-bench-selftest:
     @python3 -I scripts/window-bench-compare.py --selftest
+
+# 1533: the M9 bench walk's verdicts on a simulated board behind the rig
+# proxy's files (a good walk passes and writes its dump as a PNG, a 150 ms
+# frame and a growing rx_lost fail), and the shipped walk file reads; and
+# first the proxy itself (1542, scripts/m9-proxy.py) on a pty: the board's
+# bytes reach raw.bin, board.log and the link, tx.hex and the link reach
+# the board, STOP ends it. ~5 s, no build, no board.
+[doc('Check the M9 bench walk verdicts on a simulated board')]
+m9-walk-selftest:
+    @bash scripts/m9-walk.sh --selftest
+
+# 1533: walk the M9 on the bench without hands: flash `image` (the bench
+# ELF, `scripts/build-m9-image.sh --bench`) through the rig folder's proxy,
+# boot twice, run `walk` (scripts/m9-walks/bench.walk) and print the
+# VERDICT; walk.md and the dumps land in `<rig>/walk-<time>/`. `proxy` is
+# the M9's tty for a bench whose rig folder has no proxy running (1542):
+# scripts/m9-proxy.py is started on it.
+[doc('Walk the M9 on the bench: flash, two boots, a walk file, a verdict')]
+m9-walk rig walk="scripts/m9-walks/bench.walk" image="" proxy="":
+    bash scripts/m9-walk.sh --rig {{rig}} --walk {{walk}} {{ if image != "" { "--image " + image } else { "" } }} {{ if proxy != "" { "--start-proxy " + proxy } else { "" } }}
+
+# 1562: the bench M9's own mailbox, never Lew's: `setup` seeds a `loquax
+# mailbox` state folder with its own identity and the 1489 fixture, `run`
+# starts it beside the bench's lnsd, `join rig=<folder>` writes a fresh
+# code to the board, `send <words>` delivers a live arrival from the
+# reference LXMF client, `stop`. scripts/m9-bench-home.sh has the rest.
+[doc('The bench M9 mailbox: setup, run, code, join, send, stop')]
+m9-bench-home verb *args:
+    bash scripts/m9-bench-home.sh {{verb}} {{args}}
+
+# 1562: the bench home's setup and code offline in a scratch folder: the
+# code names the seeded home, a second setup appends nothing, another
+# home's code names another (the control). Builds loquax and the sim in
+# release; not in `fast`.
+[doc('Check the bench M9 mailbox setup offline')]
+m9-bench-home-selftest:
+    @bash scripts/m9-bench-home.sh --selftest
+
+# 1530, #232: the M9 on the host, headless (loquax-m9's `loquax-m9-sim`,
+# feature `sim`): the bin's tests first, among them the golden parity (every
+# `tests/golden/m9-fw-*.png` reached through the sim's board, by its
+# FRAME_DUMP path and by its keys from power-on, compared pixel for pixel),
+# then the two walks under scripts/m9-sim-walks/: the fixture from the
+# pairing on, and the 1489 store pulled into a home's board and booted again;
+# and since 1575 the pull walk (pull.walk) with the board's fold cost, once
+# with the drain's budget, whose keys must flush under 100 ms, and once
+# without, the control, whose keys must not.
+# Dumps, logs and text rows land in `out`, under target/; the bin's lines
+# are the board's (`KEY`, `[PAGE]`, `[STORE]`). Not in `fast`: nothing ships
+# it, and it builds the bin.
+[doc('Walk the M9 sim headless over the fixture and the 1489 store (#232)')]
+m9-sim-walk out="target/m9-sim-walk":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="$(pwd)"
+    {{manifest}} m9-sim-tests -- cargo test -p loquax-m9 --features sim --bin loquax-m9-sim
+    cargo build -q -p loquax-m9 --features sim --bin loquax-m9-sim
+    sim() { cargo run -q --manifest-path "$root/Cargo.toml" -p loquax-m9 --features sim --bin loquax-m9-sim -- "$@"; }
+    for walk in fixture real; do
+        dir="$root/{{out}}/$walk"
+        rm -rf "$dir" && mkdir -p "$dir"
+        store=fixture; [ "$walk" = real ] && store=real
+        (cd "$dir" && sim --store "$store" --save flash.img --script "$root/scripts/m9-sim-walks/$walk.walk" --dump last.png --text > text.txt 2> board.log)
+        echo "m9-sim-walk: $walk ok, $(ls "$dir"/*.png | wc -l) dumps in $dir"
+    done
+    # What the walks must have shown, read off the board's own lines.
+    grep -q '^\[PAGE\] name=map ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the fixture walk never reached the map"; exit 1; }
+    grep -q '^\[PAGE\] name=compose ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the fixture walk never reached compose"; exit 1; }
+    grep -q 'restore=resumed' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the real store's second boot did not resume"; exit 1; }
+    grep -q '^\[STORE\] page_read ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL no chat page was read from the ring"; exit 1; }
+    grep -q '^\[PAGE\] name=house ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the house key never opened the overview"; exit 1; }
+    grep -q '^\[TYPE\] size=large via=row ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the overview's row did not switch the type"; exit 1; }
+    grep -q '^\[TYPE\] size=small via=hold ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the held house key did not switch the type"; exit 1; }
+    grep -q '^\[TYPE\] size=large via=boot ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the record did not keep the large type across the reboot"; exit 1; }
+    # 1575: the pull walk, the fold costing the board's 3.6 ms an entry
+    # (window 16b), with the drain's budget and without it (as before):
+    # every key's frame under 100 ms with it, the control over it without.
+    for mode in budget none; do
+        dir="$root/{{out}}/pull-$mode"
+        rm -rf "$dir" && mkdir -p "$dir"
+        budget=""; [ "$mode" = none ] && budget="--fold-budget-us 0"
+        (cd "$dir" && sim --store pulling --fold-cost-us 3600 $budget --script "$root/scripts/m9-sim-walks/pull.walk" --text > text.txt 2> board.log)
+        max="$(sed -n 's/^\[SIM\] key_ms=\([0-9]*\) .*/\1/p' "$dir/board.log" | sort -n | tail -1)"
+        keys="$(grep -c '^\[SIM\] key_ms=' "$dir/board.log" || true)"
+        echo "m9-sim-walk: pull budget=$mode keys=$keys key_ms_max=${max:-none}"
+        [ "${keys:-0}" -eq 24 ] || { echo "m9-sim-walk: FAIL the pull walk ($mode) answered $keys of 24 keys"; exit 1; }
+    done
+    max_budget="$(sed -n 's/^\[SIM\] key_ms=\([0-9]*\) .*/\1/p' "{{out}}/pull-budget/board.log" | sort -n | tail -1)"
+    max_none="$(sed -n 's/^\[SIM\] key_ms=\([0-9]*\) .*/\1/p' "{{out}}/pull-none/board.log" | sort -n | tail -1)"
+    [ "$max_budget" -lt 100 ] || { echo "m9-sim-walk: FAIL a key under the pull waited $max_budget ms with the budget"; exit 1; }
+    [ "$max_none" -ge 100 ] || { echo "m9-sim-walk: FAIL the control: without the budget no key waited 100 ms ($max_none)"; exit 1; }
+    echo "m9-sim-walk: PASS"
+
+# 1530, #232: the M9 in a window on the host: the panel at `scale` (2 or 3),
+# the host's keys as the M9's (arrows the ring, Enter its centre, Esc Back,
+# F1-F5 the bubbles, house, square bubble, pin, map, the letters the QWERTY
+# block). `store` is `fixture`, `real` or a flash image a run saved with
+# `--save`. For the host's own triple, as `loquax-gui`: winit opens X11 and
+# Wayland with dlopen, which a musl-static binary cannot.
+[doc('Run the M9 sim in a window (#232)')]
+m9-sim store="fixture" scale="2":
+    cargo run -p loquax-m9 --features sim-window --bin loquax-m9-sim --target "$(rustc -vV | sed -n 's/^host: //p')" -- --window --scale {{scale}} --store {{store}}
 
 # 1441: rewrite the baseline `window-bench` measures against, after a change
 # whose cost was measured and accepted in its commit message; the commit

@@ -103,6 +103,7 @@ STEPS = [
     "settings",
     "receipts",
     "profile",
+    "explore",
     "first_start_qr",
     "pencil_scan",
     "share_in_contact",
@@ -120,7 +121,6 @@ STEPS = [
 WHERE_TITLE = "Where should your mailbox be?"
 WHERE_COMPUTER = "On a computer at home"
 WHERE_PHONE = "On this phone"
-USE_THIS_PHONE = "Use this phone"
 DONE = "Done"
 # Link a device (1264, finding 7): the profile's row, the sheet's ids, the
 # line once the other device came, and the name the walk's second device
@@ -189,8 +189,47 @@ THEME_AUTO = "Like the phone"
 # their old ids; neither may be on screen.
 MAP_CHROME_TEXTS = ["Load area", "All", "\u263e", "\u2600"]
 MAP_CHROME_IDS = ["load", "fit", "theme"]
-# The tab bar's tabs (activity_conversations.xml): Chats and Map.
-TABS = ["tab_chats", "tab_map"]
+# The tab bar's tabs (activity_conversations.xml): Chats, Map and
+# Explore (1578), three and no fourth.
+TABS = ["tab_chats", "tab_map", "tab_explore"]
+# Explore's list (1578): its field, its order's toggle, its list, and the
+# section titles the library words: "Pages", "Rooms" and, under it,
+# "Servers" (1621). The titles are the catalogue's (`explore_pages`,
+# `explore_rooms`, `explore_servers`) in the phone's language, read from
+# the generated strings_scene.xml: English literals failed on the German
+# Pixel before they checked anything (1618, walk 15).
+EXPLORE_IDS = ["explore_search", "explore_sort", "explore_list"]
+EXPLORE_TITLE_KEYS = ["explore_pages", "explore_rooms", "explore_servers"]
+# One scroll step of Explore's list (1621, walk 2): at most three quarters
+# of the list's height, dragged slowly enough that the list does not fling
+# on, so no section title passes unseen between two dumps.
+EXPLORE_SCROLL_SHARE = 0.75
+EXPLORE_SCROLL_MS = 1500
+ANDROID_RES = Path(__file__).resolve().parent.parent / "android" / "res"
+
+
+def catalogue_words(lang: str, keys: list[str]) -> list[str]:
+    """The catalogue's `keys` in `lang` (a locale tag, `de-DE` or `en`), as
+    the app shows them: the language's strings_scene.xml, English where
+    the phone speaks one the app does not."""
+    base = lang.replace("_", "-").split("-")[0].lower()
+    path = ANDROID_RES / ("values" if base in ("", "en") else f"values-{base}") / "strings_scene.xml"
+    if not path.exists():
+        path = ANDROID_RES / "values" / "strings_scene.xml"
+    found = {}
+    for item in ET.parse(path).getroot().iter("string"):
+        found[item.get("name")] = (item.text or "").replace("\\'", "'").replace('\\"', '"')
+    return [found[key] for key in keys]
+
+
+def phone_lang(dev) -> str:
+    """The phone's language as a locale tag: the user's choice, else the
+    build's."""
+    for prop in ("persist.sys.locale", "ro.product.locale"):
+        said = dev.shell(f"getprop {prop}", check=False).strip()
+        if said:
+            return said
+    return "en"
 NOT_DECODED = "did not decode"
 # The settings' entries in the list's order (1199, SettingsActivity.PAGES).
 SETTINGS_PAGES = [
@@ -317,6 +356,9 @@ GROUP_JOIN = "Join"
 # The pencil (1263, finding 3): its two rows, top to bottom, the fold
 # that hides the typed address, and the sentence for a text that is no
 # code (the catalogue's code_foreign).
+# "New contact" (1448, walk finding 17): the pencil's screen is a contact
+# list, and the ways to add one unfold under this row.
+PENCIL_CONTACT = "new_contact"
 PENCIL_SCAN = "new_scan"
 PENCIL_PASTE = "new_paste"
 PENCIL_ADVANCED = "new_advanced"
@@ -1235,9 +1277,44 @@ def tab_ids(nodes: list[Node]) -> list[str]:
     return out
 
 
+def explore_scroll(box: tuple[int, int, int, int]) -> tuple[int, int, int, int, int]:
+    """One slow step down Explore's list in `box` (its bounds): the
+    swipe's x, from y, to y and its milliseconds, at most
+    [`EXPLORE_SCROLL_SHARE`] of the list's height (1621: a 250 ms swipe
+    over the whole list flung a section title past)."""
+    x = (box[0] + box[2]) // 2
+    reach = int((box[3] - box[1]) * EXPLORE_SCROLL_SHARE)
+    start = box[3] - (box[3] - box[1] - reach) // 2
+    return x, start, start - reach, EXPLORE_SCROLL_MS
+
+
+def explore_problems(
+    nodes: list[Node], titles: list[str] | None = None, first: list[Node] | None = None
+) -> list[str]:
+    """What is wrong with Explore's dumps (1578): a missing field, toggle or
+    list, a section without its title (`titles`, the catalogue's in the
+    phone's language; English without), or a tab bar other than exactly
+    Chats, Map and Explore. `nodes` may be several dumps of the scrolled
+    list; the tabs are counted on `first`, the first dump alone (1621: over
+    13 dumps the bar counted 13 times), or on `nodes` without it."""
+    problems = []
+    for rid in EXPLORE_IDS:
+        if not find(nodes, rid=rid):
+            problems.append(f"no {rid}")
+    if titles is None:
+        titles = catalogue_words("en", EXPLORE_TITLE_KEYS)
+    for title in titles:
+        if not find(nodes, text=title):
+            problems.append(f"no section {title!r}")
+    tabs = tab_ids(nodes if first is None else first)
+    if tabs != TABS:
+        problems.append(f"tabs {tabs}, want {TABS}")
+    return problems
+
+
 def map_screen_problems(nodes: list[Node]) -> list[str]:
     """What is wrong with the Map tab's dump (1199): any of the old header
-    controls, or a tab bar other than exactly Chats and Map."""
+    controls, or a tab bar other than exactly Chats, Map and Explore."""
     problems = []
     for text in MAP_CHROME_TEXTS:
         if find(nodes, text=text):
@@ -3643,6 +3720,10 @@ class Walk:
         taps += 1
         dev.tap_node(self.wait_id(GROUP_NEW, 10)[0])
         taps += 1
+        # The picker is the same list with check marks (1448): its button
+        # shows once it is the picker, so the friend's row is ticked, not
+        # opened.
+        self.wait_text(GROUP_NEXT, 10)
         self.tap_text(friend)
         taps += 1
         self.tap_text(GROUP_NEXT)
@@ -4449,6 +4530,43 @@ class Walk:
         self.wait_id("write", 10)
         return f"address={shown} qr=shown share=shown back=chats"
 
+    def step_explore(self) -> str:
+        """Explore (1578): the third tab opens the pages and the public
+        rooms on one screen, its field, its order's toggle and both
+        sections there whatever the mesh holds; the toggle turns the order
+        and back; Back goes to the chats."""
+        self.back_to_chats()
+        dev = self.need_device()
+        dev.tap_node(self.wait_id("tab_explore", 10)[0])
+        self.wait_id("explore_list", 10)
+        titles = catalogue_words(phone_lang(dev), EXPLORE_TITLE_KEYS)
+        nodes = dev.dump()
+        # The list draws only what is visible (1618): the rooms' titles may
+        # be below; scroll for them slowly, a step at most three quarters
+        # of the list (1621), keeping every row seen.
+        seen = list(nodes)
+        for _ in range(24):
+            if all(find(seen, text=t) for t in titles):
+                break
+            box = find(dev.dump(), rid="explore_list")[0]
+            x, y1, y2, ms = explore_scroll(box.bounds)
+            dev.swipe(x, y1, x, y2, ms)
+            time.sleep(0.5)
+            seen.extend(dev.dump())
+        problems = explore_problems(seen, titles, first=nodes)
+        if problems:
+            raise StepFailed("; ".join(problems))
+        order = find(nodes, rid="explore_sort")[0].text
+        dev.tap_node(find(nodes, rid="explore_sort")[0])
+        time.sleep(0.8)
+        turned = find(dev.dump(), rid="explore_sort")[0].text
+        if turned == order:
+            raise StepFailed(f"the order's toggle stayed {order!r}")
+        dev.tap_node(find(dev.dump(), rid="explore_sort")[0])
+        dev.key("KEYCODE_BACK")
+        self.wait_id("write", 10)
+        return f"sections={len(titles)} order={order!r}->{turned!r} back=chats"
+
     def screen_codes(self, name: str) -> list[str]:
         """The QR codes on screen, read by zbarimg from a screenshot kept
         beside the log as `name`.png."""
@@ -4536,6 +4654,7 @@ class Walk:
         dev = self.need_device()
         self.back_to_chats()
         dev.tap_node(self.wait_id("write", 10)[0])
+        dev.tap_node(self.wait_id(PENCIL_CONTACT, 10)[0])
         self.wait_id(PENCIL_PASTE, 10)
         camera = "feature:android.hardware.camera" in dev.shell("pm list features", check=False)
         nodes = dev.dump()
@@ -4845,7 +4964,8 @@ class Walk:
         dev.shell(f"am start -W -n {PACKAGE}/{ACTIVITY}", timeout=60)
         self.wait_text(WHERE_TITLE, 20)
         self.tap_text(WHERE_PHONE)
-        self.tap_text(USE_THIS_PHONE)
+        # One primary button whatever is chosen (1448, walk finding 15).
+        self.tap_text(CONTINUE)
         problems: list[str] | None = None
         deadline = time.monotonic() + 90
         while True:
@@ -4853,7 +4973,7 @@ class Walk:
             if find(nodes, rid="write") and find(nodes, rid="avatar"):
                 break
             if time.monotonic() > deadline:
-                raise StepFailed(f"no chats 90s after Use this phone; screen: {texts(nodes)[:12]}")
+                raise StepFailed(f"no chats 90s after Continue on this phone; screen: {texts(nodes)[:12]}")
             if find(nodes, rid=WELCOME_QR):
                 if problems is None:
                     problems = first_start_name_problems(nodes)

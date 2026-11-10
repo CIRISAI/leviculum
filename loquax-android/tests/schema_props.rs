@@ -378,9 +378,10 @@ fn invite_parts() -> BoxedStrategy<InviteParts> {
 }
 
 /// A group's line parts (1307 pass four): the note line's flag and the
-/// late words, boxed on their own as the others are.
-fn line_parts() -> BoxedStrategy<(bool, String)> {
-    (any::<bool>(), text()).boxed()
+/// late words, boxed on their own as the others are; 1449 adds the
+/// mark's words.
+fn line_parts() -> BoxedStrategy<(bool, String, String, String)> {
+    (any::<bool>(), text(), text(), text()).boxed()
 }
 
 /// A chat's and a row's group parts (1307), boxed the same way.
@@ -429,7 +430,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 (
                     files,
                     (writer, invite_group, invite_title, invite_trust, invite_state, invite_join),
-                    (note, late),
+                    (note, late, state_words, position_words),
                 ),
                 (
                     voice_mode,
@@ -488,19 +489,32 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 invite_join,
                 note,
                 late,
+                state_words,
+                position_words,
             },
         )
         .boxed()
 }
 
+/// The head of [`Messages`], boxed on its own as [`voice_parts`] is: with
+/// a relay's title (1482) inline the tuple overflowed the test thread's
+/// stack in [`the_lists_round_trip`].
+type MessagesHead = (u32, String, String, Vec<MessageRow>, String);
+
+fn messages_head() -> BoxedStrategy<MessagesHead> {
+    (
+        u32s(),
+        text(),
+        text(),
+        prop::collection::vec(message_row(), 0..3),
+        text(),
+    )
+        .boxed()
+}
+
 fn messages() -> BoxedStrategy<Messages> {
     (
-        (
-            u32s(),
-            text(),
-            text(),
-            prop::collection::vec(message_row(), 0..3),
-        ),
+        messages_head(),
         (text(), opt_text(), opt_text(), any::<bool>(), opt_text()),
         (
             any::<bool>(),
@@ -524,7 +538,7 @@ fn messages() -> BoxedStrategy<Messages> {
     )
         .prop_map(
             |(
-                (v, peer, name, messages),
+                (v, peer, name, messages, relayed),
                 (initials, icon_fg, icon_bg, home_client, photo),
                 (linked, lookup, contact_id, ask_link),
                 (announced, petname, others, verified, receipts),
@@ -536,7 +550,10 @@ fn messages() -> BoxedStrategy<Messages> {
             )| Messages {
                 v,
                 peer,
+                // An extreme text the relay's title draws too (1452).
+                same_name: relayed.clone(),
                 name,
+                relayed,
                 messages,
                 initials,
                 icon_fg,
@@ -750,13 +767,15 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (liveness, cadence_s, last_fix_at),
                 (live, ring, pin, pin_label, draft),
                 sharing,
-                (group_members, group_words, _, group_invited, _),
+                (group_members, group_words, _, group_invited, time),
             )| ConversationRow {
                 peer,
+                same_name: last.clone(),
                 name,
                 last,
                 ours,
                 at,
+                time,
                 unread,
                 initials,
                 icon_fg,
@@ -794,10 +813,10 @@ fn conversations() -> impl Strategy<Value = Conversations> {
         text(),
         text(),
         u32s(),
-        any::<(bool, bool)>(),
+        any::<(bool, bool, bool)>(),
     )
         .prop_map(
-            |(v, conversations, address, initials, archived, (home_client, home_link))| {
+            |(v, conversations, address, initials, archived, (home_client, home_link, offline))| {
                 Conversations {
                     v,
                     conversations,
@@ -806,6 +825,7 @@ fn conversations() -> impl Strategy<Value = Conversations> {
                     archived,
                     home_client,
                     home_link,
+                    offline,
                 }
             },
         )
@@ -1139,7 +1159,7 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
         (i64s(), i32s(), i32s(), prop::option::of(u32s())),
         (any::<(bool, bool)>(), text()),
         live(),
-        (text(), text()),
+        (text(), text(), text()),
         (any::<bool>(), text()),
     )
         .prop_map(
@@ -1148,7 +1168,7 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
                 (at, lat_e6, lon_e6, distance_m),
                 ((recent, stale), geo),
                 (liveness, cadence_s, last_fix_at),
-                (live, ring),
+                (live, age, ring),
                 (nearby, announced),
             )| FriendRow {
                 peer,
@@ -1168,6 +1188,7 @@ fn friend_row() -> BoxedStrategy<FriendRow> {
                 cadence_s,
                 last_fix_at,
                 live,
+                age,
                 ring,
                 nearby,
                 announced,

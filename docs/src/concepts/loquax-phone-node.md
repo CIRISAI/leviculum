@@ -17,24 +17,24 @@ change to the interface seam keeps the way to the full node open.
 | Where messages wait while the phone sleeps | in the mailbox's archive | at a propagation node, as for any LXMF peer |
 
 **The client has no destination of its own.** `Engine::client`
-(`loquax/src/engine.rs:377`) says it "registers nothing, by
+(`loquax/src/engine.rs:389`) says it "registers nothing, by
 construction", and a guard test, `a_client_engine_registers_no_delivery_destination`,
 holds that. The session attaches through `attach_leaf`
-(`loquax-android/src/session.rs:522`) with `Role::Client`. That node runs
+(`loquax-android/src/session.rs:581`) with `Role::Client`. That node runs
 with transport off and has no interface from the config: the rendezvous
 rotation dials one TCP client at a time (`Upstream::Tcp`,
-`loquax/src/engine/shell.rs:828`). The only destination it talks to is the
+`loquax/src/engine/shell.rs:838`). The only destination it talks to is the
 mailbox's `loquax.home`, which the client reaches over links that it
 opens itself (`loquax/src/home/client.rs`, `loquax/src/home/watch.rs`).
 Nothing under `loquax/src/home/` registers a destination on the client's
 side. The one `register_destination` sits in the attach path and runs
-only for the home role (`loquax/src/engine/shell.rs:942`).
+only for the home role (`loquax/src/engine/shell.rs:952`).
 
 **The full node needs nothing new above the seam.** The phone already
 runs the messenger engine in one case: the mailbox on the phone
 (`loquax-android/src/mailbox.rs`) is `loquax --daemon`'s home node inside
 the app, with a node of its own that dials the entry servers
-(`DaemonUpstream::Mesh`, `loquax/src/home/daemon.rs:187`). So the full
+(`DaemonUpstream::Mesh`, `loquax/src/home/daemon.rs:197`). So the full
 node is the engine the phone's mailbox already uses, without
 `loquax.home`, on a node whose interface list holds more than TCP.
 

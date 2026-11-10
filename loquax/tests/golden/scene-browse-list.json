@@ -147,13 +147,18 @@
               "enabled": true,
               "label": {
                 "args": [
-                  "Marcel's node",
-                  "5a5a5a5a…",
+                  {
+                    "raw": "Marcel's node"
+                  },
+                  {
+                    "args": [],
+                    "key": "browser_place_seen_now"
+                  },
                   {
                     "args": [
                       2
                     ],
-                    "key": "browser_hops"
+                    "key": "browser_place_hops"
                   }
                 ],
                 "key": "browser_place_node"
@@ -173,13 +178,18 @@
             "selected": true,
             "title": {
               "args": [
-                "Marcel's node",
-                "5a5a5a5a…",
+                {
+                  "raw": "Marcel's node"
+                },
+                {
+                  "args": [],
+                  "key": "browser_place_seen_now"
+                },
                 {
                   "args": [
                     2
                   ],
-                  "key": "browser_hops"
+                  "key": "browser_place_hops"
                 }
               ],
               "key": "browser_place_node"
@@ -192,13 +202,16 @@
               "enabled": true,
               "label": {
                 "args": [
-                  "Relay Süd",
-                  "7c7c7c7c…",
                   {
-                    "args": [
-                      1
-                    ],
-                    "key": "browser_hops"
+                    "raw": "Relay Süd"
+                  },
+                  {
+                    "args": [],
+                    "key": "browser_place_seen_now"
+                  },
+                  {
+                    "args": [],
+                    "key": "browser_place_hop"
                   }
                 ],
                 "key": "browser_place_node"
@@ -218,13 +231,16 @@
             "selected": false,
             "title": {
               "args": [
-                "Relay Süd",
-                "7c7c7c7c…",
                 {
-                  "args": [
-                    1
-                  ],
-                  "key": "browser_hops"
+                  "raw": "Relay Süd"
+                },
+                {
+                  "args": [],
+                  "key": "browser_place_seen_now"
+                },
+                {
+                  "args": [],
+                  "key": "browser_place_hop"
                 }
               ],
               "key": "browser_place_node"
@@ -264,11 +280,15 @@
       ],
       "id": "top_bar",
       "lead": {
-        "me": {
-          "avatar": {
-            "me": ""
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "Back",
+            "label_key": "browser_back"
           },
-          "link": null
+          "avatar": {
+            "site": null
+          }
         }
       },
       "title": {
@@ -294,7 +314,7 @@
       "role": "tab_bar",
       "selected": false
     },
-    "active": "Browse",
+    "active": "Explore",
     "id": "tabs",
     "items": [
       {
@@ -348,22 +368,22 @@
           "enabled": true,
           "label": {
             "args": [],
-            "key": "tab_browse"
+            "key": "tab_explore"
           },
-          "resource": "tab_browse",
+          "resource": "tab_explore",
           "role": "tab",
           "selected": true
         },
         "action": {
           "enabled": true,
-          "intent": "Tab(Browse)",
-          "label_key": "tab_browse"
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
         },
         "badge": null,
-        "id": "Browse",
+        "id": "Explore",
         "label": {
           "args": [],
-          "key": "tab_browse"
+          "key": "tab_explore"
         }
       }
     ]
@@ -386,7 +406,7 @@
         "avatar": {
           "bg": "8e4b8a",
           "fg": "ffffff",
-          "initials": "30",
+          "initials": "?",
           "ring": null
         },
         "link": null,

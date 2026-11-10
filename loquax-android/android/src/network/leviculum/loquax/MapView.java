@@ -236,8 +236,12 @@ final class MapView extends View {
     private Long atZoom;
     /** The phone's own fix (1201), and where the last frame put it in its view. */
     private Long ownLat;
+    /** Our own address on the marks, drawn as the dot; null for none. */
+    private String ownPeer;
     private Long ownLon;
     private Long ownX;
+    /** The position sheet's map (1448): the own dot alone, never the radar. */
+    private boolean ownOnly;
     private Long ownY;
     /** A frame is owed: the view changed since the last request. */
     private boolean owed;
@@ -378,6 +382,19 @@ final class MapView extends View {
         }
     }
 
+    /**
+     * The position sheet's map (1448, walk finding 16): the library draws
+     * the own fix alone, no one's pin and never the radar, and a map of the
+     * world's outline where no region covers it.
+     */
+    void ownOnly() {
+        synchronized (this) {
+            ownOnly = true;
+            owed = true;
+            notifyAll();
+        }
+    }
+
     /** The phone's own fix, degrees times a million; null for none. */
     void own(Long latE6, Long lonE6) {
         synchronized (this) {
@@ -397,10 +414,16 @@ final class MapView extends View {
         return zoomMilli == null ? 0 : zoomMilli;
     }
 
-    /** The people the marks name, by peer, and the peer whose card is open. */
-    void people(Map<String, Map<String, Object>> rows, String card) {
+    /**
+     * The people the marks name, by peer, the peer whose card is open, and
+     * our own address when the store has a position of ours (null for
+     * none): that mark is the blue dot, never an avatar (1449, walk 1
+     * finding 8).
+     */
+    void people(Map<String, Map<String, Object>> rows, String card, String own) {
         people = rows;
         carded = card;
+        ownPeer = own;
         invalidate();
     }
 
@@ -722,16 +745,22 @@ final class MapView extends View {
         drawMarks(canvas);
     }
 
-    /** The phone's own position (1201): an accent dot in a ring of the background. */
+    /**
+     * The phone's own position (1201): a blue dot in a ring of the background, as the maps people
+     * know draw it (1448, walk findings 8 and 16), never an avatar.
+     */
     private void drawOwn(Canvas canvas) {
         if (ownX == null || ownY == null || ownLat == null) {
             return;
         }
-        float cx = offX + scale * ownX;
-        float cy = offY + scale * ownY;
+        dot(canvas, offX + scale * ownX, offY + scale * ownY);
+    }
+
+    /** The blue dot in a ring of the background at (cx, cy). */
+    private void dot(Canvas canvas, float cx, float cy) {
         ring.setColor(getContext().getColor(R.color.background));
         canvas.drawCircle(cx, cy, 9 * density, ring);
-        circle.setColor(getContext().getColor(R.color.accent));
+        circle.setColor(getContext().getColor(R.color.own_dot));
         canvas.drawCircle(cx, cy, 6 * density, circle);
     }
 
@@ -776,6 +805,15 @@ final class MapView extends View {
                 continue;
             }
             String peer = names.get(0);
+            if (peer.equals(ownPeer)) {
+                // Our own position (1449, walk finding 8): the blue dot as
+                // the maps people know draw it, never an avatar; the phone's
+                // own fix, when it has one, is that dot already.
+                if (ownLat == null) {
+                    dot(canvas, cx, cy);
+                }
+                continue;
+            }
             Map<String, Object> row = people.get(peer);
             if (row == null) {
                 row = new HashMap<>();
@@ -823,7 +861,12 @@ final class MapView extends View {
                 canvas.drawRect(bx + bw, by + bh / 3f, bx + bw + 1.5f * density, by + bh * 2f / 3f, battery);
             }
             if (row.containsKey("at")) {
-                String age = Ui.age(getContext(), Core.num(row, "at"), now);
+                // The position's one age, the library's (1447): the card
+                // says the same words, never a second age beside it.
+                String age = Core.str(row, "age");
+                if (age.isEmpty()) {
+                    age = Ui.age(getContext(), Core.num(row, "at"), now);
+                }
                 // Under the radar (1386): how far and which way, then the age.
                 String way = Core.str(mark, "way");
                 if (!way.isEmpty()) {
@@ -951,6 +994,9 @@ final class MapView extends View {
                     request.put("at_lon_e6", atLon);
                     if (atZoom != null) request.put("at_zoom_milli", atZoom);
                 }
+                if (ownOnly) {
+                    request.put("own_only", true);
+                }
                 if (ownLat != null) {
                     request.put("own_lat_e6", ownLat);
                     request.put("own_lon_e6", ownLon);
@@ -1013,9 +1059,11 @@ final class MapView extends View {
                 // fading in or out: draw the next frame now.
                 ask();
             }
-            if (Core.bool(shown, "filling")) {
-                // A region on screen is still arriving (1291): ask again
-                // when more of it may be there, four times a second.
+            if (Core.bool(shown, "filling") || Core.bool(shown, "loading_here")) {
+                // A region on screen is still arriving (1291), or a load
+                // runs for the screen (1527): ask again when more of it
+                // may be there, four times a second, so the screen's
+                // first tile draws within a quarter second of landing.
                 postDelayed(new Runnable() {
                     @Override
                     public void run() {

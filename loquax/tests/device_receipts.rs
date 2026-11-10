@@ -13,7 +13,7 @@
 //! a writer that does not ask, a recipient without a mailbox, a receipt
 //! that is lost, a stock recipient.
 
-use leviculum_lxmf::lev::{Lev, CAP_PROPAGATION_RECEIPTS};
+use leviculum_lxmf::lev::{Lev, PropagationReceipt, CAP_PROPAGATION_RECEIPTS};
 use leviculum_lxmf::message::{DeliveryMethod, Message as Lxm, Verification};
 use leviculum_lxmf::router::MessageState;
 use leviculum_std::Identity;
@@ -283,6 +283,7 @@ impl Mailbox {
             cap_bytes: u64::MAX,
             handover: None,
             groups: None,
+            shown: Default::default(),
         };
         let mut signed = Vec::new();
         for mark in marks {
@@ -508,6 +509,146 @@ fn a_recipient_without_a_mailbox_shows_two_ticks_on_its_devices_receipt() {
         &bob
     )
     .is_empty());
+}
+
+/// Cell 3b, happy (1486): the answer carries the receipt. Bob reads Alice's
+/// message and answers inside the batch window, so the device receipt he
+/// owes her rides on his answer. Her message goes to two ticks on it, and
+/// his answer is a message like any other: her device owes him its own
+/// receipt, and his answer goes to two ticks too.
+#[test]
+fn an_answer_that_carries_a_device_receipt_is_acknowledged_itself() {
+    let mut alice = Side::new(false);
+    let mut bob = Side::new(false);
+    let message = alice.write(bob.address, "frage", |_| {});
+    bob.takes(&message, &alice.identity);
+    alice.proven(&message);
+    update(&mut bob.model, UiEvent::Elapsed(BATCH_MS - 1));
+    let answer = bob.write(alice.address, "antwort", |_| {});
+    let rider = Lev::from_fields(&answer.fields).expect("lev");
+    assert_eq!(
+        rider.propagation_receipt.map(|r| r.ids),
+        Some(vec![message.message_id]),
+        "the receipt rides on the answer"
+    );
+    assert!(
+        device_receipts(
+            &update(&mut bob.model, UiEvent::Elapsed(BATCH_MS * 3)),
+            &bob
+        )
+        .is_empty(),
+        "nothing owed alone once it rode"
+    );
+    alice.takes(&answer, &bob.identity);
+    assert_eq!(
+        alice.ticks(&message.message_id),
+        (Some(DeliveryState::Delivered), Ticks::Delivered)
+    );
+    bob.proven(&answer);
+    assert_eq!(bob.ticks(&answer.message_id).1, Ticks::Arrived);
+    let receipts = device_receipts(
+        &update(&mut alice.model, UiEvent::Elapsed(BATCH_MS)),
+        &alice,
+    );
+    assert_eq!(
+        receipts.len(),
+        1,
+        "Alice's device owes Bob his answer's receipt"
+    );
+    let lev = Lev::from_fields(&receipts[0].fields).expect("lev");
+    assert_eq!(
+        lev.propagation_receipt.map(|r| r.ids),
+        Some(vec![answer.message_id])
+    );
+    bob.takes(&receipts[0], &alice.identity);
+    assert_eq!(
+        bob.ticks(&answer.message_id),
+        (Some(DeliveryState::Delivered), Ticks::Delivered)
+    );
+}
+
+/// Cell 3c (1557), at the mailbox: the same rule on a client of a mailbox.
+/// Bob answers Alice with his device receipt riding on the answer, and
+/// sends a bare receipt that asks (bit 2) as well. Alice's mailbox
+/// archives both and her phone pulls both: the phone marks the answer and
+/// not the bare receipt, and the mailbox signs the answer's receipt and
+/// none for the bare one, even when a mark names it.
+#[test]
+fn at_the_mailbox_an_answer_with_a_receipt_is_acknowledged_and_a_bare_one_not() {
+    let alice = leviculum_std::generate_identity();
+    let mut mailbox = Mailbox::of(alice);
+    let bob = Side::new(false);
+    let asked = [0x5a; 32];
+    let signed = |body: &str, at: f64| {
+        let lev = Lev {
+            capabilities: Some(CAP_PROPAGATION_RECEIPTS),
+            propagation_receipt: Some(PropagationReceipt {
+                received_at: RT as u32,
+                ids: vec![asked],
+            }),
+            writer: Some(bob.address),
+            ..Lev::default()
+        };
+        Lxm::create(
+            mailbox.address,
+            bob.address,
+            &bob.identity,
+            at,
+            Vec::new(),
+            body.as_bytes().to_vec(),
+            lev.fields().to_vec(),
+            DeliveryMethod::Direct,
+        )
+        .expect("message")
+    };
+    let answer = signed("antwort", RT as f64);
+    let bare = signed("", RT as f64 + 1.0);
+    mailbox.archive(&answer);
+    mailbox.archive(&bare);
+
+    let mut phone = screen(RT + 300, true);
+    for message in [&answer, &bare] {
+        let archived =
+            Lxm::unpack(&message.pack(), None, None, DeliveryMethod::Direct).expect("unpack");
+        update(
+            &mut phone,
+            UiEvent::Engine(OutboxEvent::Received {
+                sent_at: archived.timestamp as i64,
+                message_id: archived.message_id,
+                source: archived.source_hash,
+                title: archived.title,
+                body: archived.content,
+                fields: archived.fields,
+                verified: true,
+            }),
+        );
+    }
+    update(&mut phone, UiEvent::Elapsed(BATCH_MS));
+    let marks = arrived_marks(&mut phone);
+    let marked: Vec<[u8; 32]> = marks.iter().flat_map(|m| m.ids.clone()).collect();
+    assert_eq!(
+        marked,
+        [answer.message_id],
+        "the phone marks the answer, not the bare receipt"
+    );
+    let forced = Mark {
+        flag: MarkFlag::Arrived {
+            at: (RT + 300) as u32,
+        },
+        ids: vec![answer.message_id, bare.message_id],
+    };
+    let receipts = mailbox.marks(&[forced]);
+    assert_eq!(
+        receipts.len(),
+        1,
+        "the mailbox signs the answer's receipt only"
+    );
+    assert_eq!(receipts[0].destination_hash, bob.address);
+    let lev = Lev::from_fields(&receipts[0].fields).expect("lev");
+    assert_eq!(
+        lev.propagation_receipt.map(|r| r.ids),
+        Some(vec![answer.message_id])
+    );
 }
 
 /// Cell 4, unhappy: the device's receipt is lost on the way. The writer

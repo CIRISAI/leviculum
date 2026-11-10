@@ -130,7 +130,9 @@ impl Mailbox {
                 },
                 storage_dir: storage,
                 identity,
-                display_name: b"mailbox".to_vec(),
+                // No name: since 1449 a named home archives its owner's
+                // name as the first entry, and these cells count texts.
+                display_name: Vec::new(),
                 archive_cap_bytes: 1 << 20,
                 token_ttl_secs: 3600,
                 policy: loquax::home::policy(&loquax::config::Config::default()),

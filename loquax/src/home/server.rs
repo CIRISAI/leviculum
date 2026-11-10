@@ -33,6 +33,31 @@ pub struct Home<'a> {
     /// the name the owner goes by in them; none where the home hosts no
     /// groups, and `/group` is refused.
     pub groups: Option<(&'a std::path::Path, &'a str)>,
+    /// What `/about` says besides the devices (1642): the announced name
+    /// and the machine; the version is the build's.
+    pub shown: Shown,
+}
+
+/// The name and the machine `/about` says (1642).
+#[derive(Debug, Clone, Default)]
+pub struct Shown {
+    /// The name the identity is announced under; empty for none.
+    pub name: alloc::string::String,
+    /// The machine's name ([`super::about::host_word`]); empty for none.
+    pub host: alloc::string::String,
+}
+
+impl Shown {
+    /// This machine's: `name` as announced, the host as the kernel says.
+    pub fn here(name: &str) -> Self {
+        let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+            .unwrap_or_default();
+        Self {
+            name: alloc::string::String::from(name),
+            host: super::about::host_word(&raw),
+        }
+    }
 }
 
 /// An open move (1281, [`super::handover`]): the token the new device
@@ -107,6 +132,24 @@ pub fn answer(
         return Answer::only(wire::status_answer(Status::NotIdentified));
     };
     let now_secs = now as i64;
+    let answered = route(store, home, path, data, device, now, now_secs);
+    // Every request counts as the device being there (1642), whatever it
+    // asked; one that is not admitted changes nothing.
+    if let Err(error) = store.device_seen(&device, now_secs) {
+        tracing::warn!("HOME device seen: {error}");
+    }
+    answered
+}
+
+fn route(
+    store: &mut Store,
+    home: &Home<'_>,
+    path: &str,
+    data: &[u8],
+    device: [u8; 16],
+    now: f64,
+    now_secs: i64,
+) -> Answer {
     match path {
         super::JOIN_PATH => Answer::only(join(store, home, data, device, now_secs)),
         super::SYNC_PATH => Answer::only(sync(store, data, device)),
@@ -121,6 +164,9 @@ pub fn answer(
         super::GROUP_PATH => group(store, home, data, device, now),
         super::GROUP_ADD_PATH => group_add(store, home, data, device, now),
         super::GROUP_DELETE_PATH => group_delete(store, home, data, device, now),
+        super::PAGES_PATH => Answer::only(pages(store, data, device)),
+        super::BOOKMARK_PATH => Answer::only(bookmark(store, data, device)),
+        super::ABOUT_PATH => Answer::only(about(store, home, data, device)),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -594,8 +640,10 @@ fn seen(
         }) else {
             continue;
         };
-        let marked = leviculum_lxmf::lev::Lev::from_fields(&message.fields)
-            .is_some_and(|lev| lev.supports_receipts());
+        // The source's own mark (1482): a relay's copy gets no receipt.
+        let marked =
+            leviculum_lxmf::relay::own_lev(&message.content, &message.fields, &message.source_hash)
+                .is_some_and(|lev| lev.supports_receipts());
         if marked {
             owed.entry(message.source_hash).or_default().push(*id);
         }
@@ -695,11 +743,13 @@ fn arrived(
         }) else {
             continue;
         };
-        let lev = leviculum_lxmf::lev::Lev::from_fields(&message.fields);
+        // The source's own mark (1482): a relay's copy gets no receipt.
+        let lev =
+            leviculum_lxmf::relay::own_lev(&message.content, &message.fields, &message.source_hash);
         let read = seen && lev.as_ref().is_some_and(|lev| lev.supports_receipts());
         if read
             || message.source_hash == home.address
-            || !crate::ui::arrival::acknowledges(lev.as_ref())
+            || !crate::ui::arrival::acknowledges(&message.content, &message.fields, lev.as_ref())
         {
             continue;
         }
@@ -859,6 +909,11 @@ fn lev_out(
     lev: leviculum_lxmf::lev::Lev,
     now: f64,
 ) -> Result<Option<Outgoing>, alloc::string::String> {
+    // The map names its writer (1482), as a device's own does.
+    let lev = leviculum_lxmf::lev::Lev {
+        writer: Some(home.address),
+        ..lev
+    };
     let message = leviculum_lxmf::Message::create(
         peer,
         home.address,
@@ -898,6 +953,79 @@ fn lev_out(
 
 /// A client's petname for a peer, kept as an archive entry: the newest of
 /// each peer, the same one again appending nothing.
+/// `/pages` (1579): the page and bookmark rows after the device's stamp,
+/// cut to its bound or to [`super::pages::PAGES_ANSWER_MAX`]. A stamp past
+/// the home's newest is a device that counted with another home (a
+/// move, a store made again): it gets the whole list.
+fn pages(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
+    use super::pages;
+    let Ok((since, bound)) = pages::read_pages_request(data) else {
+        return wire::status_answer(Status::Malformed);
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "pages") {
+        return refused;
+    }
+    let bytes = bound
+        .and_then(|b| usize::try_from(b).ok())
+        .unwrap_or(pages::PAGES_ANSWER_MAX)
+        .min(pages::PAGES_ANSWER_MAX);
+    let read = store.pages_newest().and_then(|newest| {
+        let since = if since > newest { 0 } else { since };
+        // A row takes at least 20 bytes, so no answer holds more.
+        let limit = (bytes / 20).max(1);
+        store
+            .pages_since(since, limit)
+            .map(|(rows, behind)| (since, rows, behind))
+    });
+    match read {
+        Ok((since, rows, behind)) => {
+            let delta = pages::fit(rows, since, bytes, behind);
+            let answer = pages::pages_answer(&delta);
+            tracing::info!(
+                "HOME pages device={} since={since} rows={} stamp={} more={} bytes={}",
+                crate::address::to_hex(&device),
+                delta.rows.len(),
+                delta.stamp,
+                delta.more,
+                answer.len()
+            );
+            answer
+        }
+        Err(error) => {
+            tracing::warn!("HOME pages: {error}");
+            wire::status_answer(Status::Failed)
+        }
+    }
+}
+
+/// `/bookmark` (1579): a device's bookmark set or cleared; kept when it is
+/// newer than the home's, and `Ok` either way, since the newer word is the
+/// one every device gets.
+fn bookmark(store: &mut Store, data: &[u8], device: [u8; 16]) -> Vec<u8> {
+    let Ok(row) = super::pages::read_bookmark_request(data) else {
+        return wire::status_answer(Status::Malformed);
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "bookmark") {
+        return refused;
+    }
+    match store.bookmark_put(&row) {
+        Ok(stamp) => {
+            tracing::info!(
+                "HOME bookmark device={} deleted={} at={} stamp={}",
+                crate::address::to_hex(&device),
+                row.deleted,
+                row.at,
+                stamp.map_or_else(|| "-".to_string(), |s| s.to_string())
+            );
+            wire::status_answer(Status::Ok)
+        }
+        Err(error) => {
+            tracing::warn!("HOME bookmark: {error}");
+            wire::status_answer(Status::Failed)
+        }
+    }
+}
+
 fn petname(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: i64) -> Vec<u8> {
     let Ok((peer, _)) = wire::read_petname_entry(data) else {
         return wire::status_answer(Status::Malformed);
@@ -1052,6 +1180,44 @@ fn join(
             wire::status_answer(Status::Failed)
         }
     }
+}
+
+/// What the mailbox says of itself (1642): its name and machine, the
+/// build's version, and every device it admitted with when it was last
+/// there. An admitted device only: the list names the owner's devices.
+fn about(store: &Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> Vec<u8> {
+    if super::about::read_about_request(data).is_err() {
+        return wire::status_answer(Status::Malformed);
+    }
+    if let Some(refused) = refuse_unless_admitted(store, &device, "about") {
+        return refused;
+    }
+    let devices = match store.devices() {
+        Ok(devices) => devices,
+        Err(error) => {
+            tracing::warn!("HOME about: {error}");
+            return wire::status_answer(Status::Failed);
+        }
+    };
+    tracing::info!(
+        "HOME about device={} devices={}",
+        crate::address::to_hex(&device),
+        devices.len()
+    );
+    super::about::about_answer(&super::about::About {
+        name: home.shown.name.clone(),
+        host: home.shown.host.clone(),
+        version: alloc::string::String::from(crate::VERSION),
+        devices: devices
+            .into_iter()
+            .map(|d| super::about::KnownDevice {
+                device: d.device,
+                name: d.name,
+                admitted_at: d.admitted_at,
+                last_seen: d.last_seen,
+            })
+            .collect(),
+    })
 }
 
 /// A client keeps its link for wakes: told the newest sequence now, so it
@@ -1305,6 +1471,10 @@ mod tests {
             cap_bytes: u64::MAX,
             handover: None,
             groups: None,
+            shown: Shown {
+                name: "Lew Palm".into(),
+                host: "miauhaus".into(),
+            },
         }
     }
 
@@ -1370,6 +1540,110 @@ mod tests {
     fn admitted(store: &mut Store) {
         store.issue_token(&TOKEN, "laptop", 90).expect("issue");
         assert_eq!(join(store, LAPTOP, TOKEN), Status::Ok);
+    }
+
+    fn pages_ask(
+        store: &mut Store,
+        device: [u8; 16],
+        since: u64,
+        bound: Option<u64>,
+    ) -> Result<crate::home::pages::Delta, Status> {
+        let answer = answer(
+            store,
+            &home(),
+            crate::home::PAGES_PATH,
+            &crate::home::pages::pages_request(since, bound),
+            Some(device),
+            100.0,
+        );
+        crate::home::pages::read_pages_answer(&answer.bytes).expect("answer")
+    }
+
+    /// 1579: `/pages` refuses a device not admitted; an admitted one gets
+    /// the whole list from stamp 0 page by page at its bound, then the
+    /// delta after its stamp, and a bookmark one device set reaches the
+    /// next ask; a stamp past the home's newest gets the list again.
+    #[test]
+    fn pages_bring_the_list_then_the_delta_and_a_bookmark_comes_back() {
+        use crate::home::pages::{self, BookmarkRow};
+        let (_dir, mut store) = store();
+        assert_eq!(
+            pages_ask(&mut store, LAPTOP, 0, None),
+            Err(Status::NotAdmitted)
+        );
+        admitted(&mut store);
+        for i in 0..2000u32 {
+            let mut dest = [0u8; 16];
+            dest[..4].copy_from_slice(&i.to_be_bytes());
+            store
+                .page_heard(&lnomad::discovery::DiscoveredNode {
+                    dest_hash: dest,
+                    name: Some(alloc::format!("NomadNet node {i}")),
+                    first_seen: 1_800_000_000,
+                    last_seen: 1_800_000_000,
+                    hops: Some(3),
+                })
+                .expect("heard");
+        }
+        let mut stamp = 0;
+        let mut rows = 0;
+        let mut asks = 0;
+        let mut bytes = 0;
+        loop {
+            let answer = answer(
+                &mut store,
+                &home(),
+                crate::home::PAGES_PATH,
+                &pages::pages_request(stamp, None),
+                Some(LAPTOP),
+                100.0,
+            );
+            bytes += answer.bytes.len();
+            assert!(answer.bytes.len() <= pages::PAGES_ANSWER_MAX);
+            let delta = pages::read_pages_answer(&answer.bytes)
+                .expect("answer")
+                .expect("ok");
+            asks += 1;
+            rows += delta.rows.len();
+            stamp = delta.stamp;
+            if !delta.more {
+                break;
+            }
+        }
+        assert_eq!(rows, 2000);
+        assert!((3..=6).contains(&asks), "{asks} asks, {bytes} bytes");
+        let lora = pages_ask(
+            &mut store,
+            LAPTOP,
+            0,
+            Some(crate::home::ask::LORA_PAGE_BYTES as u64),
+        )
+        .expect("ok");
+        assert!(lora.more && !lora.rows.is_empty());
+        assert!(pages::pages_answer(&lora).len() <= crate::home::ask::LORA_PAGE_BYTES);
+        assert!(pages_ask(&mut store, LAPTOP, stamp, None)
+            .expect("ok")
+            .rows
+            .is_empty());
+        let set = BookmarkRow {
+            url: "00000001000000000000000000000000:/page/index.mu".into(),
+            title: "Node one".into(),
+            at: 1_800_000_000_000,
+            deleted: false,
+        };
+        let taken = answer(
+            &mut store,
+            &home(),
+            crate::home::BOOKMARK_PATH,
+            &pages::bookmark_request(&set),
+            Some(LAPTOP),
+            100.0,
+        );
+        assert_eq!(read_status(&taken.bytes), Ok(Status::Ok));
+        let delta = pages_ask(&mut store, LAPTOP, stamp, None).expect("ok");
+        assert_eq!(delta.bookmarks().collect::<Vec<_>>(), [&set]);
+        let again = pages_ask(&mut store, LAPTOP, delta.stamp + 1000, None).expect("ok");
+        assert!(again.more && !again.rows.is_empty(), "another home's stamp");
     }
 
     /// 1348: a German admin's phone of 1307 pass six still sends its
@@ -1918,7 +2192,7 @@ mod tests {
         let home = home();
         let sender = Identity::generate(&mut rand_core::OsRng);
         let from = crate::home::lxmf_address(&sender.public_key_bytes()).expect("address");
-        let message = |caps: u64, body: &[u8]| {
+        let written = |caps: u64, body: &[u8], writer: Option<[u8; 16]>| {
             leviculum_lxmf::Message::create(
                 HOME,
                 from,
@@ -1928,6 +2202,7 @@ mod tests {
                 body.to_vec(),
                 Lev {
                     capabilities: Some(caps),
+                    writer,
                     ..Lev::default()
                 }
                 .fields()
@@ -1936,11 +2211,21 @@ mod tests {
             )
             .expect("message")
         };
+        let message = |caps: u64, body: &[u8]| written(caps, body, None);
         let asks = message(CAP_GROUPS | CAP_PROPAGATION_RECEIPTS, b"hi");
+        // 1482: the sender is a relay here, and these are its copies of
+        // Anna's messages, her mark passed through: with her as the
+        // writer, and from before the writer key with her prefix only.
+        // Neither owes the relay a receipt of either kind.
+        let all = CAP_READ_RECEIPTS | CAP_GROUPS | CAP_PROPAGATION_RECEIPTS;
+        let anna = [0xa1; 16];
+        let relayed = written(all, b"Anna:\nnot a prefix", Some(anna));
+        let prefixed = alloc::format!("Anna\n<{}>\nhallo", crate::address::to_hex(&anna));
+        let relayed_old = written(all, prefixed.as_bytes(), None);
         let also = message(CAP_PROPAGATION_RECEIPTS, b"again");
         let silent = message(CAP_GROUPS, b"quiet");
         let read = message(CAP_READ_RECEIPTS | CAP_PROPAGATION_RECEIPTS, b"read");
-        for m in [&asks, &also, &silent, &read] {
+        for m in [&asks, &also, &silent, &read, &relayed, &relayed_old] {
             store
                 .archive_append(KIND_RECEIVED, &m.message_id, &m.pack(), 50, u64::MAX)
                 .expect("archived");
@@ -1950,7 +2235,7 @@ mod tests {
         // Read on a device first: its read receipt names it.
         let seen = wire::Mark {
             flag: wire::MarkFlag::Seen { at: 1_799_999_000 },
-            ids: vec![read.message_id],
+            ids: vec![read.message_id, relayed.message_id, relayed_old.message_id],
         };
         let answer_of = |store: &mut Store, mark: &wire::Mark, device: [u8; 16]| {
             answer(
@@ -1962,7 +2247,20 @@ mod tests {
                 200.0,
             )
         };
-        assert_eq!(answer_of(&mut store, &seen, PHONE).accepted.len(), 1);
+        let seen_answer = answer_of(&mut store, &seen, PHONE);
+        assert_eq!(seen_answer.accepted.len(), 1);
+        let read_receipt = leviculum_lxmf::Message::unpack(
+            &seen_answer.accepted[0].packed,
+            None,
+            None,
+            DeliveryMethod::Direct,
+        )
+        .expect("the read receipt");
+        assert_eq!(
+            Lev::from_fields(&read_receipt.fields).and_then(|l| l.receipt.map(|r| r.ids)),
+            Some(vec![read.message_id]),
+            "no read receipt for the relayed copies"
+        );
         let mark = wire::Mark {
             flag: wire::MarkFlag::Arrived { at: 1_800_000_000 },
             ids: vec![
@@ -1970,6 +2268,8 @@ mod tests {
                 also.message_id,
                 silent.message_id,
                 read.message_id,
+                relayed.message_id,
+                relayed_old.message_id,
                 [0x77; 32],
             ],
         };
@@ -1987,6 +2287,7 @@ mod tests {
         assert_eq!(receipt.source_hash, HOME, "signed by the home's identity");
         let lev = Lev::from_fields(&receipt.fields).expect("lev");
         assert_eq!(lev.capabilities, None);
+        assert_eq!(lev.writer, Some(HOME), "the map names its writer");
         assert_eq!(
             lev.propagation_receipt.map(|r| (r.received_at, r.ids)),
             Some((1_800_000_000, vec![asks.message_id, also.message_id]))
@@ -2238,6 +2539,49 @@ mod tests {
             .expect("new")
     }
 
+    /// 1642: `/about` names the mailbox, its machine and version, and
+    /// every device with when it was last there; each request moves that,
+    /// at most once a minute; a device not admitted is refused.
+    #[test]
+    fn about_names_the_mailbox_and_its_devices_with_when_each_was_there() {
+        use crate::home::about::{about_request, read_about_answer};
+        let (_dir, mut store) = store();
+        store.issue_token(&TOKEN, "laptop", 90).expect("issue");
+        assert_eq!(join(&mut store, LAPTOP, TOKEN), Status::Ok);
+        let ask = |store: &mut Store, device, now| {
+            let answer = answer(
+                store,
+                &home(),
+                crate::home::ABOUT_PATH,
+                &about_request(),
+                Some(device),
+                now,
+            );
+            read_about_answer(&answer.bytes).expect("decodes")
+        };
+        let about = ask(&mut store, LAPTOP, 130.0).expect("answered");
+        assert_eq!(about.name, "Lew Palm");
+        assert_eq!(about.host, "miauhaus");
+        assert_eq!(about.version, crate::VERSION);
+        assert_eq!(about.devices.len(), 1);
+        assert_eq!(about.devices[0].name, "laptop");
+        // Thirty seconds after the join: the minute has not passed.
+        assert_eq!(about.devices[0].last_seen, Some(100));
+        let later = ask(&mut store, LAPTOP, 400.0).expect("answered");
+        assert_eq!(
+            later.devices[0].last_seen,
+            Some(100),
+            "the ask at 130 was inside the minute, the one at 400 is kept after its answer"
+        );
+        assert_eq!(store.devices().expect("devices")[0].last_seen, Some(400));
+        assert_eq!(ask(&mut store, [0x44; 16], 500.0), Err(Status::NotAdmitted));
+        assert_eq!(
+            store.devices().expect("devices").len(),
+            1,
+            "a stranger's request is no device"
+        );
+    }
+
     #[test]
     fn a_good_token_admits_once_and_a_reused_one_is_refused() {
         let (_dir, mut store) = store();
@@ -2249,6 +2593,8 @@ mod tests {
                 device: LAPTOP,
                 name: "laptop".into(),
                 admitted_at: 100,
+                // The join is the device's first request: there now.
+                last_seen: Some(100),
             }]
         );
         // The same token again, from another device: used up.

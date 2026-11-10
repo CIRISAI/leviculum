@@ -574,6 +574,22 @@ and photo a phone shows stays on that phone
   the contacts file, takes it as the reader's word and writes the
   contacts file, and never hands it back. A home node from before 1139
   answers `/petname` as malformed, which the client says in its log.
+- **Owed until the home takes it** (1635). A petname the device set is
+  owed until the home answers `/petname` with ok: the newest of each peer
+  is kept in the device's store (`owed_petnames`, schema 19) and handed
+  again with the next hand or after a restart, one hand at a time so the
+  home takes a peer's names in the order they were set
+  (`UiModel::take_petnames`, `UiEvent::PetnamesHanded`). While owed, a
+  pulled entry for the peer changes nothing on screen: the home stamps an
+  entry when it takes it, so the owed one will be its newest, and the
+  pulled one is older, a name the reader cleared among them. A pulled
+  entry that says the same is the home's echo and settles the debt. Once
+  taken, the archive holds nothing older for the peer, but a pull already
+  under way may; until that pull ends an entry counts only if the home
+  took it after the device's answer came (its `at` past the device's
+  clock then, `UiModel::home_petname`). A cleared petname is an entry
+  with the empty name: the home needs no tombstone of its own, since its
+  newest entry of a peer is the reader's last word.
 
 ## Contact keys from a code
 

@@ -6,7 +6,7 @@
 //! ([`measure`]), as iced sets the label on the canvas.
 
 pub use loquax::screenmap::{
-    area, battery_at, hit, pin_hue, Placed, BATTERY, DRAG, LABEL, LINE, MARKER,
+    area, battery_at, hit, pin_hue, Placed, BATTERY, DRAG, LABEL, LINE, MARKER, OWN_DOT,
 };
 
 /// What the model's map functions are told in the window
@@ -423,6 +423,7 @@ pub(super) mod tests {
                 &scene.now,
                 unit,
                 1.0,
+                loquax::ui::strings::Lang::En,
             );
             let pins = scenes::pins(&scene);
             for (theme, suffix) in themes {
@@ -496,10 +497,16 @@ pub(super) mod tests {
                 &scene.now,
                 unit,
                 1.0,
+                loquax::ui::strings::Lang::En,
             );
             let mut pins = scenes::pins(&scene);
             let shown = match radar::shows(&fitted, &setup.regions) {
-                true => radar::radar(&pins, view.unit(), view.size()),
+                true => radar::radar(
+                    &pins,
+                    view.unit(),
+                    view.size(),
+                    loquax::ui::strings::Lang::En,
+                ),
                 false => None,
             };
             assert_eq!(shown.is_some(), scene.name == "radar", "{}", scene.name);

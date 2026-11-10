@@ -479,7 +479,7 @@ final class MapPane implements MapView.Listener {
             own = Core.str(ours, "peer");
             people.put(own, ours);
         }
-        map.people(people, carded);
+        map.people(people, carded, own);
         // The pins drawn, and how many are nodes nearby (1302): the device
         // walk counts them here, the canvas has no nodes to dump.
         int nearby = 0;
@@ -582,7 +582,7 @@ final class MapPane implements MapView.Listener {
         friendsButton.setVisibility(View.GONE);
         locateButton.setVisibility(View.GONE);
         empty.setVisibility(View.GONE);
-        map.people(people, carded);
+        map.people(people, carded, own);
     }
 
     private void closeCard() {
@@ -591,7 +591,7 @@ final class MapPane implements MapView.Listener {
         friendsButton.setVisibility(View.VISIBLE);
         locateButton.setVisibility(View.VISIBLE);
         empty.setVisibility(friends.isEmpty() ? View.VISIBLE : View.GONE);
-        map.people(people, null);
+        map.people(people, null, own);
     }
 
     /** The card's words and buttons for `row`. */
@@ -668,7 +668,9 @@ final class MapPane implements MapView.Listener {
         // A peer that reports says whether it is alive, in the chat row's
         // words as the library says them (1209, 1217); one known from a
         // text alone how old its fix is.
+        String said = Core.str(row, "age");
         String age = !live.isEmpty() ? live
+                : !said.isEmpty() ? said
                 : Ui.nowSecs() - at < 60 ? activity.getString(R.string.just_now)
                 : activity.getString(R.string.card_ago, Ui.age(activity, at, Ui.nowSecs()));
         String distance = distance(row);

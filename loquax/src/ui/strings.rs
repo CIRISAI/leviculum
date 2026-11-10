@@ -42,31 +42,136 @@ leviculum_ui::catalogue! {
     TabChatsUnread = "tab_chats_unread", "Chats, %1$d with unread messages", "Chats, %1$d mit ungelesenen Nachrichten";
     Map = "map", "Map", "Karte";
     TabBrowse = "tab_browse", "Browse", "Seiten";
+    // 1578: Explore, the pages and the public rooms under one button.
+    TabExplore = "tab_explore", "Explore", "Entdecken";
+    ExplorePages = "explore_pages", "Pages", "Seiten";
+    ExploreRooms = "explore_rooms", "Rooms", "Räume";
+    ExploreSearchHint = "explore_search_hint", "Search", "Suchen";
+    ExploreSortSeen = "explore_sort_seen", "Last seen", "Zuletzt gesehen";
+    BrowseLoading = "browse_loading", "Loading %1$s …", "Lade %1$s …";
+    BrowseLoadingSecs = "browse_loading_secs", "Loading %1$s … %2$d s", "Lade %1$s … %2$d s";
+    ExploreSortAz = "explore_sort_az", "A to Z", "A bis Z";
+    ExploreBookmarks = "explore_bookmarks", "Bookmarks", "Lesezeichen";
+    ExploreToday = "explore_today", "Today", "Heute";
+    ExploreThisWeek = "explore_this_week", "This week", "Diese Woche";
+    ExploreOlder = "explore_older", "Older", "Älter";
+    ExploreAz = "explore_az", "All pages", "Alle Seiten";
+    ExploreNoMatch = "explore_no_match", "No page matches “%1$s”.", "Keine Seite passt zu „%1$s“.";
+    ExploreNoPages = "explore_no_pages", "No pages known yet: they appear here as soon as your mailbox or this device hears one.", "Noch keine Seiten bekannt: sie erscheinen hier, sobald dein Postfach oder dieses Gerät eine hört.";
+    ExplorePagesOff = "explore_pages_off", "Pages cannot be opened on this device yet.", "Seiten lassen sich auf diesem Gerät noch nicht öffnen.";
+    // 1621 (walk 2): the rooms the reader is in, then the servers, each
+    // section one sentence when empty.
+    ExploreNoJoined = "explore_no_joined", "You are in no room. Pick a server below.", "Du bist in keinem Raum. Such dir unten einen Server aus.";
+    ExploreServers = "explore_servers", "Servers", "Server";
+    ExploreNoServers = "explore_no_servers", "No server within reach.", "Kein Server in Reichweite.";
+    ExploreNoServerMatch = "explore_no_server_match", "No server matches “%1$s”.", "Kein Server passt zu „%1$s“.";
+    ExploreNotSeen = "explore_not_seen", "not seen yet", "noch nicht gesehen";
+    ExploreFreshOne = "explore_fresh_one", "1 new page", "1 neue Seite";
+    ExploreFreshMany = "explore_fresh_many", "%1$d new pages", "%1$d neue Seiten";
+    // The chip's two words (1632, walk 4 new 18): "N new pages" whenever
+    // pages that are not on the list wait behind it; "Update the order"
+    // only when none did and the waiting answer only moves rows that are
+    // there already.
+    ExploreFreshOrder = "explore_fresh_order", "Update the order", "Reihenfolge aktualisieren";
+    ExploreSeenNow = "explore_seen_now", "seen just now", "gesehen gerade eben";
+    ExploreSeenMinutes = "explore_seen_minutes", "seen %1$d min ago", "gesehen vor %1$d Min.";
+    ExploreSeenHours = "explore_seen_hours", "seen %1$d h ago", "gesehen vor %1$d Std.";
+    ExploreSeenDay = "explore_seen_day", "seen yesterday", "gesehen gestern";
+    ExploreSeenDays = "explore_seen_days", "seen %1$d days ago", "gesehen vor %1$d Tagen";
+    ExploreHop = "explore_hop", "directly reachable", "direkt erreichbar";
+    ExploreHops = "explore_hops", "reachable over %1$d stations", "über %1$d Stationen erreichbar";
+    ExploreOpenAddress = "explore_open_address", "Open %1$s", "%1$s öffnen";
+    ExploreBookmark = "explore_bookmark", "Bookmark", "Lesezeichen setzen";
+    ExploreUnbookmark = "explore_unbookmark", "Remove bookmark", "Lesezeichen entfernen";
+    // 1618 (walk of 17024c3a): the page's menu, a nameless page, and a server's sheet.
+    ExploreOpen = "explore_open", "Open", "Öffnen";
+    ExploreCopyAddress = "explore_copy_address", "Copy address", "Adresse kopieren";
+    ExploreCopied = "explore_copied", "Address copied", "Adresse kopiert";
+    ExploreUnnamedPage = "explore_unnamed_page", "Unnamed page", "Unbenannte Seite";
+    ExploreServerUse = "explore_server_use", "Use this server for rooms", "Diesen Server für Räume nutzen";
+    ExploreServerInUse = "explore_server_in_use", "Your rooms are on this server.", "Deine Räume laufen über diesen Server.";
+    ExploreServerRooms = "explore_server_rooms", "Its rooms", "Seine Räume";
+    ExploreServerNoRooms = "explore_server_no_rooms", "This server names no rooms. Use it, then type a room's name to join.", "Dieser Server nennt keine Räume. Nutz ihn und tipp dann den Namen eines Raums.";
+    ExploreServerAsking = "explore_server_asking", "Asking the server for its rooms…", "Frage den Server nach seinen Räumen…";
+    ExploreServerNoAnswer = "explore_server_no_answer", "The server did not answer, so its rooms are unknown. Use it, then type a room's name to join.", "Der Server hat nicht geantwortet, seine Räume sind unbekannt. Nutz ihn und tipp dann den Namen eines Raums.";
+    ExploreServerClose = "explore_server_close", "Close", "Schließen";
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";
     RoomsLive = "rooms_live", "A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.", "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.";
-    RoomsNoHub = "rooms_no_hub", "No hub yet. rooms_hub in the config names one.", "Noch kein Hub. rooms_hub in der Konfiguration nennt einen.";
-    RoomsLinking = "rooms_linking", "Connecting to the hub…", "Verbinde mit dem Hub…";
-    RoomsHub = "rooms_hub", "Hub %1$s", "Hub %1$s";
-    RoomsNoPath = "rooms_no_path", "The hub cannot be reached. Is it announced on this network?", "Der Hub ist nicht erreichbar. Wird er in diesem Netz angekündigt?";
-    RoomsNoAnswer = "rooms_no_answer", "The hub did not answer. Try again later.", "Der Hub hat nicht geantwortet. Versuch es später noch einmal.";
-    RoomsLost = "rooms_lost", "The connection to the hub broke. Open the Rooms again to reconnect.", "Die Verbindung zum Hub ist abgerissen. Öffne die Räume erneut, um neu zu verbinden.";
-    RoomsLeft = "rooms_left", "You left the hub.", "Du hast den Hub verlassen.";
-    RoomsOff = "rooms_off", "There are no Rooms here; rooms_hub in the config turns them on.", "Hier gibt es keine Räume; rooms_hub in der Konfiguration schaltet sie ein.";
+    RoomsNoHub = "rooms_no_hub", "No public rooms yet. Choose a server under Explore.", "Noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.";
+    RoomsLinking = "rooms_linking", "Connecting…", "Verbinde…";
+    RoomsNoPath = "rooms_no_path", "The rooms cannot be reached. Is their server on this network?", "Die Räume sind nicht erreichbar. Ist ihr Server in diesem Netz?";
+    RoomsNoAnswer = "rooms_no_answer", "The rooms did not answer. Try again later.", "Die Räume haben nicht geantwortet. Versuch es später noch einmal.";
+    RoomsLost = "rooms_lost", "The connection to the rooms broke. Open the Rooms again to reconnect.", "Die Verbindung zu den Räumen ist abgerissen. Öffne die Räume erneut, um neu zu verbinden.";
+    RoomsLeft = "rooms_left", "Not connected.", "Nicht verbunden.";
+    RoomsOff = "rooms_off", "There are no public rooms here yet. Choose a server under Explore.", "Hier gibt es noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.";
     RoomsHowToJoin = "rooms_how_to_join", "Type a room's name, like #lab, to join it.", "Tipp den Namen eines Raums, etwa #lab, um ihm beizutreten.";
-    RoomsHintRoom = "rooms_hint_room", "Enter sends to the room. /me for an action, /part to leave.", "Enter schickt in den Raum. /me für eine Aktion, /part zum Verlassen.";
-    RoomsNotReady = "rooms_not_ready", "The hub has not answered yet. Wait a moment and try again.", "Der Hub hat noch nicht geantwortet. Warte kurz und versuch es noch einmal.";
+    RoomsNotReady = "rooms_not_ready", "Not connected yet. Wait a moment and try again.", "Noch nicht verbunden. Warte kurz und versuch es noch einmal.";
     RoomsNotIn = "rooms_not_in", "You are not in %1$s. Join it first.", "Du bist nicht in %1$s. Tritt ihm zuerst bei.";
     RoomsTooLong = "rooms_too_long", "This line is %1$d bytes long and a room takes at most %2$d. Shorten it.", "Diese Zeile ist %1$d Bytes lang, ein Raum nimmt höchstens %2$d. Kürze sie.";
     RoomsTooBig = "rooms_too_big", "This line needs %1$d bytes and the link carries %2$d. Shorten it.", "Diese Zeile braucht %1$d Bytes, die Verbindung trägt %2$d. Kürze sie.";
     RoomsBadRoom = "rooms_bad_room", "A room name needs a few letters and no spaces.", "Ein Raumname braucht ein paar Buchstaben und keine Leerzeichen.";
-    RoomsTooMany = "rooms_too_many", "You are in %1$d rooms, as many as this hub allows. Leave one first.", "Du bist in %1$d Räumen, so vielen, wie dieser Hub erlaubt. Verlass zuerst einen.";
+    RoomsTooMany = "rooms_too_many", "You are in %1$d rooms, as many as their server allows. Leave one first.", "Du bist in %1$d Räumen, so vielen, wie ihr Server erlaubt. Verlass zuerst einen.";
     RoomsYou = "rooms_you", "you", "du";
     RoomsCameIn = "rooms_came_in", "%1$s came in", "%1$s ist da";
     // Our own join (1384): "du ist da" was the nick put into the line above.
     RoomsWeCameIn = "rooms_we_came_in", "you came in", "du bist da";
     RoomsWentOut = "rooms_went_out", "%1$s left", "%1$s ist gegangen";
+    // 1450: a room drawn as a chat, its header, its people and its menu.
+    RoomsJoinHint = "rooms_join_hint", "Room name, like #lab", "Raumname, etwa #lab";
+    RoomsOnlyYou = "rooms_only_you", "Only you so far", "Bisher nur du";
+    RoomsWithYou = "rooms_with_you", "%1$s, you", "%1$s, du";
+    RoomsPeople = "rooms_people", "Who is here", "Wer hier ist";
+    RoomsPeopleNote = "rooms_people_note", "Everyone who came in or wrote while you were here.", "Alle, die hereinkamen oder schrieben, während du hier warst.";
+    RoomsLeave = "rooms_leave", "Leave room", "Raum verlassen";
+    // 1577: the public rooms' hub, chosen in the settings, and the mark of a public room.
+    RoomsPublic = "rooms_public", "public", "öffentlich";
+    RoomsHub = "rooms_hub_setting", "Server for public rooms", "Server für öffentliche Räume";
+    RoomsHubNone = "rooms_hub_none", "None", "Keiner";
+    RoomsHubOwn = "rooms_hub_own", "Your own server", "Eigener Server";
+    RoomsHubPaste = "rooms_hub_paste", "Another server: paste its address", "Anderer Server: Adresse einfügen";
+    RoomsHubPasteHint = "rooms_hub_paste_hint", "The server's address", "Adresse des Servers";
+    RoomsHubBad = "rooms_hub_bad", "That is no server's address.", "Das ist keine Adresse eines Servers.";
+    RoomsHubChosen = "rooms_hub_chosen", "Public rooms on %1$s.", "Öffentliche Räume auf %1$s.";
+    RoomsHubOff = "rooms_hub_off", "No public rooms.", "Keine öffentlichen Räume.";
+    // 1599: hubs heard on the mesh, offered closest and newest first.
+    RoomsHubUnnamed = "rooms_hub_unnamed", "Server without a name", "Server ohne Namen";
+    RoomsHubHop = "rooms_hub_hop", "directly reachable", "direkt erreichbar";
+    RoomsHubHops = "rooms_hub_hops", "reachable over %1$d stations", "über %1$d Stationen erreichbar";
+    RoomsHubSuggested = "rooms_hub_suggested", "suggested", "empfohlen";
+    RoomsHubNoAnswer = "rooms_hub_no_answer", "no answer", "keine Antwort";
+    RoomsHubMore = "rooms_hub_more", "More…", "Mehr…";
+    RoomsNameVisible = "rooms_name_visible", "Your name is visible to everyone in the room.", "Dein Name ist im Raum für alle sichtbar.";
+    RoomsNoName = "rooms_no_name", "You have no name here: in the room you appear without one.", "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen.";
     Settings = "settings", "Settings", "Einstellungen";
+    // 1450 (walk 1, finding 21): the settings' nine sections, one list on
+    // every target (`super::settings`), in the phone's order.
+    SettingsProfile = "settings_profile", "Profile", "Profil";
+    SettingsProfileSummary = "settings_profile_summary", "Name, address, QR code", "Name, Adresse, QR-Code";
+    Mailbox = "mailbox", "Mailbox", "Postfach";
+    SettingsMailboxSummary = "settings_mailbox_summary", "Where it lives", "Wo es liegt";
+    SettingsAppearance = "settings_appearance", "Appearance", "Darstellung";
+    SettingsAppearanceSummary = "settings_appearance_summary", "Light or dark, the map", "Hell oder dunkel, die Karte";
+    SettingsChats = "settings_chats", "Chats", "Chats";
+    SettingsChatsSummary = "settings_chats_summary", "Photo size", "Fotogröße";
+    SettingsNotifications = "settings_notifications", "Notifications", "Benachrichtigungen";
+    SettingsNotificationsSummary = "settings_notifications_summary", "New messages, muted chats", "Neue Nachrichten, stumme Chats";
+    SettingsPrivacy = "settings_privacy", "Privacy", "Privatsphäre";
+    SettingsPrivacySummary = "settings_privacy_summary", "Read receipts, blocked contacts, positions you shared", "Lesebestätigungen, blockierte Kontakte, geteilte Positionen";
+    SettingsMapsSummary = "settings_maps_summary", "Maps on this device, automatic download", "Karten auf diesem Gerät, automatisch laden";
+    SettingsBackup = "settings_backup", "Backup", "Sicherung";
+    SettingsBackupSummary = "settings_backup_summary", "Back up the mailbox", "Das Postfach sichern";
+    Advanced = "advanced", "Advanced", "Erweitert";
+    SettingsAdvancedSummary = "settings_advanced_summary", "Relay and more", "Relais und mehr";
+    PropagationNode = "propagation_node", "Relay", "Relais";
+    PropagationNodeText = "propagation_node_text", "While your mailbox is offline, mail for you waits at a relay in the network, which Loquax chooses by itself.", "Solange dein Postfach offline ist, wartet Post für dich bei einem Relais im Netz, das Loquax selbst wählt.";
+    SettingsLight = "settings_light", "Light", "Hell";
+    SettingsDark = "settings_dark", "Dark", "Dunkel";
+    SettingsOn = "settings_on", "On", "An";
+    SettingsOff = "settings_off", "Off", "Aus";
+    SettingsNotificationsDesktop = "settings_notifications_desktop", "Loquax tells you of every new message with a notification of the desktop; a muted chat stays quiet. To mute one, open its menu in the list.", "Loquax meldet jede neue Nachricht mit einer Benachrichtigung des Desktops; ein stummer Chat bleibt still. Zum Stummschalten öffne sein Menü in der Liste.";
+    SettingsBackupDesktop = "settings_backup_desktop", "On a computer, loquax export writes your address, contacts and history to a folder, and loquax import reads them back.", "Auf einem Computer schreibt loquax export deine Adresse, deine Kontakte und den Verlauf in einen Ordner, loquax import liest sie wieder ein.";
+    SettingsNothingHere = "settings_nothing_here", "Nothing to set here on this device yet.", "Auf diesem Gerät gibt es hier noch nichts einzustellen.";
     MailboxConnected = "mailbox_connected", "You. Your mailbox is connected.", "Du. Dein Postfach ist verbunden.";
     MailboxNotConnected = "mailbox_not_connected", "You. Your mailbox is not connected.", "Du. Dein Postfach ist nicht verbunden.";
     Search = "search", "Search", "Suchen";
@@ -84,6 +189,13 @@ leviculum_ui::catalogue! {
     MarkRead = "mark_read", "Mark as read", "Als gelesen markieren";
     MarkUnread = "mark_unread", "Mark as unread", "Als ungelesen markieren";
     Delete = "delete", "Delete", "Löschen";
+    // Names (1452): the name alone, "Unknown" without one, and where two
+    // peers share a name, the sentence that says so beside the hash tails.
+    UnknownContact = "unknown_contact", "Unknown", "Unbekannt";
+    SameNameTwo = "same_name_two", "Two contacts are called %1$s", "Zwei Kontakte heißen %1$s";
+    SameNameMany = "same_name_many", "%1$d contacts are called %2$s", "%1$d Kontakte heißen %2$s";
+    NoNameTwo = "no_name_two", "Two contacts have no name yet", "Zwei Kontakte haben noch keinen Namen";
+    NoNameMany = "no_name_many", "%1$d contacts have no name yet", "%1$d Kontakte haben noch keinen Namen";
     // Times and the liveness words (1209).
     Today = "today", "Today", "Heute";
     Yesterday = "yesterday", "Yesterday", "Gestern";
@@ -91,32 +203,68 @@ leviculum_ui::catalogue! {
     MinutesAgo = "minutes_ago", "%1$d min", "%1$d Min.";
     HoursAgo = "hours_ago", "%1$d h", "%1$d Std.";
     DaysAgo = "days_ago", "%1$d d", "%1$d T.";
-    ListHours = "list_hours", "%1$dh", "%1$dh";
     Position = "position", "Position", "Position";
     Live = "live", "live", "live";
     LiveEvery = "live_every", "every %1$s", "alle %1$s";
     LiveAgo = "live_ago", "%1$s ago", "vor %1$s";
     LiveNow = "live_now", "now", "gerade eben";
     LastPosition = "last_position", "last position %1$s", "letzte Position %1$s";
+    // A shared position in a chat (1449 item 5, walk 1 finding 11): one
+    // sentence, never the coordinates, which the Info shows.
+    PositionLive = "position_live", "Live position", "Live-Position";
+    PositionToday = "position_today", "Position from today %1$s", "Position von heute %1$s";
+    PositionYesterday = "position_yesterday", "Position from yesterday %1$s", "Position von gestern %1$s";
+    PositionWeekday = "position_weekday", "Position from %1$s %2$s", "Position von %1$s %2$s";
+    PositionDate = "position_date", "Position from %1$s %2$s", "Position vom %1$s %2$s";
+    InfoPlace = "info_place", "Place", "Ort";
+    InfoAccuracy = "info_accuracy", "Accuracy", "Genauigkeit";
     PositionOf = "position_of", "Position of %1$s, %2$s", "Position von %1$s, %2$s";
     PositionMarker = "position_marker", "⌖", "⌖";
-    NoPosition = "no_position", "No position from this friend yet", "Noch keine Position von diesem Freund";
+    // Our own pin on the map (1447): "you" was English on every screen.
+    MapYou = "map_you", "you", "du";
+    // What stopping the phone's service costs (1447, walk 1 finding 27), under "Dienst beenden".
+    StopServiceText = "stop_service_text", "Loquax then receives nothing until you open it again.", "Loquax empfängt dann nichts mehr, bis du es wieder öffnest.";
+    // The radar's line where no map is loaded (1447, walk 1 finding 19).
+    RadarNote = "radar_note", "No map loaded for this area · Rings %1$s", "Keine Karte für diese Gegend geladen · Ringe %1$s";
+    RadarNoteOn = "radar_note_on", "No map loaded for this area · Rings %1$s around %2$s", "Keine Karte für diese Gegend geladen · Ringe %1$s um %2$s";
+    // The M9's map where no region lies under the view (1476): the words of
+    // 1447 §5 instead of plain grey, and how a region gets onto the board.
+    MapNoRegion = "map_no_region", "No map for this area", "Keine Karte für diese Gegend";
+    MapRegionHow = "map_region_how", "lnflash loads maps over USB", "Karten lädt lnflash per USB";
+    MapOverview = "map_overview", "Overview only", "Nur Übersicht";
+    MapSkySearching = "map_sky_searching", "Searching satellites… %1$d", "Suche Satelliten… %1$d";
+    MapSkyFix = "map_sky_fix", "Fix %1$s ago", "Fix vor %1$s";
+    // An empty conversation in the terminal (1447, walk 1 finding 22).
+    NoMessagesYet = "no_messages_yet", "No messages yet", "Noch keine Nachrichten";
+    // The terminal's title without a name of our own (1447).
+    AppName = "app_name_title", "Loquax", "Loquax";
+    // The map with nobody else's position (1447): the window, the phone and the terminal.
+    MapEmpty = "map_empty", "Nobody shares a position with you yet", "Noch niemand teilt eine Position mit dir";
+    NoPosition = "no_position", "No position from this person yet", "Noch keine Position von dieser Person";
     // A node the mesh shows on the map that is no contact (1302).
     NearbyCard = "nearby_card", "Nearby, not in your contacts", "In der Nähe, nicht in deinen Kontakten";
     NearbyAdd = "nearby_add", "Add", "Hinzufügen";
     NearbyEnterAdds = "nearby_enter_adds", "Enter adds", "Enter fügt hinzu";
     // The map on the M9 (1375): its pins in ASCII, the atlas has no ◉, and
     // the keys a board without a palette or a pointer works it with.
-    MapLegend = "map_legend", "* person  @ chosen  grey: old or nearby", "* Person  @ gewählt  grau: alt oder in der Nähe";
-    MapKeys = "map_keys", "arrows pan  +- zoom  space pin  enter open", "Pfeile schieben  +- Zoom  Leer Pin  Enter öffnen";
+    // 1447 (walk 1 finding 23): each fits the M9's 31 cells; the keys come in two pages.
+    MapKeys = "map_keys", "T in  Y out  arrows pan", "T näher  Y weiter  Pfeile schieben";
+    MapKeysPin = "map_keys_pin", "space next pin  enter open", "Leer nächster Pin  Enter öffnen";
     // A row's last line while a message is typed there and not sent (1219).
     DraftRow = "draft_row", "Draft: %1$s", "Entwurf: %1$s";
     // The terminal's list line of our own last message (1381).
     RowYou = "row_you", "you: %1$s", "du: %1$s";
     Reacted = "reacted", "reacted %1$s", "hat mit %1$s reagiert";
+    // A reaction's line with its subject (1447, walk 1 finding 24).
+    ReactedBy = "reacted_by", "%1$s reacted %2$s", "%1$s hat mit %2$s reagiert";
     YouReacted = "you_reacted", "You reacted %1$s", "Du hast mit %1$s reagiert";
     RunUpdates = "run_updates", "%1$d updates since %2$s", "%1$d Meldungen seit %2$s";
     QuoteYou = "quote_you", "You", "Du";
+    // A relayed group (1482): a bot's chat, a reaction or a reply whose target is not on this device.
+    RelayedGroup = "relayed_group", "%1$s · group via relay", "%1$s · Gruppe über Relais";
+    ReactedElsewhere = "reacted_elsewhere", "reacted %1$s to a message that is not here", "hat mit %1$s auf eine Nachricht reagiert, die hier nicht liegt";
+    QuoteNotHere = "quote_not_here", "A message that is not here", "Eine Nachricht, die hier nicht liegt";
+    InfoRelayedFrom = "info_relayed_from", "%1$s %2$s, via %3$s", "%1$s %2$s, über %3$s";
     // A row's last line for a message without words (1377): the list and
     // the phone's notification say these in the reader's language.
     RowPhoto = "row_photo", "Photo", "Foto";
@@ -253,10 +401,17 @@ leviculum_ui::catalogue! {
     GroupRemove = "group_remove", "Remove", "Entfernen";
     GroupAdd = "group_add", "Add members", "Mitglieder hinzufügen";
     GroupAddConfirm = "group_add_confirm", "Add", "Hinzufügen";
+    // The header's relay, by the name it announces, never its hash (1587,
+    // feedback_no_hashes_on_screen).
+    RelayNamed = "relay_named", "relay %1$s", "Relais %1$s";
+    RelayUnnamed = "relay_unnamed", "a relay", "ein Relais";
     GroupRemoveAsk = "group_remove_ask", "Remove %1$s from %2$s?", "%1$s aus %2$s entfernen?";
     GroupYes = "group_yes", "Yes", "Ja";
     GroupNo = "group_no", "No", "Nein";
     GroupYou = "group_you", "You", "Du";
+    // 1449 item 3 (walk 1 finding 9): a group's chat menu names the group,
+    // never a contact.
+    GroupInfo = "group_info", "Group info", "Gruppeninfo";
     GroupAdmin = "group_admin", "admin", "Admin";
     GroupStateJoined = "group_state_joined", "joined", "beigetreten";
     GroupStateInvited = "group_state_invited", "invited", "eingeladen";
@@ -297,7 +452,9 @@ leviculum_ui::catalogue! {
     ProfileAddress = "profile_address", "Your address", "Deine Adresse";
     ProfileQrCaption = "profile_qr_caption", "Scan this code to add me as a contact", "Scanne diesen Code, um mich als Kontakt hinzuzufügen";
     ProfileMailboxHere = "profile_mailbox_here", "Mailbox: on this device", "Postfach: auf diesem Gerät";
-    ProfileMailboxAway = "profile_mailbox_away_undated", "Mailbox: on %1$s", "Postfach: auf %1$s";
+    // 1447 (walk 1 finding 13): the mailbox by the name it announces, never the server it is reached through.
+    ProfileMailboxAway = "profile_mailbox_named", "Mailbox: %1$s", "Postfach: %1$s";
+    ProfileMailboxConnected = "profile_mailbox_connected", "%1$s (connected)", "%1$s (verbunden)";
     ProfileMailboxElsewhere = "profile_mailbox_elsewhere", "Mailbox: on another device", "Postfach: auf einem anderen Gerät";
     ProfileThisDeviceUnnamed = "profile_this_device_unnamed", "This device", "Dieses Gerät";
     ProfileDeviceUnnamed = "profile_device_unnamed", "A device without a name", "Ein Gerät ohne Namen";
@@ -307,6 +464,41 @@ leviculum_ui::catalogue! {
     ProfileThisDevice = "profile_this_device", "%1$s (this device)", "%1$s (dieses Gerät)";
     ProfileShare = "profile_share", "Share my address", "Meine Adresse teilen";
     ProfileCopied = "profile_copied", "Your address is on the clipboard", "Deine Adresse ist in der Zwischenablage";
+    // 1642: the mailbox page, when the mailbox is on another device: which one, how it is reached, who uses it.
+    MailboxWhich = "mailbox_which", "Which mailbox", "Welches Postfach";
+    MailboxName = "mailbox_name", "Name", "Name";
+    MailboxNameUnheard = "mailbox_name_unheard", "not heard yet", "noch nicht gehört";
+    MailboxAddress = "mailbox_address", "Address", "Adresse";
+    MailboxHost = "mailbox_host", "Runs on", "Läuft auf";
+    MailboxVersion = "mailbox_version", "Version", "Version";
+    MailboxVersionOther = "mailbox_version_other", "%1$s (this device: %2$s)", "%1$s (dieses Gerät: %2$s)";
+    MailboxVersionOld = "mailbox_version_old", "older than this device", "älter als dieses Gerät";
+    MailboxOldText = "mailbox_old_text", "Your mailbox runs an older version. Update it there so that Explore and this page are complete.", "Dein Postfach läuft mit einer älteren Version. Aktualisiere es dort, damit Entdecken und diese Seite vollständig sind.";
+    MailboxReach = "mailbox_reach", "Connection", "Verbindung";
+    MailboxUp = "mailbox_up", "Connected", "Verbunden";
+    MailboxUpFor = "mailbox_up_for", "Connected for %1$s", "Verbunden seit %1$s";
+    MailboxDown = "mailbox_down", "Not connected", "Nicht verbunden";
+    MailboxDownFor = "mailbox_down_for", "Not connected for %1$s", "Nicht verbunden seit %1$s";
+    MailboxMoment = "mailbox_moment", "less than a minute", "weniger als einer Minute";
+    MailboxContact = "mailbox_contact", "Last contact", "Letzter Kontakt";
+    MailboxContactNone = "mailbox_contact_none", "none yet", "noch keiner";
+    MailboxWayShielded = "mailbox_way_shielded", "Connection over %1$s, port %2$d, shielded", "Verbindung über %1$s, Tor %2$d, geschirmt";
+    MailboxWayOpen = "mailbox_way_open", "Connection over %1$s, port %2$d, not shielded", "Verbindung über %1$s, Tor %2$d, ungeschirmt";
+    MailboxWayOther = "mailbox_way_other", "Connection over %1$s, port %2$d", "Verbindung über %1$s, Tor %2$d";
+    MailboxWayNone = "mailbox_way_none", "No server reached yet", "Noch kein Server erreicht";
+    MailboxWayLocal = "mailbox_way_local", "Over this computer's network connection", "Über die Netzverbindung dieses Rechners";
+    MailboxShieldedText = "mailbox_shielded_text", "Shielded: this device hears only what is meant for it.", "Geschirmt: dieses Gerät hört nur, was für es bestimmt ist.";
+    MailboxOpenText = "mailbox_open_text", "Not shielded: the shielded port could not be reached, so this device hears the whole mesh, which costs data and battery.", "Ungeschirmt: das geschirmte Tor war nicht erreichbar, deshalb hört dieses Gerät das ganze Mesh mit, was Daten und Akku kostet.";
+    MailboxAccess = "mailbox_access", "Devices of this mailbox", "Geräte dieses Postfachs";
+    MailboxSeen = "mailbox_seen", "last there %1$s", "zuletzt da %1$s";
+    MailboxSeenNone = "mailbox_seen_none", "not there yet", "noch nicht da gewesen";
+    MailboxThisDevice = "mailbox_this_device", "this device", "dieses Gerät";
+    MailboxDevicesAsking = "mailbox_devices_asking", "Asking your mailbox which devices use it …", "Dein Postfach wird gefragt, welche Geräte es nutzen …";
+    MailboxDevicesOld = "mailbox_devices_old", "Your mailbox does not list its devices yet: that needs a newer version there.", "Dein Postfach nennt seine Geräte noch nicht: dafür braucht es dort eine neuere Version.";
+    MailboxAccessThere = "mailbox_access_there", "A device is added or removed on the mailbox itself.", "Ein Gerät wird am Postfach selbst hinzugefügt oder entfernt.";
+    MailboxShowCode = "mailbox_show_code", "Show my code", "Meinen Code zeigen";
+    MailboxCopy = "mailbox_copy", "Copy", "Kopieren";
+    MailboxCopied = "mailbox_copied", "The mailbox's address is on the clipboard", "Die Adresse des Postfachs ist in der Zwischenablage";
     // The ladder's header words (loquax-reachability.md), as "Connected over %1$s" names them.
     RungLocal = "rung_local", "this computer", "diesen Rechner";
     RungBluetooth = "rung_bluetooth", "Bluetooth", "Bluetooth";
@@ -387,6 +579,7 @@ leviculum_ui::catalogue! {
     // position button and its sheet, the camera and the staged photo.
     Attach = "scene_attach", "Attach", "Anhängen";
     Locate = "scene_locate", "My position", "Meine Position";
+    SendPositionTo = "scene_send_position_to", "Send position to %1$s", "Position an %1$s senden";
     Camera = "scene_camera", "Take a photo", "Foto aufnehmen";
     CameraNoApp = "camera_no_app", "There is no camera app on this device.", "Auf diesem Gerät gibt es keine Kamera-App.";
     Staged = "scene_staged", "Photo to send, %1$s", "Foto zum Senden, %1$s";
@@ -423,14 +616,21 @@ leviculum_ui::catalogue! {
     // what a picture without one says, without the file's path.
     CodeFromPicture = "code_from_picture", "Read a code from a picture", "Code aus einem Bild lesen";
     CodeNotInPicture = "code_not_in_picture", "There is no code in this picture.", "In diesem Bild ist kein Code.";
-    CodeIsMailbox = "code_is_mailbox", "That code is for a mailbox, not for a friend.", "Dieser Code ist für ein Postfach, nicht für einen Kontakt.";
+    CodeIsMailbox = "code_is_mailbox", "That code is for a mailbox, not for a contact.", "Dieser Code ist für ein Postfach, nicht für einen Kontakt.";
     // The pencil's screen (1263): scan first, paste second, typing under
     // Advanced.
     NewScan = "new_scan", "Scan a code", "Code scannen";
     NewPaste = "new_paste", "Paste a code", "Code einfügen";
-    NewHint = "new_hint", "Your friend's code is on their profile, behind their picture.", "Den Code deines Kontakts findest du in seinem Profil, hinter dem Bild.";
-    NewTyped = "new_typed", "Or type the address your friend gave you.", "Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.";
-    NewNothing = "new_nothing", "There is nothing to paste. Copy your friend's code first.", "Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.";
+    NewHint = "new_hint", "Ask your contact for their code: in Loquax they tap their own picture at the top.", "Lass dir den Code zeigen: In Loquax tippt dein Kontakt oben auf sein eigenes Bild.";
+    NewTyped = "new_typed", "Or type the address your contact gave you.", "Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.";
+    // 1449 item 8: the terminal's words that still said "friend".
+    AskForwardTo = "ask_forward_to", "Forward to: a contact's name", "Weiterleiten an: Name eines Kontakts";
+    AskContactCode = "ask_contact_code", "Your contact's code or address", "Code oder Adresse deines Kontakts";
+    AskGroupTick = "ask_group_tick", "Tick contacts: type a name, Enter ticks or unticks it", "Kontakte ankreuzen: Namen tippen, Enter kreuzt an oder ab";
+    NoContactCalled = "no_contact_called", "No contact called %1$s", "Kein Kontakt namens %1$s";
+    NoConversationsTyped = "no_conversations_typed", "No conversations yet: :new conversation starts one with a contact's code.", "Noch keine Unterhaltungen: :new conversation beginnt eine mit dem Code eines Kontakts.";
+    AppConnecting = "app_connecting", "Loquax (connecting)", "Loquax (verbindet)";
+    NewNothing = "new_nothing", "There is nothing to paste. Copy your contact's code first.", "Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.";
     // Joining a mailbox (1263, finding 8): one sentence each, the
     // daemon's words under Details.
     JoinNoAnswer = "join_no_answer", "The mailbox did not answer. Is the computer on?", "Das Postfach hat nicht geantwortet. Ist der Computer an?";
@@ -502,9 +702,46 @@ leviculum_ui::catalogue! {
     October = "scene_october", "October", "Oktober";
     November = "scene_november", "November", "November";
     December = "scene_december", "December", "Dezember";
+    // The list's time (1449 item 4, walk 1 finding 10): one format on every
+    // target, "17:37" today, "Gestern", the weekday short within the week,
+    // else the date; never "17 Min." or "7h".
+    // The month is its short word, "Oct" in English and "10." in German.
+    ListDate = "scene_list_date", "%1$d %2$s", "%1$d.%2$s";
+    ListDateYear = "scene_list_date_year", "%1$d %2$s %3$d", "%1$d.%2$s%3$d";
+    JanuaryShort = "scene_january_short", "Jan", "1.";
+    FebruaryShort = "scene_february_short", "Feb", "2.";
+    MarchShort = "scene_march_short", "Mar", "3.";
+    AprilShort = "scene_april_short", "Apr", "4.";
+    MayShort = "scene_may_short", "May", "5.";
+    JuneShort = "scene_june_short", "Jun", "6.";
+    JulyShort = "scene_july_short", "Jul", "7.";
+    AugustShort = "scene_august_short", "Aug", "8.";
+    SeptemberShort = "scene_september_short", "Sep", "9.";
+    OctoberShort = "scene_october_short", "Oct", "10.";
+    NovemberShort = "scene_november_short", "Nov", "11.";
+    DecemberShort = "scene_december_short", "Dec", "12.";
+    MondayShort = "scene_monday_short", "Mon", "Mo.";
+    TuesdayShort = "scene_tuesday_short", "Tue", "Di.";
+    WednesdayShort = "scene_wednesday_short", "Wed", "Mi.";
+    ThursdayShort = "scene_thursday_short", "Thu", "Do.";
+    FridayShort = "scene_friday_short", "Fri", "Fr.";
+    SaturdayShort = "scene_saturday_short", "Sat", "Sa.";
+    SundayShort = "scene_sunday_short", "Sun", "So.";
     // A start with no daemon to attach to (1265, walk finding 5): one
     // sentence and the one command, the stack's detail behind --verbose.
     NeedsService = "needs_service", "Loquax needs its network service. Start it with: %1$s", "Loquax braucht seinen Netzwerkdienst. Starte ihn mit: %1$s";
+    // The M9's error states (1493): a failed write is a word on the
+    // screen, never only a log line.
+    M9NotSaved = "m9_not_saved", "Not saved: memory error", "Nicht gespeichert: Speicherfehler";
+    M9JoinNotSaved = "m9_join_not_saved", "Connected, but not saved: pair again after a restart", "Verbunden, aber nicht gespeichert: nach einem Neustart neu koppeln";
+    M9NoIdentity = "m9_no_identity", "Memory error: this device cannot read its identity and cannot start. Restart it; if this stays, it needs service.", "Speicherfehler: Dieses Gerät kann seine Identität nicht lesen und nicht starten. Starte es neu; bleibt das so, braucht es Service.";
+    // The M9's overview behind the house key and its type switch (1532).
+    M9Overview = "m9_overview", "Overview", "Übersicht";
+    M9Type = "m9_type", "Text", "Schrift";
+    M9TypeSmall = "m9_type_small", "small", "klein";
+    M9TypeLarge = "m9_type_large", "large", "groß";
+    M9TypeNowSmall = "m9_type_now_small", "Text: small", "Schrift: klein";
+    M9TypeNowLarge = "m9_type_now_large", "Text: large", "Schrift: groß";
 }
 
 /// [`leviculum_ui::strings::format`] over Loquax's catalogue.
@@ -555,6 +792,77 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), count, "a key twice");
+    }
+
+    /// A reader never reads the protocol's name (1577): "public rooms",
+    /// never RRC or Relay Chat, in either language.
+    #[test]
+    fn no_string_names_the_protocol() {
+        for (_, key, en, de) in CATALOGUE {
+            for text in [en, de] {
+                let lower = text.to_lowercase();
+                assert!(
+                    !lower.contains("rrc")
+                        && !lower.contains("relay chat")
+                        && !lower.contains("rooms_hub"),
+                    "{key}: {text}"
+                );
+                // 1618: a WhatsApp reader knows neither word; the UI says
+                // "server" and how far, never "hub" or "hops".
+                assert!(
+                    !plain_words(text).iter().any(|w| forbidden_word(w)),
+                    "{key}: {text}"
+                );
+            }
+        }
+        // The control: the check reads the catalogue's words.
+        assert!(CATALOGUE
+            .iter()
+            .any(|(_, _, en, _)| en.to_lowercase().contains("public rooms")));
+        // The control of 1618's words: the check catches them in both
+        // languages, and spares a word that only holds the letters.
+        assert!(plain_words("Hubs in deinem Netz")
+            .iter()
+            .any(|w| forbidden_word(w)));
+        assert!(plain_words("1 Hop entfernt")
+            .iter()
+            .any(|w| forbidden_word(w)));
+        assert!(plain_words("%1$d hops away")
+            .iter()
+            .any(|w| forbidden_word(w)));
+        assert!(!plain_words("Schublade, Shop, Hopfen")
+            .iter()
+            .any(|w| forbidden_word(w)));
+    }
+
+    /// The words of `text`, lower case, split at whatever is no letter.
+    fn plain_words(text: &str) -> Vec<String> {
+        text.split(|c: char| !c.is_alphabetic())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    }
+
+    /// Lew 2026-11-06: nobody on the screen is a "friend"; a contact is a
+    /// contact, in both languages (1449 item 8).
+    #[test]
+    fn no_string_calls_anyone_a_friend() {
+        let friendly = |text: &str| {
+            plain_words(text)
+                .iter()
+                .any(|w| w.starts_with("friend") || w.starts_with("freund"))
+        };
+        for (_, key, en, de) in CATALOGUE {
+            assert!(!friendly(en) && !friendly(de), "{key}: {en} / {de}");
+        }
+        // The control: the check catches the word in either language.
+        assert!(friendly("Copy your friend's code") && friendly("Freunde auf der Karte"));
+        assert!(!friendly("your contact's code"));
+    }
+
+    /// "hub", "hubs", "hop", "hops" (1618).
+    fn forbidden_word(word: &str) -> bool {
+        matches!(word, "hub" | "hubs" | "hop" | "hops")
     }
 
     #[test]

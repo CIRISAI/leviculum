@@ -1,8 +1,8 @@
 --- empty
-┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation starts││                                                    │
-│one with a friend's     ││                                                    │
+│one with a contact's    ││                                                    │
 │code.                   ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -10,16 +10,16 @@
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  compose─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- palette
-┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation s┌ commands ────────────────────────────┐                   │
-│one with a friend's│>                                     │                   │
+│one with a contact'│>                                     │                   │
 │code.              │▸ send  Enter                         │                   │
 │                   │  new conversation                    │                   │
 │                   │  add contact                         │                   │
@@ -27,42 +27,42 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                   │  fetch  F5                           │                   │
 │                   │  quit  q                             │                   │
 │                   │  help  ?                             │                   │
-│                   │  focus conversations                 │s device           │
+│                   │  focus conversations                 │                   │
 │                   │  focus messages  Enter               │ Alt-Enter newline ┤
 │                   │  focus compose  i                    │                   │
 └────────────── / se│  next conversation  Alt-↓            │───────────────────┘
 Enter run │ Esc clos└  previous conversation  Alt-↑────────┘
 --- asking
-┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation s┌ commands ────────────────────────────┐                   │
-│one with a friend's│>                                     │                   │
-│code.              │your friend's code or address         │                   │
+│one with a contact'│>                                     │                   │
+│code.              │Your contact's code or address        │                   │
 │                   │Enter opens the conversation          │                   │
 │                   └──────────────────────────────────────┘                   │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
-│                        ││           nothing earlier on this device           │
+│                        ││                  No messages yet                   │
 │                        │├  compose─────────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- naming
-┌  Loquax (attaching)────┐┌  <4ca16772…>───────────────────────────────────────┐
-│ <bebebebe…>            ││                                                    │
+┌  Loquax (connecting)───┐┌  Unknown ·4ca1  Two contacts have no name yet──────┐
+│ Unknown ·bebe          ││                                                    │
 │                   ┌ commands ────────────────────────────┐                   │
 │                   │>                                     │                   │
-│▌<4ca16772…>       │your name for <4ca16772…>             │                   │
+│▌Unknown ·4ca1     │your name for Unknown ·4ca1           │                   │
 │▌                  │Enter sets it, empty clears it        │                   │
 │                   └──────────────────────────────────────┘                   │
 │                        ││                                                    │
 │                        ││                                                    │
 │                        ││                      ┌────────────────────────────┐│
 │                        ││                      │⚠ That is not a Loquax code.││
-│                        ││           nothing ear└────────────────────────────┘│
-│                        │├● to <4ca16772…>──── Enter send · Alt-Enter newline ┤
+│                        ││                  No m└────────────────────────────┘│
+│                        │├● to Unknown ·4ca1── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close

@@ -211,7 +211,9 @@ fn the_tab_is_in_the_phones_tab_bar() {
         .scene(loquax::ui::scene::LayoutClass::Compact)
         .tabs
         .expect("the tab bar");
-    assert!(tabs.items.iter().any(|tab| tab.id == TabId::Browse));
+    // The pages are Explore's (1578): three buttons, no fourth.
+    let ids: Vec<TabId> = tabs.items.iter().map(|tab| tab.id).collect();
+    assert_eq!(ids, [TabId::Chats, TabId::Map, TabId::Explore]);
 }
 
 #[test]

@@ -254,6 +254,38 @@ if [ -n "$DESKTOP_TRIPLE" ]; then
     cargo zigbuild --release --target "${DESKTOP_TRIPLE}.${GLIBC_FLOOR}" "${DESKTOP_ARGS[@]}"
 fi
 
+# amd64's loquax a second time, for x86-64-v3 (1469, #474): the window draws
+# through tiny-skia, whose wide types are picked by cfg(target_feature) at
+# compile time, so only a build with AVX2 reaches them (1442 measured the map's
+# wheel 23 to 29 % faster at 1527x2099). The package ships it as
+# /usr/lib/loquax/loquax-v3 (loquax/Cargo.toml, variant amd64), and the
+# baseline binary hands itself over to it on a CPU that runs it
+# (loquax/src/cpu.rs). Its own target directory, so neither build takes the
+# other's artefacts as fresh; pinned under this repository's target/ because
+# the asset path is read relative to the manifest, as the manual pages' is.
+# Only the target's flags: the build scripts and proc macros run here and
+# stay baseline. arm64 has no second build, NEON is its baseline; the static
+# tarball (collect-nightly-debs.sh) stays baseline too.
+V3_TARGET="$ROOT/target/x86-64-v3"
+v3_marker='(x86-64-v3)'
+if [ "$ARCH" = amd64 ]; then
+    CARGO_TARGET_DIR="$V3_TARGET" cargo clean -p loquax --target "$DESKTOP_TRIPLE"
+    CARGO_TARGET_DIR="$V3_TARGET" CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v3" \
+        cargo zigbuild --release --target "${DESKTOP_TRIPLE}.${GLIBC_FLOOR}" -p loquax --bin loquax \
+        "${DESKTOP_FEATURES[@]}"
+    # Read off the bytes, as the allocator below: `--version` of the v3
+    # build ends in the marker (loquax/src/main.rs, cpu_suffix), the
+    # baseline's does not, so a flag that did not reach rustc fails here.
+    grep -qaF "$v3_marker" "$V3_TARGET/$DESKTOP_TRIPLE/release/loquax" || {
+        echo "error: the x86-64-v3 loquax was not built for x86-64-v3 (no '$v3_marker')" >&2
+        exit 1
+    }
+    if grep -qaF "$v3_marker" "$TARGET/$DESKTOP_TRIPLE/release/loquax"; then
+        echo "error: the baseline loquax carries '$v3_marker'" >&2
+        exit 1
+    fi
+fi
+
 # The allocator is read off the bytes, like the heap-accounting marker below:
 # an arm64 binary cannot be run here. lnsd and lnpnd log `Allocator: mimalloc`
 # at startup only when they were built on mimalloc, so a package that would
@@ -293,7 +325,9 @@ for crate in "${CRATES[@]}"; do
     version="$(cat ".deb-version-${crate}")"
     deb_args=(--target "$TRIPLE")
     if [ "$crate" = loquax ]; then
-        if [ -n "$DESKTOP_TRIPLE" ]; then
+        if [ "$ARCH" = amd64 ]; then
+            deb_args=(--target "$DESKTOP_TRIPLE" --variant amd64)
+        elif [ -n "$DESKTOP_TRIPLE" ]; then
             deb_args=(--target "$DESKTOP_TRIPLE")
         else
             deb_args+=(--variant terminal)

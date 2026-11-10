@@ -13,6 +13,11 @@
 //! The service notice's rules (1345), `Notice.java`, run with
 //! `tests/java/NoticeTest.java`: which change posts the notice again and
 //! when a reboot starts the service.
+//!
+//! The engine's questions (1496), `Engine.java`, run with
+//! `tests/java/EngineTest.java` and stand-ins for Android's `Handler`,
+//! `Looper` and `Log` (`tests/java/stubs`): a question that throws reaches
+//! its failure path.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -202,6 +207,128 @@ fn the_server_field_follows_a_typed_code() {
     assert!(out.contains("checks passed"), "{out}");
 }
 
+/// The join form's rules (1448, walk finding 4): `JoinForm.java` with
+/// `ServerField.java` run on the host with `tests/java/JoinFormTest.java`.
+/// The form's own start without a code says no failure, a join the user
+/// asked for does; the address field is offered only under a code without
+/// servers. The control in the Java, the rule before, says a failure on the
+/// bare form.
+#[test]
+fn the_join_form_says_a_failure_only_after_a_join() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("join-form-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/ServerField.java"))
+        .arg(manifest.join("android/src/network/leviculum/loquax/JoinForm.java"))
+        .arg(manifest.join("tests/java/JoinFormTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.JoinFormTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
+/// A new conversation's picker rows (1448, walk finding 17):
+/// `PeopleRows.java` run on the host with `tests/java/PeopleRowsTest.java`.
+/// The group picker is the people's list with check marks, in their order
+/// and with their look; the control, the dialog's rows before, has no look.
+#[test]
+fn the_group_picker_is_the_people_list_with_check_marks() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("people-rows-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/PeopleRows.java"))
+        .arg(manifest.join("tests/java/PeopleRowsTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.PeopleRowsTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
+/// The Explore pane's rules (1618, the walk of 17024c3a):
+/// `ExploreRows.java` run on the host with
+/// `tests/java/ExploreRowsTest.java`. 32 characters typed fast all stay
+/// in the field (the control, the rule before, loses some, as the Pixel
+/// lost 10 of 32), a row under a finger stays while a new order
+/// arrives (the control lands on the walk's wrong row), and (1621, walk 2)
+/// the row under a planned tap stays at its pixel across ten new pages,
+/// scrolled and at the top, the chip counting those that wait (the
+/// control, ListView by position, moves it).
+#[test]
+fn the_explore_field_keeps_every_character_and_rows_hold_under_a_finger() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("explore-rows-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/ExploreRows.java"))
+        .arg(manifest.join("tests/java/ExploreRowsTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.ExploreRowsTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
 /// When nothing changes, nothing is drawn (1455): `Quiet.java`, the rules
 /// the phone's screens ask before drawing again, run on the host with
 /// `tests/java/QuietTest.java`. The map's live ring pulses for its first
@@ -232,6 +359,86 @@ fn the_phone_draws_nothing_while_nothing_changes() {
         .arg("-cp")
         .arg(&classes)
         .arg("network.leviculum.loquax.QuietTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
+/// A question that throws reaches its failure path (1496): `Engine.java`
+/// run on the host with `tests/java/EngineTest.java` over stand-ins for
+/// Android's `Handler`, `Looper` and `Log`. Before, a throw in `Engine.ask`
+/// left `got` unsaid, and `ChatActivity.asking` stayed set for good.
+#[test]
+fn a_question_that_throws_reaches_its_failure_path() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("engine-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let stubs = manifest.join("tests/java/stubs/android");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(stubs.join("os/Looper.java"))
+        .arg(stubs.join("os/Handler.java"))
+        .arg(stubs.join("util/Log.java"))
+        .arg(manifest.join("android/src/network/leviculum/loquax/Engine.java"))
+        .arg(manifest.join("tests/java/EngineTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.EngineTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
+/// The chat's Back (1449 item 1, walk finding 5): `BackRule.java` run on
+/// the host with `tests/java/BackRuleTest.java`. A reply being written
+/// survives Back: the keyboard closes first, the screen leaves with the
+/// reply in the draft. The control in the Java, the rule before, ended it.
+#[test]
+fn back_closes_the_keyboard_and_keeps_the_reply() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("back-rule-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/BackRule.java"))
+        .arg(manifest.join("tests/java/BackRuleTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.BackRuleTest")
         .output()
         .expect("java runs (the same JDK)");
     let out = String::from_utf8_lossy(&ran.stdout);

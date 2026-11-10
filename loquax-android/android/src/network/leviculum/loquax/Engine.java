@@ -101,10 +101,30 @@ final class Engine {
      * first pull's 44 s in the list's query on the UI thread.
      */
     static <T> void ask(final Ask<T> ask, final Got<T> got) {
+        ask(ask, got, null);
+    }
+
+    /**
+     * {@link #ask(Ask, Got)}, and `failed` on the UI thread when the
+     * question threw (1496): a reply the library could not make, a
+     * MsgPack that did not decode, memory that ran out. Before, a throw
+     * left the caller waiting for `got` forever; the chat's `asking`
+     * stayed set and it never asked again. The throw goes to the log.
+     */
+    static <T> void ask(final Ask<T> ask, final Got<T> got, final Runnable failed) {
         THREAD.execute(new Runnable() {
             @Override
             public void run() {
-                final T answer = ask.ask();
+                final T answer;
+                try {
+                    answer = ask.ask();
+                } catch (Throwable thrown) {
+                    Log.e(TAG, "a question threw", thrown);
+                    if (failed != null) {
+                        MAIN.post(failed);
+                    }
+                    return;
+                }
                 MAIN.post(new Runnable() {
                     @Override
                     public void run() {

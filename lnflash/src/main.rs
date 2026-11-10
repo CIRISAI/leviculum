@@ -45,6 +45,11 @@ use lnflash::usb::{Sysfs, SYSFS_USB_DEVICES};
                   automounting assumes a desktop stack a headless host does not have.\n\n\
                   No network access, ever — everything it writes is in the bundle."
 )]
+#[command(group(
+    clap::ArgGroup::new("port_user")
+        .args(["home", "region", "regions"])
+        .multiple(false)
+))]
 struct Cli {
     /// Where the bundle is. Otherwise: $LNFLASH_BUNDLE, then next to this
     /// binary, then /usr/share/lnflash.
@@ -516,10 +521,26 @@ struct Cli {
     #[arg(long, value_name = "CODE", requires = "port")]
     home: Option<String>,
 
-    /// The serial port of the board --home talks to, such as
-    /// /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 for the M9's
-    /// CH340K. Opening it resets the board; the session waits for its boot.
-    #[arg(long, value_name = "TTY", requires = "home")]
+    /// Write map regions (a .lmr each, as leviculum-map-tool cuts them)
+    /// into the map area of the ThinkNode M9 on --port, then exit. Give it
+    /// once per region; together they replace what the area held. Where a
+    /// region lies under the view the board draws it, elsewhere its world
+    /// overview. Written through the ROM loader by espflash, as the M9's
+    /// image is; the board resets and boots with them. Its [MAP] regions=
+    /// line names what it found.
+    #[arg(long, value_name = "FILE.lmr", requires = "port")]
+    region: Vec<PathBuf>,
+
+    /// List the regions in the map area of the ThinkNode M9 on --port,
+    /// then exit.
+    #[arg(long, requires = "port")]
+    regions: bool,
+
+    /// The serial port of the board --home, --region or --regions talks
+    /// to, such as /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 for the
+    /// M9's CH340K. Opening it resets the board; the session waits for its
+    /// boot.
+    #[arg(long, value_name = "TTY", requires = "port_user")]
     port: Option<PathBuf>,
 }
 
@@ -809,6 +830,17 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         } else {
             ExitCode::FAILURE
         });
+    }
+
+    if let (false, Some(port)) = (cli.region.is_empty(), &cli.port) {
+        let said = lnflash::maps::write(port, &cli.region)?;
+        ui.say(&said);
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let (true, Some(port)) = (cli.regions, &cli.port) {
+        let said = lnflash::maps::list(port)?;
+        ui.say(&said);
+        return Ok(ExitCode::SUCCESS);
     }
 
     if let Some(file) = &cli.summarize {
@@ -1401,6 +1433,42 @@ mod tests {
             cli.port.as_deref(),
             Some(std::path::Path::new("/dev/ttyUSB0"))
         );
+    }
+
+    /// 1477: `--region` (once per file) and `--regions` name their port,
+    /// and neither goes with `--home` or the other.
+    #[test]
+    fn the_region_flags_need_their_port_and_go_alone() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("lnflash").chain(args.iter().copied()))
+        };
+        assert!(parse(&["--region", "a.lmr"]).is_err());
+        assert!(parse(&["--regions"]).is_err());
+        let cli = parse(&[
+            "--region",
+            "a.lmr",
+            "--region",
+            "b.lmr",
+            "--port",
+            "/dev/ttyUSB0",
+        ])
+        .expect("two regions");
+        assert_eq!(cli.region.len(), 2);
+        assert!(
+            parse(&["--regions", "--port", "/dev/ttyUSB0"])
+                .expect("list")
+                .regions
+        );
+        assert!(parse(&["--regions", "--region", "a.lmr", "--port", "/dev/ttyUSB0"]).is_err());
+        assert!(parse(&[
+            "--home",
+            "lqxh1",
+            "--region",
+            "a.lmr",
+            "--port",
+            "/dev/ttyUSB0"
+        ])
+        .is_err());
     }
 
     fn plan(args: &[&str]) -> Result<RadioPlan, String> {

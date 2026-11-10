@@ -2098,6 +2098,7 @@ mod tests {
                 stale: false,
                 nearby: false,
                 selected: true,
+                own: false,
             }],
         }
     }
@@ -2263,6 +2264,7 @@ mod tests {
                 stale: false,
                 nearby: false,
                 selected: false,
+                own: false,
             }],
         };
         let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
@@ -2360,6 +2362,7 @@ mod tests {
             stale: false,
             nearby,
             selected: false,
+            own: false,
         };
         let shown = MapView {
             tracks: Vec::new(),
@@ -2437,6 +2440,7 @@ mod tests {
                 stale: false,
                 nearby: false,
                 selected: false,
+                own: false,
             }],
         };
         let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
@@ -3203,6 +3207,7 @@ mod tests {
                 stale: false,
                 nearby: false,
                 selected: false,
+                own: false,
             }],
         }
     }

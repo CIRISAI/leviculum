@@ -224,11 +224,9 @@ async fn walk(
         tap_to_paint.as_millis(),
         README.len()
     );
-    assert!(
-        page.address.starts_with(&hex(&node_hash)[..8]),
-        "{}",
-        page.address
-    );
+    // The field says the page's name (1621); its node is the dest.
+    assert_eq!(page.address, "Testknoten");
+    assert_eq!(page.dest, hex(&node_hash));
     assert!(
         page.total > 100,
         "the whole README laid out: {} lines",

@@ -1306,3 +1306,143 @@ fn vanished_answer(rule_off: bool) -> (Bench, Pulled, u64, u64) {
     );
     (bench, pulled, took, start)
 }
+
+/// 1476: a board pulls its archive, its RAM store goes with the power, and
+/// the record in flash still says it pulled everything. At boot the rule
+/// sees the empty store, resets the cursor and the next pull brings the
+/// whole archive again. The control: the same record kept as it was asks
+/// from its cursor and gets nothing, the photo of 2026-11-07.
+#[test]
+fn a_board_that_lost_its_store_pulls_again_from_the_start() {
+    let archive: Vec<_> = (1..=6).map(|seq| entry(seq, 150)).collect();
+    let mut bench = Bench::new(archive);
+    let mut record = bench.join();
+    let Some(Ok(Outcome::Pulled { cursor, .. })) = bench.pull(&record, lora()) else {
+        panic!("not pulled");
+    };
+    record.cursor = cursor;
+    assert_eq!(cursor, 6);
+
+    // The reboot: the flash keeps the record, RAM kept the store.
+    let flash = record.encode();
+    let booted = ClientRecord::decode(&flash).expect("decode").expect("some");
+
+    // Without the rule: nothing comes, the list stays empty.
+    bench.pages.clear();
+    let kept = bench.pull(&booted, lora());
+    assert!(matches!(kept, Some(Ok(Outcome::Pulled { entries: 0, .. }))));
+    assert!(bench.seqs().is_empty(), "the control pulls nothing");
+
+    // With it: the empty store resets the cursor, the archive comes again.
+    let mut ruled = booted.clone();
+    let agreement = agree(&mut ruled, 0);
+    assert_eq!(agreement, Agreement::Lost { was: 6 });
+    assert_eq!(
+        std::format!("{agreement}"),
+        "store=empty cursor=reset was=6"
+    );
+    assert_eq!(ruled.cursor, 0);
+    bench.pages.clear();
+    let again = bench.pull(&ruled, lora());
+    assert!(matches!(
+        again,
+        Some(Ok(Outcome::Pulled {
+            cursor: 6,
+            entries: 6,
+            ..
+        }))
+    ));
+    assert_eq!(bench.seqs(), (1..=6).collect::<Vec<_>>());
+}
+
+/// 1476: the rule's other ways. A store that agrees keeps the cursor; one
+/// that ends early moves it back, one that took pages the record never
+/// saw moves it on; a record at zero over an empty store is no loss.
+#[test]
+fn the_cursor_follows_the_store_both_ways() {
+    let device = Identity::generate(&mut OsRng);
+    let code = HomeCode {
+        public_key: Identity::generate(&mut OsRng).public_key_bytes(),
+        token: [1; 16],
+    };
+    let at = |cursor| {
+        let mut record = ClientRecord::pending(&device, &code, "M9").expect("record");
+        record.admission = Admission::Admitted;
+        record.cursor = cursor;
+        record
+    };
+    let cases = [
+        (0, 0, Agreement::Agrees, 0),
+        (40, 40, Agreement::Agrees, 40),
+        (40, 0, Agreement::Lost { was: 40 }, 0),
+        (40, 25, Agreement::Behind { was: 40 }, 25),
+        (40, 52, Agreement::Ahead { was: 40 }, 52),
+        (0, 9, Agreement::Ahead { was: 0 }, 9),
+    ];
+    for (cursor, stored, said, after) in cases {
+        let mut record = at(cursor);
+        assert_eq!(agree(&mut record, stored), said, "{cursor} {stored}");
+        assert_eq!(record.cursor, after, "{cursor} {stored}");
+    }
+}
+
+/// Every queued verb survives the store round trip (1493): its tag and
+/// wire bytes come back as the same verb; a join and a pull are never
+/// persisted; an unknown tag reads as nothing.
+#[test]
+fn a_persisted_ask_replays_as_the_verb_it_was() {
+    use crate::home::ask::GroupVerb;
+    use crate::home::wire::{GroupAddRequest, GroupDeleteRequest, GroupRequest, Mark, MarkFlag};
+    let submission = wire::Submission {
+        client_id: [1; 16],
+        destination: [2; 16],
+        title: Vec::new(),
+        content: b"hallo".to_vec(),
+        fields: Vec::new(),
+    };
+    let verbs = [
+        Verb::Send(submission.clone()),
+        Verb::Mark(Mark {
+            flag: MarkFlag::Seen { at: 123 },
+            ids: std::vec![[7; 32], [8; 32]],
+        }),
+        Verb::Group(GroupVerb::Create(GroupRequest {
+            client_id: [3; 16],
+            name: "Band".into(),
+            members: std::vec![([4; 16], "Anna".into())],
+        })),
+        Verb::Group(GroupVerb::Add(GroupAddRequest {
+            client_id: [5; 16],
+            group: [6; 16],
+            members: std::vec![([7; 16], "Ben".into())],
+        })),
+        Verb::Group(GroupVerb::Delete(GroupDeleteRequest {
+            client_id: [8; 16],
+            group: [9; 16],
+        })),
+    ];
+    for verb in &verbs {
+        let (tag, bytes) = ask_bytes(verb).expect("persistable");
+        let back = ask_verb(tag, &bytes).expect("replays");
+        assert_eq!(&back, verb);
+    }
+    // A group state message goes as a send and comes back one.
+    let state = Verb::Group(GroupVerb::State(submission.clone()));
+    let (tag, bytes) = ask_bytes(&state).expect("persistable");
+    assert_eq!(ask_verb(tag, &bytes), Some(Verb::Send(submission)));
+    assert_eq!(
+        ask_bytes(&Verb::Join {
+            token: [0; 16],
+            name: "M9".into()
+        }),
+        None
+    );
+    assert_eq!(
+        ask_bytes(&Verb::Pull {
+            cursor: 0,
+            page_bytes: None
+        }),
+        None
+    );
+    assert_eq!(ask_verb(99, b"whatever"), None);
+}

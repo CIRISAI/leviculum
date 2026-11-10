@@ -329,10 +329,7 @@ impl<B> UiModel<B> {
     pub(super) fn send_staged(&mut self, body: String) -> Option<Vec<UiEffect>> {
         let peer = self.conversations.get(self.selected)?.peer;
         let staged = self.bar.staged.remove(&peer)?;
-        let body = match body.trim().is_empty() {
-            true => String::new(),
-            false => body,
-        };
+        let body = super::outgoing(body);
         self.clear_draft(peer);
         let index = self.selected;
         let effects = self.send_fields(

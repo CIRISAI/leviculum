@@ -126,6 +126,11 @@ terminal's braille cells, 72 x 22, the tracks and the pins as the text
 frame draws them, drawn by
 `ui::tracks::scenes::tests::the_track_scenes_in_cells_are_the_goldens`;
 `LOQUAX_WRITE_GOLDEN=1` writes them anew.
+Redrawn in 1447 (walk 1 finding 7): a pin's age is the catalogue's, "13 min
+ago", "now", where it was "13 min", "<1 min"; the quiet line ("no fix for
+3 h") under dino's pin is gone, the pin's own age says it; every
+`gui-tracks-*.png` moved by those words alone (hiking 3265 pixels, park
+1485, radar 513, the others alike).
 
 `gui-tracks-radar.png`, `gui-tracks-way-back.png`, `gui-tracks-late.png`,
 `gui-tracks-battery.png`, `gui-tracks-fit-all.png`, and
@@ -158,3 +163,107 @@ as text) and `gui::tests::a_groups_one_and_two_ticks_are_the_windows_golden`
 (900 x 560, light, pixel for pixel). The M9's frame of the same scene is
 `loquax-m9/tests/golden/m9-group-ticks.png`, the phone's rows and Info
 `loquax-android/tests/golden/group-ticks.json`.
+
+`scene-relay-group.json`, `tui-relay-group.txt`, `gui-relay-group.png`: a
+relayed post shows its writer (1482). A relay bot, "ReticulumNet NL", hands
+us Anna's and Ben's posts with its default prefix `Name\n<hash>\n` in front,
+from one fixture (`tests/support/relay_group.rs`): each post under its
+writer and without the prefix, the bar "ReticulumNet NL · group via relay",
+Ben's reaction to a message this device does not hold said in words, our
+own line, and Anna's reply quoting "Ben: Moin Anna". Pinned by
+`scene_golden::a_relayed_group_is_the_golden_scene`,
+`tui::tests::a_relayed_group_is_the_terminals_golden` (80 by 24, as text;
+the terminal names the writer in the line and draws no quotes) and
+`gui::tests::a_relayed_group_is_the_windows_golden` (900 x 560, light,
+pixel for pixel). The phone's title, rows and Info in German are
+`loquax-android/tests/golden/relay-group.json`.
+
+`gui-reply-sent.png`: a reply, a reaction and a photo in the window
+(1451), from the shared fixture `tests/support/reply_scene.rs`: Anna's
+chat with her question "Kommst du morgen mit zum Markt?", her photo
+(its row "Photo, 185 KB"), our reply "Ja, um zehn am Brunnen" quoting
+her question with her thumbs up as a chip under it and its delivered
+tick, and her last line "Super, bis morgen"; the compose bar empty.
+Drawn by `gui::tests::a_reply_with_its_reaction_is_the_windows_golden`,
+900 x 560, light, pixel for pixel.
+
+`gui-reply-compose.png`: the same chat while a second reply is written
+(1451, `reply_composing` of the same fixture): the window takes the draft
+and the reply back from the scene as when the reader's Reply started
+it, so the reply bar says "Reply to: Super, bis morgen" with "Cancel
+reply" over the field holding "Ich bring Kaffee mit". Drawn by
+`gui::tests::a_reply_being_written_is_the_windows_golden`, 900 x 560,
+light, pixel for pixel.
+
+`gui-first-start.png`, `gui-first-start-profile.png`: the window at its
+very first start, before any mailbox (1451): an address and its code,
+the profile's facts as the shell gives a messenger without a mailbox
+(`Mailbox::Unknown`, this one device), no conversation; the list says
+there is none yet and the chat side asks to pick one. The second picture
+is the profile the avatar opens: the name, the address in fours, "Mailbox:
+not set up yet", "This device", the QR and the code. Drawn by
+`gui::tests::the_first_start_and_its_profile_are_the_windows_goldens`,
+900 x 560, light, pixel for pixel. The window has no join screen and no
+offline bar: a desktop joins a mailbox with `loquax mailbox join CODE`,
+and its shell sets the profile's mailbox once at start without its reach.
+
+`gui-map-pins.png`: the window's map screen with two peers' pins (1451):
+Anna and Ben shared their positions in Florence's centre five and eight
+minutes ago, the frame drawn from `../../../leviculum-map/fixtures/firenze.lmr`
+(the region's extent, the theme's ground around it), Anna selected: her
+entry marked in the list and the view centred on her pin. Drawn by
+`gui::tests::two_pins_with_one_selected_are_the_windows_map_golden`,
+900 x 560, light, pixel for pixel. OpenStreetMap data as above.
+
+`tui-reply-sent.txt`, `tui-reply-compose.txt`: the same chat of
+`tests/support/reply_scene.rs` in the terminal (1451), 80 x 24, as text:
+her question, her photo's line ("▣ photo · 185 KB"), our reply "Ja, um zehn
+am Brunnen" with its tick and her 👍 under it, her last line; then the
+same chat with the compose box focused and holding "Ich bring Kaffee mit",
+the draft answering her last line. The terminal draws no quote and no
+"Reply to" line: the palette's `reply` says it once in a toast and the
+draft keeps its target. Drawn by
+`tui::tests::a_reply_and_a_reaction_are_the_terminals_golden`.
+
+`tui-first-start.txt`, `tui-first-start-profile.txt`: the terminal at its
+very first start, before any mailbox (1451), 80 x 24: no conversation,
+the list naming `:new conversation`; then `P`, the profile with the name,
+the address in fours, "Mailbox: not set up yet" and "This device", the
+facts as the shell gives a messenger without a mailbox. Drawn by
+`tui::tests::the_first_start_is_the_terminals_golden`. The terminal has no
+join screen and no offline bar, as the window has none.
+
+`tui-map-pins.txt`: the terminal's map with Anna's and Ben's pins near
+Florence (1451), 80 x 24, `M` and `Tab` until Anna is selected (`◉`, her
+name and age; the terminal's card is the selected pin's label, the title
+grows one only for a node nearby that is no contact). The test draws no
+picture and no region: the pins on the pane's empty ground. Drawn by
+`tui::tests::two_pins_on_the_map_are_the_terminals_golden`.
+
+`tui-*-de.txt`: every terminal golden above in German (walk 1 wants what a
+desktop with `LANG=de_DE.UTF-8` sees), drawn by the same test with the
+model's language set to German before the scene is built, as the terminal
+sets the locale's at start. English left in these frames is the
+terminal's own: words the catalogue has no German for or that are drawn
+past it. Likewise `../fixtures/tui_*_de.frames` (and
+`tui_toast_two_legs_de.frame`) for every frame set `src/tui.rs` pins, and
+for every session `tests/tui_snapshot.rs` pins, each script run after
+`lang de` as `tui_chat_de.frames` is. `LOQUAX_WRITE_GOLDEN=1` writes the
+terminal's goldens and frame sets anew.
+
+`scene-reply.json`, `scene-reply-compose.json`: the scene of the chat of
+`tests/support/reply_scene.rs` (1451), Compact, before and after
+`reply_composing`: our reply with its quote of her question and her chip,
+her photo's bubble; then the compose node holding the draft and the line
+it answers. Drawn by
+`scene_golden::a_reply_a_reaction_and_a_photo_are_the_golden_scene`; every
+target's golden of this chat is drawn from the same fixture.
+
+`tracks-*-de.txt`: the track scenes' cells in German (1451), the pins'
+ages as a reader under `LANG=de_DE.UTF-8` reads them ("vor 13 Min.",
+"gerade eben"), drawn by the same two tests in
+`ui::tracks::scenes::tests` beside the English ones.
+
+The goldens' index, every scene with its golden per target, is the
+section "The goldens' index" of `docs/src/concepts/loquax-ui.md`;
+`tests/golden_index.rs` holds it to the files here.

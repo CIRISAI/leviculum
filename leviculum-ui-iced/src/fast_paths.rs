@@ -522,3 +522,193 @@ fn a_picture_is_opaque_when_every_alpha_is_full() {
         assert!(fast::all_opaque(&shifted[1..]), "{n} misaligned, opaque");
     }
 }
+
+/// A byte loaded as tiny-skia's high-precision pipeline loads it (`* 1/255`)
+/// stores as itself, and an opaque one loads with an alpha of exactly one:
+/// the two facts `fast::draw_scaled`'s copy of an opaque picture read at its
+/// nearest texel rests on, and a clipped draw's pixels outside the clip.
+#[test]
+fn a_byte_loaded_stores_as_itself_and_full_alpha_is_one() {
+    const FACTOR: f32 = 1.0 / 255.0;
+    for c in 0..=255u8 {
+        assert_eq!(fast::unnorm(f32::from(c) * FACTOR), c, "byte {c}");
+    }
+    assert_eq!(255.0 * FACTOR, 1.0);
+}
+
+/// One random scaled draw of `fast_paths`' sampler test: a picture, where
+/// it is put, how it is scaled, sampled and clipped.
+struct Scaled {
+    src: tiny_skia::Pixmap,
+    opaque: bool,
+    x: i32,
+    y: i32,
+    quality: tiny_skia::FilterQuality,
+    opacity: f32,
+    transform: tiny_skia::Transform,
+    clip: Option<Rectangle>,
+}
+
+impl Scaled {
+    fn random(rng: &mut Rng, w: u32, h: u32, big: bool) -> Scaled {
+        let (sw, sh) = match big {
+            true => (
+                w - rng.below(u64::from(w / 4)) as u32,
+                h - rng.below(u64::from(h / 4)) as u32,
+            ),
+            false => (1 + rng.below(40) as u32, 1 + rng.below(40) as u32),
+        };
+        let opaque = rng.below(3) != 0;
+        let mut src = tiny_skia::Pixmap::new(sw, sh).expect("picture");
+        for p in src.data_mut().chunks_exact_mut(4) {
+            let a = match (opaque, rng.below(4)) {
+                (true, _) | (false, 0) => 255,
+                (false, 1) => 0,
+                _ => rng.below(256) as u8,
+            };
+            let mut c = || rng.below(u64::from(a) + 1) as u8;
+            p.copy_from_slice(&[c(), c(), c(), a]);
+        }
+        let opaque = opaque || src.data().chunks_exact(4).all(|p| p[3] == 255);
+        // Scales a zoom glides through, and odd ones.
+        let scale = |rng: &mut Rng| match rng.below(6) {
+            0 => 1.0,
+            1 => 1.0 + rng.below(1 << 16) as f32 / (1 << 18) as f32,
+            2 => 1.0 - rng.below(1 << 16) as f32 / (1 << 18) as f32,
+            3 => 0.1 + rng.below(1000) as f32 / 250.0,
+            4 => (1 + rng.below(8)) as f32 / 2.0,
+            _ => -(0.2 + rng.below(1000) as f32 / 400.0),
+        };
+        let sx = scale(rng);
+        let sy = match rng.below(3) {
+            0 => sx,
+            _ => scale(rng),
+        };
+        let tx = rng.coord(w) - w as f32 / 4.0;
+        let ty = rng.coord(h) - h as f32 / 4.0;
+        let transform = tiny_skia::Transform::from_row(sx, 0.0, 0.0, sy, tx, ty);
+        let x = rng.below(41) as i32 - 20;
+        let y = rng.below(41) as i32 - 20;
+        let quality = match rng.below(2) {
+            0 => tiny_skia::FilterQuality::Nearest,
+            _ => tiny_skia::FilterQuality::Bilinear,
+        };
+        let opacity = match rng.below(5) {
+            0..=2 => 1.0,
+            3 => rng.below(256) as f32 / 255.0,
+            _ => 0.6,
+        };
+        let clip = (rng.below(2) == 0).then(|| rng.rect(w, h));
+        Scaled {
+            src,
+            opaque,
+            x,
+            y,
+            quality,
+            opacity,
+            transform,
+            clip,
+        }
+    }
+
+    /// The draw through tiny-skia and through `fast::draw_scaled` onto the
+    /// same ground; `None` where the sampler declined.
+    fn both(&self, ground: &[u8], w: u32, h: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+        let mut mask = tiny_skia::Mask::new(w, h).expect("mask");
+        if let Some(r) = self.clip {
+            reference_mask(&mut mask, r);
+        }
+        let mut reference = ground.to_vec();
+        tiny_skia::PixmapMut::from_bytes(&mut reference, w, h)
+            .expect("pixmap")
+            .draw_pixmap(
+                self.x,
+                self.y,
+                self.src.as_ref(),
+                &tiny_skia::PixmapPaint {
+                    quality: self.quality,
+                    opacity: self.opacity,
+                    ..Default::default()
+                },
+                self.transform,
+                self.clip.is_some().then_some(&mask),
+            );
+        let mut ours = ground.to_vec();
+        let mut target = tiny_skia::PixmapMut::from_bytes(&mut ours, w, h).expect("pixmap");
+        let drew = match self.clip.map(|r| fast::covered(r, w, h)) {
+            Some(None) => true,
+            clip => fast::draw_scaled(
+                &mut target,
+                self.src.as_ref(),
+                self.opaque,
+                self.x,
+                self.y,
+                self.quality,
+                self.opacity,
+                self.transform,
+                clip.flatten(),
+            ),
+        };
+        drew.then_some((reference, ours))
+    }
+}
+
+/// The map's zoom frame sampled by `fast::draw_scaled` (1473) is the frame
+/// tiny-skia's `draw_pixmap` draws, byte for byte: thousands of random
+/// pictures, offsets and scales (a zoom's near one, odd ones, mirrored
+/// ones), nearest and bilinear, opaque or not, at full opacity or less,
+/// clipped by a rectangle (tiny-skia by its mask) or not; and pictures the
+/// size of the target scaled as a zoom scales the map's frame.
+#[test]
+fn a_scaled_picture_samples_as_tiny_skia_samples_it() {
+    if !fast::BLEND_EXACT {
+        return;
+    }
+    let premultiplied = |rng: &mut Rng| {
+        let a = rng.below(256) as u8;
+        [
+            rng.below(u64::from(a) + 1) as u8,
+            rng.below(u64::from(a) + 1) as u8,
+            0,
+            a,
+        ]
+    };
+    let mut rng = Rng(0x5ca1_ed0f_f5e7_0001);
+    let mut drawn = 0;
+    let cases = (0..6000)
+        .map(|_| (W, H, false))
+        .chain((0..200).map(|_| (240, 180, true)));
+    for (i, (w, h, big)) in cases.enumerate() {
+        let case = Scaled::random(&mut rng, w, h, big);
+        let ground: Vec<u8> = (0..w * h).flat_map(|_| premultiplied(&mut rng)).collect();
+        let Some((reference, ours)) = case.both(&ground, w, h) else {
+            continue;
+        };
+        drawn += 1;
+        let differ: Vec<usize> = (0..reference.len())
+            .filter(|&b| reference[b] != ours[b])
+            .collect();
+        assert!(
+            differ.is_empty(),
+            "case {i}: {}x{} at {},{} {:?} {:?} opacity {} opaque {} clip {:?}: {} bytes differ, \
+             first pixel {:?} ({:?} vs {:?})",
+            case.src.width(),
+            case.src.height(),
+            case.x,
+            case.y,
+            case.quality,
+            case.transform,
+            case.opacity,
+            case.opaque,
+            case.clip,
+            differ.len(),
+            differ
+                .first()
+                .map(|b| (b / 4 % w as usize, b / 4 / w as usize)),
+            differ.first().map(|b| &reference[b / 4 * 4..b / 4 * 4 + 4]),
+            differ.first().map(|b| &ours[b / 4 * 4..b / 4 * 4 + 4]),
+        );
+    }
+    // The sampler declines only what it cannot draw exactly: none of these.
+    assert_eq!(drawn, 6200, "the sampler declined {} draws", 6200 - drawn);
+}

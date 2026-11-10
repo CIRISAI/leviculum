@@ -1,100 +1,100 @@
 --- frame 1: list ---
-┌● Loquax afbda7b3───────┐┌  Jürgen 🚲  ·1d0a───────────── pos 155 d · no relay ┐
-│▌Jürgen 🚲  ·1d0a 29 May ││                                                    │
+┌● tui───────────────────┐┌  Jürgen 🚲 ─────────────────── pos 155 d · no relay ┐
+│▌Jürgen 🚲        29 May ││                                                    │
 │▌you: ok 👍              ││ Treffen wir uns um 18:00 am Bahnhof?               │
 │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││ 01:46 · unverified                                 │
-│ Peer 17 ·1d38   29 May ││                                                    │
+│ Peer 17         29 May ││                                                    │
 │ you: Grüße aus Kö… [3] ││    naïve façade, smörgåsbord, Ærøskøbing  01:56 ✓✓ │
 │                        ││                                                    │
-│ <cd32a602…>     29 May ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
+│ Unknown ·cd32   29 May ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
 │ you: ja            [3] ││                                                    │
 │                        ││                  😀 🐀 🚲  drei Emoji am Stück  02:16 │
-│ Peer 15 ·3d1a   29 May ││                                                    │
+│ Peer 15         29 May ││                                                    │
 │ you: zwei          [3] ││ zwei                                               │
 │                        ││ Zeilen  02:26 · unverified                         │
-│ <b305ba3b…>     29 May ││                                                    │
+│ Unknown ·b305   29 May ││                                                    │
 │ you: 😀 🐀 🚲  drei … [3] ││                                       ja  02:36 ✓  │
 │                        ││                                                    │
-│ Peer 13 ·0d1e   29 May ││ Grüße aus Köln, die Straße ist nass                │
+│ Peer 13         29 May ││ Grüße aus Köln, die Straße ist nass                │
 │ you: 日 本 語 の テ キ … [3] ││ 02:46 · unverified                                 │
 │                        ││                                                    │
-│ <0d7cc5d4…>     29 May ││                                     ok 👍   02:56 ◷ │
-│ you: naïve façade… [3] │├  to Jürgen 🚲  ·1d0a Enter send · Alt-Enter newline ┤
+│ Unknown ·0d7c   29 May ││                                     ok 👍   02:56 ◷ │
+│ you: naïve façade… [3] │├  to Jürgen 🚲 ────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: bottom ---
-┌● Loquax afbda7b3───────┐┌  Ratte Größe 🐀  ·4a36  known───────────── no relay ┐
-│ Peer 7 ·0d94    29 May ││                                       ja  01:36 ✔✔ │
+┌● tui───────────────────┐┌  Ratte Größe 🐀   known─────────────────── no relay ┐
+│ Peer 7          29 May ││                                       ja  01:36 ✔✔ │
 │ you: zwei              ││                                                    │
 │                        ││ Grüße aus Köln, die Straße ist nass                │
-│ <57b9131c…>     29 May ││ 01:46 · unverified                                 │
+│ Unknown ·57b9   29 May ││ 01:46 · unverified                                 │
 │ you: 😀 🐀 🚲  drei Emoj… ││                                                    │
 │                        ││                                     ok 👍   01:56 ✓✓│
-│ Peer 5 ·9bf4    29 May ││                                                    │
+│ Peer 5          29 May ││                                                    │
 │ you: 日 本 語 の テ キ ス ト … ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
 │                        ││                                                    │
-│ Mum ·8f77       29 May ││    naïve façade, smörgåsbord, Ærøskøbing  02:16 !  │
+│ Mum             29 May ││    naïve façade, smörgåsbord, Ærøskøbing  02:16 !  │
 │ you: naïve façade, sm… ││                                                    │
 │                        ││ 日 本 語 の テ キ ス ト も   02:26 · unverified             │
-│ Zoë 💬  Æ… ·b66d 29 May ││                                                    │
+│ Zoë 💬  Ærø      29 May ││                                                    │
 │ you: Treffen wir uns … ││                  😀 🐀 🚲  drei Emoji am Stück  02:36 │
 │                        ││                                                    │
-│ Nom… ·bffb 29 May 2025 ││ zwei                                               │
+│ Nomadin Ü… 29 May 2025 ││ zwei                                               │
 │ you: Grüße aus Köln, … ││ Zeilen  02:46 · unverified                         │
 │                        ││                                                    │
-│▌Rat… ·4a36 29 May 2025 ││                                       ja  02:56 ◷  │
-│▌you: ja                │├  to Ratte Größe 🐀   Enter send · Alt-Enter newline ┤
+│▌Ratte Grö… 29 May 2025 ││                                       ja  02:56 ◷  │
+│▌you: ja                │├  to Ratte Größe 🐀 ─ Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: opened ---
-┌  Loquax afbda7b3───────┐┌● Ratte Größe 🐀  ·4a36  known───────────── no relay ┐
-│ Peer 7 ·0d94    29 May ││                                       ja  01:36 ✔✔ │
+┌  tui───────────────────┐┌● Ratte Größe 🐀   known─────────────────── no relay ┐
+│ Peer 7          29 May ││                                       ja  01:36 ✔✔ │
 │ you: zwei              ││                                                    │
 │                        ││ Grüße aus Köln, die Straße ist nass                │
-│ <57b9131c…>     29 May ││ 01:46 · unverified                                 │
+│ Unknown ·57b9   29 May ││ 01:46 · unverified                                 │
 │ you: 😀 🐀 🚲  drei Emoj… ││                                                    │
 │                        ││                                     ok 👍   01:56 ✓✓│
-│ Peer 5 ·9bf4    29 May ││                                                    │
+│ Peer 5          29 May ││                                                    │
 │ you: 日 本 語 の テ キ ス ト … ││ Antwort 34: genau, äh, so 🙂   02:06 · unverified   │
 │                        ││                                                    │
-│ Mum ·8f77       29 May ││    naïve façade, smörgåsbord, Ærøskøbing  02:16 !  │
+│ Mum             29 May ││    naïve façade, smörgåsbord, Ærøskøbing  02:16 !  │
 │ you: naïve façade, sm… ││                                                    │
 │                        ││ 日 本 語 の テ キ ス ト も   02:26 · unverified             │
-│ Zoë 💬  Æ… ·b66d 29 May ││                                                    │
+│ Zoë 💬  Ærø      29 May ││                                                    │
 │ you: Treffen wir uns … ││                  😀 🐀 🚲  drei Emoji am Stück  02:36 │
 │                        ││                                                    │
-│ Nom… ·bffb 29 May 2025 ││ zwei                                               │
+│ Nomadin Ü… 29 May 2025 ││ zwei                                               │
 │ you: Grüße aus Köln, … ││ Zeilen  02:46 · unverified                         │
 │                        ││                                                    │
-│▌Rat… ·4a36 29 May 2025 ││                                      ▌ja  02:56 ◷  │
-│▌you: ja                │├  to Ratte Größe 🐀   Enter send · Alt-Enter newline ┤
+│▌Ratte Grö… 29 May 2025 ││                                      ▌ja  02:56 ◷  │
+│▌you: ja                │├  to Ratte Größe 🐀 ─ Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: oldest ---
-┌  Loquax afbda7b3───────┐┌● Ratte Größe 🐀  ·4a36  known───────────── no relay ┐
-│ Peer 7 ·0d94    29 May ││            ── Wednesday 28 May 2025 ──             │
-│ you: zwei              ││▌Grüße aus Köln, die Straße ist nass                │
-│                        ││▌20:26 · unverified                                 │
-│ <57b9131c…>     29 May ││                                                    │
-│ you: 😀 🐀 🚲  drei Emoj… ││                                     ok 👍   20:36 ✓✓│
-│                        ││                                                    │
-│ Peer 5 ·9bf4    29 May ││ Treffen wir uns um 18:00 am Bahnhof?               │
-│ you: 日 本 語 の テ キ ス ト … ││ 20:46 · unverified                                 │
-│                        ││                                                    │
-│ Mum ·8f77       29 May ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
-│ you: naïve façade, sm… ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
-│                        ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
-│ Zoë 💬  Æ… ·b66d 29 May ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
-│ you: Treffen wir uns … ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+┌  tui───────────────────┐┌● Ratte Größe 🐀   known─────────────────── no relay ┐
+│ Peer 7          29 May ││                                                    │
+│ you: zwei              ││            ── Wednesday 28 May 2025 ──             │
+│                        ││▌Grüße aus Köln, die Straße ist nass                │
+│ Unknown ·57b9   29 May ││▌20:26 · unverified                                 │
+│ you: 😀 🐀 🚲  drei Emoj… ││                                                    │
+│                        ││                                     ok 👍   20:36 ✓✓│
+│ Peer 5          29 May ││                                                    │
+│ you: 日 本 語 の テ キ ス ト … ││ Treffen wir uns um 18:00 am Bahnhof?               │
+│                        ││ 20:46 · unverified                                 │
+│ Mum             29 May ││                                                    │
+│ you: naïve façade, sm… ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
 │                        ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
-│ Nom… ·bffb 29 May 2025 ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
-│ you: Grüße aus Köln, … ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│ Zoë 💬  Ærø      29 May ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│ you: Treffen wir uns … ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
 │                        ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
-│▌Rat… ·4a36 29 May 2025 ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
-│▌you: ja                │├  to Ratte Größe 🐀   Enter send · Alt-Enter newline ┤
+│ Nomadin Ü… 29 May 2025 ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│ you: Grüße aus Köln, … ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│                        ││              🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀 │
+│▌Ratte Grö… 29 May 2025 ││              Grüße 🐀  Grüße 🐀  Grüße 🐀  Grüße 🐀  Gr│
+│▌you: ja                │├  to Ratte Größe 🐀 ─ Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

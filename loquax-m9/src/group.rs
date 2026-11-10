@@ -24,6 +24,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use leviculum_ui::input::{KeyCode, KeyEvent};
+use leviculum_ui::keymap::ScrollCmd;
 use leviculum_ui::style::{RLine, RStyle};
 use leviculum_ui::text::fit_width;
 use loquax::home::ask::GroupVerb;
@@ -241,6 +242,19 @@ fn new_hit(node: &NewGroupNode, row: usize, code: KeyCode) -> Hit {
     }
 }
 
+/// The scroll command `key` is in the open chat (1529): the shared table's
+/// (the ring's up and down a line, its left and right a page), which the
+/// M9's own lines carry out ([`crate::chat::page`]).
+fn chat_scroll<B>(model: &UiModel<B>, place: Place, key: &KeyEvent) -> Option<ScrollCmd> {
+    if place != Place::Chat {
+        return None;
+    }
+    match loquax::keys::resolve(key, loquax::keys::panes_of(Pane::Messages), model.ctx())? {
+        loquax::keys::Action::Scroll(cmd) => Some(cmd),
+        _ => None,
+    }
+}
+
 /// One key on the M9: a group's key runs its node's action or moves the
 /// cursor `row`; any other goes to the model as the terminal's key, the
 /// map's own keys first made the terminal's ([`crate::map::key`]). The
@@ -264,15 +278,26 @@ pub fn press(model: &mut UiModel<Field>, row: &mut usize, key: &KeyEvent) -> Vec
         }
         false => None,
     };
-    let effects = match found {
+    let mut effects = match found {
         Some(Hit::Run(Intent::Group(verb))) => update(model, UiEvent::Group(verb)),
         Some(Hit::Run(_)) | Some(Hit::Stay) => Vec::new(),
         Some(Hit::Move(to)) => {
             *row = to;
             Vec::new()
         }
-        None => update(model, UiEvent::Key(crate::map::key(model, *key))),
+        None => match chat_scroll(model, before, key) {
+            Some(cmd) => crate::chat::page(model, cmd),
+            None => update(model, UiEvent::Key(crate::map::key(model, *key))),
+        },
     };
+    // The key brought the chat onto the panel (1493): only now is it
+    // read. Moving the list's cursor selects without reading
+    // (`list_apart`), so the open is said as a phone's tap says it.
+    if before == Place::List && Place::of(model) == Place::Chat {
+        if let Some(peer) = model.conversations.get(model.selected).map(|c| c.peer) {
+            effects.extend(update(model, UiEvent::Open { peer }));
+        }
+    }
     // The question is the sheet's: answering it keeps the cursor where it
     // was.
     let sheet = |place| match place {
@@ -282,7 +307,52 @@ pub fn press(model: &mut UiModel<Field>, row: &mut usize, key: &KeyEvent) -> Vec
     if sheet(Place::of(model)) != sheet(before) {
         *row = 0;
     }
+    effects.extend(close_unshown(model));
     effects
+}
+
+/// The model's states the M9 has no screen for (1612): the message's
+/// detail, the profile and the settings, the help, the palette and the
+/// copy mode. The shared key table reaches each from a key the M9 sends
+/// (Enter on a message opens its detail, 1076; `:` the palette), and a
+/// state nobody sees takes the next keys: in window 23 every Back closed
+/// a detail view the board never drew, and the screen stood five minutes
+/// on a chat whose keys were all read. Each one found is closed and said
+/// as a notice, `unshown=<state>`, which the board logs as a `[UI]` line.
+pub fn close_unshown<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let mut said = Vec::new();
+    if model.detail.is_some() {
+        said.push("detail");
+    }
+    if model.profile_open {
+        said.push("profile");
+    }
+    if model.settings.is_some() {
+        said.push("settings");
+    }
+    // One step closes the detail or the profile, the next a settings
+    // section, the last the settings' list.
+    for _ in 0..3 {
+        if !model.detail_open() {
+            break;
+        }
+        model.close_detail();
+    }
+    if model.help {
+        model.help = false;
+        said.push("help");
+    }
+    if model.palette.is_some() {
+        model.palette = None;
+        said.push("palette");
+    }
+    if model.copy_mode.is_some() {
+        loquax::ui::copy_mode::leave(model);
+        said.push("copy_mode");
+    }
+    said.into_iter()
+        .map(|name| UiEffect::Notice(format!("unshown={name} closed")))
+        .collect()
 }
 
 /// What the board asks its home for a group effect of the model (1366):

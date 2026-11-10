@@ -12,7 +12,7 @@
 //! |---|---|
 //! | `start` | [`Start`] |
 //! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink`, `share`, `addcontact`, `draft`, `stage`, `unstage`, `sheet`, `fix`, `nofix`, `sharefix`, `startshare`, `stopshare`, `record`, `recording`, `browse`, `rooms` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording`, `linkdevice`, `linked`, `browse`, `rooms` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links`, `run`, `friends`, `shared`, `profile`, `lxma`, `mapregions`, `maptheme`, `mapfling`, `staged`, `bar`, `shares`, `recording`, `linkdevice`, `linked`, `browse`, `rooms`, `people` |
 //! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
@@ -163,6 +163,9 @@
 //! [`Query::Rooms`] with its [`RoomsScreen`]. An older app sends neither
 //! and shows no Rooms tab; the session links to no hub until the tab is
 //! opened.
+//! Explore (1578) came within version 1 too: [`Request::Explore`] and
+//! [`Query::Explore`] with its [`ExploreScreen`]. An older app sends
+//! neither and keeps its Browse and Rooms buttons.
 
 use serde::{Deserialize, Serialize};
 
@@ -519,15 +522,34 @@ pub enum Request {
     /// A verb of the Rooms tab (1384), Reticulum Relay Chat on the hub
     /// the config's `rooms_hub` names: `tab` (it comes to the front),
     /// `chats` (it leaves), `show` with the list's `index` of the room to
-    /// open (`-1` for the list), and `say` with the input field's `text`,
-    /// which the model reads as the terminal's input line: `#room` or
-    /// `/join #room key` joins, a line goes to the open room, `/me` acts,
-    /// `/part` leaves. A line the hub would not take stays in
+    /// open (`-1` for the list), `say` with the input field's `text`,
+    /// which the model reads as the terminal's input line: `#room` joins,
+    /// a line goes to the open room, and the IRC shortcuts stay for those
+    /// who know them (`/join #room key`, `/me`, `/part`); since 1450 the
+    /// open room's header and menu: `people` (`index` 1 shows them, 0
+    /// hides) and `leave`. A line the hub would not take stays in
     /// [`RoomsScreen::input`].
     Rooms {
         verb: String,
         #[serde(default)]
         text: String,
+        #[serde(default)]
+        index: i64,
+    },
+    /// A verb of the Explore tab (1578): `tab`, `chats`, `typed` (the
+    /// search field's `text`), `az` (`index` 1 for A-Z), `open` (a page's
+    /// `dest`), `address` (the field's address), `bookmark` (a page's
+    /// `dest`), `room` (the `index`th room the reader is in), `hub` (a
+    /// hub's `dest`: its sheet opens, 1618), `use` (the sheet's button,
+    /// its `dest`), `join` (a room on the sheet: `dest` and the room's
+    /// name in `text`), `close` (the sheet) and `touch` (`index` 1 while a
+    /// finger is on the list, 0 when it lifts).
+    Explore {
+        verb: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        dest: String,
         #[serde(default)]
         index: i64,
     },
@@ -733,6 +755,13 @@ pub enum Query {
         #[serde(default)]
         search: Option<String>,
     },
+    /// The people a new conversation lists (1448, walk finding 17), as
+    /// the list's rows: every person with a conversation, archived too, by
+    /// name; no group. `search` as in [`Query::Conversations`].
+    People {
+        #[serde(default)]
+        search: Option<String>,
+    },
     /// The blocked peers, as the list's rows, conversation or not.
     Blocked,
     /// This phone's own address, for the first start's last screen (1152).
@@ -757,6 +786,10 @@ pub enum Query {
     /// contact code and its QR, where the mailbox is, and the advanced
     /// facts.
     Profile,
+    /// The settings' mailbox page (1642): which mailbox, how the phone
+    /// reaches it, which devices use it; answered as [`MailboxPage`].
+    #[serde(rename = "mailboxpage")]
+    MailboxPage,
     /// "Link a device" on the profile (1264): a fresh join code of the
     /// mailbox on this phone for another device, as [`LinkCode`]; refused
     /// on a phone whose mailbox is on a computer. Each ask opens a new
@@ -814,6 +847,13 @@ pub enum Query {
         #[serde(default)]
         set: Option<bool>,
     },
+    /// The Advanced page's public rooms' hub (1577): `set` chosen when
+    /// given (`none`, or a hub's address, shipped or pasted), the choice
+    /// in force answered as [`RoomsHubChoice`].
+    RoomsHub {
+        #[serde(default)]
+        set: Option<String>,
+    },
     /// The Privacy page's "Send read receipts" (1233): `set` stored when
     /// given, the switch in force answered as [`ReceiptsChoice`].
     Receipts {
@@ -848,6 +888,11 @@ pub enum Query {
     Browse,
     /// The Rooms tab (1384); answered as [`RoomsScreen`].
     Rooms,
+    /// The Explore tab (1578); answered as [`ExploreScreen`].
+    Explore,
+    /// The settings' sections (1450), the one list every target shows
+    /// (`loquax::ui::settings`); answered as [`SettingsList`].
+    Settings,
     /// The `index`th file of the message `key` of `peer`'s conversation,
     /// saved under the app's files (`files/<peer>-<key>-<index>/<name>`,
     /// the name made safe) for the open or share intent (1221). Answered
@@ -1112,6 +1157,45 @@ pub struct ReceiptsChoice {
     pub on: bool,
 }
 
+/// What [`Query::RoomsHub`] answers (1577): the Advanced page's lines on
+/// the public rooms' hub, in the phone's language, as the window and the
+/// terminal show them (`loquax::ui::settings::hub_rows`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsHubChoice {
+    pub v: u32,
+    pub ok: bool,
+    /// Why `set` was not taken: an address that is none.
+    #[serde(default)]
+    pub error: String,
+    /// "Public rooms: hub", and the hub in force by its name.
+    pub title: String,
+    pub current: String,
+    /// The shipped hubs, then "None"; `chosen` marks the one in force.
+    pub hubs: Vec<RoomsHubRow>,
+    /// "Another hub: paste its address", the field's hint, and the own
+    /// hub's name while one is in force.
+    pub paste: String,
+    pub hint: String,
+    #[serde(default)]
+    pub own: String,
+    /// What a hub learns: the reader's name is visible in its rooms.
+    pub note: String,
+}
+
+/// A line of [`RoomsHubChoice::hubs`]: its name, whether it is in force,
+/// and the word Java sends back as `set` to choose it: a hub's address,
+/// `none`, or `more` for "More…" (1599), which shows every hub in the
+/// page's scroll. `detail` is how far the hub is and its marks
+/// ("4 hops away · suggested"), empty for none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsHubRow {
+    pub name: String,
+    pub chosen: bool,
+    pub set: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
 /// What [`Query::Shared`] answers: the positions we sent, newest first, at
 /// most [`crate::session::SHARED_SHOWN`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1198,6 +1282,11 @@ pub struct FriendRow {
     /// the ring's colour as [`ConversationRow::ring`].
     #[serde(default)]
     pub live: String,
+    /// The position's one age in the phone's language, "vor 28 Std."
+    /// (1447, `scene::ago`): what the marker says under the avatar and
+    /// the card says where `live` is empty, so the two never disagree.
+    #[serde(default)]
+    pub age: String,
     #[serde(default)]
     pub ring: String,
     /// A node the mesh announced that is no contact (1302): the map draws
@@ -1573,15 +1662,25 @@ impl Done {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationRow {
     pub peer: String,
-    /// The peer as every loquax screen names it: petname or announced name
-    /// with the short hash, or the address.
+    /// The peer as every loquax screen names it (1452): the petname, the
+    /// address book's or the announced name alone, "Unbekannt" without
+    /// one, and the short hash after it only while another peer shares it.
     pub name: String,
+    /// "Zwei Kontakte heißen Lew" while another peer shares the name, in
+    /// the phone's language; empty otherwise (1452).
+    #[serde(default)]
+    pub same_name: String,
     /// The last message's first line, a reaction as `reacted 👍`.
     pub last: String,
     /// Whether that message is ours.
     pub ours: bool,
     /// When it was written or came, seconds since 1970 UTC; 0 for none.
     pub at: i64,
+    /// `at` as the list's time column says it, the core's one rule on every
+    /// target (1449 item 4, `scene::list_time`): `17:37`, `Gestern`, `Do.`,
+    /// `22.10.`; empty for none.
+    #[serde(default)]
+    pub time: String,
     /// Unread rows: a position report counts nothing (1209), so it raises
     /// no count and no notification; the raw count the read marks name is
     /// not here.
@@ -1702,6 +1801,11 @@ pub struct Conversations {
     /// dot on the bar's avatar, green or grey (1199).
     #[serde(default)]
     pub home_link: bool,
+    /// Whether the list says "no connection" (1448, walk finding 14): the
+    /// watching link stayed down for a while, so nothing goes out or comes
+    /// in until it is up again. The bar under the top bar.
+    #[serde(default)]
+    pub offline: bool,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether
@@ -1869,6 +1973,17 @@ pub struct MessageRow {
     /// words under the bubble ("arrived late"), empty for any other.
     #[serde(default)]
     pub late: String,
+    /// Ours only: what a screen reader says for the mark, the scene's
+    /// words in the reader's language (1466, 1449 item 7): a group's two
+    /// ticks are "On the devices", as the Info says, where
+    /// `Ui.state(state)` alone would say one device. Empty for none.
+    #[serde(default)]
+    pub state_words: String,
+    /// The position it carries in one sentence, the scene's (1449 item 5,
+    /// walk 1 finding 11): `Live-Position`, `Position von gestern 21:46`;
+    /// the coordinates and the accuracy are the Info's. Empty for none.
+    #[serde(default)]
+    pub position_words: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1876,6 +1991,14 @@ pub struct Messages {
     pub v: u32,
     pub peer: String,
     pub name: String,
+    /// The header's sentence when another peer shares the name, as
+    /// [`ConversationRow::same_name`] (1452).
+    #[serde(default)]
+    pub same_name: String,
+    /// A relay's chat (1482): the bar's title, "ReticulumNet NL · Gruppe
+    /// über Relais"; empty for every other chat, whose title is the name.
+    #[serde(default)]
+    pub relayed: String,
     pub messages: Vec<MessageRow>,
     /// The header's avatar, as in [`ConversationRow`].
     #[serde(default)]
@@ -1891,7 +2014,8 @@ pub struct Messages {
     /// The address book (1139): the photo and whether it is linked, as in
     /// [`ConversationRow`]; the contact's lookup key and `_ID` for "Open
     /// contact"; whether the banner asks to add the peer (unlinked, not
-    /// answered "Not now", a message came from it); the announced name for
+    /// answered "Not now", a person met after this device began wrote,
+    /// 1448); the announced name for
     /// a new contact; the user's own name for the rename dialog; the
     /// contact's other addresses as every screen names them.
     #[serde(default)]
@@ -2077,11 +2201,26 @@ pub struct BrowseScreen {
     /// The address field: what it holds, its hint.
     pub address: String,
     pub address_hint: String,
+    /// The page's node, 32 hex (1621): the address field shows the page's
+    /// name, and this while it is edited.
+    #[serde(default)]
+    pub dest: String,
     /// The top bar's state (identity, cache, hops) and the status line.
     #[serde(default)]
     pub chips: Vec<String>,
     #[serde(default)]
     pub status: String,
+    /// A page or a file is on its way (1629): "Los" with the address
+    /// unchanged waits for it, and with nothing on its way loads the page
+    /// again.
+    #[serde(default)]
+    pub loading: bool,
+    /// The loading state over an empty page (1632, walk 4 new 12): `Lade
+    /// <name> …`, the seconds after three; empty when no page is on its
+    /// way or a cached copy stands while it comes (the status line says
+    /// that).
+    #[serde(default)]
+    pub loading_words: String,
     /// The page: the window's lines, the line it starts at, how many the
     /// page has, and the focused node's resource (`link_2`, `field_1`) or
     /// empty.
@@ -2165,7 +2304,9 @@ pub struct BrowseRow {
 /// What [`Query::Rooms`] answers (1384): the Rooms surface of the model
 /// (`loquax::ui::rooms::node`) in the phone's language, flat for
 /// `MsgPack.java`. Java draws it and decides nothing: which room is open,
-/// who said a line, and what the input does are the library's.
+/// who said a line, and what the input does are the library's. A room is
+/// drawn as a chat since 1450: bubbles, avatars, the people under its
+/// name, its menu.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomsScreen {
     pub v: u32,
@@ -2178,10 +2319,10 @@ pub struct RoomsScreen {
     /// The bar's title.
     #[serde(default)]
     pub title: String,
-    /// How the hub stands, in one line: connecting, its name, or why it
-    /// is down.
+    /// How the link stands while it is not up (connecting, or why it is
+    /// down); empty while it is.
     #[serde(default)]
-    pub hub: String,
+    pub status: String,
     /// The rooms we are in.
     #[serde(default)]
     pub rows: Vec<RoomsRow>,
@@ -2189,15 +2330,220 @@ pub struct RoomsScreen {
     /// said when a room is opened (what a room is not); its lines.
     #[serde(default)]
     pub room: String,
+    /// The open room's avatar.
+    #[serde(default)]
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: String,
+    #[serde(default)]
+    pub icon_bg: String,
+    /// Under its name: the people seen in it ("marcel, du").
+    #[serde(default)]
+    pub subtitle: String,
+    /// The people, shown while the header was tapped (`people` verb);
+    /// empty otherwise.
+    #[serde(default)]
+    pub people: Vec<String>,
+    #[serde(default)]
+    pub people_shown: bool,
+    /// The line over the people: who the list holds.
+    #[serde(default)]
+    pub people_note: String,
+    /// The room's menu, in order: its label and the verb Java sends.
+    #[serde(default)]
+    pub menu: Vec<RoomsVerb>,
     #[serde(default)]
     pub live: String,
     #[serde(default)]
     pub lines: Vec<RoomsLine>,
-    /// What the input field holds, and what it does here.
+    /// What the input field holds, and its hint (said only in the field).
     #[serde(default)]
     pub input: String,
     #[serde(default)]
-    pub hint: String,
+    pub placeholder: String,
+    /// With no room open, where the room would be: how to join one.
+    #[serde(default)]
+    pub empty: String,
+}
+
+/// What [`Query::Explore`] answers (1578): the Explore tab
+/// (`loquax::ui::explore::node`) in the phone's language, flat for
+/// `MsgPack.java`. Java draws it and decides nothing: the order, the
+/// headings, what a row opens are the library's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExploreScreen {
+    pub v: u32,
+    /// What is in front: `list` (the tab's list), `browse` (a page it
+    /// opened), `rooms` (a hub's rooms it opened), or empty while the tab
+    /// is behind.
+    #[serde(default)]
+    pub showing: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub pages_title: String,
+    /// The search field: what it holds and its hint.
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub placeholder: String,
+    /// The order's toggle: its words, and A-Z on.
+    #[serde(default)]
+    pub sort: String,
+    #[serde(default)]
+    pub az: bool,
+    /// "Open" and the address while the field holds one; empty otherwise.
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub pages: Vec<ExplorePage>,
+    /// The one sentence where there is no page to list.
+    #[serde(default)]
+    pub pages_empty: String,
+    /// The one sentence where pages cannot be opened on this device.
+    #[serde(default)]
+    pub pages_off: String,
+    /// "Rooms" (1621): the rooms the reader is in, or the one sentence
+    /// that there is none.
+    #[serde(default)]
+    pub rooms_title: String,
+    #[serde(default)]
+    pub joined: Vec<RoomsRow>,
+    #[serde(default)]
+    pub joined_empty: String,
+    /// "Servers": the servers Loquax ships, the reader's own and those
+    /// heard on the mesh, in one list, or the one sentence that there is
+    /// none (in a search: none matches).
+    #[serde(default)]
+    pub servers_title: String,
+    #[serde(default)]
+    pub hubs: Vec<ExploreHub>,
+    #[serde(default)]
+    pub servers_empty: String,
+    /// A server's sheet over the list (1618): its `dest`, empty while
+    /// none is open.
+    #[serde(default)]
+    pub sheet_dest: String,
+    #[serde(default)]
+    pub sheet_name: String,
+    /// "seen 2 h ago · reachable over 5 stations".
+    #[serde(default)]
+    pub sheet_said: String,
+    /// The server is the public rooms' in force: the button is a line.
+    #[serde(default)]
+    pub sheet_chosen: bool,
+    /// "Use this server for rooms", or that it is in use.
+    #[serde(default)]
+    pub sheet_button: String,
+    /// What using it tells the server: the reader's name.
+    #[serde(default)]
+    pub sheet_notice: String,
+    #[serde(default)]
+    pub sheet_rooms_title: String,
+    /// The rooms it named, each a `join` (1621: what its notices named
+    /// when the sheet asked, and what the shipped list recorded).
+    #[serde(default)]
+    pub sheet_rooms: Vec<String>,
+    /// The one sentence about them: asking, no answer, or none named.
+    #[serde(default)]
+    pub sheet_rooms_note: String,
+    #[serde(default)]
+    pub sheet_close: String,
+}
+
+/// A page of [`ExploreScreen`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplorePage {
+    /// The heading over it, on the first row of a group; empty after.
+    #[serde(default)]
+    pub heading: String,
+    /// Its destination in hex, what `open` and `bookmark` send.
+    pub dest: String,
+    /// The name alone; `·hash4` after it only where two names look alike;
+    /// "Unnamed page" without one (1618).
+    pub label: String,
+    /// "seen 2 h ago · reachable over 3 stations".
+    #[serde(default)]
+    pub said: String,
+    #[serde(default)]
+    pub bookmarked: bool,
+    /// What it opens, the address the menu's "Copy address" copies.
+    #[serde(default)]
+    pub url: String,
+}
+
+/// A hub of [`ExploreScreen`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExploreHub {
+    /// Its destination in hex, what `hub` sends.
+    pub dest: String,
+    pub name: String,
+    /// When it was heard, how far, "suggested", "no answer", as a page's
+    /// `said` (1618).
+    #[serde(default)]
+    pub value: String,
+    /// The public rooms' hub in force.
+    #[serde(default)]
+    pub chosen: bool,
+}
+
+/// What [`Query::MailboxPage`] answers (1642): the core's mailbox page
+/// (`loquax::ui::mailbox_page`) in the phone's language, the scene the
+/// window and the terminal draw. Java draws a header per group and a line
+/// per line: the label, the value under it, a smaller sentence for a note,
+/// a "Copy" button where `copy` is set, a tap where `action` is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxPage {
+    pub v: u32,
+    pub title: String,
+    pub groups: Vec<MailboxGroup>,
+    /// The copy button's word, and the toast after it.
+    pub copy_label: String,
+    pub copied: String,
+}
+
+/// A group of [`MailboxPage`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxGroup {
+    pub title: String,
+    pub lines: Vec<MailboxLine>,
+}
+
+/// A line of [`MailboxGroup`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxLine {
+    pub label: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    /// What the line's copy button puts on the clipboard.
+    #[serde(default)]
+    pub copy: Option<String>,
+    /// What a tap does: `profile` opens the profile with the code.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// A sentence explaining the line above.
+    #[serde(default)]
+    pub note: bool,
+}
+
+/// What [`Query::Settings`] answers (1450, walk 1 finding 21): the
+/// settings' sections in the order every target lists them, in the
+/// phone's language. Java draws an entry per section and opens its page
+/// by the key; what a page holds stays Android's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsList {
+    pub v: u32,
+    pub sections: Vec<SettingsSection>,
+}
+
+/// One section of [`SettingsList`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsSection {
+    /// `profile`, `mailbox`, `appearance`, `chats`, `notifications`,
+    /// `privacy`, `maps`, `backup` or `advanced`: the page's key.
+    pub key: String,
+    pub title: String,
+    pub summary: String,
 }
 
 /// A room of [`RoomsScreen`]'s list.
@@ -2208,6 +2554,27 @@ pub struct RoomsRow {
     pub unread: u32,
     #[serde(default)]
     pub selected: bool,
+    /// Its avatar, as a conversation's row carries one.
+    #[serde(default)]
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: String,
+    #[serde(default)]
+    pub icon_bg: String,
+    /// The word beside the name with the globe mark (1577): "public".
+    #[serde(default)]
+    pub public: String,
+}
+
+/// A verb of the open room's menu (1450).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomsVerb {
+    pub label: String,
+    /// What Java sends with [`Request::Rooms`]: `people` (with `index` 1
+    /// to show them, 0 to hide) or `leave`.
+    pub verb: String,
+    #[serde(default)]
+    pub index: i64,
 }
 
 /// One line of the open room.
@@ -2223,6 +2590,22 @@ pub struct RoomsLine {
     /// Our own line, as the hub echoed it.
     #[serde(default)]
     pub ours: bool,
+    /// A bubble (a line someone said); else a quiet line in the middle.
+    #[serde(default)]
+    pub bubble: bool,
+    /// The first bubble of another's run: the name over it, the avatar
+    /// beside it.
+    #[serde(default)]
+    pub named: bool,
+    #[serde(default)]
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: String,
+    #[serde(default)]
+    pub icon_bg: String,
+    /// `14:05`, or empty.
+    #[serde(default)]
+    pub time: String,
 }
 
 /// One row of [`GroupScreen`].
@@ -2241,6 +2624,10 @@ pub struct GroupRow {
     pub you: bool,
     #[serde(default)]
     pub remove: String,
+    /// The sheet: the member's avatar letters (1449 item 3), its colours
+    /// from `peer` as every avatar's.
+    #[serde(default)]
+    pub initials: String,
 }
 
 /// What [`Query::Shares`] answers (1273): the running shares, by peer,
@@ -2463,6 +2850,11 @@ pub struct MapRequest {
     /// inside the tracks' time window in view.
     #[serde(default)]
     pub fit_window: bool,
+    /// The position sheet's map (1448, walk finding 16): the own fix
+    /// alone, no one else's pin or track and never the radar; where no
+    /// region covers the fix, the world's outline around it.
+    #[serde(default)]
+    pub own_only: bool,
 }
 
 /// One region of the maps directory, for the Maps page (1201, 1207).

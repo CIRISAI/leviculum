@@ -1,0 +1,264 @@
+--- 120 x 40: typed ---
+┌● Search────────────── esc closes ┐┌  Alice───────────────────────────────────────────────────────────────────────────┐
+│ / tripod                         ││                                                               ein Relais adopted │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│ ▌Bob                       14:06 ││                                                                                  │
+│ ▌the «tripod» is with 4f4f4f4f   ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to Alice              14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│  Alice                     14:05 ││ did the board come back from the soak?  19:40                                    │
+│  and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                            ── Saturday 24 October ──                             │
+│                                  ││ are you at the field site tomorrow? Dana says the north                          │
+│                                  ││ gate is locked after six, so the car park by the road it                         │
+│                                  ││ is.  13:58                                                                       │
+│                                  ││                                                                                  │
+│                                  ││                      yes, from ten. Shall I bring the T114 and the long antenna, │
+│                                  ││                      or is the stick enough for the hill?  14:02 ✓               │
+│                                  ││                                                                                  │
+│                                  ││ long one, the hill eats signal  14:03                                            │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
+│                                  ││                                                                                  │
+│                                  ││ ──────────────────────────────────── 2 new ───────────────────────────────────── │
+│                                  ││ ok, bring the T114.  14:04                                                       │
+│                                  ││                                                                                  │
+│                                  ││ and the small «tripod»                                                           │
+│                                  ││ if it fits in the bag  14:05                                                     │
+│                                  ││                                                                                  │
+│                                  ││                                                      the «tripod» fits  14:06 ⠋  │
+│                                  │├  to Alice──────────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
+--- 120 x 40: opened ---
+┌  Search────────────── esc closes ┐┌● Alice───────────────────────────────────────────────────────────────────────────┐
+│ / tripod                         ││                                                               ein Relais adopted │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│  Bob                       14:06 ││                                                                                  │
+│  the «tripod» is with 4f4f4f4f   ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to Alice              14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│ ▌Alice                     14:05 ││ did the board come back from the soak?  19:40                                    │
+│ ▌and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                            ── Saturday 24 October ──                             │
+│                                  ││ are you at the field site tomorrow? Dana says the north                          │
+│                                  ││ gate is locked after six, so the car park by the road it                         │
+│                                  ││ is.  13:58                                                                       │
+│                                  ││                                                                                  │
+│                                  ││                      yes, from ten. Shall I bring the T114 and the long antenna, │
+│                                  ││                      or is the stick enough for the hill?  14:02 ✓               │
+│                                  ││                                                                                  │
+│                                  ││ long one, the hill eats signal  14:03                                            │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
+│                                  ││                                                                                  │
+│                                  ││ ──────────────────────────────────── 2 new ───────────────────────────────────── │
+│                                  ││ ok, bring the T114.  14:04                                                       │
+│                                  ││                                                                                  │
+│                                  ││▌and the small «tripod»                                                           │
+│                                  ││▌if it fits in the bag  14:05                                                     │
+│                                  ││                                                                                  │
+│                                  ││                                                      the «tripod» fits  14:06 ⠋  │
+│                                  │├  to Alice──────────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- 120 x 40: both groups ---
+┌● Search────────────── esc closes ┐┌  Alice───────────────────────────────────────────────────────────────────────────┐
+│ / 4f4f                           ││                                                               ein Relais adopted │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ CONVERSATIONS                  1 ││                                                                                  │
+│ ▌Alice                     14:06 ││                                                                                  │
+│ ▌you: the tripod fits            ││                                                                                  │
+│                                  ││                                                                                  │
+│ MESSAGES                       1 ││                                                                                  │
+│  Bob                       14:06 ││                                                                                  │
+│  the tripod is with «4f4f»4f4f   ││                             ── Friday 23 October ──                              │
+│                                  ││ did the board come back from the soak?  19:40                                    │
+│                                  ││                                                                                  │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                            ── Saturday 24 October ──                             │
+│                                  ││ are you at the field site tomorrow? Dana says the north                          │
+│                                  ││ gate is locked after six, so the car park by the road it                         │
+│                                  ││ is.  13:58                                                                       │
+│                                  ││                                                                                  │
+│                                  ││                      yes, from ten. Shall I bring the T114 and the long antenna, │
+│                                  ││                      or is the stick enough for the hill?  14:02 ✓               │
+│                                  ││                                                                                  │
+│                                  ││ long one, the hill eats signal  14:03                                            │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
+│                                  ││                                                                                  │
+│                                  ││ ──────────────────────────────────── 2 new ───────────────────────────────────── │
+│                                  ││ ok, bring the T114.  14:04                                                       │
+│                                  ││                                                                                  │
+│                                  ││ and the small tripod                                                             │
+│                                  ││ if it fits in the bag  14:05                                                     │
+│                                  ││                                                                                  │
+│                                  ││                                                        the tripod fits  14:06 ⠋  │
+│                                  │├  to Alice──────────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
+--- 120 x 40: closed ---
+┌● Loquax──────────────────────────┐┌  Alice───────────────────────────────────────────────────────────────────────────┐
+│ Bob                        14:06 ││                                                               ein Relais adopted │
+│ the tripod is with 4f4f4f4f  [1] ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│▌Alice                      14:06 ││                                                                                  │
+│▌du: the tripod fits              ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││ did the board come back from the soak?  19:40                                    │
+│                                  ││                                                                                  │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                            ── Saturday 24 October ──                             │
+│                                  ││ are you at the field site tomorrow? Dana says the north                          │
+│                                  ││ gate is locked after six, so the car park by the road it                         │
+│                                  ││ is.  13:58                                                                       │
+│                                  ││                                                                                  │
+│                                  ││                      yes, from ten. Shall I bring the T114 and the long antenna, │
+│                                  ││                      or is the stick enough for the hill?  14:02 ✓               │
+│                                  ││                                                                                  │
+│                                  ││ long one, the hill eats signal  14:03                                            │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
+│                                  ││                                                                                  │
+│                                  ││ ──────────────────────────────────── 2 new ───────────────────────────────────── │
+│                                  ││ ok, bring the T114.  14:04                                                       │
+│                                  ││                                                                                  │
+│                                  ││ and the small tripod                                                             │
+│                                  ││ if it fits in the bag  14:05                                                     │
+│                                  ││                                                                                  │
+│                                  ││                                                        the tripod fits  14:06 ⠋  │
+│                                  │├  to Alice──────────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- 80 x 24: typed ---
+┌● Search──── esc closes ┐┌  Alice───────────────────────── ein Relais adopted ┐
+│ / tripod               ││                                                    │
+│                        ││              yes, from ten. Shall I bring the T114 │
+│ MESSAGES             3 ││              and the long antenna, or is the stick │
+│ ▌Bob             14:06 ││              enough for the hill?  14:02 ✓         │
+│ ▌the «tripod» is with… ││                                                    │
+│                        ││ long one, the hill eats signal  14:03              │
+│  you to Alice    14:06 ││                                                    │
+│  the «tripod» fits     ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│  Alice           14:05 ││                                                    │
+│  … the small «tripod»… ││              stuck at the level crossing  09:31 ◷  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││ and the small «tripod»                             │
+│                        ││ if it fits in the bag  14:05                       │
+│                        ││                                                    │
+│                        ││                        the «tripod» fits  14:06 ⠋  │
+│                        │├  to Alice────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
+--- 80 x 24: opened ---
+┌  Search──── esc closes ┐┌● Alice───────────────────────── ein Relais adopted ┐
+│ / tripod               ││                                                    │
+│                        ││              yes, from ten. Shall I bring the T114 │
+│ MESSAGES             3 ││              and the long antenna, or is the stick │
+│  Bob             14:06 ││              enough for the hill?  14:02 ✓         │
+│  the «tripod» is with… ││                                                    │
+│                        ││ long one, the hill eats signal  14:03              │
+│  you to Alice    14:06 ││                                                    │
+│  the «tripod» fits     ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│ ▌Alice           14:05 ││                                                    │
+│ ▌… the small «tripod»… ││              stuck at the level crossing  09:31 ◷  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││▌and the small «tripod»                             │
+│                        ││▌if it fits in the bag  14:05                       │
+│                        ││                                                    │
+│                        ││                        the «tripod» fits  14:06 ⠋  │
+│                        │├  to Alice────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+--- 80 x 24: both groups ---
+┌● Search──── esc closes ┐┌  Alice───────────────────────── ein Relais adopted ┐
+│ / 4f4f                 ││                                                    │
+│                        ││              yes, from ten. Shall I bring the T114 │
+│ CONVERSATIONS        1 ││              and the long antenna, or is the stick │
+│ ▌Alice           14:06 ││              enough for the hill?  14:02 ✓         │
+│ ▌you: the tripod fits  ││                                                    │
+│                        ││ long one, the hill eats signal  14:03              │
+│ MESSAGES             1 ││                                                    │
+│  Bob             14:06 ││                    ── Today ──                     │
+│  …ipod is with «4f4f»… ││                                on my way  09:12 ✓  │
+│                        ││                                                    │
+│                        ││              stuck at the level crossing  09:31 ◷  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││ and the small tripod                               │
+│                        ││ if it fits in the bag  14:05                       │
+│                        ││                                                    │
+│                        ││                          the tripod fits  14:06 ⠋  │
+│                        │├  to Alice────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
+--- 80 x 24: closed ---
+┌● Loquax────────────────┐┌  Alice───────────────────────── ein Relais adopted ┐
+│ Bob              14:06 ││                                                    │
+│ the tripod is wit… [1] ││              yes, from ten. Shall I bring the T114 │
+│                        ││              and the long antenna, or is the stick │
+│▌Alice            14:06 ││              enough for the hill?  14:02 ✓         │
+│▌du: the tripod fits    ││                                                    │
+│                        ││ long one, the hill eats signal  14:03              │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│                        ││                                                    │
+│                        ││              stuck at the level crossing  09:31 ◷  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││ and the small tripod                               │
+│                        ││ if it fits in the bag  14:05                       │
+│                        ││                                                    │
+│                        ││                          the tripod fits  14:06 ⠋  │
+│                        │├  to Alice────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

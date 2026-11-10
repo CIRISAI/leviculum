@@ -89,6 +89,7 @@ impl Mailbox {
             cap_bytes: u64::MAX,
             handover: None,
             groups: None,
+            shown: Default::default(),
         };
         let answer = answer(
             &mut self.store,

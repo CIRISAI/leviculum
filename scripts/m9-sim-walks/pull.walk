@@ -1,0 +1,36 @@
+# The M9 sim's walk under a pull (1575), run with `--store pulling` and a
+# board cost per entry (`--fold-cost-us 3600`, window 16b's 836 ms for 234):
+# a device of the 1489 fixture's home with nothing pulled yet takes the
+# fixture in pages of 234 while the ring is pressed every 150 ms. Each key
+# says `[SIM] key_ms=` when its frame comes. Run by `just m9-sim-walk`,
+# once with the budget and once without (`--fold-budget-us 0`, as before
+# 1575), and the two compared.
+
+pull 6 234
+down
+down
+down
+up
+up
+up
+down
+down
+down
+up
+up
+up
+pull 6 234
+down
+down
+down
+up
+up
+up
+down
+down
+down
+up
+up
+up
+wait 2000
+dump 01-list-after-pull.png

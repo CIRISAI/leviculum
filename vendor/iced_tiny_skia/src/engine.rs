@@ -642,6 +642,20 @@ impl Engine {
                 ) {
                     return;
                 }
+                // Leviculum's patch (1473): a scaled picture, the map's
+                // frame while it zooms, sampled without tiny-skia's
+                // pipeline and clipped by the rectangle, not the mask.
+                if self.raster_pipeline.draw_fast(
+                    &image.handle,
+                    image.filter_method,
+                    *bounds,
+                    image.opacity,
+                    _pixels,
+                    transform,
+                    clip,
+                ) {
+                    return;
+                }
 
                 let clip_mask = clipped.then(|| self.clip.mask(_clip_mask));
 

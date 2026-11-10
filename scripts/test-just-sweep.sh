@@ -9,7 +9,8 @@
 # The assertion is made against a stub `cargo` on PATH, so no build runs, no
 # file is removed, and the test costs about a second. Three cases:
 #
-#   1. defaults    -- both workspaces, the documented budgets
+#   1. defaults    -- both workspaces and the three nested target
+#                     directories, the documented budgets
 #   2. overrides   -- the two parameters reach cargo-sweep unchanged
 #   3. no sweeper  -- the recipe refuses and names the install line, and
 #                     sweeps NOTHING (a guard that runs the sweep anyway is
@@ -54,6 +55,8 @@ if [ "${1:-}" = --version ]; then
     exit 101
 fi
 echo "sweep $*" >> "$CARGO_STUB_LOG"
+# Which target directory each sweep was given, for the nested ones (1469).
+echo "target ${CARGO_TARGET_DIR:-unset} sweep $*" >> "$CARGO_STUB_LOG"
 STUB
 chmod +x "$WORK/bin/cargo"
 
@@ -83,13 +86,22 @@ grep -qx 'sweep --maxsize 30GB \.' "$WORK/case1.log" \
 grep -qx 'sweep --maxsize 4GB leviculum-nrf' "$WORK/case1.log" \
     || fail "firmware workspace not swept to 4GB: $(cat "$WORK/case1.log")"
 
+# The nested target directories: the benches' BASE builds and the v3 loquax
+# (1469), each under its own CARGO_TARGET_DIR, at the side budget.
+for dir in target/window-bench/base-target target/map-bench/base-target target/x86-64-v3; do
+    grep -qx "target $ROOT/$dir sweep --maxsize 2GB \." "$WORK/case1.log" \
+        || fail "$dir not swept to 2GB: $(cat "$WORK/case1.log")"
+done
+
 # --- 2. overrides: the parameters reach the sweeper unchanged ---------------
-run_sweep "$WORK/case2.log" 7GB 1500
+run_sweep "$WORK/case2.log" 7GB 1500 900
 [ "$SWEEP_STATUS" -eq 0 ] || fail "overridden sweep exited $SWEEP_STATUS: $(cat "$WORK/case2.log.out")"
 grep -qx 'sweep --maxsize 7GB \.' "$WORK/case2.log" \
     || fail "budget override did not reach the host workspace: $(cat "$WORK/case2.log")"
 grep -qx 'sweep --maxsize 1500 leviculum-nrf' "$WORK/case2.log" \
     || fail "budget override did not reach the firmware workspace: $(cat "$WORK/case2.log")"
+grep -qx "target $ROOT/target/x86-64-v3 sweep --maxsize 900 \." "$WORK/case2.log" \
+    || fail "budget override did not reach the nested target directories: $(cat "$WORK/case2.log")"
 
 # --- 3. no sweeper installed: refuse, say how, sweep nothing ----------------
 STUB_HAS_SWEEP=0 run_sweep "$WORK/case3.log"

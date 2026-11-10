@@ -348,9 +348,59 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         ..Start::default()
     };
     let peer = loquax::address::to_hex(&[0x5a; 16]);
+    // A device that began before the ugly store's history (1448): its
+    // people count as met here, and the banner asks as before. The second
+    // start below is the same phone begun after it, which asks nothing.
+    std::fs::write(
+        phone.path().join(loquax_android::links::BOOK_FILE),
+        "since 1\n",
+    )
+    .expect("the book's beginning");
     let (address, peer) = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         ugly_in(&session);
+        // A new conversation's contact list (1448, walk finding 17): the
+        // people by name, ignoring case, the archived one too and the
+        // blocked one not; the search finds by name.
+        let people = |search: Option<&str>| -> schema::Conversations {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::People {
+                        search: search.map(str::to_string),
+                    })
+                    .expect("people"),
+            )
+            .expect("decode")
+        };
+        let all = people(None);
+        let names: Vec<String> = all
+            .conversations
+            .iter()
+            .map(|r| r.name.to_lowercase())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "by name");
+        let has = |rows: &schema::Conversations, i: usize| {
+            rows.conversations
+                .iter()
+                .any(|r| r.peer == ugly_store::peer_hex(i))
+        };
+        assert!(has(&all, ugly_store::ARCHIVED), "the archived one");
+        assert!(!has(&all, ugly_store::BLOCKED), "not the blocked one");
+        let first_name = all.conversations[0].name.clone();
+        let found = people(Some(&first_name));
+        assert!(
+            !found.conversations.is_empty()
+                && found.conversations.len() < all.conversations.len()
+                && found.conversations.iter().any(|r| r.name == first_name),
+            "{first_name}: {:?}",
+            found
+                .conversations
+                .iter()
+                .map(|r| &r.name)
+                .collect::<Vec<_>>()
+        );
         // A peer that wrote to us and is in no address book contact: its
         // chat asks to save it to the phone's contacts. Added by its code,
         // the same chat no longer asks while this session runs (walk
@@ -457,9 +507,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         );
         let chip = &messages.messages[0].chips[0];
         assert_eq!((chip.content.as_str(), chip.ours), ("\u{1F44D}", true));
-        // A peer without a name: the avatar shows its address's first byte,
-        // in the app's colour since it sent no icon appearance (1129).
-        assert_eq!(messages.initials, peer[..2].to_uppercase());
+        // A peer without a name: the avatar shows `?`, never its address
+        // (1452), in the app's colour since it sent no icon appearance (1129).
+        assert_eq!(messages.initials, "?");
         assert_eq!(
             (messages.icon_fg.as_deref(), messages.icon_bg.as_deref()),
             (None, None)
@@ -491,11 +541,16 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert_eq!(row.peer, peer);
         assert_eq!(row.last, "You reacted \u{1F44D}");
         assert!(row.ours);
-        assert_eq!(row.initials, peer[..2].to_uppercase());
+        assert_eq!(row.initials, "?", "no hex on a nameless avatar (1452)");
         // The row's mark (1130): ours is last, so a delivery word, a text.
         assert_eq!(row.kind, "reaction");
         assert!(!row.state.is_empty());
-        assert_eq!(list.initials.chars().count(), 2);
+        // The own avatar: the own name's initials, or `?`, never hex (1452).
+        assert!(
+            !list.initials.is_empty() && !list.address.to_uppercase().starts_with(&list.initials),
+            "{}",
+            list.initials
+        );
         assert_eq!(list.address.len(), 32);
 
         // The address book (1139): linked with what the picker gave, the
@@ -531,12 +586,10 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .expect("query"),
         )
         .expect("decode");
-        // The petname first, and the ugly store's other "Mum" marks both.
-        assert_eq!(
-            shown.name,
-            format!("Mum ·{short} {}", loquax::names::COLLISION),
-            "the petname first"
-        );
+        // The petname first, and the ugly store's other "Mum" gives both
+        // their hash tail and the header its sentence (1452).
+        assert_eq!(shown.name, format!("Mum ·{short}"), "the petname first");
+        assert_eq!(shown.same_name, "Two contacts are called Mum");
         assert!(shown.linked);
         assert_eq!(
             (shown.lookup.as_deref(), shown.contact_id),
@@ -590,7 +643,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
             .iter()
             .find(|row| row.peer == peer)
             .expect("listed");
-        assert_eq!(row.name, format!("Alice Schmidt ·{short}"));
+        // The name alone while nobody shares it (1452).
+        assert_eq!(row.name, "Alice Schmidt");
+        assert!(row.same_name.is_empty());
         assert_eq!(row.initials, "AS");
         assert_eq!(
             (row.linked, row.photo.as_deref()),
@@ -765,6 +820,18 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         "{kept}"
     );
 
+    // The book's beginning moved to now, as on a device that joined after
+    // the history it pulled (1448, walk finding 12).
+    let book = phone.path().join(loquax_android::links::BOOK_FILE);
+    let kept = std::fs::read_to_string(&book).expect("the book");
+    assert!(kept.contains("since 1\n"), "{kept}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock")
+        .as_secs();
+    std::fs::write(&book, kept.replace("since 1\n", &format!("since {now}\n")))
+        .expect("the book begun now");
+
     // The second start: no code, no server, the conversation from the store.
     let again = Start {
         dir: dir.clone(),
@@ -783,10 +850,22 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         .expect("decode");
         assert_eq!(messages.messages.len(), 2, "{messages:?}");
         assert_eq!(messages.messages[0].body, "hallo vom Telefon");
-        // The link outlived the session; unlinked, the address again and
-        // no photo kept.
-        let short = &peer[..4];
-        assert_eq!(messages.name, format!("Alice Schmidt ·{short}"));
+        // The peer the first session offered for the phone's contacts
+        // wrote only in the history from before the device began: no
+        // banner (1448). Control: the first session, begun before it, asked.
+        let history: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: ugly_store::peer_hex(3),
+                })
+                .expect("query"),
+        )
+        .expect("decode");
+        assert!(!history.messages.is_empty(), "the history is there");
+        assert!(!history.ask_link, "a pulled history asks nothing");
+        // The link outlived the session; unlinked, nameless again ("Unknown",
+        // never the address, 1452) and no photo kept.
+        assert_eq!(messages.name, "Alice Schmidt");
         let photo = messages.photo.clone().expect("the photo kept");
         session
             .request(Request::Unlink { peer: peer.clone() })
@@ -797,7 +876,15 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .expect("query"),
         )
         .expect("decode");
-        assert_eq!(unlinked.name, format!("<{}…>", &peer[..8]));
+        assert!(
+            matches!(
+                unlinked.name.split(" ·").next(),
+                Some("Unknown" | "Unbekannt")
+            ),
+            "{}",
+            unlinked.name
+        );
+        assert!(!unlinked.name.contains(&peer[..8]), "{}", unlinked.name);
         assert!(!unlinked.linked && unlinked.photo.is_none() && unlinked.lookup.is_none());
         assert!(!Path::new(&photo).exists());
         // 1146: the pin and the verified mark outlived the session.
@@ -1816,6 +1903,190 @@ async fn an_import_beside_the_running_mailbox_wakes_a_phone_that_only_watches() 
 /// room for a loaded test host.
 const WAKE_BOUND_SECS: u64 = 5;
 
+/// The petname entries the home node of `home` keeps for `peer`, oldest
+/// first, and their sequences.
+fn home_petnames(home: &Path, address: [u8; 16], peer: [u8; 16]) -> Vec<(u64, Option<String>)> {
+    let store =
+        loquax::store::Store::open_read_only(&home.join(loquax::store::STORE_FILE), address)
+            .expect("the home store")
+            .expect("there");
+    let page = store.archive_since(0, usize::MAX).expect("page");
+    page.entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_PETNAME)
+        .map(|e| {
+            let (about, name) = loquax::home::wire::read_petname_entry(&e.packed).expect("petname");
+            (about, (e.seq, name))
+        })
+        .filter(|(about, _)| *about == peer)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// Wait until the home node of `home` keeps `want` as `peer`'s petname,
+/// reading `session`'s events meanwhile; the entry's sequence.
+fn home_keeps_petname(session: &Session, home: &Path, peer: [u8; 16], want: Option<&str>) -> u64 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let kept = home_petnames(home, session.address(), peer);
+        if let Some((seq, name)) = kept.last() {
+            if name.as_deref() == want {
+                return *seq;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the home never kept {want:?}: {kept:?}"
+        );
+        let _ = session.next_event(Duration::from_millis(200));
+    }
+}
+
+/// 1635: the reader names a peer "Mum", the home node keeps it, and the
+/// reader clears the name again. `taken` says whether the home node took
+/// the clearing before the session stopped; without it the home is
+/// killed first, as a phone that stops before its hand of the clearing
+/// ended (the forge's pipeline #620). The phone's pull cursor is set back
+/// before the "Mum" entry, as on a phone whose pull had not reached it,
+/// and the home node comes back. The second start must show no petname,
+/// and the home must come to keep the clearing.
+async fn a_cleared_petname_across_a_restart(taken: bool) {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_dir = home.path().to_path_buf();
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let peer = [0x5a; 16];
+    let hex = loquax::address::to_hex(&peer);
+    let runtime = tokio::runtime::Handle::current();
+    let (to, at) = (hex.clone(), home_dir.clone());
+    let mut node = Some(node);
+    let mum = tokio::task::spawn_blocking(move || {
+        let mut kill = || {
+            if let Some(node) = node.take() {
+                runtime.block_on(node.kill());
+            }
+        };
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        session
+            .request(Request::Rename {
+                peer: to.clone(),
+                name: "Mum".to_string(),
+            })
+            .expect("rename");
+        let mum = home_keeps_petname(&session, &at, peer, Some("Mum"));
+        if !taken {
+            kill();
+        }
+        session
+            .request(Request::Rename {
+                peer: to.clone(),
+                name: String::new(),
+            })
+            .expect("clear");
+        if taken {
+            home_keeps_petname(&session, &at, peer, None);
+            kill();
+        }
+        let address = session.address();
+        session.stop();
+        (mum, address)
+    })
+    .await
+    .expect("the first session");
+    let (mum, address) = mum;
+    // What the phone owes its home: the clearing, unless the home took it.
+    let owed = loquax::store::Store::open_read_only(
+        &phone.path().join(loquax::store::STORE_FILE),
+        address,
+    )
+    .expect("the phone's store")
+    .expect("there")
+    .owed_petnames()
+    .expect("owed");
+    let want = match taken {
+        true => std::collections::BTreeMap::new(),
+        false => std::collections::BTreeMap::from([(peer, None)]),
+    };
+    assert_eq!(owed, want, "what the phone owes its home");
+
+    // The cursor before the "Mum" entry; a phone that never ended a pull
+    // has none, which is before every entry.
+    let cursors = files_named(phone.path(), loquax::home::client::CURSOR_FILE);
+    assert!(cursors.len() <= 1, "{cursors:?}");
+    for cursor in cursors {
+        std::fs::write(&cursor, format!("{}\n", mum - 1)).expect("the cursor set back");
+    }
+
+    let listener =
+        std::net::TcpListener::bind(format!("127.0.0.1:{port}")).expect("the same port again");
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let again = Start {
+        dir,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("the pull failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
+            }
+        }
+        let shown: schema::Detail = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Detail { peer: hex.clone() })
+                .expect("detail"),
+        )
+        .expect("decode");
+        assert_eq!(shown.petname, None, "the cleared petname came back");
+        // The home node comes to keep the clearing, and the phone still
+        // shows none once its echo is pulled.
+        home_keeps_petname(&session, &home_dir, peer, None);
+        session.request(Request::Pull).expect("pull");
+        let shown: schema::Detail = wait_for(
+            &session,
+            schema::Query::Detail { peer: hex.clone() },
+            5,
+            |d: &schema::Detail| d.petname.is_none(),
+        );
+        assert_eq!(shown.petname, None);
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+    node.stop().await;
+}
+
+/// 1635: a petname cleared while the home node could not take it stays
+/// cleared after a restart, and reaches the home node then.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleared_petname_the_home_never_took_stays_cleared_after_a_restart() {
+    a_cleared_petname_across_a_restart(false).await;
+}
+
+/// 1635's control: the home node took the clearing before the stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleared_petname_the_home_took_stays_cleared_after_a_restart() {
+    a_cleared_petname_across_a_restart(true).await;
+}
+
 /// A shared-instance name of this test process's own.
 fn instance() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2040,21 +2311,163 @@ fn facade_shows_ugly(secs: u64) {
     }
 }
 
+/// 1642, the mailbox page names the mailbox, end to end: a phone joins a
+/// real mailbox with a code the mailbox opened for "phone" and asks the page with the bytes Java's
+/// `Core.mailboxPage` sends. Once the link is up the page names the
+/// mailbox, its full address with a copy, the build it runs, the server
+/// and port it is reached over, and lists the mailbox's devices with this
+/// one said as such, all from the mailbox's `/about`. The mailbox killed,
+/// the same page says "Not connected" and keeps what the mailbox said.
+/// Both answers are printed whole (`--nocapture`), the facade dump of the
+/// page reachable and unreachable.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
+    let _facade = facade_turn().await;
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        lang: Some("en-GB".to_string()),
+        ..Start::default()
+    };
+    let page = || -> schema::MailboxPage {
+        let request: schema::Query =
+            schema::decode(&java_map(&[("t", Java::Str("mailboxpage"))])).expect("Java's bytes");
+        assert_eq!(request, schema::Query::MailboxPage);
+        rmp_serde::from_slice(&loquax_android::query(&schema::encode(&request)))
+            .expect("a MailboxPage")
+    };
+    let lines = |page: &schema::MailboxPage| -> Vec<String> {
+        page.groups
+            .iter()
+            .flat_map(|g| g.lines.iter())
+            .map(|l| match &l.value {
+                Some(value) => format!("{}: {value}", l.label),
+                None => l.label.clone(),
+            })
+            .collect()
+    };
+    let until = move |what: &str, done: &dyn Fn(&[String]) -> bool| -> schema::MailboxPage {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let now = page();
+            if done(&lines(&now)) {
+                return now;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the page never said {what}: {:#?}",
+                lines(&now)
+            );
+            let _ = loquax_android::next_event(Duration::from_millis(200));
+        }
+    };
+    let up = tokio::task::spawn_blocking(move || {
+        let answer = started(&loquax_android::start(&schema::encode(&first)));
+        assert!(answer.ok, "{answer:?}");
+        link_event(true, 30);
+        let reachable = until("the mailbox's devices", &|l| {
+            l.iter().any(|l| l == "phone: this device")
+        });
+        let said = lines(&reachable);
+        let version = format!("Version: {}", loquax::VERSION);
+        let way = format!("Connection over 127.0.0.1, port {port}");
+        for want in [
+            "Which mailbox",
+            version.as_str(),
+            way.as_str(),
+            "Last contact: now",
+        ] {
+            assert!(
+                said.iter().any(|l| l == want) || reachable.groups.iter().any(|g| g.title == want),
+                "{want:?} in {said:#?}"
+            );
+        }
+        assert!(said.iter().any(|l| l.starts_with("Connected")), "{said:#?}");
+        let address = reachable.groups[0]
+            .lines
+            .iter()
+            .find_map(|l| l.copy.clone())
+            .expect("the address to copy");
+        assert_eq!(address.len(), 32, "the address in full");
+        assert!(said.contains(&format!("Address: {address}")), "{said:#?}");
+        assert_eq!(reachable.copy_label, "Copy");
+        let code = reachable
+            .groups
+            .iter()
+            .flat_map(|g| g.lines.iter())
+            .find(|l| l.action.as_deref() == Some("profile"))
+            .expect("Show my code");
+        assert_eq!(code.label, "Show my code");
+        println!(
+            "FACADE mailboxpage reachable:\n{}",
+            serde_json::to_string_pretty(&reachable).expect("json")
+        );
+    });
+    up.await.expect("the page while the mailbox runs");
+    node.kill().await;
+    tokio::task::spawn_blocking(move || {
+        link_event(false, 30);
+        let unreachable = until("not connected", &|l| {
+            l.iter().any(|l| l.starts_with("Not connected"))
+        });
+        let said = lines(&unreachable);
+        assert!(
+            said.iter().any(|l| l == "phone: this device"),
+            "what the mailbox said stays: {said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with("Last contact: ")),
+            "{said:#?}"
+        );
+        println!(
+            "FACADE mailboxpage unreachable:\n{}",
+            serde_json::to_string_pretty(&unreachable).expect("json")
+        );
+        loquax_android::stop();
+    })
+    .await
+    .expect("the page after the mailbox went");
+}
+
 /// Wait until the list's `home_link` (1199), the status dot, says `up`:
 /// the watching link came up or went down.
 fn facade_home_link(up: bool, secs: u64) {
+    facade_list(secs, &format!("home_link {up}"), |list| {
+        list.home_link == up
+    });
+}
+
+/// Wait until the list's `offline` (1448), the bar "no connection", says
+/// `shown`.
+fn facade_offline(shown: bool, secs: u64) {
+    facade_list(secs, &format!("offline {shown}"), |list| {
+        list.offline == shown
+    });
+}
+
+/// Wait until the list answers `what`, the pump turning meanwhile.
+fn facade_list(secs: u64, what: &str, done: impl Fn(&schema::Conversations) -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(secs);
     loop {
         let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
             &schema::encode(&schema::Query::Conversations { search: None }),
         ))
         .expect("Conversations");
-        if list.home_link == up {
+        if done(&list) {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the list's home_link never said {up} in {secs} s"
+            "the list never said {what} in {secs} s"
         );
         // The pump reads the watching link's word: let events flow.
         let _ = loquax_android::next_event(Duration::from_millis(200));
@@ -2144,6 +2557,8 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
         assert_eq!(answer.server.as_deref(), Some(expected.as_str()));
         link_event(true, 30);
         facade_home_link(true, 30);
+        // The link up: no bar (1448).
+        facade_offline(false, 1);
         facade_shows_ugly(60);
         send_through_facade(&to, "vor dem Ausfall", 60);
     })
@@ -2154,6 +2569,14 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     tokio::task::spawn_blocking(|| {
         link_event(false, 30);
         facade_home_link(false, 30);
+        // Down for a moment the list says nothing yet; down for good, the
+        // bar "no connection" (1448, walk finding 14).
+        let list: schema::Conversations = rmp_serde::from_slice(&loquax_android::query(
+            &schema::encode(&schema::Query::Conversations { search: None }),
+        ))
+        .expect("Conversations");
+        assert!(!list.offline, "the link went down just now");
+        facade_offline(true, 30);
     })
     .await
     .expect("the link goes down");
@@ -2165,6 +2588,8 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
         // The TCP client redials every 5 s, doubling after the third try.
         link_event(true, 90);
         facade_home_link(true, 60);
+        // Up again: the bar goes with the dot's turn.
+        facade_offline(false, 5);
         send_through_facade(&to, "nach dem Ausfall", 60);
     })
     .await
@@ -3795,7 +4220,7 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
                     name: None,
                 })
                 .expect_err("no contact"),
-            "That code is for a mailbox, not for a friend."
+            "That code is for a mailbox, not for a contact."
         );
         session
     })
@@ -4367,6 +4792,21 @@ async fn a_draft_survives_another_chat_and_a_new_session() {
             asked(&session, schema::Query::Messages { peer: a.clone() });
         assert_eq!(messages.draft, "");
         assert_eq!(messages.draft_reply, "");
+        // 1449 item 1 (walk finding 5): the reply chosen, Back (the
+        // keyboard, then the screen: a Close and nothing else since 1449,
+        // no draft without its reply), the chat again, Send: the message
+        // that went out carries the quote.
+        let sent = messages
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.ours && m.body == "half a thought")
+            .expect("the reply sent");
+        assert_eq!(sent.quote_to.as_deref(), Some(target.as_str()), "{sent:?}");
+        assert!(
+            sent.quote.as_deref().is_some_and(|q| !q.is_empty()),
+            "{sent:?}"
+        );
         session.request(Request::Close).expect("close");
         let list: schema::Conversations =
             asked(&session, schema::Query::Conversations { search: None });
@@ -4512,7 +4952,8 @@ async fn the_compose_bar_stages_a_camera_photo_through_the_gallery_path() {
         session.request(Request::NoFix).expect("no fix");
         let none = bar(&session);
         assert_eq!(none.sheet, "position");
-        assert_eq!(none.sheet_title, "My position");
+        // Whom it goes to (1448): the peer's name, nameless here.
+        assert_eq!(none.sheet_title, "Send position to Unknown");
         assert!(!none.has_fix);
         assert_eq!(none.fix_words, "Loquax does not know where you are yet.");
         assert_eq!(none.sheet_rows[0].id, "sheet_location_on");
@@ -4930,7 +5371,7 @@ fn a_device_receipt_shows_two_ticks_on_the_phone_and_survives_the_store() {
             .map(|(_, value)| value)
             .expect("a status row")
     };
-    let who = model.names.label(&peer);
+    let who = model.names.label(&peer, Lang::En);
     assert_eq!(state_words(&model, Lang::En), format!("On {who}'s device"));
     assert_eq!(
         state_words(&model, Lang::De),
@@ -7456,6 +7897,20 @@ fn a_groups_one_and_two_ticks_are_the_phones_golden() {
     };
     assert_eq!(value(&two, "Status"), "Auf den Geräten");
     assert_eq!(value(&one, "Status"), "Angekommen");
+    // 1449 item 7: the row's word for a screen reader is the Info's, not
+    // `Ui.state("delivered")`'s one device.
+    let words: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|r| r.ours)
+        .map(|r| (r.body.as_str(), r.state_words.as_str()))
+        .collect();
+    assert_eq!(
+        words,
+        [
+            ("Brot ist da", "Auf den Geräten"),
+            ("Wer kommt mit?", "Angekommen")
+        ]
+    );
     assert!(
         value(&one, "Anna").starts_with("Auf dem Gerät · "),
         "{one:?}"
@@ -7478,4 +7933,331 @@ fn a_groups_one_and_two_ticks_are_the_phones_golden() {
         got == want,
         "group-ticks.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
     );
+}
+
+mod late_message {
+    include!("../../loquax/tests/support/late_message.rs");
+}
+
+/// 1505, a late message sits at its sent time, on the phone: Anna's chat of
+/// the shared fixture as Java reads its rows, in German, the message she
+/// wrote last night at 22:10 that came today at 14:05 second, under last
+/// night's day, and today's two below with their own day. Pinned as
+/// `golden/late-message.json`; `LOQUAX_WRITE_GOLDEN=1` writes it again.
+#[test]
+fn a_late_message_is_the_phones_golden() {
+    use loquax_android::session;
+    let mut model = loquax::ui::UiModel::<session::Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    let c = late_message::late_message(&mut model, 1_799_971_200, 3600);
+    let rows = session::rows(&model, c, Lang::De);
+    let bodies: Vec<&str> = rows.iter().map(|r| r.body.as_str()).collect();
+    assert_eq!(
+        bodies,
+        [
+            "Gute Nacht",
+            "Kommst du morgen mit?",
+            "Bis gleich am Bahnhof",
+            "Bin unterwegs"
+        ]
+    );
+    let mut got = serde_json::to_string_pretty(&serde_json::json!({ "rows": rows })).expect("json");
+    got.push('\n');
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/late-message.json");
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, &got).expect("write the golden");
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "late-message.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
+    );
+}
+
+mod relay_group {
+    include!("../../loquax/tests/support/relay_group.rs");
+}
+
+/// 1482, a relayed post shows its writer, on the phone: the relay's chat
+/// of `scene-relay-group.json` as Java reads it, in German. The bar's
+/// title says it is a group via a relay; each row carries its writer and
+/// the words without the bot's prefix; the reaction whose target is not
+/// here is a row in words; the reply's quote names its writer; the Info
+/// names Anna with her address's 4-hex tail and the relay. Pinned as
+/// `golden/relay-group.json`; `LOQUAX_WRITE_GOLDEN=1` writes it again.
+#[test]
+fn a_relayed_group_is_the_phones_golden() {
+    use loquax_android::session;
+    let mut model = loquax::ui::UiModel::<session::Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    model.lang = Lang::De;
+    let c = relay_group::relay_group(&mut model, 1_800_000_000, 3600);
+    let title = session::relayed_title(&model, &relay_group::RELAY, Lang::De);
+    assert!(title.ends_with(" · Gruppe über Relais"), "{title}");
+    let rows = session::rows(&model, c, Lang::De);
+    let bodies: Vec<&str> = rows.iter().map(|r| r.body.as_str()).collect();
+    assert_eq!(
+        bodies,
+        [
+            "Hallo zusammen",
+            "Moin Anna",
+            "hat mit 👍 auf eine Nachricht reagiert, die hier nicht liegt",
+            "Ich bin auch da",
+            "Schön, dass du da bist",
+        ]
+    );
+    let writers: Vec<&str> = rows.iter().map(|r| r.writer.as_str()).collect();
+    assert_eq!(writers, ["Anna", "Ben", "", "", "Anna"]);
+    assert_eq!(rows[4].quote.as_deref(), Some("Ben: Moin Anna"));
+    let key = model.conversations[c]
+        .messages
+        .iter()
+        .find(|m| m.id == Some(relay_group::RELAY_POST))
+        .expect("Anna's post")
+        .activity;
+    let info: Vec<schema::InfoRow> =
+        loquax::ui::info::message_info(&model, relay_group::RELAY, key)
+            .expect("its info")
+            .rows
+            .iter()
+            .map(|row| {
+                let (label, value) = row.resolve(Lang::De);
+                schema::InfoRow { label, value }
+            })
+            .collect();
+    assert!(
+        info[0]
+            .value
+            .starts_with("Anna ·6b6b, über ReticulumNet NL"),
+        "{info:?}"
+    );
+    let mut got = serde_json::to_string_pretty(&serde_json::json!({
+        "title": title,
+        "rows": rows,
+        "info_annas_post": info,
+    }))
+    .expect("json");
+    got.push('\n');
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/relay-group.json");
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, &got).expect("write the golden");
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "relay-group.json moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
+    );
+}
+
+/// The read receipts of the messages Python's router handed its delivery
+/// callback (`umsgpack.packb(message.fields)`): every id a `lev` receipt
+/// names.
+fn python_receipts(received: &[serde_json::Value]) -> Vec<[u8; 32]> {
+    let mut ids = Vec::new();
+    for message in received {
+        let Some(packed) = message.get("fields").and_then(|f| f.as_str()) else {
+            continue;
+        };
+        let Some(packed): Option<Vec<u8>> = (0..packed.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&packed[i..i + 2], 16).ok())
+            .collect()
+        else {
+            continue;
+        };
+        use leviculum_lxmf::msgpack;
+        let mut at = 0;
+        let Ok(entries) = msgpack::map_len(&packed, &mut at) else {
+            continue;
+        };
+        let mut fields = Vec::new();
+        for _ in 0..entries {
+            let Ok(key) = msgpack::read_int(&packed, &mut at) else {
+                break;
+            };
+            let start = at;
+            if msgpack::skip(&packed, &mut at).is_err() {
+                break;
+            }
+            fields.push((key, packed[start..at].to_vec()));
+        }
+        if let Some(receipt) =
+            leviculum_lxmf::lev::Lev::from_fields(&fields).and_then(|lev| lev.receipt)
+        {
+            ids.extend(receipt.ids);
+        }
+    }
+    ids
+}
+
+/// The phone sends a read receipt a Python peer sees (1496, structure
+/// review 2026-11-07 finding 10). A Python LXMF client that marks its
+/// message as one that wants receipts (`lev` `{0x00: 1}`) sends DIRECT to
+/// the mailbox on the phone; the chat opens in front. Negative first: open
+/// and in front, without a viewport, as the phone was before 1496 (no Java
+/// said one), Python gets no receipt in twice the batch time. Then the
+/// viewport `ChatActivity` says, with the bubble's key: Python receives a
+/// `lev` receipt that names its message's id, signed by the mailbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_python_writer_sees_the_read_once_the_phone_says_its_viewport() {
+    use leviculum_lxmf::lev::{Lev, CAP_READ_RECEIPTS};
+    use loquax::ui::receipts::BATCH_MS;
+    let peer = python_peer::PythonPeer::start();
+    let python = peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        lang: Some("en".to_string()),
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    let address = loquax::address::to_hex(&session.address());
+    peer.lxmf_announce();
+
+    let mark = Lev::mark();
+    assert_eq!(mark.capabilities, Some(CAP_READ_RECEIPTS));
+    let mut fields = Vec::new();
+    leviculum_lxmf::msgpack::map(&mut fields, 2);
+    for (key, value) in mark.fields() {
+        leviculum_lxmf::msgpack::int(&mut fields, key);
+        fields.extend_from_slice(&value);
+    }
+    let body = "lies mich";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": hex(body.as_bytes()),
+                "fields": hex(&fields),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let id: [u8; 32] = (0..32)
+        .map(|i| u8::from_str_radix(&message_hash[2 * i..2 * i + 2], 16).expect("hex"))
+        .collect::<Vec<u8>>()
+        .try_into()
+        .expect("32 bytes");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // The bubble on the screens, the chat open and in front.
+    let shown = python.clone();
+    let (session, key) = tokio::task::spawn_blocking(move || {
+        let messages: schema::Messages = wait_for(
+            &session,
+            schema::Query::Messages {
+                peer: shown.clone(),
+            },
+            30,
+            |m: &schema::Messages| m.messages.iter().any(|b| b.body == body),
+        );
+        let key = messages
+            .messages
+            .iter()
+            .find(|b| b.body == body)
+            .expect("the bubble")
+            .key;
+        session
+            .request(Request::Open {
+                peer: shown.clone(),
+            })
+            .expect("open");
+        session
+            .request(Request::Front { front: true })
+            .expect("front");
+        (session, key)
+    })
+    .await
+    .expect("the open chat");
+
+    // Negative: no viewport, no receipt.
+    let quiet = tokio::time::Instant::now() + Duration::from_millis(2 * BATCH_MS + 1_000);
+    while tokio::time::Instant::now() < quiet {
+        assert!(
+            !python_receipts(&peer.received()).contains(&id),
+            "a receipt without a viewport"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // The viewport, as ChatActivity says it: Python sees the read.
+    let shown = python.clone();
+    let session = tokio::task::spawn_blocking(move || {
+        session
+            .request(Request::Viewport {
+                peer: shown,
+                keys: vec![key],
+            })
+            .expect("viewport");
+        session
+    })
+    .await
+    .expect("the viewport");
+    let said = tokio::time::Instant::now();
+    let deadline = said + Duration::from_secs(60);
+    loop {
+        if python_receipts(&peer.received()).contains(&id) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python never saw the read: {:?}",
+            peer.received()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    println!(
+        "COUNTS phone.receipt python_saw_read_after_ms={}",
+        said.elapsed().as_millis()
+    );
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
 }

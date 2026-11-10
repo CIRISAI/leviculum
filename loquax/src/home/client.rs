@@ -236,6 +236,111 @@ pub async fn peer_state(
     .await
 }
 
+/// What the mailbox says of itself (1642, [`super::about`]): its name,
+/// machine, version and devices. A home from before it drops the path
+/// ([`HomeError::Unsupported`]).
+pub async fn about(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    budget: Duration,
+) -> Result<super::about::About, HomeError> {
+    let bytes = answer_if_known(
+        node,
+        public_key,
+        device,
+        super::ABOUT_PATH,
+        &super::about::about_request(),
+        budget,
+        KNOWN_WAIT,
+    )
+    .await?;
+    super::about::read_about_answer(&bytes)
+        .map_err(|_| HomeError::Malformed)?
+        .map_err(HomeError::Refused)
+}
+
+/// The NomadNet pages the home heard and the identity's bookmarks that
+/// changed after `since` (1579, [`super::pages`]): `/pages` page by page
+/// until no more follow, each on a link of its own. A home from before it
+/// drops the path ([`HomeError::Unsupported`]); the device keeps the list
+/// it heard itself.
+pub async fn pages(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    since: u64,
+    budget: Duration,
+) -> Result<super::pages::Delta, HomeError> {
+    use super::pages;
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut all = pages::Delta {
+        stamp: since,
+        more: false,
+        rows: Vec::new(),
+    };
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err(HomeError::Timeout);
+        }
+        let data = pages::pages_request(all.stamp, None);
+        let bytes = answer_if_known(
+            node,
+            public_key,
+            device,
+            super::PAGES_PATH,
+            &data,
+            left,
+            KNOWN_WAIT,
+        )
+        .await?;
+        let delta = pages::read_pages_answer(&bytes)
+            .map_err(|_| HomeError::Malformed)?
+            .map_err(HomeError::Refused)?;
+        tracing::info!(
+            "HOME pages since={} rows={} stamp={} more={} bytes={}",
+            all.stamp,
+            delta.rows.len(),
+            delta.stamp,
+            delta.more,
+            bytes.len()
+        );
+        let moved = delta.stamp != all.stamp;
+        all.stamp = delta.stamp;
+        all.rows.extend(delta.rows);
+        if !delta.more || !moved {
+            return Ok(all);
+        }
+    }
+}
+
+/// Hand the home one bookmark set or cleared (1579), asked again as a
+/// petname is: the home keeps the newer by stamp, so twice is once.
+pub async fn bookmark(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    row: &super::pages::BookmarkRow,
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let data = super::pages::bookmark_request(row);
+    let bytes = answer_if_known(
+        node,
+        public_key,
+        device,
+        super::BOOKMARK_PATH,
+        &data,
+        budget,
+        KNOWN_WAIT,
+    )
+    .await?;
+    match wire::read_status(&bytes).map_err(|_| HomeError::Malformed)? {
+        Status::Ok => Ok(()),
+        status => Err(HomeError::Refused(status)),
+    }
+}
+
 /// One request whose answer is a status, on a link of its own, asked again
 /// up to three times when the answer was lost: for requests the home node
 /// keeps once however often they come.
@@ -921,6 +1026,7 @@ async fn take_in(
                     .submit(Command::HomePetname {
                         destination,
                         petname,
+                        at: entry.at,
                     })
                     .map_err(gone)?,
                 Err(_) => tracing::warn!("HOME pull: entry {} is no petname", entry.seq),
@@ -945,6 +1051,14 @@ async fn take_in(
                         .map_err(gone)?
                 }
                 Err(_) => tracing::warn!("HOME pull: entry {} is no name", entry.seq),
+            }
+            continue;
+        }
+        if entry.kind == super::KIND_HUB {
+            // A hub the home heard (1599): every device lists it.
+            match wire::read_hub_entry(&entry.packed) {
+                Ok(hub) => outbox.submit(Command::HomeHub { hub }).map_err(gone)?,
+                Err(_) => tracing::warn!("HOME pull: entry {} is no hub", entry.seq),
             }
             continue;
         }
@@ -1274,11 +1388,13 @@ mod tests {
                 },
                 Command::HomePetname {
                     destination: [5; 16],
-                    petname: Some("Mum".to_string())
+                    petname: Some("Mum".to_string()),
+                    at: 0
                 },
                 Command::HomePetname {
                     destination: [4; 16],
-                    petname: None
+                    petname: None,
+                    at: 0
                 },
                 Command::HomePeerState {
                     destination: [5; 16],
@@ -1286,6 +1402,37 @@ mod tests {
                 },
                 Command::Fence { token: 9 },
             ]
+        );
+    }
+
+    /// 1599: a hub the home heard reaches the engine as the hub, its name
+    /// cleaned again; a broken hub entry is skipped, and neither is a
+    /// message or a state change.
+    #[tokio::test]
+    async fn a_hub_entry_reaches_the_engine_as_the_hub() {
+        let hub = crate::ui::hubs::HeardHub {
+            hash: [8; 16],
+            name: Some("Villa".into()),
+            hops: Some(4),
+            first: 100,
+            last: 200,
+            answered: None,
+        };
+        let mut said = hub.clone();
+        said.name = Some("Villa_RRC".into());
+        let pulled = Pulled {
+            entries: vec![
+                entry(3, super::super::KIND_HUB, wire::hub_entry(&said)),
+                entry(4, super::super::KIND_HUB, vec![0x90]),
+            ],
+            first: 1,
+        };
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 4 }]);
+        let pull = take_in(&mut outbox, 2, pulled).await.expect("pull");
+        assert_eq!((pull.messages(), pull.states()), (0, 0));
+        assert_eq!(
+            *outbox.commands.borrow(),
+            [Command::HomeHub { hub }, Command::Fence { token: 4 }]
         );
     }
 
@@ -1459,6 +1606,219 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         (home, phone, public_key, vec![home_dir, phone_dir], seen)
+    }
+
+    /// A home whose node answers `/pages`, `/bookmark` and `/sync` with
+    /// the real [`super::super::server::answer`] over its own store, on
+    /// TCP; `devices` admitted. The store already holds `pages` NomadNet
+    /// nodes it heard. The home's node, the phone's node, the home's key.
+    #[cfg(feature = "history")]
+    async fn real_home(
+        devices: &[[u8; 16]],
+        pages: u32,
+    ) -> (
+        std::sync::Arc<ReticulumNode>,
+        ReticulumNode,
+        [u8; 64],
+        Vec<tempfile::TempDir>,
+    ) {
+        use leviculum_core::RequestPolicy;
+        use leviculum_std::driver::ReticulumNodeBuilder;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("the port");
+        let (home_dir, phone_dir, store_dir) = (
+            tempfile::tempdir().expect("dir"),
+            tempfile::tempdir().expect("dir"),
+            tempfile::tempdir().expect("dir"),
+        );
+        let mut store =
+            crate::store::Store::open_in(store_dir.path(), [0x11; 16]).expect("the store");
+        for (i, device) in devices.iter().enumerate() {
+            let token = [u8::try_from(i).expect("few devices"); 16];
+            store.issue_token(&token, "device", 1).expect("token");
+            store
+                .redeem_token(&token, device, 2, 3600)
+                .expect("admitted");
+        }
+        for i in 0..pages {
+            let mut dest = [0u8; 16];
+            dest[..4].copy_from_slice(&i.to_be_bytes());
+            store
+                .page_heard(&lnomad::discovery::DiscoveredNode {
+                    dest_hash: dest,
+                    name: Some(alloc::format!("NomadNet node {i}")),
+                    first_seen: 1_800_000_000,
+                    last_seen: 1_800_000_000,
+                    hops: Some(3),
+                })
+                .expect("heard");
+        }
+        let mut home = ReticulumNodeBuilder::new()
+            .add_tcp_server_listener(listener)
+            .storage_path(home_dir.path().to_path_buf())
+            .build()
+            .await
+            .expect("the home's node");
+        let mut events = home.take_event_receiver().expect("events");
+        home.start().await.expect("start the home");
+        let identity = Identity::generate(&mut rand_core::OsRng);
+        let public_key = identity.public_key_bytes();
+        let signing: &'static Identity = Box::leak(Box::new(identity.clone()));
+        let destination = super::super::destination(identity).expect("home destination");
+        let hash = *destination.hash();
+        home.register_destination(destination);
+        for path in [
+            super::super::SYNC_PATH,
+            super::super::PAGES_PATH,
+            super::super::BOOKMARK_PATH,
+            super::super::ABOUT_PATH,
+        ] {
+            home.register_request_handler(hash, path, RequestPolicy::AllowAll);
+        }
+        let mut phone = ReticulumNodeBuilder::new()
+            .add_tcp_client(port)
+            .storage_path(phone_dir.path().to_path_buf())
+            .build()
+            .await
+            .expect("the phone's node");
+        phone.start().await.expect("start the phone");
+        let home = std::sync::Arc::new(home);
+        let answering = std::sync::Arc::clone(&home);
+        tokio::spawn(async move {
+            let serving = super::super::server::Home {
+                identity: signing,
+                address: [0x11; 16],
+                token_ttl_secs: 3600,
+                cap_bytes: u64::MAX,
+                handover: None,
+                groups: None,
+                shown: Default::default(),
+            };
+            while let Some(event) = events.recv().await {
+                let leviculum_core::NodeEvent::RequestReceived {
+                    link_id,
+                    request_id,
+                    path,
+                    data,
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                let remote = answering
+                    .get_remote_identity(&link_id)
+                    .map(|identity| *identity.hash());
+                let answer =
+                    super::super::server::answer(&mut store, &serving, &path, &data, remote, 100.0);
+                let sent = answering
+                    .send_response(&link_id, &request_id, &answer.bytes)
+                    .await;
+                if let Err(leviculum_std::Error::Request(
+                    leviculum_core::RequestError::PayloadTooLarge,
+                )) = sent
+                {
+                    let _ = answering
+                        .send_response_resource_with(
+                            &link_id,
+                            &request_id,
+                            &answer.bytes,
+                            super::super::ANSWERS_COMPRESSED,
+                        )
+                        .await;
+                }
+            }
+        });
+        for _ in 0..20 {
+            let _ = home.announce_destination(&hash, None).await;
+            if phone.has_path(&hash) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        (
+            home,
+            phone,
+            public_key,
+            vec![home_dir, phone_dir, store_dir],
+        )
+    }
+
+    /// 1642 over a real link: `/about` answers an admitted device with
+    /// the mailbox's devices, the asker among them, and refuses one that is
+    /// not admitted.
+    #[cfg(feature = "history")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn about_names_the_devices_over_a_link_and_refuses_a_stranger() {
+        let phone_device = Identity::generate(&mut rand_core::OsRng);
+        let (_home, phone, key, _dirs) = real_home(&[*phone_device.hash()], 0).await;
+        let budget = Duration::from_secs(60);
+        let told = about(&phone, &key, &phone_device, budget)
+            .await
+            .expect("the mailbox's word");
+        assert_eq!(told.version, crate::VERSION);
+        assert_eq!(told.devices.len(), 1);
+        assert_eq!(told.devices[0].device, *phone_device.hash());
+        let stranger = Identity::generate(&mut rand_core::OsRng);
+        assert_eq!(
+            about(&phone, &key, &stranger, budget).await.err(),
+            Some(HomeError::Refused(wire::Status::NotAdmitted))
+        );
+    }
+
+    /// 1579 over a real link: a device's first `/pages` brings the 2000
+    /// pages the home heard, and a bookmark another device set; the next
+    /// ask after its stamp brings only what changed since, the other
+    /// device's clearing as a tombstone. The full list's cost on TCP is
+    /// said in the log (`PAGES full`).
+    #[cfg(feature = "history")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pages_and_a_bookmark_reach_a_second_device_over_a_link() {
+        use super::super::pages::BookmarkRow;
+        let laptop = Identity::generate(&mut rand_core::OsRng);
+        let phone_device = Identity::generate(&mut rand_core::OsRng);
+        let (_home, phone, key, _dirs) =
+            real_home(&[*laptop.hash(), *phone_device.hash()], 2000).await;
+        let budget = Duration::from_secs(60);
+        let set = BookmarkRow {
+            url: "00000001000000000000000000000000:/page/index.mu".into(),
+            title: "Node one".into(),
+            at: 1_800_000_000_000,
+            deleted: false,
+        };
+        bookmark(&phone, &key, &laptop, &set, budget)
+            .await
+            .expect("the laptop's bookmark");
+        let started = std::time::Instant::now();
+        let full = pages(&phone, &key, &phone_device, 0, budget)
+            .await
+            .expect("the full list");
+        let took = started.elapsed();
+        let bytes = super::super::pages::pages_answer(&full).len();
+        eprintln!(
+            "PAGES full rows={} bytes={bytes} took_ms={}",
+            full.rows.len(),
+            took.as_millis()
+        );
+        assert_eq!(full.nodes().count(), 2000);
+        assert_eq!(full.bookmarks().collect::<Vec<_>>(), [&set]);
+        let cleared = BookmarkRow {
+            at: set.at + 1,
+            deleted: true,
+            ..set.clone()
+        };
+        bookmark(&phone, &key, &laptop, &cleared, budget)
+            .await
+            .expect("the laptop's clearing");
+        let delta = pages(&phone, &key, &phone_device, full.stamp, budget)
+            .await
+            .expect("the delta");
+        assert_eq!(delta.nodes().count(), 0, "no page changed");
+        assert_eq!(delta.bookmarks().collect::<Vec<_>>(), [&cleared]);
+        let stranger = Identity::generate(&mut rand_core::OsRng);
+        assert_eq!(
+            pages(&phone, &key, &stranger, 0, budget).await,
+            Err(HomeError::Refused(Status::NotAdmitted))
+        );
     }
 
     /// The message id the fake home gives every `/send` it answers.

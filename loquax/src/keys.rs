@@ -33,8 +33,9 @@
 //! test over it (1093).
 //!
 //! `Enter` on a message opens it (1076): a position report opens the map at
-//! its fix, any other message its detail view, which `v` opens for every
-//! message. `L` in the two command panes and `Alt-l` from every pane put the
+//! its fix, any other message its detail view, which `I` opens for every
+//! message (`v` until 1475, which made `v` the copy mode,
+//! [`crate::ui::copy_mode`]). `L` in the two command panes and `Alt-l` from every pane put the
 //! open conversation's peer on the map.
 //!
 //! A voice message (1276, `docs/src/concepts/loquax-voice-recording.md`):
@@ -122,6 +123,9 @@ pub enum Action {
     QuitHint,
     /// Copy the drag's selection, or the message under the cursor.
     Copy,
+    /// The copy mode on (1475): a cursor on the text that selects as it
+    /// moves.
+    CopyMode,
     /// Open the selected result of the search.
     OpenResult,
     /// The next match (`true`) or the previous one: a result row in the
@@ -242,6 +246,16 @@ pub const ROWS: &[Row<Action>] = {
                 key(PageUp, Mods::Any, ScrollMessages(PgUp), COMPOSE),
             ]],
         ),
+        // The chat is read by the line (1529): Up and Down a line, Left
+        // and Right a screen less a line, the ring's four on the M9.
+        Row::new(
+            "page the chat (left / right)",
+            MOVE,
+            &[&[
+                key(Left, NONE, Scroll(PgUp), MESSAGES),
+                key(Right, NONE, Scroll(PgDn), MESSAGES),
+            ]],
+        ),
         // Conversations.
         Row::new(
             "open the selected conversation",
@@ -266,10 +280,29 @@ pub const ROWS: &[Row<Action>] = {
         Row::new(
             "the message's details",
             MESSAGES_GROUP,
-            &[&[key(Char('v'), Mods::Plain, run(C::Details), MESSAGES)]],
+            &[&[key(Char('I'), Mods::Plain, run(C::Details), MESSAGES)]],
         )
         .palette("details")
-        .note("Ctrl-D in Signal: here v"),
+        .note("Ctrl-D in Signal, Info in WhatsApp: here I (v is the copy mode)"),
+        // The copy mode (1475): vi's visual `v`, the Emacs mark, and a
+        // Shift+arrow, which moves the new cursor at once.
+        Row::new(
+            "select text with a cursor: the copy mode",
+            MESSAGES_GROUP,
+            &[
+                &[key(Char('v'), Mods::Plain, CopyMode, MESSAGES)],
+                &[key(Char(' '), CTRL, CopyMode, MESSAGES)],
+                // Quiet: the help's key column would grow for all rows;
+                // the keys page names them.
+                &[
+                    key(Left, SHIFT, CopyMode, MESSAGES).quiet(),
+                    key(Right, SHIFT, CopyMode, MESSAGES).quiet(),
+                    key(Up, SHIFT, CopyMode, MESSAGES).quiet(),
+                    key(Down, SHIFT, CopyMode, MESSAGES).quiet(),
+                ],
+            ],
+        )
+        .note("then move, y or Alt-w copies, Esc leaves"),
         Row::new(
             "copy the message's text, or what a drag selected",
             MESSAGES_GROUP,
@@ -310,10 +343,10 @@ pub const ROWS: &[Row<Action>] = {
         Row::new("list the archived, or the rest", CONVERSATIONS, &[]).palette("archived"),
         Row::new("start a conversation", CONVERSATIONS, &[])
             .palette("new conversation")
-            .note("a friend's code or address"),
+            .note("a contact's code or address"),
         Row::new("add a contact", CONVERSATIONS, &[])
             .palette("add contact")
-            .note("a friend's code, then a name"),
+            .note("a contact's code, then a name"),
         // The profile (1443): what a tap on the avatar opens on the phone
         // and a click on it in the window; here `P`, and a click on the
         // list's title, which is the reader's own name.
@@ -323,7 +356,15 @@ pub const ROWS: &[Row<Action>] = {
             &[&[key(Char('P'), Mods::Plain, run(C::MyCode), COMMAND_PANES)]],
         )
         .palette("my code")
-        .note("for a friend to scan or paste"),
+        .note("for a contact to scan or paste"),
+        // The settings (1450): the phone's ⋮ menu and the window's gear;
+        // here `S`, beside the profile's `P`.
+        Row::new(
+            "settings: profile, mailbox, appearance, chats, privacy and more",
+            CONVERSATIONS,
+            &[&[key(Char('S'), Mods::Plain, run(C::Settings), COMMAND_PANES)]],
+        )
+        .palette("settings"),
         Row::new("import from another messenger", CONVERSATIONS, &[])
             .palette("import")
             .note("contacts and history; the identity: loquax import"),
@@ -610,6 +651,15 @@ pub const ROWS: &[Row<Action>] = {
             &[&[key(Char('R'), Mods::Plain, run(C::Rooms), COMMAND_PANES)]],
         )
         .palette("rooms"),
+        // The Explore tab (1578): the pages and the public rooms under
+        // one button. In the tab its search field and its cursor have the
+        // keys (`crate::ui::explore::key`).
+        Row::new(
+            "the pages and the public rooms (the Explore tab)",
+            MAP_GROUP,
+            &[&[key(Char('E'), Mods::Plain, run(C::Explore), COMMAND_PANES)]],
+        )
+        .palette("explore"),
         Row::new(
             "this conversation's peer on the map",
             MAP_GROUP,
@@ -873,7 +923,7 @@ pub const ROWS: &[Row<Action>] = {
         .palette("read receipts")
         .note("off, none is sent and none is shown"),
         Row::new(
-            "make a group: tick friends by name, then its name (1307)",
+            "make a group: tick contacts by name, then its name (1307)",
             EVERYWHERE,
             &[],
         )
@@ -893,7 +943,7 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("remove member"),
         Row::new(
-            "add members to the open group, its admin's: tick friends, then Enter",
+            "add members to the open group, its admin's: tick contacts, then Enter",
             EVERYWHERE,
             &[],
         )
@@ -923,7 +973,7 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("send again"),
         Row::new(
-            "forward the message under the cursor to a friend by name",
+            "forward the message under the cursor to a contact by name",
             EVERYWHERE,
             &[],
         )
@@ -984,7 +1034,7 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("send file"),
         Row::new(
-            "a friend's code from a picture of its QR: type the picture's path",
+            "a contact's code from a picture of its QR: type the picture's path",
             EVERYWHERE,
             &[],
         )

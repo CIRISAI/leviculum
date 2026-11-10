@@ -13,6 +13,7 @@ import android.content.DialogInterface;
 import android.text.format.DateUtils;
 import android.text.format.Formatter;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.Switch;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
@@ -25,10 +26,11 @@ import java.util.Map;
 
 /**
  * The settings (1199), after the modern messenger cut: one list, each
- * entry a page of its own, this screen again with PAGE. Profile, Mailbox,
- * Appearance, Notifications, Privacy, Maps, Backup, Advanced; a page that
- * has no controls yet says what exists today. Profile opens the screen
- * behind the avatar (ProfileActivity, 1187).
+ * entry a page of its own, this screen again with PAGE. The list is the
+ * library's (1450): Profile, Mailbox, Appearance, Chats, Notifications,
+ * Privacy, Maps, Backup, Advanced, the same sections in the same order on
+ * every target; a page that has no controls yet says what exists today.
+ * Profile opens the screen behind the avatar (ProfileActivity, 1187).
  *
  * Appearance holds the map's theme, which the map screen's moon held
  * before: like the phone, light or dark, the config's `map_theme` (1133).
@@ -53,33 +55,26 @@ import java.util.Map;
  * contacts.
  */
 public class SettingsActivity extends Activity implements Events.Listener {
-    /** The extra naming the page; absent for the list. */
+    /** The extra naming the page by its section's key; absent for the list. */
     static final String PAGE = "page";
-
-    /** The pages in the list's order, by their title's string. */
-    private static final int[] PAGES = {
-        R.string.settings_profile, R.string.mailbox, R.string.settings_appearance,
-        R.string.settings_chats, R.string.settings_notifications, R.string.settings_privacy,
-        R.string.settings_maps, R.string.settings_backup, R.string.advanced,
-    };
-    /** What each page holds, one line under its title in the list. */
-    private static final int[] SUMMARIES = {
-        R.string.settings_profile_summary, R.string.settings_mailbox_summary,
-        R.string.settings_appearance_summary, R.string.settings_chats_summary,
-        R.string.settings_notifications_summary,
-        R.string.settings_privacy_summary, R.string.settings_maps_summary,
-        R.string.settings_backup_summary, R.string.settings_advanced_summary,
-    };
+    /** The extra carrying the page's title, as the list said it. */
+    static final String PAGE_TITLE = "page_title";
 
     private LinearLayout body;
-    /** The page shown, a string of PAGES; 0 for the list. */
-    private int page;
+    /**
+     * The page shown, its section's key (1450): the list's entries are the
+     * library's one list of every target ({@link Core#settingsList}); null
+     * for the list.
+     */
+    private String page;
+    /** Between onResume and onPause: the mailbox page asks again only then. */
+    private boolean resumed;
     private final ServiceLink link = new ServiceLink(this);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        page = getIntent().getIntExtra(PAGE, 0);
+        page = getIntent().getStringExtra(PAGE);
         LinearLayout screen = new LinearLayout(this);
         screen.setOrientation(LinearLayout.VERTICAL);
         screen.setFitsSystemWindows(true);
@@ -99,7 +94,9 @@ public class SettingsActivity extends Activity implements Events.Listener {
             }
         });
         bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        TextView title = text(getString(page == 0 ? R.string.settings : page), 20, R.color.text);
+        String named = getIntent().getStringExtra(PAGE_TITLE);
+        TextView title = text(page == null || named == null ? getString(R.string.settings) : named,
+                20, R.color.text);
         title.setPadding(dp(12), 0, 0, 0);
         bar.addView(title);
         screen.addView(bar, new LinearLayout.LayoutParams(
@@ -128,12 +125,15 @@ public class SettingsActivity extends Activity implements Events.Listener {
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
         Events.listen(this);
         refresh();
     }
 
     @Override
     protected void onPause() {
+        resumed = false;
+        again.removeCallbacksAndMessages(null);
         Events.listen(null);
         super.onPause();
     }
@@ -150,55 +150,75 @@ public class SettingsActivity extends Activity implements Events.Listener {
 
     private void refresh() {
         body.removeAllViews();
-        if (page == R.string.mailbox) {
+        if ("mailbox".equals(page)) {
             mailbox();
-        } else if (page == R.string.settings_appearance) {
+        } else if ("appearance".equals(page)) {
             appearance();
-        } else if (page == R.string.settings_chats) {
+        } else if ("chats".equals(page)) {
             chats();
-        } else if (page == R.string.settings_notifications) {
+        } else if ("notifications".equals(page)) {
             notifications();
-        } else if (page == R.string.settings_privacy) {
+        } else if ("privacy".equals(page)) {
             privacy();
-        } else if (page == R.string.settings_maps) {
+        } else if ("maps".equals(page)) {
             maps(null, null);
-        } else if (page == R.string.settings_backup) {
+        } else if ("backup".equals(page)) {
             backup();
-        } else if (page == R.string.advanced) {
+        } else if ("advanced".equals(page)) {
             advanced();
         } else {
             entries();
         }
     }
 
-    /** The list: each page's title and what it holds. */
+    /**
+     * The list: each section's title and what it holds, in the order of
+     * the library's one list (1450), the same nine as the window's gear
+     * and the terminal's `S`.
+     */
     private void entries() {
-        for (int i = 0; i < PAGES.length; i++) {
-            final int target = PAGES[i];
-            LinearLayout entry = new LinearLayout(this);
-            entry.setOrientation(LinearLayout.VERTICAL);
-            entry.setPadding(dp(16), dp(12), dp(16), dp(12));
-            entry.setBackgroundResource(android.R.drawable.list_selector_background);
-            entry.setId(R.id.settings_entry);
-            TextView title = text(getString(target), 16, R.color.text);
-            title.setId(R.id.settings_entry_title);
-            entry.addView(title);
-            TextView summary = text(getString(SUMMARIES[i]), 14, R.color.text_secondary);
-            summary.setId(R.id.settings_entry_summary);
-            entry.addView(summary);
-            entry.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    // Profile is the screen behind the avatar (1187), not a page of its own.
-                    startActivity(target == R.string.settings_profile
-                            ? new Intent(SettingsActivity.this, ProfileActivity.class)
-                            : new Intent(SettingsActivity.this, SettingsActivity.class)
-                                    .putExtra(PAGE, target));
+        section(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.settingsList();
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                for (Map<String, Object> section : Core.list(answer, "sections")) {
+                    entry(Core.str(section, "key"), Core.str(section, "title"),
+                            Core.str(section, "summary"));
                 }
-            });
-            body.addView(entry, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
+            }
+        });
+    }
+
+    /** One section of the list; a tap opens its page. */
+    private void entry(final String target, final String named, String said) {
+        LinearLayout entry = new LinearLayout(this);
+        entry.setOrientation(LinearLayout.VERTICAL);
+        entry.setPadding(dp(16), dp(12), dp(16), dp(12));
+        entry.setBackgroundResource(android.R.drawable.list_selector_background);
+        entry.setId(R.id.settings_entry);
+        entry.setTag("settings_" + target);
+        TextView title = text(named, 16, R.color.text);
+        title.setId(R.id.settings_entry_title);
+        entry.addView(title);
+        TextView summary = text(said, 14, R.color.text_secondary);
+        summary.setId(R.id.settings_entry_summary);
+        entry.addView(summary);
+        entry.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                // Profile is the screen behind the avatar (1187), not a page of its own.
+                startActivity("profile".equals(target)
+                        ? new Intent(SettingsActivity.this, ProfileActivity.class)
+                        : new Intent(SettingsActivity.this, SettingsActivity.class)
+                                .putExtra(PAGE, target).putExtra(PAGE_TITLE, named));
+            }
+        });
+        body.addView(entry, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /**
@@ -230,12 +250,17 @@ public class SettingsActivity extends Activity implements Events.Listener {
         });
     }
 
-    /** Where the mailbox is. */
+    /**
+     * The mailbox page (1642): the core's scene (`loquax::ui::mailbox_page`),
+     * which mailbox, how the phone reaches it, which devices use it, drawn
+     * group by group. While it is up it is asked again every few seconds, so
+     * "since", the last contact and the mailbox's own answer move on it.
+     */
     private void mailbox() {
         section(new Engine.Ask<Map<String, Object>>() {
             @Override
             public Map<String, Object> ask() {
-                return Core.me();
+                return Core.mailboxPage();
             }
         }, new Engine.Got<Map<String, Object>>() {
             @Override
@@ -243,12 +268,94 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 mailbox(answer);
             }
         });
+        again.removeCallbacks(mailboxAgain);
+        again.postDelayed(mailboxAgain, MAILBOX_AGAIN_MS);
     }
 
+    /** How often the mailbox page asks again while it is up. */
+    private static final long MAILBOX_AGAIN_MS = 5000;
+    private final android.os.Handler again = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable mailboxAgain = new Runnable() {
+        @Override
+        public void run() {
+            if (!isDestroyed() && resumed && "mailbox".equals(page)) {
+                refresh();
+            }
+        }
+    };
+
     private void mailbox(Map<String, Object> answer) {
-        boolean phone = Core.bool(answer, "here");
-        body.addView(padded(text(getString(phone ? R.string.mailbox_here : R.string.mailbox_away),
-                15, R.color.text_secondary)));
+        String error = Core.str(answer, "error");
+        if (!error.isEmpty()) {
+            body.addView(padded(text(error, 15, R.color.text_secondary)));
+            return;
+        }
+        final String copyLabel = Core.str(answer, "copy_label");
+        final String copied = Core.str(answer, "copied");
+        for (Map<String, Object> group : Core.list(answer, "groups")) {
+            TextView header = text(Core.str(group, "title"), 14, R.color.accent);
+            header.setPadding(dp(16), dp(16), dp(16), dp(4));
+            body.addView(header);
+            for (Map<String, Object> line : Core.list(group, "lines")) {
+                mailboxLine(line, copyLabel, copied);
+            }
+        }
+    }
+
+    /** One line of the mailbox page: label, value under it, a copy button, a tap. */
+    private void mailboxLine(Map<String, Object> line, String copyLabel, final String copied) {
+        String label = Core.str(line, "label");
+        if (Core.bool(line, "note")) {
+            TextView note = text(label, 13, R.color.text_secondary);
+            note.setPadding(dp(16), 0, dp(16), dp(8));
+            body.addView(note);
+            return;
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(48));
+        row.setPadding(dp(16), dp(6), dp(8), dp(6));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        final String action = Core.str(line, "action");
+        words.addView(text(label, 16, "profile".equals(action) ? R.color.accent : R.color.text));
+        String value = Core.str(line, "value");
+        if (!value.isEmpty()) {
+            TextView said = text(value, 14, R.color.text_secondary);
+            said.setTextIsSelectable(true);
+            words.addView(said);
+        }
+        row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final String copy = Core.str(line, "copy");
+        if (!copy.isEmpty()) {
+            Button button = new Button(this);
+            button.setText(copyLabel);
+            button.setAllCaps(false);
+            button.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
+                            getSystemService(CLIPBOARD_SERVICE);
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(copied, copy));
+                    }
+                    android.widget.Toast.makeText(SettingsActivity.this, copied,
+                            android.widget.Toast.LENGTH_SHORT).show();
+                }
+            });
+            row.addView(button);
+        }
+        if ("profile".equals(action)) {
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    startActivity(new Intent(SettingsActivity.this, ProfileActivity.class));
+                }
+            });
+        }
+        body.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /**
@@ -512,7 +619,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 runOnUiThread(new Runnable() {
                     @Override
                     public void run() {
-                        if (page != R.string.settings_maps || isFinishing()) {
+                        if (!"maps".equals(page) || isFinishing()) {
                             return;
                         }
                         if (!Core.bool(answer, "ok") && (delete != null || autoload != null)) {
@@ -863,6 +970,11 @@ public class SettingsActivity extends Activity implements Events.Listener {
         body.addView(node);
         body.addView(padded(text(getString(R.string.propagation_node_text), 14,
                 R.color.text_secondary)));
+        hubs = new LinearLayout(this);
+        hubs.setOrientation(LinearLayout.VERTICAL);
+        body.addView(hubs, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        roomsHub(null);
         LinearLayout row = new LinearLayout(this);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(16), dp(16), dp(16), dp(4));
@@ -883,7 +995,12 @@ public class SettingsActivity extends Activity implements Events.Listener {
         row.addView(flings);
         body.addView(row, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView stop = text(getString(R.string.stop_service), 16, R.color.text);
+        // The verb and, under it, what it costs (1447, walk 1 finding 27):
+        // nothing arrives until the app is opened again.
+        LinearLayout stop = new LinearLayout(this);
+        stop.setOrientation(LinearLayout.VERTICAL);
+        stop.addView(text(getString(R.string.stop_service), 16, R.color.text));
+        stop.addView(text(getString(R.string.stop_service_text), 14, R.color.text_secondary));
         stop.setPadding(dp(16), dp(24), dp(16), dp(16));
         stop.setBackgroundResource(android.R.drawable.list_selector_background);
         stop.setOnClickListener(new View.OnClickListener() {
@@ -897,6 +1014,94 @@ public class SettingsActivity extends Activity implements Events.Listener {
         });
         body.addView(stop, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    /** The public rooms' hub lines (1577), filled by {@link #roomsHub}. */
+    private LinearLayout hubs;
+
+    /**
+     * The public rooms' hub (1577): `set` chosen when given ("none", or a
+     * hub's address), then the lines as the core answers them, the same
+     * as the window's and the terminal's Advanced section: which hub, the
+     * shipped ones with a mark on the one in force, none, a field to
+     * paste another, and what a hub learns. Asked on the engine's thread.
+     */
+    private void roomsHub(final String set) {
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
+            @Override
+            public Map<String, Object> ask() {
+                return Core.roomsHub(set);
+            }
+        }, new Engine.Got<Map<String, Object>>() {
+            @Override
+            public void got(Map<String, Object> answer) {
+                if (isDestroyed()) {
+                    return;
+                }
+                String error = Core.str(answer, "error");
+                if (!error.isEmpty()) {
+                    android.widget.Toast.makeText(SettingsActivity.this, error,
+                            android.widget.Toast.LENGTH_LONG).show();
+                }
+                hubLines(answer);
+            }
+        });
+    }
+
+    private void hubLines(Map<String, Object> answer) {
+        hubs.removeAllViews();
+        TextView title = text(Core.str(answer, "title"), 16, R.color.text);
+        title.setPadding(dp(16), dp(24), dp(16), 0);
+        hubs.addView(title);
+        hubs.addView(padded(text(Core.str(answer, "current"), 14, R.color.text_secondary)));
+        for (Map<String, Object> hub : Core.list(answer, "hubs")) {
+            final String set = Core.str(hub, "set");
+            String mark = Core.bool(hub, "chosen") ? "\u2713  " : "     ";
+            // 1599: how far the hub is and its marks, under its name.
+            String detail = Core.str(hub, "detail");
+            TextView line = text(mark + Core.str(hub, "name")
+                    + (detail.isEmpty() ? "" : "\n     " + detail), 16, R.color.text);
+            line.setPadding(dp(16), dp(12), dp(16), dp(12));
+            line.setTag("rooms_hub_" + set);
+            line.setBackgroundResource(android.R.drawable.list_selector_background);
+            line.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    roomsHub(set);
+                }
+            });
+            hubs.addView(line, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        String own = Core.str(answer, "own");
+        TextView paste = text((own.isEmpty() ? "     " : "\u2713  ") + Core.str(answer, "paste")
+                + (own.isEmpty() ? "" : ": " + own), 16, R.color.text);
+        paste.setPadding(dp(16), dp(12), dp(16), 0);
+        hubs.addView(paste);
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), 0, dp(16), dp(4));
+        final EditText field = new EditText(this);
+        field.setHint(Core.str(answer, "hint"));
+        field.setSingleLine(true);
+        field.setTag("rooms_hub_field");
+        row.addView(field, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button take = new Button(this);
+        take.setText(android.R.string.ok);
+        take.setTag("rooms_hub_take");
+        take.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String typed = field.getText().toString().trim();
+                if (!typed.isEmpty()) {
+                    roomsHub(typed);
+                }
+            }
+        });
+        row.addView(take);
+        hubs.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        hubs.addView(padded(text(Core.str(answer, "note"), 14, R.color.text_secondary)));
     }
 
     /**

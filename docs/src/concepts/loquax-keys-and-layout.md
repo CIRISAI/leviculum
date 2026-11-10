@@ -148,6 +148,29 @@ The first four rows are `lnomad`'s `SCROLL_KEYS` rows unchanged, read from
 the shared table (section 4); the `Ctrl-↑`/`Ctrl-↓` spelling is the one
 chord `loquax` adds to them.
 
+**In the conversation (M) the keys read by the line (1529, Lew on the
+M9, 2026-11-07).** Before, a press jumped a message, which skipped the
+middle of a long one and landed at its start on the way back. The rule
+is a pager with a focus (`step`, `loquax/src/ui/pager.rs`), one place
+for the terminal and the M9:
+
+| Key | in M |
+|---|---|
+| `↓` / `↑`, `j` / `k`, `Ctrl-n` / `Ctrl-p`; the M9's ring up and down | the view a line. The selection stays on a message while it has lines still to come and moves to the next only once its last line is on screen and the next one's first; on the way up a long message is entered at its end, line by line, never at its start |
+| `→` / `←` (1529); the page keys, `Space`, `Ctrl-f` / `Ctrl-b`, `Ctrl-v` / `Alt-v`; the M9's ring right and left | a page: a screen less one line of overlap. The selection goes to the first message the page brought lines of (the last, up); a page that reaches the bottom selects the newest and the pane follows it again, one that reaches the top the first |
+| `Ctrl-d` / `Ctrl-u` | half a screen, the same selection rule |
+| `g` / `G`, `Home` / `End` | the first message at the top, the newest at the bottom |
+
+`Enter` and the message's keys (`I`, `y`, `d`, `e`) act on the selected
+message as before. A held key repeats where its source repeats: the
+terminal's own key repeat, and on the M9 the keyboard controller's code
+answered again on the 10 ms poll, which the driver takes as a press each
+time (no timer of the board's). A message counts as read (the receipt's
+viewport, `hit::viewport`) once its last line has been on screen, not
+when its bubble was selected or half of it showed. The window and the
+phone scroll freely and keep their own selection rules; the list (L)
+stays a row an entry.
+
 ### Conversations
 
 | Action | vi | Emacs | mail, chat | mouse | where |
@@ -165,8 +188,9 @@ chord `loquax` adds to them.
 | Action | vi | Emacs | mail, chat | mouse | where |
 |---|---|---|---|---|---|
 | open the message: one with a position (a report, or a text with telemetry) the map at its fix, any other its detail view | `Enter` | | `Enter` (mutt display, Signal default action) | click a report or a text with a position; click a delivery mark for the detail | M |
-| the message's detail view and ledger, any message | `v` | | palette `details` (Signal `Ctrl-D`, vi's half page here) | click its delivery mark | M |
+| the message's detail view and ledger, any message | `I` (`v` until 1475) | | palette `details` (Signal `Ctrl-D`, vi's half page here; WhatsApp's Info) | click its delivery mark | M |
 | copy the message's text | `y` | `Alt-w` | | drag selects, release copies (OSC 52) | M |
+| the copy mode: a cursor on the text that selects as it moves (1475) | `v` | `Ctrl-Space` (the mark) | `Shift` with an arrow | drag | M |
 | follow a link in the body | `f`, then its label | | | click the link, as in `lnomad` | M |
 | delete from this device | `d`, then confirm | | `d` (mutt; aerc asks first) | | M, from the history slice on |
 | react: a quick emoji by its digit, or typed text and `Enter` (1104) | `e` | | palette `react` (the long press in Signal and Columba) | | M |
@@ -288,7 +312,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:248`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:256`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -467,7 +491,7 @@ text. Here it is in cells.
 
 ```text
 ┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
-│ / tripod▏                        ││ direct, 2 hops · heard 14:05    propagation node 9c31e0a2 adopted · synced 14:03 │
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05                   relay Bern adopted · synced 14:03 │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  2 ││                                                                                  │
 │  Alice ·4f2a               14:06 ││                                                                                  │
@@ -585,7 +609,7 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
 - **The list's title is our own address** (`Loquax afbda7b3`), as before,
   not `Chats`.
 - **The header's second row at 120 columns has the propagation node half only**
-  (`propagation node 9c31e0a2 adopted · synced 14:03`, right-aligned, with the rule
+  (`relay Bern adopted · synced 14:03`, the relay by the name it announces, `a relay` without one, never its hash (1587), right-aligned, with the rule
   under it). How the peer is reached and when it was last heard need the
   path table read for the screen, which nothing does yet. At 80 columns
   the propagation node's state is words, the longest form that fits, never the `⌂`
@@ -687,7 +711,9 @@ the propagation node page's decision, or fills a gap they leave:
   announced name, then a space and the address's first four hex digits
   after a `·` (`Alice ·4f2a`); with neither, the address form
   `<9c31e0a2…>` as before. A name is cut before its hash, so the hash
-  always stays.
+  always stays. *Superseded 2026-11-08 (1452): the name alone, the tail
+  only on a collision, "Unknown" instead of the address form, and no `≈`;
+  see [the user interface page](loquax-ui.md), "Built 2026-10-26, names".*
 - **Sanitising** removes control characters, the bidi embeddings,
   overrides, isolates and marks, and the invisible code points (Unicode's
   default-ignorables: zero-width characters, the soft hyphen, the Hangul
@@ -787,7 +813,7 @@ or fills a gap it leaves:
   blank row under the last of them when an unpinned one follows. No key and
   no mouse target, as the element text has it.
 - **The palette ranks** a name typed whole and then one it begins before
-  the scattered matches (`leviculum-ui/src/commands.rs:260`); without it
+  the scattered matches (`leviculum-ui/src/commands.rs:268`); without it
   `:pin` and `Enter` ran `previous conversation`, whose letters hold
   `p`, `i`, `n` in order.
 - **The unread count** and the `new` rule survive a restart: a conversation
@@ -879,7 +905,7 @@ falls from 5.9:1 to 4.3:1.
 1. `--no-color`, or `NO_COLOR` set and not empty: monochrome.
 2. `--color truecolor|256|16`: that tier. `lnomad` had the flag with two
    values (`lnomad/src/main.rs:65`); `loquax` has it now
-   (`loquax/src/main.rs:438`), and both have `16`.
+   (`loquax/src/main.rs:454`), and both have `16`.
 3. `COLORTERM` is `truecolor` or `24bit`: truecolor (the rule
    `resolve_depth` had before 1042).
 4. `TERM` contains `256color`: 256. `xterm-256color`, `tmux-256color` and
@@ -912,23 +938,23 @@ first rung it is.
 #### 2. Light or dark
 
 `loquax` asks the terminal for its background before raw mode
-(`loquax/src/tui.rs:249`), the same query `lnomad` makes: OSC 11, with
+(`loquax/src/tui.rs:251`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
 `resolve_theme` (`leviculum-ui/src/theme.rs:73`). It was hardcoded to
 `auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `loquax`'s config file
-  (`loquax/src/config.rs:345`, which holds `key = value` lines), `auto` the
+  (`loquax/src/config.rs:367`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
   has it (`lnomad/src/main.rs:57`);
 - a terminal that does not answer in time and sets no `COLORFGBG` gives
   dark, as in `lnomad`;
 - a palette action `theme` toggles for the session, the way `t` calls
-  `toggle_theme` in lnomad (`lnomad/src/app/intent.rs:350`); no key, the
+  `toggle_theme` in lnomad (`lnomad/src/app/intent.rs:351`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:4042`).
+  (`loquax/src/ui.rs:6006`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -1030,7 +1056,7 @@ palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
 
 ```text
 ┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
-│ / tripod▏                        ││ direct, 2 hops · heard 14:05    propagation node 9c31e0a2 adopted · synced 14:03 │
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05                   relay Bern adopted · synced 14:03 │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  2 ││                                                                                  │
 │  Alice ·4f2a               14:06 ││                                                                                  │
@@ -1125,7 +1151,7 @@ to 8.6:1 in 256; the ladder's three tones are among the values measured.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`loquax/src/tui.rs:1018`) writes characters only, and the existing
+  (`loquax/src/tui.rs:1322`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -1188,7 +1214,7 @@ these differences from the text above:
   for a selected block and `r` for reverse video; the build writes `^`
   for both, because a selected block in 16 colours and in monochrome is
   reverse video and a map of styles cannot tell the two apart. The
-  letters (`style_letter`, `loquax/src/tui.rs:1173`): `.` ours, `,`
+  letters (`style_letter`, `loquax/src/tui.rs:1477`): `.` ours, `,`
   theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
   tint or reverse video, `t` the toast, `e` the error colour, blank for
   the pane. Where two tokens share their colours the earlier letter wins:
@@ -1300,6 +1326,63 @@ sees. Where it differs from the table:
   `lnomad`.
 - **`--no-mouse`** starts without capture and the palette's `mouse`
   switches it; without capture the terminal's own selection works.
+- **Shift+drag is the terminal's own selection, capture or not** (1444):
+  xterm, VTE terminals (GNOME Terminal, Tilix), Konsole, kitty, Alacritty,
+  foot and WezTerm hand a drag with Shift held to their own selection and
+  never report it, so the text lands in the PRIMARY selection and the
+  terminal's copy as it does in any other program. Loquax asks nothing
+  that would stop it.
+- **The window selects as a desktop program does** (1444): a double
+  click on a bubble's words selects the word, a triple click its line, a
+  press and a drag a range across bubbles in reading order, a Shift+click
+  moves the end, a plain click or `Escape` clears it, `Ctrl-A` selects the
+  whole conversation. Every change is put on the PRIMARY selection (a
+  middle click elsewhere pastes it), `Ctrl-C` puts it on the clipboard.
+  Within one bubble the copy is its words; across bubbles one line each,
+  `Name, 14:05: text`. A middle click on the compose field pastes the
+  PRIMARY selection where it clicked (at its cursor until 1475); the field keeps its own selection,
+  `Ctrl-C` and `Ctrl-V`. The rules are the core's
+  (`loquax/src/ui/selection.rs`), the pointer's place in a text the
+  shared widget's (`leviculum-ui-iced/src/select.rs`).
+- **Every text in the window selects** (1475), not only the bubbles'
+  words: the day lines, a group's own lines ("Anna joined."), a reply's
+  quote, a bubble's position line, each conversation's last line in the
+  list, and in the profile the address and the code (shown under the QR
+  as text for it). Each is a run of its own in the core, in reading
+  order, so a drag runs through all of them. Across runs the copy is one
+  line a bubble, `Name, 14:05: ` and the bubble's quote (`> `), words and
+  position line joined by ` · `; a day line or a group's line stands
+  alone on its line; the address is copied without the blanks between its
+  fours. The window has no detail view to select in: the Info is the
+  phone's.
+- **A list row and a position line are buttons** (1475): a plain click
+  opens the chat or the map as before; the pointer moved more than 4
+  pixels with the button held, or a double click, selects instead. The
+  open that the release of such a drag still sends is dropped within that
+  one event; a double click opens with its first click and selects with
+  its second, as two clicks are.
+- **The pane scrolls at its edge** (1475): while a drag selects, the
+  pointer within 32 pixels of the chat's or the list's top or bottom edge,
+  or past it, scrolls that way on every frame, faster the deeper it is,
+  and the selection follows into what scrolls in.
+- **A middle click pastes where it clicks** (1475): the compose field's
+  cursor goes to the click, then the PRIMARY selection is pasted there.
+- **The terminal's copy mode** (1475, `loquax/src/ui/copy_mode.rs`): `v`
+  (vi's visual mode), `Ctrl-Space` (the Emacs mark) or a `Shift`+arrow in
+  the messages puts a cursor on the selected message's first character
+  and selects from there to wherever it goes: the arrows, `h` `j` `k`
+  `l`, `w` `b`, `0` `$` (`Home` `End`), and the Emacs `Ctrl-f` `Ctrl-b`
+  `Ctrl-n` `Ctrl-p` `Ctrl-a` `Ctrl-e` `Alt-f` `Alt-b`. `y`, `Alt-w` or
+  `Enter` copy it through OSC 52 and leave; `Esc`, `Ctrl-g`, `q` or `v`
+  leave without a copy; a click leaves too. The selection is the core's,
+  the same as the window's: a cursor cell is a place in its message's
+  text, the copy one line a message with its writer and time across
+  messages. It is drawn as a drag's, in inverse video. A terminal that
+  does not take OSC 52 copies nothing; the copy mode cannot change that.
+  The details moved from `v` to `I` for it.
+- **The phone stays as it is** (1475): WhatsApp offers no selection
+  inside a bubble either; a long press with Copy copies the message whole,
+  and that is the phone's model.
 - **A key script** says `click`, `wheel` and `drag` at cells counted from
   1, and writes each copy's OSC 52 sequence into its frames
   (`loquax/tests/fixtures/tui_mouse.frames`).

@@ -535,6 +535,12 @@ pub struct Model {
     /// the phone and the M9): an `lxmf@` link then asks the host to write
     /// ([`Effect::Write`]) rather than copying the address.
     pub hosted: bool,
+    /// A host's name for the page the browser shows or loads (1621, the
+    /// name Loquax's Explore lists it by): set, the bar's title, the
+    /// address field while it is not edited and the loading line say it
+    /// instead of the page's own title, its hash and its path. `None` in
+    /// lnomad's own windows.
+    pub label: Option<String>,
     /// The language the browser speaks: its catalogue's
     /// ([`super::strings`]) English unless the shell names another.
     pub lang: Lang,

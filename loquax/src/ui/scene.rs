@@ -50,6 +50,7 @@ use serde_json::{json, Map, Value};
 
 use super::chat::{self, Bubble, ListRow, Placement};
 use super::compose::{self, Button, Round, SheetRow};
+use super::counters::Op;
 use super::intent::{Intent, Messages, Switch, Target};
 use super::liveness::{self, Liveness};
 use super::recording::{self, Fold, LevelTrack, Phase, Verb};
@@ -83,6 +84,10 @@ pub enum TabId {
     /// Reticulum Relay Chat's rooms on a hub (1379), where
     /// [`super::rooms::Rooms::enabled`] says so.
     Rooms,
+    /// Explore (1578): the pages and the public rooms under one button,
+    /// the bar's third and last. Browse and Rooms are no buttons of the
+    /// bar any more: they are what Explore opens.
+    Explore,
 }
 
 /// A node's stable identity: a renderer diffs on it, hit tests to it, and
@@ -174,6 +179,7 @@ impl NodeId {
             NodeId::Tab(TabId::Map) => "tab_map".to_string(),
             NodeId::Tab(TabId::Browse) => "tab_browse".to_string(),
             NodeId::Tab(TabId::Rooms) => "tab_rooms".to_string(),
+            NodeId::Tab(TabId::Explore) => "tab_explore".to_string(),
             NodeId::List => "list".to_string(),
             NodeId::Row(peer) => format!("row_{}", to_hex(peer)),
             NodeId::Pin(peer) => format!("pin_{}", to_hex(peer)),
@@ -419,6 +425,9 @@ pub struct Row {
     /// A group's row (1307): its avatar is the member count, its line
     /// "Invitation" until the Join.
     pub group: Option<super::group_scene::GroupBadge>,
+    /// "Two contacts are called Lew" (1452): drawn quietly beside the name
+    /// while another peer shares it; both rows carry their hash tail then.
+    pub same_name: Option<Text>,
 }
 
 /// A row is its list item: `row.selected`, `row.activate`, `row.a11y`
@@ -431,11 +440,21 @@ impl core::ops::Deref for Row {
     }
 }
 
-/// The conversation list.
+/// The conversation list: the window of rows the viewport asked for
+/// (1490), inside the whole order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct List {
     pub id: NodeId,
     pub rows: Vec<Row>,
+    /// The first row's place in the whole order, and the order's length:
+    /// the scroll geometry when `rows` is a window of it.
+    pub first: usize,
+    pub total: usize,
+    /// The first row on screen, in the whole order, of a list apart
+    /// (1546, [`super::Viewing::apart`]): where the reader's cursor keeps
+    /// its line while the rows move around it. `None` where the frontend
+    /// scrolls the list itself.
+    pub top: Option<usize>,
     /// What shows when there is no row.
     pub empty: Text,
     pub a11y: A11y,
@@ -467,6 +486,9 @@ pub struct BubbleNode {
     pub text: Option<String>,
     /// The newest report's words (`live · every 10 min · 2 min ago`).
     pub live: Option<Text>,
+    /// The sentence of the position it carries, [`position_words`]: a
+    /// renderer draws it after the pin, never the coordinates.
+    pub position: Option<Text>,
     /// Ours only: the ladder's mark, what a screen reader says for it,
     /// and for a failed one the tap that sends it again (1232).
     pub mark: Option<MarkNode>,
@@ -957,6 +979,11 @@ pub struct Chat {
     /// A group its admin deleted (1307 pass four): the line drawn where the
     /// compose bar was, "Lew ended the group"; nothing can be written.
     pub ended: Option<Text>,
+    /// Two peers of one name (1452, [`crate::names::Names::same_name`]):
+    /// the sentence the bar's title ends with, apart, for a screen too
+    /// narrow for both on one row; the M9 draws it on a row of its own
+    /// under the bar (1587). Not in the JSON: the phone reads the title.
+    pub same_name: Option<Text>,
     pub a11y: A11y,
 }
 
@@ -981,6 +1008,8 @@ pub enum ScreenId {
     Browse,
     /// The Rooms tab in front (1379).
     Rooms,
+    /// The Explore tab's list in front (1578).
+    Explore,
 }
 
 /// One screen's nodes.
@@ -1009,6 +1038,10 @@ pub struct Scene {
     pub browse: Option<lnomad::app::scene::Scene>,
     /// The Rooms surface while its tab is in front (1379).
     pub rooms: Option<super::rooms::RoomsNode>,
+    /// The Explore tab's list while it is in front (1578), boxed: inline
+    /// it grew every scene by its size, and the M9's chats scene, which
+    /// never holds it, went over its stack budget (108 360 of 100 000 B).
+    pub explore: Option<alloc::boxed::Box<super::explore::ExploreNode>>,
     /// The profile over the screen while it is open (1443).
     pub profile: Option<super::profile::ProfileScreen>,
 }
@@ -1016,21 +1049,41 @@ pub struct Scene {
 impl<B> UiModel<B> {
     /// The scene of the list and the open chat for `class`.
     pub fn scene(&self, class: LayoutClass) -> Scene {
+        self.count(Op::Scenes, 1);
         let mut scene = self.content_scene(class);
+        scene.profile = self.profile_screen();
+        scene
+    }
+
+    /// The scene of the chats list alone (1463): [`UiModel::scene`] as a
+    /// screen that shows the list without the open conversation sees it,
+    /// with no chat, sheet or whereabouts, and none of them built. The
+    /// M9's list screen: a chat of 4000 bubbles built and thrown away on
+    /// every key was most of its draw.
+    pub fn list_scene(&self, class: LayoutClass) -> Scene {
+        self.count(Op::Scenes, 1);
+        let mut scene = self.content_scene_of(class, false);
         scene.profile = self.profile_screen();
         scene
     }
 
     /// [`UiModel::scene`] without what lies over it.
     fn content_scene(&self, class: LayoutClass) -> Scene {
-        if self.browse.enabled && self.browse.open {
-            return browse_scene(self).in_class(class);
+        self.content_scene_of(class, true)
+    }
+
+    /// The content scene, its chat built when `chat_open` and one is
+    /// selected.
+    fn content_scene_of(&self, class: LayoutClass, chat_open: bool) -> Scene {
+        if let Some(scene) = self.tab_scene() {
+            return self.counted(scene).in_class(class);
         }
-        if self.rooms.showing() {
-            return rooms_scene(self).in_class(class);
-        }
-        let open = self.conversations.get(self.selected).map(|_| self.selected);
-        let chat = open.map(|c| chat(self, c));
+        let open = self
+            .conversations
+            .get(self.selected)
+            .filter(|_| chat_open)
+            .map(|_| self.selected);
+        let chat = open.map(|c| self.assembled_chat(c));
         let screen = match &chat {
             Some(chat) => ScreenId::Chat { peer: chat.peer },
             None => ScreenId::Chats,
@@ -1039,12 +1092,12 @@ impl<B> UiModel<B> {
             Some(chat) => bar_sheet(self, chat.peer),
             None => (None, None),
         };
-        Scene {
+        self.counted(Scene {
             class: LayoutClass::Wide,
             screen,
             top: me_bar(self),
-            tabs: Some(tabs(self)),
-            list: Some(list(self)),
+            tabs: self.viewing.tabs.then(|| tabs(self)),
+            list: Some(self.assembled_list()),
             chat,
             sheet,
             whereabouts,
@@ -1054,25 +1107,77 @@ impl<B> UiModel<B> {
             members: super::group_scene::member_sheet(self),
             browse: None,
             rooms: None,
+            explore: None,
             profile: None,
-        }
+        })
         .in_class(class)
+    }
+
+    /// The browser, a hub's rooms or Explore's list, whichever is in
+    /// front, in a frame of its own: each built inline here put its own
+    /// `Scene` temporaries on the stack of every scene, and the M9's chats
+    /// scene, which builds none of them, went from 89 400 to 108 360 B
+    /// (1578, the board's budget is 100 000).
+    #[inline(never)]
+    fn tab_scene(&self) -> Option<Scene> {
+        if self.browse.enabled && self.browse.open {
+            return Some(browse_scene(self));
+        }
+        if self.rooms.showing() {
+            return Some(rooms_scene(self));
+        }
+        if super::explore::Explore::showing(self) {
+            return Some(explore_scene(self));
+        }
+        None
+    }
+
+    /// The list the fold left for the viewport (1490), built by the
+    /// first read after the fold and reused while its stamp is current
+    /// (1591); a model changed outside `update` builds whole, as before.
+    fn assembled_list(&self) -> List {
+        self.built_list().unwrap_or_else(|| list(self))
+    }
+
+    /// The open chat the fold left for the viewport, as the list's;
+    /// built whole otherwise.
+    fn assembled_chat(&self, c: usize) -> Chat {
+        self.built_chat(c).unwrap_or_else(|| chat(self, c))
+    }
+
+    /// `scene` with its nodes counted as built (1489), before a class
+    /// throws any away: the reader's bar, the tabs, the list's rows, the
+    /// chat's bar and its bubbles.
+    fn counted(&self, scene: Scene) -> Scene {
+        let tabs = scene.tabs.as_ref().map_or(0, |t| t.items.len());
+        let rows = scene.list.as_ref().map_or(0, |l| l.rows.len());
+        let chat = scene.chat.as_ref().map_or(0, |c| {
+            1 + c.groups.iter().map(|g| g.bubbles.len()).sum::<usize>()
+        });
+        self.count(Op::SceneNodes, 1 + tabs + rows + chat);
+        scene
     }
 }
 
-/// The Browse tab in front (1337): Loquax's bar titled Browse, its tab bar
-/// with Browse active, and lnomad's scene, which is the whole content. No
-/// list and no chat: the tab is a screen of its own in both classes.
+/// The Browse tab in front (1337): Loquax's bar titled by the page's
+/// name (1621, walk 2: it said "Pages"), "Browse" on the start screen,
+/// its tab bar with Browse active, and lnomad's scene, which is the whole
+/// content. No list and no chat: the tab is a screen of its own in both
+/// classes.
 fn browse_scene<B>(model: &UiModel<B>) -> Scene {
     let mut top = me_bar(model);
-    top.title = Text::key(StrId::TabBrowse);
+    let title = match &model.browse.model.label {
+        Some(name) => Text::Raw(name.clone()),
+        None => Text::key(StrId::TabBrowse),
+    };
+    top.title = title.clone();
     top.actions = Vec::new();
-    top.a11y = A11y::of(NodeId::TopBar, Role::Bar, Text::key(StrId::TabBrowse));
+    top.a11y = A11y::of(NodeId::TopBar, Role::Bar, title);
     Scene {
         class: LayoutClass::Wide,
         screen: ScreenId::Browse,
         top,
-        tabs: Some(tabs(model)),
+        tabs: model.viewing.tabs.then(|| tabs(model)),
         list: None,
         chat: None,
         sheet: None,
@@ -1083,6 +1188,7 @@ fn browse_scene<B>(model: &UiModel<B>) -> Scene {
         members: None,
         browse: Some(model.browse.model.scene()),
         rooms: None,
+        explore: None,
         profile: None,
     }
 }
@@ -1099,7 +1205,7 @@ fn rooms_scene<B>(model: &UiModel<B>) -> Scene {
         class: LayoutClass::Wide,
         screen: ScreenId::Rooms,
         top,
-        tabs: Some(tabs(model)),
+        tabs: model.viewing.tabs.then(|| tabs(model)),
         list: None,
         chat: None,
         sheet: None,
@@ -1110,6 +1216,35 @@ fn rooms_scene<B>(model: &UiModel<B>) -> Scene {
         members: None,
         browse: None,
         rooms: Some(super::rooms::node(model)),
+        explore: None,
+        profile: None,
+    }
+}
+
+/// The Explore tab's list in front (1578): Loquax's bar titled Explore,
+/// its tab bar with Explore active, and the two sections as the whole
+/// content, in both classes.
+fn explore_scene<B>(model: &UiModel<B>) -> Scene {
+    let mut top = me_bar(model);
+    top.title = Text::key(StrId::TabExplore);
+    top.actions = Vec::new();
+    top.a11y = A11y::of(NodeId::TopBar, Role::Bar, Text::key(StrId::TabExplore));
+    Scene {
+        class: LayoutClass::Wide,
+        screen: ScreenId::Explore,
+        top,
+        tabs: model.viewing.tabs.then(|| tabs(model)),
+        list: None,
+        chat: None,
+        sheet: None,
+        whereabouts: None,
+        card: None,
+        chips: Vec::new(),
+        new_group: None,
+        members: None,
+        browse: None,
+        rooms: None,
+        explore: Some(alloc::boxed::Box::new(super::explore::node(model))),
         profile: None,
     }
 }
@@ -1265,8 +1400,16 @@ impl List {
 /// The reader's bar over the list.
 fn me_bar<B>(model: &UiModel<B>) -> TopBar {
     let avatar = match model.address {
+        // The own name (1452 rule 4): the names' word for us, else the
+        // name the profile has from the mailbox; never the own hash.
         Some(own) => Avatar::of(
-            chat::initials(model.names.shown(&own), &own),
+            chat::initials(
+                model
+                    .names
+                    .shown(&own)
+                    .or(Some(model.profile.name.as_str()).filter(|n| !n.is_empty())),
+                &own,
+            ),
             &own,
             None,
             None,
@@ -1295,17 +1438,19 @@ fn me_bar<B>(model: &UiModel<B>) -> TopBar {
 }
 
 /// The tab bar: Chats with the count of chats holding unread messages,
-/// and the map.
+/// the map, and Explore (1578), always: three buttons and no fourth (Lew,
+/// 2026-11-08). The browser and a hub's rooms are opened from Explore, so
+/// Explore is the active tab while either is in front, and its badge is
+/// the rooms' unread lines.
 fn tabs<B>(model: &UiModel<B>) -> Tabs {
     let unread = model
-        .order()
-        .into_iter()
+        .listed()
         .filter(|&c| model.conversations[c].unread_rows() > 0)
         .count();
     let unread = u32::try_from(unread).unwrap_or(u32::MAX);
+    let exploring = model.explore.open || model.browse.showing() || model.rooms.showing();
     let active = match model.map {
-        _ if model.browse.enabled && model.browse.open => TabId::Browse,
-        _ if model.rooms.showing() => TabId::Rooms,
+        _ if exploring => TabId::Explore,
         Some(_) => TabId::Map,
         None => TabId::Chats,
     };
@@ -1324,6 +1469,7 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
         0 => Text::key(StrId::TabChats),
         n => Text::Key(StrId::TabChatsUnread, Vec::from([Arg::Int(i64::from(n))])),
     };
+    let rooms_unread: u32 = model.rooms.rooms.iter().map(|r| r.unread).sum();
     Tabs {
         id: NodeId::Tabs,
         items: Vec::from([
@@ -1334,36 +1480,37 @@ fn tabs<B>(model: &UiModel<B>) -> Tabs {
                 chats_spoken,
             ),
             tab(TabId::Map, StrId::Map, None, Text::key(StrId::Map)),
-        ])
-        .into_iter()
-        .chain(model.browse.enabled.then(|| {
             tab(
-                TabId::Browse,
-                StrId::TabBrowse,
-                None,
-                Text::key(StrId::TabBrowse),
-            )
-        }))
-        .chain(model.rooms.enabled.then(|| {
-            let unread: u32 = model.rooms.rooms.iter().map(|r| r.unread).sum();
-            tab(
-                TabId::Rooms,
-                StrId::TabRooms,
-                (unread > 0).then_some(unread),
-                Text::key(StrId::TabRooms),
-            )
-        }))
-        .collect(),
+                TabId::Explore,
+                StrId::TabExplore,
+                (rooms_unread > 0).then_some(rooms_unread),
+                Text::key(StrId::TabExplore),
+            ),
+        ]),
         active,
         a11y: A11y::of(NodeId::Tabs, Role::TabBar, Text::key(StrId::TabChats)),
     }
 }
 
-/// The list as the model orders it.
+/// The list as the model orders it, its window built afresh: the cold
+/// path, for a model changed outside `update` ([`UiModel::built_list`]
+/// keeps the fold's). The window, never the whole order (1595): the M9's
+/// fold hides the selection behind the list and gives it back outside
+/// `update` (`loquax_m9::home`), so every draw of a pull came here, and
+/// this built all 302 rows of the board's list where it shows seven
+/// (window 20: 5,700 allocator calls and 282 ms a draw). The order is
+/// the whole list's, its keys only; the rows are the screen's.
 fn list<B>(model: &UiModel<B>) -> List {
+    let order = model.order();
+    let total = order.len();
+    let (first, len, top) = model.list_window(&order);
+    let window = order[first..first + len].to_vec();
     List {
         id: NodeId::List,
-        rows: rows(model, model.order()),
+        rows: rows(model, window),
+        first,
+        total,
+        top,
         empty: Text::key(StrId::NoConversations),
         a11y: A11y::of(NodeId::List, Role::List, Text::key(StrId::TabChats)),
     }
@@ -1425,10 +1572,15 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         .draft
         .as_ref()
         .map(|line| Text::Key(StrId::DraftRow, Vec::from([Arg::Str(line.clone())])));
+    let same_name = model.names.same_name(peer);
     let spoken = match (&draft, row.last.is_empty()) {
         (Some(draft), _) => Text::Join(Vec::from([Text::Raw(row.name.clone()), draft.clone()])),
         (None, true) => Text::Raw(row.name.clone()),
         (None, false) => Text::Raw(format!("{}, {}", row.name, row.last)),
+    };
+    let spoken = match &same_name {
+        Some(sentence) => Text::Join(Vec::from([spoken, sentence.clone()])),
+        None => spoken,
     };
     let mut a11y = A11y::of(id, Role::Row, spoken);
     a11y.selected = selected;
@@ -1446,6 +1598,7 @@ pub fn row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Row {
         draft,
         sharing: model.share(peer).is_some(),
         group,
+        same_name,
         row,
     }
 }
@@ -1494,7 +1647,7 @@ pub fn share_rows<B>(model: &UiModel<B>) -> Vec<ShareRow> {
         .iter()
         .map(|(peer, share)| {
             let now = model.now.map_or(share.started_at, |now| now.unix_secs);
-            let name = model.names.label(peer);
+            let name = model.names.label(peer, model.lang);
             let words = share_words(share, now);
             let id = NodeId::ShareRow(*peer);
             ShareRow {
@@ -1513,15 +1666,38 @@ pub fn share_rows<B>(model: &UiModel<B>) -> Vec<ShareRow> {
         .collect()
 }
 
+/// The peer's name in a chat's bar title: the title itself, but for a
+/// relay's chat (1482) without the words "group via relay", for the
+/// compose's hint and a quote's writer.
+pub fn peer_title(bar: &TopBar) -> Text {
+    name_of(&bar.title)
+}
+
+/// [`peer_title`] of a title: a shared name's sentence (1452) and a relay's
+/// words left off.
+fn name_of(title: &Text) -> Text {
+    match title {
+        Text::Key(StrId::RelayedGroup, args) => match args.first() {
+            Some(Arg::Str(name)) => Text::Raw(name.clone()),
+            _ => title.clone(),
+        },
+        Text::Join(parts) => parts.first().map_or_else(|| title.clone(), name_of),
+        title => title.clone(),
+    }
+}
+
 /// The open chat of conversation `c`: its bar, its bubbles grouped, its
 /// compose. An index past the conversations gives an empty chat.
 pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
+    let to = model.conversations.get(c).map_or(0, |c| c.messages.len());
+    chat_in(model, c, 0, to)
+}
+
+/// [`chat`] over the window `from..to` of its messages alone (1490):
+/// what the fold builds for the viewport.
+pub(crate) fn chat_in<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Chat {
     let peer = model.conversations.get(c).map_or([0; 16], |c| c.peer);
-    let name = model.names.label(&peer);
-    let messages = model
-        .conversations
-        .get(c)
-        .map_or(&[][..], |c| c.messages.as_slice());
+    let name = model.names.label(&peer, model.lang);
     let liveness = model.liveness(&peer);
     let badge = super::group_scene::badge(model, &peer);
     let avatar = Avatar::of(
@@ -1530,7 +1706,11 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
             None => chat::initials(model.names.shown(&peer), &peer),
         },
         &peer,
-        chat::latest_appearance(messages).as_ref(),
+        model
+            .conversations
+            .get(c)
+            .and_then(super::Conversation::appearance)
+            .as_ref(),
         Ring::of(liveness.state),
     );
     // A group's bar opens its member sheet (1307), where the map would be.
@@ -1542,18 +1722,34 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
             peer: Target::Peer(peer),
         })]),
     };
+    // A relay's chat says it is a group via a relay (1482).
+    let title = match badge.is_none()
+        && model
+            .conversations
+            .get(c)
+            .is_some_and(super::relayed::is_relayed)
+    {
+        true => Text::Key(StrId::RelayedGroup, Vec::from([Arg::Str(name.clone())])),
+        false => Text::Raw(name.clone()),
+    };
+    // Two peers of one name (1452): the header says so after the name.
+    let same_name = model.names.same_name(&peer);
+    let title = match &same_name {
+        Some(sentence) => Text::Join(Vec::from([title, sentence.clone()])),
+        None => title,
+    };
     let bar = TopBar {
         id: NodeId::ChatBar,
         lead: Lead::Back {
             back: Action::of(Intent::CloseChat),
             avatar,
         },
-        title: Text::Raw(name.clone()),
+        title: title.clone(),
         // The list's pin and the chat's bar open the map alike (1224).
         actions: bar_actions,
-        a11y: A11y::of(NodeId::ChatBar, Role::Bar, Text::Raw(name.clone())),
+        a11y: A11y::of(NodeId::ChatBar, Role::Bar, title),
     };
-    let bubbles = chat::bubbles(model, c);
+    let bubbles = chat::bubbles_in(model, c, from, to);
     let places = chat::placements(&bubbles);
     let now = model.now;
     let in_group = model.groups.contains_key(&peer);
@@ -1612,6 +1808,7 @@ pub fn chat<B>(model: &UiModel<B>, c: usize) -> Chat {
             .and_then(|_| super::group_scene::invite(model, &peer, false)),
         compose: compose(model, c),
         ended: super::group_scene::ended(model, &peer),
+        same_name,
         a11y: A11y::of(NodeId::Chat, Role::Chat, Text::Raw(name)),
     }
 }
@@ -1725,7 +1922,7 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
     };
     let (title, rows, whereabouts) = match open {
         compose::Sheet::Attach { .. } => (
-            StrId::Attach,
+            Text::key(StrId::Attach),
             compose::attach_rows(model.bar.abilities),
             None,
         ),
@@ -1744,8 +1941,12 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
                 fix: fix.map(|f| (f.latitude_e6, f.longitude_e6)),
                 words,
             };
+            // Whom the position goes to (1448, walk finding 16).
             (
-                StrId::Locate,
+                Text::Key(
+                    StrId::SendPositionTo,
+                    Vec::from([Arg::Str(model.names.label(&peer, model.lang))]),
+                ),
                 compose::position_rows(fix, model.bar.abilities, model.map_centre().is_some()),
                 Some(whereabouts),
             )
@@ -1776,10 +1977,10 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
         .collect();
     let sheet = Sheet {
         id: NodeId::Sheet,
-        title: Text::key(title),
+        title: title.clone(),
         rows: Vec::new(),
         actions,
-        a11y: A11y::of(NodeId::Sheet, Role::Sheet, Text::key(title)),
+        a11y: A11y::of(NodeId::Sheet, Role::Sheet, title),
     };
     (Some(sheet), whereabouts)
 }
@@ -1796,6 +1997,12 @@ fn bubble_node(
     let id = NodeId::Bubble(bubble.key);
     let now_secs = now.map(|now| now.unix_secs);
     let live = bubble.liveness.map(|l| row_live(&l, now_secs));
+    let position = bubble.fix.as_ref().map(|fix| {
+        let alive = bubble
+            .liveness
+            .is_some_and(|l| l.state == liveness::State::Live);
+        position_words(fix, alive, now)
+    });
     let to = Target::Peer(peer);
     let mut actions = Vec::new();
     if let Some(target) = bubble.id {
@@ -1904,6 +2111,7 @@ fn bubble_node(
         bubble,
         place,
         live,
+        position,
         mark,
         photo,
         files,
@@ -1996,6 +2204,96 @@ pub fn day_words(at: &WallTime, now: Option<&WallTime>) -> Text {
         }
     }
 }
+
+/// A shared position's sentence in a chat (1449 item 5, walk 1 finding
+/// 11), the one rule of every target: `Live position` while the reports
+/// still come, else when the fix was taken, `Position from yesterday
+/// 21:46`. The coordinates and the accuracy are the Info's, never the
+/// bubble's.
+pub fn position_words(fix: &crate::telemetry::Fix, live: bool, now: Option<WallTime>) -> Text {
+    if live {
+        return Text::key(StrId::PositionLive);
+    }
+    // A claim ahead of our clock is its receive time, as everywhere.
+    let at = WallTime {
+        unix_secs: fix.order_time(),
+        offset_secs: now.map_or(0, |now| now.offset_secs),
+    };
+    let clock = Arg::Str(at.hh_mm());
+    let c = at.civil();
+    match now.map(|now| now.day() - at.day()) {
+        Some(..=0) => Text::Key(StrId::PositionToday, Vec::from([clock])),
+        Some(1) => Text::Key(StrId::PositionYesterday, Vec::from([clock])),
+        Some(2..=6) => Text::Key(
+            StrId::PositionWeekday,
+            Vec::from([
+                Arg::Text(Box::new(Text::key(WEEKDAYS[c.weekday as usize % 7]))),
+                clock,
+            ]),
+        ),
+        Some(_) => Text::Key(
+            StrId::PositionDate,
+            Vec::from([
+                Arg::Text(Box::new(list_time(&at, &now.unwrap_or(at)))),
+                clock,
+            ]),
+        ),
+        // No clock said yet: the whole date, as the day line says it.
+        None => Text::Key(
+            StrId::PositionDate,
+            Vec::from([Arg::Text(Box::new(day_words(&at, None))), clock]),
+        ),
+    }
+}
+
+/// The conversation list's time (1449 item 4, walk 1 finding 10), the one
+/// rule of every target's list: the clock today (`17:37`), `Yesterday`,
+/// the weekday short within the six days before (`Do.`), else the date
+/// (`22.10.`, `22 Oct`), with the year when it is not this one. Never an
+/// age: "17 Min." and "7h" beside "Do." were three formats in one column.
+pub fn list_time(at: &WallTime, now: &WallTime) -> Text {
+    let c = at.civil();
+    match now.day() - at.day() {
+        ..=0 => return Text::Raw(at.hh_mm()),
+        1 => return Text::key(StrId::Yesterday),
+        2..=6 => return Text::key(WEEKDAYS_SHORT[c.weekday as usize % 7]),
+        _ => {}
+    }
+    let month = Text::key(MONTHS_SHORT[(c.month as usize).saturating_sub(1) % 12]);
+    let mut args = Vec::from([Arg::Int(i64::from(c.day)), Arg::Text(Box::new(month))]);
+    match c.year == now.civil().year {
+        true => Text::Key(StrId::ListDate, args),
+        false => {
+            args.push(Arg::Int(c.year));
+            Text::Key(StrId::ListDateYear, args)
+        }
+    }
+}
+
+const MONTHS_SHORT: [StrId; 12] = [
+    StrId::JanuaryShort,
+    StrId::FebruaryShort,
+    StrId::MarchShort,
+    StrId::AprilShort,
+    StrId::MayShort,
+    StrId::JuneShort,
+    StrId::JulyShort,
+    StrId::AugustShort,
+    StrId::SeptemberShort,
+    StrId::OctoberShort,
+    StrId::NovemberShort,
+    StrId::DecemberShort,
+];
+
+const WEEKDAYS_SHORT: [StrId; 7] = [
+    StrId::MondayShort,
+    StrId::TuesdayShort,
+    StrId::WednesdayShort,
+    StrId::ThursdayShort,
+    StrId::FridayShort,
+    StrId::SaturdayShort,
+    StrId::SundayShort,
+];
 
 const WEEKDAYS: [StrId; 7] = [
     StrId::Monday,
@@ -2100,6 +2398,9 @@ impl Row {
         });
         if let (Some(group), Value::Object(map)) = (&self.group, &mut value) {
             map.insert("group".into(), group.to_json());
+        }
+        if let (Some(same), Value::Object(map)) = (&self.same_name, &mut value) {
+            map.insert("same_name".into(), same.to_json());
         }
         value
     }
@@ -2262,6 +2563,7 @@ impl Scene {
             ScreenId::Chat { peer } => json!({ "chat": hex(&peer) }),
             ScreenId::Browse => json!("browse"),
             ScreenId::Rooms => json!("rooms"),
+            ScreenId::Explore => json!("explore"),
         };
         map.insert("screen".into(), screen);
         map.insert("top".into(), self.top.to_json());
@@ -2316,6 +2618,9 @@ impl Scene {
         }
         if let Some(rooms) = &self.rooms {
             map.insert("rooms".into(), rooms.to_json());
+        }
+        if let Some(explore) = &self.explore {
+            map.insert("explore".into(), explore.to_json());
         }
         if let Some(profile) = &self.profile {
             map.insert("profile".into(), profile.to_json());
@@ -2575,7 +2880,11 @@ mod tests {
         assert_eq!(there.words.resolve(Lang::En), "Found 5 min ago");
         assert_eq!(there.words.resolve(Lang::De), "Ermittelt vor 5 Min.");
         let sheet = scene.sheet.as_ref().expect("the position sheet");
-        assert_eq!(sheet.title.resolve(Lang::En), "My position");
+        // Whom it goes to (1448, walk finding 16), by the name every
+        // screen gives the peer, in the model's language: nameless here,
+        // so "Unknown".
+        assert_eq!(sheet.title.resolve(Lang::En), "Send position to Unknown");
+        assert_eq!(sheet.title.resolve(Lang::De), "Position an Unknown senden");
         assert_eq!(
             scene
                 .action(NodeId::SheetRow(SheetRow::ShareNow))
@@ -2636,6 +2945,100 @@ mod tests {
         assert_eq!(list_live(&live, now).resolve(Lang::De), "live");
         assert_eq!(ago(30).resolve(Lang::En), liveness::ago(30));
         assert_eq!(ago(4 * 86_400).resolve(Lang::En), liveness::ago(4 * 86_400));
+    }
+
+    /// 1449 item 5 (walk 1 finding 11): a shared position is one sentence,
+    /// `Live position` while its reports come, else when its fix was taken,
+    /// in both languages; never the coordinates.
+    #[test]
+    fn a_shared_position_is_one_sentence_never_coordinates() {
+        let at = |unix_secs| WallTime {
+            unix_secs,
+            offset_secs: 3600,
+        };
+        // 2026-10-30 10:00 local, a Friday.
+        let t = 1_793_350_800;
+        let now = at(t);
+        let fix = |taken: i64| crate::telemetry::Fix {
+            peer: [1; 16],
+            via: [1; 16],
+            message: None,
+            received_at: Some(t),
+            location: leviculum_lxmf::telemetry::Location {
+                latitude_e6: 53_105_960,
+                longitude_e6: 9_159_300,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 10_200,
+                last_update: taken,
+            },
+            telemetry: Vec::new(),
+            source: crate::telemetry::Source::Telemetry,
+        };
+        let said = |taken: i64, live: bool, lang| {
+            position_words(&fix(taken), live, Some(now)).resolve(lang)
+        };
+        assert_eq!(said(t - 60, true, Lang::De), "Live-Position");
+        assert_eq!(said(t - 60, true, Lang::En), "Live position");
+        assert_eq!(said(t - 600, false, Lang::De), "Position von heute 09:50");
+        // Yesterday 21:46 local.
+        let yesterday = t - (10 * 3600) - (2 * 3600 + 14 * 60);
+        assert_eq!(
+            said(yesterday, false, Lang::De),
+            "Position von gestern 21:46"
+        );
+        assert_eq!(
+            said(yesterday, false, Lang::En),
+            "Position from yesterday 21:46"
+        );
+        assert_eq!(
+            said(t - 3 * 86_400, false, Lang::De),
+            "Position von Dienstag 10:00"
+        );
+        assert_eq!(
+            said(t - 9 * 86_400, false, Lang::De),
+            "Position vom 21.10. 10:00"
+        );
+        for lang in [Lang::De, Lang::En] {
+            let words = said(t - 600, false, lang);
+            assert!(!words.contains("53.") && !words.contains('±'), "{words}");
+        }
+        // A claim ahead of our clock is said at its receive time.
+        assert_eq!(said(t + 7200, false, Lang::De), "Position von heute 10:00");
+    }
+
+    /// 1449 item 4 (walk 1 finding 10): one format in the list's time
+    /// column on every target, in both languages; never an age.
+    #[test]
+    fn the_list_time_is_one_format_the_clock_yesterday_weekday_date() {
+        let at = |unix_secs| WallTime {
+            unix_secs,
+            offset_secs: 3600,
+        };
+        // 2026-10-30 10:00 local, a Friday.
+        let t = 1_793_350_800;
+        let now = at(t);
+        let both = |secs_before: i64| {
+            let shown = list_time(&at(t - secs_before), &now);
+            (shown.resolve(Lang::De), shown.resolve(Lang::En))
+        };
+        assert_eq!(
+            both(17 * 60),
+            ("09:43".into(), "09:43".into()),
+            "not 17 Min."
+        );
+        assert_eq!(both(7 * 3600), ("03:00".into(), "03:00".into()), "not 7h");
+        assert_eq!(both(86_400), ("Gestern".into(), "Yesterday".into()));
+        assert_eq!(both(2 * 86_400), ("Mi.".into(), "Wed".into()));
+        assert_eq!(both(6 * 86_400), ("Sa.".into(), "Sat".into()));
+        assert_eq!(both(8 * 86_400), ("22.10.".into(), "22 Oct".into()));
+        assert_eq!(
+            both(365 * 86_400),
+            ("30.10.2025".into(), "30 Oct 2025".into())
+        );
+        // A time ahead of the clock is today's.
+        assert_eq!(list_time(&at(t + 60), &now).resolve(Lang::De), "10:01");
     }
 
     #[test]
@@ -2888,9 +3291,9 @@ mod tests {
             .map(|i| (true, t + 600 * i as i64))
             .collect();
         let mut model = model_with(&bodies);
-        for (message, state) in model.conversations[0].messages.iter_mut().zip(states) {
-            message.delivery = Some(state);
-        }
+        model.conversations[0]
+            .messages
+            .for_each_indexed_mut(|m, message| message.delivery = Some(states[m]));
         model.selected = 0;
         let peer = [0x42; 16];
         let scene = model.scene(LayoutClass::Compact);
@@ -2983,7 +3386,11 @@ mod tests {
         let t = 1_793_350_800;
         let mut model = model_with(&[(true, t), (true, t + 600)]);
         let peer = [0x42; 16];
-        model.conversations[0].messages[0].delivery = Some(DeliveryState::Failed);
+        model.conversations[0]
+            .messages
+            .get_mut(0)
+            .expect("message")
+            .delivery = Some(DeliveryState::Failed);
         let delivered = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 2 });
         assert!(delivered.is_empty(), "a delivered one is not sent again");
         let effects = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 1 });
@@ -3122,14 +3529,16 @@ mod tests {
         let t = 1_793_350_800;
         let mut model = model_with(&[(true, t), (true, t + 60), (true, t + 120), (true, t + 180)]);
         let messages = &mut model.conversations[0].messages;
-        messages[0].body = String::new();
-        messages[0].fields = photo_fields("jpg", alloc::vec![7; 312_400]);
-        messages[1].body = " \n".into();
-        messages[1].fields = file_fields("report.pdf", alloc::vec![7; 1_400]);
-        messages[2].body = String::new();
-        messages[2].fields = voice_fields(AM_OPUS_OGG, alloc::vec![7; 900]);
-        messages[3].body = "the view".into();
-        messages[3].fields = photo_fields("jpg", alloc::vec![7; 1_000]);
+        messages.get_mut(0).expect("message").body = String::new();
+        messages.get_mut(0).expect("message").fields = photo_fields("jpg", alloc::vec![7; 312_400]);
+        messages.get_mut(1).expect("message").body = " \n".into();
+        messages.get_mut(1).expect("message").fields =
+            file_fields("report.pdf", alloc::vec![7; 1_400]);
+        messages.get_mut(2).expect("message").body = String::new();
+        messages.get_mut(2).expect("message").fields =
+            voice_fields(AM_OPUS_OGG, alloc::vec![7; 900]);
+        messages.get_mut(3).expect("message").body = "the view".into();
+        messages.get_mut(3).expect("message").fields = photo_fields("jpg", alloc::vec![7; 1_000]);
         model.selected = 0;
         let scene = model.scene(LayoutClass::Compact);
         let groups = &scene.chat.as_ref().expect("the chat").groups;
@@ -3164,8 +3573,16 @@ mod tests {
         let t = 1_793_350_800;
         let mut model = model_with(&[(false, t), (false, t + 60)]);
         let peer = [0x42; 16];
-        model.conversations[0].messages[1].body = String::new();
-        model.conversations[0].messages[1].fields = photo_fields("jpg", alloc::vec![7; 312_400]);
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .body = String::new();
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .fields = photo_fields("jpg", alloc::vec![7; 312_400]);
         model.selected = 0;
         let scene = model.scene(LayoutClass::Compact);
         assert!(scene
@@ -3250,9 +3667,16 @@ mod tests {
         let t = 1_793_350_800;
         let mut model = model_with(&[(false, t), (false, t + 60)]);
         let peer = [0x42; 16];
-        model.conversations[0].messages[1].body = String::new();
-        model.conversations[0].messages[1].fields =
-            file_fields("report.pdf", alloc::vec![7; 312_400]);
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .body = String::new();
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .fields = file_fields("report.pdf", alloc::vec![7; 312_400]);
         model.selected = 0;
         let scene = model.scene(LayoutClass::Compact);
         assert!(scene
@@ -3376,11 +3800,21 @@ mod tests {
         let peer = [0x42; 16];
         // Two seconds of Codec2 2400 as Sideband sends it, and 700C, which
         // this build does not play.
-        model.conversations[0].messages[1].body = String::new();
-        model.conversations[0].messages[1].fields =
-            voice_fields(AM_CODEC2_2400, alloc::vec![0; 600]);
-        model.conversations[0].messages[2].fields =
-            voice_fields(AM_CODEC2_700C, alloc::vec![0; 200]);
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .body = String::new();
+        model.conversations[0]
+            .messages
+            .get_mut(1)
+            .expect("message")
+            .fields = voice_fields(AM_CODEC2_2400, alloc::vec![0; 600]);
+        model.conversations[0]
+            .messages
+            .get_mut(2)
+            .expect("message")
+            .fields = voice_fields(AM_CODEC2_700C, alloc::vec![0; 200]);
         model.selected = 0;
         let scene = model.scene(LayoutClass::Compact);
         assert!(scene
@@ -3509,7 +3943,11 @@ mod tests {
         let peer = [0x42; 16];
         model.selected = 0;
         // Out of the way of the key the model gives the one it sends.
-        model.conversations[0].messages[0].activity = 1_000;
+        model.conversations[0]
+            .messages
+            .get_mut(0)
+            .expect("message")
+            .activity = 1_000;
         let feed = |model: &mut UiModel<Line>, input| {
             super::super::update(model, UiEvent::Record { peer, input })
         };

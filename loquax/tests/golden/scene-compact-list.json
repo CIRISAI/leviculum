@@ -24,7 +24,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Jürgen 🚲 ·1d0a, ok 👍"
+            "raw": "Jürgen 🚲, ok 👍"
           },
           "resource": "row_1d0abf792296d6027f9c456dda8a1f95",
           "role": "row",
@@ -81,7 +81,7 @@
           }
         ],
         "muted": false,
-        "name": "Jürgen 🚲 ·1d0a",
+        "name": "Jürgen 🚲",
         "ours": true,
         "pinned": true,
         "position": null,
@@ -95,7 +95,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Peer 17 ·1d38, Grüße aus Köln, die Straße ist nass"
+            "raw": "Peer 17, Grüße aus Köln, die Straße ist nass"
           },
           "resource": "row_1d387b13d4b4e8083e6081912e7bc2bf",
           "role": "row",
@@ -152,7 +152,7 @@
           }
         ],
         "muted": false,
-        "name": "Peer 17 ·1d38",
+        "name": "Peer 17",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -166,7 +166,17 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "<cd32a602…>, ja"
+            "join": [
+              {
+                "raw": "Unknown ·cd32, ja"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
           },
           "resource": "row_cd32a6028dd79aecc5710834dbdd0b14",
           "role": "row",
@@ -181,7 +191,7 @@
         "avatar": {
           "bg": "a2526a",
           "fg": "ffffff",
-          "initials": "CD",
+          "initials": "?",
           "ring": null
         },
         "draft": null,
@@ -223,11 +233,17 @@
           }
         ],
         "muted": false,
-        "name": "<cd32a602…>",
+        "name": "Unknown ·cd32",
         "ours": true,
         "pinned": false,
         "position": null,
         "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
         "selected": false,
         "sharing": false,
         "unread": 3,
@@ -237,7 +253,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Peer 15 ·3d1a, zwei"
+            "raw": "Peer 15, zwei"
           },
           "resource": "row_3d1a434a80c6158d434299cc52a43a6f",
           "role": "row",
@@ -294,7 +310,7 @@
           }
         ],
         "muted": false,
-        "name": "Peer 15 ·3d1a",
+        "name": "Peer 15",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -308,7 +324,17 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "<b305ba3b…>, 😀🐀🚲 drei Emoji am Stück"
+            "join": [
+              {
+                "raw": "Unknown ·b305, 😀🐀🚲 drei Emoji am Stück"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
           },
           "resource": "row_b305ba3b250d83ae0bc8eed4bf12ec14",
           "role": "row",
@@ -323,7 +349,7 @@
         "avatar": {
           "bg": "2f7a6e",
           "fg": "ffffff",
-          "initials": "B3",
+          "initials": "?",
           "ring": null
         },
         "draft": null,
@@ -365,11 +391,17 @@
           }
         ],
         "muted": false,
-        "name": "<b305ba3b…>",
+        "name": "Unknown ·b305",
         "ours": true,
         "pinned": false,
         "position": null,
         "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
         "selected": false,
         "sharing": false,
         "unread": 3,
@@ -379,7 +411,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Peer 13 ·0d1e, 日本語のテキストも"
+            "raw": "Peer 13, 日本語のテキストも"
           },
           "resource": "row_0d1ec813c53c8935a914c1e49c0c087b",
           "role": "row",
@@ -436,7 +468,7 @@
           }
         ],
         "muted": false,
-        "name": "Peer 13 ·0d1e",
+        "name": "Peer 13",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -450,7 +482,17 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "<0d7cc5d4…>, naïve façade, smörgåsbord, Ærøskøbing"
+            "join": [
+              {
+                "raw": "Unknown ·0d7c, naïve façade, smörgåsbord, Ærøskøbing"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
           },
           "resource": "row_0d7cc5d4c135bfce14c707595fc04ee9",
           "role": "row",
@@ -465,7 +507,7 @@
         "avatar": {
           "bg": "a2526a",
           "fg": "ffffff",
-          "initials": "0D",
+          "initials": "?",
           "ring": null
         },
         "draft": null,
@@ -507,11 +549,17 @@
           }
         ],
         "muted": false,
-        "name": "<0d7cc5d4…>",
+        "name": "Unknown ·0d7c",
         "ours": true,
         "pinned": false,
         "position": null,
         "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
         "selected": false,
         "sharing": false,
         "unread": 3,
@@ -521,7 +569,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Peer 11 ·5df3, Treffen wir uns um 18:00 am Bahnhof?"
+            "raw": "Peer 11, Treffen wir uns um 18:00 am Bahnhof?"
           },
           "resource": "row_5df35dda59f6735edbaef1c04a443566",
           "role": "row",
@@ -578,7 +626,7 @@
           }
         ],
         "muted": false,
-        "name": "Peer 11 ·5df3",
+        "name": "Peer 11",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -592,7 +640,17 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "<a24608ea…>, ok 👍"
+            "join": [
+              {
+                "raw": "Unknown ·a246, ok 👍"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
           },
           "resource": "row_a24608eadfea67f379a331ec448870b1",
           "role": "row",
@@ -607,7 +665,7 @@
         "avatar": {
           "bg": "b0503a",
           "fg": "ffffff",
-          "initials": "A2",
+          "initials": "?",
           "ring": null
         },
         "draft": null,
@@ -649,11 +707,17 @@
           }
         ],
         "muted": false,
-        "name": "<a24608ea…>",
+        "name": "Unknown ·a246",
         "ours": true,
         "pinned": false,
         "position": null,
         "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
         "selected": false,
         "sharing": false,
         "unread": 3,
@@ -663,7 +727,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Peer 9 ·3b5c, Grüße aus Köln, die Straße ist nass"
+            "raw": "Peer 9, Grüße aus Köln, die Straße ist nass"
           },
           "resource": "row_3b5ce3fe19fc0d2c600c001bc43eb641",
           "role": "row",
@@ -720,7 +784,7 @@
           }
         ],
         "muted": false,
-        "name": "Peer 9 ·3b5c",
+        "name": "Peer 9",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -734,7 +798,17 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "<3c014aa7…>, ja"
+            "join": [
+              {
+                "raw": "Unknown ·3c01, ja"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
           },
           "resource": "row_3c014aa73cd0da70443250b6a62e00e0",
           "role": "row",
@@ -749,7 +823,7 @@
         "avatar": {
           "bg": "7a5fb8",
           "fg": "ffffff",
-          "initials": "3C",
+          "initials": "?",
           "ring": null
         },
         "draft": null,
@@ -791,11 +865,17 @@
           }
         ],
         "muted": false,
-        "name": "<3c014aa7…>",
+        "name": "Unknown ·3c01",
         "ours": true,
         "pinned": false,
         "position": null,
         "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
         "selected": false,
         "sharing": false,
         "unread": 0,
@@ -805,7 +885,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Peer 7 ·0d94, zwei"
+            "raw": "Peer 7, zwei"
           },
           "resource": "row_0d947559ae21c2dc1367800833db8b85",
           "role": "row",
@@ -862,7 +942,7 @@
           }
         ],
         "muted": false,
-        "name": "Peer 7 ·0d94",
+        "name": "Peer 7",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -876,7 +956,17 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "<57b9131c…>, 😀🐀🚲 drei Emoji am Stück"
+            "join": [
+              {
+                "raw": "Unknown ·57b9, 😀🐀🚲 drei Emoji am Stück"
+              },
+              {
+                "args": [
+                  7
+                ],
+                "key": "no_name_many"
+              }
+            ]
           },
           "resource": "row_57b9131c2ef21373c6198c9c6993268f",
           "role": "row",
@@ -891,7 +981,7 @@
         "avatar": {
           "bg": "8a6420",
           "fg": "ffffff",
-          "initials": "57",
+          "initials": "?",
           "ring": null
         },
         "draft": null,
@@ -933,11 +1023,17 @@
           }
         ],
         "muted": false,
-        "name": "<57b9131c…>",
+        "name": "Unknown ·57b9",
         "ours": true,
         "pinned": false,
         "position": null,
         "reaction": null,
+        "same_name": {
+          "args": [
+            7
+          ],
+          "key": "no_name_many"
+        },
         "selected": false,
         "sharing": false,
         "unread": 0,
@@ -947,7 +1043,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Peer 5 ·9bf4, 日本語のテキストも"
+            "raw": "Peer 5, 日本語のテキストも"
           },
           "resource": "row_9bf4cd4129a4238d142dd20632d1604b",
           "role": "row",
@@ -1004,7 +1100,7 @@
           }
         ],
         "muted": false,
-        "name": "Peer 5 ·9bf4",
+        "name": "Peer 5",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -1018,7 +1114,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Mum ·8f77, naïve façade, smörgåsbord, Ærøskøbing"
+            "raw": "Mum, naïve façade, smörgåsbord, Ærøskøbing"
           },
           "resource": "row_8f77e37e8a1c8904553a29095a6dcadd",
           "role": "row",
@@ -1075,7 +1171,7 @@
           }
         ],
         "muted": true,
-        "name": "Mum ·8f77",
+        "name": "Mum",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -1089,7 +1185,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Zoë 💬 Ærø ·b66d, Treffen wir uns um 18:00 am Bahnhof?"
+            "raw": "Zoë 💬 Ærø, Treffen wir uns um 18:00 am Bahnhof?"
           },
           "resource": "row_b66dfdac24d9f0a11ce815aee68adef6",
           "role": "row",
@@ -1146,7 +1242,7 @@
           }
         ],
         "muted": false,
-        "name": "Zoë 💬 Ærø ·b66d",
+        "name": "Zoë 💬 Ærø",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -1160,7 +1256,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Nomadin Ünal ·bffb, Grüße aus Köln, die Straße ist nass"
+            "raw": "Nomadin Ünal, Grüße aus Köln, die Straße ist nass"
           },
           "resource": "row_bffba8cb35f47523ae1ec907077bd572",
           "role": "row",
@@ -1217,7 +1313,7 @@
           }
         ],
         "muted": false,
-        "name": "Nomadin Ünal ·bffb",
+        "name": "Nomadin Ünal",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -1231,7 +1327,7 @@
         "a11y": {
           "enabled": true,
           "label": {
-            "raw": "Ratte Größe 🐀 ·4a36, ja"
+            "raw": "Ratte Größe 🐀, ja"
           },
           "resource": "row_4a36d5c95d1b136a64a68848ba3bfc17",
           "role": "row",
@@ -1288,7 +1384,7 @@
           }
         ],
         "muted": false,
-        "name": "Ratte Größe 🐀 ·4a36",
+        "name": "Ratte Größe 🐀",
         "ours": true,
         "pinned": false,
         "position": null,
@@ -1363,6 +1459,29 @@
           "args": [],
           "key": "map"
         }
+      },
+      {
+        "a11y": {
+          "enabled": true,
+          "label": {
+            "args": [],
+            "key": "tab_explore"
+          },
+          "resource": "tab_explore",
+          "role": "tab",
+          "selected": false
+        },
+        "action": {
+          "enabled": true,
+          "intent": "Tab(Explore)",
+          "label_key": "tab_explore"
+        },
+        "badge": null,
+        "id": "Explore",
+        "label": {
+          "args": [],
+          "key": "tab_explore"
+        }
       }
     ]
   },
@@ -1395,7 +1514,7 @@
         "avatar": {
           "bg": "3d6fb6",
           "fg": "ffffff",
-          "initials": "E1",
+          "initials": "?",
           "ring": null
         },
         "link": null,

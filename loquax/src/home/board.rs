@@ -21,6 +21,9 @@ use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::{DestinationHash, Identity, LinkId, TickOutput};
 use rand_core::CryptoRngCore;
 
+pub mod rows;
+pub mod store;
+
 use super::ask::{self, Ask, HomeError, Outcome, Step};
 use super::wire::{self, Status};
 use crate::outbox::OutboxEvent;
@@ -748,6 +751,102 @@ pub enum AdmitError {
     Code(super::code::CodeError),
     /// The device identity has no private key.
     Record(super::record::RecordError),
+}
+
+/// How a board's record and its message store stood at boot (1476): the
+/// cursor says how far the device pulled, the store how far what it
+/// pulled is still there to show. They part when the store went (a board
+/// whose messages lived in RAM and lost power, a store partition erased or
+/// written over by another table), or when a power loss fell between a
+/// page the store took and the record's write at the pull's end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agreement {
+    /// The record's cursor is the store's.
+    Agrees,
+    /// The store holds nothing while the record had pulled up to `was`:
+    /// the store was lost, the cursor is reset and the board pulls again
+    /// from the start.
+    Lost { was: u64 },
+    /// The store ends before the record's cursor `was`: the cursor goes
+    /// back to the store's end and the board pulls the rest again.
+    Behind { was: u64 },
+    /// The store holds pages after the record's cursor `was`: a power loss
+    /// before the record was written. The store's end is the cursor.
+    Ahead { was: u64 },
+}
+
+/// Make `record`'s cursor agree with a store that ends at `stored` (the
+/// newest sequence the store took, zero for an empty store or a board
+/// without one), and say how they stood. The rule of 1476: a client
+/// record with a cursor past zero and an empty store means the store was
+/// lost, and the cursor resets, so the list fills again as soon as the
+/// home is reachable instead of the cursor saying everything was fetched.
+pub fn agree(record: &mut super::record::ClientRecord, stored: u64) -> Agreement {
+    let was = record.cursor;
+    record.cursor = stored;
+    match (was, stored) {
+        (was, stored) if was == stored => Agreement::Agrees,
+        (was, 0) => Agreement::Lost { was },
+        (was, stored) if stored < was => Agreement::Behind { was },
+        (was, _) => Agreement::Ahead { was },
+    }
+}
+
+impl core::fmt::Display for Agreement {
+    /// The words of the `[HOME]` line: `store=empty cursor=reset was=5625`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Agrees => f.write_str("store=agrees"),
+            Self::Lost { was } => write!(f, "store=empty cursor=reset was={was}"),
+            Self::Behind { was } => write!(f, "store=behind cursor=back was={was}"),
+            Self::Ahead { was } => write!(f, "store=ahead cursor=forward was={was}"),
+        }
+    }
+}
+
+/// The tags an ask is persisted under in the board's message store
+/// (1493, [`store::Store::keep_ask`]). The payload is the request's wire
+/// bytes, which the home's own readers parse back ([`ask_verb`]), so the
+/// store needs no codec of its own.
+pub const ASK_SEND: u8 = 1;
+pub const ASK_MARK: u8 = 2;
+pub const ASK_GROUP: u8 = 3;
+pub const ASK_GROUP_ADD: u8 = 4;
+pub const ASK_GROUP_DELETE: u8 = 5;
+
+/// A verb as the store keeps it (1493): its tag and its request's wire
+/// bytes. `None` for a join and a pull, which are never queued: the
+/// record owes the join, and the session asks pulls on its own.
+pub fn ask_bytes(verb: &ask::Verb) -> Option<(u8, alloc::vec::Vec<u8>)> {
+    use super::ask::{GroupVerb, Verb};
+    Some(match verb {
+        Verb::Send(submission) => (ASK_SEND, wire::send_request(submission)),
+        Verb::Mark(mark) => (ASK_MARK, wire::mark_request(mark)),
+        Verb::Group(GroupVerb::Create(group)) => (ASK_GROUP, wire::group_request(group)),
+        Verb::Group(GroupVerb::Add(add)) => (ASK_GROUP_ADD, wire::group_add_request(add)),
+        Verb::Group(GroupVerb::Delete(delete)) => {
+            (ASK_GROUP_DELETE, wire::group_delete_request(delete))
+        }
+        // A group state message is a send on the wire and comes back one.
+        Verb::Group(GroupVerb::State(state)) => (ASK_SEND, wire::send_request(state)),
+        Verb::Join { .. } | Verb::Pull { .. } => return None,
+    })
+}
+
+/// The verb a kept ask replays as at boot (1493). `None` for a tag or
+/// bytes this build cannot read: said in the log, never asked blindly.
+pub fn ask_verb(tag: u8, request: &[u8]) -> Option<ask::Verb> {
+    use super::ask::{GroupVerb, Verb};
+    Some(match tag {
+        ASK_SEND => Verb::Send(wire::read_send_request(request).ok()?),
+        ASK_MARK => Verb::Mark(wire::read_mark(request).ok()?),
+        ASK_GROUP => Verb::Group(GroupVerb::Create(wire::read_group_request(request).ok()?)),
+        ASK_GROUP_ADD => Verb::Group(GroupVerb::Add(wire::read_group_add_request(request).ok()?)),
+        ASK_GROUP_DELETE => Verb::Group(GroupVerb::Delete(
+            wire::read_group_delete_request(request).ok()?,
+        )),
+        _ => return None,
+    })
 }
 
 /// What one archive entry is for the board's model (1415), the board's

@@ -54,6 +54,16 @@ use leviculum_mapfill::render::{NoClock, Work};
 use leviculum_mapfill::style::{MapTheme, Profile, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
 
+/// The cores this process may run on, read once (1473, 1442 addenda 7
+/// and 8): the map's tile painters ([`crate::tiles::TileCache`]) and the
+/// region loader ([`crate::mapload`]) each run this many threads, without
+/// a cap of their own and without halving it, so one number says how wide
+/// the map works on every host, and a host with more cores uses them.
+pub fn cores() -> usize {
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
 use crate::identity::HOME_ENV;
 
 /// Where the region files are read from.

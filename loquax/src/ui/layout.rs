@@ -35,11 +35,12 @@ use super::scene::{PositionBadge, RecordingBar};
 use super::strings::{Arg, Lang, StrId, Text};
 use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Signature, UiModel};
 use crate::telemetry;
-use crate::when::{date_label, list_time, WallTime};
+use crate::when::{date_label, WallTime};
 
-/// The top of what this device holds: the store's first message with the
-/// peer.
-pub const EARLIEST: &str = "nothing earlier on this device";
+/// What an empty conversation says (1447, walk 1 finding 22): "Noch keine
+/// Nachrichten", where it said "nothing earlier on this device", a sentence
+/// about the store and in English; over messages the top row is blank.
+pub const EARLIEST: StrId = StrId::NoMessagesYet;
 
 /// The top of what the screen loaded, when the store holds more: reaching it
 /// loads the next page.
@@ -79,6 +80,11 @@ pub struct Draw<'a> {
     /// The voice messages' level tracks the model holds (1276): a
     /// bubble's waveform is its track's where there is one.
     pub tracks: Option<&'a BTreeMap<([u8; 16], u64), LevelTrack>>,
+    /// The reader's language, for the pane's own words (1447).
+    pub lang: Lang,
+    /// The reader's names, for a relayed post's writer (1482); none draws
+    /// a relay's posts as they came.
+    pub names: Option<&'a crate::names::Names>,
 }
 
 /// A style drawn in a token's colours.
@@ -99,6 +105,10 @@ pub struct Span {
     /// The delivery mark's cells, a click target: the row, the first column
     /// and how many columns.
     pub mark: Option<(usize, usize, usize)>,
+    /// The block's own rows among them, absolute: where they start and
+    /// how many, without the separators above and the reaction row
+    /// under. What a selection change re-lays ([`respan`], 1490).
+    pub block: (usize, usize),
 }
 
 /// Which cells of a row are a message's text: what a drag copies, without
@@ -118,6 +128,7 @@ pub struct RowText {
 
 /// A conversation laid out: every row from the top of what the device holds,
 /// and each message's span among them.
+#[derive(Clone, Debug)]
 pub struct Laid {
     pub rows: Vec<RLine>,
     /// Each row's text, beside `rows`: `None` on a separator, a blank and the
@@ -130,11 +141,11 @@ pub struct Laid {
 }
 
 impl Laid {
-    /// No conversation open: the pane says only where the device's memory
-    /// begins.
-    pub fn empty(width: usize, tokens: &Tokens) -> Self {
+    /// No conversation open, or one without messages: the pane says that
+    /// there are none yet.
+    pub fn empty(width: usize, tokens: &Tokens, lang: Lang) -> Self {
         Self {
-            rows: vec![centred(EARLIEST, width, painted(tokens.muted))],
+            rows: vec![centred(EARLIEST.text(lang), width, painted(tokens.muted))],
             texts: vec![None],
             spans: Vec::new(),
             links: Vec::new(),
@@ -160,13 +171,15 @@ enum Last {
 /// the blocks with a blank row between two of them.
 pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) -> Laid {
     let width = width.max(1);
-    let mut laid = Laid::empty(width, draw.tokens);
+    let mut laid = Laid::empty(width, draw.tokens, draw.lang);
     if conversation.earlier > 0 {
         laid.rows[0] = centred(
             &earlier_line(conversation.earlier),
             width,
             painted(draw.tokens.muted),
         );
+    } else if !conversation.messages.is_empty() {
+        laid.rows[0] = centred("", width, painted(draw.tokens.muted));
     }
     let mut last = Last::Separator;
     let mut day = None;
@@ -175,9 +188,13 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
     // block instead.
     let mut skipped: Option<usize> = None;
     let reactions = reactions::gather(conversation);
+    // A relay's chat (1482): each post names its writer in its line.
+    let relayed = draw
+        .names
+        .filter(|_| super::relayed::is_relayed(conversation));
     for (index, message) in conversation.messages.iter().enumerate() {
         let start = laid.rows.len();
-        if folded(conversation, index) {
+        if folded(conversation, index, relayed.is_some()) {
             skipped.get_or_insert(index);
             // Drawn as the report after it: no rows, so no click lands on
             // it and the cursor steps over it.
@@ -185,6 +202,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
                 start,
                 end: start,
                 mark: None,
+                block: (start, 0),
             });
             continue;
         }
@@ -211,6 +229,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
                 start,
                 end: laid.rows.len(),
                 mark: None,
+                block: (start, 0),
             });
             last = Last::Separator;
             continue;
@@ -241,8 +260,10 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
             width,
             draw,
             draw.selected == Some(index),
+            relayed,
             &mut laid.links,
         );
+        let block_rows = drawn.rows.len();
         laid.rows.extend(drawn.rows);
         laid.texts.extend(drawn.texts);
         let chips = message.id.and_then(|id| reactions.get(&id));
@@ -255,6 +276,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
             start,
             end: laid.rows.len(),
             mark: drawn.mark.map(|(row, col, len)| (first + row, col, len)),
+            block: (first, block_rows),
         });
         last = Last::Block;
     }
@@ -269,17 +291,69 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
     laid
 }
 
+/// Re-lay message `index`'s block inside `laid` after only the
+/// selection changed (1490): the same rows in place, restyled, the
+/// separators and the reaction row untouched. True when the splice
+/// held; false (a block whose row count moved with the selection, which
+/// none does today) asks the caller for a fresh layout. New link cells
+/// point at entries appended to `laid.links`; the old entries stay, so
+/// every index that was handed out keeps its meaning.
+pub fn respan(
+    laid: &mut Laid,
+    conversation: &Conversation,
+    index: usize,
+    width: usize,
+    draw: &Draw<'_>,
+    selected: bool,
+) -> bool {
+    let width = width.max(1);
+    let Some(span) = laid.spans.get(index).copied() else {
+        return false;
+    };
+    if span.block.1 == 0 {
+        // A folded report or a note line: nothing a selection restyles.
+        return true;
+    }
+    let relayed = draw
+        .names
+        .filter(|_| super::relayed::is_relayed(conversation));
+    let drawn = block(
+        conversation,
+        index,
+        width,
+        draw,
+        selected,
+        relayed,
+        &mut laid.links,
+    );
+    let (at, n) = span.block;
+    if drawn.rows.len() != n {
+        return false;
+    }
+    laid.rows.splice(at..at + n, drawn.rows);
+    laid.texts.splice(at..at + n, drawn.texts);
+    laid.spans[index].mark = drawn.mark.map(|(row, col, len)| (at + row, col, len));
+    true
+}
+
 /// Whether message `index` has no block of its own: a reaction, drawn
 /// under its target ([`reactions`]), or a telemetry report the next one
 /// replaces on screen: one peer's consecutive reports fold into the latest
 /// (`loquax-map.md`, "In the conversation"), by the rule every screen folds
-/// by ([`Conversation::report_folded`]).
-pub fn folded(conversation: &Conversation, index: usize) -> bool {
+/// by ([`Conversation::report_folded`]). In a relay's chat (`relayed`,
+/// 1482) a reaction whose target is not here has a block, in words.
+pub fn folded(conversation: &Conversation, index: usize, relayed: bool) -> bool {
     conversation
         .messages
         .get(index)
         .is_some_and(Message::is_aside)
         && super::groups::membership_note(&conversation.messages, index, None, Lang::En).is_none()
+        && !(relayed
+            && conversation
+                .messages
+                .get(index)
+                .and_then(|m| super::relayed::orphan_reaction(conversation, m))
+                .is_some())
         || conversation.report_folded(index)
 }
 
@@ -430,6 +504,7 @@ fn block(
     width: usize,
     draw: &Draw<'_>,
     selected: bool,
+    relayed: Option<&crate::names::Names>,
     links: &mut Vec<String>,
 ) -> Block {
     let peer = conversation.peer;
@@ -441,31 +516,35 @@ fn block(
     let body = match (message.is_report(), draw.mark) {
         // A report has no text: its line says what it carried.
         (true, _) => {
-            let received = message.at.map(|at| at.unix_secs);
-            let read = telemetry::read(peer, &message.fields, received);
-            // The newest report says whether the position is alive
-            // (1209); an older run, which stands for all of it, its count
-            // (1184).
-            let newest = conversation.newest_fix_report();
-            let words = match newest == Some(index) {
-                true => {
+            // The scene's one sentence (1449 item 5, walk 1 finding 11):
+            // `Live position` while the newest report is alive, else when
+            // the fix was taken; the coordinates are the Info's.
+            match super::message_fix(peer, message) {
+                Some(fix) => {
                     let now = draw.now.map(|now| now.unix_secs);
-                    format!(" · {}", conversation.liveness(now).row_words(now))
+                    let alive = conversation.newest_fix_report() == Some(index)
+                        && conversation.liveness(now).state == super::liveness::State::Live;
+                    format!(
+                        "{} {}",
+                        telemetry::REPORT_MARK,
+                        super::scene::position_words(&fix, alive, draw.now).resolve(draw.lang)
+                    )
                 }
-                false => {
-                    let run = conversation.run(index);
-                    let since = run
-                        .first()
-                        .and_then(|&first| conversation.messages[first].at);
-                    telemetry::run_words(run.len(), since.as_ref())
+                None => {
+                    let received = message.at.map(|at| at.unix_secs);
+                    telemetry::report_line(&telemetry::read(peer, &message.fields, received))
                 }
-            };
-            format!("{}{words}", telemetry::report_line(&read))
+            }
         }
         (false, mark) => {
             // A group's copy without words names its writer as every copy
             // does here, not with the home's sentence (1388).
             let body = super::groups::stand_in_line(&message.body, &message.fields)
+                .or_else(|| {
+                    relayed.and_then(|names| {
+                        super::relayed::terminal_line(names, draw.lang, conversation, message)
+                    })
+                })
                 .unwrap_or_else(|| message.body.clone());
             match mark {
                 Some(query) => super::search::mark_first(&body, query),
@@ -476,11 +555,11 @@ fn block(
     // A text that came with a position says so under it, in a report's
     // words: `Enter` on it opens the map there.
     let body = match (message.is_report(), super::message_fix(peer, message)) {
-        (false, Some(_)) => {
-            let received = message.at.map(|at| at.unix_secs);
-            let read = telemetry::read(peer, &message.fields, received);
-            format!("{body}\n{}", telemetry::report_line(&read))
-        }
+        (false, Some(fix)) => format!(
+            "{body}\n{} {}",
+            telemetry::REPORT_MARK,
+            super::scene::position_words(&fix, false, draw.now).resolve(draw.lang)
+        ),
         _ => body,
     };
     // The media first, the words under them (1268), as every target draws
@@ -661,7 +740,10 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
         .rposition(|&i| model.conversations[i].pinned)
         .filter(|&at| at + 1 < order.len())
         .map(|at| order[at]);
-    for &index in &order[first..] {
+    // Only what the pane shows is laid (1490): the entries on screen and
+    // the one the bottom may cut.
+    let until = (first + entries_shown(height) + 1).min(order.len());
+    for &index in &order[first..until] {
         let conversation = &model.conversations[index];
         let here = index == model.selected;
         let [top, bottom] = entry(model, conversation, width, here);
@@ -695,6 +777,8 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
             false => rows.push(RLine::default()),
         }
     }
+    // Every row laid, the ones cut off below too (1489).
+    model.count(super::counters::Op::RowsLaid, rows.len());
     rows.truncate(height);
     rows
 }
@@ -743,8 +827,15 @@ fn entry<B>(
         .iter()
         .rev()
         .find(|m| !m.is_group_state());
-    let time = match (last.and_then(|m| m.at), now) {
-        (Some(at), Some(now)) => list_time(&at, &now),
+    // Nothing loaded: the store's row carries the time and the line
+    // (1490, schema 17), the same row the phone and the M9 draw.
+    let listing = conversation
+        .messages
+        .is_empty()
+        .then_some(conversation.listing.as_ref())
+        .flatten();
+    let time = match (last.and_then(|m| m.at).or(listing.and_then(|l| l.at)), now) {
+        (Some(at), Some(now)) => super::scene::list_time(&at, &now).resolve(lang),
         _ => String::new(),
     };
     let mut top = RLine::default();
@@ -752,11 +843,23 @@ fn entry<B>(
     let title = names.label_in(
         &conversation.peer,
         room.saturating_sub(time.chars().count() + 1),
+        lang,
     );
-    let gap = room.saturating_sub(fit_width(&title) + time.chars().count());
+    // Two peers of one name (1452): the sentence after the name, muted,
+    // where the time leaves room for all of it; a cut sentence is noise,
+    // and the header says it whole.
+    let free = room.saturating_sub(fit_width(&title) + time.chars().count() + 1);
+    let same = names
+        .same_name(&conversation.peer)
+        .map(|sentence| format!("  {}", sentence.resolve(lang)))
+        .filter(|same| fit_width(same) <= free)
+        .unwrap_or_default();
+    let gap = room.saturating_sub(fit_width(&title) + fit_width(&same) + time.chars().count());
+    push(&mut top, &title, RStyle::default());
+    push(&mut top, &same, painted(model.tokens().muted));
     push(
         &mut top,
-        &format!("{title}{}{time} ", " ".repeat(gap)),
+        &format!("{}{time} ", " ".repeat(gap)),
         RStyle::default(),
     );
 
@@ -782,6 +885,16 @@ fn entry<B>(
             match message.outbound && !message.is_reaction() && !invite {
                 true => Text::Key(StrId::RowYou, vec![Arg::Str(first.into())]).resolve(lang),
                 false => first.into(),
+            }
+        }
+        // Nothing loaded: the store's row, through [`list_row`]'s listing
+        // path, worded as the loaded one is (1490).
+        None if listing.is_some() => {
+            let row = super::chat::list_row(model, &conversation.peer);
+            let first = String::from(row.last.split('\n').next().unwrap_or(""));
+            match row.ours && row.kind != "reaction" {
+                true => Text::Key(StrId::RowYou, vec![Arg::Str(first)]).resolve(lang),
+                false => first,
             }
         }
         None => String::new(),

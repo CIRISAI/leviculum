@@ -492,6 +492,44 @@ fn put_varint(mut v: u64, out: &mut Vec<u8>) {
     out.push(v as u8);
 }
 
+/// A synthetic archive for measurements (1527): every tile of `bounds` at
+/// `zooms` holds `mvt` (uncompressed MVT) and after it a field an MVT
+/// reader skips, `pad` bytes that differ from tile to tile, so no two
+/// blobs are stored once and a box's bytes grow with its tiles as a real
+/// archive's do. Served throttled, the size of a load shows in its time.
+pub fn padded(
+    mvt: &[u8],
+    bounds: &Bounds,
+    zooms: RangeInclusive<u8>,
+    pad: usize,
+    metadata: &serde_json::Value,
+) -> Res<Vec<u8>> {
+    let mut tiles = BTreeMap::new();
+    for z in zooms {
+        let (xs, ys) = tile_range(bounds, z);
+        for x in xs.into_iter().flatten() {
+            for y in ys.clone() {
+                let t = TileId { z, x, y };
+                let mut blob = mvt.to_vec();
+                // Field 15, length-delimited: unknown to the Tile message.
+                blob.push(15 << 3 | 2);
+                put_varint(pad as u64, &mut blob);
+                let mut v = tile_id(t).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                blob.extend((0..pad).map(|_| {
+                    v ^= v << 13;
+                    v ^= v >> 7;
+                    v ^= v << 17;
+                    v as u8
+                }));
+                tiles.insert(t, blob);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    write(&tiles, NONE, metadata, &mut out)?;
+    Ok(out)
+}
+
 /// Write a PMTiles v3 archive of `tiles` (raw blobs as `tile_compression`
 /// says, keyed by tile) with `metadata`: one uncompressed root directory,
 /// no leaves, identical blobs stored once. For fixtures and tests: the
