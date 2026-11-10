@@ -2464,6 +2464,14 @@ pub struct ExploreScreen {
     /// The one sentence about them: asking, no answer, or none named.
     #[serde(default)]
     pub sheet_rooms_note: String,
+    /// "Erneut versuchen" once the server gave no answer, or none in
+    /// 20 s (1653); a tap is the `ask` verb. Empty otherwise.
+    #[serde(default)]
+    pub sheet_retry: String,
+    /// The question is out: the pane draws again within a second, so the
+    /// sentence turns at its time (1653).
+    #[serde(default)]
+    pub sheet_asking: bool,
     #[serde(default)]
     pub sheet_close: String,
 }

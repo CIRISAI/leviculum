@@ -189,6 +189,9 @@ pub enum ExploreEvent {
     /// One of the rooms the sheet lists: the hub is used, and the room
     /// joined as the hub spells it once it welcomed us.
     JoinRoom([u8; 16], String),
+    /// The sheet's "try again" (1653): the server is asked again for its
+    /// rooms.
+    AskAgain([u8; 16]),
     /// The sheet closes.
     CloseSheet,
     /// A finger came down on the list (`true`) or lifted (1618): while it
@@ -299,6 +302,12 @@ pub struct HubSheet {
     /// The one sentence about them: asking, no answer, or that it named
     /// none (only once it answered and named none, walk 2).
     pub rooms_note: Option<Text>,
+    /// "Try again" once the server gave no answer, or none within
+    /// [`super::rooms::ASK_PATIENCE_SECS`] (1653).
+    pub retry: Option<Text>,
+    /// The question is out and the sentence may still turn: a frontend
+    /// that draws on answers only draws again within a second.
+    pub asking: bool,
     pub close: Text,
     /// The terminal's cursor: 0 the button, then the rooms.
     pub cursor: usize,
@@ -801,13 +810,48 @@ fn sheet_rooms(rooms: &super::rooms::Rooms, hash: &[u8; 16]) -> Vec<String> {
 /// The sentence under the sheet's rooms (1621): asking while the question
 /// is out, the hub's silence, or that it named none, only once it
 /// answered and none is known.
-fn rooms_note(rooms: &super::rooms::Rooms, hash: &[u8; 16], listed: bool) -> Option<Text> {
+fn rooms_note(
+    rooms: &super::rooms::Rooms,
+    hash: &[u8; 16],
+    listed: bool,
+    now: Option<i64>,
+) -> Option<Text> {
     match rooms.named.get(hash) {
-        Some(Named::Asking) => Some(Text::key(StrId::ExploreServerAsking)),
+        Some(Named::Asking { since }) if overdue(*since, now) => {
+            Some(Text::key(StrId::RoomsNoAnswer))
+        }
+        Some(Named::Asking { .. }) => Some(Text::key(StrId::ExploreServerAsking)),
         Some(Named::NoAnswer) if !listed => Some(Text::key(StrId::ExploreServerNoAnswer)),
         Some(Named::Rooms(_)) if !listed => Some(Text::key(StrId::ExploreServerNoRooms)),
         _ => None,
     }
+}
+
+/// The question asked at `since` waited [`super::rooms::ASK_PATIENCE_SECS`]
+/// by `now` (1653).
+fn overdue(since: Option<i64>, now: Option<i64>) -> bool {
+    match (since, now) {
+        (Some(since), Some(now)) => now - since >= super::rooms::ASK_PATIENCE_SECS,
+        _ => false,
+    }
+}
+
+/// Whether the sheet offers to ask again: the server gave no answer, or
+/// none in time (1653).
+fn retry(rooms: &super::rooms::Rooms, hash: &[u8; 16], now: Option<i64>) -> bool {
+    match rooms.named.get(hash) {
+        Some(Named::NoAnswer) => true,
+        Some(Named::Asking { since }) => overdue(*since, now),
+        _ => false,
+    }
+}
+
+/// Ask the server of the sheet for its rooms (1621), stamped with the
+/// model's clock (1653).
+fn ask<B>(model: &mut UiModel<B>, hash: [u8; 16]) -> Vec<UiEffect> {
+    let since = model.now.map(|now| now.unix_secs);
+    model.rooms.named.insert(hash, Named::Asking { since });
+    Vec::from([UiEffect::Rooms(super::rooms::RoomAsk::Peek { hub: hash })])
 }
 
 /// The sheet's rows in the terminal cursor's order: the button (while
@@ -826,6 +870,7 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
     let chosen = model.rooms.hub == Some(hash);
     let rooms = sheet_rooms(&model.rooms, &hash);
     let (now_secs, _) = now(model);
+    let clock = model.now.map(|now| now.unix_secs);
     Some(HubSheet {
         hash,
         name: hub_name(model, &hub),
@@ -843,7 +888,9 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
         }),
         notice: Text::key(super::rooms::name_notice(model)),
         rooms_title: Text::key(StrId::ExploreServerRooms),
-        rooms_note: rooms_note(&model.rooms, &hash, !rooms.is_empty()),
+        rooms_note: rooms_note(&model.rooms, &hash, !rooms.is_empty(), clock),
+        retry: retry(&model.rooms, &hash, clock).then(|| Text::key(StrId::RoomsRetry)),
+        asking: matches!(model.rooms.named.get(&hash), Some(Named::Asking { .. })),
         rooms,
         close: Text::key(StrId::ExploreServerClose),
         cursor: model
@@ -1034,13 +1081,19 @@ pub(super) fn fold<B: InputBuffer + Default>(
             model.explore.sheet_cursor = 0;
             // The sheet asks the server what it names (1621), once a run:
             // a known answer shows at once, a silence is asked again.
+            // An overdue question is asked again too (1653).
+            let clock = model.now.map(|now| now.unix_secs);
             match model.rooms.named.get(&hash) {
-                Some(Named::Asking | Named::Rooms(_)) => Vec::new(),
-                None | Some(Named::NoAnswer) => {
-                    model.rooms.named.insert(hash, Named::Asking);
-                    Vec::from([UiEffect::Rooms(super::rooms::RoomAsk::Peek { hub: hash })])
-                }
+                Some(Named::Asking { since }) if !overdue(*since, clock) => Vec::new(),
+                Some(Named::Rooms(_)) => Vec::new(),
+                None | Some(Named::NoAnswer | Named::Asking { .. }) => ask(model, hash),
             }
+        }
+        ExploreEvent::AskAgain(hash) => {
+            if model.explore.sheet != Some(hash) {
+                return Vec::new();
+            }
+            ask(model, hash)
         }
         ExploreEvent::UseHub(hash) => {
             model.explore.sheet = None;
@@ -2248,6 +2301,102 @@ mod tests {
         assert_eq!(
             explore(&mut model, ExploreEvent::Hub(silent)),
             [UiEffect::Rooms(RoomAsk::Peek { hub: silent })]
+        );
+    }
+
+    /// Walk 8 of 1653, 42: a server's sheet said "Frage den Server nach
+    /// seinen Räumen…" for 90 s, the question's whole budget. After
+    /// [`super::super::rooms::ASK_PATIENCE_SECS`] it says what the Rooms
+    /// pane says of a silent server (1652's words) and offers to ask
+    /// again; the question is asked again on that tap, the sentence back
+    /// to asking, and a late answer still fills the sheet. The control:
+    /// 19 s in it still asks, and an answered sheet offers no retry.
+    #[test]
+    fn a_silent_server_is_said_after_twenty_seconds_with_a_retry() {
+        let mut model = phone();
+        let hub = [0x98; 16];
+        let at = |model: &mut UiModel<Buffer>, secs: i64| {
+            update(
+                model,
+                UiEvent::Clock(crate::when::WallTime {
+                    unix_secs: secs,
+                    offset_secs: 0,
+                }),
+            );
+        };
+        at(&mut model, 1_000_000);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        assert_eq!(
+            explore(&mut model, ExploreEvent::Hub(hub)),
+            [UiEffect::Rooms(RoomAsk::Peek { hub })]
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert!(sheet.asking);
+        assert_eq!(sheet.retry, None);
+        at(&mut model, 1_000_019);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(
+            sheet.rooms_note,
+            Some(Text::key(StrId::ExploreServerAsking)),
+            "19 s"
+        );
+        assert_eq!(sheet.retry, None);
+        at(&mut model, 1_000_020);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(
+            sheet.rooms_note,
+            Some(Text::key(StrId::RoomsNoAnswer)),
+            "20 s"
+        );
+        assert_eq!(sheet.retry, Some(Text::key(StrId::RoomsRetry)));
+        assert_eq!(
+            sheet
+                .rooms_note
+                .as_ref()
+                .map(|t| t.resolve(Lang::De))
+                .as_deref(),
+            Some("Server antwortet nicht.")
+        );
+        // The retry asks again, and the sentence asks again for 20 s.
+        assert_eq!(
+            explore(&mut model, ExploreEvent::AskAgain(hub)),
+            [UiEffect::Rooms(RoomAsk::Peek { hub })]
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(
+            sheet.rooms_note,
+            Some(Text::key(StrId::ExploreServerAsking))
+        );
+        assert_eq!(sheet.retry, None);
+        // A retry for a sheet not open asks nothing.
+        assert!(explore(&mut model, ExploreEvent::AskAgain([0x99; 16])).is_empty());
+        // The late answer fills it, no retry.
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub,
+                rooms: Some(vec!["lobby".into()]),
+            }),
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms, ["lobby"]);
+        assert_eq!(
+            (sheet.rooms_note, sheet.retry, sheet.asking),
+            (None, None, false)
+        );
+        // A question that ended without an answer offers the retry too.
+        let silent = [0x9a; 16];
+        explore(&mut model, ExploreEvent::Hub(silent));
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub: silent,
+                rooms: None,
+            }),
+        );
+        assert_eq!(
+            node(&model).sheet.expect("the sheet").retry,
+            Some(Text::key(StrId::RoomsRetry))
         );
     }
 

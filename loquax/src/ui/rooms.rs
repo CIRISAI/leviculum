@@ -78,13 +78,22 @@ pub enum RoomAsk {
 /// next opening shows it at once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Named {
-    /// The question is on its way.
-    Asking,
+    /// The question is on its way, asked at `since` (unix seconds, the
+    /// model's clock; `None` before the clock came). The sheet waits
+    /// [`ASK_PATIENCE_SECS`] before it says the server does not answer.
+    Asking { since: Option<i64> },
     /// The rooms its notices named, maybe none.
     Rooms(Vec<String>),
     /// It gave no WELCOME (no path, no link, no answer).
     NoAnswer,
 }
+
+/// How long a server's sheet says "asking" before it says the server
+/// does not answer and offers to ask again (1653, walk 8, 42: the
+/// sentence stood 90 s, the question's whole budget, and the reader
+/// waited without end). The question itself runs on to its budget; an
+/// answer that comes later still fills the sheet.
+pub const ASK_PATIENCE_SECS: i64 = 20;
 
 /// The settings' hub row (1577): what a press on one of its lines asks.
 #[derive(Debug, Clone, PartialEq, Eq)]

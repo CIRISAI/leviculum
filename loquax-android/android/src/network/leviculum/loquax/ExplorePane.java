@@ -714,7 +714,15 @@ final class ExplorePane {
             return;
         }
         String shows = Core.str(shown, "sheet_said") + "|" + Core.bool(shown, "sheet_chosen") + "|"
-                + Core.words(shown, "sheet_rooms") + "|" + Core.str(shown, "sheet_rooms_note");
+                + Core.words(shown, "sheet_rooms") + "|" + Core.str(shown, "sheet_rooms_note") + "|"
+                + Core.str(shown, "sheet_retry");
+        // While the question is out the sentence turns at its time, 20 s
+        // (1653, walk 8, 42), which no answer may come to draw: once a
+        // second, as the Rooms pane counts its seconds.
+        list.removeCallbacks(askingTick);
+        if (Core.bool(shown, "sheet_asking")) {
+            list.postDelayed(askingTick, 1000);
+        }
         if (sheet != null && sheet.isShowing() && dest.equals(sheetFor)) {
             // The server's answer came (1621): the same sheet, its rooms now.
             if (!shows.equals(sheetShows)) {
@@ -801,7 +809,31 @@ final class ExplorePane {
             line.setTag("explore_sheet_note");
             body.addView(line);
         }
+        String retry = Core.str(shown, "sheet_retry");
+        if (!retry.isEmpty()) {
+            TextView again = words(retry, 16, R.color.accent);
+            again.setPadding(0, dp(10), 0, dp(10));
+            again.setTag("explore_sheet_retry");
+            again.setBackgroundResource(android.R.drawable.list_selector_background);
+            again.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    verb("ask", "", dest, 0);
+                }
+            });
+            body.addView(again);
+        }
     }
+
+    /** The sheet's question still out: draw again, its sentence may turn (1653). */
+    private final Runnable askingTick = new Runnable() {
+        @Override
+        public void run() {
+            if (sheet != null && sheet.isShowing() && !screen.isDestroyed()) {
+                draw();
+            }
+        }
+    };
 
     /** The sheet off the screen, by the library's word: no verb back. */
     private void closeSheet() {

@@ -168,6 +168,12 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             .as_ref()
             .map(|s| text_or_empty(&s.rooms_note, lang))
             .unwrap_or_default(),
+        sheet_retry: node
+            .sheet
+            .as_ref()
+            .map(|s| text_or_empty(&s.retry, lang))
+            .unwrap_or_default(),
+        sheet_asking: node.sheet.as_ref().is_some_and(|s| s.asking),
         sheet_close: node
             .sheet
             .as_ref()
@@ -197,6 +203,7 @@ pub fn events(verb: &str, text: &str, to: &str, index: i64) -> Result<Vec<UiEven
         "hub" => explore(ExploreEvent::Hub(dest(to)?)),
         "use" => explore(ExploreEvent::UseHub(dest(to)?)),
         "join" => explore(ExploreEvent::JoinRoom(dest(to)?, text.to_string())),
+        "ask" => explore(ExploreEvent::AskAgain(dest(to)?)),
         "close" => explore(ExploreEvent::CloseSheet),
         "touch" => explore(ExploreEvent::Touch(index != 0)),
         other => return Err(format!("no explore verb {other:?}")),
