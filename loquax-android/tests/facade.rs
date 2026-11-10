@@ -921,12 +921,15 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     node.kill().await;
 }
 
-/// 1614: a rename the reader takes back just before the app stops reaches
-/// the home all the same, and the next start does not bring the old name
-/// back. The forge gate on 0a67952c saw "Mum ·5a5a ≈" on the second start
-/// of `a_phone_joins_sends_pulls_and_comes_back`: the clear was handed to
-/// the home on a task the stop dropped, and the second start's pull took
-/// the home's "Mum" again. Here the stop follows the clear at once.
+/// 1614, 1635: a rename the reader takes back just before the app stops
+/// stays taken back, and reaches the home all the same. The forge gate on
+/// 0a67952c saw "Mum ·5a5a ≈" on the second start of
+/// `a_phone_joins_sends_pulls_and_comes_back`: the clear was handed to the
+/// home on a task the stop dropped, and the second start's pull took the
+/// home's "Mum" again. Here the stop follows the clear at once. The clear
+/// is owed until the home takes it (1635): kept in the store over the
+/// stop, the reader's word over the second start's pull, and handed by
+/// the second session.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rename_taken_back_before_the_stop_stays_taken_back() {
     let instance = instance();
@@ -966,7 +969,8 @@ async fn a_rename_taken_back_before_the_stop_stays_taken_back() {
             .filter(|(peer, _)| *peer == [0x5a; 16])
             .collect()
     };
-    tokio::task::spawn_blocking(move || {
+    let home_petnames_again = home_petnames.clone();
+    let address = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         let address = session.address();
         session
@@ -990,8 +994,7 @@ async fn a_rename_taken_back_before_the_stop_stays_taken_back() {
             })
             .expect("clear");
         session.stop();
-        // The clear reached the home before the stop let go of the node.
-        assert_eq!(home_petnames(address), [([0x5a; 16], None)]);
+        address
     })
     .await
     .expect("the first session");
@@ -1021,8 +1024,20 @@ async fn a_rename_taken_back_before_the_stop_stays_taken_back() {
                 .expect("query"),
         )
         .expect("decode");
-        assert_eq!(messages.name, format!("<{}…>", &peer_again[..8]));
+        // The peer's own name, "Unknown" while it has none (9dd62f9c),
+        // never the cleared petname.
+        assert!(!messages.name.contains("Mum"), "{}", messages.name);
         assert_eq!(messages.petname, None);
+        // The owed clear reaches the home from the second session.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while home_petnames_again(address) != [([0x5a; 16], None)] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the owed clear never reached the home: {:?}",
+                home_petnames_again(address)
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
         session.stop();
     })
     .await
