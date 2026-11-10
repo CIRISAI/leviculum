@@ -343,10 +343,10 @@ pub const ROWS: &[Row<Action>] = {
         Row::new("list the archived, or the rest", CONVERSATIONS, &[]).palette("archived"),
         Row::new("start a conversation", CONVERSATIONS, &[])
             .palette("new conversation")
-            .note("a friend's code or address"),
+            .note("a contact's code or address"),
         Row::new("add a contact", CONVERSATIONS, &[])
             .palette("add contact")
-            .note("a friend's code, then a name"),
+            .note("a contact's code, then a name"),
         // The profile (1443): what a tap on the avatar opens on the phone
         // and a click on it in the window; here `P`, and a click on the
         // list's title, which is the reader's own name.
@@ -356,7 +356,7 @@ pub const ROWS: &[Row<Action>] = {
             &[&[key(Char('P'), Mods::Plain, run(C::MyCode), COMMAND_PANES)]],
         )
         .palette("my code")
-        .note("for a friend to scan or paste"),
+        .note("for a contact to scan or paste"),
         // The settings (1450): the phone's ⋮ menu and the window's gear;
         // here `S`, beside the profile's `P`.
         Row::new(
@@ -923,7 +923,7 @@ pub const ROWS: &[Row<Action>] = {
         .palette("read receipts")
         .note("off, none is sent and none is shown"),
         Row::new(
-            "make a group: tick friends by name, then its name (1307)",
+            "make a group: tick contacts by name, then its name (1307)",
             EVERYWHERE,
             &[],
         )
@@ -943,7 +943,7 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("remove member"),
         Row::new(
-            "add members to the open group, its admin's: tick friends, then Enter",
+            "add members to the open group, its admin's: tick contacts, then Enter",
             EVERYWHERE,
             &[],
         )
@@ -973,7 +973,7 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("send again"),
         Row::new(
-            "forward the message under the cursor to a friend by name",
+            "forward the message under the cursor to a contact by name",
             EVERYWHERE,
             &[],
         )
@@ -1034,7 +1034,7 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("send file"),
         Row::new(
-            "a friend's code from a picture of its QR: type the picture's path",
+            "a contact's code from a picture of its QR: type the picture's path",
             EVERYWHERE,
             &[],
         )

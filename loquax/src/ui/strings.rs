@@ -564,14 +564,21 @@ leviculum_ui::catalogue! {
     // what a picture without one says, without the file's path.
     CodeFromPicture = "code_from_picture", "Read a code from a picture", "Code aus einem Bild lesen";
     CodeNotInPicture = "code_not_in_picture", "There is no code in this picture.", "In diesem Bild ist kein Code.";
-    CodeIsMailbox = "code_is_mailbox", "That code is for a mailbox, not for a friend.", "Dieser Code ist für ein Postfach, nicht für einen Kontakt.";
+    CodeIsMailbox = "code_is_mailbox", "That code is for a mailbox, not for a contact.", "Dieser Code ist für ein Postfach, nicht für einen Kontakt.";
     // The pencil's screen (1263): scan first, paste second, typing under
     // Advanced.
     NewScan = "new_scan", "Scan a code", "Code scannen";
     NewPaste = "new_paste", "Paste a code", "Code einfügen";
     NewHint = "new_hint", "Ask your contact for their code: in Loquax they tap their own picture at the top.", "Lass dir den Code zeigen: In Loquax tippt dein Kontakt oben auf sein eigenes Bild.";
-    NewTyped = "new_typed", "Or type the address your friend gave you.", "Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.";
-    NewNothing = "new_nothing", "There is nothing to paste. Copy your friend's code first.", "Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.";
+    NewTyped = "new_typed", "Or type the address your contact gave you.", "Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.";
+    // 1449 item 8: the terminal's words that still said "friend".
+    AskForwardTo = "ask_forward_to", "Forward to: a contact's name", "Weiterleiten an: Name eines Kontakts";
+    AskContactCode = "ask_contact_code", "Your contact's code or address", "Code oder Adresse deines Kontakts";
+    AskGroupTick = "ask_group_tick", "Tick contacts: type a name, Enter ticks or unticks it", "Kontakte ankreuzen: Namen tippen, Enter kreuzt an oder ab";
+    NoContactCalled = "no_contact_called", "No contact called %1$s", "Kein Kontakt namens %1$s";
+    NoConversationsTyped = "no_conversations_typed", "No conversations yet: :new conversation starts one with a contact's code.", "Noch keine Unterhaltungen: :new conversation beginnt eine mit dem Code eines Kontakts.";
+    AppConnecting = "app_connecting", "Loquax (connecting)", "Loquax (verbindet)";
+    NewNothing = "new_nothing", "There is nothing to paste. Copy your contact's code first.", "Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.";
     // Joining a mailbox (1263, finding 8): one sentence each, the
     // daemon's words under Details.
     JoinNoAnswer = "join_no_answer", "The mailbox did not answer. Is the computer on?", "Das Postfach hat nicht geantwortet. Ist der Computer an?";
@@ -757,6 +764,23 @@ mod tests {
             .filter(|w| !w.is_empty())
             .map(str::to_lowercase)
             .collect()
+    }
+
+    /// Lew 2026-11-06: nobody on the screen is a "friend"; a contact is a
+    /// contact, in both languages (1449 item 8).
+    #[test]
+    fn no_string_calls_anyone_a_friend() {
+        let friendly = |text: &str| {
+            plain_words(text)
+                .iter()
+                .any(|w| w.starts_with("friend") || w.starts_with("freund"))
+        };
+        for (_, key, en, de) in CATALOGUE {
+            assert!(!friendly(en) && !friendly(de), "{key}: {en} / {de}");
+        }
+        // The control: the check catches the word in either language.
+        assert!(friendly("Copy your friend's code") && friendly("Freunde auf der Karte"));
+        assert!(!friendly("your contact's code"));
     }
 
     /// "hub", "hubs", "hop", "hops" (1618).

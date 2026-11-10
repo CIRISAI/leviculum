@@ -260,7 +260,9 @@ impl<B> UiModel<B> {
     pub(super) fn verb_ask_rows(&self, ask: Ask) -> Option<Vec<String>> {
         Some(match ask {
             Ask::Forward { .. } => alloc::vec![
-                "forward to: a friend's name".to_string(),
+                super::strings::StrId::AskForwardTo
+                    .text(self.lang)
+                    .to_string(),
                 "Enter sends the copy".to_string(),
             ],
             Ask::Position => {

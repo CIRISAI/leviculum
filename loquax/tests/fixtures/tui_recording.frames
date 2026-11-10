@@ -1,5 +1,5 @@
 === locked 80x24
-┌  Loquax (attaching)────┐┌  Anna Schulz───────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌  Anna Schulz───────────────────────────────────────┐
 │▌Anna Schulz            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === locked 120x40
-┌  Loquax (attaching)──────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
+┌  Loquax (connecting)─────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
 │▌Anna Schulz                      ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -65,7 +65,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === paused, nothing heard 80x24
-┌  Loquax (attaching)────┐┌  Anna Schulz───────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌  Anna Schulz───────────────────────────────────────┐
 │▌Anna Schulz            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -90,7 +90,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === paused, nothing heard 120x40
-┌  Loquax (attaching)──────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
+┌  Loquax (connecting)─────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
 │▌Anna Schulz                      ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -131,7 +131,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === preview at the cap 80x24
-┌  Loquax (attaching)────┐┌  Anna Schulz───────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌  Anna Schulz───────────────────────────────────────┐
 │▌Anna Schulz            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -156,7 +156,7 @@ Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Alt-x commands │ F1 help │ Ctrl-q quit
 === preview at the cap 120x40
-┌  Loquax (attaching)──────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
+┌  Loquax (connecting)─────────────┐┌  Anna Schulz─────────────────────────────────────────────────────────────────────┐
 │▌Anna Schulz                      ││                                                                                  │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │

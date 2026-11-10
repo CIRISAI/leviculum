@@ -1,5 +1,5 @@
 --- two reactions ---
-┌  Loquax (attaching)────┐┌  Unknown───────────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌  Unknown───────────────────────────────────────────┐
 │▌Unknown          12:01 ││                                                    │
 │▌reacted ❤️              ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- picker ---
-┌  Loquax (attaching)────┐┌● Unknown───────────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌● Unknown───────────────────────────────────────────┐
 │▌Unknown          12:01 ││                                                    │
 │▌reacted ❤️         ┌ commands ────────────────────────────┐                   │
 │                   │>                                     │                   │
@@ -49,7 +49,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- ours ---
-┌  Loquax (attaching)────┐┌● Unknown───────────────────────────────── no relay ┐
+┌  Loquax (connecting)───┐┌● Unknown───────────────────────────────── no relay ┐
 │▌Unknown          12:01 ││                                                    │
 │▌You reacted 👍          ││                                                    │
 │                        ││                                                    │

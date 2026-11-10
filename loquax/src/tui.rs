@@ -3391,7 +3391,7 @@ mod tests {
     fn the_three_panes_and_the_footer_are_drawn_with_the_focus_marked() {
         let model = Model::new(&[[0xab; 16]]);
         let screen = render(&model);
-        assert!(screen.contains("● Loquax (attaching)"), "{screen}");
+        assert!(screen.contains("● Loquax (connecting)"), "{screen}");
         assert!(screen.contains("▌Unknown"), "{screen}");
         assert!(screen.contains("No messages yet"), "{screen}");
         assert!(screen.contains("  to Unknown"), "{screen}");
@@ -4035,7 +4035,10 @@ mod tests {
         keys(&mut model, "new conv");
         key(&mut model, "enter");
         let asking = screen(&model, 80, 16);
-        assert!(asking.contains("your friend's code or address"), "{asking}");
+        assert!(
+            asking.contains("Your contact's code or address"),
+            "{asking}"
+        );
 
         // An old code: the address alone, in capitals.
         let bert = loquax::address::to_hex(&[0xbe; 16]).to_ascii_uppercase();

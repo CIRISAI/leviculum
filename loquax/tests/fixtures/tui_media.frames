@@ -1,5 +1,5 @@
 --- photo, file, voice alone ---
-┌● Loquax (attaching)────┐┌  Unknown───────────────────────────────────────────┐
+┌● Loquax (connecting)───┐┌  Unknown───────────────────────────────────────────┐
 │▌Unknown          12:21 ││                                                    │
 │▌Voice message, 0:00    ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- ours, then words under a photo ---
-┌● Loquax (attaching)────┐┌  Unknown───────────────────────────────── no relay ┐
+┌● Loquax (connecting)───┐┌  Unknown───────────────────────────────── no relay ┐
 │▌Unknown          12:41 ││                                                    │
 │▌the view from the hill ││                                                    │
 │                        ││                                                    │

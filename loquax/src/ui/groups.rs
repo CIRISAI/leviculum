@@ -1259,7 +1259,9 @@ impl<B> UiModel<B> {
                     .map(|d| names(&d.picked))
                     .unwrap_or_default();
                 let mut rows = alloc::vec![
-                    "tick friends: type a name, Enter ticks or unticks it".to_string(),
+                    super::strings::StrId::AskGroupTick
+                        .text(self.lang)
+                        .to_string(),
                     "Enter on an empty line goes on to the name".to_string(),
                 ];
                 if !picked.is_empty() {
@@ -1353,7 +1355,11 @@ impl<B: Default> UiModel<B> {
                     }
                     None => self.toast(
                         leviculum_ui::toast::ToastKind::Info,
-                        alloc::format!("no friend called {typed}"),
+                        super::strings::Text::Key(
+                            super::strings::StrId::NoContactCalled,
+                            alloc::vec![super::strings::Arg::Str(typed.to_string())],
+                        )
+                        .resolve(self.lang),
                     ),
                 }
                 self.palette = Some(Palette {

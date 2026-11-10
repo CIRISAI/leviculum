@@ -3722,7 +3722,7 @@ async fn the_profile_shows_our_contact_code_and_a_scanned_code_adds_a_contact() 
                     name: None,
                 })
                 .expect_err("no contact"),
-            "That code is for a mailbox, not for a friend."
+            "That code is for a mailbox, not for a contact."
         );
         session
     })

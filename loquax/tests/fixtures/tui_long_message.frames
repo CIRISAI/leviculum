@@ -1,5 +1,5 @@
 --- top ---
-┌  Loquax (attaching)────┐┌● Unknown───────────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌● Unknown───────────────────────────────────────────┐
 │▌Unknown          09:00 ││                                                    │
 │▌short after            ││                    ── Today ──                     │
 │                        ││▌short before  09:00                                │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- twenty down ---
-┌  Loquax (attaching)────┐┌● Unknown───────────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌● Unknown───────────────────────────────────────────┐
 │▌Unknown          09:00 ││▌line 16 of the long one                            │
 │▌short after            ││▌line 17 of the long one                            │
 │                        ││▌line 18 of the long one                            │
@@ -49,7 +49,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- right ---
-┌  Loquax (attaching)────┐┌● Unknown───────────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌● Unknown───────────────────────────────────────────┐
 │▌Unknown          09:00 ││▌line 34 of the long one                            │
 │▌short after            ││▌line 35 of the long one                            │
 │                        ││▌line 36 of the long one                            │
@@ -74,7 +74,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- back up ---
-┌  Loquax (attaching)────┐┌● Unknown───────────────────────────────────────────┐
+┌  Loquax (connecting)───┐┌● Unknown───────────────────────────────────────────┐
 │▌Unknown          09:00 ││▌line 52 of the long one                            │
 │▌short after            ││▌line 53 of the long one                            │
 │                        ││▌line 54 of the long one                            │

@@ -7291,9 +7291,10 @@ pub const SHARE_CLICK: &str = "click to stop";
 /// The toast of a send that failed: the legs' reasons are in its details.
 pub const NOT_SENT: &str = "Not sent. Its details say why.";
 
-/// The empty conversations pane's line.
-pub const NO_CONVERSATIONS: &str =
-    "No conversations yet: :new conversation starts one with a friend's code.";
+/// The empty conversations pane's line, in the reader's language.
+fn no_conversations(lang: strings::Lang) -> &'static str {
+    strings::StrId::NoConversationsTyped.text(lang)
+}
 
 /// The `blocked` view's line while nothing is blocked.
 pub const NO_BLOCKED: &str = "Nothing blocked. :blocked returns.";
@@ -7337,7 +7338,7 @@ fn search_pane<B: InputBuffer>(
     let below = height.saturating_sub(search::FIELD_ROWS);
     match model.query() {
         None if model.conversations.is_empty() => {
-            rows.extend(wrap(&[plain(NO_CONVERSATIONS)], width, 0));
+            rows.extend(wrap(&[plain(no_conversations(model.lang))], width, 0));
         }
         None => rows.extend(layout::list(model, width, below)),
         Some(query) => {
@@ -7876,7 +7877,7 @@ fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
             let empty = match (model.show_blocked, model.show_archived) {
                 (true, _) => NO_BLOCKED,
                 (false, true) => NO_ARCHIVED,
-                (false, false) => NO_CONVERSATIONS,
+                (false, false) => no_conversations(model.lang),
             };
             (wrap(&[plain(empty)], sizes.list.0, 0), None)
         }
@@ -8112,7 +8113,7 @@ fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
                     None => strings::StrId::AppName.text(model.lang).to_string(),
                 }
             }
-            (false, None) => "Loquax (attaching)".to_string(),
+            (false, None) => strings::StrId::AppConnecting.text(model.lang).to_string(),
         },
         conversations_title_right: match (searching, model.show_blocked) {
             (true, _) => SEARCH_CLOSES.to_string(),
@@ -15859,7 +15860,7 @@ pub(crate) mod tests {
         assert_eq!(view(&alone).messages_title, "messages");
         assert_eq!(
             list_rows(&alone).join(" ").trim_end(),
-            NO_CONVERSATIONS,
+            no_conversations(alone.lang),
             "the list is empty, wrapped"
         );
         assert!(palette(&mut alone, "block").is_empty());

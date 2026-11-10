@@ -1,5 +1,5 @@
 === 80x24
-┌● Loquax (attaching)────┐┌  Unknown───────────────────────────────── no relay ┐
+┌● Loquax (connecting)───┐┌  Unknown───────────────────────────────── no relay ┐
 │▌Unknown          03:44 ││ ⌖ Sharing your position, 42 min left               │
 │▌you: Position shared   ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === 120x40
-┌● Loquax (attaching)──────────────┐┌  Unknown─────────────────────────────────────────────────────────────────────────┐
+┌● Loquax (connecting)─────────────┐┌  Unknown─────────────────────────────────────────────────────────────────────────┐
 │▌Unknown                    03:44 ││                                                                         no relay │
 │▌you: Position shared             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││ ⌖ Sharing your position, 42 min left · click to stop                             │

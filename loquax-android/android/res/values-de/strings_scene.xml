@@ -451,6 +451,12 @@
     <string name="new_paste">Code einfügen</string>
     <string name="new_hint">Lass dir den Code zeigen: In Loquax tippt dein Kontakt oben auf sein eigenes Bild.</string>
     <string name="new_typed">Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.</string>
+    <string name="ask_forward_to">Weiterleiten an: Name eines Kontakts</string>
+    <string name="ask_contact_code">Code oder Adresse deines Kontakts</string>
+    <string name="ask_group_tick">Kontakte ankreuzen: Namen tippen, Enter kreuzt an oder ab</string>
+    <string name="no_contact_called">Kein Kontakt namens %1$s</string>
+    <string name="no_conversations_typed">Noch keine Unterhaltungen: :new conversation beginnt eine mit dem Code eines Kontakts.</string>
+    <string name="app_connecting">Loquax (verbindet)</string>
     <string name="new_nothing">Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.</string>
     <string name="join_no_answer">Das Postfach hat nicht geantwortet. Ist der Computer an?</string>
     <string name="join_slow">Das Postfach hat nicht rechtzeitig geantwortet. Versuch es noch einmal.</string>

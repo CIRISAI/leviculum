@@ -1,8 +1,8 @@
 --- empty
-┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation starts││                                                    │
-│one with a friend's     ││                                                    │
+│one with a contact's    ││                                                    │
 │code.                   ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -16,10 +16,10 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- palette
-┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation s┌ commands ────────────────────────────┐                   │
-│one with a friend's│>                                     │                   │
+│one with a contact'│>                                     │                   │
 │code.              │▸ send  Enter                         │                   │
 │                   │  new conversation                    │                   │
 │                   │  add contact                         │                   │
@@ -33,11 +33,11 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / se│  next conversation  Alt-↓            │───────────────────┘
 Enter run │ Esc clos└  previous conversation  Alt-↑────────┘
 --- asking
-┌● Loquax (attaching)────┐┌  messages──────────────────────────────────────────┐
+┌● Loquax (connecting)───┐┌  messages──────────────────────────────────────────┐
 │No conversations yet:   ││                                                    │
 │:new conversation s┌ commands ────────────────────────────┐                   │
-│one with a friend's│>                                     │                   │
-│code.              │your friend's code or address         │                   │
+│one with a contact'│>                                     │                   │
+│code.              │Your contact's code or address        │                   │
 │                   │Enter opens the conversation          │                   │
 │                   └──────────────────────────────────────┘                   │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter run │ Esc clos└  previous conversation  Alt-↑───────�
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter run │ Esc close
 --- naming
-┌  Loquax (attaching)────┐┌  Unknown ·4ca1  Two contacts have no name yet──────┐
+┌  Loquax (connecting)───┐┌  Unknown ·4ca1  Two contacts have no name yet──────┐
 │ Unknown ·bebe          ││                                                    │
 │                   ┌ commands ────────────────────────────┐                   │
 │                   │>                                     │                   │

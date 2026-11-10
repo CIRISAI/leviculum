@@ -131,7 +131,9 @@ impl<B> UiModel<B> {
             ],
             Ask::React { peer, target } => self.react_rows(peer, target),
             Ask::Code { .. } => vec![
-                "your friend's code or address".to_string(),
+                super::strings::StrId::AskContactCode
+                    .text(self.lang)
+                    .to_string(),
                 "Enter opens the conversation".to_string(),
             ],
             Ask::RoomsHub => vec![
