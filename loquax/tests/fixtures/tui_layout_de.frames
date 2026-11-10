@@ -1,0 +1,137 @@
+--- 80 x 24 ---
+┌  Loquax────────────────┐┌  Alice───────────────────────── ein Relais adopted ┐
+│▌Alice            14:06 ││                                                    │
+│▌du: the tripod fits    ││              yes, from ten. Shall I bring the T114 │
+│                        ││              and the long antenna, or is the stick │
+│ Bob              12:40 ││              enough for the hill?  14:02 ✓         │
+│ the antenna is in the… ││                                                    │
+│                        ││ long one, the hill eats signal  14:03              │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│                        ││                                                    │
+│                        ││              stuck at the level crossing  09:31 ◷  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││ and the small tripod                               │
+│                        ││ if it fits in the bag  14:05                       │
+│                        ││                                                    │
+│                        ││                          the tripod fits  14:06 ⠋  │
+│                        │├● to Alice────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- 120 x 40 ---
+┌  Loquax──────────────────────────┐┌  Alice───────────────────────────────────────────────────────────────────────────┐
+│▌Alice                      14:06 ││                                                               ein Relais adopted │
+│▌du: the tripod fits              ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│ Bob                        12:40 ││                                                                                  │
+│ the antenna is in the van        ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││ did the board come back from the soak?  19:40                                    │
+│                                  ││                                                                                  │
+│                                  ││                         yes, 100 % over the night, log is on the share  19:52 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                            ── Saturday 24 October ──                             │
+│                                  ││ are you at the field site tomorrow? Dana says the north                          │
+│                                  ││ gate is locked after six, so the car park by the road it                         │
+│                                  ││ is.  13:58                                                                       │
+│                                  ││                                                                                  │
+│                                  ││                      yes, from ten. Shall I bring the T114 and the long antenna, │
+│                                  ││                      or is the stick enough for the hill?  14:02 ✓               │
+│                                  ││                                                                                  │
+│                                  ││ long one, the hill eats signal  14:03                                            │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                              on my way  09:12 ✓  │
+│                                  ││                                                                                  │
+│                                  ││                                            stuck at the level crossing  09:31 ◷  │
+│                                  ││                                                                                  │
+│                                  ││ ──────────────────────────────────── 2 new ───────────────────────────────────── │
+│                                  ││ ok, bring the T114.  14:04                                                       │
+│                                  ││                                                                                  │
+│                                  ││ and the small tripod                                                             │
+│                                  ││ if it fits in the bag  14:05                                                     │
+│                                  ││                                                                                  │
+│                                  ││                                                        the tripod fits  14:06 ⠋  │
+│                                  │├● to Alice──────────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- cursor ---
+┌  Loquax────────────────┐┌● Alice───────────────────────── ein Relais adopted ┐
+│▌Alice            14:06 ││                                                    │
+│▌du: the tripod fits    ││             ▌yes, from ten. Shall I bring the T114 │
+│                        ││             ▌and the long antenna, or is the stick │
+│ Bob              12:40 ││             ▌enough for the hill?  14:02 ✓         │
+│ the antenna is in the… ││                                                    │
+│                        ││ long one, the hill eats signal  14:03              │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                                on my way  09:12 ✓  │
+│                        ││                                                    │
+│                        ││              stuck at the level crossing  09:31 ◷  │
+│                        ││                                                    │
+│                        ││ ───────────────────── 2 new ────────────────────── │
+│                        ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││ and the small tripod                               │
+│                        ││ if it fits in the bag  14:05                       │
+│                        ││                                                    │
+│                        ││                          the tripod fits  14:06 ⠋  │
+│                        │├  to Alice────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- detail ---
+┌  Loquax────────────────┐┌● Alice───────────────────────── ein Relais adopted ┐
+│▌Alice            14:06 ││                                                    │
+│▌du: the tripod fits    ││             ▌yes, from ten. Shall I bring the T114 │
+│                        ││             ▌and the long antenna, or is the stick │
+│ Bob              12:40 ││             ▌enough for the hill?  14:02 ✓         │
+│ ┌ message ─────────────────────────────────────────────────────────────────┐ │
+│ │from you to Alice                                                         │ │
+│ │peer   4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f                                   │ │
+│ │id     a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2   │ │
+│ │size   96 bytes                                                           │ │
+│ │state  arrived: Alice's mailbox or device has it                          │ │
+│ │Alice sends no read receipts                                              │ │
+│ │                                                                          │ │
+│ │on this device                                                            │ │
+│ │14:02:00  queued                                                          │ │
+│ │14:02:00  queued by the router as a2a2a2a2                                │ │
+│ │14:02:00  arrived: proof received                                         │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││                          the tripod fits  14:06 ⠋  │
+│                        │├  to Alice────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- 60 x 20, narrow ---
+┌  Loquax────────────────┐┌  Alice───── ein Relais adopted ┐
+│▌Alice            14:06 ││ 14:03                          │
+│▌du: the tripod fits    ││                                │
+│                        ││          ── Today ──           │
+│ Bob              12:40 ││ on my way  you 09:12 ✓         │
+│ the antenna is in the… ││                                │
+│                        ││ stuck at the level crossing    │
+│                        ││ you 09:31 ◷                    │
+│                        ││                                │
+│                        ││ ─────────── 2 new ──────────── │
+│                        ││ ok, bring the T114.  14:04     │
+│                        ││                                │
+│                        ││ and the small tripod           │
+│                        ││ if it fits in the bag  14:05   │
+│                        ││                                │
+│                        ││ the tripod fits  you 14:06 ⠋   │
+│                        │├ Enter send · Alt-Enter newline ┤
+│                        ││                                │
+└────────────── / search ┘└────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Ctrl-q quit

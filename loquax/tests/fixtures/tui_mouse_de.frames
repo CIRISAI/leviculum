@@ -1,0 +1,354 @@
+=== click ===
+--- frame 1: attached ---
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd        ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: second conversation ---
+┌● tui───────────────────┐┌  Unbekannt ·5ec0  Zwei Kontakte haben noch keinen N┐
+│ Unbekannt ·61dd        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌Unbekannt ·5ec0        ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt ·5ec0 Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: typed ---
+┌  tui───────────────────┐┌  Unbekannt ·5ec0  Zwei Kontakte haben noch keinen N┐
+│ Unbekannt ·61dd        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌Unbekannt ·5ec0        ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├● to Unbekannt ·5ec0 Enter send · Alt-Enter newline ┤
+│                        ││hello by mouse                                      │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 4: sent by click ---
+┌  tui───────────────────┐┌  Unbekannt ·5ec0  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·5ec0  12:00 ││                                                    │
+│▌du: hello by mouse     ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·61dd        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                           hello by mouse  12:00 ◷  │
+│                        │├● to Unbekannt ·5ec0 Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 5: message selected ---
+┌  tui───────────────────┐┌● Unbekannt ·5ec0  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·5ec0  12:00 ││                                                    │
+│▌du: hello by mouse     ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·61dd        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                          ▌hello by mouse  12:00 ◷  │
+│                        │├  to Unbekannt ·5ec0 Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 6: detail ---
+┌  tui───────────────────┐┌● Unbekannt ·5ec0  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·5ec0  12:00 ││                                                    │
+│▌du: hello by mouse     ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·61dd        ││                                                    │
+│                        ││                                                    │
+│ ┌ message ─────────────────────────────────────────────────────────────────┐ │
+│ │from you to Unbekannt ·5ec0                                               │ │
+│ │peer   5ec0ea2ecbc35ac16053c86cc29663ec                                   │ │
+│ │id     none yet: the router has not queued it                             │ │
+│ │size   14 bytes                                                           │ │
+│ │state  waiting to be sent                                                 │ │
+│ │                                                                          │ │
+│ │on this device                                                            │ │
+│ │12:00:00  queued                                                          │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                          ▌hello by mouse  12:00 ◷  │
+│                        │├  to Unbekannt ·5ec0 Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 7: closed ---
+┌  tui───────────────────┐┌● Unbekannt ·5ec0  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·5ec0  12:00 ││                                                    │
+│▌du: hello by mouse     ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·61dd        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                          ▌hello by mouse  12:00 ◷  │
+│                        │├  to Unbekannt ·5ec0 Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 8: help ---
+┌ Loquax help ─────────────────────────────────────────────────────────────────┐
+│Move                                                                          █
+│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 █
+│  Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp  page down / up                █
+│  Ctrl-d / Ctrl-u                               half a page                   ║
+│  g / G   Home / End                            top / bottom                  ║
+│  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         ║
+│  PageDown / PageUp                             page the messages (compose)   ║
+│  ← / →                                         page the chat (left / right)  ║
+│                                                                              ║
+│Conversations                                                                 ║
+│  Enter                                         open the selected conversation║
+│  Enter                                         open the selected result      ║
+│  : delete conversation                         delete the conversation       ║
+│                                                on this device; y confirms    ║
+│  : pin                                         pin or unpin the conversation ║
+│  : rename                                      name the peer                 ║
+│                                                empty clears                  ║
+│  : block                                       block the peer                ║
+│                                                kept, not shown               ║
+│  : unblock                                     unblock the peer              ║
+│  : blocked                                     list the blocked, or the rest ║
+│  : archive                                     archive, or bring back        ║
+└──────────────────────────────────────────────────────────────────────────────┘
+=== wheel ===
+--- frame 1: list focused ---
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd  12:00 ││                                message 1  12:00 ◷  │
+│▌du: message 10         ││                                                    │
+│                        ││                                message 2  12:00 ◷  │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                message 3  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 4  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 5  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 6  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 7  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 8  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 9  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                               message 10  12:00 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: wheeled up ---
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd  12:00 ││                                                    │
+│▌du: message 10         ││                    ── Today ──                     │
+│                        ││                                message 1  12:00 ◷  │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                message 2  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 3  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 4  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 5  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 6  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 7  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 8  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 9  12:00 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: wheeled down ---
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd  12:00 ││                                message 1  12:00 ◷  │
+│▌du: message 10         ││                                                    │
+│                        ││                                message 2  12:00 ◷  │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                message 3  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 4  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 5  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 6  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 7  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 8  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                                message 9  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                               message 10  12:00 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== drag ===
+--- frame 1: two sent ---
+┌  tui───────────────────┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd  12:00 ││                                                    │
+│▌du: second line        ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                               first line  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                             ▌second line  12:00 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- osc52 \e]52;c;Zmlyc3QgbGluZQpzZWNvbmQgbGluZQ==\e\ ---
+--- frame 2: dragged ---
+┌  tui───────────────────┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd  12:00 ││                                                    │
+│▌du: second line        ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                              ▌fi┌─────────────────┐│
+│                        ││                                 │✓ copied 22 chars││
+│                        ││                              sec└─────────────────┘│
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 3: selected ---
+┌  tui───────────────────┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│▌Unbekannt ·61dd  12:00 ││                                                    │
+│▌du: second line        ││                                                    │
+│                        ││                                                    │
+│ Unbekannt ·5ec0        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                              ▌first line  12:00 ◷  │
+│                        ││                                                    │
+│                        ││                              second line  12:00 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

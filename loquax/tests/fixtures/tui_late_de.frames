@@ -1,0 +1,51 @@
+--- frame 1: attached ---
+┌● tui───────────────────┐┌  Unbekannt─────────────────────────────────────────┐
+│▌Unbekannt              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               Noch keine Nachrichten               │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: waiting ---
+┌  tui───────────────────┐┌  Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt        12:00 ││                                                    │
+│▌du: are you there      ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││               are you there  direct 2 s · 12:00 ◷  │
+│                        │├● to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 3: delivered ---
+┌  tui───────────────────┐┌  them──────────────────────────────────────────────┐
+│▌them             12:00 ││                                                    │
+│▌du: are you there      ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                            are you there  12:00 ✓  │
+│                        │├● to them─────────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

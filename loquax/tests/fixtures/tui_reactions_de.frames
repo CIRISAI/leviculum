@@ -1,0 +1,75 @@
+--- two reactions ---
+┌  Loquax (verbindet)────┐┌  Unbekannt─────────────────────────────────────────┐
+│▌Unbekannt        12:01 ││                                                    │
+│▌hat mit ❤️  reagiert    ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││ lunch at noon?  12:01                              │
+│                        ││                                                    │
+│                        ││                     yes, the usual place  12:01 ✓  │
+│                        ││                                             👍   ❤️  │
+│                        │├● to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- picker ---
+┌  Loquax (verbindet)────┐┌● Unbekannt─────────────────────────────────────────┐
+│▌Unbekannt        12:01 ││                                                    │
+│▌hat mit ❤️  reagier┌ commands ────────────────────────────┐                   │
+│                   │>                                     │                   │
+│                   │react to: lunch at noon?              │                   │
+│                   │1 👍   2 ❤️   3 😂   4 😮   5 😢   6 😡     │                   │
+│                   │a digit, or type one and Enter        │                   │
+│                   └──────────────────────────────────────┘                   │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││▌lunch at noon?  12:01                              │
+│                        ││                                                    │
+│                        ││                     yes, the usual place  12:01 ✓  │
+│                        ││                                             👍   ❤️  │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter run │ Esc close
+--- ours ---
+┌  Loquax (verbindet)────┐┌● Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt        12:01 ││                                                    │
+│▌Du hast mit 👍  reagie… ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││▌lunch at noon?  12:01                              │
+│                        ││ [👍 ]                                               │
+│                        ││                                                    │
+│                        ││                     yes, the usual place  12:01 ✓  │
+│                        ││                                             👍   ❤️  │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

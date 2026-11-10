@@ -124,23 +124,9 @@ mod ugly_store;
 use support::daemon;
 
 const LNMSG: &str = env!("CARGO_BIN_EXE_loquax");
-const EXPECTED: &str = include_str!("fixtures/tui_session.frames");
-const EXPECTED_LATE: &str = include_str!("fixtures/tui_late.frames");
-const EXPECTED_KEYS: &str = include_str!("fixtures/tui_keys.frames");
 const EXPECTED_CHAT: &str = include_str!("fixtures/tui_chat.frames");
 const EXPECTED_CHAT_DE: &str = include_str!("fixtures/tui_chat_de.frames");
-const EXPECTED_MOUSE: &str = include_str!("fixtures/tui_mouse.frames");
 const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
-const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
-const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
-const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
-const EXPECTED_DRAFT: &str = include_str!("fixtures/tui_draft.frames");
-const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
-const EXPECTED_LIVENESS: &str = include_str!("fixtures/tui_liveness.frames");
-const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
-const EXPECTED_MAPLOAD: &str = include_str!("fixtures/tui_mapload.frames");
-const EXPECTED_MAP_CYCLE: &str = include_str!("fixtures/tui_map_cycle.frames");
-const EXPECTED_UGLY: &str = include_str!("fixtures/tui_ugly.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -181,6 +167,30 @@ key esc
 key q
 ";
 
+/// A session's frames under `tests/fixtures`, compared whole; frames that
+/// moved are left in the temp dir as `loquax-golden/<name>`, and
+/// `LOQUAX_WRITE_GOLDEN=1` writes them for a change that means to move
+/// them.
+fn same_session(name: &str, got: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, got).expect("write the fixture");
+        return;
+    }
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(got) {
+        let dir = std::env::temp_dir().join("loquax-golden");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join(name), got).expect("write");
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/{name}\n{got}",
+            dir.join(name).display()
+        );
+    }
+}
+
 fn fixed_identity(seed: u8) -> Identity {
     Identity::from_private_key_bytes(&[seed; 64]).expect("a 64-byte key")
 }
@@ -204,6 +214,24 @@ async fn wait_for_frame(frames: &Path, label: &str, within: Duration) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
+    same_session(
+        "tui_session.frames",
+        &a_scripted_session_sends_sees_the_proof_and_reads_the_reply_in("").await,
+    );
+}
+
+/// [`a_scripted_session_sends_sees_the_proof_and_reads_the_reply`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply_in_german() {
+    let frames = a_scripted_session_sends_sees_the_proof_and_reads_the_reply_in("lang de\n").await;
+    assert!(frames.contains("du: "), "{frames}");
+    same_session("tui_session_de.frames", &frames);
+}
+
+/// The session of [`a_scripted_session_sends_sees_the_proof_and_reads_the_reply`] with `lang` before every script: its frames.
+async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply_in(lang: &str) -> String {
+    let en = lang.is_empty();
     let daemon = daemon("tui", |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     let ours = fixed_identity(0x11);
@@ -219,7 +247,7 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
 
     let script = home.path().join("session.script");
     let frames = home.path().join("session.frames");
-    std::fs::write(&script, SCRIPT).expect("write the script");
+    std::fs::write(&script, format!("{lang}{SCRIPT}")).expect("write the script");
 
     let args: Vec<String> = vec![
         "tui".into(),
@@ -278,7 +306,7 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
         &Tokio::new(),
     )
     .await;
-    assert!(reply.is_ok(), "the reply did not go out: {reply:?}");
+    assert!(!en || reply.is_ok(), "the reply did not go out: {reply:?}");
 
     let output = child.await.expect("the loquax child thread");
     them.stop().await;
@@ -289,17 +317,7 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
         Some(0),
         "stderr: {stderr}\nframes:\n{got}"
     );
-    if got != EXPECTED {
-        // Kept where a reader can diff it and, when the change is on purpose,
-        // copy it over the fixture.
-        let kept = std::env::temp_dir().join("loquax-tui-session.frames");
-        let _ = std::fs::write(&kept, &got);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_session.frames\n{got}",
-            kept.display()
-        );
-    }
+    got
 }
 
 /// The leg label's seconds come from the script's clock: `until leg` applies
@@ -310,6 +328,26 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
 /// before it read them (the late-recipient arm of periculum 1013).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
+    same_session(
+        "tui_late.frames",
+        &a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps_in("").await,
+    );
+}
+
+/// [`a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps_in_german() {
+    let frames =
+        a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps_in("lang de\n").await;
+    assert!(frames.contains("du: "), "{frames}");
+    same_session("tui_late_de.frames", &frames);
+}
+
+/// The session of [`a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps`] with `lang` before every script: its frames.
+async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps_in(
+    lang: &str,
+) -> String {
     let daemon = daemon("tui-late", |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     let ours = fixed_identity(0x11);
@@ -324,7 +362,7 @@ async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
 
     let script = home.path().join("late.script");
     let frames = home.path().join("late.frames");
-    std::fs::write(&script, LATE_SCRIPT).expect("write the script");
+    std::fs::write(&script, format!("{lang}{LATE_SCRIPT}")).expect("write the script");
     // The bare form, plain `loquax` with the messenger's options; the session
     // above runs the `tui` alias, so both spellings reach a daemon.
     let args: Vec<String> = vec![
@@ -395,15 +433,7 @@ async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
         "the direct leg's steps in tui.log:\n{log}"
     );
 
-    if got != EXPECTED_LATE {
-        let kept = std::env::temp_dir().join("loquax-tui-late.frames");
-        let _ = std::fs::write(&kept, &got);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_late.frames\n{got}",
-            kept.display()
-        );
-    }
+    got
 }
 
 /// The vi reader's session: `j`/`k`/`G`/`g`, `i` to write, arrows to edit,
@@ -636,6 +666,24 @@ fn frame<'a>(frames: &'a str, label: &str) -> &'a str {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
+    same_session(
+        "tui_keys.frames",
+        &the_keymap_sessions_reach_the_same_screens_in_every_spelling_in("").await,
+    );
+}
+
+/// [`the_keymap_sessions_reach_the_same_screens_in_every_spelling`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling_in_german() {
+    let frames = the_keymap_sessions_reach_the_same_screens_in_every_spelling_in("lang de\n").await;
+    assert!(frames.contains("du: "), "{frames}");
+    same_session("tui_keys_de.frames", &frames);
+}
+
+/// The session of [`the_keymap_sessions_reach_the_same_screens_in_every_spelling`] with `lang` before every script: its frames.
+async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling_in(lang: &str) -> String {
+    let en = lang.is_empty();
     let daemon = daemon("tui-keys", |b| b).await;
     let mut all = String::new();
     let mut sessions = Vec::new();
@@ -647,7 +695,7 @@ async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
         ("plain-ctrl-j", PLAIN_CTRL_J_SCRIPT),
         ("enter-off", ENTER_OFF_SCRIPT),
     ] {
-        let frames = run_keys_script(&daemon, name, script).await;
+        let frames = run_keys_script(&daemon, name, &format!("{lang}{script}")).await;
         all.push_str(&format!("=== {name} ===\n{frames}"));
         sessions.push(frames);
     }
@@ -661,41 +709,45 @@ async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
     // The two-line body is the same in both worlds; only the hint differs,
     // and it names the world's own chord.
     let body = frame(&enhanced, "body");
-    assert!(body.contains("Enter send · Shift-Enter newline"), "{body}");
+    assert!(
+        !en || body.contains("Enter send · Shift-Enter newline"),
+        "{body}"
+    );
     let plain = frame(&plain_alt, "body");
-    assert!(plain.contains("Enter send · Alt-Enter newline"), "{plain}");
+    assert!(
+        !en || plain.contains("Enter send · Alt-Enter newline"),
+        "{plain}"
+    );
     assert_eq!(without_hint(body), without_hint(plain));
     assert_eq!(plain, frame(&plain_ctrl_j, "body"));
-    assert!(frame(&enhanced, "sent").contains("you: one"), "{enhanced}");
+    assert!(
+        !en || frame(&enhanced, "sent").contains("you: one"),
+        "{enhanced}"
+    );
 
     // Ctrl-c outside compose says what quits, and the session goes on.
     assert!(
-        frame(&enhanced, "ctrl-c").contains("Ctrl-q quits"),
+        !en || frame(&enhanced, "ctrl-c").contains("Ctrl-q quits"),
         "{enhanced}"
     );
     assert!(
-        frame(&enhanced, "still here").contains("● tui"),
+        !en || frame(&enhanced, "still here").contains("● tui"),
         "{enhanced}"
     );
 
     // send_on_enter off: Enter broke the line, Alt-Enter sent.
     let off = frame(&enter_off, "body");
-    assert!(off.contains("Alt-Enter send · Enter newline"), "{off}");
-    assert!(off.contains("│one"), "{off}");
     assert!(
-        frame(&enter_off, "sent").contains("you: one"),
+        !en || off.contains("Alt-Enter send · Enter newline"),
+        "{off}"
+    );
+    assert!(!en || off.contains("│one"), "{off}");
+    assert!(
+        !en || frame(&enter_off, "sent").contains("you: one"),
         "{enter_off}"
     );
 
-    if all != EXPECTED_KEYS {
-        let kept = std::env::temp_dir().join("loquax-tui-keys.frames");
-        let _ = std::fs::write(&kept, &all);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_keys.frames\n{all}",
-            kept.display()
-        );
-    }
+    all
 }
 
 /// 1381, finding 22: a script speaks English whatever the host's locale,
@@ -1163,6 +1215,24 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
+    same_session(
+        "tui_mouse.frames",
+        &the_mouse_clicks_wheels_and_drags_through_the_screen_in("").await,
+    );
+}
+
+/// [`the_mouse_clicks_wheels_and_drags_through_the_screen`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mouse_clicks_wheels_and_drags_through_the_screen_in_german() {
+    let frames = the_mouse_clicks_wheels_and_drags_through_the_screen_in("lang de\n").await;
+    assert!(frames.contains("du: "), "{frames}");
+    same_session("tui_mouse_de.frames", &frames);
+}
+
+/// The session of [`the_mouse_clicks_wheels_and_drags_through_the_screen`] with `lang` before every script: its frames.
+async fn the_mouse_clicks_wheels_and_drags_through_the_screen_in(lang: &str) -> String {
+    let en = lang.is_empty();
     let daemon = daemon("tui-mouse", |b| b).await;
     let mut all = String::new();
     let mut runs = Vec::new();
@@ -1171,7 +1241,7 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
         ("wheel", WHEEL_SCRIPT),
         ("drag", DRAG_SCRIPT),
     ] {
-        let (frames, log) = run_script_at(&daemon, name, script, "80x24").await;
+        let (frames, log) = run_script_at(&daemon, name, &format!("{lang}{script}"), "80x24").await;
         all.push_str(&format!("=== {name} ===\n{frames}"));
         runs.push((frames, log));
     }
@@ -1181,27 +1251,30 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
     // The click on the second row opened it; the one on `send` sent, the
     // runner's first leg is in the log.
     assert!(
-        frame(&click, "second conversation").contains("│▌Unknown ·5ec0"),
+        !en || frame(&click, "second conversation").contains("│▌Unknown ·5ec0"),
         "{click}"
     );
     assert!(
-        frame(&click, "sent by click").contains("hello by mouse  12:00 ◷"),
+        !en || frame(&click, "sent by click").contains("hello by mouse  12:00 ◷"),
         "{click}"
     );
     assert!(
-        click_log.contains("SEND leg=direct to=5ec0ea2e"),
+        !en || click_log.contains("SEND leg=direct to=5ec0ea2e"),
         "tui.log:\n{click_log}"
     );
-    assert!(frame(&click, "message selected").contains("▌hello by mouse"));
-    assert!(frame(&click, "detail").contains("from you to Unknown ·5ec0"));
-    assert!(!frame(&click, "closed").contains("from you to"));
-    assert!(frame(&click, "help").contains("Loquax help"), "{click}");
+    assert!(!en || frame(&click, "message selected").contains("▌hello by mouse"));
+    assert!(!en || frame(&click, "detail").contains("from you to Unknown ·5ec0"));
+    assert!(!en || !frame(&click, "closed").contains("from you to"));
+    assert!(
+        !en || frame(&click, "help").contains("Loquax help"),
+        "{click}"
+    );
 
     // The wheel moved the conversation and nothing else.
     let up = frame(&wheel, "wheeled up");
     assert_ne!(up, frame(&wheel, "list focused"));
-    assert!(up.contains("● tui"), "the list kept the focus: {up}");
-    assert!(!up.contains("message 10  12:00"), "{up}");
+    assert!(!en || up.contains("● tui"), "the list kept the focus: {up}");
+    assert!(!en || !up.contains("message 10  12:00"), "{up}");
     assert_eq!(frame(&wheel, "wheeled down"), frame(&wheel, "list focused"));
 
     // The drag's release copied the two lines and only them.
@@ -1209,20 +1282,12 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
         "--- osc52 {} ---",
         leviculum_ui::clipboard::osc52("first line\nsecond line").replace('\x1b', "\\e")
     );
-    assert!(drag.contains(&copied), "{copied}\n{drag}");
+    assert!(!en || drag.contains(&copied), "{copied}\n{drag}");
     assert!(
-        frame(&drag, "dragged").contains("copied 22 chars"),
+        !en || frame(&drag, "dragged").contains("copied 22 chars"),
         "{drag}"
     );
-    if all != EXPECTED_MOUSE {
-        let kept = std::env::temp_dir().join("loquax-tui-mouse.frames");
-        let _ = std::fs::write(&kept, &all);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_mouse.frames\n{all}",
-            kept.display()
-        );
-    }
+    all
 }
 
 /// The search, by keys alone, against correspondents that never answer: our
@@ -1281,59 +1346,83 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_search_finds_opens_and_steps_in_place_at_both_sizes() {
+    same_session(
+        "tui_search_session.frames",
+        &the_search_finds_opens_and_steps_in_place_at_both_sizes_in("").await,
+    );
+}
+
+/// [`the_search_finds_opens_and_steps_in_place_at_both_sizes`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_search_finds_opens_and_steps_in_place_at_both_sizes_in_german() {
+    let frames = the_search_finds_opens_and_steps_in_place_at_both_sizes_in("lang de\n").await;
+    assert!(frames.contains("du: "), "{frames}");
+    same_session("tui_search_session_de.frames", &frames);
+}
+
+/// The session of [`the_search_finds_opens_and_steps_in_place_at_both_sizes`] with `lang` before every script: its frames.
+async fn the_search_finds_opens_and_steps_in_place_at_both_sizes_in(lang: &str) -> String {
+    let en = lang.is_empty();
     let daemon = daemon("tui-search", |b| b).await;
     let mut all = String::new();
     for size in ["120x40", "80x24"] {
-        let (frames, _) =
-            run_script_at(&daemon, &format!("search-{size}"), SEARCH_SCRIPT, size).await;
+        let (frames, _) = run_script_at(
+            &daemon,
+            &format!("search-{size}"),
+            &format!("{lang}{SEARCH_SCRIPT}"),
+            size,
+        )
+        .await;
         let typed = frame(&frames, "typed");
-        assert!(typed.contains("● Search"), "{size}: {typed}");
-        assert!(typed.contains(" esc closes "), "{size}: {typed}");
-        assert!(typed.contains("│ / tripod"), "{size}: {typed}");
-        assert!(typed.contains("│ MESSAGES "), "{size}: {typed}");
-        assert!(!typed.contains("│ CONVERSATIONS "), "{size}: {typed}");
-        assert!(typed.contains("Esc close search"), "{size}: {typed}");
+        assert!(!en || typed.contains("● Search"), "{size}: {typed}");
+        assert!(!en || typed.contains(" esc closes "), "{size}: {typed}");
+        assert!(!en || typed.contains("│ / tripod"), "{size}: {typed}");
+        assert!(!en || typed.contains("│ MESSAGES "), "{size}: {typed}");
+        assert!(
+            !en || !typed.contains("│ CONVERSATIONS "),
+            "{size}: {typed}"
+        );
+        assert!(!en || typed.contains("Esc close search"), "{size}: {typed}");
         // The third result, opened at its message: the block selected and
         // the match marked in place.
         let opened = frame(&frames, "opened");
         assert!(
-            opened.contains("▌and the small «tripod»"),
+            !en || opened.contains("▌and the small «tripod»"),
             "{size}: {opened}"
         );
-        assert!(opened.contains("the «tripod» fits"), "{size}: {opened}");
-        assert!(opened.contains("n / N next, previous"), "{size}: {opened}");
         assert!(
-            frame(&frames, "next").contains("▌the «tripod» fits"),
+            !en || opened.contains("the «tripod» fits"),
+            "{size}: {opened}"
+        );
+        assert!(
+            !en || opened.contains("n / N next, previous"),
+            "{size}: {opened}"
+        );
+        assert!(
+            !en || frame(&frames, "next").contains("▌the «tripod» fits"),
             "{size}"
         );
         assert_eq!(opened, frame(&frames, "previous"), "{size}: N went back");
         let both = frame(&frames, "both groups");
-        assert!(both.contains("│ CONVERSATIONS "), "{size}: {both}");
-        assert!(both.contains("│ MESSAGES "), "{size}: {both}");
+        assert!(!en || both.contains("│ CONVERSATIONS "), "{size}: {both}");
+        assert!(!en || both.contains("│ MESSAGES "), "{size}: {both}");
         // Found by its address, which the row shows as the tail of a
         // shared "Unknown" (1452).
-        assert!(both.contains("Unknown ·«61dd»"), "{size}: {both}");
+        assert!(!en || both.contains("Unknown ·«61dd»"), "{size}: {both}");
         // Closed: the list and its `/ search` back, nothing marked, the
         // conversation still the one the result opened.
         let closed = frame(&frames, "closed");
-        assert!(closed.contains("● tui"), "{size}: {closed}");
-        assert!(closed.contains(" / search "), "{size}: {closed}");
-        assert!(!closed.contains('«'), "{size}: {closed}");
+        assert!(!en || closed.contains("● tui"), "{size}: {closed}");
+        assert!(!en || closed.contains(" / search "), "{size}: {closed}");
+        assert!(!en || !closed.contains('«'), "{size}: {closed}");
         assert!(
-            closed.contains("Unknown ·61dd  Two contacts"),
+            !en || closed.contains("Unknown ·61dd  Two contacts"),
             "{size}: {closed}"
         );
         all.push_str(&format!("=== {size} ===\n{frames}"));
     }
-    if all != EXPECTED_SEARCH {
-        let kept = std::env::temp_dir().join("loquax-tui-search-session.frames");
-        let _ = std::fs::write(&kept, &all);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_search_session.frames\n{all}",
-            kept.display()
-        );
-    }
+    all
 }
 
 /// Each correspondent attaches only after the screen has drawn the frame
@@ -1371,6 +1460,29 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_petname() {
+    same_session(
+        "tui_names.frames",
+        &names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_petname_in("").await,
+    );
+}
+
+/// [`names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_petname`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_petname_in_german() {
+    let frames = names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_petname_in(
+        "lang de\n",
+    )
+    .await;
+    assert!(frames.contains("Zwei Kontakte"), "{frames}");
+    same_session("tui_names_de.frames", &frames);
+}
+
+/// The session of [`names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_petname`] with `lang` before every script: its frames.
+async fn names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_petname_in(
+    lang: &str,
+) -> String {
+    let en = lang.is_empty();
     let daemon = daemon("tui-names", |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     std::fs::write(
@@ -1389,7 +1501,7 @@ async fn names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_p
     .expect("write the contacts");
     let script = home.path().join("names.script");
     let frames = home.path().join("names.frames");
-    std::fs::write(&script, NAMES_SCRIPT).expect("write the script");
+    std::fs::write(&script, format!("{lang}{NAMES_SCRIPT}")).expect("write the script");
     let mut args: Vec<String> = vec![
         "--instance".into(),
         daemon.instance.clone(),
@@ -1458,49 +1570,52 @@ async fn names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_p
     );
     // 1452: a name is the name alone until another peer shares it.
     let named = frame(&got, "named");
-    assert!(named.contains("Bob──"), "{named}");
-    assert!(named.contains("to Bob──"), "{named}");
-    assert!(!named.contains(" ·61dd"), "{named}");
+    assert!(!en || named.contains("Bob──"), "{named}");
+    assert!(!en || named.contains("to Bob──"), "{named}");
+    assert!(!en || !named.contains(" ·61dd"), "{named}");
     let collision = frame(&got, "collision");
     assert!(
-        collision.contains("Two contacts are called Bob"),
+        !en || collision.contains("Two contacts are called Bob"),
         "{collision}"
     );
     // The tail on both list rows, the header and the compose box; no mark.
-    assert!(collision.contains("Bob ·61dd"), "{collision}");
-    assert!(collision.contains("B0b ·"), "{collision}");
-    assert!(collision.contains("to Bob ·61dd"), "{collision}");
-    assert!(!collision.contains('≈'), "{collision}");
+    assert!(!en || collision.contains("Bob ·61dd"), "{collision}");
+    assert!(!en || collision.contains("B0b ·"), "{collision}");
+    assert!(!en || collision.contains("to Bob ·61dd"), "{collision}");
+    assert!(!en || !collision.contains('≈'), "{collision}");
     let petname = frame(&got, "petname");
     assert!(
-        petname.contains("Carol  known · announces Caroline"),
+        !en || petname.contains("Carol  known · announces Caroline"),
         "{petname}"
     );
     // The palette's rename asks with the petname to edit, and its answer
     // is the header's name; block takes Carol off the list, and the
     // `blocked` view lists her.
     let rename = frame(&got, "rename");
-    assert!(rename.contains("> Carol Meyer"), "{rename}");
-    assert!(rename.contains("your name for Carol "), "{rename}");
+    assert!(!en || rename.contains("> Carol Meyer"), "{rename}");
+    assert!(!en || rename.contains("your name for Carol "), "{rename}");
     let renamed = frame(&got, "renamed");
     assert!(
-        renamed.contains("Carol Meyer  known · announces Caroline"),
+        !en || renamed.contains("Carol Meyer  known · announces Caroline"),
         "{renamed}"
     );
     let blocked = frame(&got, "blocked");
     assert!(
-        blocked
+        !en || blocked
             .lines()
             .all(|row| !row.starts_with("│ Carol") && !row.starts_with("│▌Carol")),
         "{blocked}"
     );
-    assert!(blocked.contains("blocked Carol Meyer"), "{blocked}");
+    assert!(!en || blocked.contains("blocked Carol Meyer"), "{blocked}");
     let view = frame(&got, "blocked view");
     assert!(
-        view.contains("Blocked") && view.contains("Carol Meyer"),
+        !en || view.contains("Blocked") && view.contains("Carol Meyer"),
         "{view}"
     );
-    assert!(view.contains("blocked · announces Caroline"), "{view}");
+    assert!(
+        !en || view.contains("blocked · announces Caroline"),
+        "{view}"
+    );
     // The file says it, its comment kept.
     let contacts = std::fs::read_to_string(home.path().join("contacts")).expect("the contacts");
     assert_eq!(
@@ -1510,15 +1625,7 @@ async fn names_from_announces_are_alone_collide_with_their_tail_and_yield_to_a_p
             carol = hex(0x44)
         )
     );
-    if got != EXPECTED_NAMES {
-        let kept = std::env::temp_dir().join("loquax-tui-names.frames");
-        let _ = std::fs::write(&kept, &got);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_names.frames\n{got}",
-            kept.display()
-        );
-    }
+    got
 }
 
 /// The first run: the exchange, then a send to Carol, who is never there,
@@ -1641,6 +1748,24 @@ async fn history_frames(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
+    same_session(
+        "tui_history.frames",
+        &a_restart_shows_the_earlier_exchange_with_its_marks_in("").await,
+    );
+}
+
+/// [`a_restart_shows_the_earlier_exchange_with_its_marks`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_shows_the_earlier_exchange_with_its_marks_in_german() {
+    let frames = a_restart_shows_the_earlier_exchange_with_its_marks_in("lang de\n").await;
+    assert!(frames.contains("du: "), "{frames}");
+    same_session("tui_history_de.frames", &frames);
+}
+
+/// The session of [`a_restart_shows_the_earlier_exchange_with_its_marks`] with `lang` before every script: its frames.
+async fn a_restart_shows_the_earlier_exchange_with_its_marks_in(lang: &str) -> String {
+    let en = lang.is_empty();
     let daemon = daemon("tui-history", |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     std::fs::write(
@@ -1651,7 +1776,14 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
     let our_address = delivery_address(&fixed_identity(0x11)).expect("our address");
 
     // The first run, with Bob there for the exchange.
-    let first = history_run(&daemon, home.path(), "first", HISTORY_FIRST, &[0x22, 0x33]).await;
+    let first = history_run(
+        &daemon,
+        home.path(),
+        "first",
+        &format!("{lang}{HISTORY_FIRST}"),
+        &[0x22, 0x33],
+    )
+    .await;
     wait_for_frame(
         &home.path().join("first.frames"),
         "attached",
@@ -1688,64 +1820,76 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         &Tokio::new(),
     )
     .await;
-    assert!(reply.is_ok(), "Bob's reply did not go out: {reply:?}");
+    assert!(
+        !en || reply.is_ok(),
+        "Bob's reply did not go out: {reply:?}"
+    );
     let first = history_frames(first, home.path(), "first").await;
     bob.stop().await;
     let cut = frame(&first, "cut off");
-    assert!(cut.contains("leaving in ten"), "{cut}");
+    assert!(!en || cut.contains("leaving in ten"), "{cut}");
 
     // The restart: no `--to`, and nobody else attached.
-    let second = history_run(&daemon, home.path(), "second", HISTORY_SECOND, &[]).await;
+    let second = history_run(
+        &daemon,
+        home.path(),
+        "second",
+        &format!("{lang}{HISTORY_SECOND}"),
+        &[],
+    )
+    .await;
     let second = history_frames(second, home.path(), "second").await;
     let restarted = frame(&second, "restarted");
-    assert!(restarted.contains("leaving in ten"), "{restarted}");
+    assert!(!en || restarted.contains("leaving in ten"), "{restarted}");
     assert!(
-        restarted.contains(" ◷"),
+        !en || restarted.contains(" ◷"),
         "the cut-off send is queued: {restarted}"
     );
     assert!(
-        restarted.contains("Bob") && !restarted.contains("Bob ·61dd"),
+        !en || restarted.contains("Bob") && !restarted.contains("Bob ·61dd"),
         "Bob's name from the first run: {restarted}"
     );
     assert!(
-        frame(&second, "ledger").contains("Loquax restarted: no longer being sent"),
+        !en || frame(&second, "ledger").contains("Loquax restarted: no longer being sent"),
         "{second}"
     );
     let bob_frame = frame(&second, "bob");
     assert!(
-        bob_frame.contains("are you at the field site?"),
+        !en || bob_frame.contains("are you at the field site?"),
         "{bob_frame}"
     );
     // A proof is one tick (1462), and it survives the restart.
     assert!(
-        bob_frame.contains("field site?  12:00 ✓ "),
+        !en || bob_frame.contains("field site?  12:00 ✓ "),
         "the proof survived: {bob_frame}"
     );
-    assert!(bob_frame.contains("yes, from ten"), "{bob_frame}");
-    assert!(frame(&second, "pinned").contains('┄'), "{second}");
-    assert!(frame(&second, "asked").contains("y deletes"), "{second}");
+    assert!(!en || bob_frame.contains("yes, from ten"), "{bob_frame}");
+    assert!(!en || frame(&second, "pinned").contains('┄'), "{second}");
     assert!(
-        !frame(&second, "deleted").contains("yes, from ten"),
+        !en || frame(&second, "asked").contains("y deletes"),
+        "{second}"
+    );
+    assert!(
+        !en || !frame(&second, "deleted").contains("yes, from ten"),
         "{second}"
     );
 
     // A third start: the pin and the delete were written.
-    let third = history_run(&daemon, home.path(), "third", HISTORY_THIRD, &[]).await;
+    let third = history_run(
+        &daemon,
+        home.path(),
+        "third",
+        &format!("{lang}{HISTORY_THIRD}"),
+        &[],
+    )
+    .await;
     let third = history_frames(third, home.path(), "third").await;
     let again = frame(&third, "again");
-    assert!(again.contains('┄'), "{again}");
-    assert!(!again.contains("yes, from ten"), "{again}");
+    assert!(!en || again.contains('┄'), "{again}");
+    assert!(!en || !again.contains("yes, from ten"), "{again}");
 
     let all = format!("=== first ===\n{first}=== second ===\n{second}=== third ===\n{third}");
-    if all != EXPECTED_HISTORY {
-        let kept = std::env::temp_dir().join("loquax-tui-history.frames");
-        let _ = std::fs::write(&kept, &all);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_history.frames\n{all}",
-            kept.display()
-        );
-    }
+    all
 }
 
 /// The draft's first run: a line typed to Bob, then on to Carol.
@@ -1774,6 +1918,24 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_draft_stays_when_the_reader_goes_on_and_after_a_restart() {
+    same_session(
+        "tui_draft.frames",
+        &a_draft_stays_when_the_reader_goes_on_and_after_a_restart_in("").await,
+    );
+}
+
+/// [`a_draft_stays_when_the_reader_goes_on_and_after_a_restart`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_stays_when_the_reader_goes_on_and_after_a_restart_in_german() {
+    let frames = a_draft_stays_when_the_reader_goes_on_and_after_a_restart_in("lang de\n").await;
+    assert!(frames.contains("Entwurf"), "{frames}");
+    same_session("tui_draft_de.frames", &frames);
+}
+
+/// The session of [`a_draft_stays_when_the_reader_goes_on_and_after_a_restart`] with `lang` before every script: its frames.
+async fn a_draft_stays_when_the_reader_goes_on_and_after_a_restart_in(lang: &str) -> String {
+    let en = lang.is_empty();
     let daemon = daemon("tui-draft", |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     std::fs::write(
@@ -1782,36 +1944,48 @@ async fn a_draft_stays_when_the_reader_goes_on_and_after_a_restart() {
     )
     .expect("write the identity");
 
-    let first = history_run(&daemon, home.path(), "first", DRAFT_FIRST, &[0x22, 0x33]).await;
+    let first = history_run(
+        &daemon,
+        home.path(),
+        "first",
+        &format!("{lang}{DRAFT_FIRST}"),
+        &[0x22, 0x33],
+    )
+    .await;
     let first = history_frames(first, home.path(), "first").await;
     let typed = frame(&first, "typed");
-    assert!(!typed.contains("Draft:"), "the open one's row: {typed}");
+    assert!(
+        !en || !typed.contains("Draft:"),
+        "the open one's row: {typed}"
+    );
     let left = frame(&first, "left");
-    assert!(left.contains("Draft: half a thought"), "{left}");
+    assert!(!en || left.contains("Draft: half a thought"), "{left}");
     let back = frame(&first, "back");
-    assert!(back.contains("half a thought"), "compose holds it: {back}");
-    assert!(!back.contains("Draft:"), "{back}");
+    assert!(
+        !en || back.contains("half a thought"),
+        "compose holds it: {back}"
+    );
+    assert!(!en || !back.contains("Draft:"), "{back}");
 
     // The restart: no `--to`, the store's conversations only.
-    let second = history_run(&daemon, home.path(), "second", DRAFT_SECOND, &[]).await;
+    let second = history_run(
+        &daemon,
+        home.path(),
+        "second",
+        &format!("{lang}{DRAFT_SECOND}"),
+        &[],
+    )
+    .await;
     let second = history_frames(second, home.path(), "second").await;
     let restarted = frame(&second, "restarted");
-    assert!(restarted.contains("half a thought"), "{restarted}");
+    assert!(!en || restarted.contains("half a thought"), "{restarted}");
     assert!(
-        !restarted.contains("Draft:"),
+        !en || !restarted.contains("Draft:"),
         "open, in compose: {restarted}"
     );
 
     let all = format!("=== first ===\n{first}=== second ===\n{second}");
-    if all != EXPECTED_DRAFT {
-        let kept = std::env::temp_dir().join("loquax-tui-draft.frames");
-        let _ = std::fs::write(&kept, &all);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_draft.frames\n{all}",
-            kept.display()
-        );
-    }
+    all
 }
 
 /// The telemetry session: every time on screen is the script's, and the
@@ -1857,7 +2031,7 @@ fn position_report(minutes_ago: i64, lat_e6: i32) -> Vec<(i64, Vec<u8>)> {
     )]
 }
 
-async fn telemetry_session(size: &str) -> String {
+async fn telemetry_session(size: &str, script: &str) -> String {
     let messages = |_: [u8; 16]| {
         vec![
             ("leaving the hut now", Vec::new()),
@@ -1865,7 +2039,7 @@ async fn telemetry_session(size: &str) -> String {
             ("", position_report(4, 43_773_100)),
         ]
     };
-    peer_session("telemetry", size, TELEMETRY_SCRIPT, &[], |_| {}, messages)
+    peer_session("telemetry", size, script, &[], |_| {}, messages)
         .await
         .0
 }
@@ -2027,45 +2201,68 @@ async fn peer_session_of(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line() {
+    same_session(
+        "tui_telemetry.frames",
+        &a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line_in("").await,
+    );
+}
+
+/// [`a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line_in_german() {
+    let frames =
+        a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line_in("lang de\n")
+            .await;
+    assert!(frames.contains("Live-Position"), "{frames}");
+    same_session("tui_telemetry_de.frames", &frames);
+}
+
+/// The session of [`a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line`] with `lang` before every script: its frames.
+async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line_in(
+    lang: &str,
+) -> String {
+    let en = lang.is_empty();
     let mut all = String::new();
     for size in ["80x24", "120x40"] {
-        let frames = telemetry_session(size).await;
+        let frames = telemetry_session(size, &format!("{lang}{TELEMETRY_SCRIPT}")).await;
         let folded = frame(&frames, "folded");
         // One line, one sentence (1449 item 5): the coordinates are the
         // Info's.
         assert_eq!(
-            folded.matches("◎ Live position").count(),
+            folded
+                .matches(if en {
+                    "◎ Live position"
+                } else {
+                    "◎ Live-Position"
+                })
+                .count(),
             1,
             "{size}: the two reports are one line\n{folded}"
         );
         assert!(
-            !folded.contains("◎ position 43"),
+            !en || !folded.contains("◎ position 43"),
             "{size}: no coordinates in the bubble\n{folded}"
         );
         match size {
-            "80x24" => assert!(folded.contains("pos 4 min"), "{folded}"),
+            "80x24" => assert!(!en || folded.contains("pos 4 min"), "{folded}"),
             _ => assert!(
-                folded.contains("at 43.77310 N 11.25600 E · ±5 m · 4 min ago"),
+                !en || folded.contains("at 43.77310 N 11.25600 E · ±5 m · 4 min ago"),
                 "{folded}"
             ),
         }
         let detail = frame(&frames, "detail");
         assert!(
-            detail.contains("position  43.77310 N 11.25600 E"),
+            !en || detail.contains("position  43.77310 N 11.25600 E"),
             "{size}: {detail}"
         );
-        assert!(detail.contains("fix       2026-10-26 13:56:00"), "{detail}");
+        assert!(
+            !en || detail.contains("fix       2026-10-26 13:56:00"),
+            "{detail}"
+        );
         all.push_str(&format!("=== {size} ===\n{frames}"));
     }
-    if all != EXPECTED_TELEMETRY {
-        let kept = std::env::temp_dir().join("loquax-tui-telemetry.frames");
-        let _ = std::fs::write(&kept, &all);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_telemetry.frames\n{all}",
-            kept.display()
-        );
-    }
+    all
 }
 
 /// Read receipts, slice two (1231): the peer's three messages carry the
@@ -2184,6 +2381,25 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
+    same_session(
+        "tui_liveness.frames",
+        &a_position_reports_line_says_live_recent_or_stale_and_no_badge_in("").await,
+    );
+}
+
+/// [`a_position_reports_line_says_live_recent_or_stale_and_no_badge`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge_in_german() {
+    let frames =
+        a_position_reports_line_says_live_recent_or_stale_and_no_badge_in("lang de\n").await;
+    assert!(frames.contains("Position"), "{frames}");
+    same_session("tui_liveness_de.frames", &frames);
+}
+
+/// The session of [`a_position_reports_line_says_live_recent_or_stale_and_no_badge`] with `lang` before every script: its frames.
+async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge_in(lang: &str) -> String {
+    let en = lang.is_empty();
     let messages = |_: [u8; 16]| {
         (0..6)
             .map(|i| {
@@ -2194,38 +2410,40 @@ async fn a_position_reports_line_says_live_recent_or_stale_and_no_badge() {
             })
             .collect()
     };
-    let frames = peer_session("liveness", "80x24", LIVENESS_SCRIPT, &[], |_| {}, messages)
-        .await
-        .0;
+    let frames = peer_session(
+        "liveness",
+        "80x24",
+        &format!("{lang}{LIVENESS_SCRIPT}"),
+        &[],
+        |_| {},
+        messages,
+    )
+    .await
+    .0;
     let live = frame(&frames, "live");
     let joined = |f: &str| f.split_whitespace().collect::<Vec<_>>().join(" ");
     // The bubble says one sentence (1449 item 5); the list says how alive.
-    assert!(joined(live).contains("◎ Live position"), "{live}");
-    assert!(live.contains("◎ position · live"), "{live}");
-    assert!(live.contains("⌖"), "the map pin\n{live}");
+    assert!(!en || joined(live).contains("◎ Live position"), "{live}");
+    assert!(!en || live.contains("◎ position · live"), "{live}");
+    assert!(!en || live.contains("⌖"), "the map pin\n{live}");
     assert!(
-        !live.contains("[1]") && !live.contains("[6]"),
+        !en || !live.contains("[1]") && !live.contains("[6]"),
         "no badge\n{live}"
     );
     let recent = frame(&frames, "recent");
-    assert!(joined(recent).contains("◎ Position from today"), "{recent}");
+    assert!(
+        !en || joined(recent).contains("◎ Position from today"),
+        "{recent}"
+    );
     // The entry's map pin (1224) stands left of where a badge would.
-    assert!(recent.contains("◎ position · 25 mi… ⌖"), "{recent}");
+    assert!(!en || recent.contains("◎ position · 25 mi… ⌖"), "{recent}");
     let stale = frame(&frames, "stale");
     assert!(
-        joined(stale).contains("◎ Position from yesterday"),
+        !en || joined(stale).contains("◎ Position from yesterday"),
         "{stale}"
     );
-    assert!(!stale.contains("⌖"), "no pin past a day\n{stale}");
-    if frames != EXPECTED_LIVENESS {
-        let kept = std::env::temp_dir().join("loquax-tui-liveness.frames");
-        let _ = std::fs::write(&kept, &frames);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_liveness.frames\n{frames}",
-            kept.display()
-        );
-    }
+    assert!(!en || !stale.contains("⌖"), "no pin past a day\n{stale}");
+    frames
 }
 
 /// The map session (`docs/src/concepts/loquax-map.md`, slice (c)): the
@@ -2299,8 +2517,8 @@ fn located(minutes_ago: i64, lat_e6: i32, lon_e6: i32) -> leviculum_lxmf::teleme
     }
 }
 
-async fn map_session(graphics: &str) -> (String, String) {
-    map_session_of("map", MAP_SCRIPT, graphics).await
+async fn map_session(graphics: &str, script: &str) -> (String, String) {
+    map_session_of("map", script, graphics).await
 }
 
 /// The map session's peers and region, `script` played with `--graphics`.
@@ -2345,9 +2563,34 @@ async fn map_session_of(name: &str, script: &str, graphics: &str) -> (String, St
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks() {
+    same_session(
+        "tui_map.frames",
+        &the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks_in("")
+            .await,
+    );
+}
+
+/// [`the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks_in_german()
+{
+    let frames = the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks_in(
+        "lang de\n",
+    )
+    .await;
+    assert!(frames.contains("vor "), "{frames}");
+    same_session("tui_map_de.frames", &frames);
+}
+
+/// The session of [`the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks`] with `lang` before every script: its frames.
+async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks_in(
+    lang: &str,
+) -> String {
+    let en = lang.is_empty();
     let mut all = String::new();
     for graphics in ["braille", "halfblocks"] {
-        let (frames, log) = map_session(graphics).await;
+        let (frames, log) = map_session(graphics, &format!("{lang}{MAP_SCRIPT}")).await;
         let line = log
             .lines()
             .find_map(|l| l.find("GRAPHICS ").map(|at| &l[at..]))
@@ -2366,10 +2609,10 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         );
         let map = frame(&frames, "map");
         assert!(
-            map.contains("● map"),
+            !en || map.contains("● map"),
             "the map has the pane and the focus\n{map}"
         );
-        assert!(map.contains("© OpenStreetMap contributors"), "{map}");
+        assert!(!en || map.contains("© OpenStreetMap contributors"), "{map}");
         assert_eq!(
             map.matches('●').count(),
             3,
@@ -2378,18 +2621,24 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         assert_eq!(map.matches('◉').count(), 1, "the selected pin\n{map}");
         // Our own position is the dot alone, no name and no age (1449
         // item 2): the control is that "you" was drawn before.
-        assert!(!map.contains("you · 1 min"), "{map}");
+        assert!(!en || !map.contains("you · 1 min"), "{map}");
         // Tab: the selection moves from the first pin by name to the next.
         let next = frame(&frames, "next pin");
         assert!(
             // By name, "them" before "Unknown" (1452: no hex to sort first).
-            map.contains("◉ them") && next.contains("· 3 h ago ◉"),
+            !en || map.contains("◉ them") && next.contains("· 3 h ago ◉"),
             "{map}\n{next}"
         );
-        assert!(map.contains("· 3 h"), "the stale one with its age\n{map}");
+        assert!(
+            !en || map.contains("· 3 h"),
+            "the stale one with its age\n{map}"
+        );
         // The drag: every pin ten cells left and three up, the map open.
         let dragged = frame(&frames, "dragged");
-        assert!(dragged.contains("● map"), "nothing opened\n{dragged}");
+        assert!(
+            !en || dragged.contains("● map"),
+            "nothing opened\n{dragged}"
+        );
         let at = |frame: &str| {
             frame.lines().enumerate().find_map(|(row, line)| {
                 line.find('◉')
@@ -2400,38 +2649,30 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
             panic!("the selected pin in both\n{next}\n{dragged}");
         };
         assert_eq!((was.0 - now.0, was.1 - now.1), (10, 3), "{dragged}");
-        assert!(map.contains("· 4 min"), "{map}");
+        assert!(!en || map.contains("· 4 min"), "{map}");
         let outline = frame(&frames, "outline");
-        assert!(outline.contains("Natural Earth"), "{outline}");
+        assert!(!en || outline.contains("Natural Earth"), "{outline}");
         let opened = frame(&frames, "opened");
         assert!(
-            !opened.contains("● map"),
+            !en || !opened.contains("● map"),
             "the conversation is back\n{opened}"
         );
         let back = frame(&frames, "back");
         assert!(
-            !back.contains("Natural Earth") && !back.contains("OpenStreetMap"),
+            !en || !back.contains("Natural Earth") && !back.contains("OpenStreetMap"),
             "{back}"
         );
         // Enter on the report: the map at its fix, the region's deepest
         // zoom, the sender's pin selected; Esc brings the conversation back.
         let reported = frame(&frames, "from the report");
-        assert!(reported.contains("● map"), "{reported}");
+        assert!(!en || reported.contains("● map"), "{reported}");
         // No zoom number on screen (1447): the debug overlay alone has it.
-        assert!(!reported.contains("z15"), "{reported}");
-        assert!(reported.contains("◉ them"), "{reported}");
+        assert!(!en || !reported.contains("z15"), "{reported}");
+        assert!(!en || reported.contains("◉ them"), "{reported}");
         assert_eq!(frame(&frames, "report closed"), back);
         all.push_str(&format!("=== {graphics} ===\n{frames}"));
     }
-    if all != EXPECTED_MAP {
-        let kept = std::env::temp_dir().join("loquax-tui-map.frames");
-        let _ = std::fs::write(&kept, &all);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_map.frames\n{all}",
-            kept.display()
-        );
-    }
+    all
 }
 
 /// The map's drawing cycled live (1093): opened in octants, `t` steps
@@ -2470,9 +2711,28 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_map_drawing_cycles_through_the_text_techniques() {
-    let (frames, log) = map_session_of("mapcycle", MAP_CYCLE_SCRIPT, "octant").await;
+    same_session(
+        "tui_map_cycle.frames",
+        &the_map_drawing_cycles_through_the_text_techniques_in("").await,
+    );
+}
+
+/// [`the_map_drawing_cycles_through_the_text_techniques`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_map_drawing_cycles_through_the_text_techniques_in_german() {
+    let frames = the_map_drawing_cycles_through_the_text_techniques_in("lang de\n").await;
+    assert!(frames.contains("vor "), "{frames}");
+    same_session("tui_map_cycle_de.frames", &frames);
+}
+
+/// The session of [`the_map_drawing_cycles_through_the_text_techniques`] with `lang` before every script: its frames.
+async fn the_map_drawing_cycles_through_the_text_techniques_in(lang: &str) -> String {
+    let en = lang.is_empty();
+    let (frames, log) =
+        map_session_of("mapcycle", &format!("{lang}{MAP_CYCLE_SCRIPT}"), "octant").await;
     assert!(
-        log.contains(
+        !en || log.contains(
             "GRAPHICS backend=octant reason=forced detected=none between=none cell=2x4 zooms=0-20 \
              context=local:unknown"
         ),
@@ -2499,23 +2759,26 @@ async fn the_map_drawing_cycles_through_the_text_techniques() {
             .count()
     };
     let octant = picture("octant");
-    assert!(octants(&octant) > 50, "{octant}");
+    assert!(!en || octants(&octant) > 50, "{octant}");
     let blocks = picture("blocks");
     assert_eq!(octants(&blocks), 0, "{blocks}");
     assert!(
-        blocks
+        !en || blocks
             .chars()
             .any(|c| "▘▝▀▖▌▞▛▗▚▐▜▄▙▟▁▂▃▅▆▇▔▎▊".contains(c)),
         "{blocks}"
     );
     let half = picture("halfblocks");
-    assert!(half.chars().filter(|&c| c == '▀').count() > 400, "{half}");
+    assert!(
+        !en || half.chars().filter(|&c| c == '▀').count() > 400,
+        "{half}"
+    );
     let thin = picture("braille-thin");
-    assert!(braille(&thin) > 50 && octants(&thin) == 0, "{thin}");
+    assert!(!en || braille(&thin) > 50 && octants(&thin) == 0, "{thin}");
     let mosaic = picture("mosaic");
     assert_eq!(braille(&mosaic) + octants(&mosaic), 0, "{mosaic}");
     let plain = picture("braille");
-    assert!(braille(&plain) > 50, "{plain}");
+    assert!(!en || braille(&plain) > 50, "{plain}");
     // The title names each new drawing, until the ticks pass.
     for (label, name) in [
         ("blocks", "blocks"),
@@ -2526,8 +2789,8 @@ async fn the_map_drawing_cycles_through_the_text_techniques() {
         ("back to mosaic", "mosaic"),
     ] {
         let top = frame(&frames, label).lines().next().unwrap_or_default();
-        assert!(top.contains(name), "{label}: {top}");
-        assert!(!top.contains("z14"), "no zoom number (1447): {top}");
+        assert!(!en || top.contains(name), "{label}: {top}");
+        assert!(!en || !top.contains("z14"), "no zoom number (1447): {top}");
     }
     let named = |top: &str| {
         ["octant", "blocks", "braille", "mosaic"]
@@ -2535,36 +2798,28 @@ async fn the_map_drawing_cycles_through_the_text_techniques() {
             .any(|n| top.contains(n))
     };
     let top = frame(&frames, "octant").lines().next().unwrap_or_default();
-    assert!(!named(top), "named only after a change: {top}");
+    assert!(!en || !named(top), "named only after a change: {top}");
     let top = frame(&frames, "the name gone")
         .lines()
         .next()
         .unwrap_or_default();
-    assert!(!named(top) && !top.contains("z14"), "{top}");
+    assert!(!en || !named(top) && !top.contains("z14"), "{top}");
     // Every frame keeps the pins and the credit.
     for label in ["octant", "blocks", "braille-thin", "mosaic", "braille"] {
         let shown = frame(&frames, label);
         assert_eq!(shown.matches('●').count(), 3, "{label}\n{shown}");
         assert!(
-            shown.contains("© OpenStreetMap contributors"),
+            !en || shown.contains("© OpenStreetMap contributors"),
             "{label}\n{shown}"
         );
     }
     let test = frame(&frames, "glyph test");
     assert!(
-        test.contains("glyph test · g closes") && test.contains("octant"),
+        !en || test.contains("glyph test · g closes") && test.contains("octant"),
         "{test}"
     );
-    assert!(!frame(&frames, "glyph test closed").contains("glyph test"));
-    if frames != EXPECTED_MAP_CYCLE {
-        let kept = std::env::temp_dir().join("loquax-tui-map-cycle.frames");
-        let _ = std::fs::write(&kept, &frames);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_map_cycle.frames\n{frames}",
-            kept.display()
-        );
-    }
+    assert!(!en || !frame(&frames, "glyph test closed").contains("glyph test"));
+    frames
 }
 
 /// The autoload session (1089), against the loopback server serving the
@@ -2603,6 +2858,28 @@ key q
 
 #[tokio::test(flavor = "multi_thread")]
 async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it() {
+    same_session(
+        "tui_mapload.frames",
+        &opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it_in("").await,
+    );
+}
+
+/// [`opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it_in_german() {
+    let frames =
+        opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it_in("lang de\n")
+            .await;
+    assert!(frames.contains("vor "), "{frames}");
+    same_session("tui_mapload_de.frames", &frames);
+}
+
+/// The session of [`opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it`] with `lang` before every script: its frames.
+async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it_in(
+    lang: &str,
+) -> String {
+    let en = lang.is_empty();
     const FIXTURE: &[u8] = include_bytes!("../../leviculum-mapcut/fixtures/oltrarno.pmtiles");
     let serve = leviculum_mapcut::serve::Serve::start(vec![(
         "oltrarno.pmtiles".to_string(),
@@ -2625,7 +2902,7 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     let (frames, log) = peer_session(
         "mapload",
         "80x24",
-        MAPLOAD_SCRIPT,
+        &format!("{lang}{MAPLOAD_SCRIPT}"),
         &["--graphics=braille"],
         prepare,
         messages,
@@ -2634,26 +2911,35 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     let before = frame(&frames, "before the load");
     // The place's region is what the screen shows: the title says so in
     // words since 1527 (`MAP_LOADING_HERE`), not the older "loading map".
-    assert!(before.contains("loading the map of this area"), "{before}");
+    assert!(
+        !en || before.contains("loading the map of this area"),
+        "{before}"
+    );
     // No region holds the place yet: the radar meanwhile (1386), centred
     // on the one pin, which it says, at the fit's zoom the region keeps.
     assert!(
-        before.contains("Rings 50 m around them") && !before.contains("z15"),
+        !en || before.contains("Rings 50 m around them") && !before.contains("z15"),
         "the radar meanwhile\n{before}"
     );
     let after = frame(&frames, "after the load");
     assert!(
-        !after.contains("z15") && !after.contains("in view"),
+        !en || !after.contains("z15") && !after.contains("in view"),
         "no zoom number and no count (1447)\n{after}"
     );
-    assert!(after.contains("© OpenStreetMap contributors"), "{after}");
-    assert!(!after.contains("loading map"), "{after}");
+    assert!(
+        !en || after.contains("© OpenStreetMap contributors"),
+        "{after}"
+    );
+    assert!(!en || !after.contains("loading map"), "{after}");
     assert_ne!(before, after);
     let held = frame(&frames, "held already");
-    assert!(held.contains("the map here is loaded already"), "{held}");
+    assert!(
+        !en || held.contains("the map here is loaded already"),
+        "{held}"
+    );
     let loading = frame(&frames, "loading the area");
     assert!(
-        loading.contains("─ loading the map of this area") && !loading.contains("z9"),
+        !en || loading.contains("─ loading the map of this area") && !loading.contains("z9"),
         "{loading}"
     );
     let lines: Vec<&str> = log
@@ -2670,15 +2956,18 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
         count("MAPLOAD done"),
         count("MAPLOAD failed"),
     );
-    assert!(started >= 2 && started == done && failed == 0, "{lines:#?}");
     assert!(
-        lines
+        !en || started >= 2 && started == done && failed == 0,
+        "{lines:#?}"
+    );
+    assert!(
+        !en || lines
             .iter()
             .any(|l| l.starts_with("MAPLOAD start") && l.contains("reason=place")),
         "{lines:#?}"
     );
     assert!(
-        lines
+        !en || lines
             .iter()
             .any(|l| l.starts_with("MAPLOAD start") && l.contains("reason=view")),
         "{lines:#?}"
@@ -2693,20 +2982,12 @@ async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it
     let distinct: std::collections::BTreeSet<&&str> = files.iter().collect();
     assert_eq!(distinct.len(), files.len(), "{files:?}");
     assert!(
-        files
+        !en || files
             .iter()
             .all(|f| f.starts_with("auto-") && f.ends_with(".lmr")),
         "{files:?}"
     );
-    if frames != EXPECTED_MAPLOAD {
-        let kept = std::env::temp_dir().join("loquax-tui-mapload.frames");
-        let _ = std::fs::write(&kept, &frames);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_mapload.frames\n{frames}",
-            kept.display()
-        );
-    }
+    frames
 }
 
 /// One `loquax` CLI run against `daemon` from `home`, with `stdin`.
@@ -3409,6 +3690,23 @@ async fn the_palettes_import_shows_at_once() {
 /// `tests/fixtures/tui_ugly.frames`.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row() {
+    same_session(
+        "tui_ugly.frames",
+        &an_imported_conversation_opens_and_scrolls_to_its_oldest_row_in("").await,
+    );
+}
+
+/// [`an_imported_conversation_opens_and_scrolls_to_its_oldest_row`] as a German desktop sees it (`LANG=de_DE.UTF-8`): every
+/// script of the session after `lang de`, the step the locale takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row_in_german() {
+    let frames = an_imported_conversation_opens_and_scrolls_to_its_oldest_row_in("lang de\n").await;
+    assert!(frames.contains("Unbekannt"), "{frames}");
+    same_session("tui_ugly_de.frames", &frames);
+}
+
+/// The session of [`an_imported_conversation_opens_and_scrolls_to_its_oldest_row`] with `lang` before every script: its frames.
+async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row_in(lang: &str) -> String {
     let daemon = daemon("tui-ugly", |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     std::fs::write(
@@ -3422,7 +3720,7 @@ async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row() {
                   frame bottom\nkey enter\nframe opened\nkey g\nframe oldest\nkey q\n";
     let script_path = home.path().join("ugly.script");
     let frames = home.path().join("ugly.frames");
-    std::fs::write(&script_path, script).expect("write the script");
+    std::fs::write(&script_path, format!("{lang}{script}")).expect("write the script");
     let args: Vec<String> = vec![
         "--instance".into(),
         daemon.instance.clone(),
@@ -3459,15 +3757,7 @@ async fn an_imported_conversation_opens_and_scrolls_to_its_oldest_row() {
         "stderr: {}\nframes:\n{got}",
         String::from_utf8_lossy(&output.stderr)
     );
-    if got != EXPECTED_UGLY {
-        let kept = std::env::temp_dir().join("loquax-tui-ugly.frames");
-        let _ = std::fs::write(&kept, &got);
-        panic!(
-            "the frames moved; this run's are in {}, the pinned ones in \
-             loquax/tests/fixtures/tui_ugly.frames\n{got}",
-            kept.display()
-        );
-    }
+    got
 }
 
 /// A messenger run whose own state lives in `lnmsg_home` and whose user's

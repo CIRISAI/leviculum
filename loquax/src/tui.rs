@@ -2485,10 +2485,55 @@ mod tests {
     /// A terminal golden under `tests/golden`: the frame's text, compared
     /// whole; one that moved is left in the temp dir as
     /// `loquax-golden/<name>` for a look.
+    /// `LOQUAX_WRITE_GOLDEN=1` writes the goldens and the frames anew, for
+    /// a change that means to move them.
+    fn writing_goldens() -> bool {
+        std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some()
+    }
+
+    /// The German twin's name of a golden or a fixture: `tui-x.txt` is
+    /// `tui-x-de.txt`, `tui_x.frames` is `tui_x_de.frames`.
+    fn german_name(name: &str) -> String {
+        let (stem, ext) = name.rsplit_once('.').expect("a name with its kind");
+        let join = if stem.starts_with("tui-") { "-" } else { "_" };
+        format!("{stem}{join}de.{ext}")
+    }
+
+    /// Whether `screen` holds `words`, said with the screen when not.
+    fn says(screen: &str, words: &str) {
+        assert!(screen.contains(words), "{words:?} is not said:\n{screen}");
+    }
+
+    /// A terminal fixture under `tests/fixtures`: the frames' text,
+    /// compared whole; frames that moved are left in the temp dir as
+    /// `loquax-golden/<name>`.
+    fn same_frames(name: &str, text: &str) {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        if writing_goldens() {
+            std::fs::write(&path, text).expect("write the fixture");
+            return;
+        }
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+            let dir = std::env::temp_dir().join("loquax-golden");
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            std::fs::write(dir.join(name), text).expect("write");
+            panic!(
+                "{name} moved; this run's is {}\n{text}",
+                dir.join(name).display()
+            );
+        }
+    }
+
     fn same_text(name: &str, text: &str) {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/golden")
             .join(name);
+        if writing_goldens() {
+            std::fs::write(&path, text).expect("write the golden");
+            return;
+        }
         if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
             let dir = std::env::temp_dir().join("loquax-golden");
             std::fs::create_dir_all(&dir).expect("temp dir");
@@ -2518,12 +2563,16 @@ mod tests {
     /// 80 by 24.
     #[test]
     fn a_late_message_is_the_terminals_golden() {
-        let mut model = Model::new(&[]);
-        model.address = Some([0x30; 16]);
-        late_message::late_message(&mut model, 1_799_971_200, 3600);
-        model.focus = loquax::ui::Pane::Messages;
-        model.toasts.clear();
-        let screen = whole_screen(&model);
+        let scene = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.address = Some([0x30; 16]);
+            late_message::late_message(&mut model, 1_799_971_200, 3600);
+            model.focus = loquax::ui::Pane::Messages;
+            model.toasts.clear();
+            whole_screen(&model)
+        };
+        let screen = scene(Lang::En);
         // The chat's rows, right of the list's (which names our last line).
         let lines: Vec<&str> = screen.lines().collect();
         let row = |words: &str| {
@@ -2542,6 +2591,191 @@ mod tests {
             "{screen}"
         );
         same_text("tui-late-message.txt", &screen);
+        let german = scene(Lang::De);
+        says(&german, "Gute Nacht");
+        says(&german, "du: Bin unterwegs");
+        same_text(&german_name("tui-late-message.txt"), &german);
+    }
+
+    mod reply_scene {
+        include!("../tests/support/reply_scene.rs");
+    }
+
+    /// 1451, the walk's blind spots, a reply and a reaction: the terminal
+    /// draws Anna's chat of the shared fixture, our reply to her question,
+    /// her thumbs up under it and her photo's line; then a reply to her
+    /// last line being written, the draft in the compose box. The terminal
+    /// draws no quotes (`a_relayed_group_is_the_terminals_golden`) and no
+    /// line over the compose box for a reply being written: the palette's
+    /// `reply` says it once in a toast, and the draft keeps its target.
+    /// The goldens are the screens, 80 by 24, in English and in German.
+    #[test]
+    fn a_reply_and_a_reaction_are_the_terminals_golden() {
+        let scene = |lang, composing: bool| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.address = Some([0x30; 16]);
+            reply_scene::reply_scene(&mut model, 1_799_971_200, 3600);
+            model.focus = loquax::ui::Pane::Messages;
+            if composing {
+                reply_scene::reply_composing(&mut model);
+                model.focus = loquax::ui::Pane::Compose;
+            }
+            model.toasts.clear();
+            (whole_screen(&model), model)
+        };
+        let (sent, _) = scene(Lang::En, false);
+        for words in [
+            "Kommst du morgen mit zum Markt?",
+            "Ja, um zehn am Brunnen",
+            "\u{1F44D}",
+            "photo",
+            "Super, bis morgen",
+        ] {
+            says(&sent, words);
+        }
+        same_text("tui-reply-sent.txt", &sent);
+        let (german, _) = scene(Lang::De, false);
+        says(&german, "Ja, um zehn am Brunnen");
+        says(&german, "\u{1F44D}");
+        same_text(&german_name("tui-reply-sent.txt"), &german);
+
+        let (compose, model) = scene(Lang::En, true);
+        says(&compose, reply_scene::REPLY_DRAFT);
+        says(&compose, "Super, bis morgen");
+        assert_eq!(
+            model.conversations[model.selected].draft.reply,
+            Some(reply_scene::REPLY_LAST),
+            "the draft answers her last line"
+        );
+        same_text("tui-reply-compose.txt", &compose);
+        let (german, _) = scene(Lang::De, true);
+        says(&german, reply_scene::REPLY_DRAFT);
+        same_text(&german_name("tui-reply-compose.txt"), &german);
+    }
+
+    /// The facts the shell gives the profile of a messenger without a
+    /// mailbox (`shell::profile_facts` with no client): the name, no
+    /// mailbox, this device alone.
+    fn no_mailbox_profile(name: &str) -> loquax::ui::profile::ProfileFacts {
+        use loquax::ui::profile::{Device, Mailbox, ProfileFacts};
+        ProfileFacts {
+            name: name.to_string(),
+            mailbox: Mailbox::Unknown,
+            devices: vec![Device {
+                name: String::new(),
+                this: true,
+            }],
+        }
+    }
+
+    /// 1451, the very first start, before any mailbox: no conversation,
+    /// the empty list names the palette's command; `P` opens the profile,
+    /// which says the mailbox is not set up yet. The goldens are the two
+    /// screens, 80 by 24, in English and in German.
+    #[test]
+    fn the_first_start_is_the_terminals_golden() {
+        let first = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.address = Some([0x4c; 16]);
+            model.profile = no_mailbox_profile("Mia");
+            update(
+                &mut model,
+                UiEvent::Clock(WallTime::from_civil(2026, 11, 10, 9, 30, 3600)),
+            );
+            model.toasts.clear();
+            model
+        };
+        let mut model = first(Lang::En);
+        assert!(model.conversations.is_empty());
+        let empty = whole_screen(&model);
+        says(&empty, "No conversations yet");
+        same_text("tui-first-start.txt", &empty);
+        let mut german = first(Lang::De);
+        let german_empty = whole_screen(&german);
+        says(&german_empty, "Noch keine Nachrichten");
+        same_text(&german_name("tui-first-start.txt"), &german_empty);
+
+        update(&mut model, UiEvent::Key(parse_key("P").expect("key")));
+        assert!(model.profile_open);
+        let profile = whole_screen(&model);
+        says(&profile, "Mailbox: not set up yet");
+        says(&profile, "Mia");
+        same_text("tui-first-start-profile.txt", &profile);
+        update(&mut german, UiEvent::Key(parse_key("P").expect("key")));
+        let german_profile = whole_screen(&german);
+        says(&german_profile, "Postfach: noch nicht eingerichtet");
+        same_text(&german_name("tui-first-start-profile.txt"), &german_profile);
+    }
+
+    /// 1451, the map with two pins near Florence: Anna's and Ben's
+    /// positions as the store hands them back at start, `M` opens the map,
+    /// `Tab` selects Anna's pin. The test draws no map picture (no
+    /// painter, no region): the pins and their labels on the pane's empty
+    /// ground. The goldens are the screen, 80 by 24, in English and in
+    /// German.
+    #[test]
+    fn two_pins_on_the_map_are_the_terminals_golden() {
+        use leviculum_lxmf::telemetry::Location;
+        use loquax::telemetry::{Fix, Source};
+        const ANNA: [u8; 16] = [0xa7; 16];
+        const BEN: [u8; 16] = [0xb3; 16];
+        let now = 1_800_000_000;
+        let fix = |peer, lat: i32, lon: i32, ago: i64| Fix {
+            peer,
+            via: peer,
+            message: None,
+            received_at: Some(now - ago),
+            location: Location {
+                latitude_e6: lat,
+                longitude_e6: lon,
+                altitude_e2: 5_000,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: now - ago,
+            },
+            telemetry: Vec::new(),
+            source: Source::Telemetry,
+        };
+        let map_in = |lang| {
+            let mut model = Model::new(&[ANNA, BEN]);
+            model.lang = lang;
+            model.address = Some([0x30; 16]);
+            model.names.remember(ANNA, "Anna");
+            model.names.remember(BEN, "Ben");
+            update(
+                &mut model,
+                UiEvent::Clock(WallTime {
+                    unix_secs: now,
+                    offset_secs: 3600,
+                }),
+            );
+            model.restore_positions(vec![
+                fix(ANNA, 43_771_000, 11_254_000, 4 * 60),
+                fix(BEN, 43_776_500, 11_247_000, 25 * 60),
+            ]);
+            update(&mut model, UiEvent::Key(parse_key("M").expect("key")));
+            assert!(model.map.is_some(), "M opens the map");
+            for _ in 0..4 {
+                if model.map.as_ref().and_then(|m| m.selected) == Some(ANNA) {
+                    break;
+                }
+                update(&mut model, UiEvent::Key(parse_key("tab").expect("key")));
+            }
+            assert_eq!(model.map.as_ref().and_then(|m| m.selected), Some(ANNA));
+            model.toasts.clear();
+            whole_screen(&model)
+        };
+        let screen = map_in(Lang::En);
+        says(&screen, "Anna");
+        says(&screen, "Ben");
+        same_text("tui-map-pins.txt", &screen);
+        let german = map_in(Lang::De);
+        says(&german, "Anna · vor 4 Min.");
+        says(&german, "Ben · vor 25 Min.");
+        same_text(&german_name("tui-map-pins.txt"), &german);
     }
 
     /// The screen and under it the cells drawn otherwise than with no
@@ -2585,23 +2819,31 @@ mod tests {
     /// copies as `v` and `y` do; a Shift+arrow enters and moves at once.
     #[test]
     fn the_copy_mode_selects_with_the_keys_and_copies_through_osc52() {
-        let mut model = Model::new(&[]);
-        model.address = Some([0x30; 16]);
-        late_message::late_message(&mut model, 1_799_971_200, 3600);
-        model.focus = loquax::ui::Pane::Messages;
         let press = |model: &mut Model, code: KeyCode, mods: KeyModifiers| {
             update(model, UiEvent::Key(KeyEvent::new(code, mods)))
         };
         let plain = KeyModifiers::NONE;
-        press(&mut model, KeyCode::Char('g'), plain);
-        press(&mut model, KeyCode::Char('v'), plain);
-        assert!(model.copy_mode.is_some(), "v is the copy mode");
-        assert_eq!(model.detail, None, "and no longer the details");
-        for _ in 0..3 {
-            press(&mut model, KeyCode::Char('l'), plain);
-        }
-        model.toasts.clear();
+        let selected = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.address = Some([0x30; 16]);
+            late_message::late_message(&mut model, 1_799_971_200, 3600);
+            model.focus = loquax::ui::Pane::Messages;
+            press(&mut model, KeyCode::Char('g'), plain);
+            press(&mut model, KeyCode::Char('v'), plain);
+            assert!(model.copy_mode.is_some(), "v is the copy mode");
+            assert_eq!(model.detail, None, "and no longer the details");
+            for _ in 0..3 {
+                press(&mut model, KeyCode::Char('l'), plain);
+            }
+            model.toasts.clear();
+            model
+        };
+        let mut model = selected(Lang::En);
         same_text("tui-copy-mode.txt", &screen_with_selection(&model));
+        let german = screen_with_selection(&selected(Lang::De));
+        says(&german, "du: Bin unterwegs");
+        same_text(&german_name("tui-copy-mode.txt"), &german);
         let copied = |effects: Vec<ui::UiEffect>| -> Vec<String> {
             effects
                 .into_iter()
@@ -2689,11 +2931,15 @@ mod tests {
     /// with one; the golden is the screen, 80 by 24.
     #[test]
     fn a_groups_one_and_two_ticks_are_the_terminals_golden() {
-        let mut model = Model::new(&[]);
-        model.address = Some([0x30; 16]);
-        group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
-        model.focus = loquax::ui::Pane::Messages;
-        let screen = whole_screen(&model);
+        let scene = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.address = Some([0x30; 16]);
+            group_ticks::group_ticks(&mut model, 1_800_000_000, 3600);
+            model.focus = loquax::ui::Pane::Messages;
+            whole_screen(&model)
+        };
+        let screen = scene(Lang::En);
         let line = |words: &str| {
             screen
                 .lines()
@@ -2705,6 +2951,9 @@ mod tests {
         let one = line("Wer kommt mit?");
         assert!(one.contains("✓") && !one.contains("✓✓"), "{screen}");
         same_text("tui-group-ticks.txt", &screen);
+        let german = scene(Lang::De);
+        says(&german, "du: Wer kommt mit?");
+        same_text(&german_name("tui-group-ticks.txt"), &german);
     }
 
     mod relay_group {
@@ -2718,13 +2967,17 @@ mod tests {
     /// is the screen, 80 by 24. The terminal draws no quotes at all.
     #[test]
     fn a_relayed_group_is_the_terminals_golden() {
-        let mut model = Model::new(&[]);
-        model.address = Some([0x30; 16]);
-        relay_group::relay_group(&mut model, 1_800_000_000, 3600);
-        model.focus = loquax::ui::Pane::Messages;
-        // The arrivals' toasts would cover our own line.
-        model.toasts.clear();
-        let screen = whole_screen(&model);
+        let scene = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.address = Some([0x30; 16]);
+            relay_group::relay_group(&mut model, 1_800_000_000, 3600);
+            model.focus = loquax::ui::Pane::Messages;
+            // The arrivals' toasts would cover our own line.
+            model.toasts.clear();
+            whole_screen(&model)
+        };
+        let screen = scene(Lang::En);
         for words in [
             "group via relay",
             "Anna: Hallo zusammen",
@@ -2740,6 +2993,9 @@ mod tests {
             "no hash on screen:\n{screen}"
         );
         same_text("tui-relay-group.txt", &screen);
+        let german = scene(Lang::De);
+        says(&german, "Gruppe über Relais");
+        same_text(&german_name("tui-relay-group.txt"), &german);
     }
 
     /// 1452: two peers called Lew collide, so both carry their hash tail
@@ -2749,19 +3005,23 @@ mod tests {
     #[test]
     fn a_shared_name_is_the_terminals_golden() {
         let (lew, other, anna) = ([0x1e; 16], [0xe1; 16], [0xa0; 16]);
-        let mut model = Model::new(&[lew, other, anna]);
-        for (peer, name) in [(lew, "Lew"), (other, "lew "), (anna, "Anna")] {
-            update(
-                &mut model,
-                UiEvent::Engine(OutboxEvent::Announced {
-                    destination: peer,
-                    name: Some(name.to_string()),
-                    path_response: false,
-                }),
-            );
-        }
-        model.toasts.clear();
-        let narrow = whole_screen(&model);
+        let scene = |lang| {
+            let mut model = Model::new(&[lew, other, anna]);
+            model.lang = lang;
+            for (peer, name) in [(lew, "Lew"), (other, "lew "), (anna, "Anna")] {
+                update(
+                    &mut model,
+                    UiEvent::Engine(OutboxEvent::Announced {
+                        destination: peer,
+                        name: Some(name.to_string()),
+                        path_response: false,
+                    }),
+                );
+            }
+            model.toasts.clear();
+            whole_screen(&model)
+        };
+        let narrow = scene(Lang::En);
         assert!(
             narrow.contains("Lew ·1e1e  Two contacts are called Lew"),
             "{narrow}"
@@ -2772,6 +3032,9 @@ mod tests {
         assert!(!narrow.contains("Anna ·"), "{narrow}");
         assert!(!narrow.contains('≈'), "{narrow}");
         same_text("tui-same-name.txt", &narrow);
+        let german = scene(Lang::De);
+        says(&german, "Zwei Kontakte heißen Lew");
+        same_text(&german_name("tui-same-name.txt"), &german);
     }
 
     /// 1450 (walk 1, finding 21): `S` opens the settings, the nine
@@ -2786,6 +3049,14 @@ mod tests {
         update(&mut model, key('S'));
         assert_eq!(model.settings, Some(None));
         let shown = whole_screen(&model);
+        let mut german = Model::new(&[]);
+        german.lang = Lang::De;
+        update(&mut german, key('S'));
+        let german = whole_screen(&german);
+        for section in SECTIONS {
+            says(&german, section.title().text(Lang::De));
+        }
+        same_text(&german_name("tui-settings.txt"), &german);
         let mut at = 0;
         for section in SECTIONS {
             let title = section.title().text(model.lang);
@@ -2826,11 +3097,19 @@ mod tests {
         use loquax::ui::UiEffect;
         let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         let enter = UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let mut model = Model::new(&[]);
-        update(&mut model, key('S'));
-        update(&mut model, key('9'));
-        assert_eq!(model.settings, Some(Some(Section::Advanced)));
+        let advanced = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            update(&mut model, key('S'));
+            update(&mut model, key('9'));
+            assert_eq!(model.settings, Some(Some(Section::Advanced)));
+            model
+        };
+        let mut model = advanced(Lang::En);
         let shown = whole_screen(&model);
+        let german = whole_screen(&advanced(Lang::De));
+        says(&german, "Server für öffentliche Räume: Keiner");
+        same_text(&german_name("tui-settings-advanced.txt"), &german);
         assert!(shown.contains("Server for public rooms: None"), "{shown}");
         same_text("tui-settings-advanced.txt", &shown);
         let shipped = loquax::ui::hubs::shipped();
@@ -2901,68 +3180,73 @@ mod tests {
         use loquax::ui::UiEffect;
         const HUB: [u8; 16] = [0x07; 16];
         let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        let mut model = Model::new(&[]);
-        let off = model.clone();
-        model.rooms.enabled = true;
-        model.rooms.hub = Some(HUB);
-        // Told before (1577): no sentence over the golden.
-        model.rooms.told = Some(HUB);
-        // Opening the rooms links nothing; the first join does (1578).
-        let effects = update(&mut model, key('R'));
-        assert_eq!(effects, vec![]);
-        assert!(model.rooms.showing());
-        for c in "#lab".chars() {
-            update(&mut model, key(c));
-        }
-        let effects = update(
-            &mut model,
-            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        );
-        assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
-        for event in [
-            RoomsEvent::Welcomed {
-                name: Some("periculum".into()),
-                body_limit: 350,
-            },
-            RoomsEvent::Joined {
-                room: "#lab".into(),
-                nick: None,
-            },
-            RoomsEvent::Joined {
-                room: "#lab".into(),
-                nick: Some("bob".into()),
-            },
-            RoomsEvent::Line {
-                room: "#lab".into(),
-                kind: LineKind::Msg,
-                text: "a line, twenty-five bytes".into(),
-                nick: Some("bob".into()),
-                ours: false,
-                ts_ms: 1_793_702_757_876,
-            },
-            RoomsEvent::Line {
-                room: "#lab".into(),
-                kind: LineKind::Action,
-                text: "waves".into(),
-                nick: Some("bob".into()),
-                ours: false,
-                ts_ms: 1_793_702_758_093,
-            },
-            RoomsEvent::HubNotice {
-                room: Some("#lab".into()),
-                text: "room #lab: unregistered; mode=(none); topic=(none)".into(),
-            },
-            RoomsEvent::Line {
-                room: "#lab".into(),
-                kind: LineKind::Msg,
-                text: "hello bob".into(),
-                nick: Some("lew".into()),
-                ours: true,
-                ts_ms: 1_793_702_759_000,
-            },
-        ] {
-            update(&mut model, UiEvent::Rooms(event));
-        }
+        let off = Model::new(&[]);
+        let room_in = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.rooms.enabled = true;
+            model.rooms.hub = Some(HUB);
+            // Told before (1577): no sentence over the golden.
+            model.rooms.told = Some(HUB);
+            // Opening the rooms links nothing; the first join does (1578).
+            let effects = update(&mut model, key('R'));
+            assert_eq!(effects, vec![]);
+            assert!(model.rooms.showing());
+            for c in "#lab".chars() {
+                update(&mut model, key(c));
+            }
+            let effects = update(
+                &mut model,
+                UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            );
+            assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
+            for event in [
+                RoomsEvent::Welcomed {
+                    name: Some("periculum".into()),
+                    body_limit: 350,
+                },
+                RoomsEvent::Joined {
+                    room: "#lab".into(),
+                    nick: None,
+                },
+                RoomsEvent::Joined {
+                    room: "#lab".into(),
+                    nick: Some("bob".into()),
+                },
+                RoomsEvent::Line {
+                    room: "#lab".into(),
+                    kind: LineKind::Msg,
+                    text: "a line, twenty-five bytes".into(),
+                    nick: Some("bob".into()),
+                    ours: false,
+                    ts_ms: 1_793_702_757_876,
+                },
+                RoomsEvent::Line {
+                    room: "#lab".into(),
+                    kind: LineKind::Action,
+                    text: "waves".into(),
+                    nick: Some("bob".into()),
+                    ours: false,
+                    ts_ms: 1_793_702_758_093,
+                },
+                RoomsEvent::HubNotice {
+                    room: Some("#lab".into()),
+                    text: "room #lab: unregistered; mode=(none); topic=(none)".into(),
+                },
+                RoomsEvent::Line {
+                    room: "#lab".into(),
+                    kind: LineKind::Msg,
+                    text: "hello bob".into(),
+                    nick: Some("lew".into()),
+                    ours: true,
+                    ts_ms: 1_793_702_759_000,
+                },
+            ] {
+                update(&mut model, UiEvent::Rooms(event));
+            }
+            model
+        };
+        let mut model = room_in(Lang::En);
         let room = whole_screen(&model);
         assert!(room.contains("A room is live"), "{room}");
         assert!(room.contains("hello bob"), "{room}");
@@ -2975,6 +3259,10 @@ mod tests {
         assert!(room.contains("▏Message"), "the hint in the field");
         assert_eq!(room.matches("Message").count(), 1, "said once\n{room}");
         same_text("tui-rooms-room.txt", &room);
+        let german = whole_screen(&room_in(Lang::De));
+        says(&german, "hello bob");
+        says(&german, "Ein Raum ist live");
+        same_text(&german_name("tui-rooms-room.txt"), &german);
         // The header's people, then back.
         let alt = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
         update(&mut model, alt('p'));
@@ -3037,30 +3325,40 @@ mod tests {
             last_seen: (NOW - ago) as u64,
             hops: Some(hops),
         };
-        let mut model = Model::new(&[]);
-        model.browse.enabled = true;
-        model.now = Some(loquax::when::WallTime {
-            unix_secs: NOW,
-            offset_secs: 0,
-        });
-        browse_like_the_terminal(&mut model);
-        for found in [
-            node(0x5a, "Marcel's node", 600, 2),
-            node(0x7c, "Relay Süd", 2 * 86_400, 1),
-        ] {
-            update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
-        }
-        model.browse.model.bookmarks.add(lnomad::Bookmark {
-            url: format!("{}:/page/index.mu", "7c".repeat(16)),
-            title: "Relay Süd".to_string(),
-        });
-        update(&mut model, key('E'));
-        assert!(loquax::ui::explore::Explore::showing(&model));
+        let explore_in = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.browse.enabled = true;
+            model.now = Some(loquax::when::WallTime {
+                unix_secs: NOW,
+                offset_secs: 0,
+            });
+            browse_like_the_terminal(&mut model);
+            for found in [
+                node(0x5a, "Marcel's node", 600, 2),
+                node(0x7c, "Relay Süd", 2 * 86_400, 1),
+            ] {
+                update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+            }
+            model.browse.model.bookmarks.add(lnomad::Bookmark {
+                url: format!("{}:/page/index.mu", "7c".repeat(16)),
+                title: "Relay Süd".to_string(),
+            });
+            update(&mut model, key('E'));
+            assert!(loquax::ui::explore::Explore::showing(&model));
+            model
+        };
+        let mut model = explore_in(Lang::En);
         let list = whole_screen(&model);
         for words in ["Explore", "Pages", "Bookmarks", "Today", "Rooms", "Servers"] {
             assert!(list.contains(words), "{words:?} in\n{list}");
         }
         same_text("tui-explore.txt", &list);
+        let german = whole_screen(&explore_in(Lang::De));
+        for words in ["Entdecken", "Seiten", "Lesezeichen", "Heute", "Räume"] {
+            says(&german, words);
+        }
+        same_text(&german_name("tui-explore.txt"), &german);
         // Down to Marcel's row (the bookmark is first), Enter opens it.
         update(
             &mut model,
@@ -3092,23 +3390,32 @@ mod tests {
     #[test]
     fn a_servers_row_opens_its_sheet_and_changes_nothing() {
         let key = |code| UiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
-        let mut model = Model::new(&[]);
-        model.browse.enabled = true;
-        browse_like_the_terminal(&mut model);
         let shipped = loquax::ui::hubs::shipped();
         let Some(hub) = shipped.first() else {
             return;
         };
-        update(&mut model, key(KeyCode::Char('E')));
-        update(
-            &mut model,
-            UiEvent::Explore(loquax::ui::explore::ExploreEvent::Hub(hub.hash)),
-        );
+        let sheet_in = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.browse.enabled = true;
+            browse_like_the_terminal(&mut model);
+            update(&mut model, key(KeyCode::Char('E')));
+            update(
+                &mut model,
+                UiEvent::Explore(loquax::ui::explore::ExploreEvent::Hub(hub.hash)),
+            );
+            model
+        };
+        let mut model = sheet_in(Lang::En);
         let sheet = whole_screen(&model);
         assert!(sheet.contains(&hub.name), "{sheet}");
         assert!(sheet.contains("Use this server for rooms"), "{sheet}");
         assert!(!sheet.to_lowercase().contains("hops"), "{sheet}");
         same_text("tui-explore-sheet.txt", &sheet);
+        let german = whole_screen(&sheet_in(Lang::De));
+        says(&german, &hub.name);
+        says(&german, "Diesen Server für Räume nutzen");
+        same_text(&german_name("tui-explore-sheet.txt"), &german);
         assert_eq!(model.rooms.hub, None, "opening it chose nothing");
         update(&mut model, key(KeyCode::Esc));
         assert!(model.explore.sheet.is_none());
@@ -3139,63 +3446,81 @@ mod tests {
             last_seen: 1_800_000_000,
             hops: Some(hops),
         };
-        let mut model = Model::new(&[]);
-        model.browse.enabled = true;
-        model.browse.model.clock = Some(1_800_000_060);
-        browse_like_the_terminal(&mut model);
-        update(
-            &mut model,
-            UiEvent::Resize {
-                width: 80,
-                height: 24,
-            },
-        );
-        for found in [
-            node(MARCEL, "Marcel's node", 2),
-            node([0x7c; 16], "Relay Süd", 1),
-        ] {
-            update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
-        }
-        let off = model.clone();
-        update(
-            &mut model,
-            UiEvent::Key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE)),
-        );
-        assert!(model.browse.showing());
+        let browse_in = |lang| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            model.browse.enabled = true;
+            model.browse.model.clock = Some(1_800_000_060);
+            browse_like_the_terminal(&mut model);
+            update(
+                &mut model,
+                UiEvent::Resize {
+                    width: 80,
+                    height: 24,
+                },
+            );
+            for found in [
+                node(MARCEL, "Marcel's node", 2),
+                node([0x7c; 16], "Relay Süd", 1),
+            ] {
+                update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
+            }
+            let off = model.clone();
+            update(
+                &mut model,
+                UiEvent::Key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE)),
+            );
+            assert!(model.browse.showing());
+            (model, off)
+        };
+        // Enter on Marcel's row, as the reader picks it, and the page.
+        let open_page = |model: &mut Model| {
+            let row = lnomad::app::places(&model.browse.model)
+                .iter()
+                .position(
+                    |p| matches!(p, lnomad::app::Place::Node { dest_hash, .. } if *dest_hash == MARCEL),
+                )
+                .expect("Marcel's row");
+            let effects = update(
+                model,
+                UiEvent::Browse(BrowseEvent::Intent(lnomad::Intent::Activate(
+                    lnomad::app::scene::NodeId::Place(row),
+                ))),
+            );
+            assert!(matches!(
+                &effects[..],
+                [loquax::ui::UiEffect::Browse(lnomad::Effect::Navigate(_))]
+            ));
+            let micron = std::fs::read_to_string(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../lnomad/tests/fixtures/sample.mu"),
+            )
+            .expect("lnomad's sample page");
+            update(
+                model,
+                UiEvent::Browse(BrowseEvent::Loaded {
+                    micron,
+                    title: "Marcel's node".to_string(),
+                }),
+            );
+        };
+        let (mut model, off) = browse_in(Lang::En);
         let list = whole_screen(&model);
         assert!(list.contains("Marcel's node"), "{list}");
         same_text("tui-browse-list.txt", &list);
+        let (mut german, _) = browse_in(Lang::De);
+        let german_list = whole_screen(&german);
+        says(&german_list, "Marcel's node");
+        says(&german_list, "Gehörte Seiten");
+        same_text(&german_name("tui-browse-list.txt"), &german_list);
 
-        // Enter on Marcel's row, as the reader picks it.
-        let row = lnomad::app::places(&model.browse.model)
-            .iter()
-            .position(
-                |p| matches!(p, lnomad::app::Place::Node { dest_hash, .. } if *dest_hash == MARCEL),
-            )
-            .expect("Marcel's row");
-        let effects = update(
-            &mut model,
-            UiEvent::Browse(BrowseEvent::Intent(lnomad::Intent::Activate(
-                lnomad::app::scene::NodeId::Place(row),
-            ))),
-        );
-        assert!(matches!(
-            &effects[..],
-            [loquax::ui::UiEffect::Browse(lnomad::Effect::Navigate(_))]
-        ));
-        let micron = std::fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../lnomad/tests/fixtures/sample.mu"),
-        )
-        .expect("lnomad's sample page");
-        update(
-            &mut model,
-            UiEvent::Browse(BrowseEvent::Loaded {
-                micron,
-                title: "Marcel's node".to_string(),
-            }),
-        );
+        open_page(&mut model);
         let page = whole_screen(&model);
         same_text("tui-browse-page.txt", &page);
+        open_page(&mut german);
+        let german_page = whole_screen(&german);
+        says(&german_page, "zurück");
+        same_text(&german_name("tui-browse-page.txt"), &german_page);
 
         update(
             &mut model,
@@ -3604,40 +3929,40 @@ mod tests {
     /// `tests/fixtures/tui_toast_two_legs.frame`.
     #[test]
     fn a_two_leg_failure_toasts_plainly() {
-        let mut model = Model::new(&[[0xab; 16]]);
-        for name in ["tab", "tab", "h", "i", "enter"] {
-            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
-        }
-        let direct = SendError::Unreachable {
-            destination: [0xab; 16],
-            waited: Duration::from_secs(30),
+        let failed = |lang| {
+            let mut model = Model::new(&[[0xab; 16]]);
+            model.lang = lang;
+            for name in ["tab", "tab", "h", "i", "enter"] {
+                update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+            }
+            let direct = SendError::Unreachable {
+                destination: [0xab; 16],
+                waited: Duration::from_secs(30),
+            };
+            let fallback = SendError::NoPropagationNode(
+                "no propagation node: none has been heard".to_string(),
+            );
+            update(
+                &mut model,
+                UiEvent::SendDone(Err(format!("direct: {direct}\npropagated: {fallback}"))),
+            );
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+            let view = ui::view(&model);
+            terminal
+                .draw(|frame| draw(frame, &view, None))
+                .expect("draw");
+            frame_text(terminal.backend().buffer())
         };
-        let fallback =
-            SendError::NoPropagationNode("no propagation node: none has been heard".to_string());
-        update(
-            &mut model,
-            UiEvent::SendDone(Err(format!("direct: {direct}\npropagated: {fallback}"))),
-        );
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-        let view = ui::view(&model);
-        terminal
-            .draw(|frame| draw(frame, &view, None))
-            .expect("draw");
-        let screen = frame_text(terminal.backend().buffer());
+        let screen = failed(Lang::En);
         assert!(screen.contains(ui::NOT_SENT), "{screen}");
         assert!(!screen.contains("propagated"), "{screen}");
         // The send needed a relay and there is none: the header says so.
         assert!(screen.contains("no relay"), "{screen}");
-        let expected = include_str!("../tests/fixtures/tui_toast_two_legs.frame");
-        if screen != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-toast-two-legs.frame");
-            let _ = std::fs::write(&kept, &screen);
-            panic!(
-                "the frame moved; this run's is in {}, the pinned one in \
-                 loquax/tests/fixtures/tui_toast_two_legs.frame\n{screen}",
-                kept.display()
-            );
-        }
+        same_frames("tui_toast_two_legs.frame", &screen);
+        let german = failed(Lang::De);
+        assert!(!german.contains("propagated"), "{german}");
+        says(&german, "du: hi");
+        same_frames(&german_name("tui_toast_two_legs.frame"), &german);
     }
 
     /// Our position share's chip row (1273) at 80x24 and at 120x40: under
@@ -3650,70 +3975,72 @@ mod tests {
         use leviculum_lxmf::telemetry::Location;
         use loquax::ui::share::Span;
         let peer = [0xab; 16];
-        let mut model = Model::new(&[peer]);
         let t = 1_793_500_000;
-        let clock = |model: &mut Model, at: i64| {
-            update(
-                model,
-                UiEvent::Clock(WallTime {
-                    unix_secs: at,
-                    offset_secs: 3600,
-                }),
-            )
-        };
-        clock(&mut model, t);
-        update(
-            &mut model,
-            UiEvent::OwnFix(Some(Location {
-                latitude_e6: 43_773_100,
-                longitude_e6: 11_256_000,
-                altitude_e2: 0,
-                speed_e2: 0,
-                bearing_e2: 0,
-                accuracy_e2: 500,
-                last_update: t,
-            })),
-        );
-        update(
-            &mut model,
-            UiEvent::StartShare {
-                peer,
-                span: Span::Hour1,
-            },
-        );
-        clock(&mut model, t + 18 * 60);
-        let mut frames = String::new();
-        for (w, h) in [(80u16, 24u16), (120, 40)] {
+        let mut frames_in = Vec::new();
+        for lang in Lang::ALL {
+            let mut model = Model::new(&[peer]);
+            model.lang = lang;
+            let clock = |model: &mut Model, at: i64| {
+                update(
+                    model,
+                    UiEvent::Clock(WallTime {
+                        unix_secs: at,
+                        offset_secs: 3600,
+                    }),
+                )
+            };
+            clock(&mut model, t);
             update(
                 &mut model,
-                UiEvent::Resize {
-                    width: w,
-                    height: h,
+                UiEvent::OwnFix(Some(Location {
+                    latitude_e6: 43_773_100,
+                    longitude_e6: 11_256_000,
+                    altitude_e2: 0,
+                    speed_e2: 0,
+                    bearing_e2: 0,
+                    accuracy_e2: 500,
+                    last_update: t,
+                })),
+            );
+            update(
+                &mut model,
+                UiEvent::StartShare {
+                    peer,
+                    span: Span::Hour1,
                 },
             );
-            let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
-            let view = ui::view(&model);
-            terminal
-                .draw(|frame| draw(frame, &view, None))
-                .expect("draw");
-            let screen = frame_text(terminal.backend().buffer());
-            assert!(
-                screen.contains("⌖ Sharing your position, 42 min left"),
-                "{screen}"
-            );
-            assert_eq!(screen.contains("· click to stop"), w == 120, "{screen}");
-            frames.push_str(&format!("=== {w}x{h}\n{screen}"));
+            clock(&mut model, t + 18 * 60);
+            let mut frames = String::new();
+            for (w, h) in [(80u16, 24u16), (120, 40)] {
+                update(
+                    &mut model,
+                    UiEvent::Resize {
+                        width: w,
+                        height: h,
+                    },
+                );
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+                let view = ui::view(&model);
+                terminal
+                    .draw(|frame| draw(frame, &view, None))
+                    .expect("draw");
+                let screen = frame_text(terminal.backend().buffer());
+                if lang == Lang::En {
+                    assert!(
+                        screen.contains("⌖ Sharing your position, 42 min left"),
+                        "{screen}"
+                    );
+                    assert_eq!(screen.contains("· click to stop"), w == 120, "{screen}");
+                }
+                frames.push_str(&format!("=== {w}x{h}\n{screen}"));
+            }
+            frames_in.push((model, frames));
         }
-        let expected = include_str!("../tests/fixtures/tui_share_chip.frames");
-        if frames != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-share-chip.frames");
-            let _ = std::fs::write(&kept, &frames);
-            panic!(
-                "the frames moved; this run's are in {}, the pinned ones in \
-                 loquax/tests/fixtures/tui_share_chip.frames\n{frames}",
-                kept.display()
-            );
-        }
+        let (_, german_frames) = frames_in.pop().expect("German");
+        says(&german_frames, "du: Position geteilt");
+        let (mut model, frames) = frames_in.pop().expect("English");
+        same_frames("tui_share_chip.frames", &frames);
+        same_frames(&german_name("tui_share_chip.frames"), &german_frames);
         // The click: on the chip row's first inner cell of the wide pane.
         let screen = ui::Screen::of(120, 40, 1);
         let row = screen.messages.y + 1 + model.chip_row().expect("a chip row") as u16;
@@ -3759,8 +4086,9 @@ mod tests {
         let key = |model: &mut Model, code: KeyCode, mods: KeyModifiers| {
             update(model, UiEvent::Key(KeyEvent::new(code, mods)))
         };
-        let fresh = || {
+        let fresh = |lang| {
             let mut model = Model::new(&[peer]);
+            model.lang = lang;
             model.names.remember(peer, "Anna Schulz");
             update(&mut model, UiEvent::Open { peer });
             update(&mut model, UiEvent::Elapsed(1_000));
@@ -3805,63 +4133,67 @@ mod tests {
         };
         let speech = loquax::voice::test_speech(loquax::voice::RATE, 7_400);
 
-        let mut locked = fresh();
-        let typed = key(&mut locked, KeyCode::Char('v'), KeyModifiers::NONE);
-        assert!(
-            typed.is_empty() && locked.compose.value() == "v",
-            "a letter"
-        );
-        let _ = key(&mut locked, KeyCode::Backspace, KeyModifiers::NONE);
-        start(&mut locked);
-        feed(&mut locked, &speech);
-        // Typing does not reach the hidden field.
-        let _ = key(&mut locked, KeyCode::Char('x'), KeyModifiers::NONE);
-        assert_eq!(locked.compose.value(), "");
+        let three = |lang| {
+            let mut locked = fresh(lang);
+            let typed = key(&mut locked, KeyCode::Char('v'), KeyModifiers::NONE);
+            assert!(
+                typed.is_empty() && locked.compose.value() == "v",
+                "a letter"
+            );
+            let _ = key(&mut locked, KeyCode::Backspace, KeyModifiers::NONE);
+            start(&mut locked);
+            feed(&mut locked, &speech);
+            // Typing does not reach the hidden field.
+            let _ = key(&mut locked, KeyCode::Char('x'), KeyModifiers::NONE);
+            assert_eq!(locked.compose.value(), "");
 
-        let mut paused = fresh();
-        start(&mut paused);
-        feed(&mut paused, &vec![0; 16_000 * 3]);
-        let _ = key(&mut paused, KeyCode::Char('p'), KeyModifiers::NONE);
-        assert_eq!(paused.recording.phase, Phase::Paused);
+            let mut paused = fresh(lang);
+            start(&mut paused);
+            feed(&mut paused, &vec![0; 16_000 * 3]);
+            let _ = key(&mut paused, KeyCode::Char('p'), KeyModifiers::NONE);
+            assert_eq!(paused.recording.phase, Phase::Paused);
 
-        let mut capped = fresh();
-        start(&mut capped);
-        let now = feed(&mut capped, &speech);
-        let since = 1_000;
-        update(
-            &mut capped,
-            UiEvent::Record {
-                peer,
-                input: Input::Tick {
-                    now: now.max(since + u64::from(loquax::voice::LONGEST_MS)),
-                },
-            },
-        );
-        assert_eq!(capped.recording.phase, Phase::Preview);
-
-        let mut frames = String::new();
-        for (name, model) in [
-            ("locked", &mut locked),
-            ("paused, nothing heard", &mut paused),
-            ("preview at the cap", &mut capped),
-        ] {
-            for (w, h) in [(80u16, 24u16), (120, 40)] {
-                update(
-                    model,
-                    UiEvent::Resize {
-                        width: w,
-                        height: h,
+            let mut capped = fresh(lang);
+            start(&mut capped);
+            let now = feed(&mut capped, &speech);
+            let since = 1_000;
+            update(
+                &mut capped,
+                UiEvent::Record {
+                    peer,
+                    input: Input::Tick {
+                        now: now.max(since + u64::from(loquax::voice::LONGEST_MS)),
                     },
-                );
-                let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
-                let view = ui::view(model);
-                terminal
-                    .draw(|frame| draw(frame, &view, None))
-                    .expect("draw");
-                let screen = frame_text(terminal.backend().buffer());
-                frames.push_str(&format!("=== {name} {w}x{h}\n{screen}"));
+                },
+            );
+            assert_eq!(capped.recording.phase, Phase::Preview);
+
+            let mut frames = String::new();
+            for (name, model) in [
+                ("locked", &mut locked),
+                ("paused, nothing heard", &mut paused),
+                ("preview at the cap", &mut capped),
+            ] {
+                for (w, h) in [(80u16, 24u16), (120, 40)] {
+                    update(
+                        model,
+                        UiEvent::Resize {
+                            width: w,
+                            height: h,
+                        },
+                    );
+                    let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+                    let view = ui::view(model);
+                    terminal
+                        .draw(|frame| draw(frame, &view, None))
+                        .expect("draw");
+                    let screen = frame_text(terminal.backend().buffer());
+                    frames.push_str(&format!("=== {name} {w}x{h}\n{screen}"));
+                }
             }
-        }
+            (locked, paused, frames)
+        };
+        let (mut locked, mut paused, frames) = three(Lang::En);
         for (want, state) in [
             ("● REC 00:07", "locked"),
             ("p pause · Enter send", "locked"),
@@ -3875,16 +4207,10 @@ mod tests {
             assert!(frames.contains(want), "{state}: {want:?}\n{frames}");
         }
         assert!(frames.contains('▇') && frames.contains('▁'), "{frames}");
-        let expected = include_str!("../tests/fixtures/tui_recording.frames");
-        if frames != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-recording.frames");
-            let _ = std::fs::write(&kept, &frames);
-            panic!(
-                "the frames moved; this run's are in {}, the pinned ones in \
-                 loquax/tests/fixtures/tui_recording.frames\n{frames}",
-                kept.display()
-            );
-        }
+        same_frames("tui_recording.frames", &frames);
+        let (_, _, german) = three(Lang::De);
+        says(&german, "Noch keine Nachrichten");
+        same_frames(&german_name("tui_recording.frames"), &german);
 
         // ASCII: the same bar in ASCII alone.
         locked.ascii = true;
@@ -3924,7 +4250,7 @@ mod tests {
         assert!(screen.contains(&wave), "{wave}\n{screen}");
 
         // `Esc` throws it away, and stays in compose.
-        let mut again = fresh();
+        let mut again = fresh(Lang::En);
         start(&mut again);
         feed(&mut again, &speech[..16_000]);
         let gone = key(&mut again, KeyCode::Esc, KeyModifiers::NONE);
@@ -4017,88 +4343,95 @@ mod tests {
         let key = |model: &mut Model, name: &str| {
             update(model, UiEvent::Key(parse_key(name).expect("key")));
         };
-        let mut model = Model::new(&[]);
-        update(
-            &mut model,
-            UiEvent::Resize {
-                width: 80,
-                height: 16,
-            },
-        );
-        let empty = screen(&model, 80, 16);
-        assert!(empty.contains(":new conversation"), "{empty}");
-        assert!(!empty.contains("--to"), "{empty}");
-
-        key(&mut model, ":");
-        let listed = screen(&model, 80, 16);
-        key(&mut model, "esc");
-        key(&mut model, ":");
-        keys(&mut model, "new conv");
-        key(&mut model, "enter");
-        let asking = screen(&model, 80, 16);
-        assert!(
-            asking.contains("Your contact's code or address"),
-            "{asking}"
-        );
-
-        // An old code: the address alone, in capitals.
-        let bert = loquax::address::to_hex(&[0xbe; 16]).to_ascii_uppercase();
-        keys(&mut model, &bert);
-        key(&mut model, "enter");
-        assert_eq!(
-            model.conversations.get(model.selected).map(|c| c.peer),
-            Some([0xbe; 16])
-        );
-        assert_eq!(model.focus, Pane::Compose);
-
-        // Garbage says so in the phone's sentence and opens nothing.
-        key(&mut model, "esc");
-        key(&mut model, ":");
-        keys(&mut model, "new conv");
-        key(&mut model, "enter");
-        keys(&mut model, "hello");
-        key(&mut model, "enter");
-        assert_eq!(model.conversations.len(), 1);
-        assert_eq!(
-            model.toasts.last().map(|t| t.text.as_str()),
-            Some("That is not a Loquax code.")
-        );
-
-        // A contact code: the conversation, then its name asked.
-        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
-        let key_bytes = leviculum_core::Identity::from_private_key_bytes(&private)
-            .expect("a key")
-            .public_key_bytes();
-        let code = loquax::lxma::encode(&key_bytes).expect("a code");
-        let peer = loquax::home::lxmf_address(&key_bytes).expect("an address");
-        key(&mut model, ":");
-        keys(&mut model, "add contact");
-        key(&mut model, "enter");
-        keys(&mut model, &code);
-        key(&mut model, "enter");
-        assert_eq!(
-            model.conversations.get(model.selected).map(|c| c.peer),
-            Some(peer)
-        );
-        let naming = screen(&model, 80, 16);
-        assert!(naming.contains("your name for"), "{naming}");
-        keys(&mut model, "Carol");
-        key(&mut model, "enter");
-        assert_eq!(model.names.petname(&peer), Some("Carol"));
-
-        let frames = format!(
-            "--- empty\n{empty}--- palette\n{listed}--- asking\n{asking}--- naming\n{naming}"
-        );
-        let expected = include_str!("../tests/fixtures/tui_palette_new.frames");
-        if frames != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-palette-new.frames");
-            let _ = std::fs::write(&kept, &frames);
-            panic!(
-                "the frames moved; this run's are in {}, the pinned ones in \
-                 loquax/tests/fixtures/tui_palette_new.frames\n{frames}",
-                kept.display()
+        let walk = |lang| {
+            let en = lang == Lang::En;
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            update(
+                &mut model,
+                UiEvent::Resize {
+                    width: 80,
+                    height: 16,
+                },
             );
-        }
+            let empty = screen(&model, 80, 16);
+            assert!(
+                empty.contains(if en {
+                    ":new conversation"
+                } else {
+                    "Noch keine"
+                }),
+                "{empty}"
+            );
+            assert!(!empty.contains("--to"), "{empty}");
+
+            key(&mut model, ":");
+            let listed = screen(&model, 80, 16);
+            key(&mut model, "esc");
+            key(&mut model, ":");
+            keys(&mut model, "new conv");
+            key(&mut model, "enter");
+            let asking = screen(&model, 80, 16);
+            assert!(
+                !en || asking.contains("Your contact's code or address"),
+                "{asking}"
+            );
+
+            // An old code: the address alone, in capitals.
+            let bert = loquax::address::to_hex(&[0xbe; 16]).to_ascii_uppercase();
+            keys(&mut model, &bert);
+            key(&mut model, "enter");
+            assert_eq!(
+                model.conversations.get(model.selected).map(|c| c.peer),
+                Some([0xbe; 16])
+            );
+            assert_eq!(model.focus, Pane::Compose);
+
+            // Garbage says so in the phone's sentence and opens nothing.
+            key(&mut model, "esc");
+            key(&mut model, ":");
+            keys(&mut model, "new conv");
+            key(&mut model, "enter");
+            keys(&mut model, "hello");
+            key(&mut model, "enter");
+            assert_eq!(model.conversations.len(), 1);
+            assert!(
+                !en || model.toasts.last().map(|t| t.text.as_str())
+                    == Some("That is not a Loquax code."),
+                "{:?}",
+                model.toasts.last()
+            );
+
+            // A contact code: the conversation, then its name asked.
+            let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 1);
+            let key_bytes = leviculum_core::Identity::from_private_key_bytes(&private)
+                .expect("a key")
+                .public_key_bytes();
+            let code = loquax::lxma::encode(&key_bytes).expect("a code");
+            let peer = loquax::home::lxmf_address(&key_bytes).expect("an address");
+            key(&mut model, ":");
+            keys(&mut model, "add contact");
+            key(&mut model, "enter");
+            keys(&mut model, &code);
+            key(&mut model, "enter");
+            assert_eq!(
+                model.conversations.get(model.selected).map(|c| c.peer),
+                Some(peer)
+            );
+            let naming = screen(&model, 80, 16);
+            assert!(!en || naming.contains("your name for"), "{naming}");
+            keys(&mut model, "Carol");
+            key(&mut model, "enter");
+            assert_eq!(model.names.petname(&peer), Some("Carol"));
+
+            format!(
+                "--- empty\n{empty}--- palette\n{listed}--- asking\n{asking}--- naming\n{naming}"
+            )
+        };
+        same_frames("tui_palette_new.frames", &walk(Lang::En));
+        let german = walk(Lang::De);
+        says(&german, "Code oder Adresse deines Kontakts");
+        same_frames(&german_name("tui_palette_new.frames"), &german);
     }
 
     /// 1279, 1443: `P` opens the profile, the scene's, as a tap on the
@@ -4117,30 +4450,35 @@ mod tests {
             .public_key_bytes();
         let code = loquax::lxma::encode(&key_bytes).expect("a code");
         let qr = loquax::home::qr::verbatim_modules(&code).expect("a QR");
-        let mut model = Model::new(&[[0xab; 16]]);
-        model.address = Some([0x4c; 16]);
-        model.own_code = Some(ui::OwnCode::of(code.clone(), Some(qr.clone())));
-        model.profile = ProfileFacts {
-            name: "Mia Sander".to_string(),
-            mailbox: Mailbox::Away {
-                name: Some("Mia's computer".to_string()),
-                rung: Some(Rung::Relayed),
-                word: Some(loquax::home::board::Word::Connected),
-            },
-            devices: vec![
-                Device {
-                    name: "Laptop".to_string(),
-                    this: true,
-                },
-                Device {
-                    name: "Pixel 8".to_string(),
-                    this: false,
-                },
-            ],
-        };
         let (width, height) = (100, 60);
-        update(&mut model, UiEvent::Resize { width, height });
-        update(&mut model, UiEvent::Key(parse_key("P").expect("key")));
+        let profile_in = |lang| {
+            let mut model = Model::new(&[[0xab; 16]]);
+            model.lang = lang;
+            model.address = Some([0x4c; 16]);
+            model.own_code = Some(ui::OwnCode::of(code.clone(), Some(qr.clone())));
+            model.profile = ProfileFacts {
+                name: "Mia Sander".to_string(),
+                mailbox: Mailbox::Away {
+                    name: Some("Mia's computer".to_string()),
+                    rung: Some(Rung::Relayed),
+                    word: Some(loquax::home::board::Word::Connected),
+                },
+                devices: vec![
+                    Device {
+                        name: "Laptop".to_string(),
+                        this: true,
+                    },
+                    Device {
+                        name: "Pixel 8".to_string(),
+                        this: false,
+                    },
+                ],
+            };
+            update(&mut model, UiEvent::Resize { width, height });
+            update(&mut model, UiEvent::Key(parse_key("P").expect("key")));
+            model
+        };
+        let mut model = profile_in(Lang::En);
         let shown = screen(&model, width, height);
         assert!(shown.contains(" Your profile "), "{shown}");
         for words in [
@@ -4170,16 +4508,12 @@ mod tests {
         update(&mut model, UiEvent::Key(parse_key("esc").expect("key")));
         assert!(!screen(&model, width, height).contains(" Your profile "));
 
-        let expected = include_str!("../tests/fixtures/tui_profile.frames");
-        if shown != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-profile.frames");
-            let _ = std::fs::write(&kept, &shown);
-            panic!(
-                "the frame moved; this run's is in {}, the pinned one in \
-                 loquax/tests/fixtures/tui_profile.frames\n{shown}",
-                kept.display()
-            );
-        }
+        same_frames("tui_profile.frames", &shown);
+        let german = screen(&profile_in(Lang::De), width, height);
+        says(&german, "Mia Sander");
+        says(&german, "Dein Profil");
+        says(&german, "Postfach: Mia's computer (verbunden)");
+        same_frames(&german_name("tui_profile.frames"), &german);
 
         // The click on the list's title, its third cell: the profile.
         update(
@@ -4351,9 +4685,16 @@ mod tests {
     /// writes twice, Alice opened again at her `2 new`, and a reply on its
     /// way.
     fn mockup(width: u16, height: u16) -> Model {
+        mockup_in(Lang::En, width, height)
+    }
+
+    /// The mockup's story in `lang`, the language set first as the
+    /// terminal sets the locale's.
+    fn mockup_in(lang: Lang, width: u16, height: u16) -> Model {
         let alice = [0x4f; 16];
         let bob = [0xb7; 16];
         let mut model = Model::new(&[alice, bob]);
+        model.lang = lang;
         update(&mut model, UiEvent::Resize { width, height });
         // Named as the mockup names them: two nameless peers would collide
         // and say so in the header (1452), which is its own golden.
@@ -4499,51 +4840,56 @@ mod tests {
     /// in `tests/fixtures/tui_layout.frames`.
     #[test]
     fn the_layout_draws_the_mockups_structure_at_both_sizes() {
-        let mut frames = String::new();
-        for (width, height) in [(80, 24), (120, 40)] {
-            let model = mockup(width, height);
-            let shot = screen(&model, width, height);
-            frames.push_str(&format!("--- {width} x {height} ---\n{shot}"));
-            let rows: Vec<&str> = shot.lines().collect();
-            // The list: Alice on top with the reply's time and the bar, Bob
-            // under her; the header without a trust word for the default
-            // state (1279).
-            assert!(rows[1].starts_with("│▌Alice "), "{shot}");
-            assert!(rows[2].starts_with("│▌you: the tripod fits"), "{shot}");
-            assert!(rows[4].starts_with("│ Bob "), "{shot}");
-            assert!(rows[0].contains("Alice──"), "{shot}");
-            assert!(!rows[0].contains("unknown"), "{shot}");
-            // The rule, the date line, ours right, theirs left.
-            assert!(shot.contains("── Today ──"), "{shot}");
-            assert!(shot.contains(" 2 new "), "{shot}");
-            assert!(shot.contains("│ ok, bring the T114.  14:04 "), "{shot}");
-            assert!(shot.contains(" the tripod fits  14:06 ⠋  │"), "{shot}");
-            assert!(shot.contains("to Alice"), "{shot}");
-        }
-        let mut model = mockup(80, 24);
-        model.focus = Pane::Messages;
-        for _ in 0..6 {
-            update(&mut model, UiEvent::Key(parse_key("k").expect("key")));
-        }
-        frames.push_str(&format!("--- cursor ---\n{}", screen(&model, 80, 24)));
-        update(&mut model, UiEvent::Key(parse_key("enter").expect("key")));
-        let detail = screen(&model, 80, 24);
-        assert!(detail.contains("arrived: proof received"), "{detail}");
-        frames.push_str(&format!("--- detail ---\n{detail}"));
-        let model = mockup(60, 20);
-        frames.push_str(&format!(
-            "--- 60 x 20, narrow ---\n{}",
-            screen(&model, 60, 20)
-        ));
-        let expected = include_str!("../tests/fixtures/tui_layout.frames");
-        if frames != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-layout.frames");
-            let _ = std::fs::write(&kept, &frames);
-            panic!(
-                "the frames moved; this run's are in {}, the pinned ones in \
-                 loquax/tests/fixtures/tui_layout.frames\n{frames}",
-                kept.display()
+        for lang in Lang::ALL {
+            let mut frames = String::new();
+            for (width, height) in [(80, 24), (120, 40)] {
+                let model = mockup_in(lang, width, height);
+                let shot = screen(&model, width, height);
+                frames.push_str(&format!("--- {width} x {height} ---\n{shot}"));
+                if lang == Lang::De {
+                    continue;
+                }
+                let rows: Vec<&str> = shot.lines().collect();
+                // The list: Alice on top with the reply's time and the bar, Bob
+                // under her; the header without a trust word for the default
+                // state (1279).
+                assert!(rows[1].starts_with("│▌Alice "), "{shot}");
+                assert!(rows[2].starts_with("│▌you: the tripod fits"), "{shot}");
+                assert!(rows[4].starts_with("│ Bob "), "{shot}");
+                assert!(rows[0].contains("Alice──"), "{shot}");
+                assert!(!rows[0].contains("unknown"), "{shot}");
+                // The rule, the date line, ours right, theirs left.
+                assert!(shot.contains("── Today ──"), "{shot}");
+                assert!(shot.contains(" 2 new "), "{shot}");
+                assert!(shot.contains("│ ok, bring the T114.  14:04 "), "{shot}");
+                assert!(shot.contains(" the tripod fits  14:06 ⠋  │"), "{shot}");
+                assert!(shot.contains("to Alice"), "{shot}");
+            }
+            let mut model = mockup_in(lang, 80, 24);
+            model.focus = Pane::Messages;
+            for _ in 0..6 {
+                update(&mut model, UiEvent::Key(parse_key("k").expect("key")));
+            }
+            frames.push_str(&format!("--- cursor ---\n{}", screen(&model, 80, 24)));
+            update(&mut model, UiEvent::Key(parse_key("enter").expect("key")));
+            let detail = screen(&model, 80, 24);
+            assert!(
+                lang == Lang::De || detail.contains("arrived: proof received"),
+                "{detail}"
             );
+            frames.push_str(&format!("--- detail ---\n{detail}"));
+            let model = mockup_in(lang, 60, 20);
+            frames.push_str(&format!(
+                "--- 60 x 20, narrow ---\n{}",
+                screen(&model, 60, 20)
+            ));
+            match lang {
+                Lang::En => same_frames("tui_layout.frames", &frames),
+                Lang::De => {
+                    says(&frames, "ein Relais");
+                    same_frames(&german_name("tui_layout.frames"), &frames)
+                }
+            }
         }
     }
 
@@ -4555,69 +4901,69 @@ mod tests {
     #[test]
     fn a_long_message_is_read_by_the_line() {
         let alice = [0x4f; 16];
-        let mut model = Model::new(&[alice]);
-        update(
-            &mut model,
-            UiEvent::Resize {
-                width: 80,
-                height: 24,
-            },
-        );
-        update(
-            &mut model,
-            UiEvent::Clock(WallTime::from_civil(2026, 10, 26, 9, 0, 3600)),
-        );
-        let long: Vec<String> = (1..=70)
-            .map(|n| format!("line {n} of the long one"))
-            .collect();
-        for (n, body) in ["short before", &long.join("\n"), "short after"]
-            .into_iter()
-            .enumerate()
-        {
+        for lang in Lang::ALL {
+            let mut model = Model::new(&[alice]);
+            model.lang = lang;
             update(
                 &mut model,
-                UiEvent::Engine(OutboxEvent::Received {
-                    sent_at: 0,
-                    message_id: [n as u8 + 1; 32],
-                    source: alice,
-                    title: Vec::new(),
-                    body: body.as_bytes().to_vec(),
-                    fields: Vec::new(),
-                    verified: true,
-                }),
+                UiEvent::Resize {
+                    width: 80,
+                    height: 24,
+                },
             );
-        }
-        model.toasts.clear();
-        let press = |model: &mut Model, name: &str, times: usize| {
-            for _ in 0..times {
-                update(model, UiEvent::Key(parse_key(name).expect("key")));
+            update(
+                &mut model,
+                UiEvent::Clock(WallTime::from_civil(2026, 10, 26, 9, 0, 3600)),
+            );
+            let long: Vec<String> = (1..=70)
+                .map(|n| format!("line {n} of the long one"))
+                .collect();
+            for (n, body) in ["short before", &long.join("\n"), "short after"]
+                .into_iter()
+                .enumerate()
+            {
+                update(
+                    &mut model,
+                    UiEvent::Engine(OutboxEvent::Received {
+                        sent_at: 0,
+                        message_id: [n as u8 + 1; 32],
+                        source: alice,
+                        title: Vec::new(),
+                        body: body.as_bytes().to_vec(),
+                        fields: Vec::new(),
+                        verified: true,
+                    }),
+                );
             }
-        };
-        press(&mut model, "tab", 1);
-        let mut frames = String::new();
-        press(&mut model, "home", 1);
-        frames.push_str(&format!("--- top ---\n{}", screen(&model, 80, 24)));
-        press(&mut model, "down", 20);
-        let mid = screen(&model, 80, 24);
-        assert!(mid.contains("line 20 of the long one"), "{mid}");
-        assert!(!mid.contains("short before"), "{mid}");
-        frames.push_str(&format!("--- twenty down ---\n{mid}"));
-        press(&mut model, "right", 1);
-        frames.push_str(&format!("--- right ---\n{}", screen(&model, 80, 24)));
-        press(&mut model, "end", 1);
-        press(&mut model, "up", 3);
-        let back = screen(&model, 80, 24);
-        assert!(back.contains("line 70 of the long one"), "{back}");
-        frames.push_str(&format!("--- back up ---\n{back}"));
-        let expected = include_str!("../tests/fixtures/tui_long_message.frames");
-        if frames != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-long-message.frames");
-            let _ = std::fs::write(&kept, &frames);
-            panic!(
-                "the frames moved; this run's are in {}, the pinned ones in \
-                 loquax/tests/fixtures/tui_long_message.frames\n{frames}",
-                kept.display()
-            );
+            model.toasts.clear();
+            let press = |model: &mut Model, name: &str, times: usize| {
+                for _ in 0..times {
+                    update(model, UiEvent::Key(parse_key(name).expect("key")));
+                }
+            };
+            press(&mut model, "tab", 1);
+            let mut frames = String::new();
+            press(&mut model, "home", 1);
+            frames.push_str(&format!("--- top ---\n{}", screen(&model, 80, 24)));
+            press(&mut model, "down", 20);
+            let mid = screen(&model, 80, 24);
+            assert!(mid.contains("line 20 of the long one"), "{mid}");
+            assert!(!mid.contains("short before"), "{mid}");
+            frames.push_str(&format!("--- twenty down ---\n{mid}"));
+            press(&mut model, "right", 1);
+            frames.push_str(&format!("--- right ---\n{}", screen(&model, 80, 24)));
+            press(&mut model, "end", 1);
+            press(&mut model, "up", 3);
+            let back = screen(&model, 80, 24);
+            assert!(back.contains("line 70 of the long one"), "{back}");
+            frames.push_str(&format!("--- back up ---\n{back}"));
+            match lang {
+                Lang::En => same_frames("tui_long_message.frames", &frames),
+                Lang::De => {
+                    says(&frames, "Unbekannt");
+                    same_frames(&german_name("tui_long_message.frames"), &frames)
+                }
+            }
         }
     }
 
@@ -4631,102 +4977,106 @@ mod tests {
         use leviculum_lxmf::constants::FIELD_REACTION;
         use leviculum_lxmf::reaction::Reaction;
         let alice = [0x4f; 16];
-        let mut model = Model::new(&[alice]);
-        update(
-            &mut model,
-            UiEvent::Resize {
-                width: 80,
-                height: 24,
-            },
-        );
-        update(
-            &mut model,
-            UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, 1, 3600)),
-        );
-        let recv = |m: &mut Model, id: u8, body: &str, fields: Vec<(i64, Vec<u8>)>| {
-            update(
-                m,
-                UiEvent::Engine(OutboxEvent::Received {
-                    sent_at: 0,
-                    message_id: [id; 32],
-                    source: alice,
-                    title: Vec::new(),
-                    body: body.as_bytes().to_vec(),
-                    fields,
-                    verified: true,
-                }),
-            );
-        };
-        let reaction = |to: u8, content: &str| {
-            let value = Reaction {
-                to: [to; 32],
-                content: content.into(),
-            }
-            .encode_field_value();
-            vec![(FIELD_REACTION, value)]
-        };
-        recv(&mut model, 1, "lunch at noon?", Vec::new());
-        model.focus = Pane::Compose;
-        for c in "yes, the usual place".chars() {
+        for lang in Lang::ALL {
+            let en = lang == Lang::En;
+            let mut model = Model::new(&[alice]);
+            model.lang = lang;
             update(
                 &mut model,
-                UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                UiEvent::Resize {
+                    width: 80,
+                    height: 24,
+                },
             );
-        }
-        update(
-            &mut model,
-            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        );
-        update(
-            &mut model,
-            UiEvent::Engine(OutboxEvent::Queued {
-                message_id: [0xa1; 32],
-            }),
-        );
-        update(
-            &mut model,
-            UiEvent::Engine(OutboxEvent::State {
-                message_id: [0xa1; 32],
-                state: MessageState::Delivered,
-            }),
-        );
-        update(&mut model, UiEvent::SendDone(Ok(())));
-        recv(&mut model, 2, "", reaction(0xa1, "\u{1F44D}"));
-        recv(
-            &mut model,
-            3,
-            "Reacted to your message with \u{2764}\u{FE0F}.",
-            reaction(0xa1, "\u{2764}\u{FE0F}"),
-        );
-        model.toasts.clear();
-        let mut frames = String::new();
-        let two = screen(&model, 80, 24);
-        assert!(!two.contains("Reacted"), "{two}");
-        frames.push_str(&format!("--- two reactions ---\n{two}"));
-        model.focus = Pane::Messages;
-        update(&mut model, UiEvent::Key(parse_key("k").expect("key")));
-        update(&mut model, UiEvent::Key(parse_key("e").expect("key")));
-        let picker = screen(&model, 80, 24);
-        assert!(picker.contains("react to: lunch at noon?"), "{picker}");
-        frames.push_str(&format!("--- picker ---\n{picker}"));
-        let effects = update(&mut model, UiEvent::Key(parse_key("1").expect("key")));
-        assert!(
-            // The reaction and the read-receipt mark (1230).
-            matches!(effects.as_slice(), [loquax::ui::UiEffect::Send { fields, .. }]
+            update(
+                &mut model,
+                UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, 1, 3600)),
+            );
+            let recv = |m: &mut Model, id: u8, body: &str, fields: Vec<(i64, Vec<u8>)>| {
+                update(
+                    m,
+                    UiEvent::Engine(OutboxEvent::Received {
+                        sent_at: 0,
+                        message_id: [id; 32],
+                        source: alice,
+                        title: Vec::new(),
+                        body: body.as_bytes().to_vec(),
+                        fields,
+                        verified: true,
+                    }),
+                );
+            };
+            let reaction = |to: u8, content: &str| {
+                let value = Reaction {
+                    to: [to; 32],
+                    content: content.into(),
+                }
+                .encode_field_value();
+                vec![(FIELD_REACTION, value)]
+            };
+            recv(&mut model, 1, "lunch at noon?", Vec::new());
+            model.focus = Pane::Compose;
+            for c in "yes, the usual place".chars() {
+                update(
+                    &mut model,
+                    UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                );
+            }
+            update(
+                &mut model,
+                UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            );
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Queued {
+                    message_id: [0xa1; 32],
+                }),
+            );
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::State {
+                    message_id: [0xa1; 32],
+                    state: MessageState::Delivered,
+                }),
+            );
+            update(&mut model, UiEvent::SendDone(Ok(())));
+            recv(&mut model, 2, "", reaction(0xa1, "\u{1F44D}"));
+            recv(
+                &mut model,
+                3,
+                "Reacted to your message with \u{2764}\u{FE0F}.",
+                reaction(0xa1, "\u{2764}\u{FE0F}"),
+            );
+            model.toasts.clear();
+            let mut frames = String::new();
+            let two = screen(&model, 80, 24);
+            assert!(!two.contains("Reacted"), "{two}");
+            frames.push_str(&format!("--- two reactions ---\n{two}"));
+            model.focus = Pane::Messages;
+            update(&mut model, UiEvent::Key(parse_key("k").expect("key")));
+            update(&mut model, UiEvent::Key(parse_key("e").expect("key")));
+            let picker = screen(&model, 80, 24);
+            assert!(
+                !en || picker.contains("react to: lunch at noon?"),
+                "{picker}"
+            );
+            frames.push_str(&format!("--- picker ---\n{picker}"));
+            let effects = update(&mut model, UiEvent::Key(parse_key("1").expect("key")));
+            assert!(
+                // The reaction and the read-receipt mark (1230).
+                matches!(effects.as_slice(), [loquax::ui::UiEffect::Send { fields, .. }]
                 if fields.len() == 3 && fields[0].0 == FIELD_REACTION),
-            "{effects:?}"
-        );
-        model.toasts.clear();
-        frames.push_str(&format!("--- ours ---\n{}", screen(&model, 80, 24)));
-        let expected = include_str!("../tests/fixtures/tui_reactions.frames");
-        if frames != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-reactions.frames");
-            let _ = std::fs::write(&kept, &frames);
-            panic!(
-                "the frames moved; this run's are in {}, the pinned ones in \
-                 loquax/tests/fixtures/tui_reactions.frames\n{frames}",
-                kept.display()
+                "{effects:?}"
             );
+            model.toasts.clear();
+            frames.push_str(&format!("--- ours ---\n{}", screen(&model, 80, 24)));
+            match lang {
+                Lang::En => same_frames("tui_reactions.frames", &frames),
+                Lang::De => {
+                    says(&frames, "reagiert");
+                    same_frames(&german_name("tui_reactions.frames"), &frames)
+                }
+            }
         }
     }
 
@@ -4738,93 +5088,94 @@ mod tests {
     #[test]
     fn media_without_words_is_its_line_alone() {
         let alice = [0x4f; 16];
-        let mut model = Model::new(&[alice]);
-        update(
-            &mut model,
-            UiEvent::Resize {
-                width: 80,
-                height: 24,
-            },
-        );
-        let recv = |m: &mut Model, id: u8, minute: u32, body: &str, fields| {
+        for lang in Lang::ALL {
+            let en = lang == Lang::En;
+            let mut model = Model::new(&[alice]);
+            model.lang = lang;
             update(
-                m,
-                UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, minute, 3600)),
+                &mut model,
+                UiEvent::Resize {
+                    width: 80,
+                    height: 24,
+                },
+            );
+            let recv = |m: &mut Model, id: u8, minute: u32, body: &str, fields| {
+                update(
+                    m,
+                    UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, minute, 3600)),
+                );
+                update(
+                    m,
+                    UiEvent::Engine(OutboxEvent::Received {
+                        sent_at: 0,
+                        message_id: [id; 32],
+                        source: alice,
+                        title: Vec::new(),
+                        body: body.as_bytes().to_vec(),
+                        fields,
+                        verified: true,
+                    }),
+                );
+            };
+            recv(
+                &mut model,
+                1,
+                1,
+                "",
+                loquax::ui::photos::photo_fields("jpg", vec![7; 312_400]),
+            );
+            recv(
+                &mut model,
+                2,
+                11,
+                "",
+                loquax::ui::files::file_fields("report.pdf", vec![7; 1_400]),
+            );
+            recv(
+                &mut model,
+                3,
+                21,
+                "",
+                loquax::ui::voice::voice_fields(loquax::ui::voice::AM_OPUS_OGG, vec![7; 900]),
+            );
+            model.toasts.clear();
+            let mut frames = String::new();
+            let alone = screen(&model, 80, 24);
+            assert!(!en || alone.contains("▣ photo · 313 KB"), "{alone}");
+            assert!(!en || alone.contains("▤ report.pdf · 2 KB"), "{alone}");
+            assert!(!en || alone.contains("♪ voice message"), "{alone}");
+            frames.push_str(&format!("--- photo, file, voice alone ---\n{alone}"));
+            update(
+                &mut model,
+                UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, 31, 3600)),
             );
             update(
-                m,
-                UiEvent::Engine(OutboxEvent::Received {
-                    sent_at: 0,
-                    message_id: [id; 32],
-                    source: alice,
-                    title: Vec::new(),
-                    body: body.as_bytes().to_vec(),
-                    fields,
-                    verified: true,
-                }),
+                &mut model,
+                UiEvent::SendPhoto {
+                    peer: alice,
+                    format: "jpg".into(),
+                    data: vec![0xff, 0xd8, 0xff],
+                },
             );
-        };
-        recv(
-            &mut model,
-            1,
-            1,
-            "",
-            loquax::ui::photos::photo_fields("jpg", vec![7; 312_400]),
-        );
-        recv(
-            &mut model,
-            2,
-            11,
-            "",
-            loquax::ui::files::file_fields("report.pdf", vec![7; 1_400]),
-        );
-        recv(
-            &mut model,
-            3,
-            21,
-            "",
-            loquax::ui::voice::voice_fields(loquax::ui::voice::AM_OPUS_OGG, vec![7; 900]),
-        );
-        model.toasts.clear();
-        let mut frames = String::new();
-        let alone = screen(&model, 80, 24);
-        assert!(alone.contains("▣ photo · 313 KB"), "{alone}");
-        assert!(alone.contains("▤ report.pdf · 2 KB"), "{alone}");
-        assert!(alone.contains("♪ voice message"), "{alone}");
-        frames.push_str(&format!("--- photo, file, voice alone ---\n{alone}"));
-        update(
-            &mut model,
-            UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, 31, 3600)),
-        );
-        update(
-            &mut model,
-            UiEvent::SendPhoto {
-                peer: alice,
-                format: "jpg".into(),
-                data: vec![0xff, 0xd8, 0xff],
-            },
-        );
-        recv(
-            &mut model,
-            4,
-            41,
-            "the view from the hill",
-            loquax::ui::photos::photo_fields("jpg", vec![7; 1_000]),
-        );
-        model.toasts.clear();
-        frames.push_str(&format!(
-            "--- ours, then words under a photo ---\n{}",
-            screen(&model, 80, 24)
-        ));
-        let expected = include_str!("../tests/fixtures/tui_media.frames");
-        if frames != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-media.frames");
-            let _ = std::fs::write(&kept, &frames);
-            panic!(
-                "the frames moved; this run's are in {}, the pinned ones in \
-                 loquax/tests/fixtures/tui_media.frames\n{frames}",
-                kept.display()
+            recv(
+                &mut model,
+                4,
+                41,
+                "the view from the hill",
+                loquax::ui::photos::photo_fields("jpg", vec![7; 1_000]),
             );
+            model.toasts.clear();
+            frames.push_str(&format!(
+                "--- ours, then words under a photo ---\n{}",
+                screen(&model, 80, 24)
+            ));
+            match lang {
+                Lang::En => same_frames("tui_media.frames", &frames),
+                Lang::De => {
+                    says(&frames, "Sprachnachricht");
+                    same_frames(&german_name("tui_media.frames"), &frames)
+                }
+            }
         }
     }
 
@@ -4848,63 +5199,63 @@ mod tests {
                 );
             }
         };
-        let mut frames = String::new();
-        for (width, height) in [(120, 40), (80, 24)] {
-            let mut model = mockup(width, height);
-            update(
-                &mut model,
-                UiEvent::Engine(OutboxEvent::Received {
-                    sent_at: 0,
-                    message_id: [0x7b; 32],
-                    source: [0xb7; 16],
-                    title: Vec::new(),
-                    body: b"the tripod is with 4f4f4f4f".to_vec(),
-                    fields: Vec::new(),
-                    verified: true,
-                }),
-            );
-            model.toasts.clear();
-            keys(&mut model, &["esc", "esc", "/"]);
-            typed(&mut model, "tripod");
-            let shot = screen(&model, width, height);
-            assert!(shot.contains("● Search"), "{shot}");
-            assert!(shot.contains(" esc closes "), "{shot}");
-            assert!(shot.contains("│ / tripod"), "{shot}");
-            assert!(shot.contains("│ MESSAGES"), "{shot}");
-            assert!(shot.contains("Esc close search"), "{shot}");
-            frames.push_str(&format!("--- {width} x {height}: typed ---\n{shot}"));
-            keys(&mut model, &["tab", "j", "j", "enter"]);
-            let shot = screen(&model, width, height);
-            assert!(shot.contains("▌and the small «tripod»"), "{shot}");
-            assert!(shot.contains(" the «tripod» fits "), "{shot}");
-            frames.push_str(&format!("--- {width} x {height}: opened ---\n{shot}"));
-            keys(&mut model, &["/"]);
-            for _ in 0.."tripod".len() {
-                keys(&mut model, &["backspace"]);
+        for lang in Lang::ALL {
+            let en = lang == Lang::En;
+            let mut frames = String::new();
+            for (width, height) in [(120, 40), (80, 24)] {
+                let mut model = mockup_in(lang, width, height);
+                update(
+                    &mut model,
+                    UiEvent::Engine(OutboxEvent::Received {
+                        sent_at: 0,
+                        message_id: [0x7b; 32],
+                        source: [0xb7; 16],
+                        title: Vec::new(),
+                        body: b"the tripod is with 4f4f4f4f".to_vec(),
+                        fields: Vec::new(),
+                        verified: true,
+                    }),
+                );
+                model.toasts.clear();
+                keys(&mut model, &["esc", "esc", "/"]);
+                typed(&mut model, "tripod");
+                let shot = screen(&model, width, height);
+                assert!(!en || shot.contains("● Search"), "{shot}");
+                assert!(!en || shot.contains(" esc closes "), "{shot}");
+                assert!(shot.contains("│ / tripod"), "{shot}");
+                assert!(!en || shot.contains("│ MESSAGES"), "{shot}");
+                assert!(!en || shot.contains("Esc close search"), "{shot}");
+                frames.push_str(&format!("--- {width} x {height}: typed ---\n{shot}"));
+                keys(&mut model, &["tab", "j", "j", "enter"]);
+                let shot = screen(&model, width, height);
+                assert!(shot.contains("▌and the small «tripod»"), "{shot}");
+                assert!(shot.contains(" the «tripod» fits "), "{shot}");
+                frames.push_str(&format!("--- {width} x {height}: opened ---\n{shot}"));
+                keys(&mut model, &["/"]);
+                for _ in 0.."tripod".len() {
+                    keys(&mut model, &["backspace"]);
+                }
+                typed(&mut model, "4f4f");
+                let shot = screen(&model, width, height);
+                assert!(!en || shot.contains("│ CONVERSATIONS"), "{shot}");
+                assert!(!en || shot.contains("│ MESSAGES"), "{shot}");
+                // Alice by her address, which her row no longer shows (1452),
+                // and the message that names it.
+                assert!(shot.contains("«4f4f»"), "{shot}");
+                frames.push_str(&format!("--- {width} x {height}: both groups ---\n{shot}"));
+                keys(&mut model, &["esc"]);
+                let shot = screen(&model, width, height);
+                assert!(!en || shot.contains(" / search "), "{shot}");
+                assert!(!shot.contains('«'), "{shot}");
+                frames.push_str(&format!("--- {width} x {height}: closed ---\n{shot}"));
             }
-            typed(&mut model, "4f4f");
-            let shot = screen(&model, width, height);
-            assert!(shot.contains("│ CONVERSATIONS"), "{shot}");
-            assert!(shot.contains("│ MESSAGES"), "{shot}");
-            // Alice by her address, which her row no longer shows (1452),
-            // and the message that names it.
-            assert!(shot.contains("«4f4f»"), "{shot}");
-            frames.push_str(&format!("--- {width} x {height}: both groups ---\n{shot}"));
-            keys(&mut model, &["esc"]);
-            let shot = screen(&model, width, height);
-            assert!(shot.contains(" / search "), "{shot}");
-            assert!(!shot.contains('«'), "{shot}");
-            frames.push_str(&format!("--- {width} x {height}: closed ---\n{shot}"));
-        }
-        let expected = include_str!("../tests/fixtures/tui_search.frames");
-        if frames != expected {
-            let kept = std::env::temp_dir().join("loquax-tui-search.frames");
-            let _ = std::fs::write(&kept, &frames);
-            panic!(
-                "the frames moved; this run's are in {}, the pinned ones in \
-                 loquax/tests/fixtures/tui_search.frames\n{frames}",
-                kept.display()
-            );
+            match lang {
+                Lang::En => same_frames("tui_search.frames", &frames),
+                Lang::De => {
+                    says(&frames, "ein Relais");
+                    same_frames(&german_name("tui_search.frames"), &frames)
+                }
+            }
         }
     }
 

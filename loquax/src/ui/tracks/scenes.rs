@@ -331,6 +331,12 @@ pub fn all() -> Vec<Scene> {
 
 /// The pins of a scene: each peer's newest fix, named, with its age.
 pub fn pins(scene: &Scene) -> Vec<crate::ui::map::MapPin> {
+    pins_in(scene, crate::ui::strings::Lang::En)
+}
+
+/// [`pins`] with the ages in `lang`, as a reader in that language sees
+/// them (1451: the terminal's cells in German).
+pub fn pins_in(scene: &Scene, lang: crate::ui::strings::Lang) -> Vec<crate::ui::map::MapPin> {
     let now = scene.now.unix_secs;
     scene
         .peers
@@ -341,9 +347,7 @@ pub fn pins(scene: &Scene) -> Vec<crate::ui::map::MapPin> {
                 peer: *peer,
                 at: last.at(),
                 label: alloc::string::String::from(*name),
-                age: Some(
-                    crate::ui::scene::ago(now - last.t).resolve(crate::ui::strings::Lang::En),
-                ),
+                age: Some(crate::ui::scene::ago(now - last.t).resolve(lang)),
                 stale: now - last.t > crate::telemetry::STALE_AFTER_SECS,
                 nearby: false,
                 own: scene.own == Some(*peer),
@@ -582,7 +586,8 @@ mod tests {
     /// radar scene with its rings and its pins labelled from the centre,
     /// as [`crate::ui::UiModel::map_view`] lays them out where no region
     /// is (the cells hold none); "fit all" at the view that fit gives.
-    fn frame(scene: &Scene) -> String {
+    /// The pins' words in `lang` (1451).
+    fn frame_in(scene: &Scene, lang: Lang) -> String {
         let (cols, rows) = (72u16, 22u16);
         let area = Rect::new(0, 0, cols, rows);
         let setup = MapSetup {
@@ -611,11 +616,11 @@ mod tests {
             &scene.now,
             unit,
             0.5,
-            Lang::En,
+            lang,
         );
-        let mut pinned = pins(scene);
+        let mut pinned = pins_in(scene, lang);
         let radar = match scene.name == "radar" {
-            true => crate::ui::radar::radar(&pinned, unit, view.size(), Lang::En),
+            true => crate::ui::radar::radar(&pinned, unit, view.size(), lang),
             false => None,
         };
         if let Some(r) = &radar {
@@ -666,8 +671,17 @@ mod tests {
     fn the_track_scenes_in_cells_are_the_goldens() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
         for scene in all() {
-            let got = frame(&scene);
-            let path = dir.join(alloc::format!("tracks-{}.txt", scene.name));
+            cells_are_the_golden(&dir, &scene);
+        }
+    }
+
+    /// `scene`'s cells against `tracks-<name>.txt`, and in German, as a
+    /// desktop under `LANG=de_DE.UTF-8` draws them, against
+    /// `tracks-<name>-de.txt` (1451); `LOQUAX_WRITE_GOLDEN=1` writes both.
+    fn cells_are_the_golden(dir: &std::path::Path, scene: &Scene) {
+        for (lang, suffix) in [(Lang::En, ""), (Lang::De, "-de")] {
+            let got = frame_in(scene, lang);
+            let path = dir.join(alloc::format!("tracks-{}{suffix}.txt", scene.name));
             if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
                 std::fs::write(&path, &got).expect("write golden");
             }
@@ -683,13 +697,7 @@ mod tests {
     fn the_marks_scenes_in_cells_are_the_goldens() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
         for scene in marks() {
-            let got = frame(&scene);
-            let path = dir.join(alloc::format!("tracks-{}.txt", scene.name));
-            if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
-                std::fs::write(&path, &got).expect("write golden");
-            }
-            let want = std::fs::read_to_string(&path).unwrap_or_default();
-            assert!(want == got, "{} moved:\n{got}", path.display());
+            cells_are_the_golden(&dir, &scene);
         }
     }
 

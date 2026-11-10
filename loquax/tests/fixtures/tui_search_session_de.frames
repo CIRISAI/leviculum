@@ -1,0 +1,398 @@
+=== 120x40 ===
+--- frame 1: typed ---
+┌● Search────────────── esc closes ┐┌  Unbekannt ·5ec0  Zwei Kontakte haben noch keinen Namen──────────────────────────┐
+│ / tripod                         ││                                                                         no relay │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│ ▌you to Unbekannt ·5ec0    14:07 ││                                                                                  │
+│ ▌the «tripod» stays in the van,… ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to Unbekannt ·61dd    14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to Unbekannt ·61dd    14:05 ││                                                                                  │
+│  and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                    the «tripod» stays in the van, 61ddb79a has the bag  14:07 ◷  │
+│                                  │├  to Unbekannt ·5ec0────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
+--- frame 2: opened ---
+┌  Search────────────── esc closes ┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen Namen──────────────────────────┐
+│ / tripod                         ││                                                                         no relay │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│  you to Unbekannt ·5ec0    14:07 ││                                                                                  │
+│  the «tripod» stays in the van,… ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to Unbekannt ·61dd    14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                                                                                  │
+│ ▌you to Unbekannt ·61dd    14:05 ││                                                                                  │
+│ ▌and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                 ▌and the small «tripod»          │
+│                                  ││                                                 ▌if it fits in the bag  14:05 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                                      the «tripod» fits  14:06 ◷  │
+│                                  │├  to Unbekannt ·61dd────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 3: next ---
+┌  Search────────────── esc closes ┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen Namen──────────────────────────┐
+│ / tripod                         ││                                                                         no relay │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│  you to Unbekannt ·5ec0    14:07 ││                                                                                  │
+│  the «tripod» stays in the van,… ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to Unbekannt ·61dd    14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                                                                                  │
+│ ▌you to Unbekannt ·61dd    14:05 ││                                                                                  │
+│ ▌and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                  and the small «tripod»          │
+│                                  ││                                                  if it fits in the bag  14:05 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                                     ▌the «tripod» fits  14:06 ◷  │
+│                                  │├  to Unbekannt ·61dd────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 4: previous ---
+┌  Search────────────── esc closes ┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen Namen──────────────────────────┐
+│ / tripod                         ││                                                                         no relay │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│  you to Unbekannt ·5ec0    14:07 ││                                                                                  │
+│  the «tripod» stays in the van,… ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to Unbekannt ·61dd    14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                                                                                  │
+│ ▌you to Unbekannt ·61dd    14:05 ││                                                                                  │
+│ ▌and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                 ▌and the small «tripod»          │
+│                                  ││                                                 ▌if it fits in the bag  14:05 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                                      the «tripod» fits  14:06 ◷  │
+│                                  │├  to Unbekannt ·61dd────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 5: both groups ---
+┌● Search────────────── esc closes ┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen Namen──────────────────────────┐
+│ / 61dd                           ││                                                                         no relay │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ CONVERSATIONS                  1 ││                                                                                  │
+│ ▌Unbekannt ·«61dd»         14:06 ││                                                                                  │
+│ ▌you: the tripod fits            ││                                                                                  │
+│                                  ││                                                                                  │
+│ MESSAGES                       1 ││                                                                                  │
+│  you to Unbekannt ·5ec0    14:07 ││                                                                                  │
+│  …ipod stays in the van, «61dd»… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                  and the small tripod            │
+│                                  ││                                                  if it fits in the bag  14:05 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                                        the tripod fits  14:06 ◷  │
+│                                  │├  to Unbekannt ·61dd────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
+--- frame 6: closed ---
+┌● tui─────────────────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen Namen──────────────────────────┐
+│ Unbekannt ·5ec0            14:07 ││                                                                         no relay │
+│ du: the tripod stays in the van… ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│▌Unbekannt ·61dd            14:06 ││                                                                                  │
+│▌du: the tripod fits              ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                 did the board come back from the soak?  19:40 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                  and the small tripod            │
+│                                  ││                                                  if it fits in the bag  14:05 ◷  │
+│                                  ││                                                                                  │
+│                                  ││                                                        the tripod fits  14:06 ◷  │
+│                                  │├  to Unbekannt ·61dd────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== 80x24 ===
+--- frame 1: typed ---
+┌● Search──── esc closes ┐┌  Unbekannt ·5ec0  Zwei Kontakte haben noch keinen N┐
+│ / tripod               ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             3 ││                                                    │
+│ ▌you to Unbekan… 14:07 ││                                                    │
+│ ▌the «tripod» stays i… ││                                                    │
+│                        ││                                                    │
+│  you to Unbekan… 14:06 ││                                                    │
+│  the «tripod» fits     ││                                                    │
+│                        ││                                                    │
+│  you to Unbekan… 14:05 ││                                                    │
+│  … the small «tripod»… ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                     the «tripod» stays in the van, │
+│                        ││                     61ddb79a has the bag  14:07 ◷  │
+│                        │├  to Unbekannt ·5ec0 Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
+--- frame 2: opened ---
+┌  Search──── esc closes ┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│ / tripod               ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             3 ││                                                    │
+│  you to Unbekan… 14:07 ││                                                    │
+│  the «tripod» stays i… ││                                                    │
+│                        ││                                                    │
+│  you to Unbekan… 14:06 ││                                                    │
+│  the «tripod» fits     ││                                                    │
+│                        ││                                                    │
+│ ▌you to Unbekan… 14:05 ││                                                    │
+│ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ◷                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                   ▌and the small «tripod»          │
+│                        ││                   ▌if it fits in the bag  14:05 ◷  │
+│                        ││                                                    │
+│                        ││                        the «tripod» fits  14:06 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+--- frame 3: next ---
+┌  Search──── esc closes ┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│ / tripod               ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             3 ││                                                    │
+│  you to Unbekan… 14:07 ││                                                    │
+│  the «tripod» stays i… ││                                                    │
+│                        ││                                                    │
+│  you to Unbekan… 14:06 ││                                                    │
+│  the «tripod» fits     ││                                                    │
+│                        ││                                                    │
+│ ▌you to Unbekan… 14:05 ││                                                    │
+│ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ◷                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                    and the small «tripod»          │
+│                        ││                    if it fits in the bag  14:05 ◷  │
+│                        ││                                                    │
+│                        ││                       ▌the «tripod» fits  14:06 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+--- frame 4: previous ---
+┌  Search──── esc closes ┐┌● Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│ / tripod               ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             3 ││                                                    │
+│  you to Unbekan… 14:07 ││                                                    │
+│  the «tripod» stays i… ││                                                    │
+│                        ││                                                    │
+│  you to Unbekan… 14:06 ││                                                    │
+│  the «tripod» fits     ││                                                    │
+│                        ││                                                    │
+│ ▌you to Unbekan… 14:05 ││                                                    │
+│ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ◷                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                   ▌and the small «tripod»          │
+│                        ││                   ▌if it fits in the bag  14:05 ◷  │
+│                        ││                                                    │
+│                        ││                        the «tripod» fits  14:06 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+--- frame 5: both groups ---
+┌● Search──── esc closes ┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│ / 61dd                 ││                                                    │
+│                        ││                                                    │
+│ CONVERSATIONS        1 ││                                                    │
+│ ▌Unbekannt ·«61… 14:06 ││                                                    │
+│ ▌you: the tripod fits  ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             1 ││                                                    │
+│  you to Unbekan… 14:07 ││                                                    │
+│  … in the van, «61dd»… ││                                                    │
+│                        ││                                                    │
+│                        ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ◷                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                    and the small tripod            │
+│                        ││                    if it fits in the bag  14:05 ◷  │
+│                        ││                                                    │
+│                        ││                          the tripod fits  14:06 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
+--- frame 6: closed ---
+┌● tui───────────────────┐┌  Unbekannt ·61dd  Zwei Kontakte haben noch keinen N┐
+│ Unbekannt ·5ec0  14:07 ││                                                    │
+│ du: the tripod stays … ││                                                    │
+│                        ││                                                    │
+│▌Unbekannt ·61dd  14:06 ││                                                    │
+│▌du: the tripod fits    ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ◷                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                    and the small tripod            │
+│                        ││                    if it fits in the bag  14:05 ◷  │
+│                        ││                                                    │
+│                        ││                          the tripod fits  14:06 ◷  │
+│                        │├  to Unbekannt ·61dd Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
