@@ -45,9 +45,9 @@ leviculum_ui::catalogue! {
     // 1578: Explore, the pages and the public rooms under one button.
     TabExplore = "tab_explore", "Explore", "Entdecken";
     ExplorePages = "explore_pages", "Pages", "Seiten";
-    ExploreRooms = "explore_rooms", "Public rooms", "Öffentliche Räume";
+    ExploreRooms = "explore_rooms", "Rooms", "Räume";
     ExploreSearchHint = "explore_search_hint", "Search", "Suchen";
-    ExploreSortSeen = "explore_sort_seen", "Last seen first", "Zuletzt gesehen zuerst";
+    ExploreSortSeen = "explore_sort_seen", "Last seen", "Zuletzt gesehen";
     ExploreSortAz = "explore_sort_az", "A to Z", "A bis Z";
     ExploreBookmarks = "explore_bookmarks", "Bookmarks", "Lesezeichen";
     ExploreToday = "explore_today", "Today", "Heute";
@@ -57,8 +57,16 @@ leviculum_ui::catalogue! {
     ExploreNoMatch = "explore_no_match", "No page matches “%1$s”.", "Keine Seite passt zu „%1$s“.";
     ExploreNoPages = "explore_no_pages", "No pages known yet: they appear here as soon as your mailbox or this device hears one.", "Noch keine Seiten bekannt: sie erscheinen hier, sobald dein Postfach oder dieses Gerät eine hört.";
     ExplorePagesOff = "explore_pages_off", "Pages cannot be opened on this device yet.", "Seiten lassen sich auf diesem Gerät noch nicht öffnen.";
-    ExploreNoRooms = "explore_no_rooms", "No public rooms within reach.", "Keine öffentlichen Räume in Reichweite.";
-    ExploreHeardHubs = "explore_heard_hubs", "Servers in your mesh", "Server in deinem Netz";
+    // 1621 (walk 2): the rooms the reader is in, then the servers, each
+    // section one sentence when empty.
+    ExploreNoJoined = "explore_no_joined", "You are in no room. Pick a server below.", "Du bist in keinem Raum. Such dir unten einen Server aus.";
+    ExploreServers = "explore_servers", "Servers", "Server";
+    ExploreNoServers = "explore_no_servers", "No server within reach.", "Kein Server in Reichweite.";
+    ExploreNoServerMatch = "explore_no_server_match", "No server matches “%1$s”.", "Kein Server passt zu „%1$s“.";
+    ExploreNotSeen = "explore_not_seen", "not seen yet", "noch nicht gesehen";
+    ExploreFreshOne = "explore_fresh_one", "1 new page", "1 neue Seite";
+    ExploreFreshMany = "explore_fresh_many", "%1$d new pages", "%1$d neue Seiten";
+    ExploreFreshOrder = "explore_fresh_order", "Update the list", "Liste aktualisieren";
     ExploreSeenNow = "explore_seen_now", "seen just now", "gesehen gerade eben";
     ExploreSeenMinutes = "explore_seen_minutes", "seen %1$d min ago", "gesehen vor %1$d Min.";
     ExploreSeenHours = "explore_seen_hours", "seen %1$d h ago", "gesehen vor %1$d Std.";
@@ -77,7 +85,9 @@ leviculum_ui::catalogue! {
     ExploreServerUse = "explore_server_use", "Use this server for rooms", "Diesen Server für Räume nutzen";
     ExploreServerInUse = "explore_server_in_use", "Your rooms are on this server.", "Deine Räume laufen über diesen Server.";
     ExploreServerRooms = "explore_server_rooms", "Its rooms", "Seine Räume";
-    ExploreServerNoRooms = "explore_server_no_rooms", "This server has named no rooms yet. Use it, then type a room's name to join.", "Dieser Server hat noch keine Räume genannt. Nutz ihn und tipp dann den Namen eines Raums.";
+    ExploreServerNoRooms = "explore_server_no_rooms", "This server names no rooms. Use it, then type a room's name to join.", "Dieser Server nennt keine Räume. Nutz ihn und tipp dann den Namen eines Raums.";
+    ExploreServerAsking = "explore_server_asking", "Asking the server for its rooms…", "Frage den Server nach seinen Räumen…";
+    ExploreServerNoAnswer = "explore_server_no_answer", "The server did not answer, so its rooms are unknown. Use it, then type a room's name to join.", "Der Server hat nicht geantwortet, seine Räume sind unbekannt. Nutz ihn und tipp dann den Namen eines Raums.";
     ExploreServerClose = "explore_server_close", "Close", "Schließen";
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";

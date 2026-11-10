@@ -145,7 +145,12 @@ fn a_row_is_a_name_and_its_line_says_seen_and_how_far() {
         .iter()
         .map(|p| p.said.clone())
         .chain(shown.hubs.iter().map(|h| h.value.clone()))
-        .chain([shown.heard_title.clone(), shown.rooms_title.clone()])
+        .chain([
+            shown.servers_title.clone(),
+            shown.rooms_title.clone(),
+            shown.joined_empty.clone(),
+            shown.servers_empty.clone(),
+        ])
     {
         assert!(!text.contains("  "), "no double space: {text:?}");
         let lower = text.to_lowercase();
@@ -234,10 +239,43 @@ fn the_search_finds_names_and_addresses_only() {
     assert_eq!(labels(&screen(&model)), ["IranTalk"]);
     tap(&mut model, "typed", "zzzz-no-server", "", 0);
     let shown = screen(&model);
+    assert!(shown.hubs.is_empty(), "{:?}", shown.hubs);
+    assert_eq!(
+        shown.servers_empty,
+        "Kein Server passt zu „zzzz-no-server“."
+    );
+}
+
+/// Walk 2, new 4 to 6: the rooms' section says what it holds: "Räume"
+/// with the rooms the reader is in, or one sentence; then "Server" with
+/// every server, each saying when it was seen.
+#[test]
+fn the_rooms_section_says_what_it_holds() {
+    let (_home, mut model) = phone();
+    tap(&mut model, "tab", "", "", 0);
+    let shown = screen(&model);
+    assert_eq!(shown.rooms_title, "Räume");
+    assert!(shown.joined.is_empty());
+    assert_eq!(
+        shown.joined_empty,
+        "Du bist in keinem Raum. Such dir unten einen Server aus."
+    );
+    assert_eq!(shown.servers_title, "Server");
+    for hub in &shown.hubs {
+        assert!(
+            hub.value.starts_with("noch nicht gesehen") || hub.value.starts_with("gesehen"),
+            "a seen line on every server: {:?}",
+            hub.value
+        );
+    }
     assert!(
-        shown.hubs.is_empty() && shown.heard.is_empty(),
-        "{:?}",
-        shown.hubs
+        shown
+            .hubs
+            .iter()
+            .filter(|h| h.value.contains("empfohlen"))
+            .count()
+            <= 1,
+        "one suggested at most"
     );
 }
 
@@ -254,12 +292,25 @@ fn a_server_opens_its_sheet_and_only_the_button_chooses_it() {
     };
     assert!(!first.name.trim().is_empty(), "no nameless row");
     let effects = tap(&mut model, "hub", "", &first.dest, 0);
-    assert!(effects.is_empty(), "{effects:?}");
+    // It asks the server for its rooms, on a question of its own (1621),
+    // and nothing else.
+    assert!(
+        effects
+            .iter()
+            .all(|e| matches!(e, UiEffect::Rooms(loquax::ui::rooms::RoomAsk::Peek { .. }))),
+        "{effects:?}"
+    );
     assert_eq!(model.rooms.hub, None, "the tap chose nothing");
     let sheet = screen(&model);
     assert_eq!(sheet.sheet_dest, first.dest);
     assert_eq!(sheet.sheet_name, first.name);
     assert_eq!(sheet.sheet_button, "Diesen Server für Räume nutzen");
+    if sheet.sheet_rooms.is_empty() {
+        assert_eq!(
+            sheet.sheet_rooms_note,
+            "Frage den Server nach seinen Räumen…"
+        );
+    }
     assert!(
         sheet.sheet_said.contains("Stationen"),
         "{}",

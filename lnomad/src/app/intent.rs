@@ -248,6 +248,7 @@ pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
             let raw = url.unwrap_or_else(|| InputBuffer::value(&model.input).to_string());
             go_to(model, raw.trim())
         }
+        Intent::Back if model.hosted && !model.history.can_back() => leave_host(model),
         Intent::Back => go_back(model),
         Intent::Forward => go_forward(model),
         Intent::Reload => reload_current(model),

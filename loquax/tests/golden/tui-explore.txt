@@ -1,5 +1,5 @@
 Explore
-┌● Last seen first─────────────────────────────────────────────────────────────┐
+┌● Last seen───────────────────────────────────────────────────────────────────┐
 │▏Search                                                                       │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌  ────────────────────────────────────────────────────────────────────────────┐
@@ -9,16 +9,16 @@ Explore
 │ Today                                                                        │
 │   Marcel's node  seen 10 min ago · reachable over 2 stations                 │
 │                                                                              │
-│Public rooms                                                                  │
-│ RNS Moscow  reachable over 3 stations                                        │
-│ Cascadia  reachable over 3 stations                                          │
-│ Chatsurfer  reachable over 3 stations                                        │
-│ CTRS  reachable over 3 stations                                              │
-│ Minuteman  reachable over 3 stations                                         │
-│ RMAP.WORLD Hub  reachable over 3 stations                                    │
-│ Save Europe  reachable over 3 stations                                       │
-│ SoCal Public  reachable over 3 stations                                      │
-│ UTN Oregon  reachable over 3 stations                                        │
-│ HADARC  reachable over 4 stations                                            │
+│Rooms                                                                         │
+│You are in no room. Pick a server below.                                      │
+│ Servers                                                                      │
+│ RNS Moscow  not seen yet · reachable over 3 stations                         │
+│ Cascadia  not seen yet · reachable over 3 stations                           │
+│ Chatsurfer  not seen yet · reachable over 3 stations                         │
+│ CTRS  not seen yet · reachable over 3 stations                               │
+│ Minuteman  not seen yet · reachable over 3 stations                          │
+│ RMAP.WORLD Hub  not seen yet · reachable over 3 stations                     │
+│ Save Europe  not seen yet · reachable over 3 stations                        │
+│ SoCal Public  not seen yet · reachable over 3 stations                       │
 └──────────────────────────────────────────────────────────────────────────────┘
 Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats

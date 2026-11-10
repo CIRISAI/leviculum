@@ -309,7 +309,9 @@ impl Model {
 }
 
 pub(crate) fn top_bar(model: &Model) -> TopBar {
-    let lead = match model.history.can_back() {
+    // Hosted, Back is always there (1621): at the trail's start it gives
+    // the page back to the host (`leave_host`).
+    let lead = match model.history.can_back() || model.hosted {
         true => Lead::Back {
             back: Action::of(Intent::Back),
             avatar: Badge::Site {
@@ -345,7 +347,10 @@ pub(crate) fn top_bar(model: &Model) -> TopBar {
             on: !model.identifying,
         }));
     }
-    let title = model.title.trim().to_string();
+    let title = match &model.label {
+        Some(label) => label.trim().to_string(),
+        None => model.title.trim().to_string(),
+    };
     let label = match title.is_empty() {
         true => Text::key(StrId::Page),
         false => Text::Raw(title.clone()),
@@ -361,10 +366,13 @@ pub(crate) fn top_bar(model: &Model) -> TopBar {
 
 pub(crate) fn address(model: &Model) -> AddressField {
     let editing = model.mode == Mode::Address;
-    let value = match (editing, model.history.current()) {
-        (true, _) => InputBuffer::value(&model.input).to_string(),
-        (false, Some(_)) => breadcrumb(model),
-        (false, None) => String::new(),
+    let shown = model.history.current().is_some() || model.pending.is_some();
+    let value = match (editing, &model.label, model.history.current()) {
+        (true, _, _) => InputBuffer::value(&model.input).to_string(),
+        // The host's name for the page, from the moment it is asked (1621).
+        (false, Some(label), _) if shown => label.clone(),
+        (false, _, Some(_)) => breadcrumb(model),
+        (false, _, None) => String::new(),
     };
     AddressField {
         id: NodeId::Address,
@@ -410,7 +418,11 @@ pub(crate) fn state(model: &Model) -> Vec<Chip> {
 
 fn status(model: &Model) -> Option<Chip> {
     let text = if let Some(pending) = &model.pending {
-        with(StrId::Loading, pending.target.path.clone())
+        let what = model
+            .label
+            .clone()
+            .unwrap_or_else(|| pending.target.path.clone());
+        with(StrId::Loading, what)
     } else if let Some(name) = &model.download {
         with(StrId::Downloading, name.clone())
     } else {

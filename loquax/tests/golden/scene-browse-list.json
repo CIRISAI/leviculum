@@ -264,11 +264,15 @@
       ],
       "id": "top_bar",
       "lead": {
-        "me": {
-          "avatar": {
-            "me": ""
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "Back",
+            "label_key": "browser_back"
           },
-          "link": null
+          "avatar": {
+            "site": null
+          }
         }
       },
       "title": {

@@ -210,6 +210,28 @@ impl Heard {
     }
 }
 
+/// The rooms a hub's notices name: the word after a `/join`, and every
+/// `#word`, each once, in the order said. The probe that measured the
+/// shipped list ([`rooms`](Hub::rooms), `examples/rrc_hubs_probe.rs`) and a
+/// server's sheet (1621, [`super::rooms::RoomAsk::Peek`]) read them alike.
+pub fn rooms_named(notices: &str) -> Vec<String> {
+    let mut rooms: Vec<String> = Vec::new();
+    let mut after_join = false;
+    for word in notices.split_whitespace() {
+        let clean =
+            word.trim_matches(|c: char| !(c.is_alphanumeric() || c == '#' || c == '-' || c == '_'));
+        let room = (after_join || (clean.len() > 1 && clean.starts_with('#'))).then_some(clean);
+        after_join = word == "/join";
+        if let Some(room) = room.filter(|r| !r.is_empty() && *r != "#") {
+            let room = room.to_string();
+            if !rooms.contains(&room) {
+                rooms.push(room);
+            }
+        }
+    }
+    rooms
+}
+
 /// Whether an announce's name hash is a hub's (`rrc.hub`).
 pub fn is_hub(name_hash: &[u8]) -> bool {
     name_hash

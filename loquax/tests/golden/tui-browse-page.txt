@@ -1,4 +1,4 @@
-Marcel's node · 5a5a5a5a…:/page/index.mu                                ☆ 2 hops
+Marcel's node                                                           ☆ 2 hops
 Sample Page                                                                    █
                                                                                █
 This is a plain paragraph that should wrap when the render width is narrow     █

@@ -28,7 +28,7 @@
         "key": "browser_address_hint"
       },
       "id": "address",
-      "value": "5a5a5a5a…:/page/index.mu"
+      "value": "Marcel's node"
     },
     "help": false,
     "names": null,
@@ -305,11 +305,15 @@
       ],
       "id": "top_bar",
       "lead": {
-        "me": {
-          "avatar": {
-            "me": ""
+        "back": {
+          "action": {
+            "enabled": true,
+            "intent": "Back",
+            "label_key": "browser_back"
           },
-          "link": null
+          "avatar": {
+            "site": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+          }
         }
       },
       "title": {
@@ -413,8 +417,7 @@
     "a11y": {
       "enabled": true,
       "label": {
-        "args": [],
-        "key": "tab_browse"
+        "raw": "Marcel's node"
       },
       "resource": "top_bar",
       "role": "bar",
@@ -439,8 +442,7 @@
       }
     },
     "title": {
-      "args": [],
-      "key": "tab_browse"
+      "raw": "Marcel's node"
     }
   },
   "whereabouts": null

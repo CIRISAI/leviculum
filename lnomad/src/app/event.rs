@@ -421,6 +421,43 @@ pub fn show_start_screen(model: &mut Model) {
     model.show_places = true;
 }
 
+/// A host opens a page anew (1621, Loquax's Explore and a chat's link):
+/// the page shown, its title and its trail go at once, so nothing of the
+/// page before shows while the new one loads, and the first Back from it
+/// gives the browser back to the host ([`Effect::Quit`]). A fetch in flight
+/// is cancelled. The cache, the bookmarks and the nodes stay.
+pub fn start_trail(model: &mut Model) -> Vec<Effect> {
+    let was_loading = model.is_loading();
+    model.pending = None;
+    model.pending_anchor = None;
+    model.download = None;
+    let mut effects = apply_loaded(model, MicronDocument::default(), String::new());
+    model.history = super::model::History::default();
+    model.current_dest = None;
+    model.show_places = false;
+    model.names = None;
+    if was_loading {
+        effects.insert(0, Effect::Cancel);
+    }
+    effects
+}
+
+/// Back at the start of a hosted browser's trail (1621): a fetch in
+/// flight is cancelled and the browser gives way to its host
+/// ([`Effect::Quit`], which a host reads as "back to where the reader came
+/// from").
+pub(crate) fn leave_host(model: &mut Model) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    if model.is_loading() {
+        model.pending = None;
+        model.pending_anchor = None;
+        model.download = None;
+        effects.push(Effect::Cancel);
+    }
+    effects.push(Effect::Quit);
+    effects
+}
+
 /// The platform's own address field now holds `value`: the address bar
 /// is entered first, as a press on it enters it, and then holds the text,
 /// its cursor at the end. What a window's text field says on every edit,

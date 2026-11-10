@@ -62,6 +62,11 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
         back: matches!(bar.lead, Lead::Back { .. }),
         actions,
         address: scene.address.value.clone(),
+        dest: model
+            .browse
+            .shown_dest()
+            .map(|d| d.iter().map(|b| format!("{b:02x}")).collect())
+            .unwrap_or_default(),
         address_hint: scene.address.hint.resolve(lang),
         chips: scene.state.iter().map(|c| c.text.resolve(lang)).collect(),
         status: scene

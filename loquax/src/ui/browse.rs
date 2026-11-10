@@ -17,7 +17,7 @@
 //! operator ([`lnomad::Effect::Write`]) opens that chat, and the browser's
 //! quit leaves the tab for the chats.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use leviculum_ui::input::InputBuffer;
@@ -111,11 +111,64 @@ impl Browse {
         lnomad::update(&mut self.model, event)
     }
 
-    /// Open the tab at `url`: a NomadNet page a chat linked to.
+    /// Open the tab at `url`: a page Explore lists, or one a chat linked
+    /// to. The page before and its trail go at once (1621, walk 2: the old
+    /// page stood 45 s under "loading"), so the first Back from this one
+    /// returns to where the reader came from; the history is the in-page
+    /// Back's, from here on.
     pub fn go(&mut self, url: String, lang: Lang) -> Vec<Effect> {
-        self.show(lang);
-        self.model.show_places = false;
-        self.fold(AppEvent::Intent(BrowseIntent::Go { url: Some(url) }))
+        self.open = true;
+        self.model.lang = lang;
+        let mut effects = lnomad::app::start_trail(&mut self.model);
+        effects.extend(self.fold(AppEvent::Intent(BrowseIntent::Go { url: Some(url) })));
+        effects
+    }
+
+    /// The node of the page shown or loading: the fetch's while one is
+    /// out, else the history's.
+    pub fn shown_dest(&self) -> Option<[u8; 16]> {
+        let model = &self.model;
+        model
+            .pending
+            .as_ref()
+            .map(|p| p.target.dest_hash)
+            .or_else(|| model.history.current().map(|t| t.dest_hash))
+    }
+
+    /// The name the page goes by (1621, walk 2: the bar said "Pages" and
+    /// the field a hash): the name its node announced, else a bookmark's
+    /// title on it, else "Unnamed page", as Explore lists it; `None` on
+    /// the start screen.
+    pub fn shown_name(&self, lang: Lang) -> Option<String> {
+        let dest = self.shown_dest()?;
+        let model = &self.model;
+        let announced = model
+            .node_registry
+            .get_by_hash(&dest)
+            .and_then(|n| n.name.clone())
+            .filter(|n| !n.trim().is_empty());
+        let marked = || {
+            model
+                .bookmarks
+                .list()
+                .iter()
+                .find(|b| {
+                    lnomad::parse_url(&b.url, None).is_ok_and(|t| t.dest_hash == dest)
+                        && !b.title.trim().is_empty()
+                })
+                .map(|b| b.title.clone())
+        };
+        Some(announced.or_else(marked).unwrap_or_else(|| {
+            super::strings::StrId::ExploreUnnamedPage
+                .text(lang)
+                .to_string()
+        }))
+    }
+
+    /// The browser told the name its page goes by ([`Browse::shown_name`]),
+    /// for its bar, its address field and its loading line.
+    pub fn relabel(&mut self, lang: Lang) {
+        self.model.label = self.shown_name(lang);
     }
 }
 
@@ -238,6 +291,7 @@ pub(super) fn fold<B: InputBuffer + Default>(
             Vec::new()
         }
     };
+    model.browse.relabel(model.lang);
     effects_of(model, effects)
 }
 
@@ -272,6 +326,7 @@ pub fn app<B: InputBuffer + Default>(model: &mut UiModel<B>, event: AppEvent) ->
     }
     model.browse.model.lang = model.lang;
     let effects = model.browse.fold(event);
+    model.browse.relabel(model.lang);
     effects_of(model, effects)
 }
 
@@ -295,6 +350,7 @@ pub(super) fn open_page<B: InputBuffer + Default>(
     url: String,
 ) -> Vec<UiEffect> {
     let effects = model.browse.go(url, model.lang);
+    model.browse.relabel(model.lang);
     effects_of(model, effects)
 }
 

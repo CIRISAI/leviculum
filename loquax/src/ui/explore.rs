@@ -21,14 +21,17 @@
 //! in. Opening a page is lnomad's fetch and render in the
 //! browser the tab hosts ([`super::browse`]).
 //!
-//! **The public rooms** are the rooms the reader is in, the hubs Loquax
-//! ships (1577), the hubs heard on the mesh (1599, "Servers in your mesh")
-//! and the reader's own hub. The reader's word for a hub is "server"
-//! (1618). A hub's row opens its sheet and changes nothing: its name, how
-//! far, the rooms its welcome named (a tap joins one) and the one button
-//! that makes it the public rooms' hub. The hub link opens on the first
-//! join, never on opening the tab or the sheet (the privacy sentence of
-//! 1577).
+//! **The rooms** (1621: "Rooms", then "Servers") are the rooms the reader
+//! is in, then in one list the hubs Loquax ships (1577), the hubs heard on
+//! the mesh (1599) and the reader's own hub, each saying when it was seen,
+//! "suggested" on one at most. The reader's word for a hub is "server"
+//! (1618). A hub's row opens its sheet and chooses nothing: its name, how
+//! far, the rooms it names (a tap joins one) and the one button that makes
+//! it the public rooms' hub. The sheet asks the hub which rooms it names
+//! on a question of its own ([`super::rooms::RoomAsk::Peek`]: a throwaway
+//! identity, no nick, no join), kept for the run. The rooms' link opens on
+//! the first join, never on opening the tab or the sheet (the privacy
+//! sentence of 1577: nothing that names the reader goes out before).
 //!
 //! The tab never disappears: with nothing reachable each section says so
 //! in one sentence.
@@ -42,7 +45,7 @@ use leviculum_ui::input::InputBuffer;
 use leviculum_ui::toast::ToastKind;
 use serde_json::{json, Value};
 
-use super::rooms::{HubChoice, RoomRow, RoomsEvent};
+use super::rooms::{HubChoice, Named, RoomRow, RoomsEvent};
 use super::scene::TabId;
 use super::strings::{Arg, StrId, Text};
 use super::{UiEffect, UiModel};
@@ -177,20 +180,26 @@ pub struct PagesNode {
     pub off: Option<Text>,
 }
 
-/// The public rooms' section.
+/// The rooms' section (1621, walk 2: "Public rooms" held servers and no
+/// room): "Rooms" with the rooms the reader is in, then "Servers" with
+/// every server to pick from, each part one sentence when it is empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomsSection {
+    /// "Rooms".
     pub title: Text,
     /// The rooms the reader is in.
     pub joined: Vec<RoomRow>,
     /// Where the terminal's cursor is among them.
     pub joined_cursor: Option<usize>,
-    /// The hubs Loquax ships and the reader's own hub.
+    /// "You are in no room. Pick a server below." while there is none.
+    pub joined_empty: Option<Text>,
+    /// "Servers".
+    pub servers_title: Text,
+    /// The servers Loquax ships, the reader's own and those heard on the
+    /// mesh, in one list.
     pub hubs: Vec<HubRow>,
-    /// "Hubs in your mesh": heard announcing (1599), not shipped.
-    pub heard_title: Text,
-    pub heard: Vec<HubRow>,
-    pub empty: Option<Text>,
+    /// "No server within reach.", or "No server matches …" in a search.
+    pub servers_empty: Option<Text>,
 }
 
 /// A hub's sheet (1618): what a tap on its row shows, changing nothing.
@@ -208,10 +217,13 @@ pub struct HubSheet {
     /// What using it tells the hub: the reader's name (1577).
     pub notice: Text,
     pub rooms_title: Text,
-    /// The rooms its welcome named, each a join.
+    /// The rooms it named, each a join: what its notices named when the
+    /// sheet asked (1621, [`super::rooms::RoomAsk::Peek`]) and what the
+    /// shipped list recorded, each once.
     pub rooms: Vec<String>,
-    /// The one sentence where it named none.
-    pub no_rooms: Option<Text>,
+    /// The one sentence about them: asking, no answer, or that it named
+    /// none (only once it answered and named none, walk 2).
+    pub rooms_note: Option<Text>,
     pub close: Text,
     /// The terminal's cursor: 0 the button, then the rooms.
     pub cursor: usize,
@@ -540,8 +552,7 @@ pub fn picks<B>(model: &UiModel<B>) -> Vec<Pick> {
     }
     out.extend(listed(model).into_iter().map(|(k, _)| Pick::Page(k.dest)));
     out.extend((0..model.rooms.rooms.len()).map(Pick::Room));
-    let (hubs, heard) = hub_lists(model);
-    out.extend(hubs.iter().chain(heard.iter()).map(|h| Pick::Hub(h.hash)));
+    out.extend(hub_list(model).iter().map(|h| Pick::Hub(h.hash)));
     out
 }
 
@@ -565,14 +576,13 @@ fn far(hops: Option<u8>) -> Option<Text> {
     }
 }
 
-/// The hubs the section lists: the first [`super::settings::HUB_PAGE`]
-/// shipped ones in the settings' order (heard first, then the closest),
-/// the one in force always among them, and the reader's own; then the
-/// ones heard on the mesh and not shipped. The settings list every
-/// shipped hub; Explore is a list to pick from, not the whole catalogue.
-fn hub_lists<B>(
-    model: &UiModel<B>,
-) -> (Vec<super::settings::Offered>, Vec<super::settings::Offered>) {
+/// The servers the section lists, in one list (1621): the first
+/// [`super::settings::HUB_PAGE`] shipped ones in the settings' order
+/// (heard first, then the closest), the one in force always among them,
+/// and the reader's own; then the ones heard on the mesh and not shipped.
+/// The settings list every shipped hub; Explore is a list to pick from,
+/// not the whole catalogue.
+fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
     let offered = super::settings::offered_hubs(&model.rooms);
     let (shipped, heard): (Vec<_>, Vec<_>) = offered.into_iter().partition(|o| o.shipped);
     let chosen = model.rooms.hub;
@@ -605,17 +615,31 @@ fn hub_lists<B>(
         let name = hub_name(model, o).resolve(model.lang);
         matches_name(Some(&name), &o.hash, &query)
     };
+    hubs.extend(heard);
     hubs.retain(|o| keep(o));
-    let heard = heard.into_iter().filter(|o| keep(o)).collect();
-    (hubs, heard)
+    hubs
 }
 
-fn hub_row<B>(model: &UiModel<B>, hub: &super::settings::Offered, cursor: Option<&Pick>) -> HubRow {
+/// The one server "suggested" marks ([`super::settings::suggested`]),
+/// over every server offered, the search's or not.
+fn suggested<B>(model: &UiModel<B>) -> Option<[u8; 16]> {
+    super::settings::suggested(
+        &super::settings::offered_hubs(&model.rooms),
+        model.rooms.hub,
+    )
+}
+
+fn hub_row<B>(
+    model: &UiModel<B>,
+    hub: &super::settings::Offered,
+    cursor: Option<&Pick>,
+    suggest: Option<[u8; 16]>,
+) -> HubRow {
     let chosen = model.rooms.hub == Some(hub.hash);
     let name = hub_name(model, hub);
     let mut parts = Vec::new();
     parts.extend(far(hub.hops));
-    if hub.shipped && hub.heard {
+    if suggest == Some(hub.hash) {
         parts.push(Text::key(StrId::RoomsHubSuggested));
     }
     if hub.answered == Some(false) {
@@ -630,9 +654,13 @@ fn hub_row<B>(model: &UiModel<B>, hub: &super::settings::Offered, cursor: Option
     HubRow {
         hash: hub.hash,
         name,
-        seen: hub
-            .last
-            .and_then(|last| seen(now_secs, u64::try_from(last).unwrap_or(0))),
+        // Every server says when it was heard (1621, walk 2: the shipped
+        // ones said nothing): "not seen yet" for one never heard.
+        seen: Some(
+            hub.last
+                .and_then(|last| seen(now_secs, u64::try_from(last).unwrap_or(0)))
+                .unwrap_or_else(|| Text::key(StrId::ExploreNotSeen)),
+        ),
         value,
         chosen,
         cursor: cursor == Some(&Pick::Hub(hub.hash)),
@@ -656,11 +684,34 @@ fn sheet_hub<B>(model: &UiModel<B>, hash: [u8; 16]) -> super::settings::Offered 
         })
 }
 
-/// The rooms the hub's welcome named, as shipped.
-fn sheet_rooms(hash: &[u8; 16]) -> Vec<String> {
-    super::hubs::named(hash)
+/// The rooms the hub named (1621): what its notices named when its
+/// sheet asked, then what the shipped list recorded, each once.
+fn sheet_rooms(rooms: &super::rooms::Rooms, hash: &[u8; 16]) -> Vec<String> {
+    let mut out: Vec<String> = match rooms.named.get(hash) {
+        Some(Named::Rooms(named)) => named.clone(),
+        _ => Vec::new(),
+    };
+    for room in super::hubs::named(hash)
         .map(|h| h.rooms)
         .unwrap_or_default()
+    {
+        if !out.contains(&room) {
+            out.push(room);
+        }
+    }
+    out
+}
+
+/// The sentence under the sheet's rooms (1621): asking while the question
+/// is out, the hub's silence, or that it named none, only once it
+/// answered and none is known.
+fn rooms_note(rooms: &super::rooms::Rooms, hash: &[u8; 16], listed: bool) -> Option<Text> {
+    match rooms.named.get(hash) {
+        Some(Named::Asking) => Some(Text::key(StrId::ExploreServerAsking)),
+        Some(Named::NoAnswer) if !listed => Some(Text::key(StrId::ExploreServerNoAnswer)),
+        Some(Named::Rooms(_)) if !listed => Some(Text::key(StrId::ExploreServerNoRooms)),
+        _ => None,
+    }
 }
 
 /// The sheet's rows in the terminal cursor's order: the button (while
@@ -669,7 +720,7 @@ pub fn sheet_picks<B>(model: &UiModel<B>) -> usize {
     let Some(hash) = model.explore.sheet else {
         return 0;
     };
-    usize::from(model.rooms.hub != Some(hash)) + sheet_rooms(&hash).len()
+    usize::from(model.rooms.hub != Some(hash)) + sheet_rooms(&model.rooms, &hash).len()
 }
 
 /// The open sheet as the frontends draw it.
@@ -677,7 +728,7 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
     let hash = model.explore.sheet?;
     let hub = sheet_hub(model, hash);
     let chosen = model.rooms.hub == Some(hash);
-    let rooms = sheet_rooms(&hash);
+    let rooms = sheet_rooms(&model.rooms, &hash);
     let (now_secs, _) = now(model);
     Some(HubSheet {
         hash,
@@ -693,9 +744,7 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
         }),
         notice: Text::key(StrId::RoomsNameVisible),
         rooms_title: Text::key(StrId::ExploreServerRooms),
-        no_rooms: rooms
-            .is_empty()
-            .then(|| Text::key(StrId::ExploreServerNoRooms)),
+        rooms_note: rooms_note(&model.rooms, &hash, !rooms.is_empty()),
         rooms,
         close: Text::key(StrId::ExploreServerClose),
         cursor: model
@@ -760,28 +809,36 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
         off: (!model.browse.enabled).then(|| Text::key(StrId::ExplorePagesOff)),
     };
     let rooms_node = super::rooms::node(model);
-    let (hubs, heard) = hub_lists(model);
-    let hubs: Vec<HubRow> = hubs.iter().map(|h| hub_row(model, h, cursor)).collect();
-    let heard: Vec<HubRow> = heard.iter().map(|h| hub_row(model, h, cursor)).collect();
+    let suggest = suggested(model);
+    let hubs: Vec<HubRow> = hub_list(model)
+        .iter()
+        .map(|h| hub_row(model, h, cursor, suggest))
+        .collect();
     let joined_cursor = match cursor {
         Some(Pick::Room(i)) => Some(*i),
         _ => None,
     };
-    let empty = (rooms_node.rows.is_empty()
-        && hubs.is_empty()
-        && heard.is_empty()
-        && explore.query.trim().is_empty())
-    .then(|| Text::key(StrId::ExploreNoRooms));
+    let query = explore.query.trim();
+    let servers_empty = hubs.is_empty().then(|| match query.is_empty() {
+        true => Text::key(StrId::ExploreNoServers),
+        false => Text::Key(
+            StrId::ExploreNoServerMatch,
+            Vec::from([Arg::Str(query.to_string())]),
+        ),
+    });
     ExploreNode {
         pages,
         rooms: RoomsSection {
             title: Text::key(StrId::ExploreRooms),
+            joined_empty: rooms_node
+                .rows
+                .is_empty()
+                .then(|| Text::key(StrId::ExploreNoJoined)),
             joined: rooms_node.rows,
             joined_cursor,
+            servers_title: Text::key(StrId::ExploreServers),
             hubs,
-            heard_title: Text::key(StrId::ExploreHeardHubs),
-            heard,
-            empty,
+            servers_empty,
         },
         sheet: sheet(model),
     }
@@ -858,7 +915,15 @@ pub(super) fn fold<B: InputBuffer + Default>(
         ExploreEvent::Hub(hash) => {
             model.explore.sheet = Some(hash);
             model.explore.sheet_cursor = 0;
-            Vec::new()
+            // The sheet asks the server what it names (1621), once a run:
+            // a known answer shows at once, a silence is asked again.
+            match model.rooms.named.get(&hash) {
+                Some(Named::Asking | Named::Rooms(_)) => Vec::new(),
+                None | Some(Named::NoAnswer) => {
+                    model.rooms.named.insert(hash, Named::Asking);
+                    Vec::from([UiEffect::Rooms(super::rooms::RoomAsk::Peek { hub: hash })])
+                }
+            }
         }
         ExploreEvent::UseHub(hash) => {
             model.explore.sheet = None;
@@ -968,7 +1033,10 @@ pub(super) fn key<B: InputBuffer + Default>(
                 if at < button {
                     return fold(model, ExploreEvent::UseHub(hash));
                 }
-                if let Some(room) = sheet_rooms(&hash).into_iter().nth(at - button) {
+                if let Some(room) = sheet_rooms(&model.rooms, &hash)
+                    .into_iter()
+                    .nth(at - button)
+                {
                     return fold(model, ExploreEvent::JoinRoom(hash, room));
                 }
             }
@@ -1078,10 +1146,10 @@ impl ExploreNode {
                     "public": row.public.to_json(),
                 })).collect::<Vec<_>>(),
                 "joined_cursor": r.joined_cursor,
+                "joined_empty": r.joined_empty.as_ref().map(Text::to_json),
+                "servers_title": r.servers_title.to_json(),
                 "hubs": r.hubs.iter().map(hub_json).collect::<Vec<_>>(),
-                "heard_title": r.heard_title.to_json(),
-                "heard": r.heard.iter().map(hub_json).collect::<Vec<_>>(),
-                "empty": r.empty.as_ref().map(Text::to_json),
+                "servers_empty": r.servers_empty.as_ref().map(Text::to_json),
             },
             "sheet": self.sheet.as_ref().map(|s| json!({
                 "hash": crate::address::to_hex(&s.hash),
@@ -1093,7 +1161,7 @@ impl ExploreNode {
                 "notice": s.notice.to_json(),
                 "rooms_title": s.rooms_title.to_json(),
                 "rooms": s.rooms,
-                "no_rooms": s.no_rooms.as_ref().map(Text::to_json),
+                "rooms_note": s.rooms_note.as_ref().map(Text::to_json),
                 "close": s.close.to_json(),
                 "cursor": s.cursor,
             })),
@@ -1403,18 +1471,47 @@ mod tests {
         assert_eq!(scene.screen, ScreenId::Explore);
         let shown = scene.explore.expect("the list");
         assert_eq!(shown.pages.empty, Some(Text::key(StrId::ExploreNoPages)));
-        // The shipped hubs are always offered; with none it says so.
+        // Each part of the rooms' section in one sentence (1621): no room
+        // joined says so; the shipped servers are always offered, and with
+        // none it says so.
+        assert_eq!(shown.rooms.title, Text::key(StrId::ExploreRooms));
         assert_eq!(
-            shown.rooms.empty.is_some(),
+            shown.rooms.joined_empty,
+            Some(Text::key(StrId::ExploreNoJoined))
+        );
+        assert_eq!(
+            shown
+                .rooms
+                .joined_empty
+                .as_ref()
+                .map(|t| t.resolve(Lang::De))
+                .as_deref(),
+            Some("Du bist in keinem Raum. Such dir unten einen Server aus.")
+        );
+        assert_eq!(shown.rooms.servers_title, Text::key(StrId::ExploreServers));
+        assert_eq!(
+            shown.rooms.servers_empty.is_some(),
             crate::ui::hubs::shipped().is_empty()
         );
-        assert!(shown.rooms.heard.is_empty());
+        // A search that finds no server says so in the same form.
+        explore(&mut model, ExploreEvent::Typed("zzzz".into()));
+        let shown = node(&model);
+        assert_eq!(
+            shown
+                .rooms
+                .servers_empty
+                .as_ref()
+                .map(|t| t.resolve(Lang::De))
+                .as_deref(),
+            Some("Kein Server passt zu „zzzz“.")
+        );
     }
 
-    /// A hub's row chooses it and shows its rooms, and links nothing; the
-    /// first join links (the privacy sentence of 1577) and the room joins
-    /// on the hub's welcome. Heard hubs are listed under "Hubs in your
-    /// mesh".
+    /// A hub's row opens its sheet, which asks the server for its rooms
+    /// over a question of its own (1621) and chooses nothing; the button
+    /// chooses it and links nothing; the first join links (the privacy
+    /// sentence of 1577) and the room joins on the hub's welcome. Heard
+    /// hubs are listed with the shipped ones under "Servers".
     #[test]
     fn a_hub_is_picked_without_a_link_and_the_first_join_links() {
         let mut model = phone();
@@ -1432,12 +1529,21 @@ mod tests {
         );
         update(&mut model, UiEvent::Tab(TabId::Explore));
         let shown = node(&model);
-        assert_eq!(shown.rooms.heard.len(), 1);
-        assert_eq!(shown.rooms.heard[0].name, Text::Raw("Werkstatt".into()));
-        assert_eq!(shown.rooms.heard_title, Text::key(StrId::ExploreHeardHubs));
-        // The row opens the sheet and changes nothing (1618).
+        let row = |shown: &ExploreNode| {
+            shown
+                .rooms
+                .hubs
+                .iter()
+                .find(|h| h.hash == hub)
+                .cloned()
+                .expect("the heard server among the servers")
+        };
+        assert_eq!(row(&shown).name, Text::Raw("Werkstatt".into()));
+        assert_eq!(shown.rooms.servers_title, Text::key(StrId::ExploreServers));
+        // The row opens the sheet and chooses nothing (1618); it asks the
+        // server what it names (1621), and nothing else.
         let effects = explore(&mut model, ExploreEvent::Hub(hub));
-        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(effects, [UiEffect::Rooms(RoomAsk::Peek { hub })]);
         assert_eq!(model.rooms.hub, None);
         let sheet = node(&model).sheet.expect("the sheet");
         assert_eq!(sheet.name, Text::Raw("Werkstatt".into()));
@@ -1475,7 +1581,7 @@ mod tests {
         );
         assert_eq!(model.scene(LayoutClass::Compact).screen, ScreenId::Explore);
         let picked = node(&model);
-        assert!(picked.rooms.heard[0].chosen);
+        assert!(row(&picked).chosen);
     }
 
     /// The terminal: letters go to the field, the arrows move the cursor,
@@ -1649,25 +1755,307 @@ mod tests {
             );
         }
         update(&mut model, UiEvent::Tab(TabId::Explore));
-        assert_eq!(node(&model).rooms.heard.len(), 2);
+        let heard = |shown: &ExploreNode| {
+            shown
+                .rooms
+                .hubs
+                .iter()
+                .filter(|h| h.hash == [0x91; 16] || h.hash == [0x92; 16])
+                .count()
+        };
+        assert_eq!(heard(&node(&model)), 2);
         explore(&mut model, ExploreEvent::Typed("werk".into()));
         let shown = node(&model);
-        assert_eq!(shown.rooms.heard.len(), 1);
-        assert_eq!(shown.rooms.heard[0].name, Text::Raw("Werkstatt".into()));
+        assert_eq!(heard(&shown), 1);
         assert!(shown.rooms.hubs.iter().all(|h| h
             .name
             .resolve(Lang::En)
             .to_lowercase()
             .contains("werk")));
-        assert_eq!(
-            shown.rooms.empty, None,
-            "a search says no 'nothing in reach'"
-        );
+        assert_eq!(shown.rooms.servers_empty, None);
         // A server's row says when it was heard, as a page's.
+        let werkstatt = shown
+            .rooms
+            .hubs
+            .iter()
+            .find(|h| h.hash == [0x91; 16])
+            .expect("Werkstatt");
         assert_eq!(
-            shown.rooms.heard[0].seen,
+            werkstatt.seen,
             Some(Text::Key(StrId::ExploreSeenMinutes, vec![Arg::Int(1)]))
         );
+    }
+
+    /// Every listed server says when it was heard (1621, walk 2: the
+    /// shipped ones said nothing): "not seen yet" for one never heard.
+    #[test]
+    fn every_server_says_when_it_was_seen() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let shown = node(&model);
+        for row in &shown.rooms.hubs {
+            assert_eq!(
+                row.seen,
+                Some(Text::key(StrId::ExploreNotSeen)),
+                "nothing heard yet: {:?}",
+                row.name
+            );
+        }
+        assert_eq!(StrId::ExploreNotSeen.text(Lang::De), "noch nicht gesehen");
+    }
+
+    /// "suggested" marks one server, the closest shipped one heard, or
+    /// none (1621, walk 2 saw it on four); none while a server is in use.
+    #[test]
+    fn suggested_marks_one_server_at_most() {
+        let shipped = crate::ui::hubs::shipped();
+        if shipped.len() < 3 {
+            return;
+        }
+        let mut model = phone();
+        // Three shipped servers heard, at 4, 2 and 3 hops.
+        for (hub, hops) in shipped.iter().take(3).zip([4u8, 2, 3]) {
+            update(
+                &mut model,
+                UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                    hash: hub.hash,
+                    name: Some(hub.name.clone()),
+                    hops: Some(hops),
+                    first: NOW - 60,
+                    last: NOW - 60,
+                    answered: None,
+                })),
+            );
+        }
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let marked = |model: &UiModel<Buffer>| -> Vec<[u8; 16]> {
+            node(model)
+                .rooms
+                .hubs
+                .iter()
+                .filter(|h| {
+                    h.value
+                        .as_ref()
+                        .is_some_and(|v| v.resolve(Lang::En).contains("suggested"))
+                })
+                .map(|h| h.hash)
+                .collect()
+        };
+        assert_eq!(marked(&model), [shipped[1].hash], "the closest, alone");
+        // The control: the rule before 1621 marked every shipped one heard.
+        let offered = crate::ui::settings::offered_hubs(&model.rooms);
+        assert_eq!(offered.iter().filter(|o| o.shipped && o.heard).count(), 3);
+        // A server in use: nothing is suggested.
+        explore(&mut model, ExploreEvent::UseHub(shipped[2].hash));
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        assert!(marked(&model).is_empty());
+    }
+
+    /// The sheet asks the server for its rooms (1621): "asking" while the
+    /// question is out, the rooms it named once it answered, kept for the
+    /// next opening without a second question; "names no rooms" only once
+    /// it answered and named none; a silence is asked again.
+    #[test]
+    fn a_servers_sheet_asks_it_for_its_rooms_and_keeps_the_answer() {
+        let mut model = phone();
+        let hub = [0x95; 16];
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let asked = explore(&mut model, ExploreEvent::Hub(hub));
+        assert_eq!(asked, [UiEffect::Rooms(RoomAsk::Peek { hub })]);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert!(sheet.rooms.is_empty());
+        assert_eq!(
+            sheet.rooms_note,
+            Some(Text::key(StrId::ExploreServerAsking))
+        );
+        // The answer: two rooms.
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub,
+                rooms: Some(vec!["#lobby".into(), "#radio".into()]),
+            }),
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms, ["#lobby", "#radio"]);
+        assert_eq!(sheet.rooms_note, None);
+        assert_eq!(sheet_picks(&model), 3, "the button and two rooms");
+        // Closed and opened again: shown at once, no second question.
+        explore(&mut model, ExploreEvent::CloseSheet);
+        assert!(explore(&mut model, ExploreEvent::Hub(hub)).is_empty());
+        assert_eq!(node(&model).sheet.expect("the sheet").rooms.len(), 2);
+        // Another that answers and names none: only now "names no rooms".
+        let quiet = [0x96; 16];
+        explore(&mut model, ExploreEvent::Hub(quiet));
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub: quiet,
+                rooms: Some(Vec::new()),
+            }),
+        );
+        assert_eq!(
+            node(&model).sheet.expect("the sheet").rooms_note,
+            Some(Text::key(StrId::ExploreServerNoRooms))
+        );
+        // One that never welcomed: said so, and the next opening asks again.
+        let silent = [0x97; 16];
+        explore(&mut model, ExploreEvent::Hub(silent));
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub: silent,
+                rooms: None,
+            }),
+        );
+        assert_eq!(
+            node(&model).sheet.expect("the sheet").rooms_note,
+            Some(Text::key(StrId::ExploreServerNoAnswer))
+        );
+        explore(&mut model, ExploreEvent::CloseSheet);
+        assert_eq!(
+            explore(&mut model, ExploreEvent::Hub(silent)),
+            [UiEffect::Rooms(RoomAsk::Peek { hub: silent })]
+        );
+    }
+
+    fn page_text(model: &UiModel<Buffer>) -> String {
+        model
+            .scene(LayoutClass::Compact)
+            .browse
+            .expect("the browser")
+            .page
+            .lines
+            .iter()
+            .flat_map(|line| line.runs.iter().map(|run| run.text.clone()))
+            .collect()
+    }
+
+    fn loaded(model: &mut UiModel<Buffer>, micron: &str) {
+        update(
+            model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Loaded {
+                micron: micron.into(),
+                title: "the page's own title".into(),
+            }),
+        );
+    }
+
+    fn back(model: &mut UiModel<Buffer>) -> Vec<UiEffect> {
+        update(
+            model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Intent(lnomad::Intent::Back)),
+        )
+    }
+
+    /// The page view tells the truth (1621, walk 2 new 1 to 3): opening a
+    /// page clears the one before at once, and the bar, the address field
+    /// and the loading line say the target's name, never its hash or the
+    /// page before's; the first Back returns to Explore; the in-page Back
+    /// walks the pages followed from it. The sequence open, Back, Explore.
+    #[test]
+    fn a_page_opens_clean_under_its_name_and_back_returns_to_explore() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::OpenPage([0x11; 16]));
+        loaded(&mut model, "Zebra page\n`[More`:/page/more.mu]");
+        assert!(page_text(&model).contains("Zebra page"));
+        // open, Back, Explore: one Back.
+        back(&mut model);
+        assert_eq!(model.scene(LayoutClass::Compact).screen, ScreenId::Explore);
+        // Another page: nothing of the one before while it loads.
+        explore(&mut model, ExploreEvent::OpenPage([0x22; 16]));
+        let scene = model.scene(LayoutClass::Compact);
+        assert_eq!(scene.screen, ScreenId::Browse);
+        assert_eq!(scene.top.title, Text::Raw("Alpha Relay".into()));
+        let browser = scene.browse.expect("the browser");
+        assert!(
+            !page_text(&model).contains("Zebra"),
+            "{}",
+            page_text(&model)
+        );
+        assert_eq!(browser.address.value, "Alpha Relay");
+        assert_eq!(browser.top_bar.title.resolve(Lang::De), "Alpha Relay");
+        assert_eq!(
+            browser.status.map(|c| c.text.resolve(Lang::De)).as_deref(),
+            Some("lade Alpha Relay")
+        );
+        assert!(matches!(
+            browser.top_bar.lead,
+            leviculum_ui::scene::Lead::Back { .. }
+        ));
+        loaded(&mut model, "Alpha page\n`[More`:/page/more.mu]");
+        let browser = model
+            .scene(LayoutClass::Compact)
+            .browse
+            .expect("the browser");
+        assert_eq!(browser.address.value, "Alpha Relay", "no hash, no path");
+        assert_eq!(browser.top_bar.title.resolve(Lang::En), "Alpha Relay");
+        // In-page: a link, then Back walks back to the page, then Explore.
+        update(
+            &mut model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Intent(
+                lnomad::Intent::Activate(lnomad::app::scene::NodeId::Link(1)),
+            )),
+        );
+        loaded(&mut model, "More of Alpha");
+        assert!(page_text(&model).contains("More of Alpha"));
+        back(&mut model);
+        assert!(
+            page_text(&model).contains("Alpha page"),
+            "{}",
+            page_text(&model)
+        );
+        assert_eq!(model.scene(LayoutClass::Compact).screen, ScreenId::Browse);
+        back(&mut model);
+        assert_eq!(model.scene(LayoutClass::Compact).screen, ScreenId::Explore);
+        // A page seen before opens from the cache, at once.
+        explore(&mut model, ExploreEvent::OpenPage([0x11; 16]));
+        assert!(page_text(&model).contains("Zebra page"));
+        back(&mut model);
+        // A nameless node is "Unnamed page", never its hash; Back while it
+        // loads cancels the fetch and Explore is back.
+        explore(&mut model, ExploreEvent::OpenPage([0x33; 16]));
+        let browser = model
+            .scene(LayoutClass::Compact)
+            .browse
+            .expect("the browser");
+        assert_eq!(browser.address.value, "Unnamed page");
+        assert!(page_text(&model).trim().is_empty(), "{}", page_text(&model));
+        let effects = back(&mut model);
+        assert!(
+            effects.contains(&UiEffect::Browse(lnomad::Effect::Cancel)),
+            "{effects:?}"
+        );
+        assert_eq!(model.scene(LayoutClass::Compact).screen, ScreenId::Explore);
+    }
+
+    /// The control for the clean open: lnomad's own navigation keeps the
+    /// page before on screen while the next one loads, which is what the
+    /// walk saw for 45 s.
+    #[test]
+    fn the_control_a_navigation_without_a_fresh_trail_keeps_the_old_page() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::OpenPage([0x11; 16]));
+        loaded(&mut model, "Zebra page");
+        let _ = model
+            .browse
+            .fold(lnomad::AppEvent::Intent(lnomad::Intent::Go {
+                url: Some(format!("{}:/page/index.mu", "22".repeat(16))),
+            }));
+        assert!(page_text(&model).contains("Zebra page"));
+    }
+
+    /// A server's notices name its rooms as the probe read them: the word
+    /// after `/join` and every `#word`, once each.
+    #[test]
+    fn the_notices_name_the_rooms() {
+        assert_eq!(
+            crate::ui::hubs::rooms_named("Welcome! Try /join lobby or #radio, #radio.\nBye #"),
+            ["lobby", "#radio"]
+        );
+        assert!(crate::ui::hubs::rooms_named("Welcome to the hub.").is_empty());
     }
 
     /// A shipped server's room on its sheet joins: the server is used, and
@@ -1685,7 +2073,11 @@ mod tests {
         explore(&mut model, ExploreEvent::Hub(hub.hash));
         let sheet = node(&model).sheet.expect("the sheet");
         assert_eq!(sheet.rooms, hub.rooms);
-        assert_eq!(sheet.no_rooms, None);
+        assert_eq!(
+            sheet.rooms_note,
+            Some(Text::key(StrId::ExploreServerAsking)),
+            "asking while the shipped rooms show"
+        );
         let room = hub.rooms[0].clone();
         let effects = explore(&mut model, ExploreEvent::JoinRoom(hub.hash, room.clone()));
         assert_eq!(model.rooms.hub, Some(hub.hash));
@@ -1726,7 +2118,6 @@ mod tests {
             .rooms
             .hubs
             .iter()
-            .chain(shown.rooms.heard.iter())
             .find(|h| h.hash == hash)
             .expect("the row");
         assert_eq!(row.name.resolve(Lang::De), "Server ohne Namen");

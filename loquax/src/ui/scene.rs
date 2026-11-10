@@ -1156,14 +1156,20 @@ impl<B> UiModel<B> {
     }
 }
 
-/// The Browse tab in front (1337): Loquax's bar titled Browse, its tab bar
-/// with Browse active, and lnomad's scene, which is the whole content. No
-/// list and no chat: the tab is a screen of its own in both classes.
+/// The Browse tab in front (1337): Loquax's bar titled by the page's
+/// name (1621, walk 2: it said "Pages"), "Browse" on the start screen,
+/// its tab bar with Browse active, and lnomad's scene, which is the whole
+/// content. No list and no chat: the tab is a screen of its own in both
+/// classes.
 fn browse_scene<B>(model: &UiModel<B>) -> Scene {
     let mut top = me_bar(model);
-    top.title = Text::key(StrId::TabBrowse);
+    let title = match &model.browse.model.label {
+        Some(name) => Text::Raw(name.clone()),
+        None => Text::key(StrId::TabBrowse),
+    };
+    top.title = title.clone();
     top.actions = Vec::new();
-    top.a11y = A11y::of(NodeId::TopBar, Role::Bar, Text::key(StrId::TabBrowse));
+    top.a11y = A11y::of(NodeId::TopBar, Role::Bar, title);
     Scene {
         class: LayoutClass::Wide,
         screen: ScreenId::Browse,

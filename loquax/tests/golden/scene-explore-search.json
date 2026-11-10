@@ -55,15 +55,23 @@
       }
     },
     "rooms": {
-      "empty": null,
-      "heard": [],
-      "heard_title": {
-        "args": [],
-        "key": "explore_heard_hubs"
-      },
       "hubs": [],
       "joined": [],
       "joined_cursor": null,
+      "joined_empty": {
+        "args": [],
+        "key": "explore_no_joined"
+      },
+      "servers_empty": {
+        "args": [
+          "marcel"
+        ],
+        "key": "explore_no_server_match"
+      },
+      "servers_title": {
+        "args": [],
+        "key": "explore_servers"
+      },
       "title": {
         "args": [],
         "key": "explore_rooms"

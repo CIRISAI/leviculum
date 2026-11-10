@@ -62,6 +62,28 @@ pub enum RoomAsk {
     },
     /// Leave the hub.
     Close,
+    /// Ask this hub which rooms it names (1621): a link of its own beside
+    /// the rooms' link, identified with a throwaway identity and no nick,
+    /// HELLO until WELCOME, the notices of a few seconds read for rooms
+    /// ([`super::hubs::rooms_named`]), then closed. It joins nothing and
+    /// the hub learns nothing of the reader: a server's sheet asks it on
+    /// opening, which the privacy sentence of 1577 allows because nothing
+    /// that names the reader goes out. The answer is [`RoomsEvent::Peeked`].
+    Peek {
+        hub: [u8; 16],
+    },
+}
+
+/// What a hub named when its sheet asked (1621), kept for the run so the
+/// next opening shows it at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Named {
+    /// The question is on its way.
+    Asking,
+    /// The rooms its notices named, maybe none.
+    Rooms(Vec<String>),
+    /// It gave no WELCOME (no path, no link, no answer).
+    NoAnswer,
 }
 
 /// The settings' hub row (1577): what a press on one of its lines asks.
@@ -208,6 +230,8 @@ pub struct Rooms {
     /// Joins asked before the hub answered (1578): the first join links,
     /// and the hub's welcome sends them.
     pub queued: Vec<RoomAsk>,
+    /// What each hub named when its sheet asked (1621).
+    pub named: alloc::collections::BTreeMap<[u8; 16], Named>,
 }
 
 impl Default for Rooms {
@@ -227,6 +251,7 @@ impl Default for Rooms {
             heard: super::hubs::Heard::default(),
             hub_page: 0,
             queued: Vec::new(),
+            named: alloc::collections::BTreeMap::new(),
         }
     }
 }
@@ -327,6 +352,12 @@ pub enum RoomsEvent {
     Heard(super::hubs::HeardHub),
     /// "More…" under the hubs in the settings (1599, [`more`]).
     More,
+    /// The answer to [`RoomAsk::Peek`] (1621): the rooms the hub's notices
+    /// named, or `None` when it never welcomed the question.
+    Peeked {
+        hub: [u8; 16],
+        rooms: Option<Vec<String>>,
+    },
 }
 
 /// A tab chosen: the Rooms come to the front, any other sends them back.
@@ -612,6 +643,13 @@ pub(super) fn fold<B: InputBuffer + Default>(
             rooms.heard.hear(hub);
         }
         RoomsEvent::More => more(model),
+        RoomsEvent::Peeked { hub, rooms: named } => {
+            let named = match named {
+                Some(named) => Named::Rooms(named),
+                None => Named::NoAnswer,
+            };
+            rooms.named.insert(hub, named);
+        }
     }
     Vec::new()
 }

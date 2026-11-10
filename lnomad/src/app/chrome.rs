@@ -191,6 +191,12 @@ pub(crate) fn topbar_layout(model: &Model, area: Rect) -> TopBar {
         true => field.hint.resolve(model.lang),
         false => field.value,
     };
+    // A host's name for the page is the title and the address alike
+    // (1621): said once, in the address slot.
+    let title_full = match !field.editing && title_full == addr_full {
+        true => String::new(),
+        false => title_full,
+    };
     let sep_w = UnicodeWidthStr::width(TOPBAR_SEP) as u16;
     let tw = UnicodeWidthStr::width(title_full.as_str()) as u16;
 

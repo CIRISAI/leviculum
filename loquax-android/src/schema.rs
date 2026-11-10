@@ -2181,6 +2181,10 @@ pub struct BrowseScreen {
     /// The address field: what it holds, its hint.
     pub address: String,
     pub address_hint: String,
+    /// The page's node, 32 hex (1621): the address field shows the page's
+    /// name, and this while it is edited.
+    #[serde(default)]
+    pub dest: String,
     /// The top bar's state (identity, cache, hops) and the status line.
     #[serde(default)]
     pub chips: Vec<String>,
@@ -2368,21 +2372,23 @@ pub struct ExploreScreen {
     /// The one sentence where pages cannot be opened on this device.
     #[serde(default)]
     pub pages_off: String,
+    /// "Rooms" (1621): the rooms the reader is in, or the one sentence
+    /// that there is none.
     #[serde(default)]
     pub rooms_title: String,
-    /// The rooms the reader is in.
     #[serde(default)]
     pub joined: Vec<RoomsRow>,
-    /// The hubs Loquax ships and the reader's own.
+    #[serde(default)]
+    pub joined_empty: String,
+    /// "Servers": the servers Loquax ships, the reader's own and those
+    /// heard on the mesh, in one list, or the one sentence that there is
+    /// none (in a search: none matches).
+    #[serde(default)]
+    pub servers_title: String,
     #[serde(default)]
     pub hubs: Vec<ExploreHub>,
-    /// "Hubs in your mesh", and those heard announcing.
     #[serde(default)]
-    pub heard_title: String,
-    #[serde(default)]
-    pub heard: Vec<ExploreHub>,
-    #[serde(default)]
-    pub rooms_empty: String,
+    pub servers_empty: String,
     /// A server's sheet over the list (1618): its `dest`, empty while
     /// none is open.
     #[serde(default)]
@@ -2403,11 +2409,13 @@ pub struct ExploreScreen {
     pub sheet_notice: String,
     #[serde(default)]
     pub sheet_rooms_title: String,
-    /// The rooms its welcome named, each a `join`.
+    /// The rooms it named, each a `join` (1621: what its notices named
+    /// when the sheet asked, and what the shipped list recorded).
     #[serde(default)]
     pub sheet_rooms: Vec<String>,
+    /// The one sentence about them: asking, no answer, or none named.
     #[serde(default)]
-    pub sheet_no_rooms: String,
+    pub sheet_rooms_note: String,
     #[serde(default)]
     pub sheet_close: String,
 }

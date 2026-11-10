@@ -473,10 +473,25 @@ pub fn offered_hubs(rooms: &super::rooms::Rooms) -> Vec<Offered> {
     out
 }
 
-/// What a hub's row says beside its name: how far, "suggested" for a
-/// shipped one that was heard, "no answer", and the mark on the one in
+/// The one hub "suggested" marks (1621, walk 2 saw it on four): the
+/// closest shipped hub heard on the mesh that did not fail to answer, the
+/// first in the offered order on a tie; none while a hub is in force,
+/// whose mark says enough, and none when no shipped hub was heard.
+pub fn suggested(offered: &[Offered], chosen: Option<[u8; 16]>) -> Option<[u8; 16]> {
+    if chosen.is_some() {
+        return None;
+    }
+    offered
+        .iter()
+        .filter(|o| o.shipped && o.heard && o.answered != Some(false))
+        .min_by_key(|o| o.hops.unwrap_or(u8::MAX))
+        .map(|o| o.hash)
+}
+
+/// What a hub's row says beside its name: how far, "suggested" for the
+/// one [`suggested`] names, "no answer", and the mark on the one in
 /// force.
-fn offered_value(hub: &Offered, chosen: bool) -> Option<Text> {
+fn offered_value(hub: &Offered, chosen: bool, suggested: bool) -> Option<Text> {
     let mut parts = Vec::new();
     match hub.hops {
         Some(1) => parts.push(Text::key(StrId::RoomsHubHop)),
@@ -486,7 +501,7 @@ fn offered_value(hub: &Offered, chosen: bool) -> Option<Text> {
         )),
         None => {}
     }
-    if hub.shipped && hub.heard {
+    if suggested {
         parts.push(Text::key(StrId::RoomsHubSuggested));
     }
     if hub.answered == Some(false) {
@@ -520,6 +535,7 @@ pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
         action: None,
     }]);
     let offered = offered_hubs(&model.rooms);
+    let suggest = suggested(&offered, chosen);
     let known = |hub: [u8; 16]| offered.iter().any(|o| o.hash == hub);
     let own = chosen.is_some_and(|hub| !known(hub));
     let pages = offered.len().div_ceil(HUB_PAGE).max(1);
@@ -543,7 +559,7 @@ pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
                 Some(name) => Text::Raw(name.clone()),
                 None => Text::key(StrId::RoomsHubUnnamed),
             },
-            value: offered_value(hub, chosen == Some(hub.hash)),
+            value: offered_value(hub, chosen == Some(hub.hash), suggest == Some(hub.hash)),
             key,
             action: Some(Action::of(Intent::RoomsHub(HubPick::Hub(hub.hash)))),
         });
@@ -656,7 +672,8 @@ mod tests {
             said[2],
             "Villa: reachable over 4 stations · no answer · \u{2713}"
         );
-        assert_eq!(said[3], "HADARC: reachable over 4 stations · suggested");
+        // A server is in use: none is suggested (1621).
+        assert_eq!(said[3], "HADARC: reachable over 4 stations");
         assert_eq!(
             said[4],
             shipped[0].name.clone() + ": reachable over 3 stations"

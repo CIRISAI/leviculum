@@ -184,26 +184,6 @@ fn seeded(text: &str) -> Vec<([u8; 16], Heard)> {
         .collect()
 }
 
-/// The rooms a hub's notices name: the word after a `/join`, and every
-/// `#word`, each once, in the order said.
-fn rooms_named(notices: &str) -> Vec<String> {
-    let mut rooms: Vec<String> = Vec::new();
-    let mut after_join = false;
-    for word in notices.split_whitespace() {
-        let clean =
-            word.trim_matches(|c: char| !(c.is_alphanumeric() || c == '#' || c == '-' || c == '_'));
-        let room = (after_join || (clean.len() > 1 && clean.starts_with('#'))).then_some(clean);
-        after_join = word == "/join";
-        if let Some(room) = room.filter(|r| !r.is_empty() && *r != "#") {
-            let room = room.to_string();
-            if !rooms.contains(&room) {
-                rooms.push(room);
-            }
-        }
-    }
-    rooms
-}
-
 fn main() {
     let args = match args() {
         Ok(args) => args,
@@ -423,7 +403,7 @@ async fn worker(
             .or_else(|| node.hops_to(&hash))
             .map_or("-".to_string(), |h| h.to_string());
         let listed_name = (!listed_name.is_empty()).then_some(listed_name);
-        let rooms = rooms_named(&notices).join(",");
+        let rooms = loquax::ui::hubs::rooms_named(&notices).join(",");
         println!(
             "HUB hash={} listed={} announce={} hops={} welcome={} name={} announced={} rooms={} notice={}",
             hex::encode(dest),

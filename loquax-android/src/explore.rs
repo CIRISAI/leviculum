@@ -110,6 +110,9 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             .map(|t| t.resolve(lang))
             .unwrap_or_default(),
         rooms_title: rooms.title.resolve(lang),
+        joined_empty: text_or_empty(&rooms.joined_empty, lang),
+        servers_title: rooms.servers_title.resolve(lang),
+        servers_empty: text_or_empty(&rooms.servers_empty, lang),
         joined: rooms
             .joined
             .iter()
@@ -124,13 +127,6 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             })
             .collect(),
         hubs: rooms.hubs.iter().map(|h| hub(h, lang)).collect(),
-        heard_title: rooms.heard_title.resolve(lang),
-        heard: rooms.heard.iter().map(|h| hub(h, lang)).collect(),
-        rooms_empty: rooms
-            .empty
-            .as_ref()
-            .map(|t| t.resolve(lang))
-            .unwrap_or_default(),
         sheet_dest: node
             .sheet
             .as_ref()
@@ -167,10 +163,10 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             .as_ref()
             .map(|s| s.rooms.clone())
             .unwrap_or_default(),
-        sheet_no_rooms: node
+        sheet_rooms_note: node
             .sheet
             .as_ref()
-            .map(|s| text_or_empty(&s.no_rooms, lang))
+            .map(|s| text_or_empty(&s.rooms_note, lang))
             .unwrap_or_default(),
         sheet_close: node
             .sheet

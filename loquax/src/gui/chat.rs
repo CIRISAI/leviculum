@@ -882,16 +882,15 @@ impl App {
                 p,
             )
         };
+        if let Some(empty) = &rooms.joined_empty {
+            list = list.push(heading(empty.resolve(lang)));
+        }
+        // The servers under their own heading (1621).
+        list = list.push(heading(rooms.servers_title.resolve(lang)));
         for row in &rooms.hubs {
             list = list.push(hub(row));
         }
-        if !rooms.heard.is_empty() {
-            list = list.push(heading(rooms.heard_title.resolve(lang)));
-            for row in &rooms.heard {
-                list = list.push(hub(row));
-            }
-        }
-        if let Some(empty) = &rooms.empty {
+        if let Some(empty) = &rooms.servers_empty {
             list = list.push(heading(empty.resolve(lang)));
         }
         if let Some(notice) = &self.seen.notice {
@@ -976,7 +975,7 @@ impl App {
                 p,
             ));
         }
-        if let Some(none) = &sheet.no_rooms {
+        if let Some(none) = &sheet.rooms_note {
             list = list
                 .push(container(text(none.resolve(lang)).size(13).color(quiet)).padding([4, 16]));
         }

@@ -1988,19 +1988,18 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
             Span::styled(format!("  {value}"), quiet),
         ]));
     };
+    if let Some(empty) = &rooms.joined_empty {
+        lines.push(Line::from(Span::styled(empty.resolve(lang), quiet)));
+    }
+    // The servers under their own heading (1621).
+    lines.push(Line::from(Span::styled(
+        format!(" {}", rooms.servers_title.resolve(lang)),
+        quiet,
+    )));
     for row in &rooms.hubs {
         hub(row, &mut lines, &mut at);
     }
-    if !rooms.heard.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!(" {}", rooms.heard_title.resolve(lang)),
-            quiet,
-        )));
-        for row in &rooms.heard {
-            hub(row, &mut lines, &mut at);
-        }
-    }
-    if let Some(empty) = &rooms.empty {
+    if let Some(empty) = &rooms.servers_empty {
         lines.push(Line::from(Span::styled(empty.resolve(lang), quiet)));
     }
     let mut keys = "Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats";
@@ -2051,7 +2050,7 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
             lines.push(Line::from(format!("{}{room}", mark(sheet.cursor == row))));
             row += 1;
         }
-        if let Some(none) = &sheet.no_rooms {
+        if let Some(none) = &sheet.rooms_note {
             lines.push(Line::from(Span::styled(none.resolve(lang), quiet)));
         }
     }
@@ -3059,7 +3058,7 @@ mod tests {
         update(&mut model, key('E'));
         assert!(loquax::ui::explore::Explore::showing(&model));
         let list = whole_screen(&model);
-        for words in ["Explore", "Pages", "Bookmarks", "Today", "Public rooms"] {
+        for words in ["Explore", "Pages", "Bookmarks", "Today", "Rooms", "Servers"] {
             assert!(list.contains(words), "{words:?} in\n{list}");
         }
         same_text("tui-explore.txt", &list);
