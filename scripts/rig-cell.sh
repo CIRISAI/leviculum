@@ -105,19 +105,38 @@ rig_reader_alive() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
+# Close every open fd above 2 in the calling (sub)shell. For a child that
+# outlives its caller, before it execs: whatever the caller holds open, a flock
+# above all, would otherwise be held by the child for as long as it runs. Not
+# only our own bench lock on fd 7: rig-cell is run from tools that hold their
+# own locks on other fds, and on 2026-11-08 a reader kept erase.sh's fd 9 lock
+# for 42 minutes, so lander and cadence read the rig as held. Closing a list
+# of known fds would miss the next caller's; this closes whatever is there.
+rig_close_inherited_fds() {
+    local fd n
+    for fd in /proc/self/fd/*; do
+        n="${fd##*/}"
+        [[ "$n" =~ ^[0-9]+$ ]] || continue
+        [ "$n" -gt 2 ] || continue
+        { eval "exec $n>&-"; } 2>/dev/null
+    done
+}
+
 # Start one reader, detached from this shell so it outlives the run.
 # Args: $1 = board, $2 = serial, $3 = link
 rig_reader_start() {
     local board="$1" serial="$2" link="$3"
-    # 7>&- : the bench lock is on fd 7, and a reader inheriting it would hold
-    # the bench for as long as it runs. --capture is a year: the reader's
-    # default window is 90 s, sized for one post-mortem, and a standing reader
-    # that went deaf 90 s after the cell would record nothing until the next
-    # reset.
-    setsid python3 "$LEV_RIG_READER" --port "$link" \
-        --out "$RIG_READERS_DIR/$board.log" --label "$board/$serial" \
-        --attach-now --capture 31536000 \
-        </dev/null >>"$RIG_READERS_DIR/$board.err" 2>&1 7>&- &
+    # The subshell closes every inherited fd above 2 (rig_close_inherited_fds)
+    # and then execs, so $! is the reader's own pid. --capture is a year: the
+    # reader's default window is 90 s, sized for one post-mortem, and a standing
+    # reader that went deaf 90 s after the cell would record nothing until the
+    # next reset.
+    (
+        rig_close_inherited_fds
+        exec setsid python3 "$LEV_RIG_READER" --port "$link" \
+            --out "$RIG_READERS_DIR/$board.log" --label "$board/$serial" \
+            --attach-now --capture 31536000
+    ) </dev/null >>"$RIG_READERS_DIR/$board.err" 2>&1 &
     printf '%s\n' "$!" >"$(rig_reader_pidfile "$board")"
 }
 
