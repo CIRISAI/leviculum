@@ -258,13 +258,16 @@ final class ExplorePane {
         list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-                tapped(rows.at(position));
+                // The row the finger came down on, not the one at the
+                // position now (1632, walk 4: an answer between the lift
+                // and this click had put the row above there).
+                tapped(rows.hit(position));
             }
         });
         list.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
             @Override
             public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
-                Row row = rows.at(position);
+                Row row = rows.hit(position);
                 if (row.kind != Row.PAGE) {
                     return false;
                 }
@@ -277,6 +280,7 @@ final class ExplorePane {
             public void onScrollStateChanged(android.widget.AbsListView view, int state) {
                 if (state != SCROLL_STATE_IDLE) {
                     rows.touched(SystemClock.uptimeMillis());
+                    rows.release();
                 } else {
                     // At rest again, maybe at the top: what waits shows
                     // once the list rested there long enough.
@@ -350,10 +354,14 @@ final class ExplorePane {
         int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
             rows.touched(SystemClock.uptimeMillis());
+            rows.press(list.pointToPosition((int) event.getX(), (int) event.getY()));
             rows.down();
             verb("touch", "", "", 1, false, false);
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
             rows.touched(SystemClock.uptimeMillis());
+            if (action == MotionEvent.ACTION_CANCEL) {
+                rows.release();
+            }
             int top = topOfFirst();
             if (rows.up(firstOnScreen(), list.getLastVisiblePosition()) == ExploreRows.SHOWN) {
                 place(top);

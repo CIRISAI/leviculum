@@ -52,6 +52,7 @@ final class ExploreRowsTest {
 
         stillBetweenLookingAndTapping();
         theTopAtRestFills();
+        aTapOpensTheRowItHit();
 
         check(ExploreRows.id("page:aa") == ExploreRows.id("page:aa"), "an id is stable");
         check(ExploreRows.id("page:aa") != ExploreRows.id("page:ab"), "two rows, two ids");
@@ -268,6 +269,50 @@ final class ExploreRowsTest {
         rows.down();
         check(rows.offer(more, 0, 6, false, true, now + 60_000) == ExploreRows.HELD,
                 "held under the finger");
+    }
+
+    /**
+     * Walk 4 of 1632, new 11: a tap on "Ben's Library" opened the row
+     * above it, twice. ListView takes the position under the finger when
+     * it comes down and clicks it a moment after the lift; an answer that
+     * lands in between (the lift's own "touch" verb draws) and inserts a
+     * page above the screen is shown at once, anchored, so the click's
+     * position now names the row above. The click opens the row the finger
+     * came down on, by its key, never by position in the newer list.
+     */
+    private static void aTapOpensTheRowItHit() {
+        // The order's case: A, B, C shown, the library re-sorts to B, A, C
+        // (the screen unknown, so it shows), the finger on row 2.
+        ExploreRows<String> rows = new ExploreRows<String>(KEYS);
+        rows.offer(Arrays.asList("page:A", "page:B", "page:C"));
+        rows.press(1);
+        rows.down();
+        rows.up();
+        rows.offer(Arrays.asList("page:B", "page:A", "page:C"));
+        String hit = rows.hit(1);
+        check("page:B".equals(hit), "the tap on row 2 opens B, the row the finger hit: " + hit);
+        check("page:A".equals(rows.at(1)), "the control, by position: " + rows.at(1));
+        // The walk's case: scrolled, the finger on a page, the lift, then
+        // one page lands at the top of "Heute", above the screen.
+        ExploreRows<String> walk = new ExploreRows<String>(KEYS);
+        List<String> list = explore(40);
+        walk.offer(list);
+        int first = 14;
+        int tap = 18;
+        String aimed = list.get(tap);
+        walk.press(tap);
+        walk.down();
+        check(walk.up(first, first + 10) == ExploreRows.HELD, "nothing waited for the lift");
+        List<String> next = new ArrayList<String>(list);
+        next.add(2, "page:heard");
+        check(walk.offer(next, first, first + 10, false) == ExploreRows.SHOWN,
+                "a page above the screen shows at once, unseen");
+        check(!aimed.equals(walk.at(tap)), "the control lands one row up: " + walk.at(tap));
+        hit = walk.hit(tap);
+        check(aimed.equals(hit), "the click opens " + aimed + ", not " + hit);
+        // A click with no finger before it (a key, accessibility) is the
+        // row at its position, and a press is used once.
+        check(walk.hit(5).equals(walk.at(5)), "a click without a press");
     }
 
     private static void check(boolean ok, String what) {

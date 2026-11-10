@@ -42,6 +42,10 @@ import java.util.Set;
  * the list kept at its top. The chip belongs to a scrolled list, a list
  * just touched, or a finger on it.
  *
+ * <p>A tap opens the row it hit (1632, walk 4: a tap on a page opened the
+ * row above it): {@link #press} keeps the row under the finger and
+ * {@link #hit} hands it to the click, whatever the list became between.
+ *
  * @param <T> one row as the pane draws it
  */
 final class ExploreRows<T> {
@@ -69,6 +73,8 @@ final class ExploreRows<T> {
     private List<T> waiting;
     private boolean down;
     private int anchor = -1;
+    /** The row the finger came down on, until its click or the gesture's end. */
+    private T pressed;
     /** When the reader last touched or scrolled the list; never, at first. */
     private long touched = Long.MIN_VALUE / 2;
 
@@ -255,6 +261,34 @@ final class ExploreRows<T> {
 
     int size() {
         return shown.size();
+    }
+
+    /**
+     * The finger came down on {@code position} of the rows shown (1632,
+     * walk 4): the row it hit is kept, by itself, not by its position.
+     * ListView takes the position at the press and clicks it a moment
+     * after the lift; an answer that lands in between and shows at once
+     * (pages above the screen, anchored) makes that position name another
+     * row. A position outside the rows keeps nothing.
+     */
+    void press(int position) {
+        pressed = position >= 0 && position < shown.size() ? shown.get(position) : null;
+    }
+
+    /** The gesture became a scroll or was cancelled: no click follows it. */
+    void release() {
+        pressed = null;
+    }
+
+    /**
+     * The row a click at {@code position} opens: the row the finger came
+     * down on, when a press came before it; else the row at the position
+     * (a key, accessibility). A press is used once.
+     */
+    T hit(int position) {
+        T row = pressed;
+        pressed = null;
+        return row != null ? row : shown.get(position);
     }
 
     T at(int position) {
