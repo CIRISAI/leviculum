@@ -316,6 +316,51 @@ pub fn verify_result(source: &[u8; 16], message_id: &[u8; 32], valid: bool) {
     );
 }
 
+/// How the link to a hub of the Rooms stands (1652): `linking`, `ready`,
+/// or why it is down (`no_path`, `no_answer`, `lost`, `node_gone`,
+/// `left`). Before 1652 the rooms' code logged nothing, and a phone's
+/// trace could not tell "never asked" from "connecting".
+pub fn rooms_link(hub: &[u8; 16], state: &str) {
+    tracing::debug!(
+        event = "ROOMS_LINK",
+        hub = %to_hex(hub),
+        state = %scalar(state),
+    );
+}
+
+/// The hub's WELCOME (1652), with the version it gave (`-` for none).
+pub fn rooms_welcome(hub: &[u8; 16], version: Option<&str>) {
+    tracing::debug!(
+        event = "ROOMS_WELCOME",
+        hub = %to_hex(hub),
+        version = %scalar(version.unwrap_or("-")),
+    );
+}
+
+/// How many rooms a hub named (1652): `via` is `link` for the chosen
+/// hub's `/list` after its WELCOME, `peek` for a server sheet's question;
+/// `answered` is false when the hub gave no list in time and only its
+/// greeting was read.
+pub fn rooms_list(hub: &[u8; 16], rooms: usize, via: &str, answered: bool) {
+    tracing::debug!(
+        event = "ROOMS_LIST",
+        hub = %to_hex(hub),
+        rooms = rooms,
+        via = %scalar(via),
+        answered = answered,
+    );
+}
+
+/// A join asked of the hub and how it went (1652): `ok` when the hub said
+/// we are in, not when it refused or the session would not send it.
+pub fn rooms_join(room: &str, ok: bool) {
+    tracing::debug!(
+        event = "ROOMS_JOIN",
+        room = %scalar(room),
+        ok = ok,
+    );
+}
+
 /// The first eight hex characters of an address, as the log lines carry it.
 fn short_hex(address: &[u8; 16]) -> String {
     let mut hex = to_hex(address);

@@ -247,6 +247,62 @@ pub fn rooms_named(notices: &str) -> Vec<String> {
     rooms
 }
 
+/// The command a client sends after the hub's WELCOME for its rooms (1652).
+pub const LIST_COMMAND: &str = "/list";
+
+/// The rooms a hub's answer to [`LIST_COMMAND`] names, or `None` when
+/// `text` is no such answer (the greeting, another notice). rrcd answers
+/// "Registered public rooms:" and a line `  name - topic` or `  name` per
+/// room, or "No public rooms registered" (`commands.py`); a hub of
+/// another implementation heads its list alike and puts a bare name on a
+/// line, or several after the head's colon, comma-separated. A name is
+/// kept as the hub spells it, spaces and slashes included: it is what a
+/// join asks for. An empty list is an answer that names none.
+pub fn list_answer(text: &str) -> Option<Vec<String>> {
+    let lower = text.to_lowercase();
+    if lower.contains("no public rooms") || lower.contains("no rooms") {
+        return Some(Vec::new());
+    }
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let head = lines.next()?;
+    let (said, rest) = head.split_once(':')?;
+    if !said.to_lowercase().contains("room") {
+        return None;
+    }
+    let mut rooms: Vec<String> = Vec::new();
+    let mut keep = |item: &str| {
+        let item = item.trim_start_matches(['-', '*', '\u{2022}']).trim();
+        let name = match item.split_once(" - ") {
+            Some((name, _topic)) => name.trim(),
+            None => item,
+        };
+        if !name.is_empty() && !rooms.iter().any(|r| r == name) {
+            rooms.push(name.to_string());
+        }
+    };
+    for item in rest.split(',') {
+        keep(item);
+    }
+    for line in lines {
+        keep(line);
+    }
+    Some(rooms)
+}
+
+/// The rooms a hub names (1652): its list first, as it spells them, then
+/// what its greeting named ([`rooms_named`]) that the list has not, a
+/// `#word` and the bare word counted as one.
+pub fn rooms_merged(listed: &[String], greeting: &[String]) -> Vec<String> {
+    let bare = |name: &str| name.trim_start_matches('#').to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for room in listed.iter().chain(greeting) {
+        if !out.iter().any(|r| bare(r) == bare(room)) {
+            out.push(room.clone());
+        }
+    }
+    out
+}
+
 /// Whether an announce's name hash is a hub's (`rrc.hub`).
 pub fn is_hub(name_hash: &[u8]) -> bool {
     name_hash
@@ -488,5 +544,66 @@ mod tests {
             "the one heard longest ago went"
         );
         assert!(full.get(&[0xff; 16]).is_some());
+    }
+
+    fn names(rooms: &[&str]) -> Vec<String> {
+        rooms.iter().map(|r| r.to_string()).collect()
+    }
+
+    /// 1652: rrcd's answer with topics, as Colorado Mesh gave it.
+    #[test]
+    fn the_list_answer_with_topics_names_its_rooms() {
+        let text = "Registered public rooms:\n  general - General chat\n  mesh-client - Clients: which one\n  ratspeak";
+        assert_eq!(
+            list_answer(text),
+            Some(names(&["general", "mesh-client", "ratspeak"]))
+        );
+    }
+
+    /// 1652: the other implementation's form, bare names with spaces and
+    /// slashes, on lines or after the head's colon.
+    #[test]
+    fn the_list_answer_of_bare_names_keeps_them_as_spelled() {
+        let lines = "Public rooms:\ngeneral chat\ngmrs/ham\nmeshcore\nreticulum\nwifihalow";
+        let want = names(&[
+            "general chat",
+            "gmrs/ham",
+            "meshcore",
+            "reticulum",
+            "wifihalow",
+        ]);
+        assert_eq!(list_answer(lines), Some(want.clone()));
+        let one = "Rooms: general chat, gmrs/ham, meshcore, reticulum, wifihalow";
+        assert_eq!(list_answer(one), Some(want));
+        let bullets = "Rooms on this hub:\n - lobby\n * radio - ham radio";
+        assert_eq!(list_answer(bullets), Some(names(&["lobby", "radio"])));
+    }
+
+    /// 1652: "No public rooms registered" is an answer naming none; a
+    /// greeting is no answer at all.
+    #[test]
+    fn the_empty_answer_and_a_greeting_are_told_apart() {
+        assert_eq!(list_answer("No public rooms registered"), Some(Vec::new()));
+        assert_eq!(list_answer("Registered public rooms:\n"), Some(Vec::new()));
+        assert_eq!(list_answer("Welcome to the Colorado Mesh RRC hub."), None);
+        assert_eq!(
+            list_answer("Welcome to Minuteman: try #lobby"),
+            None,
+            "a colon without rooms before it is no list"
+        );
+        assert_eq!(list_answer(""), None);
+    }
+
+    /// 1652: the list first as spelled, the greeting's hits after, `#lobby`
+    /// and `lobby` one room.
+    #[test]
+    fn the_list_and_the_greeting_merge_without_doubles() {
+        let listed = names(&["lobby", "radio"]);
+        let greeting = rooms_named("Welcome! Join #lobby or #help.");
+        assert_eq!(
+            rooms_merged(&listed, &greeting),
+            names(&["lobby", "radio", "#help"])
+        );
+        assert_eq!(rooms_merged(&[], &greeting), names(&["#lobby", "#help"]));
     }
 }

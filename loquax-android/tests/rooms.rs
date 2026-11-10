@@ -83,14 +83,10 @@ fn the_phone_works_a_room_through_the_schema() {
     let (_home, mut model) = phone(Some(HUB));
     assert!(!screen(&model).open, "closed until the tab is tapped");
 
-    // The tab links nothing (1578); the first join links, once, and the
-    // first time the reader is told their name is visible, and the config
-    // keeps that (1577). The join waits for the hub's welcome.
-    assert!(
-        tap(&mut model, "tab", "", 0).is_empty(),
-        "opening links nothing"
-    );
-    let effects = tap(&mut model, "say", "#lab", 0);
+    // The tab links (1652), once, and the first time the reader is told
+    // their name is visible, which the config keeps (1577). "Verbinde…",
+    // nothing to retry. A join meanwhile waits for the hub's welcome.
+    let effects = tap(&mut model, "tab", "", 0);
     assert_eq!(
         effects,
         [
@@ -101,6 +97,13 @@ fn the_phone_works_a_room_through_the_schema() {
             UiEffect::Rooms(RoomAsk::Open { hub: HUB })
         ],
         "{effects:?}"
+    );
+    let linking = screen(&model);
+    assert_eq!(linking.status, "Verbinde…");
+    assert!(linking.retry.is_empty() && linking.listed.is_empty());
+    assert!(
+        tap(&mut model, "say", "#lab", 0).is_empty(),
+        "the join waits"
     );
     assert!(tap(&mut model, "tab", "", 0).is_empty(), "linking already");
     // Before the welcome a line is not sent, and stays in the field.
@@ -120,7 +123,7 @@ fn the_phone_works_a_room_through_the_schema() {
             room: "#lab".to_string(),
             key: None
         })],
-        "the welcome sends the join that linked"
+        "the welcome sends the join that waited"
     );
     hub(
         &mut model,

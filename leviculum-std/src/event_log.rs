@@ -887,6 +887,22 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["id", "src", "bytes", "dup"],
     },
     EventSchema {
+        name: "ROOMS_LINK",
+        required_keys: &["hub", "state"],
+    },
+    EventSchema {
+        name: "ROOMS_WELCOME",
+        required_keys: &["hub", "version"],
+    },
+    EventSchema {
+        name: "ROOMS_LIST",
+        required_keys: &["hub", "rooms", "via", "answered"],
+    },
+    EventSchema {
+        name: "ROOMS_JOIN",
+        required_keys: &["room", "ok"],
+    },
+    EventSchema {
         name: "LNMSG_SYNC_DONE",
         required_keys: &["received", "duplicates", "new"],
     },

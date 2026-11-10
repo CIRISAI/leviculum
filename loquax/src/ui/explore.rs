@@ -184,10 +184,10 @@ pub enum ExploreEvent {
     /// (1618).
     Hub([u8; 16]),
     /// The sheet's button: this hub is the public rooms' hub from now on,
-    /// and its rooms show. Nothing is linked until a room is joined.
+    /// linked at once (1652), and its rooms show as it lists them.
     UseHub([u8; 16]),
     /// One of the rooms the sheet lists: the hub is used, and the room
-    /// joined, which links.
+    /// joined as the hub spells it once it welcomed us.
     JoinRoom([u8; 16], String),
     /// The sheet closes.
     CloseSheet,
@@ -1054,11 +1054,9 @@ pub(super) fn fold<B: InputBuffer + Default>(
             let mut effects = super::rooms::choose(model, HubChoice::Hub(hash));
             show_rooms(model);
             effects.extend(super::rooms::fold(model, RoomsEvent::Show(None)));
-            effects.extend(super::rooms::fold(
-                model,
-                RoomsEvent::Typed(format!("/join {room}")),
-            ));
-            effects.extend(super::rooms::fold(model, RoomsEvent::Submit));
+            // Joined by its name, not typed as `/join name`: a name the hub
+            // spells with a space would be read as a room and a key (1652).
+            effects.extend(super::rooms::fold(model, RoomsEvent::Join(room)));
             effects
         }
         ExploreEvent::CloseSheet => {
@@ -1075,7 +1073,7 @@ pub(super) fn fold<B: InputBuffer + Default>(
     }
 }
 
-/// A hub's rooms in front, from the tab: no link yet.
+/// A hub's rooms in front, from the tab; the choice linked (1652).
 fn show_rooms<B>(model: &mut UiModel<B>) {
     model.explore.open = true;
     model.browse.open = false;
@@ -1626,11 +1624,12 @@ mod tests {
 
     /// A hub's row opens its sheet, which asks the server for its rooms
     /// over a question of its own (1621) and chooses nothing; the button
-    /// chooses it and links nothing; the first join links (the privacy
-    /// sentence of 1577) and the room joins on the hub's welcome. Heard
-    /// hubs are listed with the shipped ones under "Servers".
+    /// chooses it and, since 1652, links at once (the privacy sentence of
+    /// 1577 comes with it): "Connecting…", then the rooms the hub lists,
+    /// one tap from a room. Heard hubs are listed with the shipped ones
+    /// under "Servers".
     #[test]
-    fn a_hub_is_picked_without_a_link_and_the_first_join_links() {
+    fn a_hub_picked_links_and_its_listed_room_is_one_tap_away() {
         let mut model = phone();
         let hub = [0x99; 16];
         update(
@@ -1672,22 +1671,70 @@ mod tests {
         assert_eq!(sheet.button, Text::key(StrId::ExploreServerUse));
         let effects = explore(&mut model, ExploreEvent::UseHub(hub));
         assert!(node(&model).sheet.is_none());
+        // Picking links at once (1652): no typed room name needed.
         assert!(
-            effects
-                .iter()
-                .all(|e| !matches!(e, UiEffect::Rooms(RoomAsk::Open { .. }))),
-            "no link on picking: {effects:?}"
+            effects.contains(&UiEffect::Rooms(RoomAsk::Open { hub })),
+            "picking links: {effects:?}"
         );
-        assert_eq!(model.rooms.state, HubState::Off);
+        assert_eq!(model.rooms.state, HubState::Linking);
         let scene = model.scene(LayoutClass::Compact);
         assert_eq!(scene.screen, ScreenId::Rooms);
         assert_eq!(scene.tabs.expect("tabs").active, TabId::Explore);
-        update(&mut model, UiEvent::Rooms(RoomsEvent::Typed("#lab".into())));
-        let effects = update(&mut model, UiEvent::Rooms(RoomsEvent::Submit));
-        assert!(
-            effects.contains(&UiEffect::Rooms(RoomAsk::Open { hub })),
-            "the first join links: {effects:?}"
+        // The words tell the state: connecting, not "not connected".
+        let rooms = crate::ui::rooms::node(&model);
+        assert_eq!(rooms.status, Some(Text::key(StrId::RoomsLinking)));
+        assert_eq!(rooms.retry, None, "nothing to retry while it links");
+        assert!(rooms.listed.is_none(), "no list before the welcome");
+        // The welcome: the hub's rooms are asked; until they come, it says so.
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Welcomed {
+                name: Some("Werkstatt".into()),
+                body_limit: 350,
+            }),
         );
+        let rooms = crate::ui::rooms::node(&model);
+        assert_eq!(rooms.status, None);
+        let listed = rooms.listed.expect("the list's place");
+        assert_eq!(listed.note, Some(Text::key(StrId::RoomsAsking)));
+        // Its answer: rows to tap, the typed-name field below them.
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Listed {
+                rooms: vec!["general chat".into(), "lobby".into()],
+            }),
+        );
+        let rooms = crate::ui::rooms::node(&model);
+        let listed = rooms.listed.expect("the hub's rooms");
+        assert_eq!(listed.rooms, ["general chat", "lobby"]);
+        assert_eq!(listed.title.resolve(Lang::De), "Räume auf Werkstatt");
+        assert_eq!(listed.other, Some(Text::key(StrId::RoomsOther)));
+        assert_eq!(rooms.empty, None, "the field moved under the list");
+        // A tap joins as the hub spells it, and the room opens.
+        let effects = update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Join("general chat".into())),
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Rooms(RoomAsk::Join {
+                room: "general chat".into(),
+                key: None
+            })]
+        );
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Joined {
+                room: "general chat".into(),
+                nick: None,
+            }),
+        );
+        let rooms = crate::ui::rooms::node(&model);
+        assert_eq!(rooms.open.expect("the room opened").name, "general chat");
+        // Back to the list: the joined room is a row, no longer offered.
+        update(&mut model, UiEvent::Rooms(RoomsEvent::Show(None)));
+        let rooms = crate::ui::rooms::node(&model);
+        assert_eq!(rooms.listed.expect("the rest").rooms, ["lobby"]);
         // Esc on the rooms' list goes back to Explore, which opened them.
         update(
             &mut model,

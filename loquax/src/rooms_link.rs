@@ -35,6 +35,9 @@ const HELLO_TRIES: u32 = 5;
 pub const NOTICE_WINDOW: Duration = Duration::from_secs(6);
 /// The most a question to a server may take, path, link and HELLOs.
 const PEEK_BUDGET: Duration = Duration::from_secs(90);
+/// How long the answer to `/list` is waited for after the WELCOME (1652);
+/// a hub that says nothing in time names what its greeting named.
+pub const LIST_WINDOW: Duration = Duration::from_secs(15);
 
 /// The name and version the client gives in its HELLO.
 pub const CLIENT_NAME: &str = "loquax";
@@ -70,6 +73,7 @@ pub fn start(runtime: &tokio::runtime::Handle, options: Options, wake: Arc<Notif
         Teller {
             told: told_tx,
             wake,
+            hub: None,
         },
     ));
     Linking { asks, told }
@@ -78,10 +82,27 @@ pub fn start(runtime: &tokio::runtime::Handle, options: Options, wake: Arc<Notif
 struct Teller {
     told: mpsc::UnboundedSender<Told>,
     wake: Arc<Notify>,
+    /// The hub the rooms' link is for, for the event log (1652).
+    hub: Option<[u8; 16]>,
 }
 
 impl Teller {
     fn tell(&self, told: Told) {
+        if let Some(hub) = &self.hub {
+            let state = match &told {
+                Told::Linking => Some("linking"),
+                Told::Welcomed { .. } => Some("ready"),
+                Told::Down(Down::NoPath) => Some("no_path"),
+                Told::Down(Down::NoAnswer) => Some("no_answer"),
+                Told::Down(Down::Lost) => Some("lost"),
+                Told::Down(Down::NodeGone) => Some("node_gone"),
+                Told::Down(Down::Left) => Some("left"),
+                _ => None,
+            };
+            if let Some(state) = state {
+                crate::events::rooms_link(hub, state);
+            }
+        }
         if self.told.send(told).is_ok() {
             self.wake.notify_one();
         }
@@ -102,15 +123,43 @@ struct Peek {
     next: tokio::time::Instant,
     welcomed: bool,
     notices: String,
+    /// The rooms its answer to `/list` named (1652), once it came.
+    listed: Option<Vec<String>>,
     deadline: tokio::time::Instant,
 }
 
 /// The hub we are linked to.
 struct Hub {
+    hash: [u8; 16],
     link_id: LinkId,
     session: Session,
     hellos: u32,
     next_hello: tokio::time::Instant,
+    /// Until when the answer to `/list` is waited for (1652), while it is.
+    listing: Option<tokio::time::Instant>,
+    /// The hub's room-less notices since its WELCOME: its greeting, read
+    /// for `#word` hits beside the list.
+    greeting: String,
+    /// The joins sent that the hub has not answered yet, for the log.
+    joining: Vec<String>,
+}
+
+impl Hub {
+    /// The hub's clock: a HELLO before its WELCOME, the end of the list's
+    /// window after.
+    fn due(&self) -> Option<tokio::time::Instant> {
+        match self.session.is_welcomed() {
+            false => Some(self.next_hello),
+            true => self.listing,
+        }
+    }
+}
+
+/// What a hub named (1652): its `/list` answer (`None` when none came in
+/// time) merged with its greeting's hits.
+fn named(listed: Option<&[String]>, greeting: &str) -> Vec<String> {
+    let hits = crate::ui::hubs::rooms_named(greeting);
+    crate::ui::hubs::rooms_merged(listed.unwrap_or(&[]), &hits)
 }
 
 fn now_ms() -> u64 {
@@ -161,11 +210,7 @@ async fn run(mut options: Options, mut asks: mpsc::UnboundedReceiver<Ask>, telle
     };
     let mut lends_open = true;
     loop {
-        let hello_due = task
-            .hub
-            .as_ref()
-            .filter(|hub| !hub.session.is_welcomed())
-            .map(|hub| hub.next_hello);
+        let hub_due = task.hub.as_ref().and_then(Hub::due);
         let peek_due = task.peek.as_ref().map(|peek| match peek.session {
             Some(_) => peek.next.min(peek.deadline),
             None => peek.deadline,
@@ -208,7 +253,7 @@ async fn run(mut options: Options, mut asks: mpsc::UnboundedReceiver<Ask>, telle
                     task.peek_linked(hub, link_id).await;
                 }
             }
-            () = sleep_until(hello_due) => task.hello_again().await,
+            () = sleep_until(hub_due) => task.hub_due().await,
             () = sleep_until(peek_due) => task.peek_due().await,
         }
     }
@@ -249,10 +294,22 @@ impl Task {
                 self.teller.tell(Told::Down(Down::Left));
             }
             Ask::Join { room, key } => {
-                self.out(|s| s.join(&room, key.as_deref(), fresh_id(), now_ms()))
+                let sent = self
+                    .out(|s| s.join(&room, key.as_deref(), fresh_id(), now_ms()))
                     .await;
+                match (sent, self.hub.as_mut()) {
+                    (true, Some(hub)) => {
+                        let name = leviculum_rrc::room_name(&room, usize::MAX).unwrap_or(room);
+                        if hub.joining.len() < 16 && !hub.joining.contains(&name) {
+                            hub.joining.push(name);
+                        }
+                    }
+                    _ => crate::events::rooms_join(&room, false),
+                }
             }
-            Ask::Part { room } => self.out(|s| s.part(&room, fresh_id(), now_ms())).await,
+            Ask::Part { room } => {
+                self.out(|s| s.part(&room, fresh_id(), now_ms())).await;
+            }
             Ask::Say { room, kind, text } => {
                 self.out(|s| s.say(&room, kind, &text, fresh_id(), now_ms()))
                     .await;
@@ -287,6 +344,7 @@ impl Task {
                 next: now,
                 welcomed: false,
                 notices: String::new(),
+                listed: None,
                 deadline: now + PEEK_BUDGET,
             });
             let linked = self.linked.clone();
@@ -385,13 +443,13 @@ impl Task {
         };
         let now = tokio::time::Instant::now();
         if peek.welcomed && now >= peek.next {
-            let named = crate::ui::hubs::rooms_named(&peek.notices);
+            let named = named(peek.listed.as_deref(), &peek.notices);
             return self.peek_done(Some(named)).await;
         }
         if now >= peek.deadline {
             let named = peek
                 .welcomed
-                .then(|| crate::ui::hubs::rooms_named(&peek.notices));
+                .then(|| named(peek.listed.as_deref(), &peek.notices));
             return self.peek_done(named).await;
         }
         if peek.session.is_some() && !peek.welcomed && now >= peek.next {
@@ -413,10 +471,33 @@ impl Task {
                 let Ok(received) = session.receive(&data, fresh_id(), now_ms()) else {
                     return;
                 };
+                let mut list = None;
+                let mut answered = false;
                 match received.event {
                     Event::Welcome { .. } if !peek.welcomed => {
                         peek.welcomed = true;
                         peek.next = tokio::time::Instant::now() + NOTICE_WINDOW;
+                        // The hub's own list (1652), beside its greeting.
+                        list = session
+                            .command(crate::ui::hubs::LIST_COMMAND, fresh_id(), now_ms())
+                            .ok();
+                    }
+                    Event::HubNotice { room: None, text } if peek.listed.is_none() => {
+                        match crate::ui::hubs::list_answer(&text) {
+                            Some(rooms) => {
+                                peek.listed = Some(rooms);
+                                answered = true;
+                            }
+                            None => {
+                                peek.notices.push_str(&text);
+                                peek.notices.push('\n');
+                            }
+                        }
+                    }
+                    // A hub without the command: its greeting is all.
+                    Event::Error { room: None, .. } if peek.welcomed && peek.listed.is_none() => {
+                        peek.listed = Some(Vec::new());
+                        answered = true;
                     }
                     Event::HubNotice { text, .. } => {
                         peek.notices.push_str(&text);
@@ -427,11 +508,22 @@ impl Task {
                 if let Some(reply) = received.reply {
                     let _ = self.send(&link_id, &reply).await;
                 }
+                if let Some(list) = list {
+                    let _ = self.send(&link_id, &list).await;
+                }
+                if answered {
+                    if let Some(peek) = self.peek.as_ref() {
+                        // The greeting came with the WELCOME, before the
+                        // list's answer: all there is is here.
+                        let named = named(peek.listed.as_deref(), &peek.notices);
+                        return self.peek_done(Some(named)).await;
+                    }
+                }
             }
             NodeEvent::LinkClosed { .. } => {
                 let named = self.peek.as_ref().and_then(|peek| {
                     peek.welcomed
-                        .then(|| crate::ui::hubs::rooms_named(&peek.notices))
+                        .then(|| named(peek.listed.as_deref(), &peek.notices))
                 });
                 if let Some(peek) = self.peek.as_mut() {
                     // Closed under us: nothing left to close.
@@ -453,6 +545,9 @@ impl Task {
         if let (Some(link_id), Some(node)) = (peek.link_id, self.node()) {
             let _ = node.close_link(&link_id).await;
         }
+        if let Some(named) = &named {
+            crate::events::rooms_list(&peek.hub, named.len(), "peek", peek.listed.is_some());
+        }
         self.teller.tell(Told::Peeked {
             hub: peek.hub,
             rooms: named,
@@ -473,11 +568,12 @@ impl Task {
         }
     }
 
-    /// Send what `make` makes of the session, or tell why not.
-    async fn out(&mut self, make: impl FnOnce(&mut Session) -> Result<Vec<u8>, Refusal>) {
+    /// Send what `make` makes of the session, or tell why not; whether it
+    /// went.
+    async fn out(&mut self, make: impl FnOnce(&mut Session) -> Result<Vec<u8>, Refusal>) -> bool {
         let Some(hub) = self.hub.as_mut() else {
             self.teller.tell(Told::Refused(Refusal::NotReady));
-            return;
+            return false;
         };
         match make(&mut hub.session) {
             Ok(bytes) => {
@@ -485,9 +581,14 @@ impl Task {
                 if !self.send(&link_id, &bytes).await {
                     self.hub = None;
                     self.teller.tell(Told::Down(Down::Lost));
+                    return false;
                 }
+                true
             }
-            Err(refusal) => self.teller.tell(Told::Refused(refusal)),
+            Err(refusal) => {
+                self.teller.tell(Told::Refused(refusal));
+                false
+            }
         }
     }
 
@@ -499,6 +600,7 @@ impl Task {
 
     async fn open(&mut self, dest: [u8; 16]) {
         self.close().await;
+        self.teller.hub = Some(dest);
         self.teller.tell(Told::Linking);
         let Some(node) = self.node() else {
             self.teller.tell(Told::Down(Down::NodeGone));
@@ -560,10 +662,14 @@ impl Task {
         }
         drop(node);
         self.hub = Some(Hub {
+            hash: dest,
             link_id,
             session,
             hellos: 0,
             next_hello: tokio::time::Instant::now(),
+            listing: None,
+            greeting: String::new(),
+            joining: Vec::new(),
         });
         self.hello_again().await;
     }
@@ -597,6 +703,37 @@ impl Task {
         tokio::time::timeout(LINK_BUDGET, wait)
             .await
             .unwrap_or(false)
+    }
+
+    /// The hub's clock ([`Hub::due`]): a HELLO again, or the list's
+    /// window over without an answer.
+    async fn hub_due(&mut self) {
+        let Some(hub) = self.hub.as_mut() else {
+            return;
+        };
+        if !hub.session.is_welcomed() {
+            return self.hello_again().await;
+        }
+        if hub
+            .listing
+            .is_some_and(|until| tokio::time::Instant::now() >= until)
+        {
+            self.listed(None);
+        }
+    }
+
+    /// The list's answer came (`Some`) or its window ended: what the hub
+    /// named is told, once (1652).
+    fn listed(&mut self, answer: Option<Vec<String>>) {
+        let Some(hub) = self.hub.as_mut() else {
+            return;
+        };
+        if hub.listing.take().is_none() {
+            return;
+        }
+        let rooms = named(answer.as_deref(), &hub.greeting);
+        crate::events::rooms_list(&hub.hash, rooms.len(), "link", answer.is_some());
+        self.teller.tell(Told::Listed { rooms });
     }
 
     async fn hello_again(&mut self) {
@@ -638,11 +775,66 @@ impl Task {
                     // or noise. Nothing to show.
                     return;
                 };
-                if let Some(told) = told(received.event) {
-                    self.teller.tell(told);
+                let mut list = None;
+                let mut answer = None;
+                let mut quiet = false;
+                match &received.event {
+                    Event::Welcome { version, .. } => {
+                        crate::events::rooms_welcome(&hub.hash, version.as_deref());
+                        // Its rooms, without a name typed (1652): asked once
+                        // a link, answered with a NOTICE.
+                        list = hub
+                            .session
+                            .command(crate::ui::hubs::LIST_COMMAND, fresh_id(), now_ms())
+                            .ok();
+                        hub.listing = list
+                            .is_some()
+                            .then(|| tokio::time::Instant::now() + LIST_WINDOW);
+                        hub.greeting.clear();
+                    }
+                    Event::HubNotice { room: None, text } if hub.listing.is_some() => {
+                        match crate::ui::hubs::list_answer(text) {
+                            Some(rooms) => {
+                                answer = Some(rooms);
+                                quiet = true;
+                            }
+                            None => {
+                                hub.greeting.push_str(text);
+                                hub.greeting.push('\n');
+                            }
+                        }
+                    }
+                    // A hub without `/list` refuses it: no toast for that,
+                    // its greeting is what it names.
+                    Event::Error { room: None, .. } if hub.listing.is_some() => {
+                        answer = Some(Vec::new());
+                        quiet = true;
+                    }
+                    Event::Joined { room, nick: None } => {
+                        hub.joining.retain(|r| r != room);
+                        crate::events::rooms_join(room, true);
+                    }
+                    Event::Error {
+                        room: Some(room), ..
+                    } if hub.joining.contains(room) => {
+                        hub.joining.retain(|r| r != room);
+                        crate::events::rooms_join(room, false);
+                    }
+                    _ => {}
+                }
+                if !quiet {
+                    if let Some(told) = told(received.event) {
+                        self.teller.tell(told);
+                    }
                 }
                 if let Some(reply) = received.reply {
                     let _ = self.send(&ours, &reply).await;
+                }
+                if let Some(list) = list {
+                    let _ = self.send(&ours, &list).await;
+                }
+                if let Some(answer) = answer {
+                    self.listed(Some(answer));
                 }
             }
             NodeEvent::LinkClosed { link_id, .. } if link_id == ours => {

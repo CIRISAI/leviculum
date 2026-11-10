@@ -133,6 +133,14 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
             body_limit: 350
         }
     );
+    // Its rooms without a name typed (1652): `/list` after the WELCOME,
+    // the answer's names as the hub spells them, nothing else told.
+    assert_eq!(
+        next(&mut link.told, 10).await,
+        Told::Listed {
+            rooms: vec!["general chat".into(), "lab".into()]
+        }
+    );
 
     // The hub's PING right after WELCOME is answered on the link and
     // tells the Rooms nothing: wait for the hub to have the PONG, so the
@@ -227,15 +235,25 @@ async fn loquax_links_to_a_hub_joins_says_a_line_and_knows_its_echo() {
             "the link was identified with the reader's identity"
         );
         let kinds: Vec<Kind> = seen.envelopes.iter().map(|e| e.kind).collect();
-        // One HELLO (welcomed at once), the PONG, JOIN, the one line that
-        // went, PART: the refused line never reached the hub.
+        // One HELLO (welcomed at once), `/list` (1652), the PONG, JOIN,
+        // the one line that went, PART: the refused line never reached
+        // the hub.
         assert_eq!(
             kinds,
-            [Kind::Hello, Kind::Pong, Kind::Join, Kind::Msg, Kind::Part]
+            [
+                Kind::Hello,
+                Kind::Msg,
+                Kind::Pong,
+                Kind::Join,
+                Kind::Msg,
+                Kind::Part
+            ]
         );
+        assert_eq!(seen.envelopes[1].room, None, "a command names no room");
+        assert_eq!(seen.envelopes[1].text(), Some("/list"));
         let ping = Envelope::decode(&vector("ping_down")).expect("ping");
         assert_eq!(
-            seen.envelopes[1].body, ping.body,
+            seen.envelopes[2].body, ping.body,
             "the PONG hands the PING's body back"
         );
         assert!(seen

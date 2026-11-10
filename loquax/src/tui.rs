@@ -1804,23 +1804,44 @@ fn draw_rooms(frame: &mut Frame, model: &Model) {
             (name, room_lines(open, inner_width, lang))
         }
         None => {
-            let empty = node.empty.as_ref().map(|e| e.resolve(lang));
-            let lines = empty
-                .map(|e| {
-                    centred(
-                        &e,
-                        inner_width,
-                        Style::default().add_modifier(Modifier::DIM),
-                    )
-                })
-                .into_iter()
-                .collect();
+            let dim = Style::default().add_modifier(Modifier::DIM);
+            let mut lines: Vec<Line> = Vec::new();
+            // The link's verb (1652): Enter on an empty field takes it.
+            if let Some(retry) = &node.retry {
+                lines.push(Line::from(Span::styled(
+                    format!("Enter: {}", retry.resolve(lang)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+            }
+            // The rooms the hub names (1652): typing one's name joins it.
+            if let Some(listed) = &node.listed {
+                lines.push(Line::from(Span::styled(
+                    listed.title.resolve(lang),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                for room in &listed.rooms {
+                    lines.push(Line::from(format!("  {room}")));
+                }
+                if let Some(note) = &listed.note {
+                    lines.push(Line::from(Span::styled(note.resolve(lang), dim)));
+                }
+                if let Some(other) = &listed.other {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(other.resolve(lang), dim)));
+                }
+            }
+            if let Some(empty) = node.empty.as_ref().map(|e| e.resolve(lang)) {
+                lines.push(centred(&empty, inner_width, dim));
+            }
             (String::new(), lines)
         }
     };
     // The newest lines that fit, the room's one line kept on top.
     let inner = usize::from(room.height.saturating_sub(2));
-    if lines.len() > inner && inner > 1 {
+    if node.open.is_none() {
+        // The hub's rooms read from the top (1652).
+        lines.truncate(inner);
+    } else if lines.len() > inner && inner > 1 {
         let live = lines.remove(0);
         let keep = lines.split_off(lines.len() - (inner - 1));
         lines = std::iter::once(live).chain(keep).collect();
@@ -3186,12 +3207,20 @@ mod tests {
             update(&mut model, key('m'));
         }
         let first = shipped[0].hash;
+        // Choosing links at once (1652), the privacy sentence with it.
         assert_eq!(
             update(&mut model, key('1')),
-            [UiEffect::RememberHash {
-                key: "rooms_hub",
-                hash: Some(first)
-            }]
+            [
+                UiEffect::RememberHash {
+                    key: "rooms_hub",
+                    hash: Some(first)
+                },
+                UiEffect::RememberHash {
+                    key: "rooms_told",
+                    hash: Some(first)
+                },
+                UiEffect::Rooms(loquax::ui::rooms::RoomAsk::Open { hub: first })
+            ]
         );
         assert!(model.rooms.enabled, "the Rooms tab is there");
         let shown = whole_screen(&model);
@@ -3211,12 +3240,21 @@ mod tests {
         for c in "07070707070707070707070707070707".chars() {
             update(&mut model, key(c));
         }
+        // The link to the first one closes, the pasted one links.
         assert_eq!(
             update(&mut model, enter),
-            [UiEffect::RememberHash {
-                key: "rooms_hub",
-                hash: Some([0x07; 16])
-            }]
+            [
+                UiEffect::Rooms(loquax::ui::rooms::RoomAsk::Close),
+                UiEffect::RememberHash {
+                    key: "rooms_hub",
+                    hash: Some([0x07; 16])
+                },
+                UiEffect::RememberHash {
+                    key: "rooms_told",
+                    hash: Some([0x07; 16])
+                },
+                UiEffect::Rooms(loquax::ui::rooms::RoomAsk::Open { hub: [0x07; 16] })
+            ]
         );
         let shown = whole_screen(&model);
         assert!(
@@ -3249,9 +3287,9 @@ mod tests {
             model.rooms.hub = Some(HUB);
             // Told before (1577): no sentence over the golden.
             model.rooms.told = Some(HUB);
-            // Opening the rooms links nothing; the first join does (1578).
+            // Opening the rooms links (1652); a join meanwhile waits.
             let effects = update(&mut model, key('R'));
-            assert_eq!(effects, vec![]);
+            assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
             assert!(model.rooms.showing());
             for c in "#lab".chars() {
                 update(&mut model, key(c));
@@ -3260,7 +3298,7 @@ mod tests {
                 &mut model,
                 UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             );
-            assert_eq!(effects, vec![UiEffect::Rooms(RoomAsk::Open { hub: HUB })]);
+            assert_eq!(effects, vec![], "the join waits for the welcome");
             for event in [
                 RoomsEvent::Welcomed {
                     name: Some("periculum".into()),

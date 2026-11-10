@@ -710,12 +710,70 @@ impl App {
             left = left
                 .push(container(text(status.resolve(lang)).size(14).color(quiet)).padding([8, 12]));
         }
+        // "Connect" or "Try again" under the state (1652).
+        if let Some(retry) = &node.retry {
+            left = left.push(
+                container(
+                    button(text(retry.resolve(lang)).size(14))
+                        .on_press(Message::Rooms(RoomsEvent::Retry))
+                        .style(button::text),
+                )
+                .padding([0, 12]),
+            );
+        }
         let left = container(left.push(scrollable(rows).height(Length::Fill)))
             .width(Length::Fixed(260.0))
             .height(Length::Fill)
             .padding([8, 0]);
         let room: Element<'_, Message> = match &node.open {
             Some(open) => self.room_chat(open, t),
+            // The rooms the hub names (1652): a press joins one and opens
+            // it; the field below is the way to another.
+            None if node.listed.is_some() => {
+                let mut list = column![].spacing(2);
+                if let Some(listed) = &node.listed {
+                    list = list.push(
+                        container(
+                            text(listed.title.resolve(lang))
+                                .size(size::ROW_NAME)
+                                .color(ink),
+                        )
+                        .padding([12, 16]),
+                    );
+                    for name in &listed.rooms {
+                        let line = row![
+                            avatar(&loquax::ui::rooms::avatar(name), size::BAR_AVATAR, t),
+                            text(name.clone()).size(size::ROW_NAME).color(ink),
+                        ]
+                        .spacing(12)
+                        .align_y(Alignment::Center);
+                        list = list.push(chrome::list_item(
+                            container(line).padding([8, 12]),
+                            false,
+                            Message::Rooms(RoomsEvent::Join(name.clone())),
+                            palette(t),
+                        ));
+                    }
+                    if let Some(note) = &listed.note {
+                        list = list.push(
+                            container(text(note.resolve(lang)).size(14).color(quiet))
+                                .padding([8, 16]),
+                        );
+                    }
+                    if let Some(other) = &listed.other {
+                        list = list.push(
+                            container(text(other.resolve(lang)).size(13).color(quiet))
+                                .padding([12, 16]),
+                        );
+                    }
+                }
+                if let Some(empty) = &node.empty {
+                    list = list.push(
+                        container(text(empty.resolve(lang)).size(15).color(quiet)).padding([8, 16]),
+                    );
+                }
+                scrollable(list).height(Length::Fill).into()
+            }
             None => container(
                 text(
                     node.empty

@@ -2364,6 +2364,23 @@ pub struct RoomsScreen {
     /// With no room open, where the room would be: how to join one.
     #[serde(default)]
     pub empty: String,
+    /// Under the state while the link is neither up nor coming (1652):
+    /// "Connect" or "Try again"; a tap sends the `retry` verb. Empty
+    /// otherwise.
+    #[serde(default)]
+    pub retry: String,
+    /// The rooms the hub names, with no room open (1652): "Rooms on
+    /// ShadowLink" over them, a tap sends `join` with the name; the note
+    /// while they are asked or when it names none; "Join another room"
+    /// over the field once there are rows.
+    #[serde(default)]
+    pub listed_title: String,
+    #[serde(default)]
+    pub listed: Vec<String>,
+    #[serde(default)]
+    pub listed_note: String,
+    #[serde(default)]
+    pub other: String,
 }
 
 /// What [`Query::Explore`] answers (1578): the Explore tab

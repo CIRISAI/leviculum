@@ -100,5 +100,10 @@
   ],
   "input": "",
   "placeholder": "Nachricht",
-  "empty": ""
+  "empty": "",
+  "retry": "",
+  "listed_title": "",
+  "listed": [],
+  "listed_note": "",
+  "other": ""
 }
