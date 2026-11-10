@@ -314,5 +314,6 @@ skip  lnpnd           pn_growth_soak             # a 20-minute soak: spawns the 
 skip  lnpnd           status_default_budget      # tokio runtime with sleeps
 skip  lnpnd           status_under_transport_load # tokio runtime, local instance sockets, an announce storm and minute-scale timeouts
 skip  lnpnd           store_index_at_start       # spawns the daemon three times against a shared-instance socket and signals it
+skip  lnpnd           store_index_census         # its subject is the code: a store built in a temp dir against a counting allocator, 2 s
 skip  nmea0183        parsing                    # sentence corpus in-process; subject is the parser
 skip  vectors-verify  corpus                     # reads the vector corpus, but the subject is the codecs under it

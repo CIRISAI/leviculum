@@ -99,6 +99,17 @@
 //! another name keeps its path, in `odd_names`: a legacy name whose rename
 //! at open failed. 289 bytes resident a message at the same count, 94 MB.
 //!
+//! The census ([`FilePropagationStore::heap_census`]) prices the four
+//! indexes as `alloc` lays them out, the live entries and the room the
+//! containers hold beyond them named apart (order 1648). How full a
+//! B-tree's nodes run depends on how it was built: the id-keyed map fills
+//! as random inserts do, about 8 entries a node of 11, but the sequence and
+//! receive-time sets are collected full from a sorted run at the open and
+//! then grow at their right end, 7 a node. A store just opened costs 254
+//! bytes a message, one appended to from empty 334 (20 000 messages,
+//! `lnpnd/tests/store_index_census.rs`). The census before priced every
+//! tree at 7 a node, which overstated a reopened store by a fifth.
+//!
 //! # The index file, and why a start reads no message
 //!
 //! The reference re-indexes its store at every start by listing the
@@ -183,6 +194,13 @@ pub struct FilePropagationStore {
     /// "The index file").
     index_dirty: bool,
     opened: OpenProfile,
+    /// The last sequence the open indexed: `by_sequence` and `by_received`
+    /// were built from a sorted run at the open, which fills their nodes,
+    /// and an entry inserted since goes in one by one (module docs, "What
+    /// the index costs").
+    bulk_through: u64,
+    /// Entries of the bulk-built run still in the store.
+    bulk_live: usize,
 }
 
 /// [`FilePropagationStore::heap_census`]: what the store holds in RAM.
@@ -190,11 +208,66 @@ pub struct FilePropagationStore {
 pub struct StoreHeapCensus {
     /// Messages indexed.
     pub messages: usize,
-    /// The four indexes (module docs, "The sequence index"), each entry's
-    /// path included.
+    /// The four indexes (module docs, "The sequence index" and "What the
+    /// index costs"): `index_entry_bytes` plus `index_spare_bytes`.
     pub index_bytes: usize,
+    /// The live entries' own sizes across the four indexes, an odd name's
+    /// path included: what the index would cost in containers with no
+    /// room to spare.
+    pub index_entry_bytes: usize,
+    /// What the containers allocate beyond their live entries: the B-tree
+    /// nodes' empty slots and headers and the inner nodes' edges, and the
+    /// counting index's vectors' capacity beyond their length.
+    pub index_spare_bytes: usize,
     /// Appends and purges the writer has not confirmed, bodies included.
     pub writer_bytes: usize,
+}
+
+/// How full a B-tree's nodes run, by how the tree was built (order 1648).
+///
+/// Entries a node, the separator above it counted with it, fitted to a
+/// counting allocator over 200 000 entries of each kind: random inserts 8.4, ascending inserts 7 (a full node splits six to the
+/// left, four and the new entry to the right, and the left one is never
+/// touched again), a sorted run collected at once 12 (`collect` fills every
+/// node). `lnpnd/tests/store_index_census.rs` holds the store's sum to the
+/// bytes a counting allocator sees it give back.
+#[derive(Debug, Clone, Copy)]
+enum NodeFill {
+    Random,
+    Ascending,
+    Bulk,
+}
+
+impl NodeFill {
+    /// Entries a node, in tenths.
+    fn tenths(self) -> usize {
+        match self {
+            NodeFill::Random => 84,
+            NodeFill::Ascending => 70,
+            NodeFill::Bulk => 120,
+        }
+    }
+}
+
+/// Bytes `alloc`'s B-tree allocates for `len` entries of `K` to `V` filled
+/// as `fill` says: its leaves (a parent pointer, two `u16`, eleven key and
+/// eleven value slots) and the level above them (a leaf's layout and twelve
+/// edges). The levels above that are under one part in fifty and left out.
+fn btree_allocated<K, V>(len: usize, fill: NodeFill) -> usize {
+    use std::mem::{align_of, size_of};
+    if len == 0 {
+        return 0;
+    }
+    let align = align_of::<usize>()
+        .max(align_of::<K>())
+        .max(align_of::<V>());
+    let leaf =
+        (size_of::<usize>() + 4 + 11 * (size_of::<K>() + size_of::<V>())).next_multiple_of(align);
+    let inner = leaf + 12 * size_of::<usize>();
+    let tenths = fill.tenths();
+    let leaves = (len * 10).div_ceil(tenths);
+    let inners = (leaves * 10).div_ceil(tenths);
+    leaves * leaf + inners * inner
 }
 
 /// What [`FilePropagationStore::open`] found and spent its time on (module
@@ -525,6 +598,8 @@ impl FilePropagationStore {
             writer: None,
             index_dirty,
             opened: OpenProfile::default(),
+            bulk_through: last_sequence,
+            bulk_live: opened.messages,
         };
         store.rebuild_counts(u64::MAX);
         opened.build_us = micros(built);
@@ -543,14 +618,30 @@ impl FilePropagationStore {
     /// writer still holds. Walks the index once for the paths' own heap, so
     /// it is a census call, not a per-hook one.
     pub fn heap_census(&self) -> StoreHeapCensus {
-        use leviculum_core::heap_census::{btree_map_bytes, btree_set_bytes};
+        use leviculum_core::heap_census::btree_map_bytes;
+        use std::mem::size_of;
+        let len = self.index.len();
+        let odd = self.odd_names.len();
         let odd_paths: usize = self.odd_names.values().map(PathBuf::capacity).sum();
-        let index_bytes = btree_map_bytes(&self.index)
-            + btree_map_bytes(&self.odd_names)
+        // Every transient id is a hash, so the id-keyed maps fill as random
+        // inserts do. The sequence and receive-time sets are a sorted run
+        // from the open plus what was appended since, in ascending order.
+        let appended = len.saturating_sub(self.bulk_live);
+        let ordered = |fill: NodeFill, n: usize| btree_allocated::<(u64, TransientId), ()>(n, fill);
+        let index_alloc = btree_allocated::<TransientId, IndexEntry>(len, NodeFill::Random)
+            + btree_allocated::<TransientId, PathBuf>(odd, NodeFill::Random)
             + odd_paths
-            + btree_set_bytes(&self.by_sequence)
-            + btree_set_bytes(&self.by_received)
-            + self.counts.heap_bytes();
+            + 2 * (ordered(NodeFill::Bulk, self.bulk_live)
+                + ordered(NodeFill::Ascending, appended));
+        let (counts_live, counts_alloc) = self.counts.heap_bytes_live_and_allocated();
+        let index_entry_bytes = len
+            * (size_of::<TransientId>()
+                + size_of::<IndexEntry>()
+                + 2 * size_of::<(u64, TransientId)>())
+            + odd * (size_of::<TransientId>() + size_of::<PathBuf>())
+            + odd_paths
+            + counts_live;
+        let index_bytes = index_alloc + counts_alloc;
         let writer_bytes = self.writer.as_ref().map_or(0, |writer| {
             btree_map_bytes(&writer.tickets)
                 + btree_map_bytes(&writer.queued)
@@ -562,8 +653,10 @@ impl FilePropagationStore {
                 + writer.failed.capacity() * std::mem::size_of::<TransientId>()
         });
         StoreHeapCensus {
-            messages: self.index.len(),
+            messages: len,
             index_bytes,
+            index_entry_bytes,
+            index_spare_bytes: index_bytes.saturating_sub(index_entry_bytes),
             writer_bytes,
         }
     }
@@ -746,6 +839,7 @@ impl FilePropagationStore {
         // writes; an odd name it replaces is gone with the old file.
         self.odd_names.remove(&transient_id);
         if let Some(previous) = self.index.insert(transient_id, entry) {
+            self.left_bulk(previous.meta.sequence);
             self.by_sequence
                 .remove(&(previous.meta.sequence, transient_id));
             self.by_received
@@ -760,9 +854,18 @@ impl FilePropagationStore {
         }
     }
 
+    /// An entry left the sequence and receive-time indexes: one fewer of
+    /// the run the open built, if it was one of them.
+    fn left_bulk(&mut self, sequence: u64) {
+        if sequence <= self.bulk_through {
+            self.bulk_live = self.bulk_live.saturating_sub(1);
+        }
+    }
+
     /// Take one entry out of all four indexes.
     fn index_remove(&mut self, transient_id: &TransientId) -> Option<IndexEntry> {
         let entry = self.index.remove(transient_id)?;
+        self.left_bulk(entry.meta.sequence);
         self.odd_names.remove(transient_id);
         self.index_dirty = true;
         self.by_sequence
