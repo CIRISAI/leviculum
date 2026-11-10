@@ -852,7 +852,7 @@ When the peer advertises a stamp cost, the estimate must include the
 proof-of-work, and that number has to be *measured* first: the crate
 contains no benchmarks, and the cost model (2^cost hashes plus a 3000-round
 workblock, `leviculum-lxmf/src/constants.rs:53`,
-`leviculum-lxmf/src/stamp.rs:458-466`) predicts scaling but not
+`leviculum-lxmf/src/stamp.rs:467-475`) predicts scaling but not
 milliseconds on a Pi.
 
 ### Offline as a state, not a failure
