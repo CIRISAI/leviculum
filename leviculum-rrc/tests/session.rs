@@ -329,3 +329,48 @@ fn a_line_past_the_limit_is_refused_with_a_sentence_before_it_is_sent() {
         Err(Refusal::Empty)
     );
 }
+
+/// 1652: `/list` goes as a MSG without a room, the command in its body,
+/// which rrcd reads before it asks for a room; nothing goes before WELCOME.
+#[test]
+fn a_command_is_a_msg_without_a_room() {
+    let (_, hello) = vector("hello_up");
+    let fresh = Session::new(me(&hello), None, "x", "y");
+    assert_eq!(
+        fresh.command("/list", [1; 8], 1),
+        Err(Refusal::NotReady),
+        "no command before WELCOME"
+    );
+    let session = alice();
+    let bytes = session.command("/list", [7; 8], 42).unwrap();
+    let sent = Envelope::decode(&bytes).unwrap();
+    assert_eq!(sent.kind, leviculum_rrc::Kind::Msg);
+    assert_eq!(sent.room, None, "a command names no room");
+    assert_eq!(sent.text(), Some("/list"));
+    assert_eq!(sent.src.as_deref(), Some(&me(&hello)[..]));
+    assert_eq!(
+        session.command("list", [8; 8], 1),
+        Err(Refusal::Empty),
+        "a command starts with a slash"
+    );
+}
+
+/// 1652: a room the hub lists with a space or a slash is joined as the
+/// hub spells it; a line break is no name.
+#[test]
+fn a_room_name_with_a_space_is_the_hubs_to_allow() {
+    assert_eq!(
+        leviculum_rrc::room_name(" General Chat ", 64),
+        Ok("general chat".to_string())
+    );
+    assert_eq!(
+        leviculum_rrc::room_name("gmrs/ham", 64),
+        Ok("gmrs/ham".to_string())
+    );
+    assert_eq!(leviculum_rrc::room_name("a\nb", 64), Err(Refusal::BadRoom));
+    assert_eq!(leviculum_rrc::room_name("   ", 64), Err(Refusal::BadRoom));
+    let session = alice();
+    let bytes = session.join("general chat", None, [9; 8], 1).unwrap();
+    let sent = Envelope::decode(&bytes).unwrap();
+    assert_eq!(sent.room.as_deref(), Some("general chat"));
+}

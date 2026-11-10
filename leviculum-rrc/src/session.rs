@@ -76,7 +76,7 @@ impl fmt::Display for Refusal {
                 f,
                 "This line needs {bytes} bytes and the link carries {mdu}. Shorten it."
             ),
-            Refusal::BadRoom => f.write_str("A room name needs a few letters and no spaces."),
+            Refusal::BadRoom => f.write_str("A room name needs a few letters on one line."),
             Refusal::TooManyRooms(n) => {
                 write!(
                     f,
@@ -279,6 +279,22 @@ impl Session {
         Ok(bytes)
     }
 
+    /// A command to the hub (1652): a MSG without a room whose body starts
+    /// with "/", which rrcd reads as a command before it asks for a room
+    /// (`router.py` `_handle_message`). `/list` is the one a client sends
+    /// on its own; the hub answers with a NOTICE.
+    pub fn command(&self, text: &str, id: [u8; 8], now_ms: u64) -> Result<Vec<u8>, Refusal> {
+        if !self.welcomed {
+            return Err(Refusal::NotReady);
+        }
+        if !text.starts_with('/') || text.trim().len() < 2 {
+            return Err(Refusal::Empty);
+        }
+        let mut envelope = self.envelope(Kind::Msg, id, now_ms);
+        envelope.body = Some(Value::Text(String::from(text)));
+        self.fits(envelope.encode())
+    }
+
     /// A PING of ours, `body` whatever we choose (the reference client
     /// sends its clock in milliseconds).
     pub fn ping(&self, body: u64, id: [u8; 8], now_ms: u64) -> Vec<u8> {
@@ -383,10 +399,13 @@ impl Session {
 }
 
 /// A room name as the hub keeps it: lower case, trimmed, at most `limit`
-/// bytes, no white space inside.
+/// bytes. A space inside is the hub's to allow (1652): rrcd's `_norm_room`
+/// only trims and lowers, and a hub of another implementation lists rooms
+/// like "general chat", which are joined as the hub spells them. A line
+/// break or another control character is no name.
 pub fn room_name(room: &str, limit: usize) -> Result<String, Refusal> {
     let room = room.trim().to_lowercase();
-    if room.is_empty() || room.len() > limit || room.chars().any(char::is_whitespace) {
+    if room.is_empty() || room.len() > limit || room.chars().any(char::is_control) {
         return Err(Refusal::BadRoom);
     }
     Ok(room)
