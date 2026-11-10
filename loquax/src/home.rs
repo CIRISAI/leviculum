@@ -17,6 +17,7 @@
 //!   `/watch`, their answers, and the wake.
 //! - [`wake`]: which watching link is owed a wake, on the home node.
 //! - [`relation`]: which announced names the home node archives.
+//! - [`about`]: what a mailbox says of itself, `/about` (1642).
 //! - [`pages`]: the NomadNet pages the home heard and the identity's
 //!   bookmarks, `/pages` and `/bookmark` (1579).
 //! - `watch`: a client's watching link, kept up while it runs.
@@ -34,6 +35,7 @@ use alloc::string::String;
 
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
+pub mod about;
 #[cfg(feature = "history")]
 pub mod admit;
 pub mod ask;
@@ -213,6 +215,11 @@ pub const PAGES_PATH: &str = "/pages";
 /// row in, a status out. The home keeps the newer by stamp, and every
 /// device of the identity gets it with its next `/pages`.
 pub const BOOKMARK_PATH: &str = "/bookmark";
+
+/// What the mailbox says of itself (1642, [`about`]): nothing in, its
+/// name, its machine, its version and its devices out, to an admitted
+/// device. A home from before it has no handler and stays silent.
+pub const ABOUT_PATH: &str = "/about";
 
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;

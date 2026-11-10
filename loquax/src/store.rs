@@ -131,10 +131,15 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 19;
+pub const SCHEMA_VERSION: i32 = 20;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
+
+/// How far apart two writes of a device's `last_seen` are at least
+/// (1642, [`Store::device_seen`]): the mailbox page says "last seen" to
+/// the minute.
+pub const SEEN_EVERY_SECS: i64 = 60;
 
 /// The most results a search returns from the store.
 pub const SEARCH_LIMIT: usize = 200;
@@ -479,6 +484,15 @@ CREATE TABLE owed_petnames(
     PRIMARY KEY (identity, peer));
 ";
 
+/// What schema 20 adds to schema 19 (1642): when the mailbox last heard
+/// from each admitted device (`home_devices.last_seen`, unix seconds, NULL
+/// until the first request after the migration), so the mailbox page of
+/// every device can say which devices it knows and when each was last
+/// there.
+const SCHEMA_V20: &str = "
+ALTER TABLE home_devices ADD COLUMN last_seen INTEGER;
+";
+
 pub mod groups;
 pub mod pages;
 
@@ -711,7 +725,7 @@ impl Store {
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
              {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} {SCHEMA_V17} \
-             {SCHEMA_V18} {SCHEMA_V19} \
+             {SCHEMA_V18} {SCHEMA_V19} {SCHEMA_V20} \
              PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
@@ -895,7 +909,10 @@ impl Store {
                 if version < 18 {
                     batch.push_str(SCHEMA_V18);
                 }
-                batch.push_str(SCHEMA_V19);
+                if version < 19 {
+                    batch.push_str(SCHEMA_V19);
+                }
+                batch.push_str(SCHEMA_V20);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -1873,6 +1890,9 @@ pub struct Device {
     pub device: [u8; 16],
     pub name: String,
     pub admitted_at: i64,
+    /// When the mailbox last heard from it (1642), unix seconds; `None`
+    /// before its first request since schema 20.
+    pub last_seen: Option<i64>,
 }
 
 /// What redeeming an admission token came to.
@@ -2808,8 +2828,8 @@ impl Store {
         let mut statement = self
             .conn
             .prepare(
-                "SELECT device, name, admitted_at FROM home_devices WHERE identity = ?1 \
-                 ORDER BY admitted_at, name",
+                "SELECT device, name, admitted_at, last_seen FROM home_devices \
+                 WHERE identity = ?1 ORDER BY admitted_at, name",
             )
             .map_err(|e| self.failed(e))?;
         let rows = statement
@@ -2818,20 +2838,36 @@ impl Store {
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map(|rows| self.read(rows))
             .map_err(|e| self.failed(e))?;
         rows.into_iter()
-            .map(|(device, name, admitted_at)| {
+            .map(|(device, name, admitted_at, last_seen)| {
                 Ok(Device {
                     device: self.address(&device)?,
                     name,
                     admitted_at,
+                    last_seen,
                 })
             })
             .collect()
+    }
+
+    /// `device` asked at `at` (1642): its `last_seen` moves there, at most
+    /// once a [`SEEN_EVERY_SECS`], so a busy link does not write on every
+    /// request. A device that is not admitted changes nothing.
+    pub fn device_seen(&self, device: &[u8; 16], at: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE home_devices SET last_seen = ?3 WHERE identity = ?1 AND device = ?2 \
+                 AND (last_seen IS NULL OR last_seen <= ?3 - ?4)",
+                params![&self.identity[..], &device[..], at, SEEN_EVERY_SECS],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
     }
 
     /// The admission tokens still open at `now`. Expired ones are removed
@@ -5229,14 +5265,49 @@ mod tests {
         let old = tempfile::tempdir().expect("an older home");
         drop(Store::open_in(old.path(), US).expect("create"));
         let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
-        conn.execute_batch("DROP TABLE owed_petnames; PRAGMA user_version = 18;")
-            .expect("made schema 18");
+        conn.execute_batch(
+            "DROP TABLE owed_petnames; ALTER TABLE home_devices DROP COLUMN last_seen; \
+             PRAGMA user_version = 18;",
+        )
+        .expect("made schema 18");
         drop(conn);
         let mut store = Store::open_in(old.path(), US).expect("migrated");
         store
             .write(&[StoreWrite::OwedPetnames(fewer.clone())])
             .expect("kept");
         assert_eq!(store.owed_petnames().expect("read"), fewer);
+    }
+
+    /// 1642: a schema 19 store gains `home_devices.last_seen`, NULL for
+    /// the devices it held; a request moves it, at most once a minute.
+    #[test]
+    fn a_schema_19_store_gains_when_each_device_was_last_there() {
+        let old = tempfile::tempdir().expect("an older home");
+        let mut store = Store::open_in(old.path(), US).expect("create");
+        store.issue_token(&[1; 16], "Fairphone", 10).expect("token");
+        store
+            .redeem_token(&[1; 16], &[0x77; 16], 20, 3600)
+            .expect("admitted");
+        drop(store);
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch(
+            "ALTER TABLE home_devices DROP COLUMN last_seen; PRAGMA user_version = 19;",
+        )
+        .expect("made schema 19");
+        drop(conn);
+        let store = Store::open_in(old.path(), US).expect("migrated");
+        let devices = store.devices().expect("devices");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].last_seen, None, "not heard since the migration");
+        store.device_seen(&[0x77; 16], 100).expect("seen");
+        store
+            .device_seen(&[0x77; 16], 130)
+            .expect("inside the minute");
+        assert_eq!(store.devices().expect("devices")[0].last_seen, Some(100));
+        store.device_seen(&[0x77; 16], 160).expect("a minute on");
+        assert_eq!(store.devices().expect("devices")[0].last_seen, Some(160));
+        store.device_seen(&[0x55; 16], 200).expect("a stranger");
+        assert_eq!(store.devices().expect("devices").len(), 1);
     }
 
     /// 1409: what the propagation node is still to be asked about comes

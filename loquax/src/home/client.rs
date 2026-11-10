@@ -236,6 +236,30 @@ pub async fn peer_state(
     .await
 }
 
+/// What the mailbox says of itself (1642, [`super::about`]): its name,
+/// machine, version and devices. A home from before it drops the path
+/// ([`HomeError::Unsupported`]).
+pub async fn about(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    budget: Duration,
+) -> Result<super::about::About, HomeError> {
+    let bytes = answer_if_known(
+        node,
+        public_key,
+        device,
+        super::ABOUT_PATH,
+        &super::about::about_request(),
+        budget,
+        KNOWN_WAIT,
+    )
+    .await?;
+    super::about::read_about_answer(&bytes)
+        .map_err(|_| HomeError::Malformed)?
+        .map_err(HomeError::Refused)
+}
+
 /// The NomadNet pages the home heard and the identity's bookmarks that
 /// changed after `since` (1579, [`super::pages`]): `/pages` page by page
 /// until no more follow, each on a link of its own. A home from before it
@@ -1647,6 +1671,7 @@ mod tests {
             super::super::SYNC_PATH,
             super::super::PAGES_PATH,
             super::super::BOOKMARK_PATH,
+            super::super::ABOUT_PATH,
         ] {
             home.register_request_handler(hash, path, RequestPolicy::AllowAll);
         }
@@ -1667,6 +1692,7 @@ mod tests {
                 cap_bytes: u64::MAX,
                 handover: None,
                 groups: None,
+                shown: Default::default(),
             };
             while let Some(event) = events.recv().await {
                 let leviculum_core::NodeEvent::RequestReceived {
@@ -1715,6 +1741,28 @@ mod tests {
             public_key,
             vec![home_dir, phone_dir, store_dir],
         )
+    }
+
+    /// 1642 over a real link: `/about` answers an admitted device with
+    /// the mailbox's devices, the asker among them, and refuses one that is
+    /// not admitted.
+    #[cfg(feature = "history")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn about_names_the_devices_over_a_link_and_refuses_a_stranger() {
+        let phone_device = Identity::generate(&mut rand_core::OsRng);
+        let (_home, phone, key, _dirs) = real_home(&[*phone_device.hash()], 0).await;
+        let budget = Duration::from_secs(60);
+        let told = about(&phone, &key, &phone_device, budget)
+            .await
+            .expect("the mailbox's word");
+        assert_eq!(told.version, crate::VERSION);
+        assert_eq!(told.devices.len(), 1);
+        assert_eq!(told.devices[0].device, *phone_device.hash());
+        let stranger = Identity::generate(&mut rand_core::OsRng);
+        assert_eq!(
+            about(&phone, &key, &stranger, budget).await.err(),
+            Some(HomeError::Refused(wire::Status::NotAdmitted))
+        );
     }
 
     /// 1579 over a real link: a device's first `/pages` brings the 2000

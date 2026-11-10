@@ -473,6 +473,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         cap_bytes: archive_cap_bytes,
         handover: None,
         groups: Some((&home, &owner_name)),
+        shown: super::server::Shown::here(&own_name),
     };
     let mut sender = Sender {
         cap_bytes: archive_cap_bytes,

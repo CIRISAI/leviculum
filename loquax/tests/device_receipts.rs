@@ -283,6 +283,7 @@ impl Mailbox {
             cap_bytes: u64::MAX,
             handover: None,
             groups: None,
+            shown: Default::default(),
         };
         let mut signed = Vec::new();
         for mark in marks {

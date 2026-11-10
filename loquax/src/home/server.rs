@@ -33,6 +33,31 @@ pub struct Home<'a> {
     /// the name the owner goes by in them; none where the home hosts no
     /// groups, and `/group` is refused.
     pub groups: Option<(&'a std::path::Path, &'a str)>,
+    /// What `/about` says besides the devices (1642): the announced name
+    /// and the machine; the version is the build's.
+    pub shown: Shown,
+}
+
+/// The name and the machine `/about` says (1642).
+#[derive(Debug, Clone, Default)]
+pub struct Shown {
+    /// The name the identity is announced under; empty for none.
+    pub name: alloc::string::String,
+    /// The machine's name ([`super::about::host_word`]); empty for none.
+    pub host: alloc::string::String,
+}
+
+impl Shown {
+    /// This machine's: `name` as announced, the host as the kernel says.
+    pub fn here(name: &str) -> Self {
+        let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+            .unwrap_or_default();
+        Self {
+            name: alloc::string::String::from(name),
+            host: super::about::host_word(&raw),
+        }
+    }
 }
 
 /// An open move (1281, [`super::handover`]): the token the new device
@@ -107,6 +132,24 @@ pub fn answer(
         return Answer::only(wire::status_answer(Status::NotIdentified));
     };
     let now_secs = now as i64;
+    let answered = route(store, home, path, data, device, now, now_secs);
+    // Every request counts as the device being there (1642), whatever it
+    // asked; one that is not admitted changes nothing.
+    if let Err(error) = store.device_seen(&device, now_secs) {
+        tracing::warn!("HOME device seen: {error}");
+    }
+    answered
+}
+
+fn route(
+    store: &mut Store,
+    home: &Home<'_>,
+    path: &str,
+    data: &[u8],
+    device: [u8; 16],
+    now: f64,
+    now_secs: i64,
+) -> Answer {
     match path {
         super::JOIN_PATH => Answer::only(join(store, home, data, device, now_secs)),
         super::SYNC_PATH => Answer::only(sync(store, data, device)),
@@ -123,6 +166,7 @@ pub fn answer(
         super::GROUP_DELETE_PATH => group_delete(store, home, data, device, now),
         super::PAGES_PATH => Answer::only(pages(store, data, device)),
         super::BOOKMARK_PATH => Answer::only(bookmark(store, data, device)),
+        super::ABOUT_PATH => Answer::only(about(store, home, data, device)),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -1138,6 +1182,44 @@ fn join(
     }
 }
 
+/// What the mailbox says of itself (1642): its name and machine, the
+/// build's version, and every device it admitted with when it was last
+/// there. An admitted device only: the list names the owner's devices.
+fn about(store: &Store, home: &Home<'_>, data: &[u8], device: [u8; 16]) -> Vec<u8> {
+    if super::about::read_about_request(data).is_err() {
+        return wire::status_answer(Status::Malformed);
+    }
+    if let Some(refused) = refuse_unless_admitted(store, &device, "about") {
+        return refused;
+    }
+    let devices = match store.devices() {
+        Ok(devices) => devices,
+        Err(error) => {
+            tracing::warn!("HOME about: {error}");
+            return wire::status_answer(Status::Failed);
+        }
+    };
+    tracing::info!(
+        "HOME about device={} devices={}",
+        crate::address::to_hex(&device),
+        devices.len()
+    );
+    super::about::about_answer(&super::about::About {
+        name: home.shown.name.clone(),
+        host: home.shown.host.clone(),
+        version: alloc::string::String::from(crate::VERSION),
+        devices: devices
+            .into_iter()
+            .map(|d| super::about::KnownDevice {
+                device: d.device,
+                name: d.name,
+                admitted_at: d.admitted_at,
+                last_seen: d.last_seen,
+            })
+            .collect(),
+    })
+}
+
 /// A client keeps its link for wakes: told the newest sequence now, so it
 /// pulls at once when its cursor is behind.
 fn watch(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
@@ -1389,6 +1471,10 @@ mod tests {
             cap_bytes: u64::MAX,
             handover: None,
             groups: None,
+            shown: Shown {
+                name: "Lew Palm".into(),
+                host: "miauhaus".into(),
+            },
         }
     }
 
@@ -2453,6 +2539,49 @@ mod tests {
             .expect("new")
     }
 
+    /// 1642: `/about` names the mailbox, its machine and version, and
+    /// every device with when it was last there; each request moves that,
+    /// at most once a minute; a device not admitted is refused.
+    #[test]
+    fn about_names_the_mailbox_and_its_devices_with_when_each_was_there() {
+        use crate::home::about::{about_request, read_about_answer};
+        let (_dir, mut store) = store();
+        store.issue_token(&TOKEN, "laptop", 90).expect("issue");
+        assert_eq!(join(&mut store, LAPTOP, TOKEN), Status::Ok);
+        let ask = |store: &mut Store, device, now| {
+            let answer = answer(
+                store,
+                &home(),
+                crate::home::ABOUT_PATH,
+                &about_request(),
+                Some(device),
+                now,
+            );
+            read_about_answer(&answer.bytes).expect("decodes")
+        };
+        let about = ask(&mut store, LAPTOP, 130.0).expect("answered");
+        assert_eq!(about.name, "Lew Palm");
+        assert_eq!(about.host, "miauhaus");
+        assert_eq!(about.version, crate::VERSION);
+        assert_eq!(about.devices.len(), 1);
+        assert_eq!(about.devices[0].name, "laptop");
+        // Thirty seconds after the join: the minute has not passed.
+        assert_eq!(about.devices[0].last_seen, Some(100));
+        let later = ask(&mut store, LAPTOP, 400.0).expect("answered");
+        assert_eq!(
+            later.devices[0].last_seen,
+            Some(100),
+            "the ask at 130 was inside the minute, the one at 400 is kept after its answer"
+        );
+        assert_eq!(store.devices().expect("devices")[0].last_seen, Some(400));
+        assert_eq!(ask(&mut store, [0x44; 16], 500.0), Err(Status::NotAdmitted));
+        assert_eq!(
+            store.devices().expect("devices").len(),
+            1,
+            "a stranger's request is no device"
+        );
+    }
+
     #[test]
     fn a_good_token_admits_once_and_a_reused_one_is_refused() {
         let (_dir, mut store) = store();
@@ -2464,6 +2593,8 @@ mod tests {
                 device: LAPTOP,
                 name: "laptop".into(),
                 admitted_at: 100,
+                // The join is the device's first request: there now.
+                last_seen: Some(100),
             }]
         );
         // The same token again, from another device: used up.
