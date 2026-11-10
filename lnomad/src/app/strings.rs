@@ -43,9 +43,9 @@ leviculum_ui::catalogue! {
     Link = "browser_link", "Link %1$d", "Link %1$d";
     Field = "browser_field", "Field %1$d", "Feld %1$d";
     // The status chip over the page's last row.
-    Loading = "browser_loading", "loading %1$s", "lade %1$s";
+    Loading = "browser_loading", "Loading %1$s", "Lade %1$s";
     CachedRefreshing = "browser_cached_refreshing", "from the page cache · updating", "aus dem Seitenspeicher · wird aktualisiert";
-    Downloading = "browser_downloading", "downloading %1$s", "lade %1$s herunter";
+    Downloading = "browser_downloading", "Downloading %1$s", "Lade %1$s herunter";
     LinkTarget = "browser_link_target", "→ %1$s", "→ %1$s";
     // The intents, as a menu or a screen reader names them.
     Back = "browser_back", "back", "zurück";
@@ -91,8 +91,8 @@ leviculum_ui::catalogue! {
     // A heard node's row (1632, walk 4): its name, when it was heard and
     // how far it is, the words Explore's page list uses; no hash.
     PlaceNodeSeen = "browser_place_node_seen", "%1$s  ·  %2$s", "%1$s  ·  %2$s";
-    PlaceUnnamed = "browser_place_unnamed", "Unnamed node", "Unbenannter Knoten";
-    PlaceUnnamedTail = "browser_place_unnamed_tail", "Unnamed node ·%1$s", "Unbenannter Knoten ·%1$s";
+    PlaceUnnamed = "browser_place_unnamed", "Unnamed page", "Unbenannte Seite";
+    PlaceUnnamedTail = "browser_place_unnamed_tail", "Unnamed page ·%1$s", "Unbenannte Seite ·%1$s";
     PlaceSeenNow = "browser_place_seen_now", "seen just now", "gesehen gerade eben";
     PlaceSeenMinutes = "browser_place_seen_minutes", "seen %1$d min ago", "gesehen vor %1$d Min.";
     PlaceSeenHours = "browser_place_seen_hours", "seen %1$d h ago", "gesehen vor %1$d Std.";

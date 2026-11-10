@@ -824,7 +824,7 @@ mod place_words {
     /// Walk 4 of 1632, new 14: the places sheet said "RNS Search ·
     /// 3e5f19fd… · 110 Sprünge". A node is its name, when it was heard and
     /// how far it is; a hop count no reader can use says nothing; a
-    /// nameless node is "Unbenannter Knoten", with the short hash only when
+    /// nameless node is "Unbenannte Seite", with the short hash only when
     /// another row reads the same.
     #[test]
     fn a_heard_node_is_its_name_and_never_110_stations() {
@@ -854,7 +854,7 @@ mod place_words {
         assert!(!place_collides(&entries, 2));
         assert_eq!(
             place_title(&entries[0], now, place_collides(&entries, 0)).resolve(Lang::De),
-            "Unbenannter Knoten ·abab  ·  gesehen gerade eben  ·  über 2 Stationen erreichbar"
+            "Unbenannte Seite ·abab  ·  gesehen gerade eben  ·  über 2 Stationen erreichbar"
         );
         assert_eq!(
             place_title(&entries[2], now, false).resolve(Lang::En),
@@ -863,7 +863,35 @@ mod place_words {
         let alone = [node(0xab, None, None, now)];
         assert_eq!(
             place_title(&alone[0], now, place_collides(&alone, 0)).resolve(Lang::De),
-            "Unbenannter Knoten  ·  gesehen gerade eben"
+            "Unbenannte Seite  ·  gesehen gerade eben"
         );
+    }
+
+    /// Walk 5 of 1639, new 24: the sheet listed the heard pages oldest
+    /// first, Explore newest first. The sheet now lists them as Explore
+    /// does, the one heard last first; a page heard again moves up.
+    #[test]
+    fn heard_pages_stand_newest_first() {
+        let doc = leviculum_micron::parse("x");
+        let mut model = Model::from_document(&doc, 79, "x", (80, 24));
+        for (byte, seen) in [(1u8, 100u64), (2, 300), (3, 200)] {
+            model
+                .node_registry
+                .upsert([byte; 16], Some(format!("n{byte}")), Some(1), seen);
+        }
+        let order = |model: &Model| -> Vec<u8> {
+            crate::app::event::places(model)
+                .iter()
+                .filter_map(|p| match p {
+                    Place::Node { dest_hash, .. } => Some(dest_hash[0]),
+                    Place::Bookmark { .. } => None,
+                })
+                .collect()
+        };
+        assert_eq!(order(&model), [2, 3, 1]);
+        model
+            .node_registry
+            .upsert([1; 16], Some("n1".into()), Some(1), 400);
+        assert_eq!(order(&model), [1, 2, 3], "heard again, it stands first");
     }
 }

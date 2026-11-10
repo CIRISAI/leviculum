@@ -2263,7 +2263,7 @@ mod tests {
         assert_eq!(browser.top_bar.title.resolve(Lang::De), "Alpha Relay");
         assert_eq!(
             browser.status.map(|c| c.text.resolve(Lang::De)).as_deref(),
-            Some("lade Alpha Relay")
+            Some("Lade Alpha Relay")
         );
         assert!(matches!(
             browser.top_bar.lead,
@@ -2366,7 +2366,7 @@ mod tests {
         assert!(browser.places.is_none(), "no start view over the page");
         assert_eq!(
             browser.status.map(|c| c.text.resolve(Lang::De)).as_deref(),
-            Some("lade Alpha Relay")
+            Some("Lade Alpha Relay")
         );
         assert!(page_text(&model).trim().is_empty(), "{}", page_text(&model));
         // The page arrives and is the page, under its name.

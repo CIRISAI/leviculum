@@ -388,7 +388,7 @@ fn a_page_opened_from_explore_shows_its_loading_line_then_the_page() {
     browse_verb(&mut model, "tab", "");
     let loading = page(&model, "after open and tab");
     assert_eq!(loading.title, "IranTalk");
-    assert_eq!(loading.status, "lade IranTalk");
+    assert_eq!(loading.status, "Lade IranTalk");
     assert!(loading.loading);
     // 1632, walk 4 new 12: the loading state in the middle, the page's
     // name in it, the seconds once three have passed.
@@ -433,7 +433,7 @@ fn a_page_opened_from_explore_shows_its_loading_line_then_the_page() {
     // The page stands while it comes again: the status line says so, no
     // loading state over it.
     assert_eq!(again.loading_words, "");
-    assert_eq!(again.status, "lade IranTalk");
+    assert_eq!(again.status, "Lade IranTalk");
 }
 
 /// The phone's model on `home` as the session starts it: the store, the
@@ -587,8 +587,7 @@ fn the_places_sheet_names_pages_and_never_hashes() {
         "{rows:?}"
     );
     assert!(
-        rows.iter()
-            .any(|r| r.starts_with("Unbenannter Knoten  ·  ")),
+        rows.iter().any(|r| r.starts_with("Unbenannte Seite  ·  ")),
         "{rows:?}"
     );
     for row in &rows {
@@ -620,13 +619,18 @@ fn a_server_row_and_its_sheet_say_the_same() {
             .expect("the server's row")
     };
     let before = row(&screen(&model));
-    assert!(before.starts_with("gesehen vor 19 Min. · über 8 Stationen"), "{before}");
+    assert!(
+        before.starts_with("gesehen vor 19 Min. · über 8 Stationen"),
+        "{before}"
+    );
     hub_heard(&mut model, &hub, 5, 0);
     tap(&mut model, "hub", "", &dest, 0);
     let shown = screen(&model);
     println!("row: {:?}  sheet: {:?}", row(&shown), shown.sheet_said);
     assert!(
-        shown.sheet_said.starts_with("gesehen gerade eben · über 5 Stationen"),
+        shown
+            .sheet_said
+            .starts_with("gesehen gerade eben · über 5 Stationen"),
         "{}",
         shown.sheet_said
     );
@@ -636,4 +640,46 @@ fn a_server_row_and_its_sheet_say_the_same() {
         row(&shown),
         shown.sheet_said
     );
+}
+
+/// Walk 5 of 1639, new 23: the places sheet and the page shared one
+/// scroll on the phone; past the sheet's last entry the page followed, and
+/// the sheet still counted as open while it was off screen, so the next
+/// tap on "Orte" closed it unseen. Through the facade: with the sheet
+/// open, a scroll past its end is the sheet's, the page under it stays at
+/// its first line, and the sheet stays open until it is closed; "Orte"
+/// again closes it and the page is where it was.
+#[test]
+fn the_places_sheet_scrolls_alone_and_stays_what_is_shown() {
+    let (_home, mut model) = phone();
+    model.browse.model.clock = Some(u64::try_from(NOW).expect("positive"));
+    tap(&mut model, "tab", "", "", 0);
+    tap(&mut model, "open", "", &"11".repeat(16), 0);
+    browse_verb(&mut model, "tab", "");
+    let long: String = (0..200).map(|n| format!("Zeile {n}\n")).collect();
+    update(
+        &mut model,
+        UiEvent::Browse(BrowseEvent::Loaded {
+            micron: long,
+            title: "Radio RPi4".into(),
+        }),
+    );
+    let first = page(&model, "the page").first;
+    browse_verb(&mut model, "places", "");
+    let open = page(&model, "the sheet open");
+    assert_eq!(open.sheet, "Orte");
+    for _ in 0..30 {
+        browse_verb(&mut model, "scroll", "pagedown");
+    }
+    let scrolled = page(&model, "thirty pages down");
+    assert_eq!(scrolled.sheet, "Orte", "the sheet is still what is shown");
+    let texts = |s: &loquax_android::schema::BrowseScreen| -> Vec<String> {
+        s.rows.iter().map(|r| r.text.clone()).collect()
+    };
+    assert_eq!(texts(&scrolled), texts(&open), "the same rows");
+    assert_eq!(scrolled.first, first, "the page under it did not move");
+    browse_verb(&mut model, "places", "");
+    let closed = page(&model, "Orte again");
+    assert_eq!(closed.sheet, "", "the second tap closes it");
+    assert_eq!(closed.first, first);
 }

@@ -840,9 +840,11 @@ pub struct DeletedBookmark {
 }
 
 /// The flat, ordered list of places: every bookmark (in insertion order), then
-/// every discovered node (in discovery order). The single source of truth for
-/// both the panel's rendering and its selection/activation, so a row index means
-/// the same thing to each.
+/// every discovered node, the one heard last first, as Loquax's Explore lists
+/// them (1639, walk 5 new 24: the sheet listed the oldest first); discovery
+/// order breaks a tie. The single source of truth for both the panel's
+/// rendering and its selection/activation, so a row index means the same thing
+/// to each.
 pub fn places(model: &Model) -> Vec<Place> {
     let mut out = Vec::new();
     for b in model.bookmarks.list() {
@@ -851,7 +853,9 @@ pub fn places(model: &Model) -> Vec<Place> {
             title: b.title.clone(),
         });
     }
-    for n in model.node_registry.nodes() {
+    let mut nodes = model.node_registry.nodes();
+    nodes.sort_by_key(|n| core::cmp::Reverse(n.last_seen));
+    for n in nodes {
         out.push(Place::Node {
             dest_hash: n.dest_hash,
             name: n.name.clone(),

@@ -2480,7 +2480,7 @@ mod tests {
         // The loading state now floats in the bottom-left chip on the content's
         // last row (row 22), not the footer row.
         let chip = row_text(&buffer, 22, 80);
-        assert!(chip.contains("loading"), "loading missing: {chip:?}");
+        assert!(chip.contains("Loading"), "loading missing: {chip:?}");
     }
 
     #[test]
@@ -3855,7 +3855,7 @@ mod tests {
         let buffer = render(&m, 80, 24);
         let chip = row_text(&buffer, 22, 80);
         assert!(
-            chip.contains("loading") && chip.contains("/page/7.mu"),
+            chip.contains("Loading") && chip.contains("/page/7.mu"),
             "loading chip missing spinner label / path: {chip:?}"
         );
         let spins: Vec<&str> = SPIN_FRAMES.to_vec();
@@ -3879,7 +3879,7 @@ mod tests {
         let chip = row_text(&buffer, 22, 80);
         assert!(!chip.contains('→'), "idle chip drew an arrow: {chip:?}");
         assert!(
-            !chip.contains("loading"),
+            !chip.contains("Loading"),
             "idle chip drew a loading label: {chip:?}"
         );
     }
@@ -3896,7 +3896,7 @@ mod tests {
         let buffer = render(&m, 80, 24);
         let chip = row_text(&buffer, 22, 80);
         assert!(
-            chip.contains("loading") && chip.contains("/page/7.mu"),
+            chip.contains("Loading") && chip.contains("/page/7.mu"),
             "loading did not win over the hovered link: {chip:?}"
         );
         assert!(
