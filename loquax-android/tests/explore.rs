@@ -415,3 +415,114 @@ fn a_page_opened_from_explore_shows_its_loading_line_then_the_page() {
     );
     assert!(page(&model, "after Los").loading);
 }
+
+/// The phone's model on `home` as the session starts it: the store, the
+/// config, and what was heard before ([`loquax::heard::load`]).
+fn started(home: &std::path::Path, me: [u8; 16]) -> (loquax::store::Store, UiModel<session::Line>) {
+    let store = loquax::store::Store::open_in(home, me).expect("the store");
+    let mut model = session::known(home, &store).expect("a model");
+    let config = loquax::config::load(home).expect("the config");
+    model.browse.enabled = config.browse_on();
+    model.lang = Lang::De;
+    update(
+        &mut model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs: NOW,
+            offset_secs: 0,
+        }),
+    );
+    let (pages, hubs) = loquax::heard::load(&store).expect("the heard rows");
+    loquax::ui::explore::restore_heard(&mut model, pages, hubs, config.rooms_suggested);
+    (store, model)
+}
+
+fn hub_heard(model: &mut UiModel<session::Line>, hub: &loquax::ui::hubs::Hub, hops: u8, ago: i64) {
+    update(
+        model,
+        UiEvent::Engine(loquax::outbox::OutboxEvent::HubAnnounced {
+            hub: loquax::ui::hubs::HeardHub {
+                hash: hub.hash,
+                name: Some(hub.name.clone()),
+                hops: Some(hops),
+                first: NOW - ago,
+                last: NOW - ago,
+                answered: None,
+            },
+        }),
+    );
+}
+
+/// The server rows' names and the one "empfohlen" marks.
+fn servers(shown: &ExploreScreen) -> (Vec<String>, Option<String>) {
+    (
+        shown.hubs.iter().map(|h| h.name.clone()).collect(),
+        shown
+            .hubs
+            .iter()
+            .find(|h| h.value.contains("empfohlen"))
+            .map(|h| h.name.clone()),
+    )
+}
+
+/// Walk 4 of 1632, new 15: after a restart Explore listed one to four
+/// pages of over twenty, and "empfohlen" sat on another server. What the
+/// phone heard is kept in its store as the session's persist keeps it;
+/// a core started again on the same store lists the same pages, each with
+/// its old "gesehen vor", and marks the same server. The control: the
+/// same hearing never kept starts empty, and without the held suggestion
+/// the closer server heard later takes the mark.
+#[test]
+fn a_restart_lists_what_was_heard_and_holds_the_suggestion() {
+    let home = tempfile::tempdir().expect("app dir");
+    let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let me = loquax::engine::delivery_address(&identity).expect("address");
+    let shipped = loquax::ui::hubs::shipped();
+    let (far, near) = (&shipped[0], &shipped[1]);
+    let before = {
+        let (mut store, mut model) = started(home.path(), me);
+        for (byte, name, ago) in [
+            (0x11, Some("Radio RPi4"), 600),
+            (0x22, Some("IranTalk"), 3_600),
+            (0x33, None, 7_200),
+            (0x44, Some("Ben's Library"), 90_000),
+        ] {
+            heard(&mut model, byte, name, ago);
+        }
+        // The far server is heard first and suggested; a closer one heard
+        // after does not take the mark (1629).
+        hub_heard(&mut model, far, 6, 300);
+        hub_heard(&mut model, near, 1, 60);
+        tap(&mut model, "tab", "", "", 0);
+        let shown = screen(&model);
+        assert_eq!(servers(&shown).1.as_deref(), Some(far.name.as_str()));
+        let owed = loquax::ui::explore::take_heard(&mut model);
+        assert_eq!((owed.pages.len(), owed.hubs.len()), (4, 2), "{owed:?}");
+        loquax::heard::keep(&mut store, home.path(), owed).expect("kept");
+        shown
+    };
+    assert_eq!(labels(&before).len(), 4, "{:?}", labels(&before));
+    let (_store, mut model) = started(home.path(), me);
+    tap(&mut model, "tab", "", "", 0);
+    let after = screen(&model);
+    assert_eq!(after.pages, before.pages, "the same rows, the same words");
+    assert_eq!(servers(&after), servers(&before));
+    assert_eq!(after.hubs, before.hubs);
+    // Nothing of it is owed again: the restart wrote nothing.
+    assert_eq!(
+        loquax::ui::explore::take_heard(&mut model),
+        loquax::ui::explore::HeardOwed::default()
+    );
+    // The controls. A store nobody kept into starts with nothing.
+    let empty = tempfile::tempdir().expect("app dir");
+    let (_, mut fresh) = started(empty.path(), me);
+    tap(&mut fresh, "tab", "", "", 0);
+    assert!(labels(&screen(&fresh)).is_empty());
+    // The hubs kept without the held suggestion: the closer one takes it.
+    loquax::config::save_hash(home.path(), loquax::heard::SUGGESTED_KEY, None).expect("unset");
+    let (_, mut unheld) = started(home.path(), me);
+    tap(&mut unheld, "tab", "", "", 0);
+    assert_eq!(
+        servers(&screen(&unheld)).1.as_deref(),
+        Some(near.name.as_str())
+    );
+}

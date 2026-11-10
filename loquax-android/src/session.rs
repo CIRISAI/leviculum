@@ -2228,6 +2228,14 @@ impl Inner {
         model.rooms.told = config.rooms_told;
         // The Explore tab's order (1578), per device.
         model.explore.az = config.explore_az.unwrap_or(false);
+        // What the phone heard before (1632): its pages, hubs and the
+        // suggestion, each with its old last seen.
+        match loquax::heard::load(&store) {
+            Ok((pages, hubs)) => {
+                loquax::ui::explore::restore_heard(&mut model, pages, hubs, config.rooms_suggested)
+            }
+            Err(error) => tracing::warn!("HEARD not read: {error}"),
+        }
         model.reading.on = config.read_receipts.unwrap_or(true);
         model.photo_size = config.photo_size.unwrap_or_default();
         model.bar.abilities = compose::Abilities::phone(camera);
@@ -2886,6 +2894,14 @@ impl Inner {
                 v: VERSION,
                 text: format!("not saved: {error}"),
             });
+        }
+        // What the phone heard (1632, walk 4 new 15: a restart forgot
+        // every page): the next start lists it again.
+        let heard = loquax::ui::explore::take_heard(&mut self.model);
+        if heard != loquax::ui::explore::HeardOwed::default() {
+            if let Err(error) = loquax::heard::keep(&mut self.store, &self.home, heard) {
+                tracing::warn!("HEARD not kept: {error}");
+            }
         }
         let petnames = self.model.take_petnames();
         if !petnames.is_empty() {

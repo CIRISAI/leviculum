@@ -82,6 +82,8 @@ pub mod fanout;
 pub mod fetch;
 #[cfg(feature = "std")]
 pub mod file_save;
+#[cfg(feature = "history")]
+pub mod heard;
 pub mod home;
 #[cfg(feature = "std")]
 pub mod host_load;

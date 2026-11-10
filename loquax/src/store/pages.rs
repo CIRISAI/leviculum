@@ -193,6 +193,37 @@ impl Store {
         Ok(Some(stamp))
     }
 
+    /// Every page row kept, heard last first (1632): what a device lists
+    /// again at its start.
+    pub fn pages_heard(&self) -> Result<Vec<DiscoveredNode>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT dest, name, first_seen, last_seen, hops, count FROM home_pages \
+                 WHERE identity = ?1 ORDER BY last_seen DESC, stamp DESC",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok(page_of(
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .map_err(|e| self.failed(e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(page) = row.map_err(|e| self.failed(e))? {
+                out.push(page.node);
+            }
+        }
+        Ok(out)
+    }
+
     /// The newest stamp of the pages and bookmarks, 0 when there are none.
     pub fn pages_newest(&self) -> Result<u64, StoreError> {
         newest_in(&self.conn, &self.identity).map_err(|e| self.failed(e))

@@ -692,6 +692,13 @@ impl Shell {
         self.hand_petnames();
         self.hand_peer_states();
         self.hand_bookmarks();
+        // What this device heard (1632): the next start lists it again.
+        let heard = loquax::ui::explore::take_heard(&mut self.model);
+        if heard != loquax::ui::explore::HeardOwed::default() {
+            if let Err(error) = loquax::heard::keep(&mut self.store, &self.context.home, heard) {
+                tracing::warn!("HEARD not kept: {error}");
+            }
+        }
         let writes = self.model.take_writes();
         if let Err(error) = self.store.write(&writes) {
             loquax::events::store_failed(&error.to_string());
@@ -1793,6 +1800,14 @@ pub(crate) async fn start(
     model.rooms.told = config.rooms_told;
     // The Explore tab's order (1578), per device.
     model.explore.az = config.explore_az.unwrap_or(false);
+    // What this device heard before (1632): its pages, hubs and the
+    // suggestion, each with its old last seen.
+    match loquax::heard::load(&store) {
+        Ok((pages, hubs)) => {
+            loquax::ui::explore::restore_heard(&mut model, pages, hubs, config.rooms_suggested)
+        }
+        Err(error) => tracing::warn!("HEARD not read: {error}"),
+    }
     let nick = Some(display_name.name.clone()).filter(|n| !n.is_empty());
     let rooming = loquax::rooms_link::Rooming::start(&attached, browse_identity, nick);
     // The microphone (1276): the system's recorder, where it has one; the

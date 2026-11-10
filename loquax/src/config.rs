@@ -35,7 +35,8 @@
 //! The settings' Advanced section writes it (1577), from the shipped hubs
 //! (`loquax/assets/hubs.toml`) or an address pasted. `rooms_told`, the
 //! hub the reader was last told that their name is visible in its rooms,
-//! before the first link to it (1577).
+//! before the first link to it (1577). `rooms_suggested`, the hub
+//! "suggested" marked last, held across a restart (1632).
 //! And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
@@ -156,6 +157,9 @@ pub struct Config {
     /// `rooms_told` (1577): the hub the reader was told, before the first
     /// link to it, that their name is visible in its rooms.
     pub rooms_told: Option<[u8; 16]>,
+    /// `rooms_suggested` (1632): the hub "suggested" held, so a restart
+    /// marks the same one while it still fits.
+    pub rooms_suggested: Option<[u8; 16]>,
     /// `send_on_enter`, when the file sets it; unset is on.
     pub send_on_enter: Option<bool>,
     /// `home_wake`, when the file sets it; unset is on.
@@ -542,6 +546,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             ("propagation_node", &mut config.propagation_node),
             ("rooms_hub", &mut config.rooms_hub),
             ("rooms_told", &mut config.rooms_told),
+            ("rooms_suggested", &mut config.rooms_suggested),
         ] {
             if key.trim() != name {
                 continue;

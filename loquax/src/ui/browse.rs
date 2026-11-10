@@ -290,6 +290,9 @@ pub(super) fn fold<B: InputBuffer + Default>(
         return Vec::new();
     }
     model.browse.model.lang = model.lang;
+    if let BrowseEvent::Node(node) = &event {
+        super::explore::owe_page(model, node);
+    }
     let effects = match event.into_app() {
         Ok(event) => model.browse.fold(event),
         Err(Aside::Identify(dest, on)) => {
@@ -321,6 +324,12 @@ fn home_pages<B: InputBuffer + Default>(
     for node in delta.nodes() {
         effects.extend(browse.fold(AppEvent::NodeDiscovered(node.clone())));
     }
+    // What the home heard stays on this device too (1632): a restart
+    // out of the home's reach still lists it.
+    for node in delta.nodes() {
+        super::explore::owe_page(model, node);
+    }
+    let browse = &mut model.browse;
     if browse
         .shared
         .apply(&mut browse.model.bookmarks, delta.bookmarks())

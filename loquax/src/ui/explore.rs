@@ -76,6 +76,81 @@ pub struct Explore {
     pub applied_ms: Option<u64>,
     /// A finger is down on the list: no new order until it lifts.
     pub held: bool,
+    /// What this device heard and its host has not kept yet (1632).
+    pub owed: HeardOwed,
+    /// The suggestion as the host last kept it.
+    pub held_kept: Option<[u8; 16]>,
+}
+
+/// What a device heard since its host last wrote it to the store (1632,
+/// walk 4 new 15: after a restart the list held one to four pages of
+/// over twenty, and "suggested" sat elsewhere). The model owes it, the
+/// host takes it with [`take_heard`] and keeps it (`crate::heard`), and
+/// the next start reads it back with [`restore_heard`]. Bounded, so a
+/// host that never takes it (the M9 keeps no store) holds no more than
+/// the lists themselves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HeardOwed {
+    /// Pages heard, oldest first.
+    pub pages: Vec<lnomad::discovery::DiscoveredNode>,
+    /// Hubs heard, oldest first.
+    pub hubs: Vec<super::hubs::HeardHub>,
+    /// The suggestion, when it changed since the host last kept it.
+    pub held: Option<Option<[u8; 16]>>,
+}
+
+/// The most pages [`HeardOwed`] holds before the oldest goes.
+const OWED_PAGES: usize = 512;
+
+/// A page this device heard, owed to the store.
+pub(crate) fn owe_page<B>(model: &mut UiModel<B>, node: &lnomad::discovery::DiscoveredNode) {
+    let pages = &mut model.explore.owed.pages;
+    if pages.len() >= OWED_PAGES {
+        pages.remove(0);
+    }
+    pages.push(node.clone());
+}
+
+/// A hub this device heard, owed to the store.
+pub(crate) fn owe_hub<B>(model: &mut UiModel<B>, hub: &super::hubs::HeardHub) {
+    let hubs = &mut model.explore.owed.hubs;
+    if hubs.len() >= super::hubs::HEARD_BOUND {
+        hubs.remove(0);
+    }
+    hubs.push(hub.clone());
+}
+
+/// What the host owes its store now: the pages and hubs heard since the
+/// last take, and the suggestion when it moved.
+pub fn take_heard<B>(model: &mut UiModel<B>) -> HeardOwed {
+    let mut owed = core::mem::take(&mut model.explore.owed);
+    let held = model.rooms.heard.held();
+    if held != model.explore.held_kept {
+        owed.held = Some(held);
+        model.explore.held_kept = held;
+    }
+    owed
+}
+
+/// What the store kept, back in the lists at a start (1632): every page
+/// with its last seen, every hub heard, and the suggestion held before,
+/// which stays while it still fits ([`super::settings::settle_suggestion`]).
+/// Nothing of it is owed again.
+pub fn restore_heard<B>(
+    model: &mut UiModel<B>,
+    pages: Vec<lnomad::discovery::DiscoveredNode>,
+    hubs: Vec<super::hubs::HeardHub>,
+    held: Option<[u8; 16]>,
+) {
+    for node in pages {
+        model.browse.fold(lnomad::AppEvent::NodeDiscovered(node));
+    }
+    for hub in hubs {
+        model.rooms.heard.hear(hub);
+    }
+    model.rooms.heard.hold(held);
+    super::settings::settle_suggestion(&mut model.rooms);
+    model.explore.held_kept = model.rooms.heard.held();
 }
 
 /// The least time between two orders applied on their own (1618): a
