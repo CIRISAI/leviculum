@@ -38,6 +38,21 @@
 //! RSS plus swap exactly as file pages do (order 1372, pipelines 602/603).
 //! The daemons map no anonymous shared memory of their own.
 //!
+//! Two more figures ride on the line without being subtracted:
+//! `lazyfree=` is the `LazyFree` of `/proc/self/smaps_rollup`, anonymous
+//! pages the allocator released with `MADV_FREE` that the kernel may drop
+//! from the resident set under pressure without swapping them, and
+//! `majfault=` is the major-fault count of `/proc/self/stat`. The nightly
+//! canary of 2026-11-10 read a host-reclaim dip as growth: anonymous pages
+//! left the resident set without reaching swap and came back (#467, order
+//! 1637). Whether those were lazy-free pages is what the two figures are
+//! there to show; the arithmetic waits for a census that says so. lnpnd
+//! runs on mimalloc, whose `purge_decommits` option defaults to on
+//! (the options table of libmimalloc-sys 0.1.49), so its purges are
+//! `MADV_DONTNEED` and leave the resident set at once: there the figure is
+//! expected to stay near 0, and a dip that is not lazy-free must be read
+//! from `majfault=` and swap instead.
+//!
 //! Every parser here takes text, not a path, so the tests feed fixtures and
 //! the daemon feeds `/proc/self/*`.
 
@@ -73,6 +88,39 @@ pub fn parse_status(text: &str) -> StatusFields {
         }
     }
     out
+}
+
+/// The reclaim witnesses the `gap:` line prints but does not subtract.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReclaimFields {
+    /// `LazyFree:` of `/proc/self/smaps_rollup` in bytes; 0 where the
+    /// kernel does not report it.
+    pub lazyfree_bytes: u64,
+    /// Major page faults since start (`/proc/self/stat` field 12).
+    pub majfault: Option<u64>,
+}
+
+/// `LazyFree:` of `/proc/self/smaps_rollup` text, in bytes; 0 when the
+/// kernel prints no such line (older kernels, or no rollup at all).
+pub fn parse_lazyfree(smaps_rollup: &str) -> u64 {
+    smaps_rollup
+        .lines()
+        .find_map(|line| {
+            let rest = line.strip_prefix("LazyFree:")?;
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            kb.checked_mul(1024)
+        })
+        .unwrap_or(0)
+}
+
+/// Field 12 (`majflt`) of `/proc/self/stat` text.
+///
+/// The second field is the command name in parentheses and may itself hold
+/// spaces and parentheses, so counting starts after the LAST `)`: the field
+/// that follows it is field 3, which puts field 12 nine further on.
+pub fn parse_majfault(stat: &str) -> Option<u64> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(12 - 3)?.parse().ok()
 }
 
 /// One anonymous writable region of `/proc/self/maps`.
@@ -271,10 +319,15 @@ pub fn render_allocator(view: Option<AllocatorView>, threads: Option<u64>) -> St
 /// each subtraction in turn. A term the process cannot measure is printed
 /// as `n/a` and subtracts nothing.
 ///
-/// `file` is the resident file pages (`RssFile`), taken off first: reclaim
-/// drops them without swapping (module docs). `shmem` is the resident
-/// shared pages (`RssShmem`), taken off next: a file on tmpfs is booked
-/// there and leaves the line the same way (module docs).
+/// `status` gives swap (`VmSwap`) and the two terms taken off first.
+/// The resident file pages (`RssFile`) go because reclaim drops them
+/// without swapping (module docs). The resident shared pages (`RssShmem`)
+/// go next: a file on tmpfs is booked there and leaves the line the same
+/// way (module docs).
+///
+/// `reclaim` is printed as `lazyfree=<bytes> majfault=<n>` just before
+/// `unaccounted`, which stays the line's last term because periculum reads
+/// it from the end. Neither is subtracted (module docs).
 ///
 /// `live` is the counting shim's balance ([`crate::heap_accounting`]), known
 /// only in a `heap-accounting` build. When it is known it is subtracted
@@ -284,9 +337,8 @@ pub fn render_allocator(view: Option<AllocatorView>, threads: Option<u64>) -> St
 /// split #437 could not make on musl without it.
 pub fn render_gap_line(
     rss: u64,
-    swap: Option<u64>,
-    file: Option<u64>,
-    shmem: Option<u64>,
+    status: &StatusFields,
+    reclaim: ReclaimFields,
     tracked: Option<u64>,
     live: Option<u64>,
     view: Option<AllocatorView>,
@@ -302,14 +354,15 @@ pub fn render_gap_line(
             }
         }
     }
+    let swap = status.swap_bytes;
     let swap_bytes = swap.unwrap_or(0);
     let mut left = rss + swap_bytes;
     let mut out = format!(
         "gap: rss {rss} + swap {} = {left}",
         swap.map_or_else(|| "n/a".to_string(), |s| s.to_string())
     );
-    step(&mut out, &mut left, "file", file);
-    step(&mut out, &mut left, "shmem", shmem);
+    step(&mut out, &mut left, "file", status.rss_file_bytes);
+    step(&mut out, &mut left, "shmem", status.rss_shmem_bytes);
     match (live, tracked) {
         (Some(_), Some(t)) => {
             let _ = write!(out, "; tracked {t} (model, not subtracted)");
@@ -325,6 +378,14 @@ pub fn render_gap_line(
         view.map(|v| v.fordblks + v.keepcost),
     );
     step(&mut out, &mut left, "mmapped", view.map(|v| v.hblkhd));
+    let _ = write!(
+        out,
+        "; lazyfree={} majfault={}",
+        reclaim.lazyfree_bytes,
+        reclaim
+            .majfault
+            .map_or_else(|| "n/a".to_string(), |m| m.to_string())
+    );
     let _ = writeln!(out, "; unaccounted {left}");
     out
 }
@@ -338,15 +399,23 @@ pub fn census_sections(rss: u64, tracked: Option<u64>) -> String {
     let regions = std::fs::read_to_string("/proc/self/maps")
         .map(|t| parse_anon_writable_maps(&t))
         .unwrap_or_default();
+    let reclaim = ReclaimFields {
+        lazyfree_bytes: std::fs::read_to_string("/proc/self/smaps_rollup")
+            .map(|t| parse_lazyfree(&t))
+            .unwrap_or(0),
+        majfault: std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .as_deref()
+            .and_then(parse_majfault),
+    };
     let view = allocator_view();
 
     let mut out = render_allocator(view, status.threads);
     out.push_str(&render_mappings(&regions));
     out.push_str(&render_gap_line(
         rss,
-        status.swap_bytes,
-        status.rss_file_bytes,
-        status.rss_shmem_bytes,
+        &status,
+        reclaim,
         tracked,
         measured_live(),
         view,
@@ -485,6 +554,99 @@ mod tests {
         assert!(out.contains("1048576 bytes [heap]\n"), "{out}");
     }
 
+    /// A `smaps_rollup` as a 6.12 kernel writes it, with lazy-free pages.
+    const SMAPS_ROLLUP: &str = "\
+55ebce6cd000-7ffe26bb3000 ---p 00000000 00:00 0                          [rollup]
+Rss:                9888 kB
+Anonymous:          5120 kB
+KSM:                   0 kB
+LazyFree:           1536 kB
+AnonHugePages:         0 kB
+Swap:                356 kB
+";
+
+    /// A `/proc/self/stat` whose command name holds a space and a `)`.
+    const STAT: &str = "4242 (ln d) x) S 1 4242 4242 0 -1 4194560 1830 0 17 0 \
+        12 3 0 0 20 0 13 0 777 1900000000 2424 18446744073709551615\n";
+
+    #[test]
+    fn lazyfree_parser_reads_bytes_and_defaults_to_zero() {
+        assert_eq!(parse_lazyfree(SMAPS_ROLLUP), 1536 * 1024);
+        // A kernel without the line, or no rollup file at all.
+        assert_eq!(parse_lazyfree("Rss:  100 kB\nSwap: 0 kB\n"), 0);
+        assert_eq!(parse_lazyfree(""), 0);
+    }
+
+    #[test]
+    fn majfault_parser_counts_fields_after_the_last_paren() {
+        // minflt (10) is 1830, cminflt (11) 0, majflt (12) 17.
+        assert_eq!(parse_majfault(STAT), Some(17));
+        assert_eq!(parse_majfault("1 (x) S 1 2"), None);
+        assert_eq!(parse_majfault("no parens at all"), None);
+    }
+
+    /// The fields of the old positional arguments, as a status block.
+    fn status(swap: Option<u64>, file: Option<u64>, shmem: Option<u64>) -> StatusFields {
+        StatusFields {
+            threads: None,
+            swap_bytes: swap,
+            rss_file_bytes: file,
+            rss_shmem_bytes: shmem,
+        }
+    }
+
+    /// Order 1637: the reclaim witnesses ride on the line before
+    /// `unaccounted`, and move nothing in the arithmetic.
+    #[test]
+    fn gap_line_prints_lazyfree_and_majfault_without_subtracting() {
+        let reclaim = ReclaimFields {
+            lazyfree_bytes: 300,
+            majfault: Some(17),
+        };
+        let line = render_gap_line(
+            1000,
+            &status(Some(500), Some(100), Some(50)),
+            reclaim,
+            Some(400),
+            None,
+            None,
+        );
+        assert_eq!(
+            line,
+            "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; - shmem 50 = 1350; \
+             - tracked 400 = 950; - live n/a; - allocator free n/a; - mmapped n/a; \
+             lazyfree=300 majfault=17; unaccounted 950\n"
+        );
+        assert_eq!(unaccounted_of(&line), 950);
+        let unknown = render_gap_line(
+            1000,
+            &status(None, None, None),
+            ReclaimFields::default(),
+            None,
+            None,
+            None,
+        );
+        assert!(
+            unknown.ends_with("; lazyfree=0 majfault=n/a; unaccounted 1000\n"),
+            "{unknown}"
+        );
+    }
+
+    /// The live process: the line carries both figures, and on Linux the
+    /// stat file always gives a fault count.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn census_gap_line_carries_the_reclaim_witnesses() {
+        let out = census_sections(1 << 20, Some(1024));
+        let gap = out
+            .lines()
+            .find(|l| l.starts_with("gap: "))
+            .unwrap_or_default();
+        assert!(gap.contains("; lazyfree="), "{gap}");
+        assert!(!gap.contains("majfault=n/a"), "{gap}");
+        assert!(gap.contains("; unaccounted "), "{gap}");
+    }
+
     #[test]
     fn gap_line_subtracts_each_term_in_turn() {
         let view = AllocatorView {
@@ -496,21 +658,28 @@ mod tests {
         assert_eq!(
             render_gap_line(
                 1000,
-                Some(500),
-                Some(100),
-                Some(50),
+                &status(Some(500), Some(100), Some(50)),
+                ReclaimFields::default(),
                 Some(400),
                 None,
                 Some(view)
             ),
             "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; - shmem 50 = 1350; \
              - tracked 400 = 950; - live n/a; - allocator free 120 = 830; - mmapped 300 = 530; \
-             unaccounted 530\n"
+             lazyfree=0 majfault=n/a; unaccounted 530\n"
         );
         assert_eq!(
-            render_gap_line(1000, None, None, None, Some(400), None, None),
+            render_gap_line(
+                1000,
+                &status(None, None, None),
+                ReclaimFields::default(),
+                Some(400),
+                None,
+                None
+            ),
             "gap: rss 1000 + swap n/a = 1000; - file n/a; - shmem n/a; - tracked 400 = 600; \
-             - live n/a; - allocator free n/a; - mmapped n/a; unaccounted 600\n"
+             - live n/a; - allocator free n/a; - mmapped n/a; lazyfree=0 majfault=n/a; \
+             unaccounted 600\n"
         );
     }
 
@@ -522,21 +691,28 @@ mod tests {
         assert_eq!(
             render_gap_line(
                 1000,
-                Some(500),
-                Some(100),
-                Some(0),
+                &status(Some(500), Some(100), Some(0)),
+                ReclaimFields::default(),
                 Some(400),
                 Some(250),
                 None
             ),
             "gap: rss 1000 + swap 500 = 1500; - file 100 = 1400; - shmem 0 = 1400; \
              tracked 400 (model, not subtracted); - live 250 = 1150; \
-             - allocator free n/a; - mmapped n/a; unaccounted 1150\n"
+             - allocator free n/a; - mmapped n/a; lazyfree=0 majfault=n/a; unaccounted 1150\n"
         );
         assert_eq!(
-            render_gap_line(1000, None, None, None, None, Some(250), None),
+            render_gap_line(
+                1000,
+                &status(None, None, None),
+                ReclaimFields::default(),
+                None,
+                Some(250),
+                None
+            ),
             "gap: rss 1000 + swap n/a = 1000; - file n/a; - shmem n/a; tracked n/a; \
-             - live 250 = 750; - allocator free n/a; - mmapped n/a; unaccounted 750\n"
+             - live 250 = 750; - allocator free n/a; - mmapped n/a; lazyfree=0 majfault=n/a; \
+             unaccounted 750\n"
         );
     }
 
