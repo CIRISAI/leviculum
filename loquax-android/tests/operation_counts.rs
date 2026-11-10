@@ -141,7 +141,13 @@ fn wait_started(session: &Session) {
 /// rows' ago-words move by it), so the lists are made again once a
 /// minute, as they should be. The fixture's own idle keeps inside a
 /// minute for the same reason (`real_store::idle`).
-fn inside_a_minute(window: Duration) {
+///
+/// A wait into the next minute ends once `session`'s pump has made the
+/// lists for it, not half a second in: an idle pump sleeps between turns
+/// (`idle_wait`), and a turn that folded the new minute inside the window
+/// was its one list (1649: the pump's last turn at …:57, its next five
+/// seconds later at …:02, the window from …:00.5).
+fn inside_a_minute(session: &Session, window: Duration) {
     let second = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -151,8 +157,17 @@ fn inside_a_minute(window: Duration) {
     let room = 60.0 - window.as_secs_f64() - 1.0;
     let at = second();
     if at > room {
-        // Half a second into the next minute: its turn is folded.
+        let before = session.scene_builds();
         std::thread::sleep(Duration::from_secs_f64(60.0 - at + 0.5));
+        let begin = Instant::now();
+        while session.scene_builds() == before {
+            assert!(
+                begin.elapsed() < Duration::from_secs(30),
+                "the pump never made the lists for the new minute"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(second() <= room, "the new minute's lists came too late");
     }
 }
 
@@ -190,7 +205,7 @@ fn an_idle_phone_builds_no_list() {
     // (1600): 5 reds in 24 loaded runs, every one with its window across
     // :00 and the pump's build at :00.09 with nothing dirty and the lists
     // revision moved; no green window crossed a minute.
-    inside_a_minute(Duration::from_millis(real_store::IDLE_MS + 500));
+    inside_a_minute(&session, Duration::from_millis(real_store::IDLE_MS + 500));
     let before = session.scene_builds();
     let begin = Instant::now();
     let mut asked = 0;
