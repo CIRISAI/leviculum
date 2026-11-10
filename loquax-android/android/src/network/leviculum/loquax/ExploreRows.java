@@ -65,6 +65,19 @@ final class ExploreRows<T> {
     /** {@link #offer}: it would move a row on screen; it waits behind the chip. */
     static final int WAITING = 2;
 
+    /**
+     * Whether the pane tells the adapter after {@code said}
+     * ({@code notifyDataSetChanged}): only when the rows changed. A
+     * {@link #WAITING} answer changes words in place, which the pane
+     * draws into the rows on screen as they stand (1653, walk 8, 39: the
+     * notification between a press and ListView's {@code onTouchUp} sets
+     * its {@code mDataChanged}, and ListView drops the click; with the
+     * chip up every tap opened nothing).
+     */
+    static boolean notifies(int said) {
+        return said == SHOWN;
+    }
+
     /** How long the list must rest untouched at its top before an answer shows there at once. */
     static final long QUIET_MS = 3000;
 
@@ -72,6 +85,8 @@ final class ExploreRows<T> {
     private List<T> shown = Collections.emptyList();
     private List<T> waiting;
     private boolean down;
+    /** An answer came while the finger was down. */
+    private boolean arrived;
     private int anchor = -1;
     /** The row the finger came down on, until its click or the gesture's end. */
     private T pressed;
@@ -132,6 +147,7 @@ final class ExploreRows<T> {
         if (down) {
             refresh(copy);
             waiting = copy;
+            arrived = true;
             return HELD;
         }
         anchor = -1;
@@ -230,24 +246,30 @@ final class ExploreRows<T> {
     /** A finger came down on the list. */
     void down() {
         down = true;
+        arrived = false;
     }
 
     /**
-     * The finger lifted: what waited for it is offered as the screen
-     * stands, {@link #SHOWN} or {@link #WAITING}; {@link #HELD} when
-     * nothing waited.
+     * The finger lifted: an answer that came while it was down is offered
+     * as the screen stands, {@link #SHOWN} or {@link #WAITING};
+     * {@link #HELD} when none came. What already waited behind the chip
+     * before the press is not offered again (1653, walk 8, 39): it waited
+     * as the screen stood, and offering it again told the adapter and
+     * cost the tap its click.
      */
     int up(int first, int last) {
         down = false;
-        if (waiting == null) {
+        if (waiting == null || !arrived) {
             return HELD;
         }
+        arrived = false;
         return offer(waiting, first, last, false);
     }
 
     /** The lift of the 1618 rule, the screen unknown: what waited shows. */
     boolean up() {
         down = false;
+        arrived = false;
         if (waiting == null) {
             return false;
         }

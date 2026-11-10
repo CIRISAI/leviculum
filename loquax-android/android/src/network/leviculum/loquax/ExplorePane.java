@@ -237,7 +237,11 @@ final class ExplorePane {
         fresh.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                if (rows.apply()) {
+                boolean applied = rows.apply();
+                // The band back to its resting 20 dp first (1653, walk 8,
+                // 38), then the list to its top under it.
+                chip();
+                if (applied) {
                     adapter.notifyDataSetChanged();
                     // After the list laid the new rows out: a selection set
                     // before that is taken back by the stable ids, which
@@ -245,19 +249,30 @@ final class ExplorePane {
                     list.post(new Runnable() {
                         @Override
                         public void run() {
-                            list.setSelection(0);
+                            measureBand();
+                            list.setSelectionFromTop(0, 0);
                         }
                     });
                 }
-                chip();
             }
         });
 
         list = new ListView(activity) {
             @Override
             public boolean dispatchTouchEvent(MotionEvent event) {
-                finger(event);
-                return super.dispatchTouchEvent(event);
+                // The press before ListView takes it, the lift after
+                // ListView decided the click (1653, walk 8, 39): whatever
+                // the lift does to the rows then cannot cost the tap.
+                int action = event.getActionMasked();
+                boolean lift = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL;
+                if (!lift) {
+                    finger(event);
+                }
+                boolean handled = super.dispatchTouchEvent(event);
+                if (lift) {
+                    finger(event);
+                }
+                return handled;
             }
         };
         list.setId(R.id.explore_list);
@@ -392,7 +407,7 @@ final class ExplorePane {
                 place(top);
             } else if (said == ExploreRows.WAITING) {
                 // The rows on screen took the waiting answer's words (1639).
-                adapter.notifyDataSetChanged();
+                rebind();
             }
             chip();
             restLater();
@@ -409,6 +424,25 @@ final class ExplorePane {
     private int topOfFirst() {
         View first = list.getChildAt(0);
         return first == null ? 0 : first.getTop();
+    }
+
+    /**
+     * The rows on screen take their rows' newest words, each view drawn
+     * again where it stands, with no word to the adapter (1653, walk 8,
+     * 39): {@code notifyDataSetChanged} sets ListView's
+     * {@code mDataChanged}, and a click that meets it is dropped. A
+     * waiting answer changes words only ({@link ExploreRows#notifies}), so
+     * every position keeps its row and its view type.
+     */
+    private void rebind() {
+        int first = list.getFirstVisiblePosition();
+        int count = adapter.getCount();
+        for (int i = 0; i < list.getChildCount(); i++) {
+            int position = first + i;
+            if (position < count) {
+                adapter.getView(position, list.getChildAt(i), list);
+            }
+        }
     }
 
     /** The rows shown: the first row on screen back at its pixel, where the rule says. */
@@ -436,8 +470,26 @@ final class ExplorePane {
         int top = topOfFirst();
         list.setPadding(0, want, 0, 0);
         list.setClipToPadding(chip);
+        measureBand();
         if (first >= 0) {
             list.setSelectionFromTop(first, ExploreRows.fromTop(top, want));
+        }
+    }
+
+    /**
+     * ListView reads its padding into the band {@code setSelectionFromTop}
+     * counts from ({@code mListPadding}) only when it is measured (1653,
+     * walk 8, 38: after a tap on the chip "Seiten" stood 20 dp low, the
+     * selection set against the chip's deeper band, which had gone). A
+     * measure at the size it has makes the new band the one the next
+     * selection counts from.
+     */
+    private void measureBand() {
+        int width = list.getWidth();
+        int height = list.getHeight();
+        if (width > 0 && height > 0) {
+            list.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
         }
     }
 
@@ -599,7 +651,7 @@ final class ExplorePane {
         } else if (said == ExploreRows.WAITING) {
             // Nothing moves, but the rows on screen say what the answer
             // says (1639, walk 5 new 26: a server row older than its sheet).
-            adapter.notifyDataSetChanged();
+            rebind();
         }
         chip();
         if (searched) {

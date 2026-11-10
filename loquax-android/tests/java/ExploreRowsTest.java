@@ -55,6 +55,8 @@ final class ExploreRowsTest {
         aTapOpensTheRowItHit();
         theScrolledListHoldsStill();
         aWaitingAnswerStillRefreshesTheWords();
+        aTapWorksWhileTheChipShows();
+        atRestAtTheTopARefreshAlsoSorts();
 
         check(ExploreRows.id("page:aa") == ExploreRows.id("page:aa"), "an id is stable");
         check(ExploreRows.id("page:aa") != ExploreRows.id("page:ab"), "two rows, two ids");
@@ -404,6 +406,131 @@ final class ExploreRowsTest {
         check(held.at(2).startsWith("page:A"), "held, nothing moved: " + held.at(2));
         check(held.up(2, 5) == ExploreRows.WAITING, "the lift: it would move rows");
         check(held.fresh() == 1, "one new page waits: " + held.fresh());
+    }
+
+    /**
+     * ListView's side of a tap, as AOSP's {@code AbsListView} has it: the
+     * press takes the position; {@code notifyDataSetChanged} sets
+     * {@code mDataChanged} until the next layout; {@code onTouchUp} and the
+     * click it posts drop the click while {@code mDataChanged} holds. The
+     * pane's lift ({@code ExplorePane.finger}) runs before ListView's own
+     * {@code ACTION_UP}, so a notification it asks for there is between
+     * the press and {@code onTouchUp}.
+     */
+    private static final class Tap {
+        boolean dataChanged;
+
+        /** The pane hears the lift: what it does to the adapter. */
+        void lift(ExploreRows<String> rows, int first, int last) {
+            int said = rows.up(first, last);
+            if (ExploreRows.notifies(said)) {
+                dataChanged = true;
+            }
+        }
+
+        /** An answer from the library reaches the pane while the finger is down. */
+        void answer(ExploreRows<String> rows, List<String> answer, int first, int last) {
+            int said = rows.offer(answer, first, last, false);
+            if (ExploreRows.notifies(said)) {
+                dataChanged = true;
+            }
+        }
+
+        /** ListView's onTouchUp: the click, or nothing. */
+        String click(ExploreRows<String> rows, int position) {
+            return dataChanged ? null : rows.hit(position);
+        }
+    }
+
+    /**
+     * Walk 8 of 1653, 39: while the chip "N neue Seiten" shows, a tap on a
+     * row opened nothing, 4 of 4 (ValleiRug twice, FabLab, Root Access
+     * Hub); without the chip 4 of 4 opened. The chip means an answer
+     * waits; the lift offered it again, it waited again, and the pane
+     * told the adapter the words changed: {@code notifyDataSetChanged}
+     * between the press and ListView's {@code onTouchUp}, which then
+     * drops the click. Three cases: the chip up and nothing new during the
+     * press; the chip up and a waiting answer that refreshes the words
+     * between press and lift (the walker's guess, 1639's refresh); and
+     * the control, no chip, which always worked.
+     */
+    private static void aTapWorksWhileTheChipShows() {
+        List<String> before = new ArrayList<String>();
+        before.add("title:pages|Seiten");
+        before.add("heading:Heute|Heute");
+        for (int i = 0; i < 30; i++) {
+            before.add("page:" + i + "|vor " + (i + 3) + " Min.");
+        }
+        before.add("title:rooms|Räume");
+        before.add("server:valleirug|vor 19 Min. · über 8 Stationen");
+        before.add("server:fablab|vor 2 Std.");
+        int first = 25;
+        int last = 34;
+        int tap = 32;
+        // An answer with a new page among the screen's rows: it waits.
+        List<String> moved = new ArrayList<String>(before);
+        moved.add(28, "page:new|gerade eben");
+        // Its successor: the same rows, newer words for the servers.
+        List<String> newer = new ArrayList<String>(moved);
+        newer.set(newer.size() - 2, "server:valleirug|gerade eben · über 5 Stationen");
+        for (int kind = 0; kind < 3; kind++) {
+            ExploreRows<String> rows = new ExploreRows<String>(WORDS);
+            rows.offer(before);
+            boolean chip = kind < 2;
+            if (chip) {
+                check(rows.offer(moved, first, last, false) == ExploreRows.WAITING, "the chip");
+                check(rows.waits(), "the chip shows");
+            }
+            Tap list = new Tap();
+            String aimed = rows.at(tap);
+            rows.press(tap);
+            rows.down();
+            if (kind == 1) {
+                list.answer(rows, newer, first, last);
+            }
+            list.lift(rows, first, last);
+            String hit = list.click(rows, tap);
+            String which = kind == 0 ? "chip up" : kind == 1 ? "chip up, words refreshed" : "no chip";
+            check(hit != null, which + ": the tap opens a row, ListView did not drop the click");
+            check(WORDS.key(aimed).equals(WORDS.key(hit)), which + ": the tap opens " + aimed + ", not " + hit);
+            if (chip) {
+                check(rows.waits(), which + ": the chip still shows after the tap");
+                check(rows.fresh() == 1, which + ": it counts the one new page: " + rows.fresh());
+            }
+            if (kind == 1) {
+                check(rows.at(rows.size() - 2).endsWith("über 5 Stationen"),
+                        "the words refreshed in place: " + rows.at(rows.size() - 2));
+            }
+        }
+    }
+
+    /**
+     * Walk 8 of 1653, 43: scrolled, a server row said "gerade eben" at
+     * the bottom, under rows "vor 3 Std.": the refresh in place (1639)
+     * changes words, never places. Decided: while scrolled, or just
+     * touched, it stays so; the list at rest at its very top for
+     * {@link ExploreRows#QUIET_MS} takes the whole answer, in its order.
+     */
+    private static void atRestAtTheTopARefreshAlsoSorts() {
+        List<String> before = Arrays.asList("title:pages|Seiten", "page:A|vor 3 Min.",
+                "title:rooms|Räume", "server:old|vor 3 Std.", "server:kj5|vor 4 Std.");
+        List<String> after = Arrays.asList("title:pages|Seiten", "page:A|vor 3 Min.",
+                "title:rooms|Räume", "server:kj5|gerade eben", "server:old|vor 3 Std.");
+        ExploreRows<String> rows = new ExploreRows<String>(WORDS);
+        rows.offer(before);
+        rows.touched(1000);
+        // Scrolled to the servers: the words, in place.
+        check(rows.offer(after, 2, 4, false, false, 9000) == ExploreRows.WAITING, "scrolled: waits");
+        check("server:kj5|gerade eben".equals(rows.at(4)), "in place, newer words: " + rows.at(4));
+        // At the top, but touched a moment ago: still in place.
+        rows.touched(9500);
+        check(rows.offer(after, 0, 4, false, true, 10000) == ExploreRows.WAITING, "just touched");
+        check(rows.at(3).startsWith("server:old"), "still in place: " + rows.at(3));
+        // At rest at the top for the quiet time: sorted.
+        check(rows.offer(after, 0, 4, false, true, 9500 + ExploreRows.QUIET_MS) == ExploreRows.SHOWN,
+                "at rest at the top: shown");
+        check("server:kj5|gerade eben".equals(rows.at(3)), "sorted: " + rows.at(3));
+        check(!rows.waits(), "no chip");
     }
 
     private static void check(boolean ok, String what) {
