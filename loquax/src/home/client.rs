@@ -1621,6 +1621,7 @@ mod tests {
     async fn real_home(
         devices: &[[u8; 16]],
         pages: u32,
+        names: u32,
     ) -> (
         std::sync::Arc<ReticulumNode>,
         ReticulumNode,
@@ -1655,6 +1656,20 @@ mod tests {
                     first_seen: 1_800_000_000,
                     last_seen: 1_800_000_000,
                     hops: Some(3),
+                })
+                .expect("heard");
+        }
+        for i in 0..names {
+            let mut address = [0u8; 16];
+            address[..4].copy_from_slice(&i.to_be_bytes());
+            address[15] = 0xaa;
+            store
+                .name_heard(&super::super::pages::NameRow {
+                    address,
+                    name: alloc::format!("Stranger {i}"),
+                    first_seen: 1_800_000_000,
+                    last_seen: 1_800_000_000,
+                    hops: Some(2),
                 })
                 .expect("heard");
         }
@@ -1755,7 +1770,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn about_names_the_devices_over_a_link_and_refuses_a_stranger() {
         let phone_device = Identity::generate(&mut rand_core::OsRng);
-        let (_home, phone, key, _dirs) = real_home(&[*phone_device.hash()], 0).await;
+        let (_home, phone, key, _dirs) = real_home(&[*phone_device.hash()], 0, 0).await;
         let budget = Duration::from_secs(60);
         let told = about(&phone, &key, &phone_device, budget)
             .await
@@ -1782,7 +1797,7 @@ mod tests {
         let laptop = Identity::generate(&mut rand_core::OsRng);
         let phone_device = Identity::generate(&mut rand_core::OsRng);
         let (_home, phone, key, _dirs) =
-            real_home(&[*laptop.hash(), *phone_device.hash()], 2000).await;
+            real_home(&[*laptop.hash(), *phone_device.hash()], 2000, 0).await;
         let budget = Duration::from_secs(60);
         let set = BookmarkRow {
             url: "00000001000000000000000000000000:/page/index.mu".into(),
@@ -1824,6 +1839,48 @@ mod tests {
             pages(&phone, &key, &stranger, 0, budget).await,
             Err(HomeError::Refused(Status::NotAdmitted))
         );
+    }
+
+    /// 1643 over a real link: a mailbox that heard 2000 names hands them
+    /// all in one pull (`/pages` page by page until no more follow), and a
+    /// phone that folds the answer names every one of those strangers,
+    /// none of whom it heard itself. The delta's cost on TCP is said in the
+    /// log (`NAMES full`). Control: the next ask after the stamp brings
+    /// nothing.
+    #[cfg(feature = "history")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_phone_names_the_two_thousand_strangers_its_mailbox_heard_after_one_pull() {
+        let phone_device = Identity::generate(&mut rand_core::OsRng);
+        let (_home, phone, key, _dirs) = real_home(&[*phone_device.hash()], 0, 2000).await;
+        let budget = Duration::from_secs(60);
+        let started = std::time::Instant::now();
+        let full = pages(&phone, &key, &phone_device, 0, budget)
+            .await
+            .expect("the full list");
+        let took = started.elapsed();
+        let bytes = super::super::pages::pages_answer(&full).len();
+        eprintln!(
+            "NAMES full rows={} bytes={bytes} took_ms={}",
+            full.rows.len(),
+            took.as_millis()
+        );
+        assert_eq!(full.names().count(), 2000);
+        assert_eq!(full.nodes().count(), 0);
+        let mut model = crate::ui::UiModel::<crate::ui::tests::Field>::new(&[]);
+        let mut stranger = [0u8; 16];
+        stranger[..4].copy_from_slice(&1234u32.to_be_bytes());
+        stranger[15] = 0xaa;
+        assert_eq!(model.names.announced(&stranger), None, "never heard here");
+        crate::ui::update(
+            &mut model,
+            crate::ui::UiEvent::Browse(crate::ui::browse::BrowseEvent::Home(full.clone())),
+        );
+        assert_eq!(model.names.heard_count(), 2000);
+        assert_eq!(model.names.announced(&stranger), Some("Stranger 1234"));
+        let again = pages(&phone, &key, &phone_device, full.stamp, budget)
+            .await
+            .expect("the delta");
+        assert!(again.rows.is_empty(), "nothing new: {again:?}");
     }
 
     /// The message id the fake home gives every `/send` it answers.

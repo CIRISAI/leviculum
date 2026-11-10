@@ -5,9 +5,10 @@
 //! |---|---|---|
 //! | `home_pages` | dest, name, first_seen, last_seen, hops, count, stamp | a node the home heard announcing `nomadnetwork.node` |
 //! | `home_bookmarks` | url, title, at, deleted, stamp | a bookmark of the identity, or its tombstone |
+//! | `home_names` | address, name, first_seen, last_seen, hops, stamp | an LXMF address the home heard announcing a name (1643) |
 //!
 //! Every row is the owner's (`identity`), as every other table's. `stamp`
-//! is one counter over both tables: a row takes the next one whenever it
+//! is one counter over the three tables: a row takes the next one whenever it
 //! says something new, and a device asks for the rows after its own. The
 //! row just written is never the one a cap evicts, so the newest stamp is
 //! always held and the counter never runs back.
@@ -16,13 +17,14 @@ use lnomad::discovery::DiscoveredNode;
 use rusqlite::{params, OptionalExtension, Transaction};
 
 use super::{failed, Store, StoreError};
-use crate::home::pages::{self, BookmarkRow, Heard, PageRow, Row, Stamped};
+use crate::home::pages::{self, BookmarkRow, Heard, NameRow, PageRow, Row, Stamped};
 
 /// The newest stamp in the store, 0 for none.
 fn newest_in(tx: &rusqlite::Connection, identity: &[u8; 16]) -> rusqlite::Result<u64> {
     let newest: i64 = tx.query_row(
         "SELECT MAX(COALESCE((SELECT MAX(stamp) FROM home_pages WHERE identity = ?1), 0), \
-                    COALESCE((SELECT MAX(stamp) FROM home_bookmarks WHERE identity = ?1), 0))",
+                    COALESCE((SELECT MAX(stamp) FROM home_bookmarks WHERE identity = ?1), 0), \
+                    COALESCE((SELECT MAX(stamp) FROM home_names WHERE identity = ?1), 0))",
         params![&identity[..]],
         |row| row.get(0),
     )?;
@@ -50,6 +52,22 @@ fn page_of(
             hops: hops.and_then(|h| u32::try_from(h).ok()),
         },
         count: u64::try_from(count).unwrap_or(0),
+    })
+}
+
+fn name_of(
+    address: Vec<u8>,
+    name: String,
+    first_seen: i64,
+    last_seen: i64,
+    hops: Option<i64>,
+) -> Option<NameRow> {
+    Some(NameRow {
+        address: <[u8; 16]>::try_from(address.as_slice()).ok()?,
+        name,
+        first_seen: u64::try_from(first_seen).unwrap_or(0),
+        last_seen: u64::try_from(last_seen).unwrap_or(0),
+        hops: hops.and_then(|h| u32::try_from(h).ok()),
     })
 }
 
@@ -132,6 +150,84 @@ impl Store {
         };
         tx.commit().map_err(|e| failed(&path, e))?;
         Ok(stamp)
+    }
+
+    /// An LXMF address the home heard announcing a name (1643): its row's
+    /// new stamp when the hearing said something new
+    /// ([`pages::name_heard`]), `None` when it said nothing. Past
+    /// [`pages::NAMES_CAP`] rows the one heard longest ago goes, never this
+    /// one. A name row wakes nobody: it rides in the next `/pages`.
+    pub fn name_heard(&mut self, heard: &NameRow) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let kept = tx
+            .query_row(
+                "SELECT address, name, first_seen, last_seen, hops FROM home_names \
+                 WHERE identity = ?1 AND address = ?2",
+                params![&identity[..], &heard.address[..]],
+                |row| {
+                    Ok(name_of(
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?
+            .flatten();
+        let Some(row) = pages::name_heard(kept.as_ref(), heard) else {
+            return Ok(None);
+        };
+        let stamp = newest_in(&tx, &identity)
+            .map_err(|e| failed(&path, e))?
+            .saturating_add(1);
+        tx.execute(
+            "INSERT OR REPLACE INTO home_names \
+             (identity, address, name, first_seen, last_seen, hops, stamp) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &identity[..],
+                &row.address[..],
+                row.name,
+                as_i64(row.first_seen),
+                as_i64(row.last_seen),
+                row.hops.map(i64::from),
+                as_i64(stamp)
+            ],
+        )
+        .map_err(|e| failed(&path, e))?;
+        if kept.is_none() {
+            let cap = i64::try_from(pages::NAMES_CAP).unwrap_or(i64::MAX);
+            tx.execute(
+                "DELETE FROM home_names WHERE identity = ?1 AND address IN \
+                 (SELECT address FROM home_names WHERE identity = ?1 AND address <> ?2 \
+                  ORDER BY last_seen DESC, stamp DESC LIMIT -1 OFFSET ?3)",
+                params![&identity[..], &row.address[..], cap - 1],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(Some(stamp))
+    }
+
+    /// How many name rows the home keeps (1643).
+    pub fn names_kept(&self) -> Result<usize, StoreError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM home_names WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(usize::try_from(count).unwrap_or(0))
     }
 
     /// A bookmark a device set or cleared (1579): its new stamp when it
@@ -224,12 +320,13 @@ impl Store {
         Ok(out)
     }
 
-    /// The newest stamp of the pages and bookmarks, 0 when there are none.
+    /// The newest stamp of the pages, bookmarks and names, 0 when there are
+    /// none.
     pub fn pages_newest(&self) -> Result<u64, StoreError> {
         newest_in(&self.conn, &self.identity).map_err(|e| self.failed(e))
     }
 
-    /// The page and bookmark rows with a stamp after `since`, oldest change
+    /// The page, bookmark and name rows with a stamp after `since`, oldest change
     /// first, at most `limit`, and whether more follow.
     pub fn pages_since(
         &self,
@@ -244,6 +341,9 @@ impl Store {
                  UNION ALL \
                  SELECT stamp, 1, NULL, title, at, deleted, NULL, NULL, url, NULL \
                  FROM home_bookmarks WHERE identity = ?1 AND stamp > ?2 \
+                 UNION ALL \
+                 SELECT stamp, 2, address, name, first_seen, last_seen, hops, NULL, NULL, NULL \
+                 FROM home_names WHERE identity = ?1 AND stamp > ?2 \
                  ORDER BY 1 LIMIT ?3",
             )
             .map_err(|e| self.failed(e))?;
@@ -262,6 +362,14 @@ impl Store {
                         row.get(7)?,
                     )
                     .map(Row::Page),
+                    2 => name_of(
+                        row.get(2)?,
+                        row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    )
+                    .map(Row::Name),
                     _ => Some(Row::Bookmark(BookmarkRow {
                         url: row.get(8)?,
                         title: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
@@ -382,7 +490,7 @@ mod tests {
             .iter()
             .filter_map(|s| match &s.row {
                 Row::Page(row) => Some(row.node.dest_hash),
-                Row::Bookmark(_) => None,
+                Row::Bookmark(_) | Row::Name(_) => None,
             })
             .collect();
         assert!(dests.contains(&[0xee; 16]), "the one heard now stays");
@@ -390,6 +498,98 @@ mod tests {
         first[..8].copy_from_slice(&0u64.to_be_bytes());
         assert!(!dests.contains(&first), "the oldest heard went");
         assert_eq!(store.pages_newest().expect("newest"), stamp);
+    }
+
+    fn name(i: u32, name: &str, at: u64) -> NameRow {
+        let mut address = [0u8; 16];
+        address[..4].copy_from_slice(&i.to_be_bytes());
+        NameRow {
+            address,
+            name: name.into(),
+            first_seen: at,
+            last_seen: at,
+            hops: Some(2),
+        }
+    }
+
+    /// 1643: a name row takes the stamp the pages and bookmarks share, a
+    /// hearing that says nothing new takes none, and the next ask after
+    /// the stamp brings only the rename.
+    #[test]
+    fn a_name_rides_the_shared_stamp_and_only_a_change_takes_one() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("store");
+        let page = store
+            .page_heard(&node(1, "N", 1000))
+            .expect("page")
+            .expect("stamped");
+        let first = store
+            .name_heard(&name(1, "Alice", 1000))
+            .expect("name")
+            .expect("stamped");
+        assert!(first > page);
+        assert_eq!(
+            store.name_heard(&name(1, "Alice", 1200)).expect("again"),
+            None
+        );
+        assert_eq!(store.pages_newest().expect("newest"), first);
+        let renamed = store
+            .name_heard(&name(1, "Alice B.", 1300))
+            .expect("renamed")
+            .expect("stamped");
+        let (delta, more) = store.pages_since(first, 100).expect("delta");
+        assert!(!more);
+        assert_eq!(delta.len(), 1);
+        assert_eq!(delta[0].stamp, renamed);
+        match &delta[0].row {
+            Row::Name(row) => {
+                assert_eq!(row.name, "Alice B.");
+                assert_eq!((row.first_seen, row.last_seen), (1000, 1300));
+            }
+            other => panic!("a name: {other:?}"),
+        }
+        let (all, _) = store.pages_since(0, 100).expect("all");
+        assert_eq!(all.len(), 2, "one page, one name: {all:?}");
+    }
+
+    /// 1643: past [`pages::NAMES_CAP`] the address heard longest ago goes,
+    /// the one heard now never, even when its own hearing is the oldest;
+    /// a name heard again is no new row and evicts nobody.
+    #[test]
+    fn past_the_name_cap_the_address_heard_longest_ago_goes() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("store");
+        let cap = pages::NAMES_CAP;
+        for i in 0..cap {
+            store
+                .name_heard(&name(i as u32, "N", 10_000 + i as u64))
+                .expect("heard");
+        }
+        assert_eq!(store.names_kept().expect("count"), cap);
+        // Heard again a day on: a new stamp, the same row count.
+        store
+            .name_heard(&name(0, "N", 200_000))
+            .expect("again")
+            .expect("refreshed");
+        assert_eq!(store.names_kept().expect("count"), cap);
+        let late = name(0xffff_ff00, "Late", 1);
+        store.name_heard(&late).expect("late").expect("stamped");
+        assert_eq!(store.names_kept().expect("count"), cap);
+        let (all, _) = store.pages_since(0, cap + 10).expect("all");
+        let kept: Vec<[u8; 16]> = all
+            .iter()
+            .filter_map(|s| match &s.row {
+                Row::Name(row) => Some(row.address),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kept.len(), cap);
+        assert!(kept.contains(&late.address), "the one heard now stays");
+        assert!(kept.contains(&name(0, "N", 0).address), "refreshed, kept");
+        assert!(
+            !kept.contains(&name(1, "N", 0).address),
+            "the one heard longest ago went"
+        );
     }
 
     /// A bookmark's newer word wins, an older one is refused, and a

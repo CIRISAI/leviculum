@@ -431,6 +431,7 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::MeshPosition { .. }
                 | OutboxEvent::HubAnnounced { .. }
                 | OutboxEvent::PageAnnounced { .. }
+                | OutboxEvent::NameHeard { .. }
                 | OutboxEvent::SyncLinked
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. }

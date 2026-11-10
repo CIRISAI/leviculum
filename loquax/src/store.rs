@@ -131,7 +131,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 21;
+pub const SCHEMA_VERSION: i32 = 22;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -508,6 +508,25 @@ CREATE TABLE owed_peer_states(
     PRIMARY KEY (identity, peer));
 ";
 
+/// What schema 22 adds to schema 21 (1643, [`crate::home::pages::NameRow`]):
+/// the name of every LXMF delivery announce the home heard (`home_names`,
+/// one row an address, at most [`crate::home::pages::NAMES_CAP`], the one
+/// heard longest ago going first). `stamp` is the counter `home_pages` and
+/// `home_bookmarks` share, so the rows ride in the same `/pages` delta.
+const SCHEMA_V22: &str = "
+CREATE TABLE home_names(
+    identity BLOB NOT NULL,
+    address BLOB NOT NULL,
+    name TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    hops INTEGER,
+    stamp INTEGER NOT NULL,
+    PRIMARY KEY (identity, address));
+CREATE INDEX home_names_by_stamp ON home_names(identity, stamp);
+CREATE INDEX home_names_by_last_seen ON home_names(identity, last_seen);
+";
+
 pub mod groups;
 pub mod pages;
 
@@ -571,6 +590,9 @@ const TABLES_V19: [&str; 1] = ["owed_petnames"];
 
 /// The table schema 21 adds.
 const TABLES_V21: [&str; 1] = ["owed_peer_states"];
+
+/// The table schema 22 adds.
+const TABLES_V22: [&str; 1] = ["home_names"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -743,7 +765,7 @@ impl Store {
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
              {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} {SCHEMA_V17} \
-             {SCHEMA_V18} {SCHEMA_V19} {SCHEMA_V20} {SCHEMA_V21} \
+             {SCHEMA_V18} {SCHEMA_V19} {SCHEMA_V20} {SCHEMA_V21} {SCHEMA_V22} \
              PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
@@ -856,6 +878,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 22 {
+            if let Some(missing) = missing(&TABLES_V22) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate(version);
         }
@@ -938,7 +965,10 @@ impl Store {
                 if version < 20 {
                     batch.push_str(SCHEMA_V20);
                 }
-                batch.push_str(SCHEMA_V21);
+                if version < 21 {
+                    batch.push_str(SCHEMA_V21);
+                }
+                batch.push_str(SCHEMA_V22);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -5347,7 +5377,7 @@ mod tests {
         let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
         conn.execute_batch(
             "DROP TABLE owed_petnames; ALTER TABLE home_devices DROP COLUMN last_seen; \
-             DROP TABLE owed_peer_states; PRAGMA user_version = 18;",
+             DROP TABLE owed_peer_states; DROP TABLE home_names; PRAGMA user_version = 18;",
         )
         .expect("made schema 18");
         drop(conn);
@@ -5356,6 +5386,53 @@ mod tests {
             .write(&[StoreWrite::OwedPetnames(fewer.clone())])
             .expect("kept");
         assert_eq!(store.owed_petnames().expect("read"), fewer);
+    }
+
+    /// 1643: a schema 21 store gains `home_names` on open, empty, and its
+    /// pages keep their stamps: the first name heard takes the next one.
+    /// Control: a store of this schema missing the table is refused as
+    /// damaged, not migrated over.
+    #[test]
+    fn a_schema_21_store_gains_the_name_rows() {
+        let old = tempfile::tempdir().expect("an older home");
+        let mut store = Store::open_in(old.path(), US).expect("create");
+        let page = store
+            .page_heard(&lnomad::discovery::DiscoveredNode {
+                dest_hash: [0x7c; 16],
+                name: Some("Relay".into()),
+                first_seen: 1,
+                last_seen: 1,
+                hops: None,
+            })
+            .expect("page")
+            .expect("stamped");
+        drop(store);
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch("DROP TABLE home_names; PRAGMA user_version = 21;")
+            .expect("made schema 21");
+        drop(conn);
+        let mut store = Store::open_in(old.path(), US).expect("migrated");
+        assert_eq!(store.names_kept().expect("count"), 0);
+        let stamp = store
+            .name_heard(&crate::home::pages::NameRow {
+                address: [0x3c; 16],
+                name: "Kaja".into(),
+                first_seen: 2,
+                last_seen: 2,
+                hops: Some(1),
+            })
+            .expect("name")
+            .expect("stamped");
+        assert_eq!(stamp, page + 1);
+        drop(store);
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch("DROP TABLE home_names;")
+            .expect("damaged");
+        drop(conn);
+        assert!(matches!(
+            Store::open_in(old.path(), US),
+            Err(StoreError::Corrupt { .. })
+        ));
     }
 
     /// 1642: a schema 19 store gains `home_devices.last_seen`, NULL for
@@ -5372,7 +5449,7 @@ mod tests {
         let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
         conn.execute_batch(
             "ALTER TABLE home_devices DROP COLUMN last_seen; DROP TABLE owed_peer_states; \
-             PRAGMA user_version = 19;",
+             DROP TABLE home_names; PRAGMA user_version = 19;",
         )
         .expect("made schema 19");
         drop(conn);
@@ -5438,8 +5515,10 @@ mod tests {
         let old = tempfile::tempdir().expect("an older home");
         drop(Store::open_in(old.path(), US).expect("create"));
         let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
-        conn.execute_batch("DROP TABLE owed_peer_states; PRAGMA user_version = 20;")
-            .expect("made schema 20");
+        conn.execute_batch(
+            "DROP TABLE owed_peer_states; DROP TABLE home_names; PRAGMA user_version = 20;",
+        )
+        .expect("made schema 20");
         drop(conn);
         let mut store = Store::open_in(old.path(), US).expect("migrated");
         store

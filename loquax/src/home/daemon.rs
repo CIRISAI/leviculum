@@ -798,6 +798,14 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             // For every device of the home (1579): its `/pages`.
                             keep_page(&mut store, &node);
                         }
+                        OutboxEvent::NameHeard { row } => {
+                            // For every device of the home (1643): its
+                            // `/pages`. The archive's name entries stay for
+                            // peers with a relation, where an entry wakes.
+                            if row.address != address {
+                                keep_name_row(&mut store, &row);
+                            }
+                        }
                         OutboxEvent::Announced { destination, name, path_response } => {
                             if let Some(name) = name.filter(|_| destination != address) {
                                 heard_name(
@@ -1758,6 +1766,28 @@ fn keep_page(store: &mut Store, node: &lnomad::discovery::DiscoveredNode) -> Opt
         Ok(None) => None,
         Err(error) => {
             tracing::warn!("HOME pages: {error}");
+            None
+        }
+    }
+}
+
+/// Keep an LXMF address the home heard announcing a name (1643,
+/// [`super::pages::NameRow`]): its row's new stamp, when the hearing said
+/// something new. It wakes nobody; a device takes it with its next
+/// `/pages`.
+fn keep_name_row(store: &mut Store, row: &super::pages::NameRow) -> Option<u64> {
+    match store.name_heard(row) {
+        Ok(Some(stamp)) => {
+            tracing::debug!(
+                "HOME name kept address={} hops={} stamp={stamp}",
+                crate::address::to_hex(&row.address),
+                row.hops.map_or(-1, i64::from)
+            );
+            Some(stamp)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!("HOME names: {error}");
             None
         }
     }
@@ -2887,6 +2917,30 @@ mod tests {
         // Positive control: the newest of all entries would have woken it.
         wakes.appended(store.archive_newest().expect("newest"));
         assert_eq!(wakes.due(20_000).len(), 1);
+    }
+
+    /// 1643: a stranger's name the home heard is a name row, no archive
+    /// entry: the archive holds nothing new and wakes nobody, and the same
+    /// hearing again keeps nothing new. Control: the stranger's name is
+    /// still no archive entry the way a related peer's is
+    /// (`only_a_peer_with_a_relation_has_its_name_archived`).
+    #[test]
+    fn a_strangers_name_is_a_row_and_no_archive_entry() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let before = store.archive_newest().expect("newest");
+        let row = crate::home::pages::NameRow {
+            address: STRANGER,
+            name: "Kaja".into(),
+            first_seen: 1_800_000_000,
+            last_seen: 1_800_000_000,
+            hops: Some(2),
+        };
+        assert!(keep_name_row(&mut store, &row).is_some());
+        assert_eq!(keep_name_row(&mut store, &row), None, "said nothing new");
+        assert_eq!(store.names_kept().expect("count"), 1);
+        assert_eq!(store.archive_newest().expect("newest"), before);
+        assert!(names_archived(&store).is_empty());
     }
 
     /// 1307: a member's message to a hosted group is archived as the

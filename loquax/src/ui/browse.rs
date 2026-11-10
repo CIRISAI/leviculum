@@ -360,11 +360,17 @@ pub(super) fn fold<B: InputBuffer + Default>(
 
 /// The home's rows into the browser (1579): every node into its list, the
 /// bookmarks by stamp, saved when they changed. The stamp moves to the
-/// answer's.
+/// answer's. Its name rows (1643) name the peers the mailbox heard, as an
+/// announce this device heard would ([`super::name_announced`]): a device
+/// of an external mailbox hears no mesh of its own. A mailbox from before
+/// 1643 sends none, and the names this device heard itself stay.
 fn home_pages<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     delta: crate::home::pages::Delta,
 ) -> Vec<Effect> {
+    for row in delta.names() {
+        super::name_announced(model, row.address, Some(&row.name));
+    }
     let browse = &mut model.browse;
     let mut effects = Vec::new();
     for node in delta.nodes() {
@@ -487,6 +493,74 @@ mod tests {
             last_seen: 1_800_000_000,
             hops: Some(2),
         }
+    }
+
+    /// 1643: the mailbox's name rows name strangers this device never
+    /// heard, by the label every list draws a peer with (chats, contacts,
+    /// a new conversation), and a newer name renames the
+    /// peer as an announce would. Control, a mailbox from before 1643: its
+    /// answer carries no name rows, and the name this device heard itself
+    /// stays.
+    #[test]
+    fn the_mailboxs_name_rows_name_strangers_and_an_old_mailbox_leaves_the_own() {
+        use crate::home::pages::{Delta, NameRow, PageRow, Row};
+        const STRANGER: [u8; 16] = [0x3c; 16];
+        const HEARD: [u8; 16] = [0x4d; 16];
+        let row = |address: [u8; 16], name: &str| {
+            Row::Name(NameRow {
+                address,
+                name: name.into(),
+                first_seen: 1_800_000_000,
+                last_seen: 1_800_000_000,
+                hops: Some(3),
+            })
+        };
+        let mut model = phone();
+        let hash_only = model.names.label(&STRANGER, Lang::En);
+        assert!(!hash_only.contains("Kaja"), "{hash_only}");
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 4,
+                more: false,
+                rows: vec![row(STRANGER, "Kaja")],
+            })),
+        );
+        assert_eq!(model.names.announced(&STRANGER), Some("Kaja"));
+        assert_eq!(model.names.label(&STRANGER, Lang::En), "Kaja");
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 5,
+                more: false,
+                rows: vec![row(STRANGER, "Kaja W.")],
+            })),
+        );
+        assert_eq!(model.names.label(&STRANGER, Lang::En), "Kaja W.");
+        // The old mailbox: pages only. The device's own hearing stays.
+        let mut old = phone();
+        update(
+            &mut old,
+            UiEvent::Engine(crate::outbox::OutboxEvent::Announced {
+                destination: HEARD,
+                name: Some("Heard here".into()),
+                path_response: false,
+            }),
+        );
+        update(
+            &mut old,
+            UiEvent::Browse(BrowseEvent::Home(Delta {
+                stamp: 2,
+                more: false,
+                rows: vec![Row::Page(PageRow {
+                    node: node([0x7c; 16], "Relay"),
+                    count: 1,
+                })],
+            })),
+        );
+        assert_eq!(old.names.label(&HEARD, Lang::En), "Heard here");
+        assert_eq!(old.names.announced(&STRANGER), None);
+        assert_eq!(old.names.heard_count(), 1);
     }
 
     /// A phone's model: the host has the tab, a node was announced.

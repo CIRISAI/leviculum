@@ -6127,6 +6127,43 @@ fn gives_up(state: DeliveryState) -> bool {
     matches!(state, DeliveryState::Rejected | DeliveryState::Failed)
 }
 
+/// `destination` announced `name`, heard by this device or, for a device
+/// of a mailbox, by the mailbox: its archive's name entries and its
+/// `/pages` name rows (1643, [`crate::home::pages::NameRow`]) come here
+/// as an announce would.
+///
+/// Our own announce, echoed back, names nobody else: a name in it is the
+/// reader's own, which the mailbox announces and its archive hands every
+/// device (1449 item 2, walk 1 finding 8). It names the avatar and the
+/// profile, never a conversation; an echo without a name (a phone's node
+/// announces none) keeps the one heard.
+pub(crate) fn name_announced<B: InputBuffer>(
+    model: &mut UiModel<B>,
+    destination: [u8; 16],
+    name: Option<&str>,
+) {
+    if model.address == Some(destination) {
+        if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
+            model.names.heard(destination, Some(name));
+        }
+        return;
+    }
+    // Said once, in the conversation, where the reader has one with the
+    // peer: a peer nobody wrote to has nothing to compare with.
+    if let Heard::Changed { was, now } = model.names.heard(destination, name) {
+        if let Some(conversation) = model
+            .conversations
+            .iter_mut()
+            .find(|c| c.peer == destination)
+        {
+            conversation.notes.push(Note {
+                before: conversation.messages.len(),
+                text: format!("was {was}, now announces {now}"),
+            });
+        }
+    }
+}
+
 fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
     match event {
         OutboxEvent::Ready { address } => {
@@ -6245,36 +6282,9 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
             model.rooms.heard.hear(hub);
             settings::settle_suggestion(&mut model.rooms);
         }
-        // Our own announce, echoed back, names nobody else: a name in it
-        // is the reader's own, which the mailbox announces and its archive
-        // hands every device (1449 item 2, walk 1 finding 8). It names the
-        // avatar and the profile, never a conversation; an echo without a
-        // name (a phone's node announces none) keeps the one heard.
         OutboxEvent::Announced {
             destination, name, ..
-        } if model.address == Some(destination) => {
-            if let Some(name) = name.as_deref().filter(|n| !n.trim().is_empty()) {
-                model.names.heard(destination, Some(name));
-            }
-        }
-        OutboxEvent::Announced {
-            destination, name, ..
-        } => {
-            // Said once, in the conversation, where the reader has one with
-            // the peer: a peer nobody wrote to has nothing to compare with.
-            if let Heard::Changed { was, now } = model.names.heard(destination, name.as_deref()) {
-                if let Some(conversation) = model
-                    .conversations
-                    .iter_mut()
-                    .find(|c| c.peer == destination)
-                {
-                    conversation.notes.push(Note {
-                        before: conversation.messages.len(),
-                        text: format!("was {was}, now announces {now}"),
-                    });
-                }
-            }
-        }
+        } => name_announced(model, destination, name.as_deref()),
         OutboxEvent::Propagated { message_id, source } => {
             return model.arrived_here(source, message_id);
         }

@@ -423,6 +423,12 @@ pub enum OutboxEvent {
     PageAnnounced {
         node: lnomad::discovery::DiscoveredNode,
     },
+    /// An LXMF delivery destination announced a name (1643), heard by this
+    /// node, timed and with the hops of the hearing. A home keeps it for its
+    /// devices ([`crate::home::pages::NameRow`]), so a device of an external
+    /// mailbox names peers it never heard itself; everyone else names the
+    /// peer by [`OutboxEvent::Announced`], which the same announce raises.
+    NameHeard { row: crate::home::pages::NameRow },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.
     SyncLinked,

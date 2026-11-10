@@ -623,9 +623,27 @@ impl Engine {
                 path_response,
             } => {
                 let destination = destination.into_bytes();
+                let name = announce.display_name();
+                // For a home's devices (1643): the name with the hearing's
+                // time and hops, which `Announced` does not carry. Only a
+                // home keeps it; every other host passes it by.
+                if let Some(name) = &name {
+                    let at = core.emission_secs();
+                    self.emit(OutboxEvent::NameHeard {
+                        row: crate::home::pages::NameRow {
+                            address: destination,
+                            name: name.clone(),
+                            first_seen: at,
+                            last_seen: at,
+                            hops: core
+                                .hops_to(&leviculum_core::DestinationHash::new(destination))
+                                .map(u32::from),
+                        },
+                    });
+                }
                 self.emit(OutboxEvent::Announced {
                     destination,
-                    name: announce.display_name(),
+                    name,
                     path_response: path_response || self.replayed == Some(destination),
                 });
             }
@@ -2471,6 +2489,64 @@ mod tests {
             &announce_bytes(&other, "nomadnetwork", &["other"], b"x"),
         );
         assert!(pages(&events).is_empty(), "another aspect: {events:?}");
+    }
+
+    /// 1643: a peer's `lxmf.delivery` announce with a name reaches the
+    /// seam as a name row with the hearing's time and hops, beside the
+    /// `Announced` that names it here; the control: a nameless announce is
+    /// no row, though it is still `Announced`.
+    #[test]
+    fn a_named_delivery_announce_reaches_the_seam_as_a_name_row() {
+        use leviculum_core::transport::InterfaceId;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let _ = drain(&mut engine);
+        let mut hear = |engine: &mut Engine, bytes: &[u8]| {
+            let out = core.handle_packet(InterfaceId(0), bytes);
+            for event in &out.events {
+                let _ = engine.on_event(&mut core, event);
+            }
+            drain(engine)
+        };
+        let rows = |events: &[OutboxEvent]| -> Vec<crate::home::pages::NameRow> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    OutboxEvent::NameHeard { row } => Some(row.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let announced = |events: &[OutboxEvent]| {
+            events
+                .iter()
+                .filter(|e| matches!(e, OutboxEvent::Announced { .. }))
+                .count()
+        };
+        let peer = leviculum_std::generate_identity();
+        let app_data = leviculum_lxmf::announce::delivery(Some(b"Kaja"), None);
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&peer, "lxmf", &["delivery"], &app_data),
+        );
+        let heard = rows(&events);
+        assert_eq!(heard.len(), 1, "{events:?}");
+        assert_eq!(announced(&events), 1);
+        assert_eq!(heard[0].address, delivery_address(&peer).expect("address"));
+        assert_eq!(heard[0].name, "Kaja");
+        assert_eq!(heard[0].hops, Some(1), "heard directly: one hop");
+        assert!(heard[0].last_seen > 0 && heard[0].first_seen == heard[0].last_seen);
+        let nameless = leviculum_std::generate_identity();
+        let app_data = leviculum_lxmf::announce::delivery(None, None);
+        let events = hear(
+            &mut engine,
+            &announce_bytes(&nameless, "lxmf", &["delivery"], &app_data),
+        );
+        assert!(rows(&events).is_empty(), "no name, no row: {events:?}");
+        assert_eq!(announced(&events), 1);
     }
 
     /// 1599: a hub's `rrc.hub` announce reaches the seam as a heard hub,
