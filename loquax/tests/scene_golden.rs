@@ -730,3 +730,49 @@ fn a_relayed_group_is_the_golden_scene() {
     assert_eq!(quote.as_deref(), Some("Ben: Moin Anna"));
     check("scene-relay-group.json", &scene);
 }
+
+mod reply_scene {
+    include!("support/reply_scene.rs");
+}
+
+/// 1451, the walk's blind spots: Anna's chat of the shared fixture, our
+/// reply under the quote of her question, her thumbs up on it, her photo
+/// as its stand-in; then a reply to her last line being written, which the
+/// compose bar carries with the quote of the line it answers. Every
+/// target's golden of this chat is drawn from this scene.
+#[test]
+fn a_reply_a_reaction_and_a_photo_are_the_golden_scene() {
+    let mut model = UiModel::<Line>::new(&[]);
+    model.address = Some([0x30; 16]);
+    reply_scene::reply_scene(&mut model, now().unix_secs, now().offset_secs);
+    let scene = model.scene(LayoutClass::Compact);
+    let chat = scene.chat.as_ref().expect("the chat");
+    let bubbles: Vec<_> = chat.groups.iter().flat_map(|g| g.bubbles.iter()).collect();
+    let ours = bubbles
+        .iter()
+        .find(|b| b.bubble.ours)
+        .expect("our reply is in the chat");
+    assert_eq!(ours.bubble.body, "Ja, um zehn am Brunnen");
+    assert_eq!(
+        ours.bubble.quote.as_ref().map(|q| q.text.as_str()),
+        Some("Kommst du morgen mit zum Markt?"),
+        "our reply quotes her question"
+    );
+    assert_eq!(ours.bubble.chips.len(), 1, "her thumbs up on our reply");
+    assert!(
+        bubbles.iter().any(|b| b.photo.is_some()),
+        "her photo is a bubble of its own"
+    );
+    check("scene-reply.json", &scene);
+
+    reply_scene::reply_composing(&mut model);
+    let scene = model.scene(LayoutClass::Compact);
+    let compose = &scene.chat.as_ref().expect("the chat").compose;
+    assert_eq!(
+        compose.reply,
+        Some(reply_scene::REPLY_LAST),
+        "the compose bar carries the line it answers"
+    );
+    assert_eq!(compose.text, reply_scene::REPLY_DRAFT);
+    check("scene-reply-compose.json", &scene);
+}
