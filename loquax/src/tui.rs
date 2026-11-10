@@ -2859,10 +2859,8 @@ mod tests {
             "{shown}"
         );
         assert!(
-            shown.contains(&format!(
-                "1  {}: reachable over 3 stations · \u{2713}",
-                shipped[0].name
-            )),
+            // Never heard here: no distance beside it (1629).
+            shown.contains(&format!("1  {}: \u{2713}", shipped[0].name)),
             "{shown}"
         );
         update(&mut model, key('a'));

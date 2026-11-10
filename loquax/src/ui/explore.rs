@@ -626,6 +626,7 @@ fn suggested<B>(model: &UiModel<B>) -> Option<[u8; 16]> {
     super::settings::suggested(
         &super::settings::offered_hubs(&model.rooms),
         model.rooms.hub,
+        model.rooms.heard.held(),
     )
 }
 
@@ -734,15 +735,18 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
         hash,
         name: hub_name(model, &hub),
         far: far(hub.hops),
-        seen: hub
-            .last
-            .and_then(|last| seen(now_secs, u64::try_from(last).unwrap_or(0))),
+        // As its row says it (1629): "not seen yet" for one never heard.
+        seen: Some(
+            hub.last
+                .and_then(|last| seen(now_secs, u64::try_from(last).unwrap_or(0)))
+                .unwrap_or_else(|| Text::key(StrId::ExploreNotSeen)),
+        ),
         chosen,
         button: Text::key(match chosen {
             true => StrId::ExploreServerInUse,
             false => StrId::ExploreServerUse,
         }),
-        notice: Text::key(StrId::RoomsNameVisible),
+        notice: Text::key(super::rooms::name_notice(model)),
         rooms_title: Text::key(StrId::ExploreServerRooms),
         rooms_note: rooms_note(&model.rooms, &hash, !rooms.is_empty()),
         rooms,
@@ -810,9 +814,27 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
     };
     let rooms_node = super::rooms::node(model);
     let suggest = suggested(model);
-    let hubs: Vec<HubRow> = hub_list(model)
+    let listed = hub_list(model);
+    // Two servers that read alike get their short address (1629, walk 3
+    // new 6: two rows "Server ohne Namen"), as pages and names do.
+    let mut alike: BTreeMap<String, usize> = BTreeMap::new();
+    for hub in &listed {
+        let shown = hub_name(model, hub).resolve(model.lang);
+        *alike.entry(crate::names::skeleton(&shown)).or_default() += 1;
+    }
+    let hubs: Vec<HubRow> = listed
         .iter()
-        .map(|h| hub_row(model, h, cursor, suggest))
+        .map(|h| {
+            let mut row = hub_row(model, h, cursor, suggest);
+            let shown = row.name.resolve(model.lang);
+            if alike
+                .get(&crate::names::skeleton(&shown))
+                .is_some_and(|n| *n > 1)
+            {
+                row.name = Text::Raw(format!("{shown} {}", crate::names::hash_suffix(&h.hash)));
+            }
+            row
+        })
         .collect();
     let joined_cursor = match cursor {
         Some(Pick::Room(i)) => Some(*i),
@@ -1800,12 +1822,21 @@ mod tests {
                 "nothing heard yet: {:?}",
                 row.name
             );
+            // No distance beside "not seen yet" (1629, walk 3 new 5).
+            assert!(
+                row.value
+                    .as_ref()
+                    .is_none_or(|v| !v.resolve(Lang::De).contains("Station")),
+                "{:?}",
+                row.value
+            );
         }
         assert_eq!(StrId::ExploreNotSeen.text(Lang::De), "noch nicht gesehen");
     }
 
-    /// "suggested" marks one server, the closest shipped one heard, or
-    /// none (1621, walk 2 saw it on four); none while a server is in use.
+    /// "suggested" marks one server, the closest shipped one heard when
+    /// it is made and held after (1629), or none (1621, walk 2 saw it on
+    /// four); none while a server is in use.
     #[test]
     fn suggested_marks_one_server_at_most() {
         let shipped = crate::ui::hubs::shipped();
@@ -1841,7 +1872,9 @@ mod tests {
                 .map(|h| h.hash)
                 .collect()
         };
-        assert_eq!(marked(&model), [shipped[1].hash], "the closest, alone");
+        // One, alone: the first heard holds the mark though a closer one
+        // came after it (1629, walk 3 new 6).
+        assert_eq!(marked(&model), [shipped[0].hash], "the first heard, alone");
         // The control: the rule before 1621 marked every shipped one heard.
         let offered = crate::ui::settings::offered_hubs(&model.rooms);
         assert_eq!(offered.iter().filter(|o| o.shipped && o.heard).count(), 3);
@@ -1849,6 +1882,112 @@ mod tests {
         explore(&mut model, ExploreEvent::UseHub(shipped[2].hash));
         update(&mut model, UiEvent::Tab(TabId::Explore));
         assert!(marked(&model).is_empty());
+    }
+
+    /// "suggested" holds once made (1629, walk 3 new 6: it wandered over
+    /// three servers in ten minutes): a closer server heard later does not
+    /// take it; a failure to answer does. Two servers that read alike get
+    /// their short address, and a nameless one is never suggested.
+    #[test]
+    fn suggested_holds_and_alike_servers_get_their_address() {
+        let shipped = crate::ui::hubs::shipped();
+        let named: Vec<_> = shipped
+            .iter()
+            .filter(|h| !h.name.trim().is_empty())
+            .take(2)
+            .cloned()
+            .collect();
+        if named.len() < 2 {
+            return;
+        }
+        let hear = |model: &mut UiModel<Buffer>, hash, name: Option<&str>, hops, answered| {
+            update(
+                model,
+                UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                    hash,
+                    name: name.map(Into::into),
+                    hops: Some(hops),
+                    first: NOW - 60,
+                    last: NOW - 60,
+                    answered,
+                })),
+            );
+        };
+        let marked = |model: &UiModel<Buffer>| -> Vec<[u8; 16]> {
+            node(model)
+                .rooms
+                .hubs
+                .iter()
+                .filter(|h| {
+                    h.value
+                        .as_ref()
+                        .is_some_and(|v| v.resolve(Lang::En).contains("suggested"))
+                })
+                .map(|h| h.hash)
+                .collect()
+        };
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        hear(&mut model, named[0].hash, Some(&named[0].name), 4, None);
+        assert_eq!(marked(&model), [named[0].hash]);
+        // A closer one heard: the mark stays.
+        hear(&mut model, named[1].hash, Some(&named[1].name), 2, None);
+        assert_eq!(marked(&model), [named[0].hash], "the mark holds");
+        // The control: the rule without the hold names the closer one.
+        let offered = crate::ui::settings::offered_hubs(&model.rooms);
+        assert_eq!(
+            crate::ui::settings::suggested(&offered, None, None),
+            Some(named[1].hash)
+        );
+        // The settings say the same.
+        let rows = crate::ui::settings::hub_rows(&model, crate::ui::settings::Target::Terminal);
+        let marked_rows: Vec<String> = rows
+            .iter()
+            .filter(|r| {
+                r.value
+                    .as_ref()
+                    .is_some_and(|v| v.resolve(Lang::En).contains("suggested"))
+            })
+            .map(|r| r.label.resolve(Lang::En))
+            .collect();
+        assert_eq!(marked_rows, [named[0].name.clone()]);
+        // It failed to answer: the mark moves.
+        hear(&mut model, named[0].hash, None, 4, Some(false));
+        assert_eq!(marked(&model), [named[1].hash]);
+        // Two nameless servers, closer than any: never suggested, and
+        // told apart by their short address.
+        hear(&mut model, [0xb1; 16], None, 1, None);
+        hear(&mut model, [0xb2; 16], None, 1, None);
+        assert_eq!(marked(&model), [named[1].hash]);
+        let names: Vec<String> = node(&model)
+            .rooms
+            .hubs
+            .iter()
+            .map(|h| h.name.resolve(Lang::En))
+            .collect();
+        let unnamed = StrId::RoomsHubUnnamed.text(Lang::En);
+        assert!(names.contains(&format!("{unnamed} ·b1b1")), "{names:?}");
+        assert!(names.contains(&format!("{unnamed} ·b2b2")), "{names:?}");
+        assert!(names.contains(&named[1].name), "a name alone: {names:?}");
+    }
+
+    /// The sheet says what the room shows of the reader (1629, walk 3 new
+    /// 9): without a name, that they appear without one; with one, that
+    /// it is visible to everyone.
+    #[test]
+    fn the_sheet_says_what_the_room_shows_of_the_reader() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::Hub([0x95; 16]));
+        let notice = |model: &UiModel<Buffer>| node(model).sheet.expect("the sheet").notice;
+        assert!(model.profile.name.is_empty());
+        assert_eq!(notice(&model), Text::key(StrId::RoomsNoName));
+        assert_eq!(
+            StrId::RoomsNoName.text(Lang::De),
+            "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen."
+        );
+        model.profile.name = "Lew".into();
+        assert_eq!(notice(&model), Text::key(StrId::RoomsNameVisible));
     }
 
     /// The sheet asks the server for its rooms (1621): "asking" while the

@@ -311,11 +311,9 @@ fn a_server_opens_its_sheet_and_only_the_button_chooses_it() {
             "Frage den Server nach seinen Räumen…"
         );
     }
-    assert!(
-        sheet.sheet_said.contains("Stationen"),
-        "{}",
-        sheet.sheet_said
-    );
+    // A shipped server this phone never heard: when, and no distance
+    // measured elsewhere (1629, walk 3 new 5).
+    assert_eq!(sheet.sheet_said, "noch nicht gesehen");
     tap(&mut model, "close", "", "", 0);
     assert_eq!(screen(&model).sheet_dest, "");
     tap(&mut model, "hub", "", &first.dest, 0);

@@ -463,7 +463,12 @@ pub fn offered_hubs(rooms: &super::rooms::Rooms) -> Vec<Offered> {
         out.push(Offered {
             name: Some(hub.name).filter(|n| !n.trim().is_empty()),
             hash: hub.hash,
-            hops: hub.hops,
+            // The shipped file's hops are the distance from where the list
+            // was measured, not from here (1629, walk 3 new 5: "not seen
+            // yet · reachable over 3 stations" said both). The list keeps
+            // the file's order, closest first; a hub says how far once
+            // this device heard it.
+            hops: None,
             shipped: true,
             heard: false,
             answered: None,
@@ -474,18 +479,40 @@ pub fn offered_hubs(rooms: &super::rooms::Rooms) -> Vec<Offered> {
 }
 
 /// The one hub "suggested" marks (1621, walk 2 saw it on four): the
-/// closest shipped hub heard on the mesh that did not fail to answer, the
-/// first in the offered order on a tie; none while a hub is in force,
-/// whose mark says enough, and none when no shipped hub was heard.
-pub fn suggested(offered: &[Offered], chosen: Option<[u8; 16]>) -> Option<[u8; 16]> {
+/// closest shipped hub with a name heard on the mesh that did not fail to
+/// answer, the first in the offered order on a tie; none while a hub is in
+/// force, whose mark says enough, and none when no such hub was heard.
+///
+/// Once made, a suggestion holds (1629, walk 3 new 6: it wandered from a
+/// nameless server over ShadowLink to 3moelf in ten minutes): `held`
+/// stays the one while it still qualifies, however close another one is
+/// heard; only a failure to answer or its leaving the list moves it.
+pub fn suggested(
+    offered: &[Offered],
+    chosen: Option<[u8; 16]>,
+    held: Option<[u8; 16]>,
+) -> Option<[u8; 16]> {
     if chosen.is_some() {
         return None;
     }
+    let fits = |o: &&Offered| o.shipped && o.heard && o.answered != Some(false) && o.name.is_some();
+    if let Some(held) = held {
+        if offered.iter().filter(fits).any(|o| o.hash == held) {
+            return Some(held);
+        }
+    }
     offered
         .iter()
-        .filter(|o| o.shipped && o.heard && o.answered != Some(false))
+        .filter(fits)
         .min_by_key(|o| o.hops.unwrap_or(u8::MAX))
         .map(|o| o.hash)
+}
+
+/// The suggestion after the hubs heard changed: held while it fits,
+/// else the closest that does ([`suggested`]). A hub in force holds none.
+pub fn settle_suggestion(rooms: &mut super::rooms::Rooms) {
+    let now = suggested(&offered_hubs(rooms), rooms.hub, rooms.heard.held());
+    rooms.heard.hold(now);
 }
 
 /// What a hub's row says beside its name: how far, "suggested" for the
@@ -535,7 +562,7 @@ pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
         action: None,
     }]);
     let offered = offered_hubs(&model.rooms);
-    let suggest = suggested(&offered, chosen);
+    let suggest = suggested(&offered, chosen, model.rooms.heard.held());
     let known = |hub: [u8; 16]| offered.iter().any(|o| o.hash == hub);
     let own = chosen.is_some_and(|hub| !known(hub));
     let pages = offered.len().div_ceil(HUB_PAGE).max(1);
@@ -588,7 +615,7 @@ pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
         key: Some('a'),
         action: Some(Action::of(Intent::RoomsHub(HubPick::Paste))),
     });
-    rows.push(note(StrId::RoomsNameVisible));
+    rows.push(note(super::rooms::name_notice(model)));
     rows
 }
 
@@ -674,10 +701,9 @@ mod tests {
         );
         // A server is in use: none is suggested (1621).
         assert_eq!(said[3], "HADARC: reachable over 4 stations");
-        assert_eq!(
-            said[4],
-            shipped[0].name.clone() + ": reachable over 3 stations"
-        );
+        // A shipped server never heard says no distance (1629, walk 3 new
+        // 5): the shipped file's hops were measured elsewhere.
+        assert_eq!(said[4], shipped[0].name.clone());
         assert!(
             said.iter()
                 .all(|s| !s.contains("a1a1") && !s.contains("rrc")),

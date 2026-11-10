@@ -6184,6 +6184,7 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
         } => model.mesh_position(identity, location, name.as_deref(), 0),
         OutboxEvent::HubAnnounced { hub } => {
             model.rooms.heard.hear(hub);
+            settings::settle_suggestion(&mut model.rooms);
         }
         // Our own announce, echoed back, names nobody.
         OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}

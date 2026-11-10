@@ -132,12 +132,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -150,12 +145,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -168,12 +158,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -186,12 +171,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -204,12 +184,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -222,12 +197,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -240,12 +210,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -258,12 +223,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -276,12 +236,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              3
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -294,12 +249,7 @@
             "args": [],
             "key": "explore_not_seen"
           },
-          "value": {
-            "args": [
-              4
-            ],
-            "key": "rooms_hub_hops"
-          }
+          "value": null
         },
         {
           "chosen": false,
@@ -361,7 +311,7 @@
       },
       "notice": {
         "args": [],
-        "key": "rooms_name_visible"
+        "key": "rooms_no_name"
       },
       "rooms": [],
       "rooms_note": {

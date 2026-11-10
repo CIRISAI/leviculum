@@ -136,6 +136,7 @@ leviculum_ui::catalogue! {
     RoomsHubNoAnswer = "rooms_hub_no_answer", "no answer", "keine Antwort";
     RoomsHubMore = "rooms_hub_more", "More…", "Mehr…";
     RoomsNameVisible = "rooms_name_visible", "Your name is visible to everyone in the room.", "Dein Name ist im Raum für alle sichtbar.";
+    RoomsNoName = "rooms_no_name", "You have no name here: in the room you appear without one.", "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen.";
     Settings = "settings", "Settings", "Einstellungen";
     // 1450 (walk 1, finding 21): the settings' nine sections, one list on
     // every target (`super::settings`), in the phone's order.

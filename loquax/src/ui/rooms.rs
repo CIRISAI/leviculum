@@ -403,7 +403,7 @@ fn link<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
             // rooms show their name.
             if model.rooms.told != Some(hub) {
                 model.rooms.told = Some(hub);
-                let text = Text::key(StrId::RoomsNameVisible).resolve(model.lang);
+                let text = Text::key(name_notice(model)).resolve(model.lang);
                 model.toast(ToastKind::Info, text);
                 effects.push(UiEffect::RememberHash {
                     key: "rooms_told",
@@ -420,6 +420,17 @@ fn link<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 /// rooms of the old one go, the tab is there with a hub and gone without,
 /// and the config keeps the choice. An address that is none is said, and
 /// nothing changes.
+/// What a room shows of the reader, said before they go in (1629, walk 3
+/// new 9: "your name is visible" beside a profile with no name): the
+/// name where there is one; without one the hub link goes without a nick
+/// and a room shows the writer with no name ([`line_node`]).
+pub(super) fn name_notice<B>(model: &UiModel<B>) -> StrId {
+    match model.profile.name.trim().is_empty() {
+        true => StrId::RoomsNoName,
+        false => StrId::RoomsNameVisible,
+    }
+}
+
 pub(super) fn choose<B>(model: &mut UiModel<B>, choice: HubChoice) -> Vec<UiEffect> {
     let hub = match choice {
         HubChoice::None => None,
@@ -451,6 +462,7 @@ pub(super) fn choose<B>(model: &mut UiModel<B>, choice: HubChoice) -> Vec<UiEffe
         heard,
         ..Rooms::default()
     };
+    super::settings::settle_suggestion(&mut model.rooms);
     effects.push(UiEffect::RememberHash {
         key: "rooms_hub",
         hash: hub,
@@ -509,6 +521,16 @@ pub(super) fn open<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 
 /// Fold one of the Rooms' events.
 pub(super) fn fold<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    event: RoomsEvent,
+) -> Vec<UiEffect> {
+    let effects = fold_event(model, event);
+    // A hub heard, answered or failed moves what is suggested (1629).
+    super::settings::settle_suggestion(&mut model.rooms);
+    effects
+}
+
+fn fold_event<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     event: RoomsEvent,
 ) -> Vec<UiEffect> {
@@ -1163,6 +1185,8 @@ mod tests {
             .map(|h| h.hash)
             .expect("shipped");
         let mut model = UiModel::<Buffer>::new(&[]);
+        // A reader with a name (without one the room shows none, 1629).
+        model.profile.name = "Lew".into();
         assert!(!model.rooms.enabled);
         let effects = rooms(&mut model, RoomsEvent::Hub(HubChoice::Hub(community)));
         assert_eq!(

@@ -90,6 +90,7 @@
     <string name="rooms_hub_no_answer">keine Antwort</string>
     <string name="rooms_hub_more">Mehr…</string>
     <string name="rooms_name_visible">Dein Name ist im Raum für alle sichtbar.</string>
+    <string name="rooms_no_name">Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen.</string>
     <string name="settings">Einstellungen</string>
     <string name="settings_profile">Profil</string>
     <string name="settings_profile_summary">Name, Adresse, QR-Code</string>

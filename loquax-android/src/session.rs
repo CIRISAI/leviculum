@@ -5024,7 +5024,8 @@ mod tests {
         assert_eq!(names[0], "RNS Moscow");
         assert_eq!((names[10], names[11]), ("Mehr…", "Keiner"));
         assert_eq!(choice.hubs[0].set, "42a97b1b07147b898f78a610dfbba587");
-        assert_eq!(choice.hubs[0].detail, "über 3 Stationen erreichbar");
+        // Never heard here: no distance (1629, walk 3 new 5).
+        assert_eq!(choice.hubs[0].detail, "");
         assert_eq!(choice.hubs[10].set, "more");
         assert_eq!(choice.hubs[11].set, "none");
         assert!(choice.hubs[11].chosen && !choice.hubs[0].chosen);
@@ -5034,7 +5035,14 @@ mod tests {
         assert_eq!(all.hubs.len(), loquax::ui::hubs::shipped().len() + 1);
         assert!(all.hubs.iter().all(|h| h.set != "more"));
         assert_eq!(choice.paste, "Anderer Server: Adresse einfügen");
-        assert_eq!(choice.note, "Dein Name ist im Raum für alle sichtbar.");
+        // No name on this phone: the room shows none (1629, walk 3 new 9).
+        assert_eq!(
+            choice.note,
+            "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen."
+        );
+        model.profile.name = "Lew".into();
+        let named = rooms_hub_choice(&model, Lang::De, String::new());
+        assert_eq!(named.note, "Dein Name ist im Raum für alle sichtbar.");
         assert!(choice.own.is_empty());
         update(
             &mut model,

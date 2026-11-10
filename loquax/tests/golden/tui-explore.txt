@@ -12,13 +12,13 @@ Explore
 │Rooms                                                                         │
 │You are in no room. Pick a server below.                                      │
 │ Servers                                                                      │
-│ RNS Moscow  not seen yet · reachable over 3 stations                         │
-│ Cascadia  not seen yet · reachable over 3 stations                           │
-│ Chatsurfer  not seen yet · reachable over 3 stations                         │
-│ CTRS  not seen yet · reachable over 3 stations                               │
-│ Minuteman  not seen yet · reachable over 3 stations                          │
-│ RMAP.WORLD Hub  not seen yet · reachable over 3 stations                     │
-│ Save Europe  not seen yet · reachable over 3 stations                        │
-│ SoCal Public  not seen yet · reachable over 3 stations                       │
+│ RNS Moscow  not seen yet                                                     │
+│ Cascadia  not seen yet                                                       │
+│ Chatsurfer  not seen yet                                                     │
+│ CTRS  not seen yet                                                           │
+│ Minuteman  not seen yet                                                      │
+│ RMAP.WORLD Hub  not seen yet                                                 │
+│ Save Europe  not seen yet                                                    │
+│ SoCal Public  not seen yet                                                   │
 └──────────────────────────────────────────────────────────────────────────────┘
 Enter open │ ↑↓ move │ Alt-b bookmark │ Alt-s order │ Esc chats

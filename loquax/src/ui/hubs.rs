@@ -153,9 +153,24 @@ pub struct HeardHub {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Heard {
     hubs: Vec<HeardHub>,
+    /// The hub "suggested" marks once it marked one (1629, walk 3 new 6:
+    /// the mark wandered over three servers in ten minutes as closer ones
+    /// were heard): it stays until it fails to answer or leaves the list
+    /// ([`super::settings::settle_suggestion`]).
+    held: Option<[u8; 16]>,
 }
 
 impl Heard {
+    /// The hub "suggested" holds, if any.
+    pub fn held(&self) -> Option<[u8; 16]> {
+        self.held
+    }
+
+    /// Hold `hub` as the suggested one, or none.
+    pub fn hold(&mut self, hub: Option<[u8; 16]>) {
+        self.held = hub;
+    }
+
     /// Take one hearing in: a new hub is added, a known one keeps its first
     /// hearing and takes the later last one, the newer name and hops. Over
     /// [`HEARD_BOUND`] the hub heard longest ago goes. Whether it was new.
