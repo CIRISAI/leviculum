@@ -4,9 +4,11 @@
     <string name="starting">Starting…</string>
     <string name="joining">Connecting to your mailbox…</string>
     <string name="code_label">The code your mailbox shows</string>
-    <string name="code_hint" translatable="false">lqxh1…</string>
+    <!-- 1448, walk finding 4: placeholders that read as a request, never
+         as a value; the address field under Advanced. -->
+    <string name="code_hint">Paste the code here</string>
     <string name="server_label">Where your mailbox is: the computer\'s address and port</string>
-    <string name="server_hint" translatable="false">192.168.1.20:4242</string>
+    <string name="server_hint">for example 192.168.1.20:4242</string>
     <string name="join">Join</string>
     <string name="open">Open</string>
     <string name="address_hint">Address of a new conversation</string>

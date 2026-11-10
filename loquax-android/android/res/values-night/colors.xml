@@ -52,4 +52,8 @@
          microphone's white glyph 3.2:1 on it; amber 8.6:1 on the bar. -->
     <color name="rec_red">#ee6464</color>
     <color name="rec_amber">#ffb74d</color>
+    <!-- A field's placeholder (1448, walk finding 4): lighter than any
+         written text, so an empty field never reads as filled; 4.4:1 on the background,
+         below text_secondary as a hint is meant to be. -->
+    <color name="hint">#7c7f86</color>
 </resources>

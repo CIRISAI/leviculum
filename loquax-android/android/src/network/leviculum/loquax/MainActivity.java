@@ -43,6 +43,15 @@ public class MainActivity extends Activity {
     private Button retry;
     private TextView detailsToggle;
     private TextView details;
+    /** "Advanced" and the address field under it (1448, JoinForm). */
+    private TextView advanced;
+    private View serverBox;
+    /** The user opened Advanced. */
+    private boolean advancedOpened;
+    /** What the last failed start needed: "code", "server", or another word. */
+    private String lastNeed = "";
+    /** The running start is a join the user asked for, not the screen's own look (1448). */
+    private boolean asked;
     /** The conversation an imto tap asked for, opened once started. */
     private String imto;
     /** A friend's code from outside (walk finding 12), added once started. */
@@ -73,6 +82,15 @@ public class MainActivity extends Activity {
         retry = (Button) findViewById(R.id.join_retry);
         detailsToggle = (TextView) findViewById(R.id.join_details_toggle);
         details = (TextView) findViewById(R.id.join_details);
+        advanced = (TextView) findViewById(R.id.join_advanced);
+        serverBox = findViewById(R.id.join_server_box);
+        advanced.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                advancedOpened = !advancedOpened;
+                showAdvanced();
+            }
+        });
         retry.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -113,6 +131,7 @@ public class MainActivity extends Activity {
         // Recreated (a rotation, the phone's dark setting) the shared code
         // already joined or failed once: the fields restore what was typed,
         // and a second join with a code the home node took would fail.
+        showAdvanced();
         imto = Book.imtoPeer(getIntent());
         start(savedInstanceState == null && (shared(getIntent()) || scanned(getIntent())));
     }
@@ -211,8 +230,21 @@ public class MainActivity extends Activity {
             server.setText(next);
             serverGiven = next.trim();
         }
-        // The code's servers are the code's business (1471): shown, not edited.
+        // The code's servers are the code's business (1471): shown, not
+        // edited, and since 1448 not even shown: the field goes with
+        // Advanced while the code carries any.
         server.setEnabled(!ServerField.carried(text));
+        showAdvanced();
+    }
+
+    /** Advanced and the address field, as the code and the last start have it (1448). */
+    private void showAdvanced() {
+        boolean offered = JoinForm.advancedOffered(code.getText().toString());
+        boolean open = offered
+                && JoinForm.advancedOpen(advancedOpened, lastNeed, server.getText().toString());
+        advanced.setVisibility(offered ? View.VISIBLE : View.GONE);
+        advanced.setText(getString(R.string.advanced) + (open ? "  ▴" : "  ▾"));
+        serverBox.setVisibility(open ? View.VISIBLE : View.GONE);
     }
 
     /** What the code gave the server field last (1464). */
@@ -230,6 +262,7 @@ public class MainActivity extends Activity {
         final String typedServer = joining
                 ? ServerField.request(typedCode, server.getText().toString()) : null;
         final boolean first = typedCode != null && !typedCode.isEmpty();
+        asked = joining;
         join.setEnabled(false);
         retry.setVisibility(View.GONE);
         detailsToggle.setVisibility(View.GONE);
@@ -275,6 +308,7 @@ public class MainActivity extends Activity {
 
     private void takeBack() {
         moved = false;
+        asked = true;
         retry.setVisibility(View.GONE);
         error.setText(getString(R.string.starting));
         final String home = home();
@@ -339,8 +373,21 @@ public class MainActivity extends Activity {
             detailsToggle.setVisibility(View.GONE);
             return;
         }
-        retry.setText(R.string.try_again);
+        lastNeed = need;
         form.setVisibility(View.VISIBLE);
+        showAdvanced();
+        if (!JoinForm.saysFailure(asked, need)) {
+            // The screen's own look without a code (1448, walk finding 4):
+            // the bare form, nothing failed yet.
+            error.setText("");
+            retry.setVisibility(View.GONE);
+            detailsToggle.setVisibility(View.GONE);
+            details.setText("");
+            showDetails(false);
+            code.requestFocus();
+            return;
+        }
+        retry.setText(R.string.try_again);
         error.setText(Core.str(started, "error"));
         retry.setVisibility(View.VISIBLE);
         String said = Core.str(started, "details");

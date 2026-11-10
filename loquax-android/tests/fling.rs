@@ -207,6 +207,47 @@ fn the_server_field_follows_a_typed_code() {
     assert!(out.contains("checks passed"), "{out}");
 }
 
+/// The join form's rules (1448, walk finding 4): `JoinForm.java` with
+/// `ServerField.java` run on the host with `tests/java/JoinFormTest.java`.
+/// The form's own start without a code says no failure, a join the user
+/// asked for does; the address field is offered only under a code without
+/// servers. The control in the Java, the rule before, says a failure on the
+/// bare form.
+#[test]
+fn the_join_form_says_a_failure_only_after_a_join() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("join-form-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/ServerField.java"))
+        .arg(manifest.join("android/src/network/leviculum/loquax/JoinForm.java"))
+        .arg(manifest.join("tests/java/JoinFormTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.JoinFormTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
 /// The Explore pane's rules (1618, the walk of 17024c3a):
 /// `ExploreRows.java` run on the host with
 /// `tests/java/ExploreRowsTest.java`. 32 characters typed fast all stay

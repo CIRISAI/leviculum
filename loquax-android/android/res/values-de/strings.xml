@@ -7,6 +7,8 @@
     <string name="starting">Startet…</string>
     <string name="joining">Verbinde mit deinem Postfach…</string>
     <string name="code_label">Der Code, den dein Postfach zeigt</string>
+    <string name="code_hint">Code hier einfügen</string>
+    <string name="server_hint">zum Beispiel 192.168.1.20:4242</string>
     <string name="server_label">Wo dein Postfach ist: Adresse und Port des Computers</string>
     <string name="join">Beitreten</string>
     <string name="address_hint">Adresse einer neuen Unterhaltung</string>
