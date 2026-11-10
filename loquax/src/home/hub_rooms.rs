@@ -16,6 +16,10 @@
 //! A hub heard is asked when its last question is [`LIST_EVERY_SECS`]
 //! old; a hub that did not answer is asked again only then, too. The
 //! questions run one at a time on the link task, which queues the rest.
+//! The daemon starts the lister with the first hub it hears, and not at
+//! all on a phone whose mailbox lends the Rooms' slot to its own screen
+//! (`daemon::Lends`): a second lend to the Rooms ends the first, and that
+//! screen's sheet asks the hub over the same node anyway.
 
 use std::collections::HashMap;
 use std::sync::Arc;

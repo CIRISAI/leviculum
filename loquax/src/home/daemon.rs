@@ -437,8 +437,15 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     };
     let mut attached = attached;
     // The rooms of the hubs this mailbox hears, asked for its devices
-    // (1643, [`super::hub_rooms`]).
-    let mut hub_rooms = super::hub_rooms::Lister::start(&attached);
+    // (1643, [`super::hub_rooms`]): started with the first hub heard, so a
+    // mailbox that hears none runs no question task. A mailbox on the
+    // phone lends the Rooms' slot of its node to the screen, whose own
+    // sheet asks the hub over the same node; it asks nothing itself, since
+    // a second lend to the Rooms would end the screen's.
+    let rooms_lent = lends
+        .iter()
+        .any(|(lender, _)| *lender == crate::engine::Lender::Rooms);
+    let mut hub_rooms: Option<super::hub_rooms::Lister> = None;
     let collector = Collector {
         home: home.clone(),
         instance,
@@ -797,7 +804,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             // For every device of the home (1599); it wakes nobody.
                             archive_hub(&mut store, &hub, archive_cap_bytes);
                             // Its rooms too, asked at most hourly (1643).
-                            hub_rooms.heard(hub.hash, unix_now());
+                            if !rooms_lent {
+                                hub_rooms
+                                    .get_or_insert_with(|| super::hub_rooms::Lister::start(&attached))
+                                    .heard(hub.hash, unix_now());
+                            }
                         }
                         OutboxEvent::PageAnnounced { node } => {
                             // For every device of the home (1579): its `/pages`.
@@ -870,7 +881,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     break Err(fatal);
                 }
                 // The hubs' answers, kept with their entries (1643).
-                let _ = hub_rooms.take(&mut store, archive_cap_bytes);
+                if let Some(hub_rooms) = &mut hub_rooms {
+                    let _ = hub_rooms.take(&mut store, archive_cap_bytes);
+                }
                 for hosted in &mut groups {
                     pump_group(&mut store, &mut sender, hosted, selected_pn);
                 }
@@ -924,7 +937,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             wakes: &wakes,
                             costs: &costs,
                             pn_asks: pn_asks.len(),
-                            hub_rooms: hub_rooms.heap_bytes(),
+                            hub_rooms: hub_rooms.as_ref().map_or(0, super::hub_rooms::Lister::heap_bytes),
                             home: census.take(),
                             store: &store,
                         };

@@ -667,4 +667,8 @@ the four elements it knows. The pull hands them on as
 `Command::HomeHubRooms`, and the sheet lists them the moment it opens
 (`Rooms::mailbox_named`); the device's own answer, from the sheet's
 question or from `/list` after it connects, replaces them as the fresher
-copy. The census counts the questions' table (`hub_rooms`).
+copy. The census counts the questions' table (`hub_rooms`). The mailbox
+starts the questions with the first hub it hears, so one that hears none
+runs no question task; a mailbox on the phone lends the Rooms' slot of
+its node to its own screen and asks nothing itself, since a second lend
+to the Rooms would end the screen's, whose sheet asks over the same node.
