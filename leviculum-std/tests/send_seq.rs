@@ -111,10 +111,10 @@ async fn a_sequenced_send_is_proved_delivered_by_its_own_sequence() {
             }
         };
         seqs.push(seq);
-        let stats = a.node.link_stats(handle.link_id()).expect("stats");
+        let stats = a.node.link_seq_stats(handle.link_id()).expect("stats");
         assert_eq!(
             stats.last_sent_sequence(),
-            Some(seq),
+            seq,
             "nothing else sent on this link"
         );
     }
@@ -132,7 +132,7 @@ async fn a_sequenced_send_is_proved_delivered_by_its_own_sequence() {
     let last = *seqs.last().unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let stats = a.node.link_stats(handle.link_id()).expect("stats");
+        let stats = a.node.link_seq_stats(handle.link_id()).expect("stats");
         if stats.delivered_through(last) {
             assert_eq!(stats.oldest_unacked_sequence(), None);
             break;
