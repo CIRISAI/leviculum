@@ -37,7 +37,8 @@ when every requirement held, 1 otherwise.
 Environment: SAM_1, SAM_2 (from the bed), I2P_BED, I2P_STATUS_WORK (where the
 daemons' directories and logs go; default $I2P_BED/status), LNSD and LNSTATUS
 (default the release binaries of this tree), FREEZE_S (default 45),
-RESTART_WALL_S (default 180), RESTART_STACKS (the server stacks `restart`
+RESTART_WALL_S (default 180), RESTART_GAP_S (seconds between S's stop and its
+start, default 2), RESTART_STACKS (the server stacks `restart`
 runs, default `rnsd lnsd`).
 """
 
@@ -65,6 +66,7 @@ LINK_WALL_S = 150.0
 DISCOVERY_WALL_S = 180.0
 FREEZE_S = float(os.environ.get("FREEZE_S", "45"))
 RESTART_WALL_S = float(os.environ.get("RESTART_WALL_S", "180"))
+RESTART_GAP_S = float(os.environ.get("RESTART_GAP_S", "2"))
 T0 = time.monotonic()
 FAILED: list[str] = []
 
@@ -437,8 +439,11 @@ def mode_restart(work: Path) -> None:
         probe = s.probe_hash()
         before = {c.name: c.wait_probe(probe, LINK_WALL_S) for c in olds}
         say(f"{tag}: before the restart {before}")
+        bed = os.environ.get("I2P_BED", "")
+        r2 = Path(bed) / "r2" / "i2pd.log"
+        r2_mark = len(r2.read_text(errors="replace")) if r2.is_file() else 0
         s.stop()
-        time.sleep(2)
+        time.sleep(RESTART_GAP_S)
         s.start()
         t_restart = time.monotonic()
         # Fresh clients start with the restart, on a router of their own, so
@@ -459,13 +464,18 @@ def mode_restart(work: Path) -> None:
         after_old = {c.name: after[c.name] for c in olds}
         after_fresh = {c.name: after[c.name] for c in fresh}
         say(f"{tag}: after the restart, old {after_old}, fresh {after_fresh}")
-        bed = os.environ.get("I2P_BED", "")
-        r2 = Path(bed) / "r2" / "i2pd.log"
-        publish_misses = r2.read_text(errors="replace").count("Publish confirmation was not received") \
-            if r2.is_file() else -1
+        # The router's own account of the restart (LOGLEVEL=info): whether
+        # SESSION CREATE was handed the destination the closed session left
+        # behind (`Local destination <S> exists`, ClientContext.cpp:393/408 in
+        # i2pd 2.56) and how often it then failed to publish its LeaseSet.
+        r2_text = r2.read_text(errors="replace")[r2_mark:] if r2.is_file() else ""
+        publish_misses = r2_text.count("Publish confirmation was not received") if r2.is_file() else -1
+        reused = f"{b32}.b32.i2p exists" in r2_text
+        not_ready = r2_text.count("destination is not ready")
         fmt = lambda d: " ".join(f"{k}={'no' if v is None else f'{v:.1f}'}" for k, v in d.items())
         print(
-            f"I2P_RESTART s={s_stack} since_restart_s={time.monotonic() - t_restart:.0f} "
+            f"I2P_RESTART s={s_stack} gap_s={RESTART_GAP_S:g} reused={'yes' if reused else 'no'} "
+            f"not_ready={not_ready} since_restart_s={time.monotonic() - t_restart:.0f} "
             f"{fmt(before)} after_{fmt(after_old).replace(' ', ' after_')} "
             f"after_{fmt(after_fresh).replace(' ', ' after_')} r2_publish_misses={publish_misses}",
             flush=True,
