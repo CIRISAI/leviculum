@@ -348,6 +348,14 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         ..Start::default()
     };
     let peer = loquax::address::to_hex(&[0x5a; 16]);
+    // A device that began before the ugly store's history (1448): its
+    // people count as met here, and the banner asks as before. The second
+    // start below is the same phone begun after it, which asks nothing.
+    std::fs::write(
+        phone.path().join(loquax_android::links::BOOK_FILE),
+        "since 1\n",
+    )
+    .expect("the book's beginning");
     let (address, peer) = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         ugly_in(&session);
@@ -770,6 +778,18 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         "{kept}"
     );
 
+    // The book's beginning moved to now, as on a device that joined after
+    // the history it pulled (1448, walk finding 12).
+    let book = phone.path().join(loquax_android::links::BOOK_FILE);
+    let kept = std::fs::read_to_string(&book).expect("the book");
+    assert!(kept.contains("since 1\n"), "{kept}");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock")
+        .as_secs();
+    std::fs::write(&book, kept.replace("since 1\n", &format!("since {now}\n")))
+        .expect("the book begun now");
+
     // The second start: no code, no server, the conversation from the store.
     let again = Start {
         dir: dir.clone(),
@@ -788,6 +808,19 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         .expect("decode");
         assert_eq!(messages.messages.len(), 2, "{messages:?}");
         assert_eq!(messages.messages[0].body, "hallo vom Telefon");
+        // The peer the first session offered for the phone's contacts
+        // wrote only in the history from before the device began: no
+        // banner (1448). Control: the first session, begun before it, asked.
+        let history: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: ugly_store::peer_hex(3),
+                })
+                .expect("query"),
+        )
+        .expect("decode");
+        assert!(!history.messages.is_empty(), "the history is there");
+        assert!(!history.ask_link, "a pulled history asks nothing");
         // The link outlived the session; unlinked, nameless again ("Unknown",
         // never the address, 1452) and no photo kept.
         assert_eq!(messages.name, "Alice Schmidt");

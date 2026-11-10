@@ -501,18 +501,37 @@ impl<B> UiModel<B> {
     /// banner asks only then: a group is not a person, and an invitation
     /// card is the group's, not its sender's.
     pub fn heard_from_a_person(&self, peer: &[u8; 16]) -> bool {
-        if self.groups.contains_key(peer) {
-            return false;
-        }
+        self.words_from_a_person(peer).next().is_some()
+    }
+
+    /// When the person `peer` first wrote, by the writer's clock (1448,
+    /// walk finding 12): the earliest of the messages
+    /// [`Self::heard_from_a_person`] counts that carries a time. The
+    /// phone asks to save a contact only when this falls after the
+    /// device began, so a history a new device pulls asks nothing.
+    /// `None` when no such message carries a time.
+    pub fn first_word_from_a_person(&self, peer: &[u8; 16]) -> Option<crate::when::WallTime> {
+        self.words_from_a_person(peer)
+            .filter_map(|m| m.at)
+            .min_by_key(|at| at.unix_secs)
+    }
+
+    /// The messages a person wrote in `peer`'s conversation: none for a
+    /// group, and neither a group's state nor an invitation card.
+    fn words_from_a_person<'a>(
+        &'a self,
+        peer: &'a [u8; 16],
+    ) -> impl Iterator<Item = &'a crate::ui::Message> + 'a {
+        let person = !self.groups.contains_key(peer);
         self.conversations
             .iter()
-            .find(|c| c.peer == *peer)
-            .is_some_and(|c| {
-                c.messages.iter().any(|m| {
-                    !m.outbound
-                        && !m.is_group_state()
-                        && Lev::from_fields(&m.fields).is_none_or(|lev| lev.invite.is_none())
-                })
+            .filter(move |c| person && c.peer == *peer)
+            .take(1)
+            .flat_map(|c| c.messages.iter())
+            .filter(|m| {
+                !m.outbound
+                    && !m.is_group_state()
+                    && Lev::from_fields(&m.fields).is_none_or(|lev| lev.invite.is_none())
             })
     }
 
@@ -2566,6 +2585,56 @@ mod tests {
         arrive(&mut model, LEW, 6, "Kommst du?", Lev::default());
         assert!(model.heard_from_a_person(&LEW), "the inviter, writing");
         assert!(!model.heard_from_a_person(&BOB), "nobody wrote");
+    }
+
+    /// 1448 (walk finding 12): the person's first word carries its
+    /// writer's time, the earliest of what it wrote, so the phone can tell
+    /// a history it pulled from a contact met after it began. An
+    /// invitation card and a group are no word of a person's; a model
+    /// without a clock knows no time. Control: the later line does not
+    /// move the first.
+    #[test]
+    fn a_persons_first_word_is_the_earliest_it_wrote() {
+        const T: i64 = 1_790_000_000;
+        let mut model = reader(&[LEW, ANNA]);
+        arrive(&mut model, ANNA, 1, "ohne Uhr", Lev::default());
+        assert_eq!(model.first_word_from_a_person(&ANNA), None, "no clock yet");
+        update(
+            &mut model,
+            UiEvent::Clock(crate::when::WallTime {
+                unix_secs: T,
+                offset_secs: 0,
+            }),
+        );
+        let at = |model: &mut UiModel<Line>, from, id, sent_at, lev: Lev| {
+            update(
+                model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    sent_at,
+                    message_id: [id; 32],
+                    source: from,
+                    title: Vec::new(),
+                    body: b"Hallo".to_vec(),
+                    fields: lev_fields(lev),
+                    verified: true,
+                }),
+            );
+        };
+        at(&mut model, LEW, 2, T - 500, invite("Lew"));
+        assert_eq!(model.first_word_from_a_person(&LEW), None, "an invitation");
+        at(&mut model, LEW, 3, T - 300, Lev::default());
+        at(&mut model, LEW, 4, T - 100, Lev::default());
+        assert_eq!(
+            model.first_word_from_a_person(&LEW).map(|w| w.unix_secs),
+            Some(T - 300)
+        );
+        at(&mut model, ANNA, 5, T - 50, Lev::default());
+        assert_eq!(
+            model.first_word_from_a_person(&ANNA).map(|w| w.unix_secs),
+            Some(T - 50),
+            "the line without a clock carries no time"
+        );
+        assert_eq!(model.first_word_from_a_person(&BOB), None, "nobody wrote");
     }
 
     /// 1307 pass six: the admin's member sheet says where each invitation

@@ -1982,7 +1982,8 @@ pub struct Messages {
     /// The address book (1139): the photo and whether it is linked, as in
     /// [`ConversationRow`]; the contact's lookup key and `_ID` for "Open
     /// contact"; whether the banner asks to add the peer (unlinked, not
-    /// answered "Not now", a message came from it); the announced name for
+    /// answered "Not now", a person met after this device began wrote,
+    /// 1448); the announced name for
     /// a new contact; the user's own name for the rename dialog; the
     /// contact's other addresses as every screen names them.
     #[serde(default)]

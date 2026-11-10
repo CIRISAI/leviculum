@@ -2298,7 +2298,7 @@ impl Inner {
             watching: false,
             front: false,
             fallback: Fallback::default(),
-            book: links::load(home),
+            book: began(home),
             photos: std::cell::RefCell::default(),
             photo_stats: std::cell::Cell::new(0),
             row_cache: std::cell::RefCell::default(),
@@ -3533,7 +3533,11 @@ impl Inner {
             // A group is not a person (1307 pass six): only a person who
             // wrote is offered for the phone's contacts.
             ask_link: link.is_none()
-                && self.model.heard_from_a_person(&peer)
+                && self.book.met_here(
+                    self.model
+                        .first_word_from_a_person(&peer)
+                        .map(|at| at.unix_secs),
+                )
                 && !self.book.not_now.contains(&peer)
                 && !self.just_added.contains(&peer),
             announced: names.announced(&peer).map(str::to_string),
@@ -4726,6 +4730,21 @@ pub fn fingerprint(peer: &[u8; 16]) -> String {
 fn server_host(server: &str) -> &str {
     let host = server.rsplit_once(':').map_or(server, |(host, _)| host);
     host.trim_start_matches('[').trim_end_matches(']')
+}
+
+/// `home`'s address book table, stamped with when this device began on
+/// its first start (1448, walk finding 12): the banner asks only for a
+/// person met after it. A stamp that cannot be written asks nothing this
+/// run and is tried again on the next start.
+fn began(home: &Path) -> Book {
+    let mut book = links::load(home);
+    if book.since.is_none() {
+        book.since = Some(leviculum_std::local_time::unix_now_secs());
+        if let Err(error) = links::save(home, &book) {
+            tracing::warn!("{}: {error}", links::BOOK_FILE);
+        }
+    }
+    book
 }
 
 fn wall_now(offset: i32) -> WallTime {
