@@ -432,6 +432,7 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::HubAnnounced { .. }
                 | OutboxEvent::PageAnnounced { .. }
                 | OutboxEvent::NameHeard { .. }
+                | OutboxEvent::HubRooms { .. }
                 | OutboxEvent::SyncLinked
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. }

@@ -60,6 +60,8 @@ pub mod daemon;
 pub mod group;
 #[cfg(feature = "std")]
 pub mod handover;
+#[cfg(feature = "history")]
+pub mod hub_rooms;
 #[cfg(feature = "std")]
 pub mod lock;
 #[cfg(feature = "std")]

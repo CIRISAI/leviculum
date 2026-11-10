@@ -436,6 +436,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         }
     };
     let mut attached = attached;
+    // The rooms of the hubs this mailbox hears, asked for its devices
+    // (1643, [`super::hub_rooms`]).
+    let mut hub_rooms = super::hub_rooms::Lister::start(&attached);
     let collector = Collector {
         home: home.clone(),
         instance,
@@ -793,6 +796,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::HubAnnounced { hub } => {
                             // For every device of the home (1599); it wakes nobody.
                             archive_hub(&mut store, &hub, archive_cap_bytes);
+                            // Its rooms too, asked at most hourly (1643).
+                            hub_rooms.heard(hub.hash, unix_now());
                         }
                         OutboxEvent::PageAnnounced { node } => {
                             // For every device of the home (1579): its `/pages`.
@@ -864,6 +869,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 if let Some(fatal) = unstarted {
                     break Err(fatal);
                 }
+                // The hubs' answers, kept with their entries (1643).
+                let _ = hub_rooms.take(&mut store, archive_cap_bytes);
                 for hosted in &mut groups {
                     pump_group(&mut store, &mut sender, hosted, selected_pn);
                 }
@@ -917,6 +924,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             wakes: &wakes,
                             costs: &costs,
                             pn_asks: pn_asks.len(),
+                            hub_rooms: hub_rooms.heap_bytes(),
                             home: census.take(),
                             store: &store,
                         };
@@ -1533,6 +1541,7 @@ struct Held<'a, O> {
     wakes: &'a Wakes<LinkId>,
     costs: &'a Ledger<LinkId>,
     pn_asks: usize,
+    hub_rooms: usize,
     home: Option<crate::outbox::EngineCensus>,
     store: &'a Store,
 }
@@ -1561,6 +1570,7 @@ impl<O> Held<'_, O> {
             costs,
             devices_n,
             pn_asks: self.pn_asks * std::mem::size_of::<([u8; 16], usize)>(),
+            hub_rooms: self.hub_rooms,
             rss_kb: leviculum_std::census::rss_kb(),
             nodes: 1 + self.groups.len(),
             archive_kb: self.store.archive_bytes().unwrap_or(0) / 1024,

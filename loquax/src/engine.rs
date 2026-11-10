@@ -782,6 +782,7 @@ impl Engine {
                 | Command::HomePnStatus { .. }
                 | Command::HomeName { .. }
                 | Command::HomeHub { .. }
+                | Command::HomeHubRooms { .. }
                 | Command::HomePetname { .. }
                 | Command::HomePeerState { .. } => {}
             }
@@ -1020,6 +1021,9 @@ impl Engine {
                     self.emit(OutboxEvent::HomeStalled { message_id });
                 }
                 Command::HomeHub { hub } => self.emit(OutboxEvent::HubAnnounced { hub }),
+                Command::HomeHubRooms { hub, rooms } => {
+                    self.emit(OutboxEvent::HubRooms { hub, rooms })
+                }
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),

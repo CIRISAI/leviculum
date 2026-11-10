@@ -6277,6 +6277,9 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
             location,
             name,
         } => model.mesh_position(identity, location, name.as_deref(), 0),
+        OutboxEvent::HubRooms { hub, rooms } => {
+            model.rooms.mailbox_named.insert(hub, rooms);
+        }
         OutboxEvent::HubAnnounced { hub } => {
             explore::owe_hub(model, &hub);
             model.rooms.heard.hear(hub);

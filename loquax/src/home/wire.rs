@@ -66,6 +66,7 @@
 //! archive still holds: a client whose cursor is older than `first - 1`
 //! lost entries to the cap and can say so.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use leviculum_lxmf::msgpack;
@@ -668,25 +669,48 @@ pub fn name_entry_prefix(peer: &[u8; 16]) -> Vec<u8> {
 /// first bytes are [`name_entry_prefix`]'s, so the store keeps a hub's
 /// newest entry only, as it does a peer's name.
 pub fn hub_entry(hub: &crate::ui::hubs::HeardHub) -> Vec<u8> {
+    hub_entry_rooms(hub, None)
+}
+
+/// A hub entry ([`hub_entry`]) with the rooms the hub's answer to `/list`
+/// named when the mailbox asked it (1643), as a fifth element after the
+/// last hearing; none when it was not asked or did not answer. A client
+/// from before it reads the four it knows and passes the fifth by.
+pub fn hub_entry_rooms(hub: &crate::ui::hubs::HeardHub, rooms: Option<&[String]>) -> Vec<u8> {
     let mut out = Vec::new();
     msgpack::array(&mut out, 2);
     msgpack::bin(&mut out, &hub.hash);
-    msgpack::array(&mut out, 4);
+    msgpack::array(&mut out, 4 + usize::from(rooms.is_some()));
     msgpack::string(&mut out, hub.name.as_deref().unwrap_or_default());
     msgpack::uint(&mut out, u64::from(hub.hops.unwrap_or(u8::MAX)));
     msgpack::int(&mut out, hub.first);
     msgpack::int(&mut out, hub.last);
+    if let Some(rooms) = rooms {
+        msgpack::array(&mut out, rooms.len());
+        for room in rooms {
+            msgpack::string(&mut out, room);
+        }
+    }
     out
 }
 
 /// A hub entry ([`hub_entry`]); its name is cleaned again, as an announce's.
 pub fn read_hub_entry(data: &[u8]) -> Result<crate::ui::hubs::HeardHub, Malformed> {
+    read_hub_entry_rooms(data).map(|(hub, _)| hub)
+}
+
+/// A hub entry and the rooms it carries ([`hub_entry_rooms`]), `None` for
+/// an entry without them.
+pub fn read_hub_entry_rooms(
+    data: &[u8],
+) -> Result<(crate::ui::hubs::HeardHub, Option<Vec<String>>), Malformed> {
     let mut p = 0;
     if msgpack::array_len(data, &mut p)? != 2 {
         return Err(Malformed);
     }
     let hash = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
-    if msgpack::array_len(data, &mut p)? < 4 {
+    let len = msgpack::array_len(data, &mut p)?;
+    if len < 4 {
         return Err(Malformed);
     }
     let name = crate::ui::hubs::shown_name(msgpack::read_str(data, &mut p)?);
@@ -695,14 +719,28 @@ pub fn read_hub_entry(data: &[u8]) -> Result<crate::ui::hubs::HeardHub, Malforme
         .filter(|h| *h != u8::MAX);
     let first = msgpack::read_int(data, &mut p)?;
     let last = msgpack::read_int(data, &mut p)?;
-    Ok(crate::ui::hubs::HeardHub {
-        hash,
-        name,
-        hops,
-        first,
-        last,
-        answered: None,
-    })
+    let rooms = match len {
+        4 => None,
+        _ => {
+            let count = msgpack::array_len(data, &mut p)?;
+            let mut rooms = Vec::new();
+            for _ in 0..count {
+                rooms.push(String::from(msgpack::read_str(data, &mut p)?));
+            }
+            Some(rooms)
+        }
+    };
+    Ok((
+        crate::ui::hubs::HeardHub {
+            hash,
+            name,
+            hops,
+            first,
+            last,
+            answered: None,
+        },
+        rooms,
+    ))
 }
 
 /// A name entry, which has a join request's shape: sixteen bytes and a

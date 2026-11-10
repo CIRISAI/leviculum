@@ -241,6 +241,11 @@ pub struct Rooms {
     pub queued: Vec<RoomAsk>,
     /// What each hub named when its sheet asked (1621).
     pub named: alloc::collections::BTreeMap<[u8; 16], Named>,
+    /// What each hub named when the mailbox asked it (1643,
+    /// `crate::home::hub_rooms`), pulled with the hub: the sheet lists it
+    /// at once, until this device's own question answers ([`Self::named`]
+    /// with rooms), which is the fresher copy.
+    pub mailbox_named: alloc::collections::BTreeMap<[u8; 16], Vec<String>>,
     /// The chosen hub's answer to `/list` after its WELCOME (1652): `None`
     /// until it came, then the rooms it names, maybe none.
     pub listed: Option<Vec<String>>,
@@ -267,6 +272,7 @@ impl Default for Rooms {
             hub_page: 0,
             queued: Vec::new(),
             named: alloc::collections::BTreeMap::new(),
+            mailbox_named: alloc::collections::BTreeMap::new(),
             listed: None,
             linking_since: None,
         }

@@ -1060,8 +1060,18 @@ async fn take_in(
         }
         if entry.kind == super::KIND_HUB {
             // A hub the home heard (1599): every device lists it.
-            match wire::read_hub_entry(&entry.packed) {
-                Ok(hub) => outbox.submit(Command::HomeHub { hub }).map_err(gone)?,
+            // Its rooms when the home asked it (1643): the sheet lists
+            // them before this device links to it.
+            match wire::read_hub_entry_rooms(&entry.packed) {
+                Ok((hub, rooms)) => {
+                    let hash = hub.hash;
+                    outbox.submit(Command::HomeHub { hub }).map_err(gone)?;
+                    if let Some(rooms) = rooms {
+                        outbox
+                            .submit(Command::HomeHubRooms { hub: hash, rooms })
+                            .map_err(gone)?;
+                    }
+                }
                 Err(_) => tracing::warn!("HOME pull: entry {} is no hub", entry.seq),
             }
             continue;
@@ -1438,6 +1448,47 @@ mod tests {
         assert_eq!(
             *outbox.commands.borrow(),
             [Command::HomeHub { hub }, Command::Fence { token: 4 }]
+        );
+    }
+
+    /// 1643: a hub entry with the rooms the home's question named reaches
+    /// the engine as the hub and its rooms; one without them as the hub
+    /// alone.
+    #[tokio::test]
+    async fn a_hub_entry_with_rooms_reaches_the_engine_with_them() {
+        let hub = crate::ui::hubs::HeardHub {
+            hash: [8; 16],
+            name: Some("Villa".into()),
+            hops: Some(4),
+            first: 100,
+            last: 200,
+            answered: None,
+        };
+        let rooms = vec!["#lab".to_string(), "#treff".to_string()];
+        let pulled = Pulled {
+            entries: vec![
+                entry(
+                    3,
+                    super::super::KIND_HUB,
+                    wire::hub_entry_rooms(&hub, Some(&rooms)),
+                ),
+                entry(4, super::super::KIND_HUB, wire::hub_entry(&hub)),
+            ],
+            first: 1,
+        };
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 4 }]);
+        take_in(&mut outbox, 2, pulled).await.expect("pull");
+        assert_eq!(
+            *outbox.commands.borrow(),
+            [
+                Command::HomeHub { hub: hub.clone() },
+                Command::HomeHubRooms {
+                    hub: [8; 16],
+                    rooms
+                },
+                Command::HomeHub { hub },
+                Command::Fence { token: 4 },
+            ]
         );
     }
 

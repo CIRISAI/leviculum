@@ -172,6 +172,10 @@ pub enum Command {
     /// [`crate::home::KIND_HUB`]); reported as [`OutboxEvent::HubAnnounced`],
     /// as a hub the client heard itself would be.
     HomeHub { hub: crate::ui::hubs::HeardHub },
+    /// On a client: the rooms a hub named when the home asked it (1643,
+    /// [`crate::home::hub_rooms`]), pulled with the hub's entry; reported
+    /// as [`OutboxEvent::HubRooms`].
+    HomeHubRooms { hub: [u8; 16], rooms: Vec<String> },
     /// On a client: a name the home node heard a peer announce, pulled from
     /// the archive; reported as [`OutboxEvent::Announced`], as an announce
     /// the client heard itself would be.
@@ -429,6 +433,10 @@ pub enum OutboxEvent {
     /// mailbox names peers it never heard itself; everyone else names the
     /// peer by [`OutboxEvent::Announced`], which the same announce raises.
     NameHeard { row: crate::home::pages::NameRow },
+    /// On a client: the rooms a hub named when its home asked it (1643,
+    /// [`Command::HomeHubRooms`]). The server sheet lists them until the
+    /// device's own question answers.
+    HubRooms { hub: [u8; 16], rooms: Vec<String> },
     /// A [`Command::Fetch`]'s link to the node came up: from here a failure
     /// is the node's answer or the transfer, not a node that never answered.
     SyncLinked,

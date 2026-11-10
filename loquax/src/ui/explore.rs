@@ -790,10 +790,12 @@ fn sheet_hub<B>(model: &UiModel<B>, hash: [u8; 16]) -> super::settings::Offered 
 }
 
 /// The rooms the hub named (1621): what its notices named when its
-/// sheet asked, then what the shipped list recorded, each once.
+/// sheet asked, or until that answer came what it named when the mailbox
+/// asked (1643), then what the shipped list recorded, each once.
 fn sheet_rooms(rooms: &super::rooms::Rooms, hash: &[u8; 16]) -> Vec<String> {
-    let mut out: Vec<String> = match rooms.named.get(hash) {
-        Some(Named::Rooms(named)) => named.clone(),
+    let mut out: Vec<String> = match (rooms.named.get(hash), rooms.mailbox_named.get(hash)) {
+        (Some(Named::Rooms(named)), _) => named.clone(),
+        (_, Some(mailbox)) => mailbox.clone(),
         _ => Vec::new(),
     };
     for room in super::hubs::named(hash)
@@ -2302,6 +2304,40 @@ mod tests {
             explore(&mut model, ExploreEvent::Hub(silent)),
             [UiEffect::Rooms(RoomAsk::Peek { hub: silent })]
         );
+    }
+
+    /// 1643: the rooms the mailbox's question named, pulled with the hub,
+    /// are on the sheet the moment it opens, before any link of this
+    /// device's; its own answer then replaces them as the fresher copy.
+    /// Control: a hub the mailbox named nothing for opens empty.
+    #[test]
+    fn the_mailboxs_rooms_are_on_the_sheet_before_any_link() {
+        let mut model = phone();
+        let hub = [0x98; 16];
+        update(
+            &mut model,
+            UiEvent::Engine(crate::outbox::OutboxEvent::HubRooms {
+                hub,
+                rooms: vec!["#lobby".into(), "#radio".into()],
+            }),
+        );
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let asked = explore(&mut model, ExploreEvent::Hub(hub));
+        assert_eq!(asked, [UiEffect::Rooms(RoomAsk::Peek { hub })]);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms, ["#lobby", "#radio"], "before any answer");
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub,
+                rooms: Some(vec!["#lobby".into()]),
+            }),
+        );
+        assert_eq!(node(&model).sheet.expect("the sheet").rooms, ["#lobby"]);
+        explore(&mut model, ExploreEvent::CloseSheet);
+        let other = [0x99; 16];
+        explore(&mut model, ExploreEvent::Hub(other));
+        assert!(node(&model).sheet.expect("the sheet").rooms.is_empty());
     }
 
     /// Walk 8 of 1653, 42: a server's sheet said "Frage den Server nach

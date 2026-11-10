@@ -594,6 +594,14 @@ const TABLES_V21: [&str; 1] = ["owed_peer_states"];
 /// The table schema 22 adds.
 const TABLES_V22: [&str; 1] = ["home_names"];
 
+/// What [`Store::put_hub`] writes: a hub heard, or the rooms a kept hub
+/// named (1643).
+#[derive(Clone, Copy)]
+enum HubPut<'a> {
+    Heard(&'a crate::ui::hubs::HeardHub),
+    Rooms(&'a [u8; 16], &'a [String]),
+}
+
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
 pub type Held = ([u8; 32], [u8; 16], Vec<u8>);
@@ -2176,18 +2184,41 @@ impl Store {
     /// home heard announcing, when it says something new: a hub not kept
     /// yet, or with another name or hops, or heard
     /// [`crate::home::HUB_REFRESH_SECS`] after its kept hearing. Its first
-    /// hearing stays the kept one. Only a hub's newest entry is kept, and
-    /// past [`crate::ui::hubs::HEARD_BOUND`] hubs the one heard longest ago
-    /// goes. `None` when nothing was appended.
+    /// hearing stays the kept one, and so do the rooms its kept entry
+    /// carries (1643). Only a hub's newest entry is kept, and past
+    /// [`crate::ui::hubs::HEARD_BOUND`] hubs the one heard longest ago goes.
+    /// `None` when nothing was appended.
     pub fn archive_hub(
         &mut self,
         hub: &crate::ui::hubs::HeardHub,
         cap_bytes: u64,
     ) -> Result<Option<u64>, StoreError> {
+        self.put_hub(HubPut::Heard(hub), cap_bytes)
+    }
+
+    /// The rooms a kept hub's answer to `/list` named when the home asked
+    /// it (1643): its entry again with them, when they differ from the
+    /// kept entry's. `None` when nothing was appended: the rooms are the
+    /// kept ones, or the archive keeps no entry of the hub (it went past
+    /// the bound while the question was out).
+    pub fn archive_hub_rooms(
+        &mut self,
+        hub: &[u8; 16],
+        rooms: &[String],
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        self.put_hub(HubPut::Rooms(hub, rooms), cap_bytes)
+    }
+
+    fn put_hub(&mut self, put: HubPut<'_>, cap_bytes: u64) -> Result<Option<u64>, StoreError> {
         let identity = self.identity;
         let path = self.path.clone();
         let kind = i64::from(crate::home::KIND_HUB);
-        let prefix = crate::home::wire::name_entry_prefix(&hub.hash);
+        let hash = match put {
+            HubPut::Heard(hub) => hub.hash,
+            HubPut::Rooms(hash, _) => *hash,
+        };
+        let prefix = crate::home::wire::name_entry_prefix(&hash);
         let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
         let tx = self
             .conn
@@ -2204,19 +2235,30 @@ impl Store {
             .map_err(|e| failed(&path, e))?;
         let kept = newest
             .as_deref()
-            .and_then(|packed| crate::home::wire::read_hub_entry(packed).ok());
-        let mut entry = hub.clone();
-        if let Some(kept) = &kept {
-            let same = kept.name == hub.name.clone().or(kept.name.clone())
-                && kept.hops == hub.hops.or(kept.hops);
-            if same && hub.last < kept.last.saturating_add(crate::home::HUB_REFRESH_SECS) {
-                return Ok(None);
+            .and_then(|packed| crate::home::wire::read_hub_entry_rooms(packed).ok());
+        let (entry, rooms) = match (put, kept) {
+            (HubPut::Heard(hub), None) => (hub.clone(), None),
+            (HubPut::Heard(hub), Some((kept, rooms))) => {
+                let same = kept.name == hub.name.clone().or(kept.name.clone())
+                    && kept.hops == hub.hops.or(kept.hops);
+                if same && hub.last < kept.last.saturating_add(crate::home::HUB_REFRESH_SECS) {
+                    return Ok(None);
+                }
+                let mut entry = hub.clone();
+                entry.first = kept.first.min(hub.first);
+                entry.name = hub.name.clone().or(kept.name.clone());
+                entry.hops = hub.hops.or(kept.hops);
+                (entry, rooms)
             }
-            entry.first = kept.first.min(hub.first);
-            entry.name = hub.name.clone().or(kept.name.clone());
-            entry.hops = hub.hops.or(kept.hops);
-        }
-        let packed = crate::home::wire::hub_entry(&entry);
+            (HubPut::Rooms(..), None) => return Ok(None),
+            (HubPut::Rooms(_, rooms), Some((kept, kept_rooms))) => {
+                if kept_rooms.as_deref() == Some(rooms) {
+                    return Ok(None);
+                }
+                (kept, Some(rooms.to_vec()))
+            }
+        };
+        let packed = crate::home::wire::hub_entry_rooms(&entry, rooms.as_deref());
         let mut keyed = packed.clone();
         keyed.extend_from_slice(&entry.last.to_be_bytes());
         let id = leviculum_core::crypto::sha256(&keyed);
@@ -4428,6 +4470,78 @@ mod tests {
         // Nor is a row under another of our addresses.
         let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
         assert!(!other.holds_received(&id).expect("ask"));
+    }
+
+    /// 1643: the rooms a hub named when the home asked it ride its entry,
+    /// a new entry only when they changed; the hourly refresh of the
+    /// hearing keeps them; a hub the archive does not keep gets none. An
+    /// entry without rooms reads as none, and the plain reader reads an
+    /// entry with them as the hub.
+    #[test]
+    fn a_hubs_rooms_ride_its_entry_and_survive_the_refresh() {
+        use crate::ui::hubs::HeardHub;
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let hub = |at: i64| HeardHub {
+            hash: [1; 16],
+            name: Some("Villa".into()),
+            hops: Some(2),
+            first: at,
+            last: at,
+            answered: None,
+        };
+        let rooms = |packed: &[u8]| {
+            crate::home::wire::read_hub_entry_rooms(packed)
+                .expect("a hub entry")
+                .1
+        };
+        let newest = |store: &Store| {
+            let page = store.archive_since(0, usize::MAX).expect("since");
+            page.entries
+                .iter()
+                .rfind(|e| e.kind == crate::home::KIND_HUB)
+                .map(|e| e.packed.clone())
+                .expect("a hub entry")
+        };
+        assert_eq!(
+            store
+                .archive_hub_rooms(&[1; 16], &["#lab".into()], u64::MAX)
+                .expect("rooms"),
+            None,
+            "a hub not kept gets no rooms"
+        );
+        let heard = store.archive_hub(&hub(1000), u64::MAX).expect("heard");
+        assert_eq!(rooms(&newest(&store)), None);
+        let named = vec!["#lab".to_string(), "#chat".to_string()];
+        let with = store
+            .archive_hub_rooms(&[1; 16], &named, u64::MAX)
+            .expect("rooms");
+        assert!(with > heard, "the rooms are news");
+        assert_eq!(rooms(&newest(&store)), Some(named.clone()));
+        assert_eq!(
+            store
+                .archive_hub_rooms(&[1; 16], &named, u64::MAX)
+                .expect("again"),
+            None,
+            "the same rooms again are none"
+        );
+        let refreshed = store
+            .archive_hub(&hub(1000 + 3600), u64::MAX)
+            .expect("refresh");
+        assert!(refreshed > with);
+        assert_eq!(
+            rooms(&newest(&store)),
+            Some(named),
+            "the refresh keeps them"
+        );
+        let plain = crate::home::wire::read_hub_entry(&newest(&store)).expect("plain");
+        assert_eq!((plain.first, plain.last), (1000, 4600));
+        assert_eq!(store.archived_hubs().expect("hubs").len(), 1);
+        let none = store
+            .archive_hub_rooms(&[1; 16], &[], u64::MAX)
+            .expect("none");
+        assert!(none.is_some(), "a hub that names none now");
+        assert_eq!(rooms(&newest(&store)), Some(Vec::new()));
     }
 
     /// 1599: the home remembers the hubs it hears for its devices: one
