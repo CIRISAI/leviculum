@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -12,6 +13,7 @@ import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.InputType;
 import android.text.TextPaint;
+import android.text.TextUtils;
 import android.text.method.LinkMovementMethod;
 import android.text.style.BackgroundColorSpan;
 import android.text.style.ClickableSpan;
@@ -23,11 +25,13 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -65,7 +69,12 @@ final class BrowsePane {
     private final TextView page;
     private final LinearLayout rows;
     private final TextView status;
+    /** The loading state over an empty page (1632, walk 4 new 12). */
+    private final LinearLayout loadingState;
+    private final TextView loadingWords;
     private int cols;
+    /** The cells said again once for a page laid out wider: never a loop. */
+    private int resentAt = -1;
     private int lines;
 
     BrowsePane(Activity activity, Host host) {
@@ -113,6 +122,13 @@ final class BrowsePane {
                     verb("reload", "", "");
                 }
                 address.clearFocus();
+                // The load starts: the keyboard goes, as opening a page
+                // from the search does (1632, walk 4 new 13).
+                InputMethodManager keyboard =
+                        (InputMethodManager) screen.getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (keyboard != null) {
+                    keyboard.hideSoftInputFromWindow(address.getWindowToken(), 0);
+                }
                 return true;
             }
         });
@@ -158,15 +174,59 @@ final class BrowsePane {
         page.setTextColor(activity.getColor(R.color.text));
         page.setMovementMethod(LinkMovementMethod.getInstance());
         page.setTag("page");
+        // A gutter on both sides (1632, walk 4 new 16: the text stood at
+        // x 0), and one wrap: the library lays the page out on the cells
+        // the view holds ({@link #size}); the view breaks no line again,
+        // which turned each long line into a long and a short one.
+        page.setPadding(dp(16), dp(8), dp(16), dp(8));
+        page.setHorizontallyScrolling(true);
         body.addView(page);
         scroll.addView(body);
-        column.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        FrameLayout stage = new FrameLayout(activity);
+        stage.addView(scroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // While a page with nothing to show yet is on its way: a spinner
+        // and "Lade <name> …" in the middle, not a black screen with a
+        // grey line in its corner (1632, walk 4 new 12).
+        loadingState = new LinearLayout(activity);
+        loadingState.setOrientation(LinearLayout.VERTICAL);
+        loadingState.setGravity(Gravity.CENTER);
+        loadingState.setBackgroundColor(activity.getColor(R.color.background));
+        loadingState.setTag("browse_loading");
+        loadingState.setClickable(true);
+        ProgressBar spinner = new ProgressBar(activity);
+        spinner.setIndeterminate(true);
+        loadingState.addView(spinner, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        loadingWords = new TextView(activity);
+        loadingWords.setTextSize(16);
+        loadingWords.setTextColor(activity.getColor(R.color.text));
+        loadingWords.setGravity(Gravity.CENTER);
+        loadingWords.setPadding(dp(24), dp(16), dp(24), 0);
+        loadingState.addView(loadingWords, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        loadingState.setVisibility(View.GONE);
+        stage.addView(loadingState, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        column.addView(stage, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         LinearLayout foot = new LinearLayout(activity);
         foot.setGravity(Gravity.CENTER_VERTICAL);
         status = new TextView(activity);
         status.setTextColor(activity.getColor(R.color.text_secondary));
-        foot.addView(status, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        // One line in a frame, cut with an ellipsis (1632, walk 4 new 12:
+        // a long name wrapped it, and it stood without an edge).
+        status.setSingleLine(true);
+        status.setEllipsize(TextUtils.TruncateAt.END);
+        status.setPadding(dp(12), dp(6), dp(12), dp(6));
+        android.graphics.drawable.GradientDrawable frame =
+                new android.graphics.drawable.GradientDrawable();
+        frame.setCornerRadius(dp(12));
+        frame.setStroke(dp(1), activity.getColor(R.color.text_secondary));
+        status.setBackground(frame);
+        LinearLayout.LayoutParams statusAt =
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        statusAt.setMargins(dp(8), dp(4), dp(4), dp(4));
+        foot.addView(status, statusAt);
         foot.addView(scrollButton("▲", "pageup", R.string.browse_page_up));
         foot.addView(scrollButton("▼", "pagedown", R.string.browse_page_down));
         column.addView(foot);
@@ -198,6 +258,25 @@ final class BrowsePane {
 
     /** The tab came to the front. */
     void show() {
+        show("");
+    }
+
+    /**
+     * The tab came to the front for the page named {@code name} (empty
+     * when not known): the loading state stands at once, before the
+     * library's first answer (1632, walk 4 new 12: the first frame said
+     * "Seiten" over an empty field).
+     */
+    void show(String name) {
+        if (!name.isEmpty()) {
+            if (!address.hasFocus()) {
+                address.setText(name);
+            }
+            loadingWords.setText(screen.getString(R.string.browse_loading, name));
+            loadingState.setVisibility(View.VISIBLE);
+            page.setText("");
+            status.setVisibility(View.GONE);
+        }
         verb("tab", "", "");
     }
 
@@ -286,7 +365,19 @@ final class BrowsePane {
         }
         host.titled(Core.str(shown, "title"));
         address.setHint(Core.str(shown, "address_hint"));
-        status.setText(Core.str(shown, "status"));
+        String loading = Core.str(shown, "loading_words");
+        loadingWords.setText(loading);
+        loadingState.setVisibility(loading.isEmpty() ? View.GONE : View.VISIBLE);
+        String said = Core.str(shown, "status");
+        status.setText(said);
+        // The status line says what the loading state does not: a cached
+        // copy standing while the fresh one comes, a download.
+        status.setVisibility(said.isEmpty() || !loading.isEmpty() ? View.INVISIBLE : View.VISIBLE);
+        // The seconds count while a page is on its way.
+        page.removeCallbacks(redraw);
+        if (Core.bool(shown, "loading")) {
+            page.postDelayed(redraw, 1000);
+        }
         String toast = Core.str(shown, "toast");
         if (!toast.isEmpty()) {
             Toast.makeText(screen, toast, Toast.LENGTH_SHORT).show();
@@ -306,14 +397,35 @@ final class BrowsePane {
         }
 
         SpannableStringBuilder text = new SpannableStringBuilder();
+        int widest = 0;
         for (Map<String, Object> line : Core.list(shown, "lines")) {
+            int start = text.length();
             for (Map<String, Object> run : Core.list(line, "runs")) {
                 append(text, run);
             }
+            widest = Math.max(widest, text.length() - start);
             text.append('\n');
         }
         page.setText(text);
+        // A page laid out wider than the view holds was laid out on cells
+        // the library never heard of this view (a size said before the
+        // session ran): say them again.
+        if (cols > 0 && widest > cols && resentAt != cols) {
+            resentAt = cols;
+            cols = 0;
+            size();
+        }
     }
+
+    /** The next second of a load: the tab drawn again. */
+    private final Runnable redraw = new Runnable() {
+        @Override
+        public void run() {
+            if (!screen.isDestroyed() && last != null && Core.bool(last, "loading")) {
+                draw();
+            }
+        }
+    };
 
     /**
      * What the library hands out once with the screen (1337 pass two): a

@@ -53,7 +53,14 @@ pub struct Browse {
     /// (`/bookmark`); empty on a device without a home, whose shell never
     /// takes them.
     pub outgoing: Vec<crate::home::pages::BookmarkRow>,
+    /// When the page on its way was asked for, on the browser's wall
+    /// clock (1632): the loading state counts the seconds after three.
+    pub loading_since: Option<u64>,
 }
+
+/// How long a page loads before its loading state says the seconds
+/// (1632, walk 4 new 12: six to nine black seconds read as a hang).
+pub const LOADING_SECS_AFTER: u64 = 3;
 
 /// How many NomadNet nodes the hosted browser keeps (1578): as many as a
 /// home remembers on a desktop and a phone, which have the memory, so the
@@ -84,6 +91,7 @@ impl Default for Browse {
             model,
             shared: crate::home::pages::Shared::new(),
             outgoing: Vec::new(),
+            loading_since: None,
         }
     }
 }
@@ -106,6 +114,44 @@ impl Browse {
         if self.model.title.is_empty() && !self.model.is_loading() {
             show_start_screen(&mut self.model);
         }
+    }
+
+    /// Start or stop the loading clock as the browser says a page is on
+    /// its way or not.
+    pub fn note_loading(&mut self) {
+        match (self.model.is_loading(), self.loading_since) {
+            (true, None) => self.loading_since = Some(self.model.wall_now()),
+            (false, Some(_)) => self.loading_since = None,
+            _ => {}
+        }
+    }
+
+    /// The loading state's sentence (1632, walk 4 new 12): `Lade <name>
+    /// …`, with the seconds after [`LOADING_SECS_AFTER`]; `None` when no
+    /// page is on its way or a cached copy stands while it comes, which
+    /// the status line says.
+    pub fn loading_words(&self, lang: Lang) -> Option<String> {
+        if !self.model.is_loading() || self.model.cached_view {
+            return None;
+        }
+        let name = self.shown_name(lang)?;
+        let secs = self
+            .loading_since
+            .map_or(0, |since| self.model.wall_now().saturating_sub(since));
+        let text = match secs >= LOADING_SECS_AFTER {
+            true => super::strings::Text::Key(
+                super::strings::StrId::BrowseLoadingSecs,
+                Vec::from([
+                    super::strings::Arg::Str(name),
+                    super::strings::Arg::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
+                ]),
+            ),
+            false => super::strings::Text::Key(
+                super::strings::StrId::BrowseLoading,
+                Vec::from([super::strings::Arg::Str(name)]),
+            ),
+        };
+        Some(text.resolve(lang))
     }
 
     /// The tab is on this host and in front: the browser has the keys.
@@ -384,6 +430,7 @@ pub fn effects_of<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     effects: Vec<Effect>,
 ) -> Vec<UiEffect> {
+    model.browse.note_loading();
     let mut out = Vec::new();
     for effect in effects {
         match effect {

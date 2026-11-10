@@ -10,6 +10,8 @@
     <string name="explore_rooms">Räume</string>
     <string name="explore_search_hint">Suchen</string>
     <string name="explore_sort_seen">Zuletzt gesehen</string>
+    <string name="browse_loading">Lade %1$s …</string>
+    <string name="browse_loading_secs">Lade %1$s … %2$d s</string>
     <string name="explore_sort_az">A bis Z</string>
     <string name="explore_bookmarks">Lesezeichen</string>
     <string name="explore_today">Heute</string>
@@ -26,7 +28,7 @@
     <string name="explore_not_seen">noch nicht gesehen</string>
     <string name="explore_fresh_one">1 neue Seite</string>
     <string name="explore_fresh_many">%1$d neue Seiten</string>
-    <string name="explore_fresh_order">Liste aktualisieren</string>
+    <string name="explore_fresh_order">Reihenfolge aktualisieren</string>
     <string name="explore_seen_now">gesehen gerade eben</string>
     <string name="explore_seen_minutes">gesehen vor %1$d Min.</string>
     <string name="explore_seen_hours">gesehen vor %1$d Std.</string>

@@ -2211,6 +2211,12 @@ pub struct BrowseScreen {
     /// again.
     #[serde(default)]
     pub loading: bool,
+    /// The loading state over an empty page (1632, walk 4 new 12): `Lade
+    /// <name> …`, the seconds after three; empty when no page is on its
+    /// way or a cached copy stands while it comes (the status line says
+    /// that).
+    #[serde(default)]
+    pub loading_words: String,
     /// The page: the window's lines, the line it starts at, how many the
     /// page has, and the focused node's resource (`link_2`, `field_1`) or
     /// empty.

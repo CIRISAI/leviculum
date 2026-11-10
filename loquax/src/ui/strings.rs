@@ -48,6 +48,8 @@ leviculum_ui::catalogue! {
     ExploreRooms = "explore_rooms", "Rooms", "Räume";
     ExploreSearchHint = "explore_search_hint", "Search", "Suchen";
     ExploreSortSeen = "explore_sort_seen", "Last seen", "Zuletzt gesehen";
+    BrowseLoading = "browse_loading", "Loading %1$s …", "Lade %1$s …";
+    BrowseLoadingSecs = "browse_loading_secs", "Loading %1$s … %2$d s", "Lade %1$s … %2$d s";
     ExploreSortAz = "explore_sort_az", "A to Z", "A bis Z";
     ExploreBookmarks = "explore_bookmarks", "Bookmarks", "Lesezeichen";
     ExploreToday = "explore_today", "Today", "Heute";
@@ -66,7 +68,11 @@ leviculum_ui::catalogue! {
     ExploreNotSeen = "explore_not_seen", "not seen yet", "noch nicht gesehen";
     ExploreFreshOne = "explore_fresh_one", "1 new page", "1 neue Seite";
     ExploreFreshMany = "explore_fresh_many", "%1$d new pages", "%1$d neue Seiten";
-    ExploreFreshOrder = "explore_fresh_order", "Update the list", "Liste aktualisieren";
+    // The chip's two words (1632, walk 4 new 18): "N new pages" whenever
+    // pages that are not on the list wait behind it; "Update the order"
+    // only when none did and the waiting answer only moves rows that are
+    // there already.
+    ExploreFreshOrder = "explore_fresh_order", "Update the order", "Reihenfolge aktualisieren";
     ExploreSeenNow = "explore_seen_now", "seen just now", "gesehen gerade eben";
     ExploreSeenMinutes = "explore_seen_minutes", "seen %1$d min ago", "gesehen vor %1$d Min.";
     ExploreSeenHours = "explore_seen_hours", "seen %1$d h ago", "gesehen vor %1$d Std.";

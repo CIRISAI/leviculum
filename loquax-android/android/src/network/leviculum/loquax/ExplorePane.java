@@ -69,8 +69,8 @@ final class ExplorePane {
         /** The tab gave way to the chats. */
         void left();
 
-        /** A page it opened is in front: the browser. */
-        void page();
+        /** A page it opened is in front: the browser, for the page named {@code name}. */
+        void page(String name);
 
         /** A server's rooms it opened are in front. */
         void rooms();
@@ -120,6 +120,8 @@ final class ExplorePane {
             return row.kind == Row.PAGE;
         }
     });
+    /** The name of the page a tap opened, for the browser's first frame (1632). */
+    private String opening = "";
     /** The next answer is the reader's own verb's: shown at once. */
     private boolean forced = true;
     private final Adapter adapter = new Adapter();
@@ -141,12 +143,18 @@ final class ExplorePane {
         this.screen = activity;
         this.host = host;
         FrameLayout pane = (FrameLayout) activity.findViewById(R.id.pane_explore);
+        // The column under the chip: the chip sits on the edge between the
+        // search bar and the list (1632, walk 4 new 18: floating 8 dp into
+        // the list it hid the line of the row under it).
+        final FrameLayout head = new FrameLayout(activity);
+        pane.addView(head, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout column = new LinearLayout(activity);
         column.setOrientation(LinearLayout.VERTICAL);
-        pane.addView(column, new FrameLayout.LayoutParams(
+        head.addView(column, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        LinearLayout top = new LinearLayout(activity);
+        final LinearLayout top = new LinearLayout(activity);
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setPadding(dp(12), dp(4), dp(12), dp(2));
         field = new EditText(activity);
@@ -292,16 +300,28 @@ final class ExplorePane {
             public void onScroll(android.widget.AbsListView view, int first, int visible, int total) {
             }
         });
-        FrameLayout stack = new FrameLayout(activity);
-        stack.addView(list, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // The chip's lower half has a band of its own at the list's top,
+        // always there so nothing moves when the chip comes; rows scroll
+        // through it.
+        list.setPadding(0, dp(20), 0, 0);
+        list.setClipToPadding(false);
+        column.addView(list, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         FrameLayout.LayoutParams over = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        over.topMargin = dp(8);
-        stack.addView(fresh, over);
-        column.addView(stack, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        head.addView(fresh, over);
+        // Centred on the bar's bottom edge: half over the bar's padding and
+        // field line, half over the list's first few pixels, not a row's
+        // words.
+        View.OnLayoutChangeListener edge = new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
+                fresh.setTranslationY(top.getBottom() - fresh.getHeight() / 2f);
+            }
+        };
+        top.addOnLayoutChangeListener(edge);
+        fresh.addOnLayoutChangeListener(edge);
     }
 
     /** The list stands at its very top. */
@@ -409,6 +429,7 @@ final class ExplorePane {
     private void tapped(Row row) {
         switch (row.kind) {
             case Row.PAGE:
+                opening = row.words;
                 verb("open", "", Core.str(row.item, "dest"), 0);
                 break;
             case Row.ADDRESS:
@@ -440,6 +461,7 @@ final class ExplorePane {
             public boolean onMenuItemClick(MenuItem item) {
                 int id = item.getItemId();
                 if (id == R.string.explore_open) {
+                    opening = Core.str(page, "label");
                     verb("open", "", dest, 0);
                 } else if (id == R.string.explore_bookmark) {
                     forced = true;
@@ -513,7 +535,8 @@ final class ExplorePane {
         String showing = Core.str(shown, "showing");
         if (showing.equals("browse")) {
             closeSheet();
-            host.page();
+            host.page(opening);
+            opening = "";
             return;
         }
         if (showing.equals("rooms")) {

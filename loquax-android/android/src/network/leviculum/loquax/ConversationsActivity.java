@@ -346,6 +346,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
      * {@link BrowsePane} from the library's scene. Chats or Map leaves it.
      */
     private void browse() {
+        browse("");
+    }
+
+    /** The Browse pane in front, for the page named {@code name} when known (1632). */
+    private void browse(String name) {
         if (query.getVisibility() == View.VISIBLE) {
             searching(false);
         }
@@ -378,7 +383,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.pane_chats).setVisibility(View.GONE);
         findViewById(R.id.pane_map).setVisibility(View.GONE);
         findViewById(R.id.pane_browse).setVisibility(View.VISIBLE);
-        title.setText(R.string.tab_browse);
+        // The page's name from the first frame on (1632, walk 4 new 12:
+        // "Seiten" stood there while the page loaded).
+        if (name.isEmpty()) {
+            title.setText(R.string.tab_browse);
+        } else {
+            title.setText(name);
+        }
         exploreTab(true);
         // The page in front, the search's keyboard goes (1629, walk 3 new
         // 7: it stayed open over half the page).
@@ -386,7 +397,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         if (keyboard != null) {
             keyboard.hideSoftInputFromWindow(getWindow().getDecorView().getWindowToken(), 0);
         }
-        browsePane.show();
+        browsePane.show(name);
     }
 
     /** The Explore button lit (the list, the browser or a hub's rooms in front) or not. */
@@ -433,8 +444,8 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 }
 
                 @Override
-                public void page() {
-                    browse();
+                public void page(String name) {
+                    browse(name);
                 }
 
                 @Override

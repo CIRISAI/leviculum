@@ -358,11 +358,12 @@ fn page(model: &UiModel<session::Line>, when: &str) -> loquax_android::schema::B
         .filter(|l| !l.trim().is_empty())
         .collect();
     println!(
-        "{when}: title={:?} address={:?} status={:?} loading={} sheet={:?} rows={} lines={lines:?}",
+        "{when}: title={:?} address={:?} status={:?} loading={} loading_words={:?} sheet={:?} rows={} lines={lines:?}",
         shown.title,
         shown.address,
         shown.status,
         shown.loading,
+        shown.loading_words,
         shown.sheet,
         shown.rows.len()
     );
@@ -379,6 +380,8 @@ fn page(model: &UiModel<session::Line>, when: &str) -> loquax_android::schema::B
 #[test]
 fn a_page_opened_from_explore_shows_its_loading_line_then_the_page() {
     let (_home, mut model) = phone();
+    let asked = u64::try_from(NOW).expect("positive");
+    model.browse.model.clock = Some(asked);
     tap(&mut model, "tab", "", "", 0);
     tap(&mut model, "open", "", &"22".repeat(16), 0);
     assert_eq!(screen(&model).showing, "browse");
@@ -387,6 +390,16 @@ fn a_page_opened_from_explore_shows_its_loading_line_then_the_page() {
     assert_eq!(loading.title, "IranTalk");
     assert_eq!(loading.status, "lade IranTalk");
     assert!(loading.loading);
+    // 1632, walk 4 new 12: the loading state in the middle, the page's
+    // name in it, the seconds once three have passed.
+    assert_eq!(loading.loading_words, "Lade IranTalk …");
+    model.browse.model.clock = Some(asked + 2);
+    assert_eq!(page(&model, "2 s later").loading_words, "Lade IranTalk …");
+    model.browse.model.clock = Some(asked + 7);
+    assert_eq!(
+        page(&model, "7 s later").loading_words,
+        "Lade IranTalk … 7 s"
+    );
     assert_eq!(loading.sheet, "", "no places list over the page");
     assert!(loading.rows.is_empty());
     update(
@@ -399,6 +412,8 @@ fn a_page_opened_from_explore_shows_its_loading_line_then_the_page() {
     let shown = page(&model, "after the page came");
     assert_eq!(shown.status, "", "the loading line leaves with the page");
     assert!(!shown.loading);
+    assert_eq!(shown.loading_words, "", "and the loading state with it");
+    assert_eq!(model.browse.loading_since, None);
     let text: String = shown
         .lines
         .iter()
@@ -413,7 +428,12 @@ fn a_page_opened_from_explore_shows_its_loading_line_then_the_page() {
             .any(|e| matches!(e, UiEffect::Browse(lnomad::Effect::Navigate(_)))),
         "{effects:?}"
     );
-    assert!(page(&model, "after Los").loading);
+    let again = page(&model, "after Los");
+    assert!(again.loading);
+    // The page stands while it comes again: the status line says so, no
+    // loading state over it.
+    assert_eq!(again.loading_words, "");
+    assert_eq!(again.status, "lade IranTalk");
 }
 
 /// The phone's model on `home` as the session starts it: the store, the
@@ -525,4 +545,54 @@ fn a_restart_lists_what_was_heard_and_holds_the_suggestion() {
         servers(&screen(&unheld)).1.as_deref(),
         Some(near.name.as_str())
     );
+}
+
+/// Walk 4 of 1632, new 14: the browser's "Orte" sheet on the phone said
+/// "Gefundene Knoten" and rows like "RNS Search · 3e5f19fd… · 110
+/// Sprünge". Through the facade: the heading says what the rows are, a
+/// row is a name with when it was heard and how far, no hash, and a hop
+/// count no reader can use says nothing.
+#[test]
+fn the_places_sheet_names_pages_and_never_hashes() {
+    let (_home, mut model) = phone();
+    model.browse.model.clock = Some(u64::try_from(NOW).expect("positive"));
+    heard(&mut model, 0x3e, Some("RNS Search"), 120);
+    update(
+        &mut model,
+        UiEvent::Browse(BrowseEvent::Node(DiscoveredNode {
+            dest_hash: [0x3e; 16],
+            name: Some("RNS Search".into()),
+            first_seen: u64::try_from(NOW - 120).expect("positive"),
+            last_seen: u64::try_from(NOW - 120).expect("positive"),
+            hops: Some(110),
+        })),
+    );
+    tap(&mut model, "tab", "", "", 0);
+    tap(&mut model, "open", "", &"11".repeat(16), 0);
+    browse_verb(&mut model, "tab", "");
+    browse_verb(&mut model, "places", "");
+    let shown = page(&model, "the places sheet");
+    assert_eq!(shown.loading_words, "", "no loading state over the sheet");
+    let rows: Vec<String> = shown.rows.iter().map(|r| r.text.clone()).collect();
+    println!("places rows: {rows:#?}");
+    assert!(rows.iter().any(|r| r == "Gehörte Seiten"), "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|r| r == "RNS Search  ·  gesehen vor 2 Min."),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r == "Radio RPi4  ·  gesehen vor 10 Min.  ·  über 5 Stationen erreichbar"),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.starts_with("Unbenannter Knoten  ·  ")),
+        "{rows:?}"
+    );
+    for row in &rows {
+        assert!(!row.contains("Sprünge") && !row.contains('…'), "{row}");
+        assert!(!row.contains("3e3e") && !row.contains("1111"), "{row}");
+    }
 }

@@ -75,6 +75,12 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
             .map(|c| c.text.resolve(lang))
             .unwrap_or_default(),
         loading: model.browse.model.is_loading(),
+        // Only over an empty page (1632): a sheet open over it, or a page
+        // on screen while it loads again ("Los"), keeps the status line.
+        loading_words: match sheet.is_some() || shows_text(&scene.page.lines) {
+            true => String::new(),
+            false => model.browse.loading_words(lang).unwrap_or_default(),
+        },
         lines: scene
             .page
             .lines
@@ -100,6 +106,13 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
         // The session's to fill, once.
         ..BrowseScreen::default()
     }
+}
+
+/// Whether a page's lines say anything: a run with more than blanks.
+fn shows_text(lines: &[lnomad::app::scene::PageLine]) -> bool {
+    lines
+        .iter()
+        .any(|line| line.runs.iter().any(|run| !run.text.trim().is_empty()))
 }
 
 fn run(run: &Run) -> BrowseRun {
