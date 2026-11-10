@@ -794,22 +794,20 @@ fn sheet_hub<B>(model: &UiModel<B>, hash: [u8; 16]) -> super::settings::Offered 
 
 /// The rooms the hub named (1621): what its notices named when its
 /// sheet asked, or until that answer came what it named when the mailbox
-/// asked (1643), then what the shipped list recorded, each once.
+/// asked (1643), then what the shipped list recorded, each once: a
+/// `#word` and the bare word are one room, spelt as the answer spells it
+/// (1655, walk 9, 46: Minuteman's "lobby" and the list's "#lobby" were two
+/// rows; [`super::hubs::rooms_merged`], the rooms screen's rule since 1652).
 fn sheet_rooms(rooms: &super::rooms::Rooms, hash: &[u8; 16]) -> Vec<String> {
-    let mut out: Vec<String> = match (rooms.named.get(hash), rooms.mailbox_named.get(hash)) {
-        (Some(Named::Rooms(named)), _) => named.clone(),
-        (_, Some(mailbox)) => mailbox.clone(),
-        _ => Vec::new(),
+    let answered: &[String] = match (rooms.named.get(hash), rooms.mailbox_named.get(hash)) {
+        (Some(Named::Rooms(named)), _) => named,
+        (_, Some(mailbox)) => mailbox,
+        _ => &[],
     };
-    for room in super::hubs::named(hash)
+    let shipped = super::hubs::named(hash)
         .map(|h| h.rooms)
-        .unwrap_or_default()
-    {
-        if !out.contains(&room) {
-            out.push(room);
-        }
-    }
-    out
+        .unwrap_or_default();
+    super::hubs::rooms_merged(answered, &shipped)
 }
 
 /// The sentence under the sheet's rooms (1621): asking while the question
@@ -2385,6 +2383,43 @@ mod tests {
             explore(&mut model, ExploreEvent::Hub(silent)),
             [UiEffect::Rooms(RoomAsk::Peek { hub: silent })]
         );
+    }
+
+    /// One room is one row on the sheet (1655, walk 9, 46: Minuteman
+    /// listed "lobby" and "#lobby"). Its answer says "lobby", the shipped
+    /// list "#lobby"; the answer's spelling wins, as on the rooms screen
+    /// (1652). The mailbox's rooms merge alike.
+    #[test]
+    fn a_room_the_answer_and_the_shipped_list_spell_apart_is_one_row() {
+        let Some(minuteman) = crate::ui::hubs::shipped()
+            .into_iter()
+            .find(|h| h.name == "Minuteman")
+        else {
+            panic!("Minuteman is shipped");
+        };
+        assert_eq!(minuteman.rooms, ["#lobby"], "the shipped spelling");
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::Hub(minuteman.hash));
+        update(
+            &mut model,
+            UiEvent::Rooms(RoomsEvent::Peeked {
+                hub: minuteman.hash,
+                rooms: Some(vec!["lobby".into(), "Radio".into()]),
+            }),
+        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms, ["lobby", "Radio"]);
+        assert_eq!(sheet_picks(&model), 3, "the button and two rooms");
+        // Before any answer, the mailbox's spelling against the shipped one.
+        let mut fresh = phone();
+        fresh
+            .rooms
+            .mailbox_named
+            .insert(minuteman.hash, vec!["lobby".into()]);
+        update(&mut fresh, UiEvent::Tab(TabId::Explore));
+        explore(&mut fresh, ExploreEvent::Hub(minuteman.hash));
+        assert_eq!(node(&fresh).sheet.expect("the sheet").rooms, ["lobby"]);
     }
 
     /// 1643: the rooms the mailbox's question named, pulled with the hub,
