@@ -44,6 +44,7 @@ leviculum_ui::catalogue! {
     Field = "browser_field", "Field %1$d", "Feld %1$d";
     // The status chip over the page's last row.
     Loading = "browser_loading", "loading %1$s", "lade %1$s";
+    CachedRefreshing = "browser_cached_refreshing", "from the page cache · updating", "aus dem Seitenspeicher · wird aktualisiert";
     Downloading = "browser_downloading", "downloading %1$s", "lade %1$s herunter";
     LinkTarget = "browser_link_target", "→ %1$s", "→ %1$s";
     // The intents, as a menu or a screen reader names them.

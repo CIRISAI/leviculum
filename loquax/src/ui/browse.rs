@@ -93,10 +93,17 @@ impl Browse {
     /// yet: it shows its start screen with the places panel open over it,
     /// the bookmarks and the NomadNet nodes the announces named, which is
     /// the list the terminal's browser opens on.
+    ///
+    /// A page asked for is no "first time" (1629, walk 3 new 1): Explore's
+    /// open clears the title and starts the fetch, and the phone's pane
+    /// says this verb right after. The start screen goes through the load
+    /// path, which would take that fetch as its own: the loading line
+    /// gone, the places list under the page's name, and the start screen
+    /// cached under the page's address.
     pub fn show(&mut self, lang: Lang) {
         self.open = true;
         self.model.lang = lang;
-        if self.model.title.is_empty() {
+        if self.model.title.is_empty() && !self.model.is_loading() {
             show_start_screen(&mut self.model);
         }
     }
@@ -121,6 +128,13 @@ impl Browse {
         self.model.lang = lang;
         let mut effects = lnomad::app::start_trail(&mut self.model);
         effects.extend(self.fold(AppEvent::Intent(BrowseIntent::Go { url: Some(url) })));
+        // A page from the cache shows at once and is asked for again
+        // (1629, walk 3 new 2): a cached "Request Not Allowed" stood as if
+        // it were the page. The line says it is the cache's while the
+        // fresh copy comes.
+        if self.model.cached_view && !self.model.is_loading() {
+            effects.extend(self.fold(AppEvent::Intent(BrowseIntent::Reload)));
+        }
         effects
     }
 

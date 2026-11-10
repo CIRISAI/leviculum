@@ -332,3 +332,88 @@ fn a_server_opens_its_sheet_and_only_the_button_chooses_it() {
     );
     assert_eq!(screen(&model).showing, "rooms");
 }
+
+/// What Java's `Core.browse` sends for `verb`, folded.
+fn browse_verb(model: &mut UiModel<session::Line>, verb: &str, text: &str) -> Vec<UiEffect> {
+    let request: Request = schema::decode(&java_map(&[
+        ("t", Java::Str("browse")),
+        ("verb", Java::Str(verb)),
+        ("node", Java::Str("")),
+        ("text", Java::Str(text)),
+    ]))
+    .expect("a request");
+    match session::decode(request).expect("a browse verb") {
+        Decoded::Platform(Platform::Browse(event)) => update(model, event),
+        _ => panic!("a browse verb is the platform's"),
+    }
+}
+
+/// What the Browse pane reads back, said for the report as the dump a
+/// device walk would show.
+fn page(model: &UiModel<session::Line>, when: &str) -> loquax_android::schema::BrowseScreen {
+    let shown: loquax_android::schema::BrowseScreen =
+        schema::decode(&loquax_android::browser::encode(model, Lang::De, 1)).expect("the answer");
+    let lines: Vec<String> = shown
+        .lines
+        .iter()
+        .map(|l| l.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    println!(
+        "{when}: title={:?} address={:?} status={:?} loading={} sheet={:?} rows={} lines={lines:?}",
+        shown.title,
+        shown.address,
+        shown.status,
+        shown.loading,
+        shown.sheet,
+        shown.rows.len()
+    );
+    shown
+}
+
+/// Walk 3 new 1 (1629): a page opened from Explore loads. The phone
+/// says, in this order, Explore's `open`, then (its next screen saying
+/// "browse") the Browse pane's `tab`; the page arrives from the fetch.
+/// Before the fix the `tab` drew the start screen through the load path,
+/// which took the fetch in flight: no loading line, the places list
+/// under the page's name, and the page never came. "Los" on the unchanged
+/// address waits while the page is on its way and loads it again after.
+#[test]
+fn a_page_opened_from_explore_shows_its_loading_line_then_the_page() {
+    let (_home, mut model) = phone();
+    tap(&mut model, "tab", "", "", 0);
+    tap(&mut model, "open", "", &"22".repeat(16), 0);
+    assert_eq!(screen(&model).showing, "browse");
+    browse_verb(&mut model, "tab", "");
+    let loading = page(&model, "after open and tab");
+    assert_eq!(loading.title, "IranTalk");
+    assert_eq!(loading.status, "lade IranTalk");
+    assert!(loading.loading);
+    assert_eq!(loading.sheet, "", "no places list over the page");
+    assert!(loading.rows.is_empty());
+    update(
+        &mut model,
+        UiEvent::Browse(BrowseEvent::Loaded {
+            micron: "Willkommen bei IranTalk".into(),
+            title: "IranTalk".into(),
+        }),
+    );
+    let shown = page(&model, "after the page came");
+    assert_eq!(shown.status, "", "the loading line leaves with the page");
+    assert!(!shown.loading);
+    let text: String = shown
+        .lines
+        .iter()
+        .flat_map(|l| l.runs.iter().map(|r| r.text.clone()))
+        .collect();
+    assert!(text.contains("Willkommen bei IranTalk"), "{text}");
+    // "Los" on the unchanged address, nothing on its way: the page again.
+    let effects = browse_verb(&mut model, "reload", "");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, UiEffect::Browse(lnomad::Effect::Navigate(_)))),
+        "{effects:?}"
+    );
+    assert!(page(&model, "after Los").loading);
+}

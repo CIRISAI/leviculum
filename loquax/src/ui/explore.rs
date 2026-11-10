@@ -2047,6 +2047,129 @@ mod tests {
         assert!(page_text(&model).contains("Zebra page"));
     }
 
+    /// A page opened from Explore loads on the phone (1629, walk 3 new 1).
+    /// The phone's shell does what the 1621 test above never did: Explore's
+    /// next screen says "browse", the activity brings the Browse pane to
+    /// the front and the pane says the `tab` verb. That verb found the
+    /// browser with no title (the fresh trail had cleared it) and drew the
+    /// start screen through the load path, which took the fetch in flight
+    /// as if the start screen were its page: no loading line, the places
+    /// list under the page's name, and the start screen cached under the
+    /// page's address for the next open.
+    #[test]
+    fn a_page_opened_from_explore_loads_when_the_phone_brings_its_tab_to_the_front() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let effects = explore(&mut model, ExploreEvent::OpenPage([0x22; 16]));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, UiEffect::Browse(lnomad::Effect::Navigate(_)))),
+            "{effects:?}"
+        );
+        // The pane in front, as `BrowsePane.show` says it.
+        let effects = update(&mut model, UiEvent::Tab(TabId::Browse));
+        assert!(effects.is_empty(), "the tab asks nothing: {effects:?}");
+        assert!(
+            model.browse.model.is_loading(),
+            "the fetch is still in flight"
+        );
+        let browser = model
+            .scene(LayoutClass::Compact)
+            .browse
+            .expect("the browser");
+        assert!(browser.places.is_none(), "no start view over the page");
+        assert_eq!(
+            browser.status.map(|c| c.text.resolve(Lang::De)).as_deref(),
+            Some("lade Alpha Relay")
+        );
+        assert!(page_text(&model).trim().is_empty(), "{}", page_text(&model));
+        // The page arrives and is the page, under its name.
+        loaded(&mut model, "Alpha page");
+        assert!(
+            page_text(&model).contains("Alpha page"),
+            "{}",
+            page_text(&model)
+        );
+        let browser = model
+            .scene(LayoutClass::Compact)
+            .browse
+            .expect("the browser");
+        assert!(
+            browser.status.is_none(),
+            "the loading line leaves with the page"
+        );
+        assert_eq!(browser.address.value, "Alpha Relay");
+        // A second `tab` (the pane shown again) leaves the page standing.
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        assert!(
+            page_text(&model).contains("Alpha page"),
+            "{}",
+            page_text(&model)
+        );
+        // Back to Explore and open again: the cache holds the page, not
+        // the start screen.
+        back(&mut model);
+        explore(&mut model, ExploreEvent::OpenPage([0x22; 16]));
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        assert!(
+            page_text(&model).contains("Alpha page"),
+            "{}",
+            page_text(&model)
+        );
+    }
+
+    /// A page seen before opens from the cache at once and is asked for
+    /// again (1629, walk 3 new 2): the line says it is the cache's while
+    /// the fresh copy comes, and leaves when it is there.
+    #[test]
+    fn a_cached_page_says_it_is_cached_while_the_fresh_copy_comes() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::OpenPage([0x22; 16]));
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        loaded(&mut model, "Request Not Allowed");
+        back(&mut model);
+        let effects = explore(&mut model, ExploreEvent::OpenPage([0x22; 16]));
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, UiEffect::Browse(lnomad::Effect::Navigate(_)))),
+            "{effects:?}"
+        );
+        assert!(page_text(&model).contains("Request Not Allowed"));
+        let status = |model: &UiModel<Buffer>| {
+            model
+                .scene(LayoutClass::Compact)
+                .browse
+                .expect("the browser")
+                .status
+                .map(|c| c.text.resolve(Lang::De))
+        };
+        assert_eq!(
+            status(&model).as_deref(),
+            Some("aus dem Seitenspeicher · wird aktualisiert")
+        );
+        loaded(&mut model, "The waterfall");
+        assert!(page_text(&model).contains("The waterfall"));
+        assert_eq!(status(&model), None, "no line once the page is fresh");
+    }
+
+    /// The control: the tab opened on its own, with nothing shown and
+    /// nothing loading, still shows the start screen and its places list.
+    #[test]
+    fn the_control_the_tab_opened_bare_shows_the_start_screen() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Browse));
+        let browser = model
+            .scene(LayoutClass::Compact)
+            .browse
+            .expect("the browser");
+        assert!(browser.places.is_some(), "the places list over the start");
+        assert!(!model.browse.model.is_loading());
+    }
+
     /// A server's notices name its rooms as the probe read them: the word
     /// after `/join` and every `#word`, once each.
     #[test]

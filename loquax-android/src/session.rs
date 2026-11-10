@@ -4602,6 +4602,18 @@ fn redraws(event: &UiEvent) -> bool {
             // What the hub said, or a verb of the Rooms tab (1384): the
             // pane is drawn again.
             | UiEvent::Rooms(_)
+            // What the fetch brought (1629, walk 3: a page that came was
+            // drawn only after the next tap, and "lade" stood 30 s under
+            // it). Not the tick, which comes every turn, nor a node heard
+            // (1491, 1595: no list moves for it).
+            | UiEvent::Browse(
+                BrowseEvent::Loaded { .. }
+                    | BrowseEvent::Failed(_)
+                    | BrowseEvent::FailedText(_)
+                    | BrowseEvent::Downloaded { .. }
+                    | BrowseEvent::DownloadFailed(_)
+                    | BrowseEvent::Identifying { .. }
+            )
     )
 }
 
@@ -4938,6 +4950,32 @@ pub fn settings_list(lang: Lang) -> schema::SettingsList {
 
 #[cfg(test)]
 mod tests {
+
+    /// 1629 (walk 3 new 1 and 2): what the fetch brings marks the session
+    /// changed, so the Browse pane draws the page when it comes, not at the
+    /// next tap; the tick, every turn, does not.
+    #[test]
+    fn a_page_the_fetch_brought_redraws_and_the_tick_does_not() {
+        use super::*;
+        let page = UiEvent::Browse(BrowseEvent::Loaded {
+            micron: "page".into(),
+            title: "page".into(),
+        });
+        assert!(redraws(&page));
+        assert!(redraws(&UiEvent::Browse(BrowseEvent::Failed(
+            "no path".into()
+        ))));
+        assert!(!redraws(&UiEvent::Browse(BrowseEvent::Tick)));
+        assert!(!redraws(&UiEvent::Browse(BrowseEvent::Node(
+            lnomad::DiscoveredNode {
+                dest_hash: [1; 16],
+                name: None,
+                first_seen: 0,
+                last_seen: 0,
+                hops: None,
+            }
+        ))));
+    }
 
     /// 1450 (walk 1, finding 21): the phone's settings list is the core's
     /// one list, the nine sections in their order, in the phone's

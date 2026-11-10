@@ -2190,6 +2190,11 @@ pub struct BrowseScreen {
     pub chips: Vec<String>,
     #[serde(default)]
     pub status: String,
+    /// A page or a file is on its way (1629): "Los" with the address
+    /// unchanged waits for it, and with nothing on its way loads the page
+    /// again.
+    #[serde(default)]
+    pub loading: bool,
     /// The page: the window's lines, the line it starts at, how many the
     /// page has, and the focused node's resource (`link_2`, `field_1`) or
     /// empty.

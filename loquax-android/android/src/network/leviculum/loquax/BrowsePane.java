@@ -104,9 +104,13 @@ final class BrowsePane {
             @Override
             public boolean onEditorAction(TextView v, int action, KeyEvent event) {
                 String typed = v.getText().toString().trim();
-                // The field still says the node's own address: nothing to go to.
+                // The field still says the node's own address: the page
+                // again, unless it is on its way already (1629, walk 3: a
+                // page that never came could not be asked for again).
                 if (!typed.isEmpty() && !typed.equals(Core.str(last, "dest"))) {
                     verb("go", "", typed);
+                } else if (!typed.isEmpty() && !Core.bool(last, "loading")) {
+                    verb("reload", "", "");
                 }
                 address.clearFocus();
                 return true;

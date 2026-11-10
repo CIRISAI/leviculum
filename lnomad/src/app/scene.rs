@@ -417,7 +417,11 @@ pub(crate) fn state(model: &Model) -> Vec<Chip> {
 }
 
 fn status(model: &Model) -> Option<Chip> {
-    let text = if let Some(pending) = &model.pending {
+    let text = if model.pending.is_some() && model.cached_view {
+        // The cached page stands while its fresh copy comes (1629, walk 3
+        // new 2: "loading" under a page read as if the page were not there).
+        Text::key(StrId::CachedRefreshing)
+    } else if let Some(pending) = &model.pending {
         let what = model
             .label
             .clone()
@@ -425,8 +429,13 @@ fn status(model: &Model) -> Option<Chip> {
         with(StrId::Loading, what)
     } else if let Some(name) = &model.download {
         with(StrId::Downloading, name.clone())
+    } else if let Some(target) = focused_link_target(model) {
+        with(StrId::LinkTarget, target)
+    } else if model.hosted && model.cached_view {
+        // A host's line is the only state it draws (the phone has no chips).
+        Text::key(StrId::Cached)
     } else {
-        with(StrId::LinkTarget, focused_link_target(model)?)
+        return None;
     };
     Some(chip(ChipId::Status, text))
 }

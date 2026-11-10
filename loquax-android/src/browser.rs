@@ -74,6 +74,7 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> BrowseScreen {
             .as_ref()
             .map(|c| c.text.resolve(lang))
             .unwrap_or_default(),
+        loading: model.browse.model.is_loading(),
         lines: scene
             .page
             .lines

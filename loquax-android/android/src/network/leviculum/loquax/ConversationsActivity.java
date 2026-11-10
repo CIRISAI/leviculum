@@ -918,6 +918,12 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                     // 2 of 17024c3a: the list never refreshed itself).
                     explorePane.draw();
                 }
+                if (onBrowse && browsePane != null) {
+                    // The page the fetch brought (1629, walk 3: the pane
+                    // drew only after a tap, so "lade" stood 30 s under a
+                    // page and a page that came was never shown).
+                    browsePane.draw();
+                }
             }
         }
     };
