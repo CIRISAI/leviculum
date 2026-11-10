@@ -713,6 +713,8 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
             // count bounds them.
             dup_cap_ids: dup.processed_cap + dup.departed_cap + store.messages,
             origin_slots: peering.origin_slots,
+            store_index_entries: store.index_entry_bytes,
+            store_index_spare: store.index_spare_bytes,
             transport,
         }
     }
@@ -2347,8 +2349,9 @@ impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
         let requested = self.census.take_request();
         if requested || now_ms >= self.next_census_at {
             let transport = crate::census::TransportCensus::of(core.storage());
-            self.census(&ready, transport)
-                .log(if requested { "signal" } else { "periodic" });
+            let census = self.census(&ready, transport);
+            census.log(if requested { "signal" } else { "periodic" });
+            self.census.publish(&census);
             if !requested {
                 self.next_census_at = now_ms + CENSUS_PERIOD_MS;
             }

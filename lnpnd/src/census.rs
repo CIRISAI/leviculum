@@ -27,7 +27,15 @@
 //! `rss_kb`, `stored`, `peered`, `events_queued`, and the `dup` column by
 //! its parts (order 1558): `processed_ids`, `departed_ids`, `origin_ids`,
 //! the bound the three are held to, `dup_cap_ids`, and the origins' hash
-//! table buckets, `origin_slots`, which name a table doubling.
+//! table buckets, `origin_slots`, which name a table doubling. Then the
+//! `store_index` column by its parts (order 1648): `store_index_entries`,
+//! the live entries' own bytes, and `store_index_spare`, what the
+//! containers allocate beyond them; the two sum to the column.
+//!
+//! The SIGUSR1 dump carries the latest line too, and its `tables` in the
+//! dump's total (order 1648): the `gap:` line subtracts the role's tables
+//! with the transport's, so its `unaccounted` is what neither counts
+//! ([`CensusHandle::latest`]).
 //!
 //! After them, the node's transport tables (order 1586): `transport`, the
 //! core storage's own byte estimate (the SIGUSR1 dump's tracked total),
@@ -44,7 +52,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SendError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::engine::EngineEvent;
 
@@ -171,6 +179,10 @@ pub struct PnCensus {
     /// Buckets of the origins' hash table: a jump in `dup` with this
     /// doubled is the table resizing, not growth.
     pub origin_slots: usize,
+    /// The `store_index` column by its parts (order 1648): the live
+    /// entries' own bytes, and what the containers allocate beyond them.
+    pub store_index_entries: usize,
+    pub store_index_spare: usize,
     /// The node's transport tables (order 1586, [`TransportCensus`]).
     pub transport: TransportCensus,
 }
@@ -268,7 +280,8 @@ impl PnCensus {
         }
         line.push_str(&format!(
             " tables={} rss_kb={} stored={} peered={} events_queued={} processed_ids={} \
-             departed_ids={} origin_ids={} dup_cap_ids={} origin_slots={} transport={} \
+             departed_ids={} origin_ids={} dup_cap_ids={} origin_slots={} \
+             store_index_entries={} store_index_spare={} transport={} \
              transport_entries={} transport_unbounded={} transport_over={}",
             self.tables(),
             self.rss_kb,
@@ -280,6 +293,8 @@ impl PnCensus {
             self.origin_ids,
             self.dup_cap_ids,
             self.origin_slots,
+            self.store_index_entries,
+            self.store_index_spare,
             self.transport.bytes,
             self.transport.entries(),
             self.transport.unbounded(),
@@ -313,6 +328,8 @@ impl PnCensus {
             origin_ids = self.origin_ids,
             dup_cap_ids = self.dup_cap_ids,
             origin_slots = self.origin_slots,
+            store_index_entries = self.store_index_entries,
+            store_index_spare = self.store_index_spare,
             transport = self.transport.bytes,
             transport_entries = self.transport.entries(),
             transport_unbounded = self.transport.unbounded(),
@@ -378,6 +395,14 @@ impl From<Sender<EngineEvent>> for EventSender {
 pub struct CensusHandle {
     requested: Arc<AtomicBool>,
     counts: Arc<EventCounts>,
+    latest: Arc<Mutex<Latest>>,
+}
+
+/// The last census the engine took, and how many it has taken.
+#[derive(Default)]
+struct Latest {
+    taken: u64,
+    census: Option<PnCensus>,
 }
 
 impl CensusHandle {
@@ -385,7 +410,32 @@ impl CensusHandle {
         Self {
             requested: Arc::default(),
             counts: Arc::clone(&events.counts),
+            latest: Arc::default(),
         }
+    }
+
+    /// The engine took a census: keep it for the SIGUSR1 dump.
+    pub(crate) fn publish(&self, census: &PnCensus) {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        latest.taken += 1;
+        latest.census = Some(census.clone());
+    }
+
+    /// How many censuses the engine has taken, and the last of them.
+    pub fn latest(&self) -> (u64, Option<PnCensus>) {
+        let latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        (latest.taken, latest.census.clone())
+    }
+
+    /// The SIGUSR1 dump's section of the role (order 1648): the census
+    /// line, and its `tables` as the bytes the dump adds to its total.
+    /// `None` before the engine took one.
+    pub fn dump_section(&self) -> Option<(String, u64)> {
+        let census = self.latest().1?;
+        Some((
+            format!("{}\n", census.line()),
+            u64::try_from(census.tables()).unwrap_or(u64::MAX),
+        ))
     }
 
     /// Ask for a `PN_CENSUS` line at the engine's next tick.
@@ -603,6 +653,37 @@ mod tests {
             "{}",
             transport.detail()
         );
+    }
+
+    /// Order 1648: the dump's section is the last census the engine took,
+    /// its line and its `tables`, and nothing before the first.
+    #[test]
+    fn the_dump_section_is_the_last_census_taken() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let handle = CensusHandle::new(&EventSender::from(tx));
+        assert_eq!(handle.latest().0, 0);
+        assert_eq!(handle.dump_section(), None);
+        for store_index in [10, 7000] {
+            handle.publish(&PnCensus {
+                store_index,
+                store_index_entries: store_index - 3,
+                store_index_spare: 3,
+                peers: 5,
+                ..PnCensus::default()
+            });
+        }
+        assert_eq!(handle.latest().0, 2);
+        let (line, bytes) = handle.dump_section().expect("a census was taken");
+        assert_eq!(bytes, 7005);
+        assert!(
+            line.starts_with("PN_CENSUS peers=5 store_index=7000 "),
+            "{line}"
+        );
+        assert!(
+            line.contains(" store_index_entries=6997 store_index_spare=3 "),
+            "{line}"
+        );
+        assert!(line.ends_with('\n'), "{line:?}");
     }
 
     #[test]

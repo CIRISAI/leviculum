@@ -889,8 +889,16 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
             },
             _ = sigterm.recv() => break "SIGTERM",
             _ = sigusr1.recv() => {
+                let (taken, _) = census.latest();
                 census.request();
-                eprint!("{}", census_dump(&node));
+                // The engine takes the census at its next tick; the dump
+                // waits for it so its total holds the role's tables of
+                // now, and takes the last one if the tick is late.
+                let deadline = tokio::time::Instant::now() + CENSUS_WAIT;
+                while census.latest().0 == taken && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                eprint!("{}", census_dump(&node, census.dump_section()));
             }
         }
     };
@@ -900,13 +908,30 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The SIGUSR1 dump: the composed census, then the measured live line in a
-/// build that can measure it. Written in one piece, because periculum tells
-/// a fresh dump from the last by its `gap:` line and reads each section as
-/// the last line of its kind.
-fn census_dump(node: &leviculum_std::ReticulumNode) -> String {
+/// How long a SIGUSR1 dump waits for the census it asked the engine for.
+const CENSUS_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The SIGUSR1 dump: the node's census, the role's `PN_CENSUS` line under
+/// it, one total over both, then the measured live line in a build that
+/// can measure it. The total is what the `gap:` line subtracts as
+/// `tracked`, so it holds the role's tables (order 1648): before, it held
+/// the transport's alone and the gap's `unaccounted` counted the whole
+/// store index. Written in one piece, because periculum tells a fresh dump
+/// from the last by its `gap:` line and reads each section as the last
+/// line of its kind.
+fn census_dump(node: &leviculum_std::ReticulumNode, role: Option<(String, u64)>) -> String {
+    let (own, own_bytes) = role.unwrap_or_else(|| {
+        (
+            "PN_CENSUS none yet: the engine has not registered\n".into(),
+            0,
+        )
+    });
     #[allow(unused_mut)]
-    let mut dump = leviculum_std::reticulum::compose_diagnostic_dump(node.diagnostic_dump());
+    let mut dump = leviculum_std::census::compose_multi_node_dump(
+        &[("lnpnd".to_string(), node.diagnostic_dump())],
+        &own,
+        own_bytes,
+    );
     #[cfg(feature = "heap-accounting")]
     dump.push_str(&leviculum_std::heap_accounting::measured_live_line(
         if cfg!(feature = "alloc-mimalloc") {

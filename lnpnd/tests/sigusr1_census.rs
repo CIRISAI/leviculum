@@ -173,13 +173,15 @@ async fn census_after_sigusr1(dump_complete: impl Fn(&str) -> bool) -> String {
 /// The role's own census event (order 1515), asked for by the same signal.
 const PN_CENSUS: &str = "PN_CENSUS";
 
-/// One `PN_CENSUS` line, from the signal and not the ten-minute period,
-/// carrying every table column and the resident set.
+/// One `PN_CENSUS` event, from the signal and not the ten-minute period,
+/// carrying every table column and the resident set. The dump's own copy
+/// of the line ([`assert_dump_tracks_the_role`]) is not an event.
 fn assert_pn_census(text: &str) {
     let lines: Vec<String> = text
         .lines()
         .filter(|l| l.contains(PN_CENSUS))
         .map(plain)
+        .filter(|l| !l.starts_with("PN_CENSUS "))
         .collect();
     assert_eq!(
         lines.len(),
@@ -202,6 +204,39 @@ fn assert_pn_census(text: &str) {
         .find_map(|field| field.strip_prefix("rss_kb="))
         .and_then(|value| value.parse::<u64>().ok());
     assert!(rss.is_some_and(|kb| kb > 0), "{line}");
+}
+
+/// Order 1648: the dump carries the role's census line under the node's,
+/// and its total, the `tracked` the gap line subtracts, is the node's
+/// total plus the role's `tables`.
+fn assert_dump_tracks_the_role(text: &str, gap: &str) {
+    let number_after = |prefix: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("no `{prefix}` line; it said:\n{text}"))
+    };
+    let node = number_after("=== Node total estimated: ");
+    let total = number_after("=== Total estimated: ");
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("PN_CENSUS "))
+        .unwrap_or_default();
+    let tables = line
+        .split_whitespace()
+        .find_map(|f| f.strip_prefix("tables="))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("no tables= in the dump's line: {line}"));
+    assert!(tables > 0, "the role holds tables: {line}");
+    assert_eq!(
+        total,
+        node + tables,
+        "the total must hold the role's tables; {line}"
+    );
+    if !gap.contains("(model, not subtracted)") {
+        assert_eq!(gap_term(gap, "- tracked "), Some(total), "{gap}");
+    }
 }
 
 /// The start's store limit line (order 1548): one, before the census, the
@@ -291,6 +326,7 @@ async fn sigusr1_prints_the_census_with_live_n_a() {
             .await;
     let gap = assert_census_shape(&text);
     assert_pn_census(&text);
+    assert_dump_tracks_the_role(&text, &gap);
     assert_store_limit_line(&text);
     assert!(gap.contains("; - live n/a;"), "{gap}");
     assert_eq!(gap_term(&gap, "- live "), None, "{gap}");
@@ -312,6 +348,7 @@ async fn sigusr1_prints_measured_live_bytes_and_the_sampler() {
     .await;
     let gap = assert_census_shape(&text);
     assert_pn_census(&text);
+    assert_dump_tracks_the_role(&text, &gap);
     assert_store_limit_line(&text);
     let live = gap_term(&gap, "- live ").unwrap_or_else(|| panic!("live not measured: {gap}"));
     assert!(live > 0, "{gap}");

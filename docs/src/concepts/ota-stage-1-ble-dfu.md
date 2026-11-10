@@ -311,8 +311,8 @@ This page, written two days before #235 landed, said the control frame
 "cannot be the one we have" and asked for the shape the propagation
 node's control destination has: request over a link, identity taken
 from the link, checked against an operator list, typed refusal when
-absent (`answer_control`, `lnpnd/src/engine.rs:1533`; the check at
-`lnpnd/src/engine.rs:1543`). That shape now exists on the board itself,
+absent (`answer_control`, `lnpnd/src/engine.rs:1535`; the check at
+`lnpnd/src/engine.rs:1545`). That shape now exists on the board itself,
 on the `rnstransport.remote.management` destination. The unauthenticated
 USB envelope (#238, `TYPE_RESET` at `leviculum-core/src/envelope.rs:79`)
 stays what it was, a cable protocol, and stage 1 does not touch it.

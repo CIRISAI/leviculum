@@ -133,7 +133,7 @@ more candidates pressing on the 16-slot table (D1).
 Test: an mvr driving `handle_announce` at hops 5-6 asserting
 `Added`, board config — one assertion beside lnpnd's
 `a_sync_from_a_client_or_from_beyond_the_depth_peers_nobody`
-(`lnpnd/src/engine.rs:3533`).
+(`lnpnd/src/engine.rs:3536`).
 **Fixed in d2a9dcfb**: the board builds its table from
 `board_peering_config` (`leviculum-nrf/pn-store`), whose
 `BOARD_AUTOPEER_MAXDEPTH` is 6 with lxmd's generated config as its
@@ -274,7 +274,7 @@ Price to adopt: 0 B — the link is still up when
 `on_inbound_resource` runs on the board's synchronous event path, so
 its hop count is a read, not a new field.
 Test: the lnpnd rule's test shape
-(`lnpnd/src/engine.rs:3682-3689`) replayed through the board engine.
+(`lnpnd/src/engine.rs:3685-3692`) replayed through the board engine.
 **Fixed in 00ac770b**: the board reads the link's hop count at the
 resource advertisement, while the link certainly exists, into one slot
 (`AdvertisedHops`, `leviculum-nrf/sync-batch`; one because D14 admits
@@ -617,7 +617,7 @@ Pinned by `four_links_advertising_at_once_get_what_the_reserve_funds`
 lnpnd and the reference.** lnpnd tears down a propagation link
 without payload after `PROPAGATION_LINK_MAX_INACTIVITY_SECS` = 180 s
 (`leviculum-lxmf/src/constants.rs:30`, applied `close_idle_links`,
-`lnpnd/src/engine.rs:1369`, the reference's
+`lnpnd/src/engine.rs:1371`, the reference's
 `reference/LXMF/LXMF/LXMRouter.py:968-974`). The board has no such
 pass; its inbound links fall to the core's generic stale rule,
 keepalive 360 s × 2 + 5 s grace
@@ -636,7 +636,7 @@ links reading `no_data_for_ms`, the lnpnd loop transplanted; a few
 hundred bytes of flash.
 Test: lnpnd's
 `an_idle_inbound_link_is_torn_down_after_the_reference_bound`
-(`lnpnd/src/engine.rs:4170`) through the board engine.
+(`lnpnd/src/engine.rs:4173`) through the board engine.
 **Fixed in 5c82832d**: one rule for both stacks, `link_idle_past_bound`
 (`leviculum-lxmf`), used by lnpnd's `close_idle_links` and by the
 board's sweep in `settle` (`tick_idle_links`, at most 15 s late on a
@@ -674,7 +674,7 @@ shortfalls re-listed on the client's next round.
 lnpnd registers the reference's control destination with
 `/pn/get/stats`, `/pn/peer/sync`, `/pn/peer/unpeer` behind the
 identity allow list (`register_control_handlers`,
-`lnpnd/src/engine.rs:1022-1026`, the codec in
+`lnpnd/src/engine.rs:1024-1028`, the codec in
 `leviculum-lxmf/src/control.rs:35-39`, against
 `reference/LXMF/LXMF/LXMRouter.py:672-676` and `:89-91`). The board
 registers nothing of it.
