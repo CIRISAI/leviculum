@@ -324,10 +324,14 @@ final class ExplorePane {
         fresh.addOnLayoutChangeListener(edge);
     }
 
-    /** The list stands at its very top. */
+    /**
+     * The list stands at its very top: the first row at or under the
+     * band's resting 20 dp (the chip's band, {@link #band}, is deeper and
+     * would otherwise take a list kept at its top for a scrolled one).
+     */
     private boolean atTop() {
         return list.getChildCount() == 0
-                || (list.getFirstVisiblePosition() == 0 && topOfFirst() >= list.getPaddingTop());
+                || (list.getFirstVisiblePosition() == 0 && topOfFirst() >= dp(20));
     }
 
     /** What waits behind the chip, offered again as the screen stands now (1629). */
@@ -416,10 +420,32 @@ final class ExplorePane {
         }
     }
 
+    /**
+     * The list's top band follows the chip (1639, walk 5 new 18: scrolled,
+     * the chip still covered the top row's name). Without it, 20 dp the
+     * rows scroll through; with it, the chip's lower half and 8 dp under
+     * it, and the rows clipped there, so no row's words stand under the
+     * chip. The rows on screen stay on their pixels either way.
+     */
+    private void band(boolean chip) {
+        int want = chip ? Math.max(dp(28), fresh.getHeight() / 2 + dp(8)) : dp(20);
+        if (list.getPaddingTop() == want && list.getClipToPadding() == chip) {
+            return;
+        }
+        int first = firstOnScreen();
+        int top = topOfFirst();
+        list.setPadding(0, want, 0, 0);
+        list.setClipToPadding(chip);
+        if (first >= 0) {
+            list.setSelectionFromTop(first, ExploreRows.fromTop(top, want));
+        }
+    }
+
     /** The chip: how many new pages wait, or gone. */
     private void chip() {
         if (!rows.waits()) {
             fresh.setVisibility(View.GONE);
+            band(false);
             return;
         }
         int n = rows.fresh();
@@ -428,6 +454,7 @@ final class ExplorePane {
                 : screen.getString(R.string.explore_fresh_order);
         fresh.setText(words);
         fresh.setVisibility(View.VISIBLE);
+        band(true);
     }
 
     private void tapped(Row row) {
