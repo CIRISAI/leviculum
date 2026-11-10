@@ -54,6 +54,7 @@ final class ExploreRowsTest {
         theTopAtRestFills();
         aTapOpensTheRowItHit();
         theScrolledListHoldsStill();
+        aWaitingAnswerStillRefreshesTheWords();
 
         check(ExploreRows.id("page:aa") == ExploreRows.id("page:aa"), "an id is stable");
         check(ExploreRows.id("page:aa") != ExploreRows.id("page:ab"), "two rows, two ids");
@@ -352,6 +353,57 @@ final class ExploreRowsTest {
             check(controlTop == startTop + 10 * band,
                     "the control drifts one band per answer: " + controlTop);
         }
+    }
+
+    /** A row "key|words": the key before the bar. */
+    private static final ExploreRows.Keys<String> WORDS = new ExploreRows.Keys<String>() {
+        @Override
+        public String key(String row) {
+            int bar = row.indexOf('|');
+            return bar < 0 ? row : row.substring(0, bar);
+        }
+
+        @Override
+        public boolean counts(String row) {
+            return row.startsWith("page:");
+        }
+    };
+
+    /**
+     * Walk 5 of 1639, new 26: scrolled, a server row said "vor 19 Min. ·
+     * über 8 Stationen" while its sheet, drawn from the newest answer,
+     * said "gerade eben · über 5 Stationen". The answer that would move a
+     * row waited behind the chip whole, so the rows on screen kept the
+     * words of an older one. Now a waiting or held answer still gives
+     * every row it shares with the screen its words, in place: the same
+     * rows, the same order, the newest words. The control is the rule
+     * before, which keeps the old words.
+     */
+    private static void aWaitingAnswerStillRefreshesTheWords() {
+        List<String> before = Arrays.asList("title:pages|Seiten", "heading:Heute|Heute",
+                "page:A|vor 3 Min.", "page:B|vor 5 Min.", "title:rooms|Räume",
+                "server:X|vor 19 Min. · über 8 Stationen");
+        List<String> after = Arrays.asList("title:pages|Seiten", "heading:Heute|Heute",
+                "page:A|vor 3 Min.", "page:new|gerade eben", "page:B|vor 5 Min.",
+                "title:rooms|Räume", "server:X|gerade eben · über 5 Stationen");
+        ExploreRows<String> rows = new ExploreRows<String>(WORDS);
+        rows.offer(before);
+        int said = rows.offer(after, 2, 5, false);
+        check(said == ExploreRows.WAITING, "a page among the screen's rows moves them: " + said);
+        check("server:X|gerade eben · über 5 Stationen".equals(rows.at(5)),
+                "the server row says what its sheet says: " + rows.at(5));
+        check("page:A|vor 3 Min.".equals(rows.at(2)), "no row moved: " + rows.at(2));
+        check(rows.size() == before.size(), "nothing added: " + rows.size());
+        check(rows.fresh() == 1, "the chip still counts the new page: " + rows.fresh());
+        // Held under a finger: the same.
+        ExploreRows<String> held = new ExploreRows<String>(WORDS);
+        held.offer(before);
+        held.down();
+        check(held.offer(after, 2, 5, false) == ExploreRows.HELD, "held");
+        check(held.at(5).endsWith("über 5 Stationen"), "held, the words: " + held.at(5));
+        check(held.at(2).startsWith("page:A"), "held, nothing moved: " + held.at(2));
+        check(held.up(2, 5) == ExploreRows.WAITING, "the lift: it would move rows");
+        check(held.fresh() == 1, "one new page waits: " + held.fresh());
     }
 
     private static void check(boolean ok, String what) {

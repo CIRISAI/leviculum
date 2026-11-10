@@ -596,3 +596,44 @@ fn the_places_sheet_names_pages_and_never_hashes() {
         assert!(!row.contains("3e3e") && !row.contains("1111"), "{row}");
     }
 }
+
+/// Walk 5 of 1639, new 26: scrolled, a server row said "vor 19 Min. ·
+/// über 8 Stationen" while its sheet said "gerade eben · über 5
+/// Stationen". The library reads both from one source
+/// (`settings::offered_hubs`) at the same moment: after the server is
+/// heard again, nearer, the row and the sheet say the same when and how
+/// far. (The phone showed an older row because its list held a waiting
+/// answer whole; `ExploreRows.refresh` is that half, in `fling.rs`.)
+#[test]
+fn a_server_row_and_its_sheet_say_the_same() {
+    let (_home, mut model) = phone();
+    let hub = loquax::ui::hubs::shipped()[0].clone();
+    hub_heard(&mut model, &hub, 8, 19 * 60);
+    tap(&mut model, "tab", "", "", 0);
+    let dest: String = hub.hash.iter().map(|b| format!("{b:02x}")).collect();
+    let row = |shown: &ExploreScreen| {
+        shown
+            .hubs
+            .iter()
+            .find(|h| h.dest == dest)
+            .map(|h| h.value.clone())
+            .expect("the server's row")
+    };
+    let before = row(&screen(&model));
+    assert!(before.starts_with("gesehen vor 19 Min. · über 8 Stationen"), "{before}");
+    hub_heard(&mut model, &hub, 5, 0);
+    tap(&mut model, "hub", "", &dest, 0);
+    let shown = screen(&model);
+    println!("row: {:?}  sheet: {:?}", row(&shown), shown.sheet_said);
+    assert!(
+        shown.sheet_said.starts_with("gesehen gerade eben · über 5 Stationen"),
+        "{}",
+        shown.sheet_said
+    );
+    assert!(
+        row(&shown).starts_with(&shown.sheet_said),
+        "row {:?}, sheet {:?}",
+        row(&shown),
+        shown.sheet_said
+    );
+}

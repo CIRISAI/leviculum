@@ -130,6 +130,7 @@ final class ExploreRows<T> {
             return SHOWN;
         }
         if (down) {
+            refresh(copy);
             waiting = copy;
             return HELD;
         }
@@ -144,8 +145,29 @@ final class ExploreRows<T> {
             show(copy);
             return SHOWN;
         }
+        refresh(copy);
         waiting = copy;
         return WAITING;
+    }
+
+    /**
+     * An answer that waits still gives every row it shares with the list
+     * its words, in place (1639, walk 5 new 26: a server row said "vor 19
+     * Min. · über 8 Stationen" while its sheet, drawn from the newest
+     * answer, said "gerade eben · über 5 Stationen"). Rows keep their
+     * places and the list its length; only what a row says is newer.
+     */
+    private void refresh(List<T> rows) {
+        java.util.Map<String, T> by = new java.util.HashMap<String, T>();
+        for (T row : rows) {
+            by.put(keys.key(row), row);
+        }
+        List<T> now = new ArrayList<T>(shown.size());
+        for (T row : shown) {
+            T newer = by.get(keys.key(row));
+            now.add(newer != null ? newer : row);
+        }
+        shown = now;
     }
 
     /**

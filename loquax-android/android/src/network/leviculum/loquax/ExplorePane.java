@@ -383,8 +383,12 @@ final class ExplorePane {
                 rows.release();
             }
             int top = topOfFirst();
-            if (rows.up(firstOnScreen(), list.getLastVisiblePosition()) == ExploreRows.SHOWN) {
+            int said = rows.up(firstOnScreen(), list.getLastVisiblePosition());
+            if (said == ExploreRows.SHOWN) {
                 place(top);
+            } else if (said == ExploreRows.WAITING) {
+                // The rows on screen took the waiting answer's words (1639).
+                adapter.notifyDataSetChanged();
             }
             chip();
             restLater();
@@ -565,6 +569,10 @@ final class ExplorePane {
                 atTop(), SystemClock.uptimeMillis());
         if (said == ExploreRows.SHOWN) {
             place(top);
+        } else if (said == ExploreRows.WAITING) {
+            // Nothing moves, but the rows on screen say what the answer
+            // says (1639, walk 5 new 26: a server row older than its sheet).
+            adapter.notifyDataSetChanged();
         }
         chip();
         if (searched) {
