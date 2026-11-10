@@ -524,8 +524,10 @@ fn seen(now: u64, then: u64) -> Option<Text> {
     })
 }
 
+/// How far a page is, when known and a count a reader can use
+/// ([`lnomad::discovery::shown_hops`], 1632: the mesh carries 110).
 fn hops(hops: Option<u32>) -> Option<Text> {
-    match hops? {
+    match lnomad::discovery::shown_hops(hops)? {
         1 => Some(Text::key(StrId::ExploreHop)),
         n => Some(Text::Key(
             StrId::ExploreHops,
@@ -567,7 +569,7 @@ fn hub_name<B>(model: &UiModel<B>, hub: &super::settings::Offered) -> Text {
 
 /// How far a hub is, in stations (1618), when known.
 fn far(hops: Option<u8>) -> Option<Text> {
-    match hops? {
+    match lnomad::discovery::shown_hops(hops.map(u32::from))? {
         0 | 1 => Some(Text::key(StrId::RoomsHubHop)),
         n => Some(Text::Key(
             StrId::RoomsHubHops,

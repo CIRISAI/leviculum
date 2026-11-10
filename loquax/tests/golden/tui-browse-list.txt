@@ -10,9 +10,9 @@ Tap a node to open its pages, or type an address above.                        �
     │Bookmarks                                                             │   █
     │  (none)                                                              │   █
     │                                                                      │   █
-    │Discovered nodes                                                      │   █
-    │  Marcel's node  ·  5a5a5a5a…  ·  2 hops                              │   █
-    │  Relay Süd  ·  7c7c7c7c…  ·  1 hops                                  │   █
+    │Pages heard                                                           │   █
+    │  Marcel's node  ·  seen 1 min ago  ·  reachable over 2 stations      │   █
+    │  Relay Süd  ·  seen 1 min ago  ·  directly reachable                 │   █
     └──────────────────────────────────────────────────────────────────────┘   █
                                                                                █
                                                                                █

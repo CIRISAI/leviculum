@@ -129,6 +129,20 @@ pub fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// The most stations a list says a node is away (1632, walk 4). The hop
+/// count is the path table's, as the announce carried it; the protocol
+/// allows up to 127, and on the public mesh an announce that went round a
+/// loop of bridged interfaces arrives with counts like 108 and 110. No
+/// reader can use "over 110 stations", and no path that long carries a
+/// page, so a count above this says nothing on screen, as an unknown one.
+pub const PLAUSIBLE_HOPS: u32 = 32;
+
+/// The hop count a list shows: `None` when unknown or above
+/// [`PLAUSIBLE_HOPS`].
+pub fn shown_hops(hops: Option<u32>) -> Option<u32> {
+    hops.filter(|h| *h <= PLAUSIBLE_HOPS)
+}
+
 /// A NomadNet node learned from one or more announces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredNode {

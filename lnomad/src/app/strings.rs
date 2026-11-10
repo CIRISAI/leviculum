@@ -84,10 +84,21 @@ leviculum_ui::catalogue! {
     PlacesTitle = "browser_places_title", "places", "Orte";
     Bookmarks = "browser_bookmarks", "Bookmarks", "Lesezeichen";
     NoBookmarks = "browser_no_bookmarks", "(none)", "(keine)";
-    Nodes = "browser_nodes", "Discovered nodes", "Gefundene Knoten";
+    Nodes = "browser_nodes", "Pages heard", "Gehörte Seiten";
     NoNodesYet = "browser_no_nodes_yet", "(listening for announces…)", "(lausche auf Ankündigungen…)";
     PlaceBookmark = "browser_place_bookmark", "%1$s  ·  %2$s", "%1$s  ·  %2$s";
     PlaceNode = "browser_place_node", "%1$s  ·  %2$s  ·  %3$s", "%1$s  ·  %2$s  ·  %3$s";
+    // A heard node's row (1632, walk 4): its name, when it was heard and
+    // how far it is, the words Explore's page list uses; no hash.
+    PlaceNodeSeen = "browser_place_node_seen", "%1$s  ·  %2$s", "%1$s  ·  %2$s";
+    PlaceUnnamed = "browser_place_unnamed", "Unnamed node", "Unbenannter Knoten";
+    PlaceUnnamedTail = "browser_place_unnamed_tail", "Unnamed node ·%1$s", "Unbenannter Knoten ·%1$s";
+    PlaceSeenNow = "browser_place_seen_now", "seen just now", "gesehen gerade eben";
+    PlaceSeenMinutes = "browser_place_seen_minutes", "seen %1$d min ago", "gesehen vor %1$d Min.";
+    PlaceSeenHours = "browser_place_seen_hours", "seen %1$d h ago", "gesehen vor %1$d Std.";
+    PlaceSeenDays = "browser_place_seen_days", "seen %1$d days ago", "gesehen vor %1$d Tagen";
+    PlaceHop = "browser_place_hop", "directly reachable", "direkt erreichbar";
+    PlaceHops = "browser_place_hops", "reachable over %1$d stations", "über %1$d Stationen erreichbar";
     // The name search's result list (1227).
     NamesTitle = "browser_names_title", "sites matching \"%1$s\"", "Seiten zu \"%1$s\"";
     NamesHint = "browser_names_hint", "Enter open · Esc close · a name is a hint, the hash is the address", "Enter öffnet · Esc schließt · ein Name ist ein Hinweis, der Hash ist die Adresse";

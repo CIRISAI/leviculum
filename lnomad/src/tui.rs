@@ -663,7 +663,7 @@ fn render_search_bar(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 /// Draw the centered places panel from the scene's sheet: a chrome-styled
-/// overlay with a "Bookmarks" section and a "Discovered nodes" section, the
+/// overlay with a "Bookmarks" section and a "Pages heard" section, the
 /// selected row reverse-video highlighted. Both the fill and the border use
 /// the theme's chrome colours, so the panel tracks the light/dark theme.
 fn render_places(model: &Model, sheet: &Sheet, frame: &mut Frame, area: Rect) {
@@ -5366,7 +5366,7 @@ mod tests {
         press(&mut m, KeyCode::Char('d'), KeyModifiers::NONE);
         let len = places(&m).len();
         // Walk the whole list; the selected row is visible at every step, even
-        // as it crosses the blank spacer and the "Discovered nodes" title.
+        // as it crosses the blank spacer and the "Pages heard" title.
         for _ in 0..len + 2 {
             press(&mut m, KeyCode::Char('j'), KeyModifiers::NONE);
             assert!(
@@ -6041,7 +6041,7 @@ mod tests {
         let buffer = render(&m, 80, 24);
         let text = flat(&buffer);
         assert!(text.contains("Bookmarks"), "missing header:\n{text}");
-        assert!(text.contains("Discovered nodes"), "missing header:\n{text}");
+        assert!(text.contains("Pages heard"), "missing header:\n{text}");
         assert!(text.contains("Home"), "missing bookmark:\n{text}");
         assert!(text.contains("Node-C"), "missing node:\n{text}");
     }

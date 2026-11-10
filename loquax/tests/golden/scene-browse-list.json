@@ -147,13 +147,18 @@
               "enabled": true,
               "label": {
                 "args": [
-                  "Marcel's node",
-                  "5a5a5a5a…",
+                  {
+                    "raw": "Marcel's node"
+                  },
+                  {
+                    "args": [],
+                    "key": "browser_place_seen_now"
+                  },
                   {
                     "args": [
                       2
                     ],
-                    "key": "browser_hops"
+                    "key": "browser_place_hops"
                   }
                 ],
                 "key": "browser_place_node"
@@ -173,13 +178,18 @@
             "selected": true,
             "title": {
               "args": [
-                "Marcel's node",
-                "5a5a5a5a…",
+                {
+                  "raw": "Marcel's node"
+                },
+                {
+                  "args": [],
+                  "key": "browser_place_seen_now"
+                },
                 {
                   "args": [
                     2
                   ],
-                  "key": "browser_hops"
+                  "key": "browser_place_hops"
                 }
               ],
               "key": "browser_place_node"
@@ -192,13 +202,16 @@
               "enabled": true,
               "label": {
                 "args": [
-                  "Relay Süd",
-                  "7c7c7c7c…",
                   {
-                    "args": [
-                      1
-                    ],
-                    "key": "browser_hops"
+                    "raw": "Relay Süd"
+                  },
+                  {
+                    "args": [],
+                    "key": "browser_place_seen_now"
+                  },
+                  {
+                    "args": [],
+                    "key": "browser_place_hop"
                   }
                 ],
                 "key": "browser_place_node"
@@ -218,13 +231,16 @@
             "selected": false,
             "title": {
               "args": [
-                "Relay Süd",
-                "7c7c7c7c…",
                 {
-                  "args": [
-                    1
-                  ],
-                  "key": "browser_hops"
+                  "raw": "Relay Süd"
+                },
+                {
+                  "args": [],
+                  "key": "browser_place_seen_now"
+                },
+                {
+                  "args": [],
+                  "key": "browser_place_hop"
                 }
               ],
               "key": "browser_place_node"

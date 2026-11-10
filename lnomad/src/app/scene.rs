@@ -505,8 +505,9 @@ fn page_line(model: &Model, at: usize) -> PageLine {
 fn places_sheet(model: &Model) -> Sheet {
     let entries = places(model);
     let marks = model.bookmarks.len();
+    let now = model.wall_now();
     let item = |i: usize, place: &Place| {
-        let title = place_title(place);
+        let title = place_title(place, now, place_collides(&entries, i));
         let menu = match place {
             Place::Bookmark { .. } => vec![Action::of(Intent::Forget(i))],
             Place::Node { .. } => Vec::new(),
@@ -558,9 +559,11 @@ fn places_sheet(model: &Model) -> Sheet {
     }
 }
 
-/// A place's words: a bookmark's title and URL, a node's name, short hash
-/// and hops.
-pub(crate) fn place_title(place: &Place) -> Text {
+/// A place's words: a bookmark's title and URL; a heard node's name, when
+/// it was heard and how far it is (1632, walk 4: no hash, and a hop count
+/// no list can mean said as nothing). `tail` adds the short hash after the
+/// name, for a name another row shows too.
+pub(crate) fn place_title(place: &Place, now: u64, tail: bool) -> Text {
     match place {
         Place::Bookmark { url, title } if title.is_empty() => Text::Raw(url.clone()),
         Place::Bookmark { url, title } => Text::Key(
@@ -569,27 +572,75 @@ pub(crate) fn place_title(place: &Place) -> Text {
         ),
         Place::Node {
             dest_hash,
-            name,
             hops,
+            last_seen,
             ..
         } => {
-            let label = name
-                .clone()
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| short_hex(dest_hash));
-            let hops = match hops {
-                Some(h) => Text::Key(StrId::Hops, vec![Arg::Int((*h).into())]),
-                None => Text::key(StrId::HopsNone),
+            let label = node_label(place).unwrap_or_default();
+            let label = match (label.is_empty(), tail) {
+                (true, false) => Text::key(StrId::PlaceUnnamed),
+                (true, true) => Text::Key(
+                    StrId::PlaceUnnamedTail,
+                    vec![Arg::Str(crate::names::hash4(dest_hash))],
+                ),
+                (false, false) => Text::Raw(label),
+                (false, true) => Text::Raw(format!("{label} ·{}", crate::names::hash4(dest_hash))),
             };
-            Text::Key(
-                StrId::PlaceNode,
-                vec![
-                    Arg::Str(label),
-                    Arg::Str(short_hex(dest_hash)),
-                    Arg::Text(Box::new(hops)),
-                ],
-            )
+            let seen = place_seen(now, *last_seen);
+            match crate::discovery::shown_hops(*hops) {
+                Some(h) => Text::Key(
+                    StrId::PlaceNode,
+                    vec![
+                        Arg::Text(Box::new(label)),
+                        Arg::Text(Box::new(seen)),
+                        Arg::Text(Box::new(match h {
+                            0 | 1 => Text::key(StrId::PlaceHop),
+                            n => Text::Key(StrId::PlaceHops, vec![Arg::Int(n.into())]),
+                        })),
+                    ],
+                ),
+                None => Text::Key(
+                    StrId::PlaceNodeSeen,
+                    vec![Arg::Text(Box::new(label)), Arg::Text(Box::new(seen))],
+                ),
+            }
         }
+    }
+}
+
+/// A node's announced name, trimmed; `None` for a bookmark.
+fn node_label(place: &Place) -> Option<String> {
+    match place {
+        Place::Node { name, .. } => Some(name.as_deref().unwrap_or("").trim().to_string()),
+        Place::Bookmark { .. } => None,
+    }
+}
+
+/// Whether the node at `i` shares its shown name with another node row.
+fn place_collides(entries: &[Place], i: usize) -> bool {
+    let Some(mine) = entries.get(i).and_then(node_label) else {
+        return false;
+    };
+    entries
+        .iter()
+        .enumerate()
+        .any(|(j, p)| j != i && node_label(p).as_deref() == Some(mine.as_str()))
+}
+
+/// "seen 3 min ago", in the words Explore's page list uses.
+fn place_seen(now: u64, then: u64) -> Text {
+    let secs = now.saturating_sub(then);
+    let n = |id: StrId, unit: u64| {
+        Text::Key(
+            id,
+            vec![Arg::Int(i64::try_from(secs / unit).unwrap_or(i64::MAX))],
+        )
+    };
+    match secs {
+        0..=59 => Text::key(StrId::PlaceSeenNow),
+        60..=3599 => n(StrId::PlaceSeenMinutes, 60),
+        3600..=86_399 => n(StrId::PlaceSeenHours, 3600),
+        _ => n(StrId::PlaceSeenDays, 86_400),
     }
 }
 
@@ -753,5 +804,66 @@ impl Scene {
             })),
             "help": self.help,
         })
+    }
+}
+
+#[cfg(test)]
+mod place_words {
+    use super::*;
+    use crate::app::strings::Lang;
+
+    fn node(byte: u8, name: Option<&str>, hops: Option<u32>, last_seen: u64) -> Place {
+        Place::Node {
+            dest_hash: [byte; 16],
+            name: name.map(str::to_string),
+            hops,
+            last_seen,
+        }
+    }
+
+    /// Walk 4 of 1632, new 14: the places sheet said "RNS Search ·
+    /// 3e5f19fd… · 110 Sprünge". A node is its name, when it was heard and
+    /// how far it is; a hop count no reader can use says nothing; a
+    /// nameless node is "Unbenannter Knoten", with the short hash only when
+    /// another row reads the same.
+    #[test]
+    fn a_heard_node_is_its_name_and_never_110_stations() {
+        let now = 10_000;
+        let far = node(0x3e, Some("RNS Search"), Some(110), now - 180);
+        let text = place_title(&far, now, false).resolve(Lang::De);
+        assert_eq!(text, "RNS Search  ·  gesehen vor 3 Min.");
+        let near = node(0x3e, Some("NL-WB Backbone"), Some(5), now - 30);
+        assert_eq!(
+            place_title(&near, now, false).resolve(Lang::De),
+            "NL-WB Backbone  ·  gesehen gerade eben  ·  über 5 Stationen erreichbar"
+        );
+        assert!(!place_title(&near, now, false)
+            .resolve(Lang::De)
+            .contains("3e3e"));
+        // The edge: 32 shows, 33 does not.
+        let edge = |h| place_title(&node(1, Some("x"), Some(h), now), now, false).resolve(Lang::En);
+        assert!(edge(32).contains("32 stations"), "{}", edge(32));
+        assert!(!edge(33).contains("stations"), "{}", edge(33));
+        // Nameless: the word, and the tail only on a collision.
+        let entries = [
+            node(0xab, None, Some(2), now),
+            node(0xcd, Some(" "), None, now),
+            node(0xef, Some("Solo"), None, now),
+        ];
+        assert!(place_collides(&entries, 0));
+        assert!(!place_collides(&entries, 2));
+        assert_eq!(
+            place_title(&entries[0], now, place_collides(&entries, 0)).resolve(Lang::De),
+            "Unbenannter Knoten ·abab  ·  gesehen gerade eben  ·  über 2 Stationen erreichbar"
+        );
+        assert_eq!(
+            place_title(&entries[2], now, false).resolve(Lang::En),
+            "Solo  ·  seen just now"
+        );
+        let alone = [node(0xab, None, None, now)];
+        assert_eq!(
+            place_title(&alone[0], now, place_collides(&alone, 0)).resolve(Lang::De),
+            "Unbenannter Knoten  ·  gesehen gerade eben"
+        );
     }
 }
