@@ -467,13 +467,17 @@ pub async fn home_about(client: HomeClient, budget: Duration) -> Option<UiEvent>
     }
 }
 
-/// The peer states a fold set, handed to the home node in order (1146), as
-/// petnames are.
+/// The peer states this device owes, handed to the home node in order
+/// (1146, [`crate::ui::UiModel::take_peer_states`]), as petnames are: the
+/// event the model folds names those the home took (1640); one it did not
+/// take is said in the log and stays owed, handed again with the next hand
+/// or after a restart.
 pub async fn hand_peer_states(
     client: HomeClient,
     states: Vec<([u8; 16], super::wire::PeerState)>,
     budget: Duration,
-) {
+) -> UiEvent {
+    let mut taken = Vec::new();
     for (peer, state) in states {
         let outcome = super::client::peer_state(
             &client.node,
@@ -484,12 +488,16 @@ pub async fn hand_peer_states(
             budget,
         )
         .await;
-        let peer = crate::address::to_hex(&peer);
+        let hex = crate::address::to_hex(&peer);
         match outcome {
-            Ok(()) => tracing::info!("HOME peerstate peer={peer}"),
-            Err(error) => tracing::warn!("HOME peerstate peer={peer} not taken: {error}"),
+            Ok(()) => {
+                tracing::info!("HOME peerstate peer={hex}");
+                taken.push((peer, state));
+            }
+            Err(error) => tracing::warn!("HOME peerstate peer={hex} not taken: {error}"),
         }
     }
+    UiEvent::PeerStatesHanded { taken }
 }
 
 /// A received message the store already holds, which the screen drops

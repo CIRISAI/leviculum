@@ -590,6 +590,18 @@ and photo a phone shows stays on that phone
   clock then, `UiModel::home_petname`). A cleared petname is an entry
   with the empty name: the home needs no tombstone of its own, since its
   newest entry of a peer is the reader's last word.
+- **Peer states are owed the same way** (1640). A pin, a mute, an
+  archive or a block the device set is owed until the home answers
+  `/peerstate` with ok, by the same rules and the same code
+  (`ui::owed::Owed`, one per kind of word): the newest state of each peer
+  in the device's store (`owed_peer_states`, schema 21), handed again
+  after a restart, one hand at a time (`UiModel::take_peer_states`,
+  `UiEvent::PeerStatesHanded`), over any pulled entry while owed and over
+  an entry the home stamped before the answer until the pull ends
+  (`UiModel::home_peer_state`, the pull now carries the entry's `at`). A
+  pin loosened just before the app stopped no longer comes back from the
+  home after the restart. Verified is not among them: it stays on the
+  device that compared the key, and nothing of it goes to the home.
 
 ## Contact keys from a code
 

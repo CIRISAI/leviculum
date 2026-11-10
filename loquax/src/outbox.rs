@@ -186,11 +186,13 @@ pub enum Command {
         at: i64,
     },
     /// On a client: the reader's word on a peer one of the home's devices
-    /// set, pulled from the archive (1146); reported as
+    /// set, pulled from the archive (1146), and when the home took it, unix
+    /// seconds on the home's clock (1640); reported as
     /// [`OutboxEvent::HomePeerState`].
     HomePeerState {
         destination: [u8; 16],
         state: crate::home::wire::PeerState,
+        at: i64,
     },
 }
 
@@ -285,6 +287,7 @@ pub enum OutboxEvent {
     HomePeerState {
         destination: [u8; 16],
         state: crate::home::wire::PeerState,
+        at: i64,
     },
     /// The message left the router's outbound queue, which the router does
     /// only in a terminal state (`leviculum-lxmf/src/router.rs:872-874`).

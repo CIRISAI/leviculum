@@ -157,6 +157,7 @@ pub mod listing;
 pub mod liveness;
 pub mod mailbox_page;
 pub mod map;
+pub mod owed;
 pub mod pager;
 pub mod photos;
 pub mod profile;
@@ -1344,22 +1345,11 @@ pub struct UiModel<B> {
     /// The petnames this device set that the home node has not taken
     /// yet, the newest of each peer (1635, [`UiModel::take_petnames`]):
     /// kept in the store until the home takes them, and the reader's word
-    /// on the peer over any entry a pull brings meanwhile.
-    pub(crate) owed_petnames: BTreeMap<[u8; 16], Option<String>>,
-    /// A hand of [`UiModel::take_petnames`] is under way: the next waits
-    /// for its [`UiEvent::PetnamesHanded`], so the home takes a peer's
-    /// petnames in the order they were set.
-    petnames_in_flight: bool,
-    /// [`Self::owed_petnames`] changed since the store last kept it.
-    owed_petnames_changed: bool,
-    /// The petnames the home took from this device until the next pull
-    /// ends, each with this device's clock when the home's answer came
-    /// (1635): a pull under way when the home took it may still bring an
-    /// older entry, which the home's stamp tells apart from a newer word.
-    taken_petnames: BTreeMap<[u8; 16], (Option<String>, i64)>,
-    /// Peer states for the home node, in the order they were set
-    /// ([`UiModel::take_peer_states`]).
-    peer_states: Vec<([u8; 16], crate::home::wire::PeerState)>,
+    /// on the peer over any entry a pull brings meanwhile ([`owed`]).
+    pub(crate) owed_petnames: owed::Owed<Option<String>>,
+    /// The peer states this device set that the home node has not taken
+    /// yet, by the same rules (1640, [`UiModel::take_peer_states`]).
+    pub(crate) owed_peer_states: owed::Owed<crate::home::wire::PeerState>,
     /// A pull a send or a wake asked for while one was running, with its
     /// reason: started when that one ends, since it may have begun before
     /// the home node had the message.
@@ -1641,11 +1631,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             history: false,
             list_apart: false,
             marks: Vec::new(),
-            owed_petnames: BTreeMap::new(),
-            petnames_in_flight: false,
-            owed_petnames_changed: false,
-            taken_petnames: BTreeMap::new(),
-            peer_states: Vec::new(),
+            owed_petnames: owed::Owed::default(),
+            owed_peer_states: owed::Owed::default(),
             pull_owed: None,
             confirm: None,
             reveal_pending: None,
@@ -3349,6 +3336,11 @@ pub enum UiEvent {
     PetnamesHanded {
         taken: Vec<([u8; 16], Option<String>)>,
     },
+    /// A hand of [`UiModel::take_peer_states`] ended (1640): the peer
+    /// states the home node took. Those still owed go with the next hand.
+    PeerStatesHanded {
+        taken: Vec<([u8; 16], crate::home::wire::PeerState)>,
+    },
     /// A tab of the bar was chosen (1337): the Browse tab comes to the
     /// front, or leaves it for the chats or the map.
     Tab(scene::TabId),
@@ -4048,6 +4040,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.petnames_handed(taken);
             Vec::new()
         }
+        UiEvent::PeerStatesHanded { taken } => {
+            model.peer_states_handed(taken);
+            Vec::new()
+        }
         UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
         UiEvent::Verify { peer, verified } => {
             model.set_verified(peer, verified);
@@ -4177,9 +4173,10 @@ pub fn position_fields(location: leviculum_lxmf::telemetry::Location) -> Vec<Fie
 /// messages, and the first failure in a row, not every retry's.
 fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Vec<UiEffect> {
     model.fetching = false;
-    // A pull ended: the next began after every petname the home took so
-    // far, and brings nothing older than them (1635).
-    model.taken_petnames.clear();
+    // A pull ended: the next began after every petname and peer state the
+    // home took so far, and brings nothing older than them (1635, 1640).
+    model.owed_petnames.fetch_done();
+    model.owed_peer_states.fetch_done();
     model.fetches_done += 1;
     let now = model.elapsed_ms;
     let failures = model.sync.as_mut().map_or(1, |sync| {
@@ -6211,9 +6208,11 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
             petname,
             at,
         } => return model.home_petname(destination, petname, at),
-        OutboxEvent::HomePeerState { destination, state } => {
-            return model.home_peer_state(destination, state)
-        }
+        OutboxEvent::HomePeerState {
+            destination,
+            state,
+            at,
+        } => return model.home_peer_state(destination, state, at),
         OutboxEvent::HomeMarked { mark } => match mark.flag {
             crate::home::wire::MarkFlag::Read => model.read_marks(&mark.ids),
             crate::home::wire::MarkFlag::Deleted => {
@@ -16142,29 +16141,31 @@ pub(crate) mod tests {
             [UiEffect::Contact(Contact { blocked: true, .. })]
         ));
         let unpinned = crate::home::wire::PeerState::default();
-        assert_eq!(
-            model.take_peer_states(),
-            [
-                (PEER, unpinned),
-                (
-                    PEER,
-                    crate::home::wire::PeerState {
-                        blocked: true,
-                        ..unpinned
-                    }
-                )
-            ]
+        // The newest of the peer is what is owed (1640).
+        let blocked = crate::home::wire::PeerState {
+            blocked: true,
+            ..unpinned
+        };
+        assert_eq!(model.take_peer_states(), [(PEER, blocked)]);
+        update(
+            &mut model,
+            UiEvent::PeerStatesHanded {
+                taken: vec![(PEER, blocked)],
+            },
         );
+        assert!(model.take_peer_states().is_empty(), "the home took it");
         let pulled = crate::home::wire::PeerState {
             pinned: true,
             archived: true,
             ..unpinned
         };
+        // Taken by the home after this device's word (1640).
         let effects = update(
             &mut model,
             UiEvent::Engine(OutboxEvent::HomePeerState {
                 destination: PEER,
                 state: pulled,
+                at: 1,
             }),
         );
         assert!(matches!(
@@ -16178,9 +16179,115 @@ pub(crate) mod tests {
             UiEvent::Engine(OutboxEvent::HomePeerState {
                 destination: PEER,
                 state: pulled,
+                at: 1,
             })
         )
         .is_empty());
+    }
+
+    /// 1640, as 1635 for a petname: a peer state this device set and the
+    /// home node has not taken yet is the reader's newest word on the
+    /// peer. A pin the reader loosened, pulled again from an older entry
+    /// before the home took the loosening, changes nothing; after a
+    /// restart the loosening is handed again and still stands over the
+    /// pull. Once the home took it, an entry it stamped before the answer
+    /// changes nothing until the pull ends, one stamped after it does.
+    #[test]
+    fn a_peer_state_owed_to_the_home_outlives_an_older_pulled_one() {
+        use crate::home::wire::PeerState;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        receive(&mut model, PEER, 1, "hi");
+        model.home_client = true;
+        let pinned = PeerState {
+            pinned: true,
+            ..PeerState::default()
+        };
+        let loose = PeerState::default();
+        let pin = |on: bool| UiEvent::PeerState {
+            peer: PEER,
+            state: PeerState {
+                pinned: on,
+                ..PeerState::default()
+            },
+        };
+        let pulled_at = |state: PeerState, at: i64| {
+            UiEvent::Engine(OutboxEvent::HomePeerState {
+                destination: PEER,
+                state,
+                at,
+            })
+        };
+        let pulled = |state: PeerState| pulled_at(state, 0);
+        let handed = |taken: &[PeerState]| UiEvent::PeerStatesHanded {
+            taken: taken.iter().map(|state| (PEER, *state)).collect(),
+        };
+        let owed = |writes: Vec<StoreWrite>| {
+            writes
+                .into_iter()
+                .filter_map(|write| match write {
+                    StoreWrite::OwedPeerStates(owed) => Some(owed),
+                    _ => None,
+                })
+                .next_back()
+        };
+        update(&mut model, pin(true));
+        assert_eq!(model.take_peer_states(), [(PEER, pinned)]);
+        // One hand at a time: the loosening waits for the first.
+        update(&mut model, pin(false));
+        assert!(model.take_peer_states().is_empty(), "a hand is under way");
+        // The home's intake died: nothing taken.
+        update(&mut model, handed(&[]));
+        assert!(update(&mut model, pulled(pinned)).is_empty());
+        assert_eq!(model.peer_state(&PEER), loose, "the pin came back");
+        let kept = owed(model.take_writes()).expect("the owed kept");
+        assert_eq!(kept, BTreeMap::from([(PEER, loose)]));
+
+        // A restart: the owed handed first, and over the first pull.
+        let mut again = UiModel::<Field>::new(&[PEER]);
+        receive(&mut again, PEER, 1, "hi");
+        again.home_client = true;
+        again.restore_owed_peer_states(kept);
+        assert_eq!(again.take_peer_states(), [(PEER, loose)]);
+        update(&mut again, handed(&[]));
+        assert_eq!(again.take_peer_states(), [(PEER, loose)]);
+        update(&mut again, pulled(pinned));
+        assert_eq!(again.peer_state(&PEER), loose, "the pin came back");
+        // The home's echo settles it, and a later word of another device
+        // is the reader's here.
+        update(&mut again, pulled(loose));
+        assert_eq!(owed(again.take_writes()), Some(BTreeMap::new()));
+        update(&mut again, handed(&[loose]));
+        assert!(again.take_peer_states().is_empty());
+        update(&mut again, pulled(pinned));
+        assert_eq!(again.peer_state(&PEER), pinned);
+
+        // Taken: a pull under way when the home took the loosening may
+        // still bring the older pin; stamped before the answer, it changes
+        // nothing, stamped after it, it does; once a pull ended the next
+        // brings nothing older.
+        let mut taken = UiModel::<Field>::new(&[PEER]);
+        receive(&mut taken, PEER, 1, "hi");
+        taken.home_client = true;
+        update(&mut taken, pin(true));
+        update(&mut taken, pin(false));
+        assert_eq!(taken.take_peer_states(), [(PEER, loose)]);
+        update(&mut taken, handed(&[loose]));
+        assert!(update(&mut taken, pulled_at(pinned, 0)).is_empty());
+        assert_eq!(taken.peer_state(&PEER), loose);
+        update(&mut taken, pulled_at(pinned, 1));
+        assert_eq!(taken.peer_state(&PEER), pinned);
+        update(&mut taken, pin(false));
+        assert_eq!(taken.take_peer_states(), [(PEER, loose)]);
+        update(&mut taken, handed(&[loose]));
+        update(&mut taken, UiEvent::FetchDone(Ok(0)));
+        update(&mut taken, pulled_at(pinned, 0));
+        assert_eq!(taken.peer_state(&PEER), pinned);
+
+        // Off a home node nothing is owed.
+        let mut alone = UiModel::<Field>::new(&[PEER]);
+        receive(&mut alone, PEER, 1, "hi");
+        update(&mut alone, pin(true));
+        assert!(owed(alone.take_writes()).is_none());
     }
 
     /// 1139: on a client of a home node a rename goes to the home node as

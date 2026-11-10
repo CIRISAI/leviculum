@@ -131,7 +131,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 20;
+pub const SCHEMA_VERSION: i32 = 21;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -493,6 +493,21 @@ const SCHEMA_V20: &str = "
 ALTER TABLE home_devices ADD COLUMN last_seen INTEGER;
 ";
 
+/// What schema 21 adds to schema 20 (1640): the peer states this device
+/// set that its home node has not taken yet (`owed_peer_states`, one row a
+/// peer, the newest state whole, `muted_until` NULL for unmuted), as
+/// `owed_petnames` holds the petnames.
+const SCHEMA_V21: &str = "
+CREATE TABLE owed_peer_states(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    blocked INTEGER NOT NULL,
+    pinned INTEGER NOT NULL,
+    archived INTEGER NOT NULL,
+    muted_until INTEGER,
+    PRIMARY KEY (identity, peer));
+";
+
 pub mod groups;
 pub mod pages;
 
@@ -553,6 +568,9 @@ const TABLES_V18: [&str; 2] = ["home_pages", "home_bookmarks"];
 
 /// The table schema 19 adds.
 const TABLES_V19: [&str; 1] = ["owed_petnames"];
+
+/// The table schema 21 adds.
+const TABLES_V21: [&str; 1] = ["owed_peer_states"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -725,7 +743,7 @@ impl Store {
             "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
              {SCHEMA_V6} {SCHEMA_V7} {SCHEMA_V8} {SCHEMA_V9} {SCHEMA_V10} {SCHEMA_V11} \
              {SCHEMA_V12} {SCHEMA_V13} {SCHEMA_V14} {SCHEMA_V15} {SCHEMA_V16} {SCHEMA_V17} \
-             {SCHEMA_V18} {SCHEMA_V19} {SCHEMA_V20} \
+             {SCHEMA_V18} {SCHEMA_V19} {SCHEMA_V20} {SCHEMA_V21} \
              PRAGMA user_version = {SCHEMA_VERSION}; \
              COMMIT;"
         );
@@ -833,6 +851,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 21 {
+            if let Some(missing) = missing(&TABLES_V21) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate(version);
         }
@@ -912,7 +935,10 @@ impl Store {
                 if version < 19 {
                     batch.push_str(SCHEMA_V19);
                 }
-                batch.push_str(SCHEMA_V20);
+                if version < 20 {
+                    batch.push_str(SCHEMA_V20);
+                }
+                batch.push_str(SCHEMA_V21);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -1344,6 +1370,40 @@ impl Store {
             .map_err(|e| failed(&path, e))?;
         }
         tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// The peer states this device owes its home node (1640), as the last
+    /// [`StoreWrite::OwedPeerStates`] kept them.
+    pub fn owed_peer_states(
+        &self,
+    ) -> Result<BTreeMap<[u8; 16], crate::home::wire::PeerState>, StoreError> {
+        let read = || -> rusqlite::Result<BTreeMap<[u8; 16], crate::home::wire::PeerState>> {
+            let mut statement = self.conn.prepare(
+                "SELECT peer, blocked, pinned, archived, muted_until FROM owed_peer_states \
+                 WHERE identity = ?1",
+            )?;
+            let rows = statement.query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    crate::home::wire::PeerState {
+                        blocked: row.get(1)?,
+                        pinned: row.get(2)?,
+                        archived: row.get(3)?,
+                        muted_until: row.get(4)?,
+                    },
+                ))
+            })?;
+            let mut owed = BTreeMap::new();
+            for row in rows {
+                let (peer, state) = row?;
+                // A row of another length is no address: passed over.
+                if let Ok(peer) = <[u8; 16]>::try_from(peer.as_slice()) {
+                    owed.insert(peer, state);
+                }
+            }
+            Ok(owed)
+        };
+        read().map_err(|e| self.failed(e))
     }
 
     /// The petnames this device owes its home node (1635), as the last
@@ -3800,6 +3860,26 @@ fn apply(
             }
         }
         StoreWrite::PnAsks(state) => write_pn_asks(tx, identity, state)?,
+        StoreWrite::OwedPeerStates(owed) => {
+            tx.execute(
+                "DELETE FROM owed_peer_states WHERE identity = ?1",
+                params![&identity[..]],
+            )?;
+            for (peer, state) in owed {
+                tx.execute(
+                    "INSERT INTO owed_peer_states(identity, peer, blocked, pinned, archived, \
+                     muted_until) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        &identity[..],
+                        &peer[..],
+                        state.blocked,
+                        state.pinned,
+                        state.archived,
+                        state.muted_until
+                    ],
+                )?;
+            }
+        }
         StoreWrite::OwedPetnames(owed) => {
             tx.execute(
                 "DELETE FROM owed_petnames WHERE identity = ?1",
@@ -5267,7 +5347,7 @@ mod tests {
         let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
         conn.execute_batch(
             "DROP TABLE owed_petnames; ALTER TABLE home_devices DROP COLUMN last_seen; \
-             PRAGMA user_version = 18;",
+             DROP TABLE owed_peer_states; PRAGMA user_version = 18;",
         )
         .expect("made schema 18");
         drop(conn);
@@ -5291,7 +5371,8 @@ mod tests {
         drop(store);
         let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
         conn.execute_batch(
-            "ALTER TABLE home_devices DROP COLUMN last_seen; PRAGMA user_version = 19;",
+            "ALTER TABLE home_devices DROP COLUMN last_seen; DROP TABLE owed_peer_states; \
+             PRAGMA user_version = 19;",
         )
         .expect("made schema 19");
         drop(conn);
@@ -5308,6 +5389,63 @@ mod tests {
         assert_eq!(store.devices().expect("devices")[0].last_seen, Some(160));
         store.device_seen(&[0x55; 16], 200).expect("a stranger");
         assert_eq!(store.devices().expect("devices").len(), 1);
+    }
+
+    /// 1640: the peer states a device owes its home node come back after a
+    /// restart as they were kept, an unmuted one as `None` and an always
+    /// mute as `i64::MAX`; a write replaces all of them, and another
+    /// identity sees none. A store of schema 20 gains the table on open.
+    #[test]
+    fn owed_peer_states_survive_a_restart_and_a_schema_20_store_gains_them() {
+        use crate::home::wire::PeerState;
+        let home = tempfile::tempdir().expect("home");
+        let owed = BTreeMap::from([
+            ([0x5a; 16], PeerState::default()),
+            (
+                [0x5b; 16],
+                PeerState {
+                    blocked: true,
+                    pinned: true,
+                    archived: true,
+                    muted_until: Some(i64::MAX),
+                },
+            ),
+        ]);
+        {
+            let mut store = Store::open_in(home.path(), US).expect("open");
+            assert!(store.owed_peer_states().expect("read").is_empty());
+            store
+                .write(&[StoreWrite::OwedPeerStates(owed.clone())])
+                .expect("kept");
+        }
+        let mut store = Store::open_in(home.path(), US).expect("again");
+        assert_eq!(store.owed_peer_states().expect("read"), owed);
+        let fewer = BTreeMap::from([(
+            [0x5b; 16],
+            PeerState {
+                muted_until: Some(1_800_000_000),
+                ..PeerState::default()
+            },
+        )]);
+        store
+            .write(&[StoreWrite::OwedPeerStates(fewer.clone())])
+            .expect("replaced");
+        assert_eq!(store.owed_peer_states().expect("read"), fewer);
+        let other = Store::open_in(home.path(), BOB).expect("other");
+        assert!(other.owed_peer_states().expect("read").is_empty());
+        drop((store, other));
+
+        let old = tempfile::tempdir().expect("an older home");
+        drop(Store::open_in(old.path(), US).expect("create"));
+        let conn = Connection::open(old.path().join(STORE_FILE)).expect("raw");
+        conn.execute_batch("DROP TABLE owed_peer_states; PRAGMA user_version = 20;")
+            .expect("made schema 20");
+        drop(conn);
+        let mut store = Store::open_in(old.path(), US).expect("migrated");
+        store
+            .write(&[StoreWrite::OwedPeerStates(fewer.clone())])
+            .expect("kept");
+        assert_eq!(store.owed_peer_states().expect("read"), fewer);
     }
 
     /// 1409: what the propagation node is still to be asked about comes

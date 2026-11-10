@@ -1016,9 +1016,15 @@ impl Engine {
                     petname,
                     at,
                 }),
-                Command::HomePeerState { destination, state } => {
-                    self.emit(OutboxEvent::HomePeerState { destination, state })
-                }
+                Command::HomePeerState {
+                    destination,
+                    state,
+                    at,
+                } => self.emit(OutboxEvent::HomePeerState {
+                    destination,
+                    state,
+                    at,
+                }),
                 Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
                     detail: "a client of a home node pulls from the home node, not a \
                              propagation node"

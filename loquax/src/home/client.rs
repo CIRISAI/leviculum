@@ -1036,7 +1036,11 @@ async fn take_in(
         if entry.kind == super::KIND_PEERSTATE {
             match wire::read_peer_state_entry(&entry.packed) {
                 Ok((destination, state)) => outbox
-                    .submit(Command::HomePeerState { destination, state })
+                    .submit(Command::HomePeerState {
+                        destination,
+                        state,
+                        at: entry.at,
+                    })
                     .map_err(gone)?,
                 Err(_) => tracing::warn!("HOME pull: entry {} is no peer state", entry.seq),
             }
@@ -1398,7 +1402,8 @@ mod tests {
                 },
                 Command::HomePeerState {
                     destination: [5; 16],
-                    state: blocked
+                    state: blocked,
+                    at: 0
                 },
                 Command::Fence { token: 9 },
             ]

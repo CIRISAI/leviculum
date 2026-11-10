@@ -1977,6 +1977,195 @@ async fn a_cleared_petname_the_home_took_stays_cleared_after_a_restart() {
     a_cleared_petname_across_a_restart(true).await;
 }
 
+/// The peer state entries the home node of `home` keeps for `peer`,
+/// oldest first, and their sequences (1640).
+fn home_peer_states(
+    home: &Path,
+    address: [u8; 16],
+    peer: [u8; 16],
+) -> Vec<(u64, loquax::home::wire::PeerState)> {
+    let store =
+        loquax::store::Store::open_read_only(&home.join(loquax::store::STORE_FILE), address)
+            .expect("the home store")
+            .expect("there");
+    let page = store.archive_since(0, usize::MAX).expect("page");
+    page.entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_PEERSTATE)
+        .map(|e| {
+            let (about, state) =
+                loquax::home::wire::read_peer_state_entry(&e.packed).expect("peer state");
+            (about, (e.seq, state))
+        })
+        .filter(|(about, _)| *about == peer)
+        .map(|(_, entry)| entry)
+        .collect()
+}
+
+/// Wait until the home node of `home` keeps `peer` pinned or not as
+/// `pinned` says, reading `session`'s events meanwhile; the entry's
+/// sequence (1640).
+fn home_keeps_pin(session: &Session, home: &Path, peer: [u8; 16], pinned: bool) -> u64 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let kept = home_peer_states(home, session.address(), peer);
+        if let Some((seq, state)) = kept.last() {
+            if state.pinned == pinned {
+                return *seq;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the home never kept pinned={pinned}: {kept:?}"
+        );
+        let _ = session.next_event(Duration::from_millis(200));
+    }
+}
+
+/// 1640, the shape of 1635's petname test for a peer state: the reader
+/// pins a peer, the home node keeps it, and the reader loosens the pin
+/// again. `taken` says whether the home node took the loosening before
+/// the session stopped; without it the home is killed first. The phone's
+/// pull cursor is set back before the pinned entry and the home node comes
+/// back. The second start must show the peer unpinned, and the home must
+/// come to keep it so.
+async fn an_unpinned_peer_across_a_restart(taken: bool) {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_dir = home.path().to_path_buf();
+    let phone = tempfile::tempdir().expect("app dir");
+    let dir = phone.path().display().to_string();
+    let first = Start {
+        dir: dir.clone(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        ..Start::default()
+    };
+    let peer = [0x5c; 16];
+    let hex = loquax::address::to_hex(&peer);
+    let runtime = tokio::runtime::Handle::current();
+    let (to, at) = (hex.clone(), home_dir.clone());
+    let mut node = Some(node);
+    let (pinned, address) = tokio::task::spawn_blocking(move || {
+        let mut kill = || {
+            if let Some(node) = node.take() {
+                runtime.block_on(node.kill());
+            }
+        };
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        session
+            .request(Request::Pin {
+                peer: to.clone(),
+                on: true,
+            })
+            .expect("pin");
+        let pinned = home_keeps_pin(&session, &at, peer, true);
+        if !taken {
+            kill();
+        }
+        session
+            .request(Request::Pin {
+                peer: to.clone(),
+                on: false,
+            })
+            .expect("unpin");
+        if taken {
+            home_keeps_pin(&session, &at, peer, false);
+            kill();
+        }
+        let address = session.address();
+        session.stop();
+        (pinned, address)
+    })
+    .await
+    .expect("the first session");
+    // What the phone owes its home: the loosening, unless the home took it.
+    let owed = loquax::store::Store::open_read_only(
+        &phone.path().join(loquax::store::STORE_FILE),
+        address,
+    )
+    .expect("the phone's store")
+    .expect("there")
+    .owed_peer_states()
+    .expect("owed");
+    let want = match taken {
+        true => std::collections::BTreeMap::new(),
+        false => {
+            std::collections::BTreeMap::from([(peer, loquax::home::wire::PeerState::default())])
+        }
+    };
+    assert_eq!(owed, want, "what the phone owes its home");
+
+    // The cursor before the pinned entry.
+    let cursors = files_named(phone.path(), loquax::home::client::CURSOR_FILE);
+    assert!(cursors.len() <= 1, "{cursors:?}");
+    for cursor in cursors {
+        std::fs::write(&cursor, format!("{}\n", pinned - 1)).expect("the cursor set back");
+    }
+
+    let listener =
+        std::net::TcpListener::bind(format!("127.0.0.1:{port}")).expect("the same port again");
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let again = Start {
+        dir,
+        ..Start::default()
+    };
+    tokio::task::spawn_blocking(move || {
+        let session = Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"));
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("the pull failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
+            }
+        }
+        let shown: schema::Detail = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Detail { peer: hex.clone() })
+                .expect("detail"),
+        )
+        .expect("decode");
+        assert!(!shown.pinned, "the loosened pin came back");
+        // The home node comes to keep the loosening, and the phone still
+        // shows it once its echo is pulled.
+        home_keeps_pin(&session, &home_dir, peer, false);
+        session.request(Request::Pull).expect("pull");
+        let shown: schema::Detail = wait_for(
+            &session,
+            schema::Query::Detail { peer: hex.clone() },
+            5,
+            |d: &schema::Detail| !d.pinned,
+        );
+        assert!(!shown.pinned);
+        session.stop();
+    })
+    .await
+    .expect("the second session");
+    node.stop().await;
+}
+
+/// 1640: a pin loosened while the home node could not take it stays
+/// loosened after a restart, and reaches the home node then.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpinned_peer_the_home_never_took_stays_unpinned_after_a_restart() {
+    an_unpinned_peer_across_a_restart(false).await;
+}
+
+/// 1640's control: the home node took the loosening before the stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpinned_peer_the_home_took_stays_unpinned_after_a_restart() {
+    an_unpinned_peer_across_a_restart(true).await;
+}
+
 /// A shared-instance name of this test process's own.
 fn instance() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

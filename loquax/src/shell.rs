@@ -746,20 +746,24 @@ impl Shell {
     }
 
     /// The peer states the reader set (1146), handed to the home node as
-    /// petnames are.
+    /// petnames are, and owed until it takes them (1640).
     fn hand_peer_states(&mut self) {
-        let states = self.model.take_peer_states();
+        // Taken only with a client to hand them to: a take waits for its
+        // answer before the next (1640).
         let Some(client) = self.context.client.clone() else {
             return;
         };
+        let states = self.model.take_peer_states();
         if states.is_empty() {
             return;
         }
         self.mark_tasks.retain(|task| !task.is_finished());
         let budget = self.context.timeout;
-        self.mark_tasks.push(tokio::spawn(runner::hand_peer_states(
-            client, states, budget,
-        )));
+        let done = self.done_tx.clone();
+        self.mark_tasks.push(tokio::spawn(async move {
+            let event = runner::hand_peer_states(client, states, budget).await;
+            let _ = done.send(Finished::Event(event));
+        }));
     }
 
     /// The marks a fold made, handed to the home node in order, on a task
@@ -1716,6 +1720,7 @@ pub(crate) async fn start(
                 store.fixes_between(None, i64::MIN, i64::MAX)?,
                 store.pn_asks()?,
                 store.owed_petnames()?,
+                store.owed_peer_states()?,
             ))
         })
         .map_err(|error| crate::failure(error, "no-store"))?;
@@ -1796,8 +1801,17 @@ pub(crate) async fn start(
     // Only the contacts: the names already know the peers `Model::new`
     // opened conversations with (1452, two nameless ones collide).
     model.names.contacts = contacts;
-    let (restored, names, last_key, positions, unverified, track_fixes, pn_asks, owed_petnames) =
-        history;
+    let (
+        restored,
+        names,
+        last_key,
+        positions,
+        unverified,
+        track_fixes,
+        pn_asks,
+        owed_petnames,
+        owed_peer_states,
+    ) = history;
     // The messages an earlier run kept unverified: the engine checks each
     // once its sender's key is known, and asks for it until then.
     for (message_id, source, packed) in unverified {
@@ -1852,6 +1866,9 @@ pub(crate) async fn start(
     // The petnames the home node had not taken when loquax ended (1635):
     // handed again, and the reader's word over what the first pull brings.
     model.restore_owed_petnames(owed_petnames);
+    // The peer states likewise (1640): a pin loosened before the end
+    // stays loosened.
+    model.restore_owed_peer_states(owed_peer_states);
     model.restore_positions(positions);
     model.restore_tracks(track_fixes);
     model.activity = model.activity.max(last_key);
