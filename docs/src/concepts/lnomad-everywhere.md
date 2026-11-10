@@ -270,7 +270,7 @@ and ships on its own.
 
 | # | Slice | Files | Tests | Accepted by | Depends on |
 |---|---|---|---|---|---|
-| 0 | **The contract's vocabulary moves into `leviculum-ui`**: `A11y`, `Role`, `Action<I>`, `TopBar`, `Lead`, `Tabs`, `Sheet`, `Chip`, a list item; `Text<K>`, `Lang`, `Arg`, `format`, the `catalogue!` macro, `android_xml`. Loquax re-exports, its `StrId` and node types stay its own. No behaviour change | `leviculum-ui/src/scene.rs`, `leviculum-ui/src/strings.rs` (new), `loquax/src/ui/scene.rs`, `loquax/src/ui/strings.rs`, `loquax/src/ui/intent.rs` | `loquax/tests/scene_golden.rs` unchanged; `the_phone_reads_the_catalogue` (`loquax/src/ui/strings.rs:812`) | the three `loquax/tests/golden/scene-*.json` and the generated `strings_scene.xml` byte-identical; `just ui-no-terminal`, `just loquax-core-no-std` green | Loquax slice one (`bb0e9f77`..`af8fa5c1`, here) |
+| 0 | **The contract's vocabulary moves into `leviculum-ui`**: `A11y`, `Role`, `Action<I>`, `TopBar`, `Lead`, `Tabs`, `Sheet`, `Chip`, a list item; `Text<K>`, `Lang`, `Arg`, `format`, the `catalogue!` macro, `android_xml`. Loquax re-exports, its `StrId` and node types stay its own. No behaviour change | `leviculum-ui/src/scene.rs`, `leviculum-ui/src/strings.rs` (new), `loquax/src/ui/scene.rs`, `loquax/src/ui/strings.rs`, `loquax/src/ui/intent.rs` | `loquax/tests/scene_golden.rs` unchanged; `the_phone_reads_the_catalogue` (`loquax/src/ui/strings.rs:813`) | the three `loquax/tests/golden/scene-*.json` and the generated `strings_scene.xml` byte-identical; `just ui-no-terminal`, `just loquax-core-no-std` green | Loquax slice one (`bb0e9f77`..`af8fa5c1`, here) |
 | 1 | **The proof: lnomad's TUI draws through a scene** (2 passes). `lnomad/src/app/scene.rs`: `Model::scene(class)` builds `TopBar`, `Page` (window of runs), the places `Sheet`, chips, toast; `lnomad::Intent`; `lnomad/src/app/strings.rs`, English and German, for the 37 toasts, the start page and the help groups. `tui::view` (`lnomad/src/tui.rs:99`) renders the scene; the cell mouse arms stay as they are, as in the Loquax study | `lnomad/src/app/{scene,strings}.rs` (new), `app/event.rs`, `app/chrome.rs`, `tui.rs` | the 241 `#[test]`s of `tui.rs` unchanged; `render_golden.rs`; new `lnomad/tests/scene_golden.rs` with `scene-page-{53,80}.json` of the README; positive control: shift a link by one cell and the golden fails | every `TestBackend` frame unchanged; the README window at 53×22 holds at most 67 runs (asserted, from 2.2); the build time of a README scene measured and written into this page | slice 0 |
 | 1b | **Keys become a table and intents**: lnomad's rows over `leviculum_ui::keymap`, vi, Emacs and arrows; `update_*_key` resolve to `lnomad::Intent`; help and footer derived | `lnomad/src/app/keys.rs` (new), `app/event.rs`, `app/chrome.rs` | a table test: each chord the old `match`es honoured resolves to the same intent; no chord resolves to two intents in one mode | the help overlay lists exactly the chords the handler honours | slice 1 |
 | 2 | **The window** (2 passes): `leviculum-ui-iced` extracted from `loquax/src/gui*.rs` (top bar, sheet, toast, list item, search field); `lnomad --gui` behind a `gui` feature draws the scene, the page as monospace `rich_text` runs | `leviculum-ui-iced/` (new), `loquax/src/gui.rs`, `loquax/src/gui/chat.rs`, `lnomad/src/gui.rs` (new), `lnomad/Cargo.toml` | `loquax/tests/golden/gui-chat-{light,dark}.png` byte-identical; new `lnomad/tests/golden/gui-page-{light,dark}.png` of the README fixture | Loquax's goldens unchanged; a click on a link run raises `Activate(Link(n))` in a headless test; frame time for the README at 1280×800 measured | slice 1; Loquax study slices 2 and 3 (iced draws the scene, the top bar and tab bar in the model) |
@@ -531,7 +531,7 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   `Palette::of` the same table (`lnomad/src/gui.rs:131`). A page's inks
   and NomadNet's link colour stay lnomad's. Loquax's window goldens and
   the phone's `colors.xml` test are unchanged;
-  `the_chrome_is_the_suites` (`loquax/src/ui/chat.rs:1495`) holds the
+  `the_chrome_is_the_suites` (`loquax/src/ui/chat.rs:1507`) holds the
   sharing.
 - **`--theme auto` follows the desktop.** Asked at the start and on
   each change (`lnomad/src/gui.rs:524`), as Loquax's window does, until
@@ -667,7 +667,7 @@ terminal and window get no tab (the second question, answered no for now).
   lnomad-core-no-std` still build both for the firmware triples. The tab
   is `Browse` (`loquax/src/ui/browse.rs:38`): whether the host has the tab
   (`enabled`, set by the phone's session from the config, on unless it
-  says off, at `loquax-android/src/session.rs:2216`), whether it is in front, and
+  says off, at `loquax-android/src/session.rs:2223`), whether it is in front, and
   lnomad's `Model`, marked `hosted`. `TabId::Browse`
   (`loquax/src/ui/scene.rs:82`) joins Chats and Map where enabled, and the
   scene carries lnomad's scene as `browse` (`loquax/src/ui/scene.rs:1035`;
@@ -754,12 +754,12 @@ two).** Slice 3's network seam: one node, lent, not a second one.
 - **The phone's turn.** `loquax-android/src/browse_fetch.rs` is the task
   the terminal's loop is on a desktop: one fetch in flight, a newer one or
   a cancel superseding it, lnomad's discovery drain beside it. The
-  session's pump (`browse`, `loquax-android/src/session.rs:2323`) hands it
+  session's pump (`browse`, `loquax-android/src/session.rs:2331`) hands it
   the owed effects and folds back what it says: `BrowseEvent::FailedText`,
   `Identifying`, `Downloaded` and `DownloadFailed` are new
   (`loquax/src/ui/browse.rs:125`). A download is kept under the app's
   files as a bubble's file is, `files/browse/` (`keep_download`,
-  `loquax-android/src/session.rs:2385`), and the clipboard text and the
+  `loquax-android/src/session.rs:2393`), and the clipboard text and the
   file go to Java once with the next screen; `BrowsePane` writes the
   clipboard and opens the file, or the share sheet takes it. Announces
   reach the list from the session's start, the tab shown or not.
@@ -767,7 +767,7 @@ two).** Slice 3's network seam: one node, lent, not a second one.
   key named (`lnomad/src/app/event.rs:385`, English and German).
 - **On by default since 1618.** The browser is Explore's way in: on
   unless the config's `browse_tab` says off
-  (`loquax-android/src/session.rs:2216`). It was held back, off in the
+  (`loquax-android/src/session.rs:2223`). It was held back, off in the
   APK, until the fetch had been seen on a device; the walk of 17024c3a
   found Explore listing every page and opening none.
 - **Measured.** From the tap on a node's row to the first screen that

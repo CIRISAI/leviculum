@@ -1028,7 +1028,7 @@ grows by 17,248 B to 944,768 B (`just build-m9`).
 board needs: `Create` (`/group`), `Add` (`/groupadd`), `Delete`
 (`/groupdelete`, its `Ok` the group it deleted), and `State`, the
 member's Join, Leave or the admin's Remove, which the model makes a state
-message to the group (`group_state`, `loquax/src/ui/groups.rs:1580`) and
+message to the group (`group_state`, `loquax/src/ui/groups.rs:1622`) and
 the home sends as any message (`/send`). `ask_of`
 (`loquax-m9/src/group.rs:363`) turns the model's effect into that verb,
 with the board's fresh client id; a plain message is no group's ask.
@@ -1295,7 +1295,7 @@ All targets:
   our pin on the map where it is newer than our last share; otherwise
   unchanged.
 - **Android:** the phone's own fix (`Intent::OwnFix`,
-  `loquax-android/src/session.rs:1603`) is our pin the same way;
+  `loquax-android/src/session.rs:1607`) is our pin the same way;
   otherwise unchanged.
 - **The home:** unchanged; it carries no region yet (above).
 
