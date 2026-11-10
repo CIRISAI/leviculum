@@ -2250,6 +2250,30 @@ pub fn install_global_subscriber_to_file(default_filter: &str, path: &std::path:
     }
 }
 
+/// The function [`install_line_subscriber`] hands each line to.
+static LINE_HOOK: OnceLock<fn(&str)> = OnceLock::new();
+
+/// The structured lines of the targets starting with `target_prefix`,
+/// each handed to `hook` as it is rendered (1655, walk 9, 48): the phone
+/// has no terminal and no `LEVICULUM_EVENT_LOG`, so its events went
+/// nowhere, and a walk could not read `ROOMS_LINK` or `ROOMS_LIST`. The
+/// phone's hook writes each to logcat. Installs the global subscriber
+/// with the event layer alone, filtered to those targets so another
+/// crate's events cost no rendering; whether it did (a second call, or
+/// another subscriber first, keeps what is there).
+pub fn install_line_subscriber(target_prefix: &'static str, hook: fn(&str)) -> bool {
+    if LINE_HOOK.set(hook).is_err() {
+        return false;
+    }
+    let targets = tracing_subscriber::filter::filter_fn(move |meta: &Metadata<'_>| {
+        meta.target().starts_with(target_prefix)
+    });
+    Registry::default()
+        .with(layer().with_filter(targets))
+        .try_init()
+        .is_ok()
+}
+
 /// The layer registered into the global subscriber chain.  Driven by
 /// the active-handles list above.
 pub struct EventLogLayer {
@@ -2408,6 +2432,12 @@ impl EventLogLayer {
                 sink.write(t_ms, v);
             }
             sink.write(t_ms, line);
+        }
+        if let Some(hook) = LINE_HOOK.get() {
+            for v in &field_violation_lines {
+                hook(v);
+            }
+            hook(line);
         }
     }
 }

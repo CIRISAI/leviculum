@@ -199,6 +199,7 @@ skip  leviculum-std   destination_lifecycle      # binds sockets under a tokio r
 skip  leviculum-std   discovery_autoconnect      # tokio runtime, discovery over real interfaces
 skip  leviculum-std   doc_citations              # in class, but already run by the citation-guard step of `just fast`
 skip  leviculum-std   event_log_callsite_filter  # in-process event-log filtering; subject is the code
+skip  leviculum-std   event_log_line_hook        # in-process line hook and its target filter; subject is the code
 skip  leviculum-std   event_log_multiprocess     # spawns a second process to share the log
 skip  leviculum-std   event_log_rotation         # spawns processes, sleeps, rotates real files
 skip  leviculum-std   event_log_subscriber       # long in-process subscriber suite; seconds, and needs --test-threads=1
