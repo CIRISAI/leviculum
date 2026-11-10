@@ -131,8 +131,8 @@
 //!                           the line took (1507), tx_drop_kind the same
 //!                           by what they were (1553); dump stays 0, a
 //!                           dump's line is never dropped for another
-//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> park_ms=<n> park_max_ms=<n> park_ops=<n> park_coop=<n> park_fallback=<n> park_late=<n> t=<ms>  (1569; park_coop/park_fallback/park_late since 1613, the window's cooperative parks against hardware-stall fallbacks, `leviculum_esp::corepark`; the bench image adds alloc_ms0=<n> alloc_ms1=<n>, each core's time inside the allocator, and since 1594 wait_ms0=<n> wait_ms1=<n> allocs0=<n> allocs1=<n>, the spin for a pool's lock and the calls)
-//! [FLASH] op=<erase|write> ms=<n> at=<ms>  (1613, bench image only: one line per flash op, the masked window's length and when it ran; the erase distribution window 24 reads)
+//! [IDLE] io_pct=<n> ui_pct=<n> window_ms=<n> park_ms=<n> park_max_ms=<n> park_ops=<n> park_coop=<n> park_fallback=<n> park_late=<n> t=<ms>  (1569; park_coop/park_fallback/park_late since 1613, the window's cooperative parks against hardware-stall fallbacks, `leviculum_esp::corepark`; the bench image adds alloc_ms0=<n> alloc_ms1=<n>, each core's time inside the allocator, and since 1594 wait_ms0=<n> wait_ms1=<n> allocs0=<n> allocs1=<n>, the spin for a pool's lock and the calls, and since 1622 flash_lost=<n>, the window's `[FLASH]` records overwritten unsaid)
+//! [FLASH] op=<erase|write> ms=<n> at=<ms>  (1613, bench image only: one line per flash op, the masked window's length and when it ran; the erase distribution window 24 reads; since 1622 the ring holds 1024, a forget's turn, and a drain that still found records overwritten says `[FLASH] lost=<n>`)
 //!                           every five seconds (1507, `leviculum_esp::idle`):
 //!                           the share of the window each core waited for
 //!                           its next interrupt (WAITI) instead of spinning;
@@ -2054,6 +2054,10 @@ fn main() -> ! {
     // starve's instrument, in the bench image whose clock it is.
     #[cfg(m9_bench)]
     let mut alloc_since = alloc_window();
+    // The `[FLASH]` records overwritten unsaid as of the last window
+    // (1622).
+    #[cfg(m9_bench)]
+    let mut flash_lost_since = leviculum_esp::flash::park::records_lost();
     // The bench's keys (1533), only in an image built for it.
     #[cfg(m9_bench)]
     let mut inject = loquax_m9::kbraw::Inject::new();
@@ -2084,13 +2088,20 @@ fn main() -> ! {
         // The masked windows one by one (1613): the distribution the
         // bench reads erase lengths from, beside the overruns they
         // used to cause.
+        // Since 1622 a drain that found records overwritten says how
+        // many, so a window's distribution says what it misses.
         #[cfg(m9_bench)]
-        leviculum_esp::flash::park::take_records(|op, us, at| {
-            log.text(
-                "[FLASH] ",
-                &alloc::format!("op={} ms={}.{:03} at={at}", op.name(), us / 1000, us % 1000),
-            );
-        });
+        {
+            let lost = leviculum_esp::flash::park::take_records(|op, us, at| {
+                log.text(
+                    "[FLASH] ",
+                    &alloc::format!("op={} ms={}.{:03} at={at}", op.name(), us / 1000, us % 1000),
+                );
+            });
+            if lost > 0 {
+                log.text("[FLASH] ", &alloc::format!("lost={lost}"));
+            }
+        }
         let now = uptime_ms();
         let mut turn = Turn::default();
         if now >= next_banner {
@@ -2141,10 +2152,15 @@ fn main() -> ! {
                 )
             };
             #[cfg(m9_bench)]
+            let flash_lost = {
+                let now = leviculum_esp::flash::park::records_lost();
+                now.wrapping_sub(core::mem::replace(&mut flash_lost_since, now))
+            };
+            #[cfg(m9_bench)]
             log.text(
                 "[IDLE] ",
                 &alloc::format!(
-                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops} park_coop={park_coop} park_fallback={park_fallback} park_late={park_late} alloc_ms0={} alloc_ms1={} wait_ms0={} wait_ms1={} allocs0={} allocs1={}",
+                    "io_pct={} ui_pct={} window_ms={} park_ms={}.{:03} park_max_ms={}.{:03} park_ops={park_ops} park_coop={park_coop} park_fallback={park_fallback} park_late={park_late} alloc_ms0={} alloc_ms1={} wait_ms0={} wait_ms1={} allocs0={} allocs1={} flash_lost={flash_lost}",
                     u64::from(io) * 100 / window_us,
                     u64::from(ui) * 100 / window_us,
                     window_us / 1000,

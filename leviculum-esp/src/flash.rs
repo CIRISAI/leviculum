@@ -80,23 +80,10 @@ fn parked<R>(op: park::Op, f: impl FnOnce() -> R) -> R {
 pub mod park {
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    /// What an op is, for the per-kind distribution (1613): an erase's
-    /// masked window is the sector's 35 to 57 ms, a write's is per
-    /// 512-byte chunk and well under a millisecond.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    pub enum Op {
-        Erase,
-        Write,
-    }
-
-    impl Op {
-        pub fn name(self) -> &'static str {
-            match self {
-                Op::Erase => "erase",
-                Op::Write => "write",
-            }
-        }
-    }
+    /// What an op is, for the per-kind distribution (1613): the ring's
+    /// own kind, `loquax_m9::oplog::Op`, so the host pins the ring the
+    /// board keeps.
+    pub use loquax_m9::oplog::Op;
 
     static TOTAL_US: AtomicU32 = AtomicU32::new(0);
     static OPS: AtomicU32 = AtomicU32::new(0);
@@ -108,65 +95,35 @@ pub mod park {
         OPS.fetch_add(1, Ordering::Relaxed);
         MAX_US.fetch_max(us, Ordering::Relaxed);
         #[cfg(m9_bench)]
-        records::keep(op, us);
+        RECORDS.keep(op, us, crate::uptime_ms() as u32);
         #[cfg(not(m9_bench))]
         let _ = op;
     }
 
-    /// The bench image's per-op records (1613): a ring of the last ops,
-    /// written by the op's core and read by the same core's loop, which
-    /// says each as a `[FLASH] op=<kind> ms=<n>.<frac> at=<ms>` line.
-    /// One writer and one reader on one core: plain indices.
+    /// The bench image's per-op records (1613): the last ops, written by
+    /// the op's core and read by the same core's loop, which says each as
+    /// a `[FLASH] op=<kind> ms=<n>.<frac> at=<ms>` line. Since 1622 sized
+    /// for a forget's turn (`oplog::KEEP`, 1024; window 24's ring of 32
+    /// said 7 of a forget's erases) and counting what a drain finds
+    /// overwritten (`loquax-m9/tests/oplog.rs` pins both).
     #[cfg(m9_bench)]
-    mod records {
-        use super::Op;
-        use core::sync::atomic::{AtomicU32, Ordering};
-
-        const KEEP: usize = 32;
-        static AT_MS: [AtomicU32; KEEP] = [const { AtomicU32::new(0) }; KEEP];
-        static US: [AtomicU32; KEEP] = [const { AtomicU32::new(0) }; KEEP];
-        static KIND: [AtomicU32; KEEP] = [const { AtomicU32::new(0) }; KEEP];
-        static WRITE: AtomicU32 = AtomicU32::new(0);
-        static READ: AtomicU32 = AtomicU32::new(0);
-
-        pub(super) fn keep(op: Op, us: u32) {
-            let w = WRITE.load(Ordering::Relaxed);
-            let slot = (w as usize) % KEEP;
-            AT_MS[slot].store(crate::uptime_ms() as u32, Ordering::Relaxed);
-            US[slot].store(us, Ordering::Relaxed);
-            KIND[slot].store(op as u32, Ordering::Relaxed);
-            WRITE.store(w.wrapping_add(1), Ordering::Relaxed);
-        }
-
-        pub(super) fn take(mut say: impl FnMut(Op, u32, u32)) {
-            let w = WRITE.load(Ordering::Relaxed);
-            let mut r = READ.load(Ordering::Relaxed);
-            // Overrun: the oldest still-held records are the truth.
-            if w.wrapping_sub(r) > KEEP as u32 {
-                r = w.wrapping_sub(KEEP as u32);
-            }
-            while r != w {
-                let slot = (r as usize) % KEEP;
-                let op = match KIND[slot].load(Ordering::Relaxed) {
-                    0 => Op::Erase,
-                    _ => Op::Write,
-                };
-                say(
-                    op,
-                    US[slot].load(Ordering::Relaxed),
-                    AT_MS[slot].load(Ordering::Relaxed),
-                );
-                r = r.wrapping_add(1);
-            }
-            READ.store(r, Ordering::Relaxed);
-        }
-    }
+    static RECORDS: loquax_m9::oplog::OpLog<{ loquax_m9::oplog::KEEP }> =
+        loquax_m9::oplog::OpLog::new();
 
     /// Say every op since the last call: `(op, us, at_ms)`, oldest
-    /// first. The bench image's loop turns this into `[FLASH]` lines.
+    /// first; returns how many were overwritten before this call could
+    /// say them. The bench image's loop turns this into `[FLASH]` lines
+    /// and a `[FLASH] lost=` line when it is not zero.
     #[cfg(m9_bench)]
-    pub fn take_records(say: impl FnMut(Op, u32, u32)) {
-        records::take(say);
+    pub fn take_records(say: impl FnMut(Op, u32, u32)) -> u32 {
+        RECORDS.take(say)
+    }
+
+    /// The records overwritten unsaid since boot, wrapping (1622): the
+    /// `[IDLE]` line's `flash_lost=` is its delta per window.
+    #[cfg(m9_bench)]
+    pub fn records_lost() -> u32 {
+        RECORDS.lost()
     }
 
     /// Microseconds inside flash ops and the ops, since boot, wrapping.

@@ -292,6 +292,7 @@ skip  loquax-m9        read                       # the M9 reads by its viewport
 skip  loquax-m9        bench                      # the bench never touches a real chat: arrivals into "Bench" only, a release restore lists none, no mark to the home, bench forget takes 1540's and the flagged out (1562); subject is the code
 skip  loquax-m9        drain                      # the UI core's drain played over a test clock: a budget per turn, a key yields the fold, pages counted once and rows once a page, the unbudgeted loop as control (1575); subject is the code
 skip  loquax-m9        unshown                    # every M9 key in the open chat and on the list leaves no model state the M9 does not draw, the terminal's `I` as control (1612); subject is the code
+skip  loquax-m9        oplog                      # the bench image's [FLASH] ring fed a real forget and rebuild over a 1489-shaped store, the old ring of 32 as control (1622); subject is the code
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer

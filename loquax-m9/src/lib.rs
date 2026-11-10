@@ -50,6 +50,8 @@
 //! - [`census`]: what a screen costs where it is drawn, and its budget.
 //! - [`bench`](mod@bench): a message that arrives with no network, for the bench
 //!   image's walks (1540).
+//! - [`oplog`]: the bench image's ring of flash ops, said as `[FLASH]`
+//!   lines, and the ops it could not say counted (1613, 1622).
 
 #![no_std]
 
@@ -72,6 +74,7 @@ pub mod keyboard;
 pub mod keys;
 pub mod map;
 pub mod mspi;
+pub mod oplog;
 pub mod pace;
 pub mod page;
 pub mod pair;
