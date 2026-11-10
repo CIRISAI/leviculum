@@ -12,8 +12,9 @@ src/bin/sd-ram-probe.rs (294):
 src/bin/solarnode.rs (1534):
 src/bin/t1000e.rs (1407): feedback
 src/bin/t114.rs (229):
-src/ble/columba.rs (3225): info log radio_store warn
-src/ble/mod.rs (899): info log media radio_store transport_stats warn
+src/ble/columba.rs (3244): info log radio_store warn
+src/ble/err_text.rs (101):
+src/ble/mod.rs (900): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
 src/boards/mod.rs (84): lora qspi radio_store telemetry
 src/boards/rak4631.rs (275): power
