@@ -1241,10 +1241,11 @@ fn draw_tx_hold_spread_ms(rng: &mut impl RngCore, max_ms: u64) -> u64 {
 /// with a blind window the length of a preamble. It costs, on average, half of
 /// [`TX_HOLD_SPREAD_SLOTS`] slots per frame.
 ///
-/// This is not [`rnode::compute_spacing_ms`], which computes the same shape
-/// from constants that assume a 24 ms slot and adds a fixed 100 ms margin.
-/// The slot is a function of the modulation (6 ms above 30 kbps, up to 100 ms
-/// at SF12), and the modem reports the value it is actually using.
+/// Core once had `compute_spacing_ms`, the same shape from constants that
+/// assumed a 24 ms slot plus a fixed 100 ms margin, without a caller; it was
+/// removed in 1638. The slot is a function of the modulation (6 ms above
+/// 30 kbps, up to 100 ms at SF12), and the modem reports the value it is
+/// actually using.
 ///
 /// Nothing here asks what the frame contains: a packet is a packet, and the
 /// only input from the frame is its length on the air.
@@ -5799,8 +5800,8 @@ mod tests {
     /// of 16 across the corpus (167 ms at SF7/250 to 2673 ms at SF10/125 for
     /// an announce-sized frame), and at SF10 the slot as well: 12 symbols are
     /// 98 ms there against the 24 ms floor every SF7 cell clamps up to. A
-    /// hold built on the fixed 24 ms slot `rnode::compute_spacing_ms`
-    /// assumes would under-price SF10's contest by a second.
+    /// hold built on a fixed 24 ms slot (core's removed `compute_spacing_ms`
+    /// assumed one) would under-price SF10's contest by a second.
     #[test]
     fn the_hold_is_the_frames_airtime_plus_the_firmwares_contest() {
         // One announce-sized frame, the population the corpus cells put on

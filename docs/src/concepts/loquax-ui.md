@@ -836,11 +836,11 @@ Show what a message will cost before it is sent, next to the send action:
 ```
 
 The pieces exist. `leviculum_core::rnode::airtime_ms`
-(`leviculum-core/src/rnode.rs:1107`) and `packet_airtime_ms`
-(`leviculum-core/src/rnode.rs:1701`) are public, interfaces report a
+(`leviculum-core/src/rnode.rs:1096`) and `packet_airtime_ms`
+(`leviculum-core/src/rnode.rs:1667`) are public, interfaces report a
 `bitrate` (`leviculum-std/src/interfaces/mod.rs:700-702`) computed from
 spreading factor, coding rate and bandwidth
-(`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:3451`), and
+(`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:3452`), and
 `fetch_remote_status` (`leviculum-std/src/remote_status.rs:311`) retrieves
 the interface list from the daemon, which is how `lnstatus` works. Note two
 honesty constraints: `fetch_remote_status` needs the management authkey,

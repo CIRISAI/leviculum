@@ -82,7 +82,7 @@ its medium. For the phone that means the following:
 What already fits the seam:
 
 - **USB serial needs no new interface.** `RNodeChannelFactory`
-  (`leviculum-std/src/interfaces/rnode.rs:3627`) exists for exactly this
+  (`leviculum-std/src/interfaces/rnode.rs:3628`) exists for exactly this
   case: a host that never sees `/dev/ttyACM*`, Android named. The phone
   supplies `open`. The KISS detection and configuration, the airtime
   bucket and the reconnect loop stay the host RNode interface's own, and

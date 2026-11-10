@@ -549,7 +549,7 @@ firmware reported `op=tx duration_ms=903..905` for 13 of the 15 such
 transmissions in the run (SF8, BW 125 kHz, CR 4:5, 18-symbol preamble).
 Our airtime model agrees: computed 543 ms for the 184-byte frame the
 same log reports as `airtime_ms=544` (`airtime_ms_with_preamble`,
-`leviculum-core/src/rnode.rs:1107`; preamble from
+`leviculum-core/src/rnode.rs:1096`; preamble from
 `derive_preamble_symbols`, `leviculum-core/src/rnode.rs:963`, which
 floors at 18, `LORA_PREAMBLE_SYMBOLS_MIN`,
 `leviculum-core/src/rnode.rs:898`).

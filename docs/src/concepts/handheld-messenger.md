@@ -823,7 +823,7 @@ larger link MTU that is one packet, but on LoRa it would be a resource.
 
 **The airtime**, at our defaults (BW 125 kHz, SF8, CR 4/5, 18-symbol
 preamble), from those lengths through `packet_airtime_ms`
-(`leviculum-core/src/rnode.rs:1702`), as [Announce
+(`leviculum-core/src/rnode.rs:1668`), as [Announce
 cadence](announce-cadence.md) reckons its announces. Every entry the
 archive gains wakes the watching link, the board's own entries too, and
 every wake past the cursor is a pull. So a message in costs a wake, a

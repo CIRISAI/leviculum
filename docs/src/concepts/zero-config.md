@@ -345,8 +345,8 @@ only when both hold:
 
 Then, and only then, one `CMD_DETECT` with `DETECT_REQ`; a device that
 answers `DETECT_RESP` is an RNode. lnsd already speaks this handshake
-(`detect_on_port`, `leviculum-std/src/interfaces/rnode.rs:1932`; the same
-frame is its serial heartbeat, `leviculum-std/src/interfaces/rnode.rs:3086-3088`).
+(`detect_on_port`, `leviculum-std/src/interfaces/rnode.rs:1933`; the same
+frame is its serial heartbeat, `leviculum-std/src/interfaces/rnode.rs:3087-3089`).
 A refused device is remembered and not asked again; hotplug is a rescan
 of the by-id directory every 5 s (built so, see step 5 below). The directory is
 `LEVICULUM_AUTO_SERIAL_DIR`, default `/dev/serial/by-id`, so a cell can
