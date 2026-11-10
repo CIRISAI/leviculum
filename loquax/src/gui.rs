@@ -6237,6 +6237,249 @@ mod tests {
         map::tests::same_as("gui-relay-group.png", &shoot(&app, w, h), w, h);
     }
 
+    mod reply_scene {
+        include!("../tests/support/reply_scene.rs");
+    }
+
+    /// The window over the shared reply fixture's model, light, `w` x `h`.
+    fn reply_window(model: &crate::shell::Model, w: u32, h: u32) -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(model))));
+        app
+    }
+
+    /// Anna's chat of `reply_scene.rs` with the shared clock: today's
+    /// midnight of a fixed day, an hour east of UTC, as the window keeps
+    /// its scenes (whole).
+    fn reply_model() -> crate::shell::Model {
+        let mut model = crate::shell::Model::new(&[]);
+        update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
+        model.address = Some(OWN);
+        reply_scene::reply_scene(&mut model, 1_800_000_000 - 1_800_000_000 % 86_400, 3600);
+        model.toasts.clear();
+        model
+    }
+
+    /// 1451, the walk's blind spots: a reply, a reaction and a photo in the
+    /// window. Anna's chat of the shared fixture: her question, her photo,
+    /// our reply "Ja, um zehn am Brunnen" quoting her question with her
+    /// thumbs up as a chip under it, and her last line; pixel for pixel the
+    /// golden, light, 900 x 560.
+    #[test]
+    fn a_reply_with_its_reaction_is_the_windows_golden() {
+        let (w, h) = (900, 560);
+        let model = reply_model();
+        let app = reply_window(&model, w, h);
+        let chat = app.scene.chat.as_ref().expect("Anna's chat");
+        assert_eq!(chat.peer, reply_scene::REPLY_ANNA);
+        let ours = chat
+            .groups
+            .iter()
+            .flat_map(|g| &g.bubbles)
+            .find(|b| b.bubble.id == Some(reply_scene::REPLY_OURS))
+            .expect("our reply");
+        assert_eq!(ours.bubble.body, "Ja, um zehn am Brunnen");
+        assert_eq!(
+            ours.bubble.quote.as_ref().map(|q| q.text.as_str()),
+            Some("Kommst du morgen mit zum Markt?")
+        );
+        let chips: Vec<_> = ours
+            .bubble
+            .chips
+            .iter()
+            .map(|c| (c.content.as_str(), c.count, c.ours))
+            .collect();
+        assert_eq!(chips, [("\u{1F44D}", 1, false)]);
+        assert!(
+            chat.groups
+                .iter()
+                .flat_map(|g| &g.bubbles)
+                .any(|b| b.bubble.id == Some(reply_scene::REPLY_PHOTO) && b.bubble.photo.is_some()),
+            "her photo"
+        );
+        // Control: nothing is being written yet.
+        assert_eq!(app.reply, None);
+        assert_eq!(app.compose.text().trim(), "");
+        map::tests::same_as("gui-reply-sent.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// 1451: the same chat while a second reply is written, to Anna's last
+    /// line. The window takes the draft and the reply back from the scene
+    /// as when the reader's Reply had started it: the reply bar quoting
+    /// "Super, bis morgen" over the field holding "Ich bring Kaffee mit";
+    /// pixel for pixel the golden, light, 900 x 560.
+    #[test]
+    fn a_reply_being_written_is_the_windows_golden() {
+        let (w, h) = (900, 560);
+        let mut model = reply_model();
+        reply_scene::reply_composing(&mut model);
+        let app = reply_window(&model, w, h);
+        assert_eq!(
+            app.reply,
+            Some((reply_scene::REPLY_LAST, "Super, bis morgen".to_string()))
+        );
+        assert_eq!(
+            app.compose.text().trim_end_matches('\n'),
+            reply_scene::REPLY_DRAFT
+        );
+        // The sent reply keeps its quote and its chip above the bar.
+        let ours = app
+            .scene
+            .chat
+            .iter()
+            .flat_map(|c| &c.groups)
+            .flat_map(|g| &g.bubbles)
+            .find(|b| b.bubble.id == Some(reply_scene::REPLY_OURS))
+            .expect("our reply");
+        assert!(ours.bubble.quote.is_some() && !ours.bubble.chips.is_empty());
+        map::tests::same_as("gui-reply-compose.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// The model at the window's very first start (1451): an address and
+    /// its code, the profile's facts as the shell gives a messenger without
+    /// a mailbox (`shell::profile_facts` with no client: `Mailbox::Unknown`
+    /// and this one device), no conversation.
+    fn first_start_model() -> crate::shell::Model {
+        use loquax::ui::profile::{Device, Mailbox, ProfileFacts};
+        let mut model = crate::shell::Model::new(&[]);
+        update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
+        model.address = Some(OWN);
+        update(&mut model, UiEvent::Clock(at(29, 9, 30)));
+        let private: [u8; 64] = core::array::from_fn(|i| i as u8 + 9);
+        let key = leviculum_core::Identity::from_private_key_bytes(&private)
+            .expect("a key")
+            .public_key_bytes();
+        let code = loquax::lxma::encode(&key).expect("a code");
+        model.own_code = Some(loquax::ui::OwnCode::of(
+            code.clone(),
+            loquax::home::qr::verbatim_modules(&code).ok(),
+        ));
+        model.profile = ProfileFacts {
+            name: "Mia Sander".to_string(),
+            mailbox: Mailbox::Unknown,
+            devices: vec![Device {
+                name: String::new(),
+                this: true,
+            }],
+        };
+        model.toasts.clear();
+        model
+    }
+
+    /// 1451, the window at its very first start, before any mailbox: no
+    /// conversation in the list, no chat open; pixel for pixel the golden.
+    /// The avatar opens the profile, which says the mailbox is not set up
+    /// yet, the golden too; both light, 900 x 560.
+    #[test]
+    fn the_first_start_and_its_profile_are_the_windows_goldens() {
+        let (w, h) = (900, 560);
+        let mut model = first_start_model();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(model.conversations.is_empty());
+        assert!(app.listed().is_empty(), "no conversation");
+        assert!(app.scene.chat.is_none(), "no chat open");
+        assert!(app.scene.profile.is_none(), "control: closed");
+        map::tests::same_as("gui-first-start.png", &shoot(&app, w, h), w, h);
+        let open = app
+            .scene
+            .action(NodeId::Me)
+            .expect("the avatar does something")
+            .intent
+            .clone();
+        assert_eq!(open, Intent::Profile);
+        let _ = app.update(Message::Intent(open));
+        for event in told(&mut rx) {
+            update(&mut model, event);
+        }
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let profile = app.scene.profile.as_ref().expect("the profile");
+        assert_eq!(profile.mailbox.resolve(Lang::En), "Mailbox: not set up yet");
+        assert_eq!(profile.state, None);
+        assert_eq!(profile.devices.len(), 1);
+        map::tests::same_as("gui-first-start-profile.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// 1451, the map in the window with two peers' pins: Anna and Ben
+    /// shared their positions in Florence's centre, inside the committed
+    /// region, five and eight minutes ago, the window shows the map screen over the
+    /// committed Florence region, Anna selected, her card marked in the
+    /// list and the view centred on her; pixel for pixel the golden,
+    /// light, 900 x 560.
+    #[test]
+    fn two_pins_with_one_selected_are_the_windows_map_golden() {
+        use leviculum_lxmf::telemetry::Location;
+        const BEN: [u8; 16] = [0xbe; 16];
+        let (w, h) = (900, 560);
+        let mut model = crate::shell::Model::new(&[]);
+        update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
+        model.address = Some(OWN);
+        model.names.remember(ANNA, "Anna");
+        model.names.remember(BEN, "Ben");
+        let now = at(29, 9, 30);
+        update(&mut model, UiEvent::Clock(now));
+        let mut report = |peer: [u8; 16], id: u8, lat: i32, lon: i32, ago: i64| {
+            let fix = Location {
+                latitude_e6: lat,
+                longitude_e6: lon,
+                altitude_e2: 5_000,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: now.unix_secs - ago,
+            };
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    sent_at: now.unix_secs - ago,
+                    message_id: [id; 32],
+                    source: peer,
+                    title: Vec::new(),
+                    body: Vec::new(),
+                    fields: loquax::ui::position_fields(fix),
+                    verified: true,
+                }),
+            );
+        };
+        report(ANNA, 1, 43_775_630, 11_260_220, 300);
+        report(BEN, 2, 43_774_030, 11_255_720, 480);
+        model.toasts.clear();
+        let frames = map::tests::florence();
+        let maps = frames.painter().epoch();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(frames, Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let mut seen = seen_of(&model);
+        seen.maps = maps;
+        app.apply(Message::Seen(Box::new(seen)));
+        let _ = app.update(Message::Intent(Intent::ShowMap { peer: None }));
+        assert_eq!(app.screen, Screen::Map);
+        let _ = told(&mut rx);
+        // The map's canvas in a 900 x 560 window: right of the rail and
+        // the list, above the bar.
+        app.apply(Message::MapSize(Size::new(568.0, 539.0)));
+        app.apply(Message::Select(ANNA));
+        let (shown, _) = run(&mut app);
+        assert!(shown.is_some(), "a frame of Florence at rest");
+        let labels: Vec<_> = app.seen.pins.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("Anna")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("Ben")), "{labels:?}");
+        assert_eq!(app.selected, Some(ANNA));
+        let anna = app
+            .seen
+            .pins
+            .iter()
+            .find(|p| p.peer == ANNA)
+            .expect("Anna's pin");
+        assert_eq!(app.view.centre, anna.at, "the view is on Anna");
+        map::tests::same_as("gui-map-pins.png", &shoot(&app, w, h), w, h);
+    }
+
     /// `pcm` as the microphone's levels for Anna's recording, a window
     /// every 50 ms from `from` on; the time after the last.
     fn levels_of(model: &mut crate::shell::Model, pcm: &[i16], from: u64) -> u64 {

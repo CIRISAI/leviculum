@@ -177,3 +177,40 @@ the terminal names the writer in the line and draws no quotes) and
 `gui::tests::a_relayed_group_is_the_windows_golden` (900 x 560, light,
 pixel for pixel). The phone's title, rows and Info in German are
 `loquax-android/tests/golden/relay-group.json`.
+
+`gui-reply-sent.png`: a reply, a reaction and a photo in the window
+(1451), from the shared fixture `tests/support/reply_scene.rs`: Anna's
+chat with her question "Kommst du morgen mit zum Markt?", her photo
+(its row "Photo, 185 KB"), our reply "Ja, um zehn am Brunnen" quoting
+her question with her thumbs up as a chip under it and its delivered
+tick, and her last line "Super, bis morgen"; the compose bar empty.
+Drawn by `gui::tests::a_reply_with_its_reaction_is_the_windows_golden`,
+900 x 560, light, pixel for pixel.
+
+`gui-reply-compose.png`: the same chat while a second reply is written
+(1451, `reply_composing` of the same fixture): the window takes the draft
+and the reply back from the scene as when the reader's Reply started
+it, so the reply bar says "Reply to: Super, bis morgen" with "Cancel
+reply" over the field holding "Ich bring Kaffee mit". Drawn by
+`gui::tests::a_reply_being_written_is_the_windows_golden`, 900 x 560,
+light, pixel for pixel.
+
+`gui-first-start.png`, `gui-first-start-profile.png`: the window at its
+very first start, before any mailbox (1451): an address and its code,
+the profile's facts as the shell gives a messenger without a mailbox
+(`Mailbox::Unknown`, this one device), no conversation; the list says
+there is none yet and the chat side asks to pick one. The second picture
+is the profile the avatar opens: the name, the address in fours, "Mailbox:
+not set up yet", "This device", the QR and the code. Drawn by
+`gui::tests::the_first_start_and_its_profile_are_the_windows_goldens`,
+900 x 560, light, pixel for pixel. The window has no join screen and no
+offline bar: a desktop joins a mailbox with `loquax mailbox join CODE`,
+and its shell sets the profile's mailbox once at start without its reach.
+
+`gui-map-pins.png`: the window's map screen with two peers' pins (1451):
+Anna and Ben shared their positions in Florence's centre five and eight
+minutes ago, the frame drawn from `../../../leviculum-map/fixtures/firenze.lmr`
+(the region's extent, the theme's ground around it), Anna selected: her
+entry marked in the list and the view centred on her pin. Drawn by
+`gui::tests::two_pins_with_one_selected_are_the_windows_map_golden`,
+900 x 560, light, pixel for pixel. OpenStreetMap data as above.
