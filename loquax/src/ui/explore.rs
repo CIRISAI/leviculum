@@ -811,8 +811,11 @@ fn sheet_rooms(rooms: &super::rooms::Rooms, hash: &[u8; 16]) -> Vec<String> {
 }
 
 /// The sentence under the sheet's rooms (1621): asking while the question
-/// is out, the hub's silence, or that it named none, only once it
-/// answered and none is known.
+/// is out, with its seconds from the fifth on as the rooms screen counts
+/// its connecting (1655, walk 9, 47: a slow server's sheet said the same
+/// sentence for 60 to 90 s); the hub's silence; or that it named none,
+/// only once it answered and none is known. Silence and an empty answer
+/// read apart, in the rooms screen's words (1652).
 fn rooms_note(
     rooms: &super::rooms::Rooms,
     hash: &[u8; 16],
@@ -823,9 +826,17 @@ fn rooms_note(
         Some(Named::Asking { since }) if overdue(*since, now) => {
             Some(Text::key(StrId::RoomsNoAnswer))
         }
-        Some(Named::Asking { .. }) => Some(Text::key(StrId::ExploreServerAsking)),
-        Some(Named::NoAnswer) if !listed => Some(Text::key(StrId::ExploreServerNoAnswer)),
-        Some(Named::Rooms(_)) if !listed => Some(Text::key(StrId::ExploreServerNoRooms)),
+        Some(Named::Asking { since }) => Some(match (*since, now) {
+            (Some(since), Some(now)) if now - since >= super::rooms::LINKING_QUIET_SECS => {
+                Text::Key(
+                    StrId::ExploreServerAskingFor,
+                    Vec::from([Arg::Int(now - since)]),
+                )
+            }
+            _ => Text::key(StrId::ExploreServerAsking),
+        }),
+        Some(Named::NoAnswer) if !listed => Some(Text::key(StrId::RoomsNoAnswer)),
+        Some(Named::Rooms(_)) if !listed => Some(Text::key(StrId::RoomsNoneNamed)),
         _ => None,
     }
 }
@@ -2360,9 +2371,15 @@ mod tests {
                 rooms: Some(Vec::new()),
             }),
         );
+        // In the rooms screen's words (1655, walk 9, 47), apart from a
+        // silence.
         assert_eq!(
             node(&model).sheet.expect("the sheet").rooms_note,
-            Some(Text::key(StrId::ExploreServerNoRooms))
+            Some(Text::key(StrId::RoomsNoneNamed))
+        );
+        assert_eq!(
+            StrId::RoomsNoneNamed.text(Lang::De),
+            "Dieser Server nennt keine öffentlichen Räume."
         );
         // One that never welcomed: said so, and the next opening asks again.
         let silent = [0x97; 16];
@@ -2376,7 +2393,7 @@ mod tests {
         );
         assert_eq!(
             node(&model).sheet.expect("the sheet").rooms_note,
-            Some(Text::key(StrId::ExploreServerNoAnswer))
+            Some(Text::key(StrId::RoomsNoAnswer))
         );
         explore(&mut model, ExploreEvent::CloseSheet);
         assert_eq!(
@@ -2485,11 +2502,26 @@ mod tests {
         let sheet = node(&model).sheet.expect("the sheet");
         assert!(sheet.asking);
         assert_eq!(sheet.retry, None);
+        // The seconds from the fifth on (1655, walk 9, 47: the sheet said
+        // the same sentence for 60 to 90 s), as the rooms screen counts.
+        at(&mut model, 1_000_004);
+        assert_eq!(
+            node(&model).sheet.expect("the sheet").rooms_note,
+            Some(Text::key(StrId::ExploreServerAsking)),
+            "4 s"
+        );
+        at(&mut model, 1_000_005);
+        let note = node(&model).sheet.expect("the sheet").rooms_note;
+        assert_eq!(
+            note.as_ref().map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("Frage den Server nach seinen Räumen… 5 s"),
+            "5 s"
+        );
         at(&mut model, 1_000_019);
         let sheet = node(&model).sheet.expect("the sheet");
         assert_eq!(
             sheet.rooms_note,
-            Some(Text::key(StrId::ExploreServerAsking)),
+            Some(Text::Key(StrId::ExploreServerAskingFor, vec![Arg::Int(19)])),
             "19 s"
         );
         assert_eq!(sheet.retry, None);

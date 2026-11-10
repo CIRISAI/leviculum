@@ -46,9 +46,8 @@
     <string name="explore_server_use">Use this server for rooms</string>
     <string name="explore_server_in_use">Your rooms are on this server.</string>
     <string name="explore_server_rooms">Its rooms</string>
-    <string name="explore_server_no_rooms">This server names no rooms. Use it, then type a room\'s name to join.</string>
     <string name="explore_server_asking">Asking the server for its rooms…</string>
-    <string name="explore_server_no_answer">The server did not answer, so its rooms are unknown. Use it, then type a room\'s name to join.</string>
+    <string name="explore_server_asking_for">Asking the server for its rooms… %1$d s</string>
     <string name="explore_server_close">Close</string>
     <string name="tab_rooms">Rooms</string>
     <string name="rooms_live">A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.</string>

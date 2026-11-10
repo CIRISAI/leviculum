@@ -46,9 +46,8 @@
     <string name="explore_server_use">Diesen Server für Räume nutzen</string>
     <string name="explore_server_in_use">Deine Räume laufen über diesen Server.</string>
     <string name="explore_server_rooms">Seine Räume</string>
-    <string name="explore_server_no_rooms">Dieser Server nennt keine Räume. Nutz ihn und tipp dann den Namen eines Raums.</string>
     <string name="explore_server_asking">Frage den Server nach seinen Räumen…</string>
-    <string name="explore_server_no_answer">Der Server hat nicht geantwortet, seine Räume sind unbekannt. Nutz ihn und tipp dann den Namen eines Raums.</string>
+    <string name="explore_server_asking_for">Frage den Server nach seinen Räumen… %1$d s</string>
     <string name="explore_server_close">Schließen</string>
     <string name="tab_rooms">Räume</string>
     <string name="rooms_live">Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.</string>

@@ -91,9 +91,8 @@ leviculum_ui::catalogue! {
     ExploreServerUse = "explore_server_use", "Use this server for rooms", "Diesen Server für Räume nutzen";
     ExploreServerInUse = "explore_server_in_use", "Your rooms are on this server.", "Deine Räume laufen über diesen Server.";
     ExploreServerRooms = "explore_server_rooms", "Its rooms", "Seine Räume";
-    ExploreServerNoRooms = "explore_server_no_rooms", "This server names no rooms. Use it, then type a room's name to join.", "Dieser Server nennt keine Räume. Nutz ihn und tipp dann den Namen eines Raums.";
     ExploreServerAsking = "explore_server_asking", "Asking the server for its rooms…", "Frage den Server nach seinen Räumen…";
-    ExploreServerNoAnswer = "explore_server_no_answer", "The server did not answer, so its rooms are unknown. Use it, then type a room's name to join.", "Der Server hat nicht geantwortet, seine Räume sind unbekannt. Nutz ihn und tipp dann den Namen eines Raums.";
+    ExploreServerAskingFor = "explore_server_asking_for", "Asking the server for its rooms… %1$d s", "Frage den Server nach seinen Räumen… %1$d s";
     ExploreServerClose = "explore_server_close", "Close", "Schließen";
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";
