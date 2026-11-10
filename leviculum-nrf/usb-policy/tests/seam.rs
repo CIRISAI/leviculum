@@ -727,6 +727,7 @@ fn stray_input_asks_for_nothing() {
 
 use leviculum_core::envelope::{
     radio_config_answer, ConfigDelivery, Persist, REFUSE_BUSY, REFUSE_NOT_RUNNING, REFUSE_PERSIST,
+    REFUSE_PERSIST_PENDING,
 };
 use leviculum_core::rnode::RadioConfigWire;
 
@@ -771,6 +772,18 @@ fn a_lora_off_boot_whose_page_write_is_lost_answers_not_persisted() {
     let delivery = stored_answer(Persist::Lost);
     assert_eq!(delivery, ConfigDelivery::StoreFailed);
     assert_eq!(reason(&radio_config_answer(delivery)), REFUSE_PERSIST);
+}
+
+/// Order 1626: a page write the store task is still retrying when the
+/// answer is due is pending, not lost.
+#[test]
+fn a_lora_off_boot_whose_page_write_is_still_running_answers_pending() {
+    let delivery = stored_answer(Persist::Pending);
+    assert_eq!(delivery, ConfigDelivery::StorePending);
+    assert_eq!(
+        reason(&radio_config_answer(delivery)),
+        REFUSE_PERSIST_PENDING
+    );
 }
 
 #[test]

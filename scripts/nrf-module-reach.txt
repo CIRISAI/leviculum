@@ -28,7 +28,7 @@ src/chtm.rs (71): log lora sx1262
 src/display.rs (222): log panel_facts
 src/events.rs (261): announce log pn transport_stats
 src/feedback.rs (289): led log
-src/flash.rs (79):
+src/flash.rs (149): log
 src/gnss.rs (598): boards log log_critical vext
 src/heap_census.rs (398): log pn
 src/led.rs (52): feedback log
@@ -45,7 +45,7 @@ src/position.rs (502): announce chtm log name telemetry
 src/power.rs (261): boards button log usb
 src/qspi.rs (1188): log
 src/radio.rs (218): boards log lora sx1262
-src/radio_store.rs (197): boards flash log telemetry
+src/radio_store.rs (209): boards flash log telemetry
 src/record_store.rs (216): ble flash pn usb
 src/remote_dfu.rs (167): log lora usb
 src/remote_status.rs (146): log lora
@@ -53,10 +53,10 @@ src/rng.rs (214): log
 src/st7789.rs (408): log log_stack panel_facts vext
 src/store_spike.rs (164): flash log record_store
 src/sx1262.rs (1713): chtm log lora
-src/telemetry.rs (2115): ble flash log lora media name pn position radio_store
+src/telemetry.rs (2158): ble flash log lora media name pn position radio_store
 src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (169): log lora
-src/usb.rs (1545): banner ble boards chtm heap_census log lora media mgmt name pn position postmortem_query radio_store record_store remote_dfu reset_stack_watermark telemetry
+src/usb.rs (1547): banner ble boards chtm heap_census log lora media mgmt name pn position postmortem_query radio_store record_store remote_dfu reset_stack_watermark telemetry
 src/vext.rs (87): boards log
 firmware/src/battery.rs (468): board_state fakes log seams
 firmware/src/ble_link.rs (1126): fakes iface_bytes log media seams

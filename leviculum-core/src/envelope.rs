@@ -681,6 +681,27 @@ pub const REFUSE_NO_CLOCK: u8 = 0x07;
 /// does carry the consumer — it is the boot that left the carrier down, and
 /// a reset with this configuration on the page is what fixes it.
 pub const REFUSE_NOT_RUNNING: u8 = 0x08;
+/// The value is applied and its page write is still under way: the store
+/// has not finished inside the board's answer window, and it has not given
+/// up either (order 1626, #24, #474).
+///
+/// The third refusal that is not a rejection, and the sibling of
+/// [`REFUSE_PERSIST`]: that one says the store gave up and a reset would
+/// lose the value, this one says the store is still retrying and the value
+/// will land. Until 2026-11-10 both were [`REFUSE_PERSIST`], and the Pocket
+/// answered a media profile with it 2.5 s into a 5 s write that then
+/// landed: the next boot came up on the very profile the board had called
+/// lost, and the harness that trusted the refusal skipped 17 cells.
+///
+/// The SoftDevice schedules flash access between radio events, and a BLE
+/// link that is busy or being torn down can hold an erase off for seconds;
+/// the store keeps trying for longer than any host waits for one answer.
+/// A host that needs the record durable before it resets the board
+/// re-asks (a query, or the same frame again, which a page that already
+/// carries the value answers at once) until the answer is durable. The
+/// board logs `[TELEMETRY] persist landed <record> after <ms> ms` when the
+/// write completes, and `persist gave up after retries` if it does not.
+pub const REFUSE_PERSIST_PENDING: u8 = 0x09;
 
 // ---------------------------------------------------------------------------
 // Generic encode / decode
@@ -1091,8 +1112,8 @@ pub fn mgmt_allow_answer(
     stored: Option<&[[u8; TRUNCATED_HASHBYTES]]>,
     running: bool,
 ) -> Vec<u8> {
-    if persist == Persist::Lost {
-        return encode_refusal(for_type, REFUSE_PERSIST);
+    if let Some(reason) = persist_refusal(persist) {
+        return encode_refusal(for_type, reason);
     }
     let mut flags = 0u8;
     if stored.is_some() {
@@ -1216,6 +1237,10 @@ pub enum ConfigDelivery {
     /// write failed or timed out: nothing will survive the reset, so the
     /// answer must not claim otherwise.
     StoreFailed,
+    /// Same boot state as [`Stored`](ConfigDelivery::Stored), but the page
+    /// write is still being retried when the answer is due: answered
+    /// [`REFUSE_PERSIST_PENDING`], not [`REFUSE_PERSIST`] (order 1626).
+    StorePending,
 }
 
 /// The enveloped answer to a [`TYPE_RADIO_CONFIG`] frame.
@@ -1237,6 +1262,7 @@ pub fn radio_config_answer(delivery: ConfigDelivery) -> Vec<u8> {
         }
         ConfigDelivery::Stored => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_NOT_RUNNING),
         ConfigDelivery::StoreFailed => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_PERSIST),
+        ConfigDelivery::StorePending => encode_refusal(TYPE_RADIO_CONFIG, REFUSE_PERSIST_PENDING),
     }
 }
 
@@ -1528,8 +1554,23 @@ pub enum Persist {
     /// The record is on the page: a reset comes back with it. The only
     /// state that may be acked.
     Durable,
-    /// Applied in RAM, not written: [`REFUSE_PERSIST`].
+    /// Applied in RAM, and the store gave up writing it:
+    /// [`REFUSE_PERSIST`].
     Lost,
+    /// Applied in RAM, and the store is still writing it when the answer
+    /// is due: [`REFUSE_PERSIST_PENDING`]. Not a loss (order 1626).
+    Pending,
+}
+
+/// The refusal reason for a persist outcome that is not
+/// [`Persist::Durable`], so every answer on the persist path names the
+/// same difference between "gave up" and "still writing".
+pub fn persist_refusal(persist: Persist) -> Option<u8> {
+    match persist {
+        Persist::Durable => None,
+        Persist::Lost => Some(REFUSE_PERSIST),
+        Persist::Pending => Some(REFUSE_PERSIST_PENDING),
+    }
 }
 
 /// The answer to a fixed-position frame, decided by capability first —
@@ -1546,10 +1587,10 @@ pub fn fixed_position_answer(reporter_wired: bool, delivered: bool, persist: Per
         encode_refusal(TYPE_FIXED_POSITION, REFUSE_UNSUPPORTED)
     } else if !delivered {
         encode_refusal(TYPE_FIXED_POSITION, REFUSE_BUSY)
-    } else if persist == Persist::Durable {
-        encode_ack(TYPE_FIXED_POSITION)
+    } else if let Some(reason) = persist_refusal(persist) {
+        encode_refusal(TYPE_FIXED_POSITION, reason)
     } else {
-        encode_refusal(TYPE_FIXED_POSITION, REFUSE_PERSIST)
+        encode_ack(TYPE_FIXED_POSITION)
     }
 }
 
@@ -1723,10 +1764,10 @@ pub fn media_profile_answer(
         encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_UNSUPPORTED)
     } else if !delivered {
         encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_BUSY)
-    } else if persist == Persist::Durable {
-        encode_media_report(&running, &configured)
+    } else if let Some(reason) = persist_refusal(persist) {
+        encode_refusal(TYPE_MEDIA_PROFILE, reason)
     } else {
-        encode_refusal(TYPE_MEDIA_PROFILE, REFUSE_PERSIST)
+        encode_media_report(&running, &configured)
     }
 }
 
@@ -1965,9 +2006,10 @@ pub fn node_name_answer(name_wired: bool, persist: Persist, report: NodeNameRepo
     match (name_wired, report) {
         (false, _) => encode_refusal(TYPE_NODE_NAME, REFUSE_UNSUPPORTED),
         (true, None) => encode_refusal(TYPE_NODE_NAME, REFUSE_BUSY),
-        (true, Some(_)) if persist != Persist::Durable => {
-            encode_refusal(TYPE_NODE_NAME, REFUSE_PERSIST)
-        }
+        (true, Some(_)) if persist != Persist::Durable => encode_refusal(
+            TYPE_NODE_NAME,
+            persist_refusal(persist).unwrap_or(REFUSE_PERSIST),
+        ),
         (true, Some((flags, mesh, ble))) => encode_node_name_report(flags, mesh, ble),
     }
 }
@@ -2036,10 +2078,10 @@ pub fn telemetry_target_answer(
         encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_VALUE)
     } else if !delivered {
         encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_BUSY)
-    } else if persist == Persist::Durable {
-        encode_ack(TYPE_TELEMETRY_TARGET)
+    } else if let Some(reason) = persist_refusal(persist) {
+        encode_refusal(TYPE_TELEMETRY_TARGET, reason)
     } else {
-        encode_refusal(TYPE_TELEMETRY_TARGET, REFUSE_PERSIST)
+        encode_ack(TYPE_TELEMETRY_TARGET)
     }
 }
 
@@ -3524,7 +3566,7 @@ mod tests {
         );
     }
 
-    /// The other five outcomes, so the one ack stays the only ack and each
+    /// The other six outcomes, so the one ack stays the only ack and each
     /// refusal keeps the reason a host branches on.
     #[test]
     fn every_radio_config_outcome_but_applied_is_a_named_refusal() {
@@ -3534,6 +3576,7 @@ mod tests {
             (ConfigDelivery::Unconfirmed, REFUSE_BUSY),
             (ConfigDelivery::Stored, REFUSE_NOT_RUNNING),
             (ConfigDelivery::StoreFailed, REFUSE_PERSIST),
+            (ConfigDelivery::StorePending, REFUSE_PERSIST_PENDING),
         ] {
             assert_eq!(
                 refusal_reason(&radio_config_answer(delivery), TYPE_RADIO_CONFIG),
@@ -3555,6 +3598,7 @@ mod tests {
             ConfigDelivery::Undeliverable,
             ConfigDelivery::Unconfirmed,
             ConfigDelivery::StoreFailed,
+            ConfigDelivery::StorePending,
         ] {
             assert!(
                 !legacy_radio_config_acked(delivery),
@@ -3974,6 +4018,69 @@ mod tests {
             decode_refusal_payload(&answer[ENVELOPE_HEADER_LEN..]),
             Some((TYPE_MEDIA_PROFILE, REFUSE_PERSIST))
         );
+    }
+
+    /// Order 1626: a write the store is still retrying is not a loss. The
+    /// Pocket answered 0x06 2.5 s into a 5 s write that then landed, and the
+    /// harness skipped 17 cells on a profile the next boot came up with.
+    #[test]
+    fn a_profile_still_being_written_is_pending_not_lost() {
+        let running = MediaProfileWire {
+            lora_enabled: false,
+            ble_enabled: false,
+        };
+        let answer = media_profile_answer(true, true, Persist::Pending, running, running);
+        assert_eq!(
+            decode_refusal_payload(&answer[ENVELOPE_HEADER_LEN..]),
+            Some((TYPE_MEDIA_PROFILE, REFUSE_PERSIST_PENDING))
+        );
+        assert_ne!(REFUSE_PERSIST_PENDING, REFUSE_PERSIST);
+    }
+
+    /// Every answer on the persist path names the same three states the
+    /// same way, so a host reads one table for all of them.
+    #[test]
+    fn every_persist_path_answer_tells_pending_from_lost() {
+        let profile = MediaProfileWire {
+            lora_enabled: true,
+            ble_enabled: true,
+        };
+        let name = name("ab");
+        for (persist, reason) in [
+            (Persist::Lost, REFUSE_PERSIST),
+            (Persist::Pending, REFUSE_PERSIST_PENDING),
+        ] {
+            assert_eq!(persist_refusal(persist), Some(reason));
+            for (answer, ty) in [
+                (
+                    fixed_position_answer(true, true, persist),
+                    TYPE_FIXED_POSITION,
+                ),
+                (
+                    media_profile_answer(true, true, persist, profile, profile),
+                    TYPE_MEDIA_PROFILE,
+                ),
+                (
+                    telemetry_target_answer(true, true, true, persist),
+                    TYPE_TELEMETRY_TARGET,
+                ),
+                (
+                    node_name_answer(true, persist, Some((0, &name, &name))),
+                    TYPE_NODE_NAME,
+                ),
+                (
+                    mgmt_allow_answer(TYPE_MGMT_ALLOW, persist, Some(&[]), false),
+                    TYPE_MGMT_ALLOW,
+                ),
+            ] {
+                assert_eq!(
+                    decode_refusal_payload(&answer[ENVELOPE_HEADER_LEN..]),
+                    Some((ty, reason)),
+                    "{persist:?} answered with the wrong reason for type 0x{ty:02x}"
+                );
+            }
+        }
+        assert_eq!(persist_refusal(Persist::Durable), None);
     }
 
     #[test]

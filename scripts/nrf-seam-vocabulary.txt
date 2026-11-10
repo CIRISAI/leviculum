@@ -90,7 +90,9 @@ src/radio.rs: sx1262::RxStatus x1
 src/radio.rs: sx1262::Sx1262 x1
 src/radio_store.rs: boards::BoardConfig::radio_config_flash_page doc x1
 src/radio_store.rs: flash::SharedFlash x2
+src/radio_store.rs: flash::log_step_fault x1
 src/radio_store.rs: flash::shared_flash doc x1
+src/radio_store.rs: flash::timed x1
 src/record_store.rs: ble doc x1
 src/record_store.rs: flash::SharedFlash x4 doc x1
 src/record_store.rs: usb doc x1
@@ -102,7 +104,9 @@ src/store_spike.rs: flash::SharedFlash x1
 src/store_spike.rs: record_store::region x1 doc x1
 src/telemetry.rs: ble::init doc x1
 src/telemetry.rs: flash::SharedFlash x2
+src/telemetry.rs: flash::log_step_fault x1
 src/telemetry.rs: flash::shared_flash doc x1
+src/telemetry.rs: flash::timed x1
 src/telemetry.rs: radio_store doc x1
 src/time_floor.rs: flash::SharedFlash x2 doc x1
 src/time_floor.rs: radio_store doc x1

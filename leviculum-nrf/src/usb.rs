@@ -1214,13 +1214,14 @@ async fn retic_serial_task(
                                     let persist =
                                         crate::telemetry::confirm(crate::pn::apply_config(config))
                                             .await;
-                                    let answer = match persist {
-                                        envelope::Persist::Durable => {
-                                            envelope::encode_ack(envelope::TYPE_PN_CONFIG)
-                                        }
-                                        envelope::Persist::Lost => envelope::encode_refusal(
+                                    // Lost and pending (order 1626) are
+                                    // named apart, like every answer on
+                                    // the persist path.
+                                    let answer = match envelope::persist_refusal(persist) {
+                                        None => envelope::encode_ack(envelope::TYPE_PN_CONFIG),
+                                        Some(reason) => envelope::encode_refusal(
                                             envelope::TYPE_PN_CONFIG,
-                                            envelope::REFUSE_PERSIST,
+                                            reason,
                                         ),
                                     };
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
@@ -1239,13 +1240,14 @@ async fn retic_serial_task(
                                         crate::position::apply_setting(setting),
                                     )
                                     .await;
-                                    let answer = match persist {
-                                        envelope::Persist::Durable => {
-                                            envelope::encode_ack(envelope::TYPE_POSITION_SHARE)
-                                        }
-                                        envelope::Persist::Lost => envelope::encode_refusal(
+                                    // Lost and pending (order 1626) are
+                                    // named apart, like every answer on
+                                    // the persist path.
+                                    let answer = match envelope::persist_refusal(persist) {
+                                        None => envelope::encode_ack(envelope::TYPE_POSITION_SHARE),
+                                        Some(reason) => envelope::encode_refusal(
                                             envelope::TYPE_POSITION_SHARE,
-                                            envelope::REFUSE_PERSIST,
+                                            reason,
                                         ),
                                     };
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)

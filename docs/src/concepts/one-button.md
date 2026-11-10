@@ -143,7 +143,7 @@ players only through the `Sinks` seam. Five things play:
   place a message for its user is kept.
 - **The proof of the report a double press sent** plays
   `report-delivered` on the LED and the buzzer
-  (`leviculum-nrf/src/telemetry.rs:1788`), see the next section.
+  (`leviculum-nrf/src/telemetry.rs:1831`), see the next section.
 - **The announces of a double press leaving the radio** play
   `announce-sent` on the LED and the buzzer, see "The double press's
   announces" below.
@@ -206,7 +206,7 @@ figure, 360 ms against the 650 ms of two short.
 Since 914 the double press does what the gesture table says: after the
 two announces the node loop's button arm asks the telemetry reporter for
 one report (`leviculum_nrf::telemetry::on_button_press`,
-`leviculum-nrf/src/telemetry.rs:2002`, called from each binary, e.g.
+`leviculum-nrf/src/telemetry.rs:2045`, called from each binary, e.g.
 `leviculum-nrf/src/bin/t1000e.rs:1153`). There is no second sender. The
 press arms the same immediate report a target write or a request from
 the target arms ([Telemetry](telemetry.md), "Setting a target emits one
@@ -238,11 +238,11 @@ reason=immediate trigger=button …`. Each report names who asked for it
 proves it. The core surfaces a verified proof for a sent packet as
 `NodeEvent::PacketDeliveryConfirmed` (`leviculum-core/src/node/mod.rs:4912`),
 and the reporter's proof wait (`ProofTracker`, with its one
-retransmission) takes it (`leviculum-nrf/src/telemetry.rs:1771`). The
+retransmission) takes it (`leviculum-nrf/src/telemetry.rs:1814`). The
 wait now carries who asked for the report. When the proof of a press's
 report arrives, whether for the first send or the retransmission, the
 board plays `report-delivered` once
-(`leviculum-nrf/src/telemetry.rs:1788`), with its
+(`leviculum-nrf/src/telemetry.rs:1831`), with its
 `FEEDBACK pattern=report-delivered sink=led` line (and `sink=buzzer` on
 the T1000-E). A proof of a cadence, target-set or request report plays
 nothing: the rule is for the user's own press, the one person standing
