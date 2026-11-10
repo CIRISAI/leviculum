@@ -67,16 +67,18 @@ recorded, and the bench measurement below reads it first.
 | --- | --- | --- |
 | Magic that selects BLE DFU | `0xA8`, `DFU_MAGIC_OTA_RESET` "entered by soft reset, SD is not inited yet" (`Adafruit_nRF52_Bootloader/src/main.c:110`); UF2 is `0x57` (`Adafruit_nRF52_Bootloader/src/main.c:112`), the value our touch writes (`leviculum-nrf/src/usb.rs:236-237`) | Same: `ldr.w r4, [r3, #1308]` reads `0x4000051C` (`GPREGRET`) at `0xF483A`, `cmp r4, #177` (`0xB1`) at `0xF483E`, `sub.w r1, r4, #168` (`0xA8`, the compare-to-zero idiom) at `0xF484A`, `0x4E` and `0x57` at `0xF486C`/`0xF4870` |
 | How the magic is consumed | `_ota_dfu` is set from it (`Adafruit_nRF52_Bootloader/src/main.c:229`) and the register is cleared on entry (`Adafruit_nRF52_Bootloader/src/main.c:243`) | Cleared on entry: `str.w r1, [r2, #1308]` with `r1 = 0` at `0xF489C` |
-| Does it leave DFU mode by itself | **No.** OTA entry calls `bootloader_dfu_start(_ota_dfu, 0, false)` (`Adafruit_nRF52_Bootloader/src/main.c:305`); the only startup timer is armed on the serial branch, never when `ota` is true (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/bootloader.c:333-347`); advertising runs with `BLE_GAP_ADV_TIMEOUT_GENERAL_UNLIMITED` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:58`); the one advertising timeout that ends DFU counts down directed advertising (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:808-815`), which is used only when an application handed the bootloader bond data (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:1034`); our firmware never does | **No, as far as the image shows.** The call site takes the timeout `3000` only when the application asked for single-tap reset or the magic was `0x57` or `0x4E`, and `0` otherwise (`movw r1, #3000` at `0xF4A98`, `mov r1, r2` with `r2 = 0` at `0xF4AA0`, `bl` at `0xF4AA4`), the same shape as `Adafruit_nRF52_Bootloader/src/main.c:301-306`. The advertising duration inside the transport is not decoded; the bench hour settles it |
-| What it advertises | Name `AdaDFU` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:50`, put into the advertisement at `Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:645`); the Nordic legacy DFU service `0x1530` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/ble/ble_services/ble_dfu/ble_dfu.h:36`) on base `23D1BCEA-5F78-2315-DEEF-1212…` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/ble/ble_services/ble_dfu/ble_dfu.c:472`), i.e. `00001530-1212-EFDE-1523-785FEABCD123`, as a 128-bit UUID (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:646`); connectable undirected every 25 ms (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:57`) | `AdaDFU` at file offset `0xB72C` of the image and the same 128-bit base at `0xB761`; interval not decoded |
-| Address | The SoftDevice's default address with its lowest byte plus one (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:1047`): a static random address, not resolvable, and not the one our firmware advertises under, so a phone sees a new device | Not decoded; the sniffer answers it |
+| Does it leave DFU mode by itself | **No, measured.** On the T114 (bench 2026-11-10, below) the bootloader advertised for 61.5 minutes after `lnmgmt dfu` with no reboot, no debug line and no USB enumeration, until it was sent out by hand. The source agrees: OTA entry calls `bootloader_dfu_start(_ota_dfu, 0, false)` (`Adafruit_nRF52_Bootloader/src/main.c:305`); the only startup timer is armed on the serial branch, never when `ota` is true (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/bootloader.c:333-347`); advertising runs with `BLE_GAP_ADV_TIMEOUT_GENERAL_UNLIMITED` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:58`); the one advertising timeout that ends DFU counts down directed advertising (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:808-815`), which is used only when an application handed the bootloader bond data (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:1034`); our firmware never does | **No, as far as the image shows.** The call site takes the timeout `3000` only when the application asked for single-tap reset or the magic was `0x57` or `0x4E`, and `0` otherwise (`movw r1, #3000` at `0xF4A98`, `mov r1, r2` with `r2 = 0` at `0xF4AA0`, `bl` at `0xF4AA4`), the same shape as `Adafruit_nRF52_Bootloader/src/main.c:301-306`. The advertising duration inside the transport is not decoded, and the RAK has not had its bench hour yet |
+| What it advertises | **Measured on the T114, and not what the source says: the name `HT-n5262-OTA`, and no service UUID in the advertisement.** A connectable `ADV_IND` with flags `0x06` and the complete name as its only other field (`02 01 06 0d 09 48 54 2d 6e 35 32 36 32 2d 4f 54 41`), an empty scan response; 311 sightings in 273 back-to-back `btmgmt find` rounds of about 11.5 s (`scanloop.log`). The DFU service `0x1530` is there only in GATT (handles `0x000E..0x0015`: Packet `0x1532`, Control Point `0x1531` at `0x0012` with its CCCD at `0x0013`, Version `0x1534` reading `08 00`); Device Information names `Heltec AutoMation`, `HT-n5262` and firmware `0.9.0-2-g836c8dc-dirty s140 6.1.1`, which runs under the installed S140 7.3.0. The interval is consistent with 25 ms (268 `ADV_IND` in 10.1 s on a Realtek host adapter that bundles reports, so a lower bound on the rate). The `-dirty` vendor tree is where name and advertisement changed; upstream 0.9.0 reads: name `AdaDFU` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:50`, put into the advertisement at `Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:645`); the Nordic legacy DFU service `0x1530` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/ble/ble_services/ble_dfu/ble_dfu.h:36`) on base `23D1BCEA-5F78-2315-DEEF-1212…` (`Adafruit_nRF52_Bootloader/lib/sdk11/components/ble/ble_services/ble_dfu/ble_dfu.c:472`), i.e. `00001530-1212-EFDE-1523-785FEABCD123`, as a 128-bit UUID (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:646`); connectable undirected every 25 ms (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:57`) | `AdaDFU` at file offset `0xB72C` of the image and the same 128-bit base at `0xB761`; interval not decoded. **Unmeasured on a board**: the T114 shows that the string in an image is not proof of the advertisement |
+| Address | **Confirmed on the T114**: application `E1:AC:9E:B3:F0:5C`, bootloader `E1:AC:9E:B3:F0:5D`, random static. The source: the SoftDevice's default address with its lowest byte plus one (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:1047`): a static random address, not resolvable, and not the one our firmware advertises under, so a phone sees a new device | Not decoded and not measured |
 | An aborted transfer | **The old application is gone.** The build is single-bank (`Adafruit_nRF52_Bootloader/Makefile:159`); the start packet erases the application area in OTA mode (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_single_bank.c:99`) and the bootloader records bank 0 invalid (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/bootloader.c:292`). A dropped link restarts advertising (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_transport_ble.c:764-770`), but a second start packet is refused until a reset, because the state is no longer idle (`Adafruit_nRF52_Bootloader/lib/sdk11/components/libraries/bootloader_dfu/dfu_single_bank.c:313`). After any reset `GPREGRET` is `0`, the application is invalid, and the bootloader enters DFU on the **USB** branch, not BLE (`Adafruit_nRF52_Bootloader/src/main.c:288-296`) | Same outcome, by RAK's own account: their 0.4.4 changelog lists "if a BLE OTA firmware update fails or is interrupted, the device stays in BLE OTA / DFU mode so another attempt can be made (instead of getting stuck in USB DFU/UF2 boot mode)" (WisBlock `d3da249c`, `bootloader/RAK4630/README.md` line 14) |
 
 Two consequences follow, and both change what this page used to say.
 
-**DFU mode does not end by itself.** A board told to enter it and never
-visited advertises `AdaDFU` until power is lost or it is reset. A reset
-of any kind brings the application back, because the bootloader cleared
+**DFU mode does not end by itself**, measured for an hour on the T114. A
+board told to enter it and never visited advertises its DFU name
+(`HT-n5262-OTA` on the T114) until power is lost or it is reset. A reset
+of any kind brings the application back, the one sent over Bluetooth
+included ([Leaving DFU without hands](#leaving-dfu-without-hands)), because the bootloader cleared
 `GPREGRET` on entry and the application is still valid as long as no
 transfer started (`Adafruit_nRF52_Bootloader/src/main.c:202`). Our
 firmware runs no watchdog, and one would not help: the bootloader feeds
@@ -95,6 +97,64 @@ promised before holds only as long as the board is not reset in
 between, and even then the bootloader refuses the second start packet.
 RAK's 0.4.4 fixes this on the RAK; for the T114 family nothing
 published does. Lifting the RAK to 0.4.4 is the next section.
+
+## Leaving DFU without hands
+
+Measured on the T114 `DEC9947` on 2026-11-10 (files under
+`/home/lew/rig-run/bench/2026-11-10-ota/` on schneckenschreck, the
+board's debug log `/home/lew/rig-run/ble-drop/t114-boot.log` lines 843823
+to 845742):
+
+1. `lnmgmt dfu -R <transport hash> -i <identity>` answered `accepted: the
+   board resets into BLE DFU now`, the board's debug port said
+   `MGMT_DFU accepted=yes`, and the board dropped off USB within a second.
+2. It then advertised `HT-n5262-OTA` from the application's address plus
+   one for 61.5 minutes, with nothing on the debug port and no USB
+   enumeration (the table above).
+3. A host connected to that address, enabled notifications on the Control
+   Point's CCCD (`0x0013`, `0100`) and wrote the Legacy DFU opcode `06`,
+   SYS_RESET, to the Control Point (`0x0012`). No start packet was sent,
+   so nothing was erased, and the application was back 1.5 s later, intact.
+
+So a board somebody sent into DFU by mistake does not need a visit with a
+needle or a power switch: anybody within Bluetooth range with a BlueZ host
+brings it back. `scripts/dfu-exit.py` is that step as a tool: it finds the
+bootloader by a name ending in `-OTA` or by the application's address plus
+one (`--app-address`), connects, finds the Control Point by its UUID
+rather than trusting the T114's handles, writes `06`, and scans until the
+advertisement is gone. `--from-capture` reads a captured scan instead and
+only says what it would do; `just dfu-exit-selftest` holds its parsers
+against the bench captures. `lnmgmt` has no Bluetooth path (it is a
+Reticulum client, and a board in its bootloader is off the mesh), so
+`lnmgmt dfu --help` names the script instead of growing a verb. nRF Connect
+does the same by hand: connect, Legacy DFU service, Control Point,
+notifications on, write `06`.
+
+**Which name to look for, per board family.**
+
+| Board | DFU advertisement | Source |
+| --- | --- | --- |
+| Heltec T114 (`0.9.0-2-g836c8dc-dirty`) | `HT-n5262-OTA`, no service UUID, from app + 1 | measured 2026-11-10 |
+| RAK4631, Pocket V2 (RAK `0.4.3`, `0.4.4`) | unmeasured; the image carries `AdaDFU` and the 128-bit base | read from the image only |
+| T1000-E | unmeasured | none |
+
+A phone or a script that filters the scan for `AdaDFU`, or for the DFU
+service UUID `1530` in the advertisement, does **not** find a T114: the name
+is the vendor's and the UUID is only in GATT. Look for the name ending in
+`-OTA`, or for the address one above the one the board's application
+advertised under (nRF Connect shows both), and connect to see `1530`.
+
+**One board's allow-list.** The bench found the T114 still holding the
+management identity of the periculum cell `lnode_remote_status` from
+2026-11-09, and the only tool that reads or clears a list,
+`lnflash --management-identity` / `--clear-management`, acts on every
+attached LNode, so the bench scripted the envelope by hand. With `--port`
+naming one board's serial port (any of its CDC ports, a by-id link works)
+the same flags act on that board alone: `lnflash --management-identity
+--port <tty>` lists its list, `lnflash --clear-management --port <tty>`
+empties it, every other board on the bus is left alone
+(`flow::set_mgmt`'s `only`, `lnflash/src/flow.rs`). The cell's own cleanup
+is periculum's.
 
 ## Bootloader update
 
@@ -286,7 +346,9 @@ Lew has the Debug Probe connected to the RAK before step 3.
    still works), then `just flash-rak4631-one`.
 5. The DFU hour and the sniffer above, on 0.4.4, and then the case this is
    for: a transfer started from the phone and cut off, after which the RAK
-   must still advertise `AdaDFU` and take a second, complete transfer.
+   must still advertise its DFU name (`AdaDFU` per the image, unmeasured;
+   the T114 showed the image string is not the advertisement) and take a
+   second, complete transfer.
 
 ## What is built (Codeberg #235 and its neighbours)
 
@@ -296,14 +358,15 @@ Lew has the Debug Probe connected to the RAK before step 3.
 | The board loads it at boot and says so | `load_at_boot`, `leviculum-nrf/src/mgmt.rs:126`; the `[MGMT] disabled (no allow-list)` banner, `leviculum-nrf/src/mgmt.rs:163` |
 | "Identified link plus allow-list" before any verb is answered, in the core and path-generic | `enable_remote_management`, `leviculum-core/src/node/mod.rs:907`, registering `/status` under `RequestPolicy::AllowList` at `leviculum-core/src/node/mod.rs:946` |
 | A board answering a request over the mesh | `/status`, `leviculum-nrf/src/remote_status.rs` |
-| Setting the list over the cable | `lnflash --management-identity` / `--clear-management`, `lnflash/src/mgmt.rs:253` |
+| Setting the list over the cable | `lnflash --management-identity` / `--clear-management`, `lnflash/src/mgmt.rs:253`; with `--port`, on one board only |
+| Bringing a board out of DFU without a transfer | `scripts/dfu-exit.py` (BlueZ: `btmgmt` scan, `gatttool` write of SYS_RESET), selftest `just dfu-exit-selftest`; named in `lnmgmt dfu --help` |
 | Writing a `GPREGRET` magic and resetting under a live SoftDevice, with no await between | `write_gpregret`, `leviculum-nrf/src/usb.rs:409`, the one seam both the UF2 touch (`leviculum-nrf/src/usb.rs:236-238`) and `/dfu` call, Codeberg #249 |
 | The `/dfu` verb: registered beside `/status` under the same `RequestPolicy::AllowList`, only on a node built with `remote_dfu` (the boards; `lnsd` never serves it) | `leviculum-core/src/node/mod.rs:942`, the builder flag at `leviculum-core/src/node/builder.rs:287`, the decision in the engine-pass macro at `leviculum-nrf/src/node_loop.rs:828` and the exit at the top of the main loop, `leviculum-nrf/src/node_loop.rs:869`, expanded once (in the macro, per arm, it cost 6.4 KiB of flash), the same in the T1000-E and solar node binaries |
 | A refused request is visible: still dropped, nothing leaves because of it, but the core raises `NodeEvent::RequestRefused` with the requester (or none) | `leviculum-core/src/node/link_management.rs:2516`, the variant at `leviculum-core/src/node/event.rs:523` |
 | What a `/dfu` event means, and the typed reply: one msgpack fixint, `0` accepted, `1` not listed, `2` no identity | `dfu_command`, `leviculum-core/src/node/remote_dfu.rs:131`; `DfuVerdict`, `leviculum-core/src/node/remote_dfu.rs:61` |
 | The exit order: reply handed over, waited for until every carrier's queue reports it gone (bounded by 20 s, above the LoRa queue's 18 s stale-drop age), then `0xA8`, then reset | `exit_to_dfu`, `leviculum-core/src/node/remote_dfu.rs:280`, behind `DfuExit` (`leviculum-core/src/node/remote_dfu.rs:254`); the magic at `leviculum-core/src/node/remote_dfu.rs:42`, the bound at `leviculum-core/src/node/remote_dfu.rs:51`; the board's side in `leviculum-nrf/src/remote_dfu.rs:131` (hand-over) and `leviculum-nrf/src/remote_dfu.rs:136` (LoRa settled through the reply, serial queue empty, BLE census empty) |
 | Both lines on the debug port, before the reply | `MGMT_DFU accepted=yes from=<identity> reason=accepted` and `MGMT_DFU accepted=no from=<identity\|none> reason=not-listed\|no-identity`, the body in `leviculum-nrf/log-line/src/lib.rs:195`; host side the `MGMT_DFU` trace event ([Structured event logs](../structured-event-logs.md)) |
-| The sender, `lnmgmt dfu -R <transport hash> -i <identity> [-w <secs>]`: the verdict in words (`accepted: the board resets into BLE DFU now`, `refused: not listed`, `refused: no identity`), exit 0 only on accepted, a timeout said as one | the binary, `leviculum-cli/src/lnmgmt.rs:111` (words) and `leviculum-cli/src/lnmgmt.rs:120` (timeouts and failures); the library call the `lnflash` GUI can reuse, `send_dfu`, `leviculum-std/src/remote_dfu.rs:51`, on the flow `lnstatus -R` runs, extracted as `request_on_management`, `leviculum-std/src/remote_status.rs:232`; manual page `lnmgmt(1)`, shipped in the `leviculum` package |
+| The sender, `lnmgmt dfu -R <transport hash> -i <identity> [-w <secs>]`: the verdict in words (`accepted: the board resets into BLE DFU now`, `refused: not listed`, `refused: no identity`), exit 0 only on accepted, a timeout said as one | the binary, `leviculum-cli/src/lnmgmt.rs:126` (words) and `leviculum-cli/src/lnmgmt.rs:135` (timeouts and failures); the library call the `lnflash` GUI can reuse, `send_dfu`, `leviculum-std/src/remote_dfu.rs:51`, on the flow `lnstatus -R` runs, extracted as `request_on_management`, `leviculum-std/src/remote_status.rs:232`; manual page `lnmgmt(1)`, shipped in the `leviculum` package |
 | A boot counter that survives the trip | `record_at_boot`, `leviculum-nrf/src/boot_count.rs:76`, Codeberg #380 |
 | A legacy DFU package and the init-packet constants the bootloader checks | for the T1000-E only, `scripts/t1000e-dfu-package.sh`; the constants checked are `ADAFRUIT_DEVICE_TYPE` (`Adafruit_nRF52_Bootloader/src/dfu_init.c:84`) and the SoftDevice id (`Adafruit_nRF52_Bootloader/src/dfu_init.c:178`) |
 
@@ -364,7 +427,9 @@ words and the exit statuses. Why a separate binary:
   library call, not a binary.
 
 **A package per board.** nRF Connect speaks Nordic legacy DFU and needs
-one `.zip` from us and no code. The T1000-E script already builds it;
+one `.zip` from us and no code. The phone finds the board by its DFU name
+(`HT-n5262-OTA` on a T114), not by `AdaDFU` and not by a service filter on
+`1530`; see [Leaving DFU without hands](#leaving-dfu-without-hands). The T1000-E script already builds it;
 the T114 image and the RAK4631 and Pocket images need the same wrapper
 with their own `--sd-req` (the T114 and the rig RAK both report S140
 7.3.0, the same `0x0123`; the Pocket's is read on the bench), and
@@ -382,7 +447,11 @@ right trade one day for a fleet; it is not part of stage 1.
 The source answers what the bootloader is written to do. The bench
 answers what the builds on our boards actually do, and it is owed
 because the T114's build is `-dirty` and the RAK's has no published
-source.
+source. **The T114's half is done** (2026-11-10, results in the table at
+the top and in [Leaving DFU without hands](#leaving-dfu-without-hands)):
+no timeout in 61.5 minutes, the advertisement measured, the address rule
+confirmed, and the way out was the Bluetooth SYS_RESET rather than a pin
+reset. The RAK4631, the Pocket V2 and the T1000-E are still owed.
 
 * **One hour in DFU, nobody connecting**, one T114 and one RAK (and
   the Pocket's `INFO_UF2.TXT` read beside them), entered with `0xA8` (until the verb exists, a debug build or the
@@ -393,10 +462,13 @@ source.
   bootloader enables in OTA mode overwrites (`leviculum-nrf/memory.x:149`),
   so `prev_magic=absent` after a DFU trip is expected, not a fault. The
   source predicts no return within the hour.
-* **Advertising per sniffer**: the name (`AdaDFU`), the 128-bit service
-  UUID, the address and its type, and the interval (25 ms predicted),
-  on both builds ([Bluetooth interfaces](bluetooth-interfaces.md)).
-  nRF Connect on the rig phone answers the first three in one scan.
+* **Advertising per sniffer**: the name (the T114's is `HT-n5262-OTA`,
+  not the source's `AdaDFU`), whether any service UUID is advertised (the
+  T114 advertises none), the address and its type, and the interval
+  (25 ms predicted), on both builds
+  ([Bluetooth interfaces](bluetooth-interfaces.md)). nRF Connect on the
+  rig phone answers the first three in one scan; `scripts/dfu-exit.py
+  --dry-run` (or `--from-capture` on a btmon decode) prints them too.
 * **Reset recovers**: one pin reset during the idle DFU hour brings the
   application back (predicted by `Adafruit_nRF52_Bootloader/src/main.c:243`).
 
@@ -406,7 +478,7 @@ source.
 | --- | --- | --- |
 | Command lost in the mesh | Running firmware, nothing happened | Resend |
 | Command refused (not on the allow list, or no identity) | Running firmware, typed refusal returned and logged | Fix the list over the cable |
-| Board enters DFU, nobody arrives | Bootloader, advertising `AdaDFU` indefinitely, off the mesh | Any reset or power cycle returns the application |
+| Board enters DFU, nobody arrives | Bootloader, advertising its DFU name (`HT-n5262-OTA` on the T114) indefinitely, off the mesh | `scripts/dfu-exit.py` from within Bluetooth range (SYS_RESET, measured on the T114), or any reset or power cycle |
 | Transfer starts and is interrupted, no reset | Bootloader, old image erased, refuses a second start | Reset puts it in USB DFU: cable |
 | Transfer interrupted, board resets | Bootloader in USB DFU, no BLE | Cable and UF2 (the RAK on 0.4.4 would stay in BLE DFU) |
 | Image is for the wrong board | Refused by the init packet, or written and dark | Double tap, UF2, as today |
