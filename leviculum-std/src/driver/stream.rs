@@ -299,3 +299,7 @@ mod timed;
 // +ciris (leviculum#102): unordered datagrams, in a child module for the
 // same reason.
 mod datagram;
+
+// +ciris: a send that returns its Channel sequence, for a per-message
+// delivery proof, in a child module for the same reason.
+mod send_seq;

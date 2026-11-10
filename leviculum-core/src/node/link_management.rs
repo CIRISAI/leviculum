@@ -990,12 +990,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// [`Self::send_on_link`], as a timed frame when `ttl_ms` is set (+ciris,
     /// leviculum#94; see [`crate::link::channel::timed`]).
-    pub(super) fn send_on_link_ttl(
+    /// Returns the Channel sequence the frame went out under (+ciris).
+    pub(super) fn send_on_link_ttl_seq(
         &mut self,
         link_id: &LinkId,
         data: &[u8],
         ttl_ms: Option<u32>,
-    ) -> Result<crate::transport::TickOutput, send::SendError> {
+    ) -> Result<(u16, crate::transport::TickOutput), send::SendError> {
         let link_id = &self.resolve_link_id(link_id);
         let link = self.links.get(link_id).ok_or(send::SendError::NoLink)?;
 
@@ -1031,7 +1032,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         let link_mdu = link.mdu();
         let rtt_ms = link.rtt_ms();
-        let envelope_data = {
+        let (sequence, envelope_data) = {
             let channel = link.ensure_channel(rtt_ms);
             let sent = match ttl_ms {
                 None => channel.send(&RawBytesMessage(data), link_mdu, now_ms, rtt_ms),
@@ -1049,7 +1050,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     )
                 }
             };
-            sent.map_err(|e| match e {
+            let sent = sent.map_err(|e| match e {
                 // A link that moved onto a direct path has a smaller MDU;
                 // that is a size to fix, not a dead link.
                 ChannelError::TooLarge => send::SendError::TooLarge,
@@ -1058,22 +1059,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     send::SendError::PacingDelay { ready_at_ms }
                 }
                 _ => send::SendError::LinkFailed,
-            })?
+            })?;
+            (channel.last_sent_sequence(), sent)
         };
         let packet_bytes = link
             .build_data_packet_with_context(&envelope_data, PacketContext::Channel, &mut self.rng)
             .map_err(|_| send::SendError::LinkFailed)?;
 
         // Register receipt for channel delivery tracking (Python Channel.py:631)
-        if let Some(seq) = self
-            .links
-            .get(link_id)
-            .and_then(|l| l.channel())
-            .map(|ch| ch.last_sent_sequence())
-        {
-            self.receipt_tracker
-                .register(&packet_bytes, *link_id, seq, now_ms);
-        }
+        self.receipt_tracker
+            .register(&packet_bytes, *link_id, sequence, now_ms);
 
         // Route via attached interface
         if let Some(iface_idx) = attached_iface {
@@ -1087,7 +1082,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             crate::tracing::warn!(%e, "send_to_destination failed — packet lost");
         }
 
-        Ok(self.process_events_and_actions())
+        Ok((sequence, self.process_events_and_actions()))
     }
 
     /// Send a plain data packet on an existing link.
@@ -1193,6 +1188,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             busy_rejections: ch.map(|c| c.busy_rejections()).unwrap_or(0),
             pacing_rejections: ch.map(|c| c.pacing_rejections()).unwrap_or(0),
             iface_pacing_rejections: link.iface_pacing_rejections(),
+            oldest_unacked_sequence: ch.and_then(|c| c.oldest_unacked_sequence()),
+            last_sent_sequence: ch.map(|c| c.last_sent_sequence()),
         })
     }
 

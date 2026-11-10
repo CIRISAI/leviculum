@@ -2716,3 +2716,20 @@ impl Channel {
         self.tx_ring.iter().filter_map(|o| o.deadline_ms).min()
     }
 }
+
+// +ciris: the per-message delivery proof, declared last so the fork moves no
+// line an upstream citation points at.
+impl Channel {
+    /// The sequence of the oldest envelope still awaiting its delivery
+    /// proof, or `None` when every envelope sent has been proved.
+    ///
+    /// The tx ring is send-ordered: envelopes join only at the back
+    /// ([`Self::send`] and its variants), a proof removes its envelope in
+    /// place ([`Self::mark_delivered`]), and a retransmit or an expiry
+    /// rewrites an envelope where it stands under the same sequence. So the
+    /// front is the oldest unproved send, and every sequence sent before it
+    /// has been proved delivered.
+    pub fn oldest_unacked_sequence(&self) -> Option<u16> {
+        self.tx_ring.front().map(|o| o.envelope.sequence)
+    }
+}
