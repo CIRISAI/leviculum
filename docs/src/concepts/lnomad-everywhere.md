@@ -52,7 +52,7 @@ lnomad-core-no-tui` (`Justfile:646`) and stated in the module doc of
   `lnomad/src/app/keys.rs:150`; `resolve`, `lnomad/src/app/keys.rs:386`). The top
   bar is a cell layout (`TopBar`, `lnomad/src/app/chrome.rs:29`), and the
   click and hover tests run against it (`handle_click`,
-  `lnomad/src/app/event.rs:1825`). There is no intent and no scene.
+  `lnomad/src/app/event.rs:1829`). There is no intent and no scene.
 - **The core was `std`.** `PathBuf` for `bookmarks_path`, `SystemTime`
   in discovery, and the parser crate used `std::collections::BTreeMap`
   and `std::borrow::Cow`, all of which `alloc` has. The crate as a whole
@@ -109,9 +109,9 @@ means only the browser has it. Catalogue keys named `browser_*` are new.
 | Page view (`model.page`, laid out by `layout`, `lnomad/src/render.rs:187`) | `Page`: a window of `PageLine`s, each a list of runs (see 2.2) | `Scroll(ScrollCmd)` (exists) | none: page text is `Text::Raw` | browser |
 | Link focus, hint labels, follow (`focus`, `visible_links`, `lnomad/src/app/model.rs:937`) | a run carries its link index; `Page.focus` names the focused link | `FocusNext(dir)`, `Activate(NodeId::Link(n))`, `Hint` | `browser_hint` | `Activate` exists (`Intent`, `loquax/src/ui/intent.rs:167`); the link node browser |
 | Form fields (`RenderedField`, `lnomad/src/render.rs:114`) | a run carries its field index; the edited field is a platform text field like the address | `Edit`, `Toggle(field)`, `Submit` | `browser_submit` | browser |
-| Back and forward (`go_back`, `lnomad/src/app/event.rs:1518`; `go_forward`, `lnomad/src/app/event.rs:1528`) | `Lead::Back`; forward as a `TopBar` action | `Back` (exists), `Forward` | `back` (exists), `browser_forward` | `Back` exists |
+| Back and forward (`go_back`, `lnomad/src/app/event.rs:1522`; `go_forward`, `lnomad/src/app/event.rs:1532`) | `Lead::Back`; forward as a `TopBar` action | `Back` (exists), `Forward` | `back` (exists), `browser_forward` | `Back` exists |
 | History (`History`, `lnomad/src/app/model.rs:303`) | a `Sheet` of rows | `Activate(row)` | `browser_history` | sheet exists, rows browser |
-| Places: bookmarks and discovered nodes (`Place`, `lnomad/src/app/event.rs:808`; `places`, `lnomad/src/app/event.rs:846`) | `Sheet` (`leviculum-ui/src/scene.rs:293`) of list rows | `Activate(row)`, `Menu(row)` → `Rename`, `Forget` | `browser_places`, `browser_nodes` | sheet exists; `Rename` and `Forget` exist |
+| Places: bookmarks and discovered nodes (`Place`, `lnomad/src/app/event.rs:808`; `places`, `lnomad/src/app/event.rs:848`) | `Sheet` (`leviculum-ui/src/scene.rs:293`) of list rows | `Activate(row)`, `Menu(row)` → `Rename`, `Forget` | `browser_places`, `browser_nodes` | sheet exists; `Rename` and `Forget` exist |
 | The name search of 1227 (not in this tree: no `1227` in `lnomad/` or `docs/src/` at `af8fa5c1`) | the address field's results: the places `Sheet`, rows from 1227's announce search | `Search` (exists), `Bookmark{on}` for its pinning | `browser_find_name` | lands with 1227 into the shapes above, no new node |
 | In-page search (`Mode::Search`, matches as `Match`, `lnomad/src/app/model.rs:173`) | the shared search field; matches as a run flag | `Search`, `Match(next)` (both exist) | `search` | exists |
 | Images (`SlotState`, `lnomad/src/image.rs:229`) | `Image` node in the page window: name, state, the decoded picture by reference (pixels never enter the scene, as for the map) | `Activate` opens, `Menu` saves | `browser_image_loading`, `_failed`, `_too_many` | browser |
@@ -686,7 +686,7 @@ terminal and window get no tab (the second question, answered no for now).
   tab (`loquax/src/ui.rs:5327`) and is copied for lnomad where not. A
   page's `lxmf@` link raises lnomad's new `Effect::Write`
   (`lnomad/src/app/model.rs:455`) when hosted
-  (`lnomad/src/app/event.rs:1568`), and Loquax opens that chat for
+  (`lnomad/src/app/event.rs:1572`), and Loquax opens that chat for
   writing (`effects_of`, `loquax/src/ui/browse.rs:429`); the browser's
   quit leaves the tab, not the app. A `nomadnet://` URL in a chat is not
   a link shape `leviculum_ui::link::find_links` knows yet.

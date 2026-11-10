@@ -175,9 +175,9 @@ colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1572-1575`). The messenger is the natural target of that
+`lnomad/src/app/event.rs:1576-1579`). The messenger is the natural target of that
 handoff: hosted as Loquax's Browse tab (1337) the browser hands the address
-over instead (`lnomad/src/app/event.rs:1568-1571`), and Loquax opens that chat.
+over instead (`lnomad/src/app/event.rs:1572-1575`), and Loquax opens that chat.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not
 
