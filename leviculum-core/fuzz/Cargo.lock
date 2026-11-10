@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.10.0-dev.8"
+version = "0.10.0-dev.9"
 dependencies = [
  "aes",
  "cbc",
