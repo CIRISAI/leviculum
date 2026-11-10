@@ -772,6 +772,14 @@ final class Core {
         return query(map("t", "archived", "search", search));
     }
 
+    /**
+     * The people a new conversation lists (1448): every person with a conversation, by name; with
+     * `search` (null for none) only those the library's search finds.
+     */
+    static Map<String, Object> people(String search) {
+        return search == null ? query(map("t", "people")) : query(map("t", "people", "search", search));
+    }
+
     static Map<String, Object> blocked() {
         return query(map("t", "blocked"));
     }

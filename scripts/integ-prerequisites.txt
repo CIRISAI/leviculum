@@ -221,6 +221,10 @@ command:java loquax-android/fling the_server_field_follows_a_typed_code
 command:javac loquax-android/fling the_join_form_says_a_failure_only_after_a_join
 command:java loquax-android/fling the_join_form_says_a_failure_only_after_a_join
 
+# A new conversation's picker rows (1448): PeopleRows.java with its host test.
+command:javac loquax-android/fling the_group_picker_is_the_people_list_with_check_marks
+command:java loquax-android/fling the_group_picker_is_the_people_list_with_check_marks
+
 # The Explore pane's rules (1618): ExploreRows.java run with its host test.
 command:javac loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
 command:java loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger

@@ -293,4 +293,6 @@
     <string name="add_contact_name">Wie nennst du diesen Kontakt?</string>
     <!-- 1448: the list while the engine has no path to the mailbox. -->
     <string name="offline_bar">Keine Verbindung. Nachrichten gehen raus, sobald du wieder online bist.</string>
+    <!-- 1448: a new conversation's contact list without anyone in it. -->
+    <string name="people_none">Noch keine Kontakte. Füge oben mit „Neuer Kontakt“ einen hinzu.</string>
 </resources>

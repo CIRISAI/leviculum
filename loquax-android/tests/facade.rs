@@ -359,6 +359,48 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let (address, peer) = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
         ugly_in(&session);
+        // A new conversation's contact list (1448, walk finding 17): the
+        // people by name, ignoring case, the archived one too and the
+        // blocked one not; the search finds by name.
+        let people = |search: Option<&str>| -> schema::Conversations {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::People {
+                        search: search.map(str::to_string),
+                    })
+                    .expect("people"),
+            )
+            .expect("decode")
+        };
+        let all = people(None);
+        let names: Vec<String> = all
+            .conversations
+            .iter()
+            .map(|r| r.name.to_lowercase())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "by name");
+        let has = |rows: &schema::Conversations, i: usize| {
+            rows.conversations
+                .iter()
+                .any(|r| r.peer == ugly_store::peer_hex(i))
+        };
+        assert!(has(&all, ugly_store::ARCHIVED), "the archived one");
+        assert!(!has(&all, ugly_store::BLOCKED), "not the blocked one");
+        let first_name = all.conversations[0].name.clone();
+        let found = people(Some(&first_name));
+        assert!(
+            !found.conversations.is_empty()
+                && found.conversations.len() < all.conversations.len()
+                && found.conversations.iter().any(|r| r.name == first_name),
+            "{first_name}: {:?}",
+            found
+                .conversations
+                .iter()
+                .map(|r| &r.name)
+                .collect::<Vec<_>>()
+        );
         // A peer that wrote to us and is in no address book contact: its
         // chat asks to save it to the phone's contacts. Added by its code,
         // the same chat no longer asks while this session runs (walk

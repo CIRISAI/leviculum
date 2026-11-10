@@ -440,7 +440,7 @@
     <string name="code_is_mailbox">Dieser Code ist für ein Postfach, nicht für einen Kontakt.</string>
     <string name="new_scan">Code scannen</string>
     <string name="new_paste">Code einfügen</string>
-    <string name="new_hint">Den Code deines Kontakts findest du in seinem Profil, hinter dem Bild.</string>
+    <string name="new_hint">Lass dir den Code zeigen: In Loquax tippt dein Kontakt oben auf sein eigenes Bild.</string>
     <string name="new_typed">Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.</string>
     <string name="new_nothing">Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.</string>
     <string name="join_no_answer">Das Postfach hat nicht geantwortet. Ist der Computer an?</string>

@@ -440,7 +440,7 @@
     <string name="code_is_mailbox">That code is for a mailbox, not for a friend.</string>
     <string name="new_scan">Scan a code</string>
     <string name="new_paste">Paste a code</string>
-    <string name="new_hint">Your friend\'s code is on their profile, behind their picture.</string>
+    <string name="new_hint">Ask your contact for their code: in Loquax they tap their own picture at the top.</string>
     <string name="new_typed">Or type the address your friend gave you.</string>
     <string name="new_nothing">There is nothing to paste. Copy your friend\'s code first.</string>
     <string name="join_no_answer">The mailbox did not answer. Is the computer on?</string>

@@ -2002,6 +2002,9 @@ impl Session {
                 schema::encode(&inner.listed(order, search.as_deref()))
             }
             schema::Query::Blocked => schema::encode(&inner.blocked()),
+            schema::Query::People { search } => {
+                schema::encode(&inner.listed(inner.model.people(), search.as_deref()))
+            }
             schema::Query::Friends { lat_e6, lon_e6 } => schema::encode(&crate::friends::friends(
                 &inner.model,
                 wall_now(inner.offset).unix_secs,

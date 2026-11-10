@@ -105,66 +105,57 @@ final class GroupDialogs {
         });
     }
 
-    /** The friends to tick, then Next (a new group's name step) or Add. */
+    /**
+     * The people to tick, then Next (a new group's name step) or Add: the new conversation's list
+     * with check marks (1448, UI walk 1 finding 17), not a dialog of names. On that screen it turns
+     * into the picker; from another screen (a group's Add members) it opens as one.
+     */
     private static void picker(final Activity screen, final boolean adding) {
-        shown(screen, new Engine.Got<Map<String, Object>>() {
-            @Override
-            public void got(Map<String, Object> shown) {
-                picker(screen, adding, shown);
-            }
-        });
+        if (screen instanceof NewConversationActivity) {
+            ((NewConversationActivity) screen).pick(adding);
+            return;
+        }
+        screen.startActivity(new android.content.Intent(screen, NewConversationActivity.class)
+                .putExtra(NewConversationActivity.PICK, true)
+                .putExtra(NewConversationActivity.ADDING, adding));
     }
 
-    /** {@link #picker} as the library `shown` it. */
-    private static void picker(final Activity screen, final boolean adding,
-            final Map<String, Object> shown) {
-        final List<Map<String, Object>> rows = Core.list(shown, "rows");
-        String[] names = new String[rows.size()];
-        boolean[] picked = new boolean[rows.size()];
-        for (int i = 0; i < rows.size(); i++) {
-            names[i] = Core.str(rows.get(i), "name");
-            picked[i] = Core.bool(rows.get(i), "picked");
-        }
-        new AlertDialog.Builder(screen)
-                .setTitle(Core.str(shown, "title"))
-                .setMultiChoiceItems(names, picked, new DialogInterface.OnMultiChoiceClickListener() {
+    /** A person ticked or unticked in the picker; `after` reads the screen the verb left. */
+    static void pick(Activity screen, String peer, Runnable after) {
+        verb(screen, "pick", peer, after);
+    }
+
+    /** The picker given up: the draft closes. */
+    static void cancel(Activity screen) {
+        close(screen);
+    }
+
+    /**
+     * The picker's button: Next asks the name of a new group, Add asks the home (whose answer
+     * opens the member sheet). `over` runs when the picker is done with: after Add, after a name
+     * step given up, or when the library has no name step to show.
+     */
+    static void next(final Activity screen, final boolean adding, final Runnable over) {
+        verb(screen, "next", "", new Runnable() {
+            @Override
+            public void run() {
+                if (adding) {
+                    over.run();
+                    return;
+                }
+                shown(screen, new Engine.Got<Map<String, Object>>() {
                     @Override
-                    public void onClick(DialogInterface dialog, int which, boolean on) {
-                        verb(screen, "pick", Core.str(rows.get(which), "peer"), null);
+                    public void got(Map<String, Object> now) {
+                        if ("name".equals(Core.str(now, "step"))) {
+                            name(screen, now, over);
+                        } else {
+                            close(screen);
+                            over.run();
+                        }
                     }
-                })
-                .setPositiveButton(Core.str(shown, "go"), new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        verb(screen, "next", "", new Runnable() {
-                            @Override
-                            public void run() {
-                                if (adding) {
-                                    // The home is asked; its answer closes the
-                                    // picker and opens the member sheet.
-                                    return;
-                                }
-                                shown(screen, new Engine.Got<Map<String, Object>>() {
-                                    @Override
-                                    public void got(Map<String, Object> now) {
-                                        if ("name".equals(Core.str(now, "step"))) {
-                                            name(screen, now);
-                                        } else {
-                                            close(screen);
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    }
-                })
-                .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        close(screen);
-                    }
-                })
-                .show();
+                });
+            }
+        });
     }
 
     /** The name step: the field, the trust sentence, Create. */
@@ -172,13 +163,14 @@ final class GroupDialogs {
         shown(screen, new Engine.Got<Map<String, Object>>() {
             @Override
             public void got(Map<String, Object> shown) {
-                name(screen, shown);
+                name(screen, shown, null);
             }
         });
     }
 
-    /** {@link #name} as the library `shown` it. */
-    private static void name(final Activity screen, Map<String, Object> shown) {
+    /** {@link #name} as the library `shown` it; `cancelled`, if any, runs when it is given up. */
+    private static void name(final Activity screen, Map<String, Object> shown,
+            final Runnable cancelled) {
         final EditText field = new EditText(screen);
         field.setHint(Core.str(shown, "hint"));
         // The draft's name: empty for a new group, the old one when it
@@ -207,6 +199,9 @@ final class GroupDialogs {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         close(screen);
+                        if (cancelled != null) {
+                            cancelled.run();
+                        }
                     }
                 })
                 .show();

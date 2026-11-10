@@ -248,6 +248,44 @@ fn the_join_form_says_a_failure_only_after_a_join() {
     assert!(out.contains("checks passed"), "{out}");
 }
 
+/// A new conversation's picker rows (1448, walk finding 17):
+/// `PeopleRows.java` run on the host with `tests/java/PeopleRowsTest.java`.
+/// The group picker is the people's list with check marks, in their order
+/// and with their look; the control, the dialog's rows before, has no look.
+#[test]
+fn the_group_picker_is_the_people_list_with_check_marks() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("people-rows-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/PeopleRows.java"))
+        .arg(manifest.join("tests/java/PeopleRowsTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.PeopleRowsTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
+
 /// The Explore pane's rules (1618, the walk of 17024c3a):
 /// `ExploreRows.java` run on the host with
 /// `tests/java/ExploreRowsTest.java`. 32 characters typed fast all stay

@@ -478,6 +478,29 @@ impl<B> UiModel<B> {
         self.groups.get(peer)
     }
 
+    /// The people a new conversation lists (1448, walk finding 17), as a
+    /// messenger's contact list: every conversation with a person, the
+    /// list's and the archived ones, by the name every screen gives them,
+    /// ignoring case; no group and not the reader. Conversation indices.
+    pub fn people(&self) -> Vec<usize> {
+        let mut people: Vec<(String, usize)> = self
+            .order()
+            .into_iter()
+            .chain(self.archived_order())
+            .filter(|&c| {
+                let peer = self.conversations[c].peer;
+                !self.groups.contains_key(&peer) && self.address != Some(peer)
+            })
+            .map(|c| {
+                let name = self.names.label(&self.conversations[c].peer, self.lang);
+                (name.to_lowercase(), c)
+            })
+            .collect();
+        people.sort();
+        people.dedup_by_key(|(_, c)| *c);
+        people.into_iter().map(|(_, c)| c).collect()
+    }
+
     /// The friends the "New group" picker lists: every conversation the
     /// list shows that is no group, in the list's order.
     pub fn group_candidates(&self) -> Vec<[u8; 16]> {
@@ -2585,6 +2608,53 @@ mod tests {
         arrive(&mut model, LEW, 6, "Kommst du?", Lev::default());
         assert!(model.heard_from_a_person(&LEW), "the inviter, writing");
         assert!(!model.heard_from_a_person(&BOB), "nobody wrote");
+    }
+
+    /// 1448 (walk finding 17): a new conversation lists the people by
+    /// name, ignoring case, the archived ones too; a group and the reader
+    /// are no one to start a conversation with there.
+    #[test]
+    fn the_people_are_every_person_by_name() {
+        let mut model = reader(&[LEW, ANNA, BOB]);
+        arrive(
+            &mut model,
+            LEW,
+            1,
+            "Lew invited you to Familie",
+            invite("Lew"),
+        );
+        arrive(&mut model, ANNA, 2, "Hallo", Lev::default());
+        arrive(
+            &mut model,
+            GROUP,
+            3,
+            "",
+            members(1, &[(LEW, "Lew", 2 | 4), (ME, "Me", 4)]),
+        );
+        arrive(&mut model, GROUP, 4, "Lew: Brot ist da", copy(LEW));
+        model.names.remember(LEW, "lew");
+        model.names.remember(ANNA, "Anna");
+        model.names.remember(BOB, "bob");
+        let names = |model: &UiModel<Line>| -> Vec<String> {
+            model
+                .people()
+                .into_iter()
+                .map(|c| model.names.label(&model.conversations[c].peer, model.lang))
+                .collect()
+        };
+        assert!(model.group(&GROUP).is_some());
+        assert_eq!(names(&model), ["Anna", "bob", "lew"]);
+        let bob = model
+            .conversations
+            .iter()
+            .position(|c| c.peer == BOB)
+            .expect("bob's conversation");
+        model.conversations[bob].flags.archived = true;
+        assert_eq!(
+            names(&model),
+            ["Anna", "bob", "lew"],
+            "the archived one too"
+        );
     }
 
     /// 1448 (walk finding 12): the person's first word carries its

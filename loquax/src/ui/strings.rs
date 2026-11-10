@@ -558,7 +558,7 @@ leviculum_ui::catalogue! {
     // Advanced.
     NewScan = "new_scan", "Scan a code", "Code scannen";
     NewPaste = "new_paste", "Paste a code", "Code einfügen";
-    NewHint = "new_hint", "Your friend's code is on their profile, behind their picture.", "Den Code deines Kontakts findest du in seinem Profil, hinter dem Bild.";
+    NewHint = "new_hint", "Ask your contact for their code: in Loquax they tap their own picture at the top.", "Lass dir den Code zeigen: In Loquax tippt dein Kontakt oben auf sein eigenes Bild.";
     NewTyped = "new_typed", "Or type the address your friend gave you.", "Oder tippe die Adresse ein, die dein Kontakt dir gegeben hat.";
     NewNothing = "new_nothing", "There is nothing to paste. Copy your friend's code first.", "Es gibt nichts zum Einfügen. Kopiere zuerst den Code deines Kontakts.";
     // Joining a mailbox (1263, finding 8): one sentence each, the

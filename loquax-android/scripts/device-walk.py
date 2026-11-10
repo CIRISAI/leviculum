@@ -350,6 +350,9 @@ GROUP_JOIN = "Join"
 # The pencil (1263, finding 3): its two rows, top to bottom, the fold
 # that hides the typed address, and the sentence for a text that is no
 # code (the catalogue's code_foreign).
+# "New contact" (1448, walk finding 17): the pencil's screen is a contact
+# list, and the ways to add one unfold under this row.
+PENCIL_CONTACT = "new_contact"
 PENCIL_SCAN = "new_scan"
 PENCIL_PASTE = "new_paste"
 PENCIL_ADVANCED = "new_advanced"
@@ -3696,6 +3699,10 @@ class Walk:
         taps += 1
         dev.tap_node(self.wait_id(GROUP_NEW, 10)[0])
         taps += 1
+        # The picker is the same list with check marks (1448): its button
+        # shows once it is the picker, so the friend's row is ticked, not
+        # opened.
+        self.wait_text(GROUP_NEXT, 10)
         self.tap_text(friend)
         taps += 1
         self.tap_text(GROUP_NEXT)
@@ -4625,6 +4632,7 @@ class Walk:
         dev = self.need_device()
         self.back_to_chats()
         dev.tap_node(self.wait_id("write", 10)[0])
+        dev.tap_node(self.wait_id(PENCIL_CONTACT, 10)[0])
         self.wait_id(PENCIL_PASTE, 10)
         camera = "feature:android.hardware.camera" in dev.shell("pm list features", check=False)
         nodes = dev.dump()
