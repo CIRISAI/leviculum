@@ -672,3 +672,33 @@ starts the questions with the first hub it hears, so one that hears none
 runs no question task; a mailbox on the phone lends the Rooms' slot of
 its node to its own screen and asks nothing itself, since a second lend
 to the Rooms would end the screen's, whose sheet asks over the same node.
+
+## 7. Explore asks when it opens, and says how old its list is (1644)
+
+Lew, 2026-11-10 (the mailbox split, step 4): pages and servers never
+wake a device, so without a message a phone saw a new server hours
+late. Opening Explore now asks `/pages` once more, the same stamp and
+the same bound as the ask after a pull (`UiEffect::AskPages`, folded in
+`loquax/src/ui/explore.rs`). The model starts at most one such ask a
+minute (`ASK_EVERY_MS`), counted from the last ask of either kind; the
+host runs one ask at a time and drops a second while the first runs.
+Only a device that has told the model of its mailbox link asks
+(`ExploreEvent::Mailbox`: the terminal's and the window's shell from
+the watching link, the phone from the same debounced word as its "no
+connection" bar).
+
+**The line on top.** The model notes when the last answer came
+(`MailboxList::answered`, in memory like the stamp) and the list says
+how old it is (`explore::as_of`): nothing while the link is up and the
+answer at most an hour old (`AS_OF_AFTER_SECS`); "As of 3 h ago" when it
+is older; "Not connected · as of yesterday 14:20" while the link is
+down, or only "Not connected" before any answer. The words are the
+catalogue's (`explore_as_of*`), the same on every target.
+
+**Ageing.** A page or a server not announced for seven days is not
+listed (`HIDDEN_AFTER_SECS`, a default and not a setting, Lew took the
+plan's recommendation); the row stays in the mailbox's table, the
+device's store and the browser's registry, and the next announce lists
+it again. A bookmarked page, the server in use and the servers Loquax
+ships stay listed whatever their age. Since no unbookmarked page can be
+older than a week now, the "Older" heading holds none.
