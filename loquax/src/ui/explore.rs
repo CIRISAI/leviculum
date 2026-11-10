@@ -693,6 +693,24 @@ fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
         matches_name(Some(&name), &o.hash, &query)
     };
     hubs.extend(heard);
+    // The suggested one first, the rest in their order (1632, walk 4 new
+    // 17: it stood fourth, and a newcomer looks for it on top).
+    if let Some(first) = suggested(model) {
+        match hubs.iter().position(|o| o.hash == first) {
+            Some(at) => {
+                let hub = hubs.remove(at);
+                hubs.insert(0, hub);
+            }
+            None => {
+                if let Some(hub) = super::settings::offered_hubs(&model.rooms)
+                    .into_iter()
+                    .find(|o| o.hash == first)
+                {
+                    hubs.insert(0, hub);
+                }
+            }
+        }
+    }
     hubs.retain(|o| keep(o));
     hubs
 }
@@ -1959,6 +1977,57 @@ mod tests {
         explore(&mut model, ExploreEvent::UseHub(shipped[2].hash));
         update(&mut model, UiEvent::Tab(TabId::Explore));
         assert!(marked(&model).is_empty());
+    }
+
+    /// The suggested server stands first (1632, walk 4 new 17: it stood
+    /// fourth, under three closer ones heard after it), the rest in their
+    /// order.
+    #[test]
+    fn the_suggested_server_stands_first() {
+        let shipped = crate::ui::hubs::shipped();
+        if shipped.len() < 4 {
+            return;
+        }
+        let mut model = phone();
+        for (hub, hops) in [
+            (&shipped[3], 5u8),
+            (&shipped[0], 1),
+            (&shipped[1], 1),
+            (&shipped[2], 2),
+        ] {
+            update(
+                &mut model,
+                UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                    hash: hub.hash,
+                    name: Some(hub.name.clone()),
+                    hops: Some(hops),
+                    first: NOW - 60,
+                    last: NOW - 60,
+                    answered: None,
+                })),
+            );
+        }
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let hubs: Vec<[u8; 16]> = node(&model).rooms.hubs.iter().map(|h| h.hash).collect();
+        assert_eq!(hubs[0], shipped[3].hash, "the suggested one first");
+        assert!(node(&model).rooms.hubs[0]
+            .value
+            .as_ref()
+            .is_some_and(|v| v.resolve(Lang::En).contains("suggested")));
+        // The rest in the settings' order: the closer ones heard after it.
+        assert_eq!(
+            &hubs[1..4],
+            &[shipped[0].hash, shipped[1].hash, shipped[2].hash]
+        );
+        // The control: the settings' order alone puts it fourth.
+        let offered = crate::ui::settings::offered_hubs(&model.rooms);
+        let at = offered.iter().position(|o| o.hash == shipped[3].hash);
+        assert_eq!(
+            at,
+            Some(3),
+            "{:?}",
+            offered.iter().map(|o| o.hops).collect::<Vec<_>>()
+        );
     }
 
     /// "suggested" holds once made (1629, walk 3 new 6: it wandered over
