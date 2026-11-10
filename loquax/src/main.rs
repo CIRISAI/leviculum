@@ -1114,7 +1114,6 @@ fn gui_args(args: &Args) -> GuiArgs {
             no_start: tui.no_start,
             exit_after_first_frame: false,
             fps: false,
-            no_start: tui.no_start,
         }
     }
     #[cfg(not(feature = "tui"))]
@@ -1129,7 +1128,6 @@ fn gui_args(args: &Args) -> GuiArgs {
             no_start: false,
             exit_after_first_frame: false,
             fps: false,
-            no_start: false,
         }
     }
 }
