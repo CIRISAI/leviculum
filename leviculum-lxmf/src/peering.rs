@@ -710,6 +710,11 @@ pub enum DropReason {
     /// Unpeered by [`PeerTable::rotate`] to keep headroom for newcomers
     /// (`rotate_peers`, `LXMRouter.py:2060-2126`).
     Rotation,
+    /// Over `max_peers` at load or at a maintenance pass, and the least
+    /// synced ([`PeerTable::trim_to_cap`]). The reference has no such drop:
+    /// its cap only gates admission (`LXMRouter.py:2032`), and its table
+    /// lives on a host with the RAM to hold whatever a store brings back.
+    Cap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -852,24 +857,87 @@ impl PeerTable {
         refreshed
     }
 
-    /// Restore persisted peers (engine start-up). A non-static record
-    /// already unheard past [`MAX_UNREACHABLE_SECS`] at `now` is not
-    /// restored: it is returned instead, and the caller removes it from its
-    /// store. The reference restores such a peer and culls it in its first
-    /// `sync_peers` pass (`LXMRouter.py:615-628`, `:2136-2140`); doing it
-    /// here makes the load heal a persisted table on its own, before any
-    /// sync pass or clock seed can dial or refresh the dead entry.
-    pub fn restore(&mut self, records: Vec<PeerRecord>, now: u64) -> Vec<[u8; DESTINATION_LENGTH]> {
+    /// Restore persisted peers (engine start-up), and hand back every
+    /// record that did not make it into the table with the reason, for the
+    /// caller to remove from its store and log as `PN_PEER action=drop`.
+    ///
+    /// A non-static record already unheard past [`MAX_UNREACHABLE_SECS`] at
+    /// `now` is not restored ([`DropReason::Unreachable`]). The reference
+    /// restores such a peer and culls it in its first `sync_peers` pass
+    /// (`LXMRouter.py:615-628`, `:2136-2140`); doing it here makes the load
+    /// heal a persisted table on its own, before any sync pass or clock seed
+    /// can dial or refresh the dead entry.
+    ///
+    /// The rest is held to `max_peers` ([`Self::trim_to_cap`],
+    /// [`DropReason::Cap`]). The cap used to be an admission rule only
+    /// ([`Self::handle_announce`]), and a store written under a larger cap
+    /// came back whole: a T114 whose table had grown to 15 under the old
+    /// board cap of 16 booted with all 15 after the cap went to 7, and the
+    /// heap budget sized for 7 ran out (order 1651, LV-1006).
+    pub fn restore(
+        &mut self,
+        records: Vec<PeerRecord>,
+        now: u64,
+    ) -> Vec<([u8; DESTINATION_LENGTH], DropReason)> {
         let mut dropped = Vec::new();
         for record in records {
             let mut peer = record.into_peer();
             peer.is_static =
                 self.config.static_peers.contains(&peer.destination_hash) || peer.is_static;
             if unreachable_at(&peer, now) {
-                dropped.push(peer.destination_hash);
+                dropped.push((peer.destination_hash, DropReason::Unreachable));
                 continue;
             }
             self.peers.insert(peer.destination_hash, peer);
+        }
+        dropped.extend(
+            self.trim_to_cap()
+                .into_iter()
+                .map(|hash| (hash, DropReason::Cap)),
+        );
+        dropped
+    }
+
+    /// Hold the table to `max_peers`: drop the non-static, idle peers the
+    /// node has the least invested in until it fits, and return them, least
+    /// valuable first. Static peers bypass the cap here as at admission, and
+    /// a peer mid-round is never dropped (its round would end on a missing
+    /// entry); either can leave the table above the cap until the next call.
+    ///
+    /// Kept first: the highest cursor, then the latest `last_heard`, then
+    /// destination-hash order. The cursor is how far the board's own sync
+    /// rounds have carried the peer through the store, the work a drop
+    /// throws away (a re-peered node is offered everything again); the
+    /// board keeps no traffic counters, so [`Self::rotate`]'s acceptance
+    /// ratio has nothing to rank by there.
+    ///
+    /// [`Self::restore`] calls it on every load, and a host without
+    /// [`Self::rotate`]'s counters calls it on its maintenance tick, so no
+    /// path can leave a table past the cap for longer than one tick.
+    pub fn trim_to_cap(&mut self) -> Vec<[u8; DESTINATION_LENGTH]> {
+        let excess = self.peers.len().saturating_sub(self.config.max_peers);
+        if excess == 0 {
+            return Vec::new();
+        }
+        let mut droppable: Vec<&Peer> = self
+            .peers
+            .values()
+            .filter(|peer| !peer.is_static && peer.state == SyncPhase::Idle)
+            .collect();
+        // Ascending by what is kept: the first entries are the ones to drop.
+        droppable.sort_by(|a, b| {
+            a.cursor
+                .cmp(&b.cursor)
+                .then(a.last_heard.cmp(&b.last_heard))
+                .then(b.destination_hash.cmp(&a.destination_hash))
+        });
+        let dropped: Vec<[u8; DESTINATION_LENGTH]> = droppable
+            .into_iter()
+            .take(excess)
+            .map(|peer| peer.destination_hash)
+            .collect();
+        for hash in &dropped {
+            self.peers.remove(hash);
         }
         dropped
     }

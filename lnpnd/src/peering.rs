@@ -61,6 +61,7 @@ fn drop_reason_name(reason: DropReason) -> &'static str {
         DropReason::Unreachable => "unreachable",
         DropReason::NoAccess => "no_access",
         DropReason::Rotation => "rotation",
+        DropReason::Cap => "cap",
     }
 }
 
@@ -446,15 +447,16 @@ impl PeeringRuntime {
         let mut table = PeerTable::new(config);
         let mut traffic = HashMap::new();
         // A record already unheard past the reference's 14 days is not
-        // restored; it is purged below, once the runtime owns the store.
-        let mut unreachable = Vec::new();
+        // restored, nor one past `max_peers` (`PeerTable::restore`); both
+        // are purged below, once the runtime owns the store.
+        let mut not_restored = Vec::new();
         match peer_store.load_all() {
             Ok(records) => {
                 for record in &records {
                     traffic.insert(record.destination_hash, record.traffic);
                 }
-                unreachable = table.restore(records, unix_secs());
-                for dropped in &unreachable {
+                not_restored = table.restore(records, unix_secs());
+                for (dropped, _) in &not_restored {
                     traffic.remove(dropped);
                 }
             }
@@ -492,9 +494,9 @@ impl PeeringRuntime {
             static_paths_pending,
             events,
         };
-        for dropped in &unreachable {
+        for (dropped, reason) in &not_restored {
             runtime.forget(dropped);
-            runtime.log_peer("drop", dropped, drop_reason_name(DropReason::Unreachable));
+            runtime.log_peer("drop", dropped, drop_reason_name(*reason));
         }
         for destination_hash in &activated {
             runtime.log_peer("add", destination_hash, "static");

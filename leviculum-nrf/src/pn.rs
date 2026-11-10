@@ -406,6 +406,14 @@ const MAINTENANCE_SECS: u64 = 480;
 /// `PN_STATS` cadence (instruction item 3).
 const STATS_SECS: u64 = 300;
 
+/// How often the engine looks for peer records ageing toward the reclaim
+/// ([`Engine::tick_peer_refresh`]). A record is re-saved once it is half a
+/// lap old and erased a full lap after it was written, so the look has
+/// seven of the region's sixteen pages to happen in: a minute is far inside
+/// that at any write rate the board sustains, and the scan reads the
+/// memory-mapped region without writing.
+const PEER_REFRESH_SECS: u64 = 60;
+
 /// The longest the loop sleeps before the idle-link sweep looks again
 /// ([`Engine::tick_idle_links`]). The sweep also runs on every settle pass
 /// the loop makes for other reasons; this only bounds a quiet board, where
@@ -800,6 +808,7 @@ pub struct Engine {
     last_synced: Option<[u8; 16]>,
     next_sync_at_ms: u64,
     next_maintenance_at_ms: u64,
+    next_peer_refresh_at_ms: u64,
     /// A sync message the store did not keep since the last maintenance
     /// sweep: `/offer`s answer `ERROR_THROTTLED` and peer batches are
     /// refused at their advertisement until the sweep, booked for the next
@@ -932,19 +941,32 @@ impl Engine {
         ));
         // A record already unheard past the reference's 14 days is left
         // out and purged here, so a table that holds dead peers heals on
-        // load (leviculum#466): nothing below may dial it or refresh it.
+        // load (leviculum#466): nothing below may dial it or refresh it. So
+        // is every record past `BOARD_MAX_PEERS` (order 1651): a table
+        // stored under the old cap of 16 came back whole and outgrew the
+        // heap the budget sized for seven; the purge persists the trim.
         if let Ok(records) = peer_store.load_all() {
-            for dropped in peers.restore(records, node.emission_secs()) {
+            for (dropped, reason) in peers.restore(records, node.emission_secs()) {
                 let _ = peer_store.remove(&dropped);
                 crate::log::log_fmt(
                     "PN_PEER ",
                     format_args!(
-                        "peer={} action=drop reason=unreachable peers={}",
+                        "peer={} action=drop reason={} peers={}",
                         Hex(&dropped),
+                        drop_reason_word(reason),
                         peers.len()
                     ),
                 );
             }
+        }
+        // A live record whose body no longer decodes is left out of the
+        // load: a peer lost without a drop, named here rather than silently.
+        let undecodable = peer_store.undecodable_peer_records();
+        if undecodable > 0 {
+            crate::log::log_fmt_critical(
+                "PN_PEER_SKIP ",
+                format_args!("reason=undecodable records={}", undecodable),
+            );
         }
         // The reference's order (`enable_propagation`,
         // `reference/LXMF/LXMF/LXMRouter.py:615-642`), lnpnd's too: the
@@ -1012,6 +1034,7 @@ impl Engine {
             last_synced: None,
             next_sync_at_ms: 0,
             next_maintenance_at_ms: 0,
+            next_peer_refresh_at_ms: 0,
             store_full: false,
             next_stats_at_ms: 0,
             announce_withheld_logged: false,
@@ -1114,6 +1137,7 @@ impl Engine {
             cadence.wait_ms(AnnounceSlot::Propagation, now_ms)
         }));
         due = due.min(self.next_maintenance_at_ms.max(now_ms + 1));
+        due = due.min(self.next_peer_refresh_at_ms.max(now_ms + 1));
         due = due.min(self.next_stats_at_ms.max(now_ms + 1));
         due = due.min(now_ms.saturating_add(IDLE_SWEEP_MS));
         due = due.min(self.next_sync_at_ms.max(now_ms + 1));
@@ -1643,21 +1667,7 @@ impl Engine {
             }
             PeerChange::Dropped(reason) => {
                 let _ = self.peer_store.remove(&destination_hash);
-                self.log_peer(
-                    "drop",
-                    &destination_hash,
-                    match reason {
-                        DropReason::Disabled => "disabled",
-                        DropReason::OutOfDepth => "out_of_depth",
-                        DropReason::CostRaised => "cost_raised",
-                        DropReason::Unreachable => "unreachable",
-                        DropReason::NoAccess => "no_access",
-                        // The board does not rotate (`PeerTable::rotate`
-                        // runs on the host's tick); named for the shared
-                        // vocabulary.
-                        DropReason::Rotation => "rotation",
-                    },
-                );
+                self.log_peer("drop", &destination_hash, drop_reason_word(reason));
             }
             PeerChange::Declined(reason) => {
                 if reason == DeclineReason::TableFull {
@@ -2499,6 +2509,7 @@ impl Engine {
         }
         self.tick_announce(node, now_ms, &mut out);
         self.tick_maintenance(node, now_ms);
+        self.tick_peer_refresh(now_ms);
         self.tick_stats(now_ms);
         self.tick_idle_links(node, now_ms, &mut out);
         leviculum_firmware::thread_watch::set_phase(
@@ -2803,6 +2814,38 @@ impl Engine {
         for dropped in self.peers.cull(now) {
             let _ = self.peer_store.remove(&dropped);
             self.log_peer("drop", &dropped, "unreachable");
+        }
+        // The board's rotation (order 1651). lnpnd runs
+        // `PeerTable::rotate` every `ROTATION_INTERVAL_SECS`; its rule ranks
+        // peers by traffic counters the board does not keep, and with none it
+        // postpones every pass, so here the table is held to the cap by
+        // `trim_to_cap` instead, every `MAINTENANCE_SECS`. Admission and
+        // restore already stop at the cap; this is the pass that catches any
+        // other path, a peer kept past the cap mid-round included.
+        for dropped in self.peers.trim_to_cap() {
+            let _ = self.peer_store.remove(&dropped);
+            self.log_peer("drop", &dropped, drop_reason_word(DropReason::Cap));
+        }
+    }
+
+    /// Keep the stored peer records out of the round-robin reclaim
+    /// ([`PnPeerStore::refresh_ageing_peers`], order 1651): every
+    /// [`PEER_REFRESH_SECS`], each record whose copy aged into the older half
+    /// of the region is re-saved unchanged and flushed with the next drain.
+    /// Before, a peer that neither announced nor synced for a lap of the
+    /// region was erased with its page and missing from the next boot's
+    /// table without a drop event.
+    fn tick_peer_refresh(&mut self, now_ms: u64) {
+        if now_ms < self.next_peer_refresh_at_ms {
+            return;
+        }
+        self.next_peer_refresh_at_ms = now_ms + PEER_REFRESH_SECS * 1000;
+        let refreshed = self.peer_store.refresh_ageing_peers();
+        if !refreshed.is_empty() {
+            crate::log::log_fmt(
+                "PN_PEER_REFRESH ",
+                format_args!("reason=ageing records={}", refreshed.len()),
+            );
         }
     }
 
@@ -3805,6 +3848,21 @@ impl Engine {
             let _ = self.peer_store.op_done(ok.is_some());
         }
         all_ok
+    }
+}
+
+/// The `reason=` word of a `PN_PEER action=drop` line, lnpnd's vocabulary
+/// (`lnpnd/src/peering.rs`, `drop_reason_name`).
+fn drop_reason_word(reason: DropReason) -> &'static str {
+    match reason {
+        DropReason::Disabled => "disabled",
+        DropReason::OutOfDepth => "out_of_depth",
+        DropReason::CostRaised => "cost_raised",
+        DropReason::Unreachable => "unreachable",
+        DropReason::NoAccess => "no_access",
+        // lnpnd's rotation; the board trims by `Cap` instead.
+        DropReason::Rotation => "rotation",
+        DropReason::Cap => "cap",
     }
 }
 
