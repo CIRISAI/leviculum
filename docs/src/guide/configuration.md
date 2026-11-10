@@ -331,7 +331,7 @@ parse time, as Python does (`normalize_backbone_interface`
 with a log line (`tracing::warn` (`ini_config.rs:351-356`)), not an
 error.
 
-The per-type tables below cover the six types most deployments use. All
+The per-type tables below cover the seven types most deployments use. All
 interface keys are parsed in `apply_interface_key`
 (`ini_config.rs:782-1020`); the struct they land in, with its defaults,
 is `InterfaceConfig` (`config.rs:267-758`).
@@ -340,7 +340,7 @@ is `InterfaceConfig` (`config.rs:267-758`).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `type` | string | (required) | Interface type, one of the eleven above. (`type` (`ini_config.rs:784`)) |
+| `type` | string | (required) | Interface type, one of the twelve above. (`type` (`ini_config.rs:784`)) |
 | `enabled` | bool | `true` | Bring this interface up; the legacy spelling `interface_enabled` is honoured too. (`enabled` (`ini_config.rs:788`); `InterfaceConfig::enabled` (`config.rs:781-783`)) |
 | `outgoing` | bool | `true` | Allow sending outgoing packets. (`outgoing` (`ini_config.rs:789`); `InterfaceConfig::outgoing` (`config.rs:791-793`)) |
 | `bitrate` | u64 (bps) | per type | Override the interface's own bitrate figure, which feeds announce bandwidth capping and timing. Values below `MINIMUM_BITRATE` (`constants.rs:405-408`), 5 bps, are ignored. (`bitrate` (`ini_config.rs:846-852`); `InterfaceConfig::bitrate` (`config.rs:794-799`)) |
@@ -457,6 +457,39 @@ Bind and forward are independent, as in `rnsd`: an interface with only bind
 parameters receives without transmitting, one with only forward parameters
 transmits without listening, and only an interface that would do neither is a
 configuration error.
+
+### I2P (`I2PInterface`)
+
+Reticulum over the I2P anonymous network, through the SAM v3 bridge of a
+local I2P router (i2pd, or Java I2P with SAM on). The bridge address is not
+a key: it comes from the `I2P_SAM_ADDRESS` environment variable, else
+`127.0.0.1:7656`, as in `rnsd` (`build` (`driver/interface_build/i2p.rs:22-30`)).
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `peers` | list | unset | Comma-separated `.b32.i2p` addresses; one outbound peer each, redialled after `reconnect_interval`. (`peers` (`ini_config.rs:829-840`); `InterfaceConfig::peers` (`config.rs:952-954`)) |
+| `connectable` | bool | `false` | Open an inbound endpoint under a persistent `.b32.i2p` address that other nodes list in their `peers`. Each accepted connection becomes an interface of its own. (`connectable` (`ini_config.rs:841`); `InterfaceConfig::connectable` (`config.rs:955-957`)) |
+
+The endpoint's private key is what keeps its address. It lives in
+`<storage>/i2p/<hex>.i2p`, the file name the reference uses:
+`<hex>` is `sha256(sha256(name) + sha256(transport identity hash))` with
+`name` the section's name, and an older `sha256(sha256(name))` file is
+preferred when present (`resolve_keyfile` (`interfaces/i2p/mod.rs:802-850`)).
+So an `rnsd` user who switches to `lnsd` on the same configuration directory
+keeps the address, and the other way round. A key without a file is
+generated as an Ed25519 destination and written there, mode 0600. A key
+from an lnsd older than 1576, `i2p_iface_<n>.i2p`, is renamed to the new
+name once, and the rename is logged. Renaming the section, or replacing
+the transport identity, gives the endpoint a new address.
+
+```ini
+[interfaces]
+  [[I2P]]
+    type = I2PInterface
+    enabled = Yes
+    connectable = Yes
+    peers = ykzlw5ujbaqc2xkec4cpvgyxj257wcrmmgkuxqmqcur7cq3w3lha.b32.i2p
+```
 
 ### AutoInterface (`AutoInterface`)
 

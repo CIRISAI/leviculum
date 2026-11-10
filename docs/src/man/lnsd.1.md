@@ -58,6 +58,9 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 **LEVICULUM_AUTO_BLUETOOTH_ADAPTER**
 :   The one adapter `[auto] bluetooth = yes` may take (`hci1`), instead of BlueZ's default adapter. A name BlueZ does not list is no adapter.
 
+**I2P_SAM_ADDRESS**
+:   `host:port` of the I2P router's SAM bridge every `I2PInterface` section talks to, as for **rnsd**; default `127.0.0.1:7656`. The section itself names only its `peers` (`.b32.i2p` addresses to dial) and whether it is `connectable` (an inbound endpoint under a persistent address); see the configuration guide.
+
 **LEVICULUM_NO_AUTO**
 :   `1` turns every medium of the automatic layer off, whatever the `[auto]` section says (`reason=env`). `0` lifts the host marker */etc/leviculum/no-auto*. Interfaces the file names are never touched.
 
@@ -68,6 +71,9 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 
 *<storage>/auto_servers*
 :   The server entries the automatic layer dials, one `host:port` per slot, kept across starts while the list still names them.
+
+*<storage>/i2p/<hex>.i2p*
+:   The private key of a `connectable` `I2PInterface` section, mode 0600, which keeps its `.b32.i2p` address across starts. Named as **rnsd** names it, `<hex>` = `sha256(sha256(section name) + sha256(transport identity hash))`, an older `sha256(sha256(section name))` file preferred when present, so **rnsd** and **lnsd** on one configuration directory serve the same address. A key an older **lnsd** wrote as `i2p_iface_<n>.i2p` is renamed to that name once.
 
 *<storage>/lnsd.lock*
 :   Held with an exclusive `flock` while **lnsd** runs, and holding its instance name and pid. A second **lnsd** on the same storage directory, under any instance name, refuses to start with one sentence naming the running daemon's instance and pid and exits non-zero; give it its own **--storage**. The kernel drops the lock when the daemon exits, however it exits, so a file left behind blocks nothing.
