@@ -221,10 +221,11 @@ what it plays.
   (`MOST_WINDOWS`), so a platform that forgets to stop cannot grow it
   without end.
 
-An lnpnd started without a config still takes only 4 KB a message
-([files](loquax-files.md), open item 1). A long voice message to an
-offline peer through such a node does not fit. That is the node's
-limit, not the recorder's.
+A propagation node, lxmd or lnpnd with or without a config, carries
+256 KB a message on to its peers, about three and a half minutes of
+voice; a longer one is stored local only, collected from the node it
+was uploaded to ([files](loquax-files.md), section 2). A board's node
+takes 4 KB. Those are the nodes' limits, not the recorder's.
 
 ## 6. The core, built in pass one
 

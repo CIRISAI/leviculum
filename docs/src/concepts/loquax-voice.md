@@ -187,6 +187,11 @@ The tools are `opus-tools` and `codec2` from apt
 4. No seek. Signal moves the playback with a drag on the bar.
 5. Codec2 700C and the 450 modes do not play: the Rust codec has none.
    Sideband sends 2400.
-6. An lnpnd started without a config takes 4 KB a message
-   ([files](loquax-files.md), open item 1): three seconds of voice fit,
-   a longer message to an offline peer does not.
+6. A propagation node carries 256 KB a message on to its peers, lxmd
+   and lnpnd alike, lnpnd with or without a config: about three and a
+   half minutes of voice. (This item said 4 KB, lnpnd's fallback before
+   1294; 1663 pins the default by a test.) A longer
+   one, up to the ten-minute cap, is stored local only, so an offline
+   peer collects it from the node it was uploaded to. A board's node
+   takes 4 KB, about three seconds ([board](propagation-node-on-a-board.md),
+   section 6).

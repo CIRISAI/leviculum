@@ -52,15 +52,18 @@ not read is skipped while the rest are still read.
 | A file Loquax sends | 990 000 bytes | `loquax::ui::files::LARGEST`, the same budget as an original photo |
 | Any receiver, direct or over a link | 1000 KB a message | `DELIVERY_LIMIT`, `reference/LXMF/LXMF/LXMRouter.py:60`, applied at `:1979`; ours `leviculum_lxmf::constants::DELIVERY_LIMIT_BYTES` |
 | A stock Python propagation node (lxmd) | 256 KB a message | `PROPAGATION_LIMIT`, `reference/LXMF/LXMF/LXMRouter.py:55`; lxmd's `propagation_transfer_max_accepted_size` default, `reference/LXMF/LXMF/Utilities/lxmd.py:165-177` |
-| lnpnd | 4 KB a message with no config file or flag, 256 with lxmd's config | `transfer_limit_kb`'s fallback `unwrap_or(4)`, `lnpnd/src/main.rs:508-514` |
+| lnpnd | 256 KB a message, with or without a config, as lxmd; up to 1000 KB stored local only, above it refused | `DEFAULT_TRANSFER_LIMIT_KB` and `DEFAULT_DELIVERY_LIMIT_KB`, `lnpnd/src/config.rs` (256 since 1294, 4 before); pinned by `a_node_without_a_config_takes_a_sixty_kb_voice_message_and_refuses_one_over_the_delivery_limit` (1663) |
+| A board's propagation node | 4 KB a message | `BOARD_TRANSFER_LIMIT_KB`, `leviculum-nrf/heap-budget`; its heap, see [the board's node](propagation-node-on-a-board.md), section 6 |
 | A Loquax Mailbox's archive | 1024 MB in all, oldest first out | `DEFAULT_ARCHIVE_CAP_MB`, `loquax/src/home.rs:362`, `archive_cap_mb` in the config |
 | Columba | none of its own | `MAX_SINGLE_FILE_SIZE = Int.MAX_VALUE`, `columba/app/src/main/java/network/columba/app/util/FileUtils.kt:37`; its receiver defaults to 1 MB (`columba/app/src/main/java/network/columba/app/repository/SettingsRepository.kt:1849`) |
 
 So a file up to 990 KB goes to a peer that is online, and to a peer that
-is offline through a Loquax Mailbox. Through a stock propagation node a
-file past 256 KB is refused by the node (past 4 KB by an lnpnd started
-without a config): the same open question as a phone-size photo
-([photos](loquax-photos.md), section 7).
+is offline through a Loquax Mailbox. Through a propagation node, lxmd or
+lnpnd, a file up to 256 KB is stored and carried on to the node's peers;
+past 256 KB it is stored local only, so its recipient collects it from
+that node and from no other, and lnpnd refuses one past 1000 KB
+(`PN_REJECT reason=too_large`). A board's node takes 4 KB. The same open
+question as a phone-size photo ([photos](loquax-photos.md), section 7).
 
 The refusal says both sizes, in the reader's language: "This file is
 4.2 MB. A message carries at most 990 KB." The phone reads at most the
@@ -148,7 +151,9 @@ both.
 
 1. Progress in the bubble (section 5).
 2. The propagation node's 256 KB per message (section 2), shared with
-   photos; lnpnd's fallback of 4 KB without a config is lower still.
+   photos: above it a file reaches its recipient only through the node
+   it was uploaded to. lnpnd without a config takes the same 256 KB
+   since 1294 (checked in 1663).
 3. One file per message from the plus sheet; several picked at once are a
    later slice. Received messages with several show all.
 4. No preview of a received picture sent as a file: it is a file row.

@@ -1176,6 +1176,15 @@ cannot hold what `lnpnd` holds, the limit is its own and named here.
 | A sync message the store did not keep | `PN_STORE_FULL offered= dropped=`, sweep at the next tick, `/offer` answered `ERROR_THROTTLED` and peer batches refused `store_full` until then | the same; the ring never refuses for room, so on the board it means the flash refused a write |
 | Expiry sweep | reads only the expired range of a receive-time index | skips the region while the oldest receive time it measured is not expired; a walk that runs is one scan (0.4 ms on the host over a full 16-page region, 8 to 33 ms on the board, §2) |
 
+What that means for a voice message (order 1663): Loquax sends Opus at
+1.2 KB/s ([voice](loquax-voice.md)), so a board takes about three
+seconds, where `lnpnd` and lxmd carry about three and a half minutes on
+to their peers and keep up to 1000 KB local only. The board's 4 KB is
+not a default to align with the host's: it is what its heap holds while
+two phones' uploads are in flight (`BOARD_TRANSFER_LIMIT_KB`, above),
+and an upload past one record-log page is refused at its advertisement.
+A longer voice message for an offline peer goes through a host node.
+
 A client learns none of the board's limits before it uploads: only a
 peer reads fields 3 and 4 (`reference/LXMF/LXMF/LXMRouter.py:2367-2375`),
 and no stock client consults a propagation node's limits. An upload
