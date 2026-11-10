@@ -38,7 +38,7 @@ fn phone() -> (tempfile::TempDir, UiModel<session::Line>) {
     model.own_code = Some(loquax::ui::OwnCode::of(code, Some(qr)));
     update(
         &mut model,
-        UiEvent::ProfileFacts(ProfileFacts {
+        UiEvent::ProfileFacts(Box::new(ProfileFacts {
             name: String::new(),
             mailbox: Mailbox::Away {
                 name: Some("Lews Rechner".to_string()),
@@ -49,7 +49,8 @@ fn phone() -> (tempfile::TempDir, UiModel<session::Line>) {
                 name: String::new(),
                 this: true,
             }],
-        }),
+            ..Default::default()
+        })),
     );
     (home, model)
 }

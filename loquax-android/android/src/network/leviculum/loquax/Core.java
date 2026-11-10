@@ -183,6 +183,11 @@ final class Core {
         return query(map("t", "profile"));
     }
 
+    /** The settings' mailbox page (1642): `title`, `groups` of `title` and `lines` (`label`, `value`, `copy`, `action`, `note`), `copy_label`, `copied`; `error` when not. */
+    static Map<String, Object> mailboxPage() {
+        return query(map("t", "mailboxpage"));
+    }
+
     /** A fresh join code of the mailbox on this phone for another device (1264): `code`, `qr`, `qr_size`, `hours`; `error` when not. */
     static Map<String, Object> linkDevice() {
         return query(map("t", "linkdevice"));

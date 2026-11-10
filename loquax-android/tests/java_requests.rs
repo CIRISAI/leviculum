@@ -660,6 +660,7 @@ fn queries() -> Vec<(&'static str, Vec<u8>, Query)> {
         ),
         ("me", t("me"), Query::Me),
         ("profile", t("profile"), Query::Profile),
+        ("mailboxPage", t("mailboxpage"), Query::MailboxPage),
         ("linkDevice", t("linkdevice"), Query::LinkDevice),
         ("linked", t("linked"), Query::Linked),
         ("movePhone", t("movephone"), Query::MovePhone),

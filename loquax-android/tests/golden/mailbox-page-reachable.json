@@ -1,0 +1,107 @@
+{
+  "v": 1,
+  "title": "Postfach",
+  "groups": [
+    {
+      "title": "Welches Postfach",
+      "lines": [
+        {
+          "label": "Name",
+          "value": "Lew Palm",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Adresse",
+          "value": "5a3e910c7742d81b6f03a4e258c92d80",
+          "copy": "5a3e910c7742d81b6f03a4e258c92d80",
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Läuft auf",
+          "value": "miauhaus",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Version",
+          "value": "0.9.7 (5f0c2e1)",
+          "copy": null,
+          "action": null,
+          "note": false
+        }
+      ]
+    },
+    {
+      "title": "Verbindung",
+      "lines": [
+        {
+          "label": "Verbunden seit 12 Min.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Letzter Kontakt",
+          "value": "gerade eben",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Verbindung über leviculum.network, Tor 4343, geschirmt",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Geschirmt: dieses Gerät hört nur, was für es bestimmt ist.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": true
+        }
+      ]
+    },
+    {
+      "title": "Geräte dieses Postfachs",
+      "lines": [
+        {
+          "label": "Fairphone",
+          "value": "dieses Gerät",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "M9",
+          "value": "zuletzt da vor 2 Std.",
+          "copy": null,
+          "action": null,
+          "note": false
+        },
+        {
+          "label": "Ein Gerät wird am Postfach selbst hinzugefügt oder entfernt.",
+          "value": null,
+          "copy": null,
+          "action": null,
+          "note": true
+        },
+        {
+          "label": "Meinen Code zeigen",
+          "value": null,
+          "copy": null,
+          "action": "profile",
+          "note": false
+        }
+      ]
+    }
+  ],
+  "copy_label": "Kopieren",
+  "copied": "Die Adresse des Postfachs ist in der Zwischenablage"
+}

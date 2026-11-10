@@ -442,14 +442,7 @@ impl App {
             ))
             .padding([12, 16])
             .into(),
-            Section::Mailbox => self
-                .seen
-                .mailbox
-                .iter()
-                .fold(column![], |page, line| {
-                    page.push(say(line.resolve(self.lang)))
-                })
-                .into(),
+            Section::Mailbox => self.mailbox_page(t),
             Section::Appearance => {
                 let switch = self.switch_row(
                     self.word(StrId::SettingsDark),
@@ -493,6 +486,63 @@ impl App {
     /// one in force, a press choosing it, "More…" for every hub in the
     /// page's scroll, none, the field for another's address, and what a
     /// hub learns.
+    /// The mailbox page (1642), the core's scene: a header per group in
+    /// the accent, a line per line with its value under it, a note
+    /// smaller, the address selectable and with "Copy", "Show my code" a
+    /// link to the profile.
+    fn mailbox_page(&self, t: Colours) -> Element<'_, Message> {
+        let lang = self.lang;
+        let Some(page) = &self.seen.mailbox else {
+            return column![].into();
+        };
+        let mut rows = column![].spacing(2).padding([4, 16]);
+        for group in &page.groups {
+            rows = rows.push(
+                container(
+                    text(group.title.resolve(lang))
+                        .size(14)
+                        .color(colour(t.accent)),
+                )
+                .padding(iced::Padding {
+                    top: 12.0,
+                    bottom: 4.0,
+                    ..iced::Padding::ZERO
+                }),
+            );
+            for line in &group.lines {
+                let label = line.label.resolve(lang);
+                if line.note {
+                    rows = rows.push(text(label).size(13).color(colour(t.text_secondary)));
+                    continue;
+                }
+                if let Some(action) = &line.action {
+                    rows = rows.push(link(&label, Message::Intent(action.intent.clone()), t));
+                    continue;
+                }
+                let mut words = column![text(label).size(15).color(colour(t.text))];
+                if let Some(value) = &line.value {
+                    words = words.push(
+                        text(value.resolve(lang))
+                            .size(14)
+                            .color(colour(t.text_secondary)),
+                    );
+                }
+                let mut shown = row![container(words).width(Length::Fill)]
+                    .spacing(8)
+                    .align_y(Alignment::Center);
+                if let Some(copy) = &line.copy {
+                    shown = shown.push(filled(
+                        &Text::key(StrId::MailboxCopy).resolve(lang),
+                        Some(Message::CopyText(copy.clone())),
+                        t,
+                    ));
+                }
+                rows = rows.push(container(shown).padding([4, 0]));
+            }
+        }
+        rows.into()
+    }
+
     fn hub_rows(&self, t: Colours) -> Element<'_, Message> {
         use loquax::ui::intent::Intent;
         use loquax::ui::rooms::HubPick;

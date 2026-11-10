@@ -105,6 +105,16 @@ pub struct ProfileFacts {
     /// This identity's devices, this one among them; empty where the
     /// shell does not know them.
     pub devices: Vec<Device>,
+    /// What the mailbox said of itself (1642, `/about`).
+    pub told: super::mailbox_page::Told,
+    /// How this device reaches its mailbox now (1642).
+    pub reach: super::mailbox_page::Reach,
+    /// This device's RNS identity hash, which finds it in the mailbox's
+    /// list (1642); never shown.
+    pub device: Option<[u8; 16]>,
+    /// This device's build (`loquax::VERSION`), which the mailbox's is
+    /// held against (1642); empty where the shell did not say it.
+    pub version: String,
 }
 
 /// A QR code as the core's bitmap: `side` modules a side, row by row,

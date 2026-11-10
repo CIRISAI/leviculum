@@ -261,6 +261,7 @@ skip  loquax-android   glyph                      # Glyph.java against the core'
 skip  loquax-android   home_reach                 # phone and mailbox through in-process relays over loopback TCP sockets (1196); subject is the code
 skip  loquax-android   java_requests              # decodes every request the app's Java builds, in Java's bytes, with the facade schema; subject is the code
 skip  loquax-android   m9_scene_census            # counts the M9 screens' scene heap with a global allocator (1343); subject is the code
+skip  loquax-android   mailbox_page               # the mailbox page (1642) in Java's bytes and its words against two goldens; subject is the code
 skip  loquax-android   m9_fold_census             # a pulled page's fold split into unpack, step, note and route by time and allocator calls and bytes, and folded in chunks (1575); subject is the code
 skip  loquax-android   m9_list_window             # rows built and allocator calls per draw of the M9's list, 302 conversations against 30 (1595); subject is the code
 skip  loquax-android   name_lookups               # a list row's name questions counted in allocator calls for 32 and 1000 names (1581); subject is the code

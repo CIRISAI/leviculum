@@ -786,6 +786,10 @@ pub enum Query {
     /// contact code and its QR, where the mailbox is, and the advanced
     /// facts.
     Profile,
+    /// The settings' mailbox page (1642): which mailbox, how the phone
+    /// reaches it, which devices use it; answered as [`MailboxPage`].
+    #[serde(rename = "mailboxpage")]
+    MailboxPage,
     /// "Link a device" on the profile (1264): a fresh join code of the
     /// mailbox on this phone for another device, as [`LinkCode`]; refused
     /// on a phone whose mailbox is on a computer. Each ask opens a new
@@ -2481,6 +2485,45 @@ pub struct ExploreHub {
     /// The public rooms' hub in force.
     #[serde(default)]
     pub chosen: bool,
+}
+
+/// What [`Query::MailboxPage`] answers (1642): the core's mailbox page
+/// (`loquax::ui::mailbox_page`) in the phone's language, the scene the
+/// window and the terminal draw. Java draws a header per group and a line
+/// per line: the label, the value under it, a smaller sentence for a note,
+/// a "Copy" button where `copy` is set, a tap where `action` is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxPage {
+    pub v: u32,
+    pub title: String,
+    pub groups: Vec<MailboxGroup>,
+    /// The copy button's word, and the toast after it.
+    pub copy_label: String,
+    pub copied: String,
+}
+
+/// A group of [`MailboxPage`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxGroup {
+    pub title: String,
+    pub lines: Vec<MailboxLine>,
+}
+
+/// A line of [`MailboxGroup`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxLine {
+    pub label: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    /// What the line's copy button puts on the clipboard.
+    #[serde(default)]
+    pub copy: Option<String>,
+    /// What a tap does: `profile` opens the profile with the code.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// A sentence explaining the line above.
+    #[serde(default)]
+    pub note: bool,
 }
 
 /// What [`Query::Settings`] answers (1450, walk 1 finding 21): the

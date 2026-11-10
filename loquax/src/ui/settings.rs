@@ -331,22 +331,8 @@ pub fn rows<B>(model: &UiModel<B>, target: Target, section: Section) -> Vec<Page
     let terminal = target == Target::Terminal;
     match section {
         Section::Profile => Vec::from([verb(StrId::ProfileTitle, None, 'p', Intent::Profile)]),
-        Section::Mailbox => {
-            let (line, state) = super::profile::mailbox_words(&model.profile.mailbox);
-            let mut rows = Vec::from([PageRow {
-                label: line,
-                value: None,
-                key: None,
-                action: None,
-            }]);
-            rows.extend(state.map(|state| PageRow {
-                label: state,
-                value: None,
-                key: None,
-                action: None,
-            }));
-            rows
-        }
+        // 1642: which mailbox, how it is reached, which devices use it.
+        Section::Mailbox => super::mailbox_page::page(model).rows(),
         Section::Appearance => {
             let value = Text::key(match model.theme {
                 Theme::Dark => StrId::SettingsDark,

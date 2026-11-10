@@ -50,6 +50,11 @@ pub const DOWNLOADS: &str = "browse";
 pub const SERVER_FILE: &str = "home-server";
 /// How long a join, a send or a mark may take; a pull gets twice this.
 pub const BUDGET: Duration = Duration::from_secs(60);
+
+/// How old the mailbox's word on itself may be before the mailbox page
+/// asks again (1642): a minute, so a device's "last there" moves while the
+/// page is watched, and a page opened ten times asks once.
+const ABOUT_FRESH_MS: u64 = 60_000;
 /// How often the session takes what the engine said and runs the clock
 /// while something is going on: the terminal's pump interval.
 pub const PUMP: Duration = Duration::from_millis(100);
@@ -238,6 +243,13 @@ struct Inner {
     /// none before the first, and when that look was.
     link: Option<bool>,
     link_looked: Option<u64>,
+    /// When the link last changed, and when it was last seen up, unix
+    /// seconds (1642): the mailbox page's "since" and "last contact".
+    link_since: Option<i64>,
+    last_contact: Option<i64>,
+    /// What the mailbox said of itself (1642, `/about`), and whether an
+    /// ask runs and when the last one began (the pump's clock).
+    about: Arc<Mutex<AboutAsk>>,
     /// Whether the last turn skipped its look at the TCP interface.
     link_owed: bool,
     /// Wakes the pump out of an idle sleep (1176).
@@ -940,32 +952,62 @@ impl Session {
         lxma: &str,
         qr: (u32, Vec<bool>),
     ) -> schema::ProfileWords {
+        let facts = self.profile_facts(home, here, name);
+        let mut inner = self.lock();
+        inner.model.own_code = Some(loquax::ui::OwnCode::of(lxma.to_string(), Some(qr)));
+        inner.apply(UiEvent::ProfileFacts(Box::new(facts)));
+        profile_words(&inner.model, inner.lang)
+    }
+
+    /// What the phone knows of the reader that the model does not (1443,
+    /// 1642): the name, where the mailbox is and how the phone reaches it,
+    /// what the mailbox said of itself, the devices.
+    fn profile_facts(
+        &self,
+        home: &std::path::Path,
+        here: bool,
+        name: &str,
+    ) -> loquax::ui::profile::ProfileFacts {
+        use loquax::ui::mailbox_page::Reach;
         use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
+        let rendezvous = self.rendezvous();
+        let relayed = rendezvous.iter().any(|(_, up)| *up);
+        let (link, heard, since, last_contact, entry, told, device) = {
+            let inner = self.lock();
+            // The mailbox announces this identity under the name it keeps
+            // (1447): what the profile calls it, never the server the
+            // phone reaches it through.
+            let heard = inner
+                .model
+                .names
+                .announced(&self.address)
+                .map(str::to_string);
+            let entry = inner
+                .attached
+                .rendezvous()
+                .map(|state| state.entry)
+                .filter(|entry| !entry.is_empty());
+            let told = lock_about(&inner.about).told.clone();
+            (
+                inner.link,
+                heard,
+                inner.link_since,
+                inner.last_contact,
+                entry,
+                told,
+                *inner.client.device.hash(),
+            )
+        };
         let mailbox = match here {
             true => Mailbox::Here,
-            false => {
-                let relayed = self.rendezvous().iter().any(|(_, up)| *up);
-                let (link, heard) = {
-                    let inner = self.lock();
-                    // The mailbox announces this identity under the name
-                    // it keeps (1447): what the profile calls it, never
-                    // the server the phone reaches it through.
-                    let heard = inner
-                        .model
-                        .names
-                        .announced(&self.address)
-                        .map(str::to_string);
-                    (inner.link, heard)
-                };
-                Mailbox::Away {
-                    name: heard,
-                    rung: relayed.then_some(Rung::Relayed),
-                    word: link.map(|up| match up {
-                        true => loquax::home::board::Word::Connected,
-                        false => loquax::home::board::Word::Unreachable,
-                    }),
-                }
-            }
+            false => Mailbox::Away {
+                name: heard,
+                rung: relayed.then_some(Rung::Relayed),
+                word: link.map(|up| match up {
+                    true => loquax::home::board::Word::Connected,
+                    false => loquax::home::board::Word::Unreachable,
+                }),
+            },
         };
         let others = match here {
             true => mailbox::devices(home).unwrap_or_default(),
@@ -977,14 +1019,43 @@ impl Session {
         })
         .chain(others.into_iter().map(|name| Device { name, this: false }))
         .collect();
-        let mut inner = self.lock();
-        inner.model.own_code = Some(loquax::ui::OwnCode::of(lxma.to_string(), Some(qr)));
-        inner.apply(UiEvent::ProfileFacts(ProfileFacts {
+        ProfileFacts {
             name: name.to_string(),
             mailbox,
             devices,
-        }));
-        profile_words(&inner.model, inner.lang)
+            told,
+            reach: Reach {
+                up: link,
+                since,
+                last_contact,
+                entry,
+                dials: !self.servers.is_empty(),
+            },
+            device: Some(device),
+            version: loquax::VERSION.to_string(),
+        }
+    }
+
+    /// The mailbox page of the settings (1642, [`schema::Query::MailboxPage`]):
+    /// the facts told to the model, the mailbox asked again for its own
+    /// word when the last ask is older than a minute, and the core's page
+    /// resolved. Java asks again every few seconds while the page is up,
+    /// so the answer of the ask begun here shows on the next look.
+    fn mailbox_page(&self) -> Result<schema::MailboxPage, String> {
+        let home = self.lock().home.clone();
+        let here = self.is_here();
+        let name = match here {
+            true => mailbox::name(&home),
+            false => String::new(),
+        };
+        let facts = self.profile_facts(&home, here, &name);
+        let mut inner = self.lock();
+        inner.model.now = Some(wall_now(inner.offset));
+        if !here {
+            inner.ask_about(ABOUT_FRESH_MS);
+        }
+        inner.apply(UiEvent::ProfileFacts(Box::new(facts)));
+        Ok(mailbox_page_words(&inner.model, inner.lang))
     }
 
     /// A contact from its contact code ([`schema::Request::AddContact`],
@@ -1696,6 +1767,7 @@ impl Session {
         match query {
             schema::Query::Me => return self.me().map(|me| schema::encode(&me)),
             schema::Query::Profile => return self.profile().map(|p| schema::encode(&p)),
+            schema::Query::MailboxPage => return self.mailbox_page().map(|p| schema::encode(&p)),
             schema::Query::LinkDevice => return self.link_device().map(|c| schema::encode(&c)),
             schema::Query::Linked => return self.linked().map(|l| schema::encode(&l)),
             schema::Query::MovePhone => return self.move_phone().map(|c| schema::encode(&c)),
@@ -2027,6 +2099,7 @@ impl Session {
             )?),
             schema::Query::Me
             | schema::Query::Profile
+            | schema::Query::MailboxPage
             | schema::Query::LinkDevice
             | schema::Query::Linked
             | schema::Query::MovePhone
@@ -2311,6 +2384,9 @@ impl Inner {
             link: None,
             // The first pump looks, and says what it saw.
             link_looked: None,
+            link_since: None,
+            last_contact: None,
+            about: Arc::default(),
             link_owed: false,
             wake,
             watch,
@@ -2622,10 +2698,71 @@ impl Inner {
         if up && self.link == Some(false) {
             self.ask_for_home_path();
         }
+        let wall = wall_now(self.offset).unix_secs;
+        if up {
+            self.last_contact = Some(wall);
+        }
         if self.link != Some(up) {
             self.link = Some(up);
+            self.link_since = Some(wall);
             let _ = self.events.send(Event::Link { v: VERSION, up });
+            // The mailbox's own word, once per connection (1642).
+            if up {
+                self.ask_about(0);
+            }
         }
+    }
+
+    /// Ask the mailbox what it says of itself (1642, `/about`), unless an
+    /// ask runs or one began less than `fresh_ms` ago. The answer lands in
+    /// [`Inner::about`]; the mailbox page reads it on its next look.
+    fn ask_about(&mut self, fresh_ms: u64) {
+        let now = self.elapsed_ms();
+        {
+            let mut about = lock_about(&self.about);
+            if about.asking
+                || about
+                    .began
+                    .is_some_and(|at| fresh_ms > 0 && now.saturating_sub(at) < fresh_ms)
+            {
+                return;
+            }
+            about.asking = true;
+            about.began = Some(now);
+        }
+        let node = self.client.node.clone();
+        let public_key = self.client.public_key;
+        let device = self.client.device.clone();
+        let state = Arc::clone(&self.about);
+        self.runtime.spawn(async move {
+            use loquax::home::ask::HomeError;
+            use loquax::ui::mailbox_page::Told;
+            let told = match loquax::home::client::about(&node, &public_key, &device, BUDGET).await
+            {
+                Ok(about) => {
+                    tracing::info!(
+                        "HOME about host={:?} version={} devices={}",
+                        about.host,
+                        about.version,
+                        about.devices.len()
+                    );
+                    Some(Told::Told(about))
+                }
+                Err(HomeError::Unsupported(_)) => {
+                    tracing::info!("HOME about unsupported: the mailbox is older");
+                    Some(Told::Older)
+                }
+                Err(error) => {
+                    tracing::warn!("HOME about: {error}");
+                    None
+                }
+            };
+            let mut about = lock_about(&state);
+            about.asking = false;
+            if let Some(told) = told {
+                about.told = told;
+            }
+        });
     }
 
     /// After a network change (1298): the line says "Reconnecting…" while
@@ -4751,6 +4888,58 @@ async fn relay_node(
             },
             () = opened.closed() => return,
         }
+    }
+}
+
+/// The mailbox's word on itself (1642) as the phone holds it.
+#[derive(Default)]
+struct AboutAsk {
+    told: loquax::ui::mailbox_page::Told,
+    asking: bool,
+    /// When the last ask began, on the pump's clock.
+    began: Option<u64>,
+}
+
+fn lock_about(about: &Mutex<AboutAsk>) -> MutexGuard<'_, AboutAsk> {
+    about
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The mailbox page of `model` (1642, `loquax::ui::mailbox_page`) in
+/// `lang`'s words, as [`schema::MailboxPage`] carries it to the settings
+/// page: the scene the window and the terminal draw, resolved.
+pub fn mailbox_page_words<B>(model: &UiModel<B>, lang: Lang) -> schema::MailboxPage {
+    let page = loquax::ui::mailbox_page::page(model);
+    schema::MailboxPage {
+        v: VERSION,
+        title: page.title.resolve(lang),
+        groups: page
+            .groups
+            .iter()
+            .map(|group| schema::MailboxGroup {
+                title: group.title.resolve(lang),
+                lines: group
+                    .lines
+                    .iter()
+                    .map(|line| schema::MailboxLine {
+                        label: line.label.resolve(lang),
+                        value: line.value.as_ref().map(|v| v.resolve(lang)),
+                        copy: line.copy.clone(),
+                        action: line.action.as_ref().map(|action| {
+                            match action.intent {
+                                loquax::ui::intent::Intent::Profile => "profile",
+                                _ => "",
+                            }
+                            .to_string()
+                        }),
+                        note: line.note,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        copy_label: StrId::MailboxCopy.text(lang).to_string(),
+        copied: StrId::MailboxCopied.text(lang).to_string(),
     }
 }
 

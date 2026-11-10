@@ -280,7 +280,18 @@ pub(crate) struct Shell {
     /// On a client of a home node: the running `/pages` ask (1579), one at
     /// a time.
     pages_task: Option<tokio::task::JoinHandle<()>>,
+    /// On a client of a home node: the running `/about` ask (1642), and
+    /// when the last began on the shell's clock.
+    about_task: Option<tokio::task::JoinHandle<()>>,
+    about_at: Option<u64>,
+    /// How this device reaches its mailbox (1642), as the mailbox page
+    /// says it: the watching link up or down since when, the last contact.
+    reach: loquax::ui::mailbox_page::Reach,
 }
+
+/// How long the mailbox's word on itself stays fresh on a computer (1642):
+/// asked after a pull at most this often.
+const ABOUT_EVERY_MS: u64 = 10 * 60 * 1000;
 
 /// What the model asks of the terminal beyond drawing.
 #[derive(Debug, PartialEq, Eq)]
@@ -1191,9 +1202,13 @@ impl Shell {
             return;
         };
         let mut wake = false;
+        let mut told_reach = None;
         while let Ok(event) = events.try_recv() {
             match event {
-                WatchEvent::Watching(up) => self.watching = up,
+                WatchEvent::Watching(up) => {
+                    self.watching = up;
+                    told_reach = Some(up);
+                }
                 WatchEvent::Wake(newest) => {
                     let cursor = loquax::home::client::load_cursor(&self.context.home);
                     wake |= watch::wants_pull(newest, cursor);
@@ -1204,9 +1219,57 @@ impl Shell {
             tracing::info!("SYNC the watching link is down; pulling");
             wake = true;
         }
+        if let Some(up) = told_reach {
+            self.reached(Some(up));
+        }
         if wake {
             self.apply(UiEvent::HomeWake);
         }
+    }
+
+    /// The mailbox page's connection (1642): `up` the watching link's
+    /// word, `None` for a pull that came back (a contact, the link as it
+    /// was). Told to the model when it moved.
+    fn reached(&mut self, up: Option<bool>) {
+        let now = leviculum_std::local_time::unix_now_secs();
+        let mut reach = self.reach.clone();
+        if let Some(up) = up {
+            if reach.up != Some(up) {
+                reach.up = Some(up);
+                reach.since = Some(now);
+            }
+        }
+        if up != Some(false) {
+            reach.last_contact = Some(now);
+        }
+        if reach != self.reach {
+            self.reach = reach.clone();
+            self.apply(UiEvent::MailboxReach(Box::new(reach)));
+        }
+    }
+
+    /// On a client of a home node, after a pull: the mailbox's word on
+    /// itself (1642), at most every [`ABOUT_EVERY_MS`], one ask at a time.
+    fn ask_about(&mut self) {
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        let now = self.elapsed_ms();
+        if self.about_task.as_ref().is_some_and(|t| !t.is_finished())
+            || self
+                .about_at
+                .is_some_and(|at| now.saturating_sub(at) < ABOUT_EVERY_MS)
+        {
+            return;
+        }
+        self.about_at = Some(now);
+        let budget = self.context.timeout;
+        let done = self.done_tx.clone();
+        self.about_task = Some(tokio::spawn(async move {
+            if let Some(event) = runner::home_about(client, budget).await {
+                let _ = done.send(Finished::Event(event));
+            }
+        }));
     }
 
     /// What a job starting now runs with: the nodes excluded at this moment.
@@ -1251,6 +1314,10 @@ impl Shell {
         self.apply(UiEvent::FetchDone(end.result.map_err(|e| e.to_string())));
         if pulled {
             self.ask_pages();
+            if self.context.client.is_some() {
+                self.reached(None);
+                self.ask_about();
+            }
         }
     }
 
@@ -1576,6 +1643,7 @@ fn profile_facts(name: &str, client: bool) -> loquax::ui::profile::ProfileFacts 
             name: String::new(),
             this: true,
         }],
+        ..Default::default()
     }
 }
 
@@ -1722,6 +1790,9 @@ pub(crate) async fn start(
     model.history = model.home_client && loquax::home::client::history_owed(&home);
     model.own_code = own_code(&own_key);
     model.profile = profile_facts(&display_name.name, model.home_client);
+    // This device in the mailbox's list (1642): the identity it joined with.
+    model.profile.device = client.as_ref().map(|c| *c.device.hash());
+    model.profile.version = loquax::VERSION.to_string();
     // Only the contacts: the names already know the peers `Model::new`
     // opened conversations with (1452, two nameless ones collide).
     model.names.contacts = contacts;
@@ -1939,6 +2010,9 @@ pub(crate) async fn start(
         browsing,
         rooming,
         pages_task: None,
+        about_task: None,
+        about_at: None,
+        reach: loquax::ui::mailbox_page::Reach::default(),
     };
     Ok((shell, config))
 }

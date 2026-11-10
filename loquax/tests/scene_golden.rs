@@ -490,7 +490,7 @@ fn the_profile_is_the_golden_scene() {
     model.own_code = Some(loquax::ui::OwnCode::of(code, Some(qr)));
     update(
         &mut model,
-        UiEvent::ProfileFacts(ProfileFacts {
+        UiEvent::ProfileFacts(Box::new(ProfileFacts {
             name: "Mia Sander".to_string(),
             mailbox: Mailbox::Away {
                 name: Some("Mia's computer".to_string()),
@@ -510,7 +510,8 @@ fn the_profile_is_the_golden_scene() {
                     this: false,
                 },
             ],
-        }),
+            ..Default::default()
+        })),
     );
     update(&mut model, UiEvent::Profile { open: true });
     let scene = model.scene(LayoutClass::Compact);

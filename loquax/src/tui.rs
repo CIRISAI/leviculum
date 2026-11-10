@@ -2556,6 +2556,66 @@ mod tests {
         include!("../tests/support/late_message.rs");
     }
 
+    mod mailbox_page {
+        include!("../tests/support/mailbox_page.rs");
+    }
+
+    /// 1642, the mailbox page names the mailbox: `S` and `2` open it, the
+    /// fixture's mailbox on miauhaus reached over the shielded port, both
+    /// devices with when each was there (the golden, in both languages);
+    /// the unreachable older one says so; `c` opens the profile with the
+    /// code. 80 by 40, so the whole page is on the screen.
+    #[test]
+    fn the_mailbox_page_names_the_mailbox_its_way_and_its_devices() {
+        use loquax::ui::settings::Section;
+        let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        let screen = |model: &Model| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 40)).expect("terminal");
+            let view = ui::view(model);
+            let drawn = terminal
+                .draw(|frame| draw_screen(frame, model, &view, None))
+                .expect("draw");
+            frame_text(drawn.buffer)
+        };
+        let open = |lang, reachable| {
+            let mut model = Model::new(&[]);
+            model.lang = lang;
+            mailbox_page::mailbox_told(&mut model, reachable);
+            update(&mut model, key('S'));
+            update(&mut model, key('2'));
+            assert_eq!(model.settings, Some(Some(Section::Mailbox)));
+            model
+        };
+        let german = screen(&open(Lang::De, true));
+        for words in [
+            "Welches Postfach",
+            "Name: Lew Palm",
+            "Adresse: 5a3e910c7742d81b6f03a4e258c92d80",
+            "Läuft auf: miauhaus",
+            "Verbunden seit 12 Min.",
+            "Verbindung über leviculum.network, Tor 4343, geschirmt",
+            "Fairphone: dieses Gerät",
+            "M9: zuletzt da vor 2 Std.",
+            "c  Meinen Code zeigen",
+        ] {
+            says(&german, words);
+        }
+        same_text(&german_name("tui-settings-mailbox.txt"), &german);
+        let mut model = open(Lang::En, true);
+        let shown = screen(&model);
+        says(
+            &shown,
+            "Connection over leviculum.network, port 4343, shielded",
+        );
+        same_text("tui-settings-mailbox.txt", &shown);
+        let away = screen(&open(Lang::En, false));
+        says(&away, "Not connected for 2 h");
+        says(&away, "port 4242, not shielded");
+        says(&away, "Version: older than this device");
+        update(&mut model, key('c'));
+        assert!(model.profile_open, "c shows the code");
+    }
+
     /// 1505, a late message sits at its sent time: the terminal draws
     /// Anna's chat of the shared fixture, the message she wrote last night
     /// at 22:10 that came today at 14:05 under last night's day line, the
@@ -2666,6 +2726,7 @@ mod tests {
                 name: String::new(),
                 this: true,
             }],
+            ..Default::default()
         }
     }
 
@@ -4473,6 +4534,7 @@ mod tests {
                         this: false,
                     },
                 ],
+                ..Default::default()
             };
             update(&mut model, UiEvent::Resize { width, height });
             update(&mut model, UiEvent::Key(parse_key("P").expect("key")));

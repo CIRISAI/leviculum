@@ -586,6 +586,38 @@ the guard that every target draws every section it does not mark
 missing or n/a, and that a phone, a window and a terminal draw all nine.
 The inventory's `Settings` row points to it.
 
+### Built 2026-11-10, the mailbox page
+
+Lew, 2026-11-10, on the Fairphone (1642): Settings, Mailbox said only
+"Your mailbox is on another device", and nothing told which one. The
+page is now one scene in the core, `loquax/src/ui/mailbox_page.rs`,
+which the phone's `SettingsActivity`, the window's Mailbox section and
+the terminal's draw. For a mailbox on another device it has three
+groups:
+
+- **Which mailbox**: the name it announces, the address in full under
+  "Address" with a copy (the one place the no-hash rule yields, Lew asked
+  for it), the machine it runs on and its version;
+- **Connection**: connected or not since when, the last contact, the
+  server and port the device is on and whether that is the shielded
+  access-point port 4343 or the 4242 fallback, with a sentence on what
+  that means;
+- **Devices of this mailbox**: each device the mailbox admitted with when
+  it was last there, this one said as such, and "Show my code".
+
+The name, machine, version and devices come from the mailbox itself:
+`/about` (`loquax/src/home/about.rs`), answered to an admitted device;
+the mailbox keeps a device's last request since schema 20
+(`home_devices.last_seen`). A mailbox from before it stays silent on
+the path, and the page says it runs an older version. The phone asks on
+every connection and when the page is up and its word is older than a
+minute; the desktop after a pull, every ten minutes at most.
+
+Goldens: `gui-settings-mailbox-light.png`, `tui-settings-mailbox.txt`
+and its German twin, and the phone's answers
+`mailbox-page-reachable.json` and `mailbox-page-unreachable.json`, all
+from `loquax/tests/support/mailbox_page.rs`.
+
 ### Built 2026-11-09, the public rooms' hubs
 
 Lew, 2026-11-08 (1577): Loquax offers the popular public room hubs, and
@@ -1025,6 +1057,7 @@ golden without its German twin.
 | A narrow window | `gui-chat-compact-chat.png`, `gui-chat-compact-list.png` | | | | | |
 | The large type | | | | `m9-chats-large.png`, `m9-chat-large.png` | | |
 | The settings | `gui-settings-light.png`, `gui-settings-privacy-light.png`, `gui-settings-advanced-light.png` | `tui-settings.txt`, `tui-settings-advanced.txt` | `tui-settings-de.txt`, `tui-settings-advanced-de.txt` | `m9-settings.png`, `m9-settings-de.png` (the house key's overview, the M9's only settings) | | |
+| The mailbox page, which mailbox and how it is reached | `gui-settings-mailbox-light.png` | `tui-settings-mailbox.txt` | `tui-settings-mailbox-de.txt` | not drawn: the M9 has no settings screen | `mailbox-page-reachable.json`, `mailbox-page-unreachable.json` | |
 | The keys' help | not pinned: the shared overlay lnomad's window draws | not pinned: `?` | | not drawn: no key opens the help; the keys stand on their screens (`m9-fw-pairing.png`, `m9-map-hint.png`, the group's frames) | n/a: no keys | |
 | The keymap and the mouse | | `tui_keys.frames`, `tui_mouse.frames` | `tui_keys_de.frames`, `tui_mouse_de.frames` | | | |
 | Typing and sending | | | | `m9-compose.png`, `m9-sent.png` | | |

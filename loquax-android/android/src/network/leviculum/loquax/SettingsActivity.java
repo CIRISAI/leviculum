@@ -67,6 +67,8 @@ public class SettingsActivity extends Activity implements Events.Listener {
      * for the list.
      */
     private String page;
+    /** Between onResume and onPause: the mailbox page asks again only then. */
+    private boolean resumed;
     private final ServiceLink link = new ServiceLink(this);
 
     @Override
@@ -123,12 +125,15 @@ public class SettingsActivity extends Activity implements Events.Listener {
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
         Events.listen(this);
         refresh();
     }
 
     @Override
     protected void onPause() {
+        resumed = false;
+        again.removeCallbacksAndMessages(null);
         Events.listen(null);
         super.onPause();
     }
@@ -245,12 +250,17 @@ public class SettingsActivity extends Activity implements Events.Listener {
         });
     }
 
-    /** Where the mailbox is. */
+    /**
+     * The mailbox page (1642): the core's scene (`loquax::ui::mailbox_page`),
+     * which mailbox, how the phone reaches it, which devices use it, drawn
+     * group by group. While it is up it is asked again every few seconds, so
+     * "since", the last contact and the mailbox's own answer move on it.
+     */
     private void mailbox() {
         section(new Engine.Ask<Map<String, Object>>() {
             @Override
             public Map<String, Object> ask() {
-                return Core.me();
+                return Core.mailboxPage();
             }
         }, new Engine.Got<Map<String, Object>>() {
             @Override
@@ -258,12 +268,94 @@ public class SettingsActivity extends Activity implements Events.Listener {
                 mailbox(answer);
             }
         });
+        again.removeCallbacks(mailboxAgain);
+        again.postDelayed(mailboxAgain, MAILBOX_AGAIN_MS);
     }
 
+    /** How often the mailbox page asks again while it is up. */
+    private static final long MAILBOX_AGAIN_MS = 5000;
+    private final android.os.Handler again = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable mailboxAgain = new Runnable() {
+        @Override
+        public void run() {
+            if (!isDestroyed() && resumed && "mailbox".equals(page)) {
+                refresh();
+            }
+        }
+    };
+
     private void mailbox(Map<String, Object> answer) {
-        boolean phone = Core.bool(answer, "here");
-        body.addView(padded(text(getString(phone ? R.string.mailbox_here : R.string.mailbox_away),
-                15, R.color.text_secondary)));
+        String error = Core.str(answer, "error");
+        if (!error.isEmpty()) {
+            body.addView(padded(text(error, 15, R.color.text_secondary)));
+            return;
+        }
+        final String copyLabel = Core.str(answer, "copy_label");
+        final String copied = Core.str(answer, "copied");
+        for (Map<String, Object> group : Core.list(answer, "groups")) {
+            TextView header = text(Core.str(group, "title"), 14, R.color.accent);
+            header.setPadding(dp(16), dp(16), dp(16), dp(4));
+            body.addView(header);
+            for (Map<String, Object> line : Core.list(group, "lines")) {
+                mailboxLine(line, copyLabel, copied);
+            }
+        }
+    }
+
+    /** One line of the mailbox page: label, value under it, a copy button, a tap. */
+    private void mailboxLine(Map<String, Object> line, String copyLabel, final String copied) {
+        String label = Core.str(line, "label");
+        if (Core.bool(line, "note")) {
+            TextView note = text(label, 13, R.color.text_secondary);
+            note.setPadding(dp(16), 0, dp(16), dp(8));
+            body.addView(note);
+            return;
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(48));
+        row.setPadding(dp(16), dp(6), dp(8), dp(6));
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        final String action = Core.str(line, "action");
+        words.addView(text(label, 16, "profile".equals(action) ? R.color.accent : R.color.text));
+        String value = Core.str(line, "value");
+        if (!value.isEmpty()) {
+            TextView said = text(value, 14, R.color.text_secondary);
+            said.setTextIsSelectable(true);
+            words.addView(said);
+        }
+        row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        final String copy = Core.str(line, "copy");
+        if (!copy.isEmpty()) {
+            Button button = new Button(this);
+            button.setText(copyLabel);
+            button.setAllCaps(false);
+            button.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
+                            getSystemService(CLIPBOARD_SERVICE);
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(copied, copy));
+                    }
+                    android.widget.Toast.makeText(SettingsActivity.this, copied,
+                            android.widget.Toast.LENGTH_SHORT).show();
+                }
+            });
+            row.addView(button);
+        }
+        if ("profile".equals(action)) {
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    startActivity(new Intent(SettingsActivity.this, ProfileActivity.class));
+                }
+            });
+        }
+        body.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /**

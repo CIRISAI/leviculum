@@ -135,9 +135,9 @@ pub struct Seen {
     pub receipts: bool,
     /// The reader's photo size (1220), the settings' row (1371).
     pub photo_size: loquax::ui::photos::PhotoSize,
-    /// Where the mailbox is and how it is reached (1450): the settings'
-    /// Mailbox section, the profile's words.
-    pub mailbox: Vec<loquax::ui::strings::Text>,
+    /// The settings' Mailbox section (1450, 1642): the core's mailbox
+    /// page, which mailbox, how it is reached, which devices use it.
+    pub mailbox: Option<loquax::ui::mailbox_page::MailboxPage>,
     /// The photo a press on a bubble's photo last asked to see whole
     /// (1269), decoded by the shell: a new one opens the viewer.
     pub photo: Option<viewer::Picture>,
@@ -185,11 +185,9 @@ impl std::fmt::Debug for Browsed {
     }
 }
 
-/// The mailbox's line and the line on how it is reached, as the profile
-/// says them (1450).
-fn mailbox_lines(model: &crate::shell::Model) -> Vec<loquax::ui::strings::Text> {
-    let (line, state) = loquax::ui::profile::mailbox_words(&model.profile.mailbox);
-    std::iter::once(line).chain(state).collect()
+/// The mailbox page (1642), as the phone and the terminal draw it.
+fn mailbox_lines(model: &crate::shell::Model) -> Option<loquax::ui::mailbox_page::MailboxPage> {
+    Some(loquax::ui::mailbox_page::page(model))
 }
 
 impl Seen {
@@ -630,6 +628,9 @@ pub enum Message {
     Intent(Intent),
     /// The top bar's gear: the settings page (1233).
     Settings,
+    /// A "Copy" on the mailbox page (1642): the words onto the clipboard,
+    /// and the notice that says so.
+    CopyText(String),
     /// A time window chosen in the map's menu (1385, 1419).
     TrackWindow(loquax::ui::tracks::TrackWindow),
     /// The map bar's More: its menu open, or closed again (1419).
@@ -1090,7 +1091,7 @@ impl App {
                 now: None,
                 receipts: true,
                 photo_size: loquax::ui::photos::PhotoSize::default(),
-                mailbox: Vec::new(),
+                mailbox: None,
                 photo: None,
                 browse: None,
                 copied: None,
@@ -2207,6 +2208,10 @@ impl App {
             Message::MapMenu => {
                 self.map_menu = !self.map_menu;
                 return Task::none();
+            }
+            Message::CopyText(words) => {
+                self.seen.notice = Some(StrId::MailboxCopied.text(self.lang).to_string());
+                return iced::clipboard::write(words);
             }
             Message::Settings => {
                 self.screen = Screen::Settings;
@@ -3491,7 +3496,7 @@ mod tests {
             now: None,
             receipts: true,
             photo_size: loquax::ui::photos::PhotoSize::default(),
-            mailbox: Vec::new(),
+            mailbox: None,
             photo: None,
             browse: None,
             copied: None,
@@ -4278,6 +4283,7 @@ mod tests {
                     this: false,
                 },
             ],
+            ..Default::default()
         }
     }
 
@@ -6116,6 +6122,39 @@ mod tests {
         include!("../tests/support/late_message.rs");
     }
 
+    mod mailbox_page {
+        include!("../tests/support/mailbox_page.rs");
+    }
+
+    /// 1642, the mailbox page names the mailbox: the gear and Mailbox open
+    /// the core's page for the fixture's mailbox on miauhaus (the golden,
+    /// light, 900 x 700); its "Copy" puts the address on the clipboard and
+    /// says so; "Show my code" opens the profile.
+    #[test]
+    fn the_mailbox_page_names_the_mailbox_and_copies_its_address() {
+        use loquax::ui::settings::Section;
+        let (w, h) = (900, 700);
+        let mut model = chat_model();
+        mailbox_page::mailbox_told(&mut model, true);
+        let (mut app, mut rx) = chat_window();
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Settings);
+        let _ = app.update(Message::Intent(Intent::Settings(Some(Section::Mailbox))));
+        assert_eq!(app.settings_at, Some(Section::Mailbox));
+        let page = app.seen.mailbox.clone().expect("the page");
+        assert_eq!(page.groups.len(), 3, "which, how, who");
+        map::tests::same_as("gui-settings-mailbox-light.png", &shoot(&app, w, h), w, h);
+        let address = loquax::address::to_hex(&mailbox_page::MAILBOX_ADDRESS);
+        let _ = app.update(Message::CopyText(address));
+        assert_eq!(
+            app.seen.notice.as_deref(),
+            Some("The mailbox's address is on the clipboard")
+        );
+        let _ = app.update(Message::Intent(Intent::Profile));
+        assert_eq!(told(&mut rx), [UiEvent::Profile { open: true }]);
+    }
+
     /// 1505, a late message sits at its sent time: the window draws Anna's
     /// chat of the shared fixture, the message she wrote last night at
     /// 22:10 that came today at 14:05 second under last night's day, the
@@ -6363,6 +6402,7 @@ mod tests {
                 name: String::new(),
                 this: true,
             }],
+            ..Default::default()
         };
         model.toasts.clear();
         model

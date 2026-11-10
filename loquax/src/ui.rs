@@ -98,6 +98,7 @@
 //! stays beside it. The shell draws the picture for the view the model
 //! makes; the model places the pins, so what a click hits is what is drawn.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -154,6 +155,7 @@ pub mod inventory;
 pub mod layout;
 pub mod listing;
 pub mod liveness;
+pub mod mailbox_page;
 pub mod map;
 pub mod pager;
 pub mod photos;
@@ -3212,7 +3214,12 @@ pub enum UiEvent {
     /// and Back from it.
     Profile { open: bool },
     /// What the shell knows of the reader for the profile, anew.
-    ProfileFacts(profile::ProfileFacts),
+    ProfileFacts(Box<profile::ProfileFacts>),
+    /// What the mailbox said of itself (1642, `/about`), or that it is too
+    /// old to say; the rest of the profile's facts stay.
+    MailboxTold(Box<mailbox_page::Told>),
+    /// How this device reaches its mailbox now (1642); the rest stays.
+    MailboxReach(Box<mailbox_page::Reach>),
     /// The profile's "Share my address" where the share is a copy: the
     /// window and the terminal ([`intent::Intent::ShareCode`]).
     ShareCode,
@@ -3988,7 +3995,15 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::ShareFix { peer } => model.share_fix(peer),
         UiEvent::Profile { open } => model.show_profile(open),
         UiEvent::ProfileFacts(facts) => {
-            model.profile = facts;
+            model.profile = *facts;
+            Vec::new()
+        }
+        UiEvent::MailboxTold(told) => {
+            model.profile.told = *told;
+            Vec::new()
+        }
+        UiEvent::MailboxReach(reach) => {
+            model.profile.reach = *reach;
             Vec::new()
         }
         UiEvent::ShareCode => model.share_code(),
@@ -7722,8 +7737,9 @@ fn settings_view<B>(model: &UiModel<B>, at: Option<settings::Section>) -> Detail
                 // The section opens the profile itself; this is the line
                 // under it once the profile closes over the list.
                 Section::Profile => "p your profile · q back",
-                Section::Mailbox | Section::Notifications | Section::Backup => "q back",
-                Section::Appearance
+                Section::Notifications | Section::Backup => "q back",
+                Section::Mailbox
+                | Section::Appearance
                 | Section::Chats
                 | Section::Privacy
                 | Section::Maps

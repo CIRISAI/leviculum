@@ -441,6 +441,32 @@ pub async fn home_pages(
     }
 }
 
+/// What the mailbox says of itself (1642, `/about`), as the event the
+/// model folds: its answer, or that it is too old to know the question;
+/// `None` when it did not answer, and the page keeps what it had.
+pub async fn home_about(client: HomeClient, budget: Duration) -> Option<UiEvent> {
+    use crate::ui::mailbox_page::Told;
+    match super::client::about(&client.node, &client.public_key, &client.device, budget).await {
+        Ok(about) => {
+            tracing::info!(
+                "HOME about host={:?} version={} devices={}",
+                about.host,
+                about.version,
+                about.devices.len()
+            );
+            Some(UiEvent::MailboxTold(Box::new(Told::Told(about))))
+        }
+        Err(super::ask::HomeError::Unsupported(_)) => {
+            tracing::info!("HOME about unsupported: the mailbox is older");
+            Some(UiEvent::MailboxTold(Box::new(Told::Older)))
+        }
+        Err(error) => {
+            tracing::warn!("HOME about: {error}");
+            None
+        }
+    }
+}
+
 /// The peer states a fold set, handed to the home node in order (1146), as
 /// petnames are.
 pub async fn hand_peer_states(

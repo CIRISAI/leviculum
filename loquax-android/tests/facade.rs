@@ -2201,6 +2201,133 @@ fn facade_shows_ugly(secs: u64) {
     }
 }
 
+/// 1642, the mailbox page names the mailbox, end to end: a phone joins a
+/// real mailbox with a code the mailbox opened for "phone" and asks the page with the bytes Java's
+/// `Core.mailboxPage` sends. Once the link is up the page names the
+/// mailbox, its full address with a copy, the build it runs, the server
+/// and port it is reached over, and lists the mailbox's devices with this
+/// one said as such, all from the mailbox's `/about`. The mailbox killed,
+/// the same page says "Not connected" and keeps what the mailbox said.
+/// Both answers are printed whole (`--nocapture`), the facade dump of the
+/// page reachable and unreachable.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
+    let _facade = facade_turn().await;
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        code: Some(format!("{code}@127.0.0.1:{port}")),
+        name: Some("Pixel".to_string()),
+        lang: Some("en-GB".to_string()),
+        ..Start::default()
+    };
+    let page = || -> schema::MailboxPage {
+        let request: schema::Query =
+            schema::decode(&java_map(&[("t", Java::Str("mailboxpage"))])).expect("Java's bytes");
+        assert_eq!(request, schema::Query::MailboxPage);
+        rmp_serde::from_slice(&loquax_android::query(&schema::encode(&request)))
+            .expect("a MailboxPage")
+    };
+    let lines = |page: &schema::MailboxPage| -> Vec<String> {
+        page.groups
+            .iter()
+            .flat_map(|g| g.lines.iter())
+            .map(|l| match &l.value {
+                Some(value) => format!("{}: {value}", l.label),
+                None => l.label.clone(),
+            })
+            .collect()
+    };
+    let until = move |what: &str, done: &dyn Fn(&[String]) -> bool| -> schema::MailboxPage {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let now = page();
+            if done(&lines(&now)) {
+                return now;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the page never said {what}: {:#?}",
+                lines(&now)
+            );
+            let _ = loquax_android::next_event(Duration::from_millis(200));
+        }
+    };
+    let up = tokio::task::spawn_blocking(move || {
+        let answer = started(&loquax_android::start(&schema::encode(&first)));
+        assert!(answer.ok, "{answer:?}");
+        link_event(true, 30);
+        let reachable = until("the mailbox's devices", &|l| {
+            l.iter().any(|l| l == "phone: this device")
+        });
+        let said = lines(&reachable);
+        let version = format!("Version: {}", loquax::VERSION);
+        let way = format!("Connection over 127.0.0.1, port {port}");
+        for want in [
+            "Which mailbox",
+            version.as_str(),
+            way.as_str(),
+            "Last contact: now",
+        ] {
+            assert!(
+                said.iter().any(|l| l == want) || reachable.groups.iter().any(|g| g.title == want),
+                "{want:?} in {said:#?}"
+            );
+        }
+        assert!(said.iter().any(|l| l.starts_with("Connected")), "{said:#?}");
+        let address = reachable.groups[0]
+            .lines
+            .iter()
+            .find_map(|l| l.copy.clone())
+            .expect("the address to copy");
+        assert_eq!(address.len(), 32, "the address in full");
+        assert!(said.contains(&format!("Address: {address}")), "{said:#?}");
+        assert_eq!(reachable.copy_label, "Copy");
+        let code = reachable
+            .groups
+            .iter()
+            .flat_map(|g| g.lines.iter())
+            .find(|l| l.action.as_deref() == Some("profile"))
+            .expect("Show my code");
+        assert_eq!(code.label, "Show my code");
+        println!(
+            "FACADE mailboxpage reachable:\n{}",
+            serde_json::to_string_pretty(&reachable).expect("json")
+        );
+    });
+    up.await.expect("the page while the mailbox runs");
+    node.kill().await;
+    tokio::task::spawn_blocking(move || {
+        link_event(false, 30);
+        let unreachable = until("not connected", &|l| {
+            l.iter().any(|l| l.starts_with("Not connected"))
+        });
+        let said = lines(&unreachable);
+        assert!(
+            said.iter().any(|l| l == "phone: this device"),
+            "what the mailbox said stays: {said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with("Last contact: ")),
+            "{said:#?}"
+        );
+        println!(
+            "FACADE mailboxpage unreachable:\n{}",
+            serde_json::to_string_pretty(&unreachable).expect("json")
+        );
+        loquax_android::stop();
+    })
+    .await
+    .expect("the page after the mailbox went");
+}
+
 /// Wait until the list's `home_link` (1199), the status dot, says `up`:
 /// the watching link came up or went down.
 fn facade_home_link(up: bool, secs: u64) {
