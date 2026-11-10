@@ -35,6 +35,13 @@ import java.util.Set;
  * answer until it lifts (1618), and the lift offers it under the same
  * rule.
  *
+ * <p>The top at rest (1629, walk 3: after a cold start one page stood
+ * there and the chip counted to seven in 30 s while nobody touched
+ * anything): while the list stands at its very top and the reader has not
+ * touched or scrolled it for {@link #QUIET_MS}, an answer shows at once,
+ * the list kept at its top. The chip belongs to a scrolled list, a list
+ * just touched, or a finger on it.
+ *
  * @param <T> one row as the pane draws it
  */
 final class ExploreRows<T> {
@@ -54,11 +61,16 @@ final class ExploreRows<T> {
     /** {@link #offer}: it would move a row on screen; it waits behind the chip. */
     static final int WAITING = 2;
 
+    /** How long the list must rest untouched at its top before an answer shows there at once. */
+    static final long QUIET_MS = 3000;
+
     private final Keys<T> keys;
     private List<T> shown = Collections.emptyList();
     private List<T> waiting;
     private boolean down;
     private int anchor = -1;
+    /** When the reader last touched or scrolled the list; never, at first. */
+    private long touched = Long.MIN_VALUE / 2;
 
     ExploreRows(Keys<T> keys) {
         this.keys = keys;
@@ -96,7 +108,21 @@ final class ExploreRows<T> {
      * verb. {@link #SHOWN}, {@link #HELD} or {@link #WAITING}.
      */
     int offer(List<T> rows, int first, int last, boolean force) {
+        return offer(rows, first, last, force, false, 0);
+    }
+
+    /**
+     * {@link #offer(List, int, int, boolean)} with the screen's top:
+     * {@code atTop} when the list stands at its very top, {@code now} the
+     * clock {@link #touched} reads.
+     */
+    int offer(List<T> rows, int first, int last, boolean force, boolean atTop, long now) {
         List<T> copy = new ArrayList<T>(rows);
+        if (!down && atTop && now - touched >= QUIET_MS) {
+            show(copy);
+            anchor = 0;
+            return SHOWN;
+        }
         if (down) {
             waiting = copy;
             return HELD;
@@ -154,6 +180,11 @@ final class ExploreRows<T> {
     /** The row that stood first on screen, where it stands now; -1 to keep the scroll as it is. */
     int anchor() {
         return anchor;
+    }
+
+    /** The reader touched or scrolled the list at {@code now}. */
+    void touched(long now) {
+        touched = now;
     }
 
     /** A finger came down on the list. */

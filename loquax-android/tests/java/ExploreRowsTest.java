@@ -51,6 +51,7 @@ final class ExploreRowsTest {
         check("Bergwacht".equals(free.at(2)), "the walk's mis-tap: " + free.at(2));
 
         stillBetweenLookingAndTapping();
+        theTopAtRestFills();
 
         check(ExploreRows.id("page:aa") == ExploreRows.id("page:aa"), "an id is stable");
         check(ExploreRows.id("page:aa") != ExploreRows.id("page:ab"), "two rows, two ids");
@@ -222,6 +223,51 @@ final class ExploreRowsTest {
         same.offer(explore(5));
         check(same.offer(explore(5), 0, 6, false) == ExploreRows.SHOWN, "the same rows show");
         check(same.anchor() == 0, "where they stood");
+    }
+
+    /**
+     * Walk 3 of 1629: after a cold start the list stood with one page and
+     * the chip counted to seven while nobody touched anything. At the very
+     * top, untouched for {@link ExploreRows#QUIET_MS}, every answer shows
+     * at once and the list stays at its top; touched a moment ago, or
+     * scrolled, it waits behind the chip as before. The control, the 1621
+     * rule, keeps the cold start's pages behind the chip.
+     */
+    private static void theTopAtRestFills() {
+        ExploreRows<String> rows = new ExploreRows<String>(KEYS);
+        ExploreRows<String> control = new ExploreRows<String>(KEYS);
+        rows.offer(explore(1));
+        control.offer(explore(1));
+        long now = 10_000;
+        for (int n = 2; n <= 7; n++) {
+            List<String> next = explore(n);
+            int said = rows.offer(next, 0, next.size() - 1, false, true, now);
+            check(said == ExploreRows.SHOWN, "at rest at the top, page " + n + " shows: " + said);
+            check(rows.anchor() == 0, "the list stays at its top: " + rows.anchor());
+            check(rows.size() == next.size(), "all of them: " + rows.size());
+            control.offer(next, 0, next.size() - 1, false);
+            now += 5_000;
+        }
+        check(rows.fresh() == 0, "no chip: " + rows.fresh());
+        check(control.fresh() == 6, "the control's chip counts six: " + control.fresh());
+        // Touched a moment ago at the top: the reader aims, it waits.
+        List<String> above = explore(7);
+        above.add(2, "page:top");
+        rows.touched(now - 1_000);
+        check(rows.offer(above, 0, 6, false, true, now) == ExploreRows.WAITING,
+                "touched a second ago, it waits");
+        // Untouched long enough since: it shows.
+        check(rows.offer(above, 0, 6, false, true, now - 1_000 + ExploreRows.QUIET_MS)
+                == ExploreRows.SHOWN, "at rest again, it shows");
+        // Scrolled, at rest: it waits, as 1621 has it.
+        List<String> more = new ArrayList<String>(above);
+        more.add(5, "page:new");
+        check(rows.offer(more, 4, 8, false, false, now + 60_000) == ExploreRows.WAITING,
+                "scrolled, it waits");
+        // A finger on the list holds, at the top or not.
+        rows.down();
+        check(rows.offer(more, 0, 6, false, true, now + 60_000) == ExploreRows.HELD,
+                "held under the finger");
     }
 
     private static void check(boolean ok, String what) {

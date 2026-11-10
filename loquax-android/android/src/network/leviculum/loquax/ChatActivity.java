@@ -996,6 +996,13 @@ public class ChatActivity extends Activity implements Events.Listener {
             line.setGravity(Gravity.CENTER_VERTICAL);
             line.setPadding(pad, 0, pad, 0);
             line.setBackgroundResource(android.R.drawable.list_selector_background);
+            if (id.equals("sheet_location_on")) {
+                // An action, not a sentence (1629, walk 3 new 10: "Standort
+                // einschalten" read as plain text under "Loquax weiß noch
+                // nicht, wo du bist").
+                line.setTextColor(getColor(R.color.accent));
+                line.setTypeface(null, android.graphics.Typeface.BOLD);
+            }
             int viewId = getResources().getIdentifier(id, "id", getPackageName());
             if (viewId != 0) {
                 line.setId(viewId);

@@ -380,6 +380,12 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.pane_browse).setVisibility(View.VISIBLE);
         title.setText(R.string.tab_browse);
         exploreTab(true);
+        // The page in front, the search's keyboard goes (1629, walk 3 new
+        // 7: it stayed open over half the page).
+        InputMethodManager keyboard = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (keyboard != null) {
+            keyboard.hideSoftInputFromWindow(getWindow().getDecorView().getWindowToken(), 0);
+        }
         browsePane.show();
     }
 
@@ -441,6 +447,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         findViewById(R.id.pane_map).setVisibility(View.GONE);
         findViewById(R.id.pane_explore).setVisibility(View.VISIBLE);
         title.setText(R.string.tab_explore);
+        // The magnifier searches the tab's list here, whatever it said on
+        // the map before (1629, walk 3 new 8: TalkBack read "Person suchen").
+        search.setContentDescription(getString(R.string.search));
         exploreTab(true);
         // Landscape keeps the list its room (walk 13: one and a half
         // rows): the bar folds away, the tab's field stays.

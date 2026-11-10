@@ -76,6 +76,7 @@ public class NewConversationActivity extends Activity {
         address = (EditText) findViewById(R.id.address);
         search = (EditText) findViewById(R.id.new_search);
         error = (TextView) findViewById(R.id.error);
+        say(null);
         advanced = (TextView) findViewById(R.id.new_advanced);
         advancedBody = findViewById(R.id.new_advanced_body);
         contactBody = findViewById(R.id.new_contact_body);
@@ -349,7 +350,7 @@ public class NewConversationActivity extends Activity {
         CharSequence text = clip == null || clip.getItemCount() == 0
                 ? null : clip.getItemAt(0).coerceToText(this);
         if (text == null || text.toString().trim().isEmpty()) {
-            error.setText(R.string.new_nothing);
+            say(getString(R.string.new_nothing));
             return;
         }
         take(text.toString());
@@ -366,7 +367,18 @@ public class NewConversationActivity extends Activity {
                 finish();
             }
         });
-        error.setText(why == null ? "" : why);
+        say(why);
+    }
+
+    /**
+     * Why a code was not taken, under the rows; with nothing to say the line
+     * takes no room (1629, walk 3 new 10: an empty line stood as a gap
+     * before Advanced).
+     */
+    private void say(CharSequence why) {
+        boolean said = why != null && why.length() > 0;
+        error.setText(said ? why : "");
+        error.setVisibility(said ? View.VISIBLE : View.GONE);
     }
 
     private int dp(int value) {

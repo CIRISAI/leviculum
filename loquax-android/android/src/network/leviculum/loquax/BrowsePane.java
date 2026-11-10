@@ -135,7 +135,8 @@ final class BrowsePane {
         });
         bar.addView(address, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         Button places = new Button(activity);
-        places.setText("☰");
+        // A word, not a grey "☰" (1629, walk 3 new 7).
+        places.setText(R.string.browse_places);
         places.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -166,8 +167,8 @@ final class BrowsePane {
         status = new TextView(activity);
         status.setTextColor(activity.getColor(R.color.text_secondary));
         foot.addView(status, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        foot.addView(scrollButton("▲", "pageup"));
-        foot.addView(scrollButton("▼", "pagedown"));
+        foot.addView(scrollButton("▲", "pageup", R.string.browse_page_up));
+        foot.addView(scrollButton("▼", "pagedown", R.string.browse_page_down));
         column.addView(foot);
 
         // The page is laid out on the cells the view holds.
@@ -179,9 +180,13 @@ final class BrowsePane {
         });
     }
 
-    private Button scrollButton(String label, final String how) {
+    private Button scrollButton(String label, final String how, int words) {
         Button button = new Button(screen);
         button.setText(label);
+        // An arrow that says what it does, not a grey box (1629, walk 3 new 7).
+        button.setContentDescription(screen.getString(words));
+        button.setBackground(null);
+        button.setTextColor(screen.getColor(R.color.accent));
         button.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {

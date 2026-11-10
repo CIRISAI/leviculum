@@ -305,4 +305,8 @@
     <string name="offline_bar">No connection. Messages go out as soon as you are online again.</string>
     <!-- 1448: a new conversation's contact list without anyone in it. -->
     <string name="people_none">No contacts yet. Add one with \"New contact\" above.</string>
+    <!-- The browser's buttons in words (1629, walk 3 new 7). -->
+    <string name="browse_places">Places</string>
+    <string name="browse_page_up">Page up</string>
+    <string name="browse_page_down">Page down</string>
 </resources>

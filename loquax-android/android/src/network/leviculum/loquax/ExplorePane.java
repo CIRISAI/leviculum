@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.graphics.Typeface;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
@@ -57,9 +58,10 @@ import java.util.Map;
  * <p>Since 1621 (walk 2, 02e6984a) the list stands still between looking
  * and tapping: an answer shows at once only when no row on screen moves,
  * the first row on screen put back at its pixel; one that would move a
- * row waits behind the chip "N neue Seiten" above the list, a tap on
- * which shows it ({@link ExploreRows}). The rooms' section is "Räume"
- * with the rooms the reader is in, then "Server" with every server.
+ * row waits behind the chip "N neue Seiten" floating over the list (1629),
+ * a tap on which shows it from the top ({@link ExploreRows}); at the top
+ * and left alone, the list fills by itself (1629). The rooms' section is
+ * "Räume" with the rooms the reader is in, then "Server" with every server.
  */
 final class ExplorePane {
     /** What the pane hands back to the Activity. */
@@ -207,13 +209,21 @@ final class ExplorePane {
         column.addView(top);
 
         // New pages that would move a row on screen wait behind this chip
-        // (1621); a tap shows them, from the top.
+        // (1621); a tap shows them, from the top. It floats over the list
+        // (1629, walk 3: as a row above it, it pushed every row 87 px down
+        // when it came), as the chat apps' "new posts" pill does.
         fresh = new TextView(activity);
         fresh.setTextSize(14);
         fresh.setTypeface(null, Typeface.BOLD);
-        fresh.setTextColor(activity.getColor(R.color.accent));
+        fresh.setTextColor(android.graphics.Color.WHITE);
         fresh.setGravity(Gravity.CENTER);
         fresh.setPadding(dp(16), dp(8), dp(16), dp(8));
+        android.graphics.drawable.GradientDrawable pill =
+                new android.graphics.drawable.GradientDrawable();
+        pill.setColor(activity.getColor(R.color.accent));
+        pill.setCornerRadius(dp(18));
+        fresh.setBackground(pill);
+        fresh.setElevation(dp(4));
         fresh.setTag("explore_fresh");
         fresh.setVisibility(View.GONE);
         fresh.setOnClickListener(new View.OnClickListener() {
@@ -221,13 +231,19 @@ final class ExplorePane {
             public void onClick(View v) {
                 if (rows.apply()) {
                     adapter.notifyDataSetChanged();
-                    list.setSelection(0);
+                    // After the list laid the new rows out: a selection set
+                    // before that is taken back by the stable ids, which
+                    // keep the old first row (walk 3: the tap stayed put).
+                    list.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            list.setSelection(0);
+                        }
+                    });
                 }
                 chip();
             }
         });
-        column.addView(fresh, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         list = new ListView(activity) {
             @Override
@@ -256,8 +272,54 @@ final class ExplorePane {
                 return true;
             }
         });
-        column.addView(list, new LinearLayout.LayoutParams(
+        list.setOnScrollListener(new android.widget.AbsListView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(android.widget.AbsListView view, int state) {
+                if (state != SCROLL_STATE_IDLE) {
+                    rows.touched(SystemClock.uptimeMillis());
+                } else {
+                    // At rest again, maybe at the top: what waits shows
+                    // once the list rested there long enough.
+                    restLater();
+                }
+            }
+
+            @Override
+            public void onScroll(android.widget.AbsListView view, int first, int visible, int total) {
+            }
+        });
+        FrameLayout stack = new FrameLayout(activity);
+        stack.addView(list, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams over = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        over.topMargin = dp(8);
+        stack.addView(fresh, over);
+        column.addView(stack, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+    }
+
+    /** The list stands at its very top. */
+    private boolean atTop() {
+        return list.getChildCount() == 0
+                || (list.getFirstVisiblePosition() == 0 && topOfFirst() >= list.getPaddingTop());
+    }
+
+    /** What waits behind the chip, offered again as the screen stands now (1629). */
+    private final Runnable offerWaiting = new Runnable() {
+        @Override
+        public void run() {
+            if (rows.waits() && atTop() && !screen.isDestroyed()) {
+                draw();
+            }
+        }
+    };
+
+    /** Offer what waits once the list rested {@link ExploreRows#QUIET_MS}. */
+    private void restLater() {
+        list.removeCallbacks(offerWaiting);
+        list.postDelayed(offerWaiting, ExploreRows.QUIET_MS + 50);
     }
 
     /** The tab came to the front: its list, nothing it opened. */
@@ -287,14 +349,17 @@ final class ExplorePane {
     private void finger(MotionEvent event) {
         int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
+            rows.touched(SystemClock.uptimeMillis());
             rows.down();
             verb("touch", "", "", 1, false, false);
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            rows.touched(SystemClock.uptimeMillis());
             int top = topOfFirst();
             if (rows.up(firstOnScreen(), list.getLastVisiblePosition()) == ExploreRows.SHOWN) {
                 place(top);
             }
             chip();
+            restLater();
             verb("touch", "", "", 0);
         }
     }
@@ -465,7 +530,8 @@ final class ExplorePane {
         boolean own = forced || searched;
         forced = false;
         int top = topOfFirst();
-        int said = rows.offer(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(), own);
+        int said = rows.offer(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(), own,
+                atTop(), SystemClock.uptimeMillis());
         if (said == ExploreRows.SHOWN) {
             place(top);
         }
