@@ -6045,8 +6045,8 @@ fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
 
 /// The text a send carries: `body` without leading and trailing
 /// whitespace or newlines (walk 1 #26), on every target, because every
-/// target's send passes through here, [`send_body`] and
-/// [`UiModel::reply_to`]. Inner lines stay as typed.
+/// target's send passes through here, `send_body` and
+/// `UiModel::reply_to`. Inner lines stay as typed.
 pub fn outgoing(body: String) -> String {
     let trimmed = body.trim();
     match trimmed.len() == body.len() {
