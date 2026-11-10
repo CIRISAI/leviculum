@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-cli"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "aes",
  "cbc",
@@ -2872,7 +2872,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-ffi"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "cbindgen",
  "hex",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "futures",
  "hex",
@@ -2911,7 +2911,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf-node"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "leviculum-core",
  "leviculum-lxmf",
@@ -2924,7 +2924,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-map"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "embedded-graphics",
  "leviculum-mapfill",
@@ -2934,7 +2934,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-map-tool"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "clap",
  "embedded-graphics",
@@ -2947,7 +2947,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-mapcut"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "flate2",
  "leviculum-map",
@@ -2960,7 +2960,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-mapfill"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "embedded-graphics",
  "leviculum-mapfill",
@@ -2968,11 +2968,11 @@ dependencies = [
 
 [[package]]
 name = "leviculum-micron"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 
 [[package]]
 name = "leviculum-proxy"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -2991,7 +2991,7 @@ version = "0.1.0"
 
 [[package]]
 name = "leviculum-std"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "backtrace",
  "bluer",
@@ -3040,7 +3040,7 @@ version = "0.1.0"
 
 [[package]]
 name = "leviculum-ui"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "tui-input",
  "unicode-width",
@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-ui-ratatui"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "crossterm",
  "icy_sixel",
@@ -3181,7 +3181,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "lndecode"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -3193,7 +3193,7 @@ dependencies = [
 
 [[package]]
 name = "lnflash"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "clap",
  "leviculum-core",
@@ -6498,7 +6498,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vectors-verify"
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 dependencies = [
  "hex",
  "leviculum-core",

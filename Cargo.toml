@@ -94,7 +94,7 @@ crossterm = { path = "vendor/crossterm" }
 termbg = { path = "vendor/termbg" }
 
 [workspace.package]
-version = "0.34.0+ciris.2"
+version = "0.34.0+ciris.3"
 edition = "2021"
 authors = ["Lew Palm"]
 license = "AGPL-3.0-or-later"

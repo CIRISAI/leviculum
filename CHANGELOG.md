@@ -11,6 +11,34 @@ git tag, not the version string. -->
 
 ## [Unreleased]
 
+## [0.34.0+ciris.3] — CIRIS fork
+
+### Added
+
+- A Channel send that returns its sequence, and the watermarks that prove it
+  delivered (+ciris). `LinkHandle::try_send_seq` (and
+  `NodeCore::send_on_link_seq`) is `try_send` / `send_on_link` returning the
+  Channel sequence the envelope went out under, read under the same core lock
+  as the send, so no other sender's message can come between.
+  `ReticulumNode::link_seq_stats` / `NodeCore::link_seq_stats` read a link's
+  `LinkSeqStats`: `last_sent_sequence` (the newest envelope sent) and
+  `oldest_unacked_sequence` (the front of the send-ordered tx ring, `None`
+  when everything sent is proved). `LinkSeqStats::delivered_through(seq)`
+  says the envelope sent as `seq`, and every envelope before it, has been
+  proved delivered, while later traffic can keep the ring busy. Sequences
+  wrap at 2^16 and compare in serial order (RFC 1982).
+  - A frame sent with a deadline (`send_on_link_timed`) may be proved by its
+    expired marker; use an untimed send when the proof must mean the frame
+    itself arrived.
+
+### Consumer notes
+
+- New API only: `LinkStats` is unchanged, there is no wire change, and the
+  `ChannelError` to `SendError` mapping of `send_on_link` is unchanged.
+- Use `try_send_seq` and `delivered_through` to prove one message (a leave
+  or replace binding, say) was delivered, instead of waiting for the tx ring
+  to empty.
+
 ## [0.34.0+ciris.2] — CIRIS fork
 
 ### Added
