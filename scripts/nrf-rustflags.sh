@@ -20,6 +20,10 @@
 #                                            whose rust-src build-std compiles)
 #   the firmware target dir   -> /target   (build-script output, OUT_DIR)
 #
+# and, more specific than the first two and so after them, each registry index
+# directory and git checkout the firmware's Cargo.lock uses -> /r and /g
+# (`dependency_dir_remaps`, order 1620).
+#
 # All five are asked at build time (`cargo metadata`, `rustc --print sysroot`),
 # so the result is the same image on every host and in every checkout. The
 # firmware crate's own files were relative already (`src/lora.rs`) and stay so.
@@ -117,6 +121,53 @@ firmware_remap_flags() {
         "--remap-path-prefix=$sysroot=/rustc" \
         "--remap-path-prefix=$root=/src" \
         "--remap-path-prefix=$target=/target"
+    # After the two roots above, because rustc applies the last match.
+    dependency_dir_remaps "$fw" "$cargo_home"
+}
+
+# dependency_dir_remaps <firmware dir> <cargo home>: prints one remap flag per
+# dependency source directory the firmware's Cargo.lock resolves to below the
+# cargo home, to a short name (order 1620, #235):
+#
+#   $CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f -> /r
+#   $CARGO_HOME/git/checkouts/nrf-softdevice-c026ac046cd0977f/1d813cb -> /g
+#
+# Each prefix is in every panic location of the crates below it, and the
+# board images carry them as strings: on the RAK4631 of 7b1ca161, 43
+# registry paths and 17 git paths, 2440 B of a FLASH window that had 8240 B
+# left. What a panic line names stays enough to find the source, the crate
+# and its version (`/r/embassy-usb-0.5.1/src/lib.rs`, then line and column)
+# or the checkout's crate directory
+# (`/g/nrf-softdevice/src/ble/gatt_client.rs`); the index hash and the
+# checkout revision are Cargo.lock's to say. The list comes from the lock
+# rather than a glob over the cargo home, so two hosts with different
+# leftovers there still hand rustc the same flags. Std's own paths
+# (`/rustc/<commit>/library/...`) are baked into the shipped std and no flag
+# reaches them.
+dependency_dir_remaps() {
+    local fw="$1" cargo_home="$2" meta
+    meta="$(cd "$fw" && cargo metadata --format-version 1 --all-features)" || {
+        echo "nrf-rustflags: 'cargo metadata' failed in $fw" >&2
+        return 1
+    }
+    printf '%s' "$meta" | python3 -I -c '
+import json, sys
+home = sys.argv[1].rstrip("/")
+reg, git = home + "/registry/src/", home + "/git/checkouts/"
+dirs = set()
+for pkg in json.load(sys.stdin)["packages"]:
+    path = pkg["manifest_path"]
+    if path.startswith(reg):
+        dirs.add((reg + path[len(reg):].split("/")[0], "/r"))
+    elif path.startswith(git):
+        name, rev = path[len(git):].split("/")[:2]
+        dirs.add((git + name + "/" + rev, "/g"))
+for src, dst in sorted(dirs):
+    print("--remap-path-prefix=%s=%s" % (src, dst), end=" ")
+' "$cargo_home" || {
+        echo "nrf-rustflags: could not read the dependency directories of $fw" >&2
+        return 1
+    }
 }
 
 # nrf_remap_flags: the flags for the nRF firmware workspace.
