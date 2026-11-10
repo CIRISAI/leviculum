@@ -80,6 +80,15 @@ leviculum_ui::catalogue! {
     ExploreSeenHours = "explore_seen_hours", "seen %1$d h ago", "gesehen vor %1$d Std.";
     ExploreSeenDay = "explore_seen_day", "seen yesterday", "gesehen gestern";
     ExploreSeenDays = "explore_seen_days", "seen %1$d days ago", "gesehen vor %1$d Tagen";
+    // How old the mailbox's list is, on top of Explore (1644): "As of 3 h
+    // ago" when the last answer is over an hour old, "Not connected · as of
+    // yesterday 14:20" while the link is down.
+    ExploreAsOf = "explore_as_of", "As of %1$s", "Stand: %1$s";
+    ExploreDownAsOf = "explore_down_as_of", "Not connected · %1$s", "Nicht verbunden · %1$s";
+    ExploreAsOfToday = "explore_as_of_today", "as of today %1$s", "Stand von heute %1$s";
+    ExploreAsOfYesterday = "explore_as_of_yesterday", "as of yesterday %1$s", "Stand von gestern %1$s";
+    ExploreAsOfWeekday = "explore_as_of_weekday", "as of %1$s %2$s", "Stand von %1$s %2$s";
+    ExploreAsOfDate = "explore_as_of_date", "as of %1$s %2$s", "Stand vom %1$s %2$s";
     ExploreHop = "explore_hop", "directly reachable", "direkt erreichbar";
     ExploreHops = "explore_hops", "reachable over %1$d stations", "über %1$d Stationen erreichbar";
     ExploreOpenAddress = "explore_open_address", "Open %1$s", "%1$s öffnen";

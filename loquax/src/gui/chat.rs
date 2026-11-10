@@ -931,16 +931,23 @@ impl App {
         let sort = button(text(pages.sort.resolve(lang)).size(13))
             .on_press(Message::Explore(ExploreEvent::Az(!pages.az)))
             .style(button::text);
-        let mut list = column![
-            container(
-                text(pages.title.resolve(lang))
-                    .size(size::ROW_NAME)
-                    .color(ink)
+        let mut list = column![].spacing(2);
+        // How old the mailbox's list is, on top (1644).
+        if let Some(as_of) = &pages.as_of {
+            list = list.push(heading(as_of.resolve(lang)));
+        }
+        list = list
+            .push(
+                container(
+                    text(pages.title.resolve(lang))
+                        .size(size::ROW_NAME)
+                        .color(ink),
+                )
+                .padding([12, 16]),
             )
-            .padding([12, 16]),
-            container(row![field, sort].spacing(8).align_y(Alignment::Center)).padding([0, 12]),
-        ]
-        .spacing(2);
+            .push(
+                container(row![field, sort].spacing(8).align_y(Alignment::Center)).padding([0, 12]),
+            );
         if let Some(off) = &pages.off {
             list = list.push(heading(off.resolve(lang)));
         }

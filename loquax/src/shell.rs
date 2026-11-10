@@ -382,6 +382,8 @@ impl Shell {
                     }));
                 }
                 UiEffect::PnLine(line) => tracing::info!("{line}"),
+                // Explore opened (1644): the mailbox's list asked again.
+                UiEffect::AskPages => self.ask_pages(),
                 UiEffect::Quit => {}
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
@@ -1242,6 +1244,10 @@ impl Shell {
             if reach.up != Some(up) {
                 reach.up = Some(up);
                 reach.since = Some(now);
+                // Explore says how old the mailbox's list is (1644).
+                self.apply(UiEvent::Explore(
+                    loquax::ui::explore::ExploreEvent::Mailbox(up),
+                ));
             }
         }
         if up != Some(false) {
@@ -1345,11 +1351,13 @@ impl Shell {
         let stamp = self.model.browse.shared.stamp;
         let budget = self.context.timeout;
         let done = self.done_tx.clone();
+        tracing::info!("HOME pages asked since={stamp}");
         self.pages_task = Some(tokio::spawn(async move {
             if let Some(event) = runner::home_pages(client, pending, stamp, budget).await {
                 let _ = done.send(Finished::Event(event));
             }
         }));
+        loquax::ui::explore::pages_asked(&mut self.model);
     }
 
     /// The bookmark changes the reader made (1579), handed to the home on a

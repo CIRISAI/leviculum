@@ -761,3 +761,89 @@ fn the_places_sheet_scrolls_alone_and_stays_what_is_shown() {
     assert_eq!(closed.sheet, "", "the second tap closes it");
     assert_eq!(closed.first, first);
 }
+
+/// The phone's answer for the tab as Java decodes it, against
+/// `golden/<name>`; `LOQUAX_WRITE_GOLDEN=1` writes it again.
+fn check(name: &str, shown: &ExploreScreen) {
+    let mut got = serde_json::to_string_pretty(shown).expect("json");
+    got.push('\n');
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name);
+    if std::env::var_os("LOQUAX_WRITE_GOLDEN").is_some() {
+        std::fs::write(&path, &got).expect("write the golden");
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        got == want,
+        "{name} moved; the answer now:\n{got}\n(LOQUAX_WRITE_GOLDEN=1 writes it)"
+    );
+}
+
+fn clock(model: &mut UiModel<session::Line>, unix_secs: i64) {
+    update(
+        model,
+        UiEvent::Clock(loquax::when::WallTime {
+            unix_secs,
+            offset_secs: 0,
+        }),
+    );
+}
+
+fn mailbox(model: &mut UiModel<session::Line>, up: bool) {
+    update(
+        model,
+        UiEvent::Explore(loquax::ui::explore::ExploreEvent::Mailbox(up)),
+    );
+}
+
+/// 1644: opening the tab through the facade asks the mailbox once, a
+/// second open within the minute does not; the line on top of the answer
+/// Java reads says how old the list is in its three states, and a page
+/// silent for seven days is not in it while one at six days and 23 hours
+/// is. Goldens: `explore-as-of-old.json` (up, three hours old) and
+/// `explore-as-of-down.json` (down, as of yesterday 14:20).
+#[test]
+fn the_tab_asks_the_mailbox_once_and_says_how_old_its_list_is() {
+    let (_home, mut model) = phone();
+    heard(&mut model, 0x66, Some("Funkstille"), 7 * 86_400);
+    heard(&mut model, 0x77, Some("Knapp"), 7 * 86_400 - 3_600);
+    let asks = |effects: &[UiEffect]| {
+        effects
+            .iter()
+            .filter(|e| matches!(e, UiEffect::AskPages))
+            .count()
+    };
+    // The session says the link before the tab opens.
+    mailbox(&mut model, true);
+    assert_eq!(asks(&tap(&mut model, "tab", "", "", 0)), 1, "opened");
+    tap(&mut model, "chats", "", "", 0);
+    update(&mut model, UiEvent::Elapsed(40_000));
+    assert_eq!(asks(&tap(&mut model, "tab", "", "", 0)), 0, "30 s later");
+    let shown = screen(&model);
+    assert!(!labels(&shown).contains(&"Funkstille".to_string()));
+    assert!(labels(&shown).contains(&"Knapp".to_string()), "control");
+    // Fresh: no line. The answer comes at 14:20.
+    let answered = NOW - NOW.rem_euclid(86_400) + 14 * 3_600 + 20 * 60;
+    clock(&mut model, answered);
+    update(
+        &mut model,
+        UiEvent::Browse(BrowseEvent::Home(loquax::home::pages::Delta {
+            stamp: 1,
+            more: false,
+            rows: Vec::new(),
+        })),
+    );
+    assert_eq!(screen(&model).as_of, "", "fresh");
+    // Three hours on, the link up.
+    clock(&mut model, answered + 3 * 3_600);
+    let shown = screen(&model);
+    assert_eq!(shown.as_of, "Stand: vor 3 Std.");
+    check("explore-as-of-old.json", &shown);
+    // The next day, the link down.
+    mailbox(&mut model, false);
+    clock(&mut model, answered + 86_400);
+    let shown = screen(&model);
+    assert_eq!(shown.as_of, "Nicht verbunden · Stand von gestern 14:20");
+    check("explore-as-of-down.json", &shown);
+}

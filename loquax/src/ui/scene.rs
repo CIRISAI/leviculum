@@ -2285,6 +2285,11 @@ const MONTHS_SHORT: [StrId; 12] = [
     StrId::DecemberShort,
 ];
 
+/// The weekday of `at`, in full: "Monday".
+pub fn weekday(at: &WallTime) -> Text {
+    Text::key(WEEKDAYS[at.civil().weekday as usize % 7])
+}
+
 const WEEKDAYS_SHORT: [StrId; 7] = [
     StrId::MondayShort,
     StrId::TuesdayShort,

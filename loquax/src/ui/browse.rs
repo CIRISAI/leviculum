@@ -389,6 +389,7 @@ fn home_pages<B: InputBuffer + Default>(
         effects.push(Effect::SaveBookmarks);
     }
     browse.shared.stamp = delta.stamp;
+    super::explore::pages_answered(model);
     effects
 }
 

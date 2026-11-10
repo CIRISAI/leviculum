@@ -3423,6 +3423,11 @@ pub enum UiEffect {
     /// [`lnomad::Effect::Write`] or [`lnomad::Effect::Quit`], which the
     /// core does itself ([`browse::effects_of`]).
     Browse(lnomad::Effect),
+    /// Ask the mailbox for its list of pages, servers and names (`/pages`,
+    /// 1579) now: the Explore tab opened (1644). The host runs one ask at
+    /// a time and drops this one while another runs; a host without a
+    /// mailbox never sees it ([`explore::MailboxList::link`]).
+    AskPages,
     /// What the Rooms ask of their hub link (1379, `crate::rooms_link`).
     Rooms(rooms::RoomAsk),
     /// Make the contacts file say this about its peer, its other lines kept

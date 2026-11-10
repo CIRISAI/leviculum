@@ -777,6 +777,8 @@ final class ExplorePane {
     /** The answer as the list's rows, in its order. */
     private List<Row> flatten(Map<String, Object> shown) {
         List<Row> out = new ArrayList<Row>();
+        // How old the mailbox's list is, on top (1644).
+        note(out, "as_of", Core.str(shown, "as_of"));
         out.add(new Row(Row.TITLE, "title:pages", Core.str(shown, "pages_title"), null, 0));
         note(out, "off", Core.str(shown, "pages_off"));
         String address = Core.str(shown, "address");

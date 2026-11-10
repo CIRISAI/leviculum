@@ -7160,9 +7160,66 @@ mod tests {
         assert!(app.seen.scene.rooms.is_none());
     }
 
+    /// 1644: the line on top of Explore in the window, the golden: the
+    /// link to the mailbox down, its list as of yesterday 14:20, above the
+    /// pages title (the window draws in its own language, English here;
+    /// the model's German words are asserted).
+    #[test]
+    fn explore_says_how_old_the_mailboxs_list_is() {
+        use loquax::ui::browse::BrowseEvent;
+        use loquax::ui::explore::ExploreEvent;
+        const NOW: i64 = 1_800_000_000;
+        let answered = NOW - NOW.rem_euclid(86_400) + 14 * 3_600 + 20 * 60;
+        let (w, h) = (1100u32, 640u32);
+        let mut model = chat_model();
+        model.lang = Lang::De;
+        model.browse.enabled = true;
+        model.now = Some(loquax::when::WallTime {
+            unix_secs: answered,
+            offset_secs: 0,
+        });
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Node(lnomad::DiscoveredNode {
+                dest_hash: [0x5a; 16],
+                name: Some("Marcel's node".to_string()),
+                first_seen: (answered - 600) as u64,
+                last_seen: (answered - 600) as u64,
+                hops: Some(2),
+            })),
+        );
+        update(&mut model, UiEvent::Explore(ExploreEvent::Mailbox(true)));
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(loquax::home::pages::Delta {
+                stamp: 1,
+                more: false,
+                rows: Vec::new(),
+            })),
+        );
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        update(&mut model, UiEvent::Explore(ExploreEvent::Mailbox(false)));
+        model.now = Some(loquax::when::WallTime {
+            unix_secs: answered + 86_400,
+            offset_secs: 0,
+        });
+        let pages = loquax::ui::explore::node(&model).pages;
+        assert_eq!(
+            pages.as_of.map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("Nicht verbunden · Stand von gestern 14:20")
+        );
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), None);
+        app.window = Size::new(w as f32, h as f32);
+        let _ = app.update(Message::Seen(Box::new(seen_of(&model))));
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Explore)));
+        let _ = app.update(Message::Seen(Box::new(seen_of(&model))));
+        assert_eq!(app.screen, Screen::Explore);
+        map::tests::same_as("gui-explore-as-of.png", &shoot(&app, w, h), w, h);
+    }
+
     /// 1578: Explore beside the rail, one scroll for the pages and the
     /// public rooms, the golden: a bookmark, a page heard today and one
-    /// older, the hubs. A press on a page is the model's verb, and the
+    /// this week, the hubs. A press on a page is the model's verb, and the
     /// window follows the model into the browser and back to the list;
     /// Chats leaves it, and a picture from before does not bring it back.
     #[test]
@@ -7188,7 +7245,8 @@ mod tests {
         for found in [
             node(0x5a, "Marcel's node", 600, 2),
             node(0x7c, "Relay Süd", 2 * 86_400, 1),
-            node(0x3d, "Bergwacht", 20 * 86_400, 4),
+            // Five days: a page silent for a week is not listed (1644).
+            node(0x3d, "Bergwacht", 5 * 86_400, 4),
         ] {
             update(&mut model, UiEvent::Browse(BrowseEvent::Node(found)));
         }

@@ -6,6 +6,7 @@
   "explore": {
     "pages": {
       "address": null,
+      "as_of": null,
       "az": true,
       "empty": null,
       "groups": [

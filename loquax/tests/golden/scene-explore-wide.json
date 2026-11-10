@@ -6,6 +6,7 @@
   "explore": {
     "pages": {
       "address": null,
+      "as_of": null,
       "az": false,
       "empty": null,
       "groups": [
@@ -89,7 +90,7 @@
         {
           "heading": {
             "args": [],
-            "key": "explore_older"
+            "key": "explore_this_week"
           },
           "rows": [
             {
@@ -103,7 +104,7 @@
               },
               "seen": {
                 "args": [
-                  20
+                  5
                 ],
                 "key": "explore_seen_days"
               },

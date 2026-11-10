@@ -36,6 +36,12 @@
     <string name="explore_seen_hours">gesehen vor %1$d Std.</string>
     <string name="explore_seen_day">gesehen gestern</string>
     <string name="explore_seen_days">gesehen vor %1$d Tagen</string>
+    <string name="explore_as_of">Stand: %1$s</string>
+    <string name="explore_down_as_of">Nicht verbunden · %1$s</string>
+    <string name="explore_as_of_today">Stand von heute %1$s</string>
+    <string name="explore_as_of_yesterday">Stand von gestern %1$s</string>
+    <string name="explore_as_of_weekday">Stand von %1$s %2$s</string>
+    <string name="explore_as_of_date">Stand vom %1$s %2$s</string>
     <string name="explore_hop">direkt erreichbar</string>
     <string name="explore_hops">über %1$d Stationen erreichbar</string>
     <string name="explore_open_address">%1$s öffnen</string>

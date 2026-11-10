@@ -36,6 +36,12 @@
     <string name="explore_seen_hours">seen %1$d h ago</string>
     <string name="explore_seen_day">seen yesterday</string>
     <string name="explore_seen_days">seen %1$d days ago</string>
+    <string name="explore_as_of">As of %1$s</string>
+    <string name="explore_down_as_of">Not connected · %1$s</string>
+    <string name="explore_as_of_today">as of today %1$s</string>
+    <string name="explore_as_of_yesterday">as of yesterday %1$s</string>
+    <string name="explore_as_of_weekday">as of %1$s %2$s</string>
+    <string name="explore_as_of_date">as of %1$s %2$s</string>
     <string name="explore_hop">directly reachable</string>
     <string name="explore_hops">reachable over %1$d stations</string>
     <string name="explore_open_address">Open %1$s</string>

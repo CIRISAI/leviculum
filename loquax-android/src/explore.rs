@@ -109,6 +109,7 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> ExploreScreen {
             .as_ref()
             .map(|t| t.resolve(lang))
             .unwrap_or_default(),
+        as_of: text_or_empty(&pages.as_of, lang),
         rooms_title: rooms.title.resolve(lang),
         joined_empty: text_or_empty(&rooms.joined_empty, lang),
         open_rooms: text_or_empty(&rooms.open_rooms, lang),

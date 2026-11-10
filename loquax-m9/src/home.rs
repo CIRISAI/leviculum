@@ -1423,6 +1423,7 @@ fn effect_name(effect: &UiEffect) -> &'static str {
         UiEffect::Network { .. } => "network",
         UiEffect::Send { .. } => "send",
         UiEffect::Fetch => "fetch",
+        UiEffect::AskPages => "ask-pages",
         UiEffect::AskPn { .. } => "ask-pn",
         UiEffect::PnLine(_) => "pn-line",
         UiEffect::Quit => "quit",

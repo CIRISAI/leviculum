@@ -6,6 +6,7 @@
   "explore": {
     "pages": {
       "address": null,
+      "as_of": null,
       "az": true,
       "empty": null,
       "groups": [
@@ -95,7 +96,7 @@
               },
               "seen": {
                 "args": [
-                  20
+                  5
                 ],
                 "key": "explore_seen_days"
               },

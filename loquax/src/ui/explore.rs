@@ -80,6 +80,138 @@ pub struct Explore {
     pub owed: HeardOwed,
     /// The suggestion as the host last kept it.
     pub held_kept: Option<[u8; 16]>,
+    /// The mailbox's list as this device has it (1644).
+    pub mailbox: MailboxList,
+}
+
+/// The mailbox's list of pages and servers as this device last had it
+/// (1644, step 4 of the mailbox-first plan): whether the link to the
+/// mailbox is up, when the device last asked `/pages` and when the last
+/// answer came. Opening the tab asks once more ([`UiEffect::AskPages`]),
+/// never twice within [`ASK_EVERY_MS`]; the line on top says how old the
+/// list is once the link is down or the answer older than
+/// [`AS_OF_AFTER_SECS`] ([`as_of`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MailboxList {
+    /// The link to the mailbox: up, down, or `None` on a device that has
+    /// told of none (no mailbox, or not told yet), which neither asks on
+    /// opening nor says an age.
+    pub link: Option<bool>,
+    /// When the last `/pages` ask began, on the model's monotonic clock:
+    /// the one after a pull ([`pages_asked`]) or the tab's.
+    pub asked_ms: Option<u64>,
+    /// When the last answer came, unix seconds. In memory only, as the
+    /// stamp is: a start asks for the whole list anyway.
+    pub answered: Option<i64>,
+}
+
+/// The least time between two `/pages` asks the tab's opening starts
+/// (1644): one a minute at most.
+pub const ASK_EVERY_MS: u64 = 60_000;
+
+/// From this age of the last answer on, the line on top says it (1644):
+/// "As of 3 h ago". Below it, nothing.
+pub const AS_OF_AFTER_SECS: i64 = 3_600;
+
+/// A page or a server not announced for this long is not listed (1644,
+/// Lew took the plan's recommendation: seven days, a default and not a
+/// setting). Its row stays in the store and the registry; the next
+/// announce lists it again. A bookmark stays listed, as does the server
+/// in use and the ones Loquax ships.
+pub const HIDDEN_AFTER_SECS: u64 = 7 * 86_400;
+
+/// Whether a thing last announced at `last_seen` (unix seconds, 0 for
+/// never) is too old to list at `now`.
+pub fn aged_out(now: u64, last_seen: u64) -> bool {
+    last_seen != 0 && now.saturating_sub(last_seen) >= HIDDEN_AFTER_SECS
+}
+
+/// A host began a `/pages` ask (the one after a pull, 1579): the tab's
+/// opening waits [`ASK_EVERY_MS`] from here.
+pub fn pages_asked<B>(model: &mut UiModel<B>) {
+    model.explore.mailbox.asked_ms = Some(model.elapsed_ms);
+}
+
+/// The mailbox's `/pages` answer came (1644): the list is as of now.
+pub(crate) fn pages_answered<B>(model: &mut UiModel<B>) {
+    let (now_secs, _) = now(model);
+    model.explore.mailbox.answered = Some(i64::try_from(now_secs).unwrap_or(i64::MAX));
+}
+
+/// Opening the tab asks the mailbox (1644): only a device that has one,
+/// and never within [`ASK_EVERY_MS`] of the last ask. The ask is marked
+/// begun here; the host runs it one at a time.
+fn ask_on_opening<B>(model: &mut UiModel<B>) -> Option<UiEffect> {
+    let list = &model.explore.mailbox;
+    list.link?;
+    let recent = list
+        .asked_ms
+        .is_some_and(|at| model.elapsed_ms < at.saturating_add(ASK_EVERY_MS));
+    if recent {
+        return None;
+    }
+    pages_asked(model);
+    Some(UiEffect::AskPages)
+}
+
+/// The line on top of the tab (1644): how old the list is, in the
+/// catalogue's words. The link down: "Not connected", with "as of
+/// yesterday 14:20" once an answer came; the link up and the answer older
+/// than [`AS_OF_AFTER_SECS`]: "As of 3 h ago"; fresh, or a device without
+/// a mailbox: nothing.
+pub fn as_of<B>(model: &UiModel<B>) -> Option<Text> {
+    let list = &model.explore.mailbox;
+    let (now_secs, offset) = now(model);
+    let now_secs = i64::try_from(now_secs).unwrap_or(i64::MAX);
+    match (list.link?, list.answered) {
+        (false, None) => Some(Text::key(StrId::MailboxDown)),
+        (false, Some(at)) => Some(Text::Key(
+            StrId::ExploreDownAsOf,
+            Vec::from([Arg::Text(alloc::boxed::Box::new(as_of_when(
+                at, now_secs, offset,
+            )))]),
+        )),
+        (true, Some(at)) if now_secs.saturating_sub(at) > AS_OF_AFTER_SECS => Some(Text::Key(
+            StrId::ExploreAsOf,
+            Vec::from([Arg::Text(alloc::boxed::Box::new(super::scene::ago(
+                now_secs.saturating_sub(at),
+            )))]),
+        )),
+        (true, _) => None,
+    }
+}
+
+/// "as of yesterday 14:20": the answer's day and time of day, as a
+/// shared position's sentence says them ([`super::scene::position_words`]).
+fn as_of_when(at: i64, now: i64, offset: i32) -> Text {
+    use crate::when::WallTime;
+    let at = WallTime {
+        unix_secs: at,
+        offset_secs: offset,
+    };
+    let now = WallTime {
+        unix_secs: now,
+        offset_secs: offset,
+    };
+    let clock = Arg::Str(at.hh_mm());
+    match now.day() - at.day() {
+        ..=0 => Text::Key(StrId::ExploreAsOfToday, Vec::from([clock])),
+        1 => Text::Key(StrId::ExploreAsOfYesterday, Vec::from([clock])),
+        2..=6 => Text::Key(
+            StrId::ExploreAsOfWeekday,
+            Vec::from([
+                Arg::Text(alloc::boxed::Box::new(super::scene::weekday(&at))),
+                clock,
+            ]),
+        ),
+        _ => Text::Key(
+            StrId::ExploreAsOfDate,
+            Vec::from([
+                Arg::Text(alloc::boxed::Box::new(super::scene::list_time(&at, &now))),
+                clock,
+            ]),
+        ),
+    }
 }
 
 /// What a device heard since its host last wrote it to the store (1632,
@@ -201,6 +333,9 @@ pub enum ExploreEvent {
     /// A finger came down on the list (`true`) or lifted (1618): while it
     /// is down no new order is applied.
     Touch(bool),
+    /// The host's word on the link to its mailbox (1644): up or down. A
+    /// host without a mailbox never says it.
+    Mailbox(bool),
 }
 
 /// A page's row as the tab draws it.
@@ -260,6 +395,8 @@ pub struct PagesNode {
     pub empty: Option<Text>,
     /// Opening a page is off on this device: the one sentence that says so.
     pub off: Option<Text>,
+    /// How old the mailbox's list is, on top of the tab (1644, [`as_of`]).
+    pub as_of: Option<Text>,
 }
 
 /// The rooms' section (1621, walk 2: "Public rooms" held servers and no
@@ -493,12 +630,21 @@ fn heading(page: &Known, az: bool, now_secs: u64, offset: i32) -> StrId {
     }
 }
 
+/// The pages the tab may list (1644): every one [`known`] but those not
+/// announced for [`HIDDEN_AFTER_SECS`]; a bookmark always.
+fn listable<B>(model: &UiModel<B>) -> Vec<Known> {
+    let (now_secs, _) = now(model);
+    let mut pages = known(&model.browse.model);
+    pages.retain(|k| k.bookmark.is_some() || !aged_out(now_secs, k.last_seen));
+    pages
+}
+
 /// Every page the device knows in the order the model would apply now,
 /// each under its heading.
 fn fresh<B>(model: &UiModel<B>) -> Vec<(Known, StrId)> {
     let (now_secs, offset) = now(model);
     let az = model.explore.az;
-    ordered(known(&model.browse.model), az)
+    ordered(listable(model), az)
         .into_iter()
         .map(|k| {
             let h = heading(&k, az, now_secs, offset);
@@ -694,12 +840,28 @@ fn far(hops: Option<u8>) -> Option<Text> {
 fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
     let offered = super::settings::offered_hubs(&model.rooms);
     let searching = !model.explore.query.trim().is_empty();
-    let heard_shipped = offered.iter().filter(|o| o.heard && o.shipped).count();
-    let mut unheard = super::settings::HUB_PAGE.saturating_sub(heard_shipped);
     let chosen = model.rooms.hub;
+    // A server not announced for a week (1644) counts as not heard: a
+    // shipped one stands among the shipped, any other is not listed, the
+    // one in use always is.
+    let (now_secs, _) = now(model);
+    let stale = |o: &super::settings::Offered| {
+        o.heard
+            && o.last
+                .is_some_and(|last| aged_out(now_secs, u64::try_from(last).unwrap_or(0)))
+    };
+    let hidden = |o: &super::settings::Offered| stale(o) && !o.shipped && Some(o.hash) != chosen;
+    let heard_shipped = offered
+        .iter()
+        .filter(|o| o.heard && !stale(o) && o.shipped)
+        .count();
+    let mut unheard = super::settings::HUB_PAGE.saturating_sub(heard_shipped);
     let mut hubs: Vec<super::settings::Offered> = Vec::new();
     for hub in offered {
-        if hub.heard || searching || Some(hub.hash) == chosen {
+        if hidden(&hub) {
+            continue;
+        }
+        if (hub.heard && !stale(&hub)) || searching || Some(hub.hash) == chosen {
             hubs.push(hub);
         } else if hub.shipped && unheard > 0 {
             unheard -= 1;
@@ -743,7 +905,7 @@ fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
             }
         }
     }
-    hubs.retain(|o| keep(o));
+    hubs.retain(|o| keep(o) && !hidden(o));
     hubs
 }
 
@@ -945,7 +1107,7 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
     let picks = picks(model);
     let cursor = picks.get(explore.cursor.min(picks.len().saturating_sub(1)));
     let (now_secs, _) = now(model);
-    let all = known(&model.browse.model);
+    let all = listable(model);
     let any = !all.is_empty();
     let looks = looks(&all);
     let pages = listed(model);
@@ -992,6 +1154,7 @@ pub fn node<B>(model: &UiModel<B>) -> ExploreNode {
         groups,
         empty,
         off: (!model.browse.enabled).then(|| Text::key(StrId::ExplorePagesOff)),
+        as_of: as_of(model),
     };
     let rooms_node = super::rooms::node(model);
     let suggest = suggested(model);
@@ -1066,6 +1229,7 @@ pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
             model.explore.cursor = 0;
             model.explore.held = false;
             settle(model, true);
+            return ask_on_opening(model).into_iter().collect();
         }
         TabId::Browse | TabId::Rooms => model.explore.open = true,
         TabId::Chats | TabId::Map => model.explore.open = false,
@@ -1079,6 +1243,10 @@ pub(super) fn fold<B: InputBuffer + Default>(
     event: ExploreEvent,
 ) -> Vec<UiEffect> {
     match event {
+        ExploreEvent::Mailbox(up) => {
+            model.explore.mailbox.link = Some(up);
+            Vec::new()
+        }
         ExploreEvent::Typed(text) => {
             if model.explore.query != text {
                 model.explore.query = text;
@@ -1387,6 +1555,7 @@ impl ExploreNode {
                 })).collect::<Vec<_>>(),
                 "empty": p.empty.as_ref().map(Text::to_json),
                 "off": p.off.as_ref().map(Text::to_json),
+                "as_of": p.as_of.as_ref().map(Text::to_json),
             },
             "rooms": {
                 "title": r.title.to_json(),
@@ -1447,7 +1616,8 @@ mod tests {
     }
 
     /// A phone with the browser, its clock at [`NOW`] in UTC, three nodes
-    /// heard: one an hour ago, one three days ago, one a month ago.
+    /// heard: one an hour ago, one three days ago, one six days ago (a
+    /// month ago until 1644, which lists no page silent for a week).
     fn phone() -> UiModel<Buffer> {
         let mut model = UiModel::<Buffer>::new(&[]);
         model.browse.enabled = true;
@@ -1458,7 +1628,7 @@ mod tests {
         for n in [
             heard(0x11, Some("Zebra Hof"), 3_600, Some(2)),
             heard(0x22, Some("Alpha Relay"), 3 * 86_400, Some(1)),
-            heard(0x33, None, 30 * 86_400, None),
+            heard(0x33, None, 6 * 86_400, None),
         ] {
             update(
                 &mut model,
@@ -1500,13 +1670,11 @@ mod tests {
         update(&mut model, UiEvent::Tab(TabId::Explore));
         let shown = node(&model);
         assert_eq!(labels(&shown), ["Zebra Hof", "Alpha Relay", "Unnamed page"]);
+        // "Older" holds no page that is not bookmarked since 1644: a page
+        // silent for a week is not listed ([`HIDDEN_AFTER_SECS`]).
         assert_eq!(
             headings(&shown),
-            [
-                StrId::ExploreToday,
-                StrId::ExploreThisWeek,
-                StrId::ExploreOlder
-            ]
+            [StrId::ExploreToday, StrId::ExploreThisWeek]
         );
         let first = &shown.pages.groups[0].rows[0];
         assert_eq!(
@@ -3154,5 +3322,212 @@ mod tests {
             .find(|h| h.hash == hash)
             .expect("the row");
         assert_eq!(row.name.resolve(Lang::De), "Server ohne Namen");
+    }
+
+    fn asks(effects: &[UiEffect]) -> usize {
+        effects
+            .iter()
+            .filter(|e| matches!(e, UiEffect::AskPages))
+            .count()
+    }
+
+    fn open_at(model: &mut UiModel<Buffer>, ms: u64) -> usize {
+        update(model, UiEvent::Elapsed(ms));
+        update(model, UiEvent::Tab(TabId::Chats));
+        asks(&update(model, UiEvent::Tab(TabId::Explore)))
+    }
+
+    /// 1644 item 1: opening Explore asks the mailbox once, in addition to
+    /// the ask after a pull, never twice within a minute; a device without
+    /// a mailbox never asks.
+    #[test]
+    fn opening_explore_asks_the_mailbox_and_two_opens_within_a_minute_ask_once() {
+        let mut model = phone();
+        assert_eq!(open_at(&mut model, 1_000), 0, "no mailbox, no ask");
+        explore(&mut model, ExploreEvent::Mailbox(true));
+        assert_eq!(open_at(&mut model, 10_000), 1, "opened: one ask");
+        assert_eq!(
+            open_at(&mut model, 10_000 + ASK_EVERY_MS - 1),
+            0,
+            "opened again within the minute"
+        );
+        assert_eq!(open_at(&mut model, 10_000 + ASK_EVERY_MS), 1, "a minute on");
+        // The ask after a pull counts too: the tab waits a minute from it.
+        update(&mut model, UiEvent::Elapsed(200_000));
+        pages_asked(&mut model);
+        assert_eq!(open_at(&mut model, 230_000), 0);
+        assert_eq!(open_at(&mut model, 260_000), 1);
+        // The link down asks all the same: the host's ask finds out.
+        explore(&mut model, ExploreEvent::Mailbox(false));
+        assert_eq!(open_at(&mut model, 400_000), 1);
+        // Other tabs ask nothing.
+        assert_eq!(asks(&update(&mut model, UiEvent::Tab(TabId::Browse))), 0);
+    }
+
+    fn at(model: &mut UiModel<Buffer>, unix_secs: i64) {
+        model.now = Some(WallTime {
+            unix_secs,
+            offset_secs: 0,
+        });
+    }
+
+    fn answer(model: &mut UiModel<Buffer>) {
+        update(
+            model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Home(
+                crate::home::pages::Delta {
+                    stamp: 1,
+                    more: false,
+                    rows: Vec::new(),
+                },
+            )),
+        );
+    }
+
+    fn line(model: &UiModel<Buffer>, lang: Lang) -> Option<String> {
+        let shown = node(model).pages.as_of;
+        assert_eq!(shown, as_of(model));
+        shown.map(|t| t.resolve(lang))
+    }
+
+    /// 1644 item 2: the line on top says how old the mailbox's list is:
+    /// nothing while fresh, "Stand: vor 3 Std." once the last answer is
+    /// older than an hour, "Nicht verbunden · Stand von gestern 14:20"
+    /// while the link is down; a device without a mailbox says nothing.
+    #[test]
+    fn the_line_on_top_says_how_old_the_mailboxs_list_is() {
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        assert_eq!(line(&model, Lang::De), None, "no mailbox");
+        explore(&mut model, ExploreEvent::Mailbox(true));
+        assert_eq!(line(&model, Lang::De), None, "up, no answer yet");
+        // The answer comes at 14:20 of NOW's day.
+        let answered = NOW - NOW.rem_euclid(86_400) + 14 * 3_600 + 20 * 60;
+        at(&mut model, answered);
+        answer(&mut model);
+        assert_eq!(model.explore.mailbox.answered, Some(answered));
+        // State one: fresh.
+        assert_eq!(line(&model, Lang::De), None, "fresh");
+        at(&mut model, answered + AS_OF_AFTER_SECS);
+        assert_eq!(line(&model, Lang::De), None, "an hour old is fresh");
+        // State two: up, the answer older than an hour.
+        at(&mut model, answered + AS_OF_AFTER_SECS + 1);
+        assert_eq!(line(&model, Lang::De).as_deref(), Some("Stand: vor 1 Std."));
+        at(&mut model, answered + 3 * 3_600);
+        assert_eq!(line(&model, Lang::De).as_deref(), Some("Stand: vor 3 Std."));
+        assert_eq!(line(&model, Lang::En).as_deref(), Some("As of 3 h ago"));
+        // State three: the link down, said with the answer's day and time.
+        explore(&mut model, ExploreEvent::Mailbox(false));
+        assert_eq!(
+            line(&model, Lang::De).as_deref(),
+            Some("Nicht verbunden · Stand von heute 14:20")
+        );
+        at(&mut model, answered + 86_400);
+        assert_eq!(
+            line(&model, Lang::De).as_deref(),
+            Some("Nicht verbunden · Stand von gestern 14:20")
+        );
+        assert_eq!(
+            line(&model, Lang::En).as_deref(),
+            Some("Not connected · as of yesterday 14:20")
+        );
+        // A fresh answer and the link up: nothing again.
+        answer(&mut model);
+        explore(&mut model, ExploreEvent::Mailbox(true));
+        assert_eq!(line(&model, Lang::De), None);
+        // Down before any answer: only that it is not connected.
+        let mut fresh = phone();
+        explore(&mut fresh, ExploreEvent::Mailbox(false));
+        assert_eq!(line(&fresh, Lang::De).as_deref(), Some("Nicht verbunden"));
+    }
+
+    fn hear_hub(model: &mut UiModel<Buffer>, hash: [u8; 16], name: &str, last: i64) {
+        update(
+            model,
+            UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                hash,
+                name: Some(name.into()),
+                hops: Some(2),
+                first: last,
+                last,
+                answered: None,
+            })),
+        );
+    }
+
+    fn listed_hub(model: &UiModel<Buffer>, hash: [u8; 16]) -> bool {
+        node(model).rooms.hubs.iter().any(|h| h.hash == hash)
+    }
+
+    /// 1644 item 3: a page or a server not announced for seven days is not
+    /// listed; the control, six days and 23 hours, is. The row stays, and
+    /// the next announce lists it again. A bookmark and the server in use
+    /// stay listed whatever their age.
+    #[test]
+    fn a_page_or_server_silent_for_seven_days_is_not_listed_and_six_days_23_hours_is() {
+        const WEEK: i64 = 7 * 86_400;
+        let mut model = phone();
+        for n in [
+            heard(0x66, Some("Funkstille"), WEEK, None),
+            heard(0x77, Some("Knapp"), WEEK - 3_600, None),
+            heard(0x88, Some("Gemerkt"), 30 * 86_400, None),
+        ] {
+            update(
+                &mut model,
+                UiEvent::Browse(crate::ui::browse::BrowseEvent::Node(n)),
+            );
+        }
+        model.browse.model.bookmarks.add(lnomad::Bookmark {
+            url: format!("{}:/page/index.mu", "88".repeat(16)),
+            title: "Gemerkt".into(),
+        });
+        let silent = [0xa1; 16];
+        let close = [0xa2; 16];
+        let in_use = [0xa3; 16];
+        hear_hub(&mut model, silent, "Stiller Server", NOW - WEEK);
+        hear_hub(&mut model, close, "Knapper Server", NOW - WEEK + 3_600);
+        hear_hub(&mut model, in_use, "Mein Server", NOW - 30 * 86_400);
+        model.rooms.hub = Some(in_use);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let shown = labels(&node(&model));
+        assert!(!shown.iter().any(|l| l == "Funkstille"), "{shown:?}");
+        assert!(shown.iter().any(|l| l == "Knapp"), "control: {shown:?}");
+        assert!(
+            shown.iter().any(|l| l == "Gemerkt"),
+            "a bookmark: {shown:?}"
+        );
+        assert!(!listed_hub(&model, silent));
+        assert!(listed_hub(&model, close), "control");
+        assert!(listed_hub(&model, in_use), "the server in use");
+        // A search does not reach them either.
+        explore(&mut model, ExploreEvent::Typed("Stille".into()));
+        assert!(labels(&node(&model)).is_empty());
+        assert!(!listed_hub(&model, silent));
+        explore(&mut model, ExploreEvent::Typed(String::new()));
+        // The rows are kept: the registry and the servers heard hold them.
+        assert!(model
+            .browse
+            .model
+            .node_registry
+            .nodes()
+            .iter()
+            .any(|n| n.dest_hash == [0x66; 16]));
+        assert!(crate::ui::settings::offered_hubs(&model.rooms)
+            .iter()
+            .any(|o| o.hash == silent));
+        // The next announce lists them again.
+        update(
+            &mut model,
+            UiEvent::Browse(crate::ui::browse::BrowseEvent::Node(heard(
+                0x66,
+                Some("Funkstille"),
+                60,
+                None,
+            ))),
+        );
+        hear_hub(&mut model, silent, "Stiller Server", NOW - 60);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        assert!(labels(&node(&model)).iter().any(|l| l == "Funkstille"));
+        assert!(listed_hub(&model, silent));
     }
 }

@@ -1,0 +1,121 @@
+{
+  "v": 1,
+  "showing": "list",
+  "title": "Entdecken",
+  "pages_title": "Seiten",
+  "query": "",
+  "placeholder": "Suchen",
+  "sort": "Zuletzt gesehen",
+  "az": false,
+  "address": "",
+  "pages": [
+    {
+      "heading": "Heute",
+      "dest": "11111111111111111111111111111111",
+      "label": "Radio RPi4",
+      "said": "gesehen vor 9 Std. · über 5 Stationen erreichbar",
+      "bookmarked": false,
+      "url": "11111111111111111111111111111111:/page/index.mu"
+    },
+    {
+      "heading": "",
+      "dest": "22222222222222222222222222222222",
+      "label": "IranTalk",
+      "said": "gesehen vor 10 Std. · über 5 Stationen erreichbar",
+      "bookmarked": false,
+      "url": "22222222222222222222222222222222:/page/index.mu"
+    },
+    {
+      "heading": "",
+      "dest": "33333333333333333333333333333333",
+      "label": "Unbenannte Seite",
+      "said": "gesehen vor 11 Std. · über 5 Stationen erreichbar",
+      "bookmarked": false,
+      "url": "33333333333333333333333333333333:/page/index.mu"
+    }
+  ],
+  "pages_empty": "",
+  "pages_off": "",
+  "as_of": "Stand: vor 3 Std.",
+  "rooms_title": "Räume",
+  "joined": [],
+  "joined_empty": "Du bist in keinem Raum. Such dir unten einen Server aus.",
+  "open_rooms": "",
+  "servers_title": "Server",
+  "hubs": [
+    {
+      "dest": "42a97b1b07147b898f78a610dfbba587",
+      "name": "RNS Moscow",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "fcf451c9dd57fb262f30bf60ba9aa562",
+      "name": "Cascadia",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "0de5818cbe93fedab3ce82d02750aa9c",
+      "name": "Chatsurfer",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "741da32223fa46db2f284ca9c20496b1",
+      "name": "CTRS",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "68dda18a26508d81b53fb94407882121",
+      "name": "Minuteman",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "6ffeb457f58d8bd2041b3585caa9cc1e",
+      "name": "RMAP.WORLD Hub",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "ceadff8d8ee0e319ec2b9b456b650c10",
+      "name": "Save Europe",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "4f07b6e366835a159519cc854a57c9f7",
+      "name": "SoCal Public",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "472c760aa181f889902959e9d6de5ac7",
+      "name": "UTN Oregon",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    },
+    {
+      "dest": "e7fd7f9efd6608ca4ade879d18646eed",
+      "name": "HADARC",
+      "value": "noch nicht gesehen",
+      "chosen": false
+    }
+  ],
+  "servers_empty": "",
+  "sheet_dest": "",
+  "sheet_name": "",
+  "sheet_said": "",
+  "sheet_chosen": false,
+  "sheet_button": "",
+  "sheet_notice": "",
+  "sheet_rooms_title": "",
+  "sheet_rooms": [],
+  "sheet_rooms_note": "",
+  "sheet_retry": "",
+  "sheet_asking": false,
+  "sheet_open_rooms": "",
+  "sheet_close": ""
+}

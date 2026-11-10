@@ -2632,6 +2632,14 @@ impl Inner {
         self.watched(elapsed);
         // The bar under the list's top bar (1448, walk finding 14).
         self.dirty |= self.offline.look(self.watching, elapsed);
+        // Explore says how old the mailbox's list is (1644), on the same
+        // word as the bar: a start's moment without a link says nothing.
+        let up = !self.offline.offline();
+        if self.model.explore.mailbox.link != Some(up) {
+            self.apply(UiEvent::Explore(
+                loquax::ui::explore::ExploreEvent::Mailbox(up),
+            ));
+        }
         // Applied, not quiet: a running share sends from the clock (1273).
         self.apply(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
@@ -2957,6 +2965,8 @@ impl Inner {
                 UiEffect::Store(read) => answers.push(self.read(read)),
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
+                // Explore opened (1644): the mailbox's list asked again.
+                UiEffect::AskPages => self.ask_pages(),
                 UiEffect::Browse(effect) => self.browse_owed.push(effect),
                 // The Rooms (1384): the hub link does it; what the hub says
                 // comes back on the pump.
@@ -3316,12 +3326,14 @@ impl Inner {
         let stamp = self.model.browse.shared.stamp;
         let done = self.finished_tx.clone();
         let wake = Arc::clone(&self.wake);
+        tracing::info!("HOME pages asked since={stamp}");
         self.pages_asking = Some(self.runtime.spawn(async move {
             if let Some(event) = runner::home_pages(client, pending, stamp, BUDGET).await {
                 let _ = done.send(Finished::Event(event));
                 wake.notify_one();
             }
         }));
+        loquax::ui::explore::pages_asked(&mut self.model);
     }
 
     /// The two lists into [`Inner::scene`] (1464), and the digest of the

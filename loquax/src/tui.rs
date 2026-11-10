@@ -1917,6 +1917,10 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
     let mark = |on: bool| if on { "▌" } else { " " };
     let mut lines: Vec<Line> = Vec::new();
     let mut at: Option<usize> = None;
+    // How old the mailbox's list is, on top (1644).
+    if let Some(as_of) = &pages.as_of {
+        lines.push(Line::from(Span::styled(as_of.resolve(lang), quiet)));
+    }
     lines.push(Line::from(Span::styled(pages.title.resolve(lang), bold)));
     if let Some(off) = &pages.off {
         lines.push(Line::from(Span::styled(off.resolve(lang), quiet)));
@@ -3428,6 +3432,58 @@ mod tests {
         update(&mut off, key('R'));
         assert!(!off.rooms.showing());
         assert!(!whole_screen(&off).contains("A room is live"));
+    }
+
+    /// 1644: the line on top of Explore says how old the mailbox's list
+    /// is: in German, the link down and the last answer yesterday at
+    /// 14:20; the golden. Up and three hours old it says that instead, and
+    /// fresh nothing.
+    #[test]
+    fn explore_says_how_old_the_mailboxs_list_is() {
+        use loquax::ui::browse::BrowseEvent;
+        use loquax::ui::explore::ExploreEvent;
+        let key = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        const NOW: i64 = 1_800_000_000;
+        let answered = NOW - NOW.rem_euclid(86_400) + 14 * 3_600 + 20 * 60;
+        let at = |model: &mut Model, unix_secs| {
+            model.now = Some(loquax::when::WallTime {
+                unix_secs,
+                offset_secs: 0,
+            });
+        };
+        let mut model = Model::new(&[]);
+        model.lang = Lang::De;
+        model.browse.enabled = true;
+        browse_like_the_terminal(&mut model);
+        at(&mut model, answered);
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Node(lnomad::DiscoveredNode {
+                dest_hash: [0x5a; 16],
+                name: Some("Marcel's node".to_string()),
+                first_seen: (answered - 600) as u64,
+                last_seen: (answered - 600) as u64,
+                hops: Some(2),
+            })),
+        );
+        update(&mut model, UiEvent::Explore(ExploreEvent::Mailbox(true)));
+        update(
+            &mut model,
+            UiEvent::Browse(BrowseEvent::Home(loquax::home::pages::Delta {
+                stamp: 1,
+                more: false,
+                rows: Vec::new(),
+            })),
+        );
+        update(&mut model, key('E'));
+        assert!(!whole_screen(&model).contains("Stand"), "fresh");
+        at(&mut model, answered + 3 * 3_600);
+        says(&whole_screen(&model), "Stand: vor 3 Std.");
+        update(&mut model, UiEvent::Explore(ExploreEvent::Mailbox(false)));
+        at(&mut model, answered + 86_400);
+        let screen = whole_screen(&model);
+        says(&screen, "Nicht verbunden · Stand von gestern 14:20");
+        same_text("tui-explore-as-of-de.txt", &screen);
     }
 
     /// 1578: `E` brings Explore to the front over the whole terminal: the

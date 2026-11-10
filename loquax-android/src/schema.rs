@@ -2420,6 +2420,10 @@ pub struct ExploreScreen {
     /// The one sentence where pages cannot be opened on this device.
     #[serde(default)]
     pub pages_off: String,
+    /// How old the mailbox's list is (1644): "As of 3 h ago", "Not
+    /// connected · as of yesterday 14:20"; empty while it is fresh.
+    #[serde(default)]
+    pub as_of: String,
     /// "Rooms" (1621): the rooms the reader is in, or the one sentence
     /// that there is none.
     #[serde(default)]
