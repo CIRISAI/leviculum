@@ -2168,22 +2168,22 @@ pub enum DropReason {
     /// does on a Python node.
     LinkIfaceMismatch,
     /// A packet for one of our own links that is not Active yet (or any
-    /// more): link DATA, a request or a channel packet on a link still in
-    /// its handshake. Until 860 the link layer dropped it at trace level and
-    /// a board printed nothing (858 §Q6: a phone's 483 B transfer packet and
-    /// a 99 B packet on 2026-10-19, 17:48 CEST, left no line on the board
-    /// that terminated the link).
+    /// more), other than an RTT, keepalive or close, that does not establish
+    /// it: on a responder link in its handshake one that does not decrypt
+    /// under the link keys, on any other non-Active link any such packet.
+    /// Until 860 these were trace-level drops a board never printed (858
+    /// §Q6: a phone's 483 B and 99 B packets on 2026-10-19, 17:48 CEST, left
+    /// no line on the board that terminated the link); until 1624 a resource
+    /// advertisement, hashmap update, response or identify still was silent.
     ///
-    /// The reference does NOT refuse all of these, which is what makes the
-    /// line worth having: a responder registers its link as active before
-    /// the RTT arrives (`reference/Reticulum/RNS/Link.py:216`,
-    /// `reference/Reticulum/RNS/Transport.py:2447-2452`), and `Link.receive`
-    /// decrypts and delivers plain link data and channel data with no status
-    /// check (`reference/Reticulum/RNS/Link.py:988-1000`, `:1168-1176`). Only
-    /// a request waits for ACTIVE (`reference/Reticulum/RNS/Link.py:853-854`).
-    /// So a rising count of this reason on a link a Python peer opened names
-    /// packets a Python terminus would have taken; 860 only names them, and
-    /// whether to take them is a decision of its own.
+    /// A packet that DOES decrypt on a responder link in its handshake
+    /// establishes the link instead, as only the initiator holds the keys,
+    /// and is taken (1624: a lost RTT stranded the link until the responder's
+    /// establishment timeout). The reference takes such packets with no
+    /// status gate (`reference/Reticulum/RNS/Link.py:974`, RESOURCE_ADV at
+    /// `:1068`) but leaves HANDSHAKE only on the RTT (`:541`), so its watchdog
+    /// still closes the link at the establishment timeout (`:773-777`); we
+    /// keep it.
     LinkNotActive,
     /// Link DATA (a plain packet or a request) for an Active link of ours
     /// that did not decrypt under the link key: corruption, or a peer that
@@ -2194,9 +2194,9 @@ pub enum DropReason {
     /// An RTT packet a responder link could not take: the link is not in
     /// its handshake (already established, a retry or duplicate), we are
     /// the link's initiator, or it did not decrypt or parse. The responder
-    /// link stays in its handshake if the RTT never validates, and every
-    /// later packet on it is a [`DropReason::LinkNotActive`]; this is the
-    /// line that names the start of that chain (858 §Q6). The reference
+    /// link stays in its handshake until a packet of the initiator decrypts
+    /// on it (1624), each packet before that a [`DropReason::LinkNotActive`];
+    /// this line names the start of that chain (858 §Q6). The reference
     /// runs an RTT on an already active responder link through again
     /// (`reference/Reticulum/RNS/Link.py:1059-1061`, no state check), where
     /// we refuse it; the link is up either way, so that refusal loses

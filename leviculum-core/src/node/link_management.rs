@@ -1629,6 +1629,46 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
         }
 
+        // A link that is not Active takes only the packets that move its
+        // state: the RTT, a keepalive, a close. Anything else on a responder
+        // link still in its handshake is the initiator using a link it already
+        // holds Active, so the RTT was lost: a packet that decrypts under the
+        // link keys establishes the link here, as the RTT would have (1624).
+        // Python takes these packets in HANDSHAKE too (`Link.py:974`, no
+        // status gate) but never leaves HANDSHAKE on them, so its watchdog
+        // still closes the link at the establishment timeout (`Link.py:773-777`).
+        // A packet that does not decrypt, or one on a link not in that state,
+        // is a named drop, never a silent one.
+        if !matches!(
+            packet.context,
+            PacketContext::Lrrtt
+                | PacketContext::Keepalive
+                | PacketContext::LinkClose
+                | PacketContext::Unknown(_)
+        ) && self
+            .links
+            .get(&link_id)
+            .is_some_and(|l| l.state() != LinkState::Active)
+        {
+            let established = self.links.get_mut(&link_id).and_then(|l| {
+                l.establish_on_initiator_packet(packet.data.as_slice(), now_ms)
+                    .ok()
+            });
+            if let Some(rtt_secs) = established {
+                self.finish_responder_establish(link_id, rtt_secs, now_ms, packet.context);
+            } else {
+                crate::tracing::debug!(
+                    target: "leviculum_core::link",
+                    "LINK_PKT_DROPPED link={} state={:?} ctx={:?}",
+                    HexShort(link_id.as_bytes()),
+                    self.links.get(&link_id).map(|l| l.state()),
+                    packet.context,
+                );
+                self.drop_link_packet(packet, rx, DropReason::LinkNotActive);
+                return;
+            }
+        }
+
         match packet.context {
             PacketContext::Lrrtt => self.handle_rtt_packet(link_id, packet, rx, now_ms),
             PacketContext::Keepalive => self.handle_keepalive_packet(link_id, packet, now_ms),
@@ -1707,9 +1747,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         let encrypted_data = packet.data.as_slice();
         let Ok(rtt_secs) = link.process_rtt(encrypted_data, now_ms) else {
-            // The responder link stays in its handshake, and every packet
-            // after this one on it is a `link-not-active` drop: this line
-            // names where that chain starts (858 §Q6).
+            // The responder link stays in its handshake until a packet of
+            // the initiator decrypts on it (1624); every one before that is
+            // a `link-not-active` drop, and this line names where that
+            // chain starts (858 §Q6).
             crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "RTT packet did not decrypt or parse, ignoring"
@@ -1717,23 +1758,36 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.drop_link_packet(packet, rx, DropReason::RttInvalid);
             return;
         };
+        self.finish_responder_establish(link_id, rtt_secs, now_ms, packet.context);
+    }
+
+    /// The responder side of an establishment, once its link has gone
+    /// Active: on the RTT packet, or on the first other packet of the
+    /// initiator that decrypted when the RTT was lost (1624). `via` is the
+    /// context of the packet that did it.
+    fn finish_responder_establish(
+        &mut self,
+        link_id: LinkId,
+        rtt_secs: f64,
+        now_ms: u64,
+        via: PacketContext,
+    ) {
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return;
+        };
         link.update_keepalive_from_rtt(rtt_secs);
         link.mark_established(now_ms);
         link.set_phase(LinkPhase::Established);
         crate::tracing::debug!(
-            "Link <{}> established (responder), RTT {:.3}s",
-            HexShort(link_id.as_bytes()),
-            rtt_secs
-        );
-        crate::tracing::debug!(
             target: "leviculum_core::link",
-            "LINK_ESTAB link={} rtt_ms={} keepalive_ms={} stale_ms={} inactivity_timeout_ms={} hops={} initiator=false",
+            "LINK_ESTAB link={} rtt_ms={} keepalive_ms={} stale_ms={} inactivity_timeout_ms={} hops={} initiator=false via={:?}",
             HexShort(link_id.as_bytes()),
             link.rtt_ms(),
             link.keepalive_ms(),
             link.stale_time_ms(),
             link.stale_close_timeout_ms(),
             link.hops(),
+            via,
         );
         self.events.push(NodeEvent::LinkEstablished {
             link_id,
