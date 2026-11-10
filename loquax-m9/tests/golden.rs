@@ -27,6 +27,7 @@ use leviculum_lxmf::lev::{
 use leviculum_ui::input::InputBuffer;
 use leviculum_ui::style::RLine;
 use leviculum_ui::text::fit_width;
+use loquax::home::board::Word;
 use loquax::outbox::OutboxEvent;
 use loquax::store::Store;
 use loquax::ui::scene::{LayoutClass, Scene};
@@ -1157,4 +1158,225 @@ fn back_leaves_the_chat_after_an_enter_in_it() {
         loquax_m9::group::Place::List,
         "one Back leaves the chat"
     );
+}
+
+mod reply_scene {
+    include!("../../loquax/tests/support/reply_scene.rs");
+}
+
+/// The M9 on Anna's chat of the shared fixture (1451): her question, her
+/// photo, our reply quoting her question, her thumbs up on our reply, her
+/// last line; the clock at 09:30, the chat open with the keys on its
+/// bubbles, the board's screen and size.
+fn reply_model() -> UiModel<Field> {
+    let mut model = UiModel::<Field>::new(&[]);
+    model.address = Some([0x30; 16]);
+    model.viewing = screen::viewing(Size::DEFAULT);
+    model.selected = reply_scene::reply_scene(&mut model, 1_799_971_200, 3600);
+    model.focus = Pane::Messages;
+    model.toasts.clear();
+    model
+}
+
+/// The row of `rows` that holds `words`, the lowest.
+fn row_with(rows: &[String], words: &str) -> usize {
+    rows.iter()
+        .rposition(|r| r.contains(words))
+        .unwrap_or_else(|| panic!("{words:?} is not on the screen: {rows:#?}"))
+}
+
+/// 1451, the walk's blind spots, the reply: `m9-reply.png` is Anna's chat
+/// as the M9 opens it, the cursor on her newest line. Our reply carries
+/// its quote as the bubble's first line, `> Kommst du morgen mit zum
+/// Markt?` (`chat::block` draws `> ` and the quote's first line, in
+/// italics), above our text, in our bubble on the right.
+/// Her photo stands in the same frame as its words, `[#] Photo, 185 KB`,
+/// under her question; `m9-photo.png` pins the frame with the cursor on
+/// it (two presses up), which differs only in the selection bar.
+#[test]
+fn a_reply_and_a_photo_are_the_golden_frames() {
+    let mut model = reply_model();
+    let rows = text_of(&model);
+    let quote = row_with(&rows, "> Kommst du morgen mit zum Markt?");
+    let reply = row_with(&rows, "Ja, um zehn am Brunnen");
+    assert_eq!(quote + 1, reply, "the quote heads our bubble: {rows:#?}");
+    let photo = row_with(&rows, "[#] Photo, 185 KB");
+    assert!(
+        row_with(&rows, "Kommst du morgen mit zum Markt?  ") < photo && photo < quote,
+        "her question, her photo, our reply: {rows:#?}"
+    );
+    assert!(rows[row_with(&rows, "Super, bis morgen")].starts_with('▌'));
+    check("m9-reply.png", &shown(&model));
+
+    press(&mut model, M9Key::Up);
+    press(&mut model, M9Key::Up);
+    let rows = text_of(&model);
+    assert!(
+        rows[row_with(&rows, "[#] Photo, 185 KB")].starts_with('▌'),
+        "the cursor on the photo: {rows:#?}"
+    );
+    check("m9-photo.png", &shown(&model));
+}
+
+/// 1451, the reaction: `m9-reaction.png` is the chat with the cursor on
+/// our reply, the bubble Anna put her thumbs up on. The M9 draws no
+/// reaction: `chat::block` lays the quote, the media, the text and the
+/// time with its mark, and never reads the bubble's chips, so the thumbs
+/// up is nowhere on the screen (a finding of the walk, not a choice).
+/// The frame is pinned as it is; the assertion below says what it shows.
+#[test]
+fn a_reaction_is_not_drawn_on_the_m9() {
+    let mut model = reply_model();
+    press(&mut model, M9Key::Up);
+    let rows = text_of(&model);
+    let reply = row_with(&rows, "Ja, um zehn am Brunnen");
+    assert!(rows[reply].starts_with('▌'), "{rows:#?}");
+    assert!(
+        rows.iter()
+            .all(|r| !r.contains('\u{1F44D}') && !r.contains("+1")),
+        "the M9 draws no reaction chip: {rows:#?}"
+    );
+    check("m9-reaction.png", &shown(&model));
+}
+
+/// 1451, a reply being written: `m9-reply-compose.png` is the chat after
+/// `reply_composing` (the draft "Ich bring Kaffee mit" answering Anna's
+/// last line) and `i`, which gives the compose line the keys, the caret
+/// after the text. The M9 shows the text alone: its compose line
+/// (`chat::compose_line`) reads the scene's `Compose::text` and never its
+/// `reply`, so nothing on the screen says which line the reply answers.
+#[test]
+fn a_reply_being_written_is_the_golden_frame() {
+    let mut model = reply_model();
+    reply_scene::reply_composing(&mut model);
+    press(&mut model, M9Key::Char('i'));
+    assert_eq!(model.focus, Pane::Compose);
+    assert_eq!(model.compose.value(), reply_scene::REPLY_DRAFT);
+    let scene = screen::scene(&model);
+    let compose = &scene.chat.as_ref().expect("the chat").compose;
+    assert_eq!(compose.reply, Some(reply_scene::REPLY_LAST));
+    let rows = text_of(&model);
+    assert_eq!(
+        rows.last().map(|r| r.trim_end().to_string()).as_deref(),
+        Some(" Ich bring Kaffee mit"),
+        "the compose line holds the draft and nothing of the reply: {rows:#?}"
+    );
+    check("m9-reply-compose.png", &shown(&model));
+}
+
+/// The house key's overview (1532) drawn as the board draws it
+/// (`Renderer::text` over `Overview::lines`), open, in the default size,
+/// in `lang`.
+fn overview_frame(lang: Lang) -> (Frame, Vec<String>) {
+    let mut overview = loquax_m9::house::Overview::new(Size::DEFAULT);
+    overview.open = true;
+    let look = Look::m9(lang, Some(now()));
+    let (cols, rows) = Size::DEFAULT.grid();
+    let words = overview
+        .lines(&look, cols, rows)
+        .iter()
+        .map(row_text)
+        .collect();
+    let mut frame = Frame::new();
+    let mut renderer = Renderer::new(&mut frame).expect("renderer");
+    renderer.set_size(Size::DEFAULT);
+    renderer
+        .text(|cols, rows| overview.lines(&look, cols, rows))
+        .expect("draw");
+    drop(renderer);
+    (frame, words)
+}
+
+/// 1451, the M9's settings: the M9 has no settings screen (the model's
+/// settings are one of the states `group::close_unshown` closes); what it
+/// has is the house key's overview (`house.rs`, 1532), its one row the
+/// type switch. `m9-settings.png` is that page in English ("Overview",
+/// "Text: small | large"), `m9-settings-de.png` in German ("Übersicht",
+/// "Schrift: klein | groß"): its words go through the catalogue.
+#[test]
+fn the_house_keys_overview_is_the_settings_golden() {
+    let (en, rows) = overview_frame(Lang::En);
+    assert!(rows[0].starts_with(" Overview"), "{rows:#?}");
+    assert!(rows[2].contains("Text: small | large"), "{rows:#?}");
+    check("m9-settings.png", &en);
+    let (de, rows) = overview_frame(Lang::De);
+    assert!(rows[0].starts_with(" Übersicht"), "{rows:#?}");
+    assert!(rows[2].contains("Schrift: klein | groß"), "{rows:#?}");
+    check("m9-settings-de.png", &de);
+    assert_ne!(en.pixels(), de.pixels());
+}
+
+/// The board's chats list (the fixture's, in English) with `word` at the
+/// top bar's right end, as the board's look carries the home's word.
+fn list_with_word(word: Option<Word>) -> (Frame, String) {
+    let mut model = loquax_m9::fixture::model();
+    model.lang = Lang::En;
+    let look = Look {
+        home: word,
+        ..Look::of(&model)
+    };
+    let scene = screen::scene(&model);
+    let (cols, rows) = grid(&model);
+    let bar = row_text(&screen::lines(&scene, &look, cols, rows)[0]);
+    (draw_sized(&scene, &look, screen::size_of(&model)), bar)
+}
+
+/// 1451, the home's words in the top bar (1415, `loquax::home::board::
+/// Word`), which no golden showed before. `m9-joining.png`: the pairing
+/// screen with a whole code typed and Enter pressed, the join running,
+/// its bar "Joining your mailbox" where it said "Link this M9 to your
+/// mailbox" (the board keeps the pairing on the screen until the home
+/// takes the code). `m9-offline.png`: the chats list while the mailbox is
+/// out of reach, "Mailbox unreachable" at the bar's right end.
+/// `m9-online.png`: the return, the bar's right end with the word for
+/// `Connected`, whose catalogue sentence ("You. Your mailbox is
+/// connected.") is longer than the bar and is cut there.
+#[test]
+fn the_homes_words_in_the_top_bar_are_golden_frames() {
+    use loquax::home::code::HomeCode;
+    use loquax_m9::pair::{self, Pairing};
+    let code = HomeCode {
+        public_key: core::array::from_fn(|i| i as u8),
+        token: [7; 16],
+    };
+    let mut pairing = Pairing::new();
+    let mut got = None;
+    for c in code.encode().chars() {
+        got = got.or(pairing.key(&event(M9Key::Char(c))));
+    }
+    got = got.or(pairing.key(&event(M9Key::Enter)));
+    assert_eq!(got, Some(code), "the code is taken");
+    let model = loquax_m9::fixture::model();
+    let look = Look {
+        row: 0,
+        home: Some(Word::Joining),
+        lang: Lang::En,
+        ..Look::of(&model)
+    };
+    let (cols, rows) = Size::DEFAULT.grid();
+    let lines = pair::screen(&pairing, Some(Word::Joining), &look, cols, rows);
+    assert!(
+        row_text(&lines[0]).contains("Joining your mailbox"),
+        "{:?}",
+        row_text(&lines[0])
+    );
+    let mut joining = Frame::new();
+    let mut renderer = Renderer::new(&mut joining).expect("renderer");
+    pair::draw(&mut renderer, &pairing, Some(Word::Joining), &look).expect("draw");
+    drop(renderer);
+    check("m9-joining.png", &joining);
+
+    let (none, plain) = list_with_word(None);
+    let (offline, bar) = list_with_word(Some(Word::Unreachable));
+    assert!(
+        bar.trim_end().ends_with("Mailbox unreachable"),
+        "{bar:?} against {plain:?}"
+    );
+    check("m9-offline.png", &offline);
+    let (online, bar) = list_with_word(Some(Word::Connected));
+    assert!(bar.contains("You. Your"), "{bar:?}");
+    assert!(!bar.contains("unreachable"), "{bar:?}");
+    check("m9-online.png", &online);
+    assert_ne!(none.pixels(), offline.pixels());
+    assert_ne!(offline.pixels(), online.pixels());
 }
