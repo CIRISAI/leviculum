@@ -2,6 +2,7 @@ package network.leviculum.loquax;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -58,6 +59,8 @@ final class ExploreRowsTest {
         aTapWorksWhileTheChipShows();
         atRestAtTheTopARefreshAlsoSorts();
         aWaitingAnswerWithFewerRowsKeepsTheOthers();
+        backFromAPageKeepsTheRowsAndTheChip();
+        aTapOnTheSectionRowSurvivesAnAnswerBeforeItsClick();
 
         check(ExploreRows.id("page:aa") == ExploreRows.id("page:aa"), "an id is stable");
         check(ExploreRows.id("page:aa") != ExploreRows.id("page:ab"), "two rows, two ids");
@@ -310,11 +313,15 @@ final class ExploreRowsTest {
         check(walk.up(first, first + 10) == ExploreRows.HELD, "nothing waited for the lift");
         List<String> next = new ArrayList<String>(list);
         next.add(2, "page:heard");
-        check(walk.offer(next, first, first + 10, false) == ExploreRows.SHOWN,
-                "a page above the screen shows at once, unseen");
-        check(!aimed.equals(walk.at(tap)), "the control lands one row up: " + walk.at(tap));
+        // Since 1659 (walk 10, 51) the answer waits for the owed click,
+        // which the adapter told meanwhile would have cost.
+        check(walk.offer(next, first, first + 10, false) == ExploreRows.HELD,
+                "a page above the screen waits for the click");
         hit = walk.hit(tap);
         check(aimed.equals(hit), "the click opens " + aimed + ", not " + hit);
+        check(walk.settle(first, first + 10) == ExploreRows.SHOWN,
+                "then it shows at once, unseen");
+        check(!aimed.equals(walk.at(tap)), "the control, by position, lands one row up: " + walk.at(tap));
         // A click with no finger before it (a key, accessibility) is the
         // row at its position, and a press is used once.
         check(walk.hit(5).equals(walk.at(5)), "a click without a press");
@@ -561,6 +568,122 @@ final class ExploreRowsTest {
         check(held.offer(after, 1, 5, false) == ExploreRows.HELD, "held");
         check(held.size() == before.size(), "held, every row stays: " + held.size());
         check(held.at(3).startsWith("server:whatcom"), "held, Whatcom stays: " + held.at(3));
+    }
+
+    /**
+     * Walk 10 of 1659, 50: the chip said "8 neue Seiten", the reader opened
+     * rns.moscow and came back; the list had applied the waiting order,
+     * the chip was gone and other rows stood where rns.moscow had stood
+     * (three times). Coming back is no verb of the reader's on the list:
+     * the rows stay, the chip stays, and only the chip or the top at rest
+     * shows what waits. The control: the pane before 1659 offered the
+     * answer as its own verb's ({@code force}), which moved the rows.
+     */
+    private static void backFromAPageKeepsTheRowsAndTheChip() {
+        List<String> before = explore(30);
+        List<String> after = new ArrayList<String>(before);
+        for (int i = 0; i < 8; i++) {
+            after.add(12, "page:new" + i);
+        }
+        int first = 10;
+        int last = 18;
+        long now = 100_000;
+        for (boolean control : new boolean[] {false, true}) {
+            ExploreRows<String> rows = new ExploreRows<String>(KEYS);
+            rows.offer(before);
+            rows.touched(now - 60_000);
+            check(rows.offer(after, first, last, false, false, now) == ExploreRows.WAITING,
+                    "new pages on screen wait");
+            String aimed = rows.at(first + 2);
+            // The page opened, read, Back: the same answer, or a newer one.
+            int said = control ? rows.offer(after, first, last, true, false, now + 30_000)
+                    : rows.back(after, first, last, false, now + 30_000);
+            if (control) {
+                check(said == ExploreRows.SHOWN, "the control applies it");
+                check(!aimed.equals(rows.at(first + 2)), "the control moves the row: " + rows.at(first + 2));
+                check(!rows.waits(), "the control's chip is gone");
+                continue;
+            }
+            check(said == ExploreRows.WAITING, "back: it still waits: " + said);
+            check(aimed.equals(rows.at(first + 2)), "back: the row stays: " + rows.at(first + 2));
+            check(rows.waits() && rows.fresh() == 8, "back: the chip counts eight: " + rows.fresh());
+            check(rows.apply(), "the chip shows them");
+            check(rows.size() == after.size(), "all of them: " + rows.size());
+        }
+        // The top at rest still takes it at once.
+        ExploreRows<String> top = new ExploreRows<String>(KEYS);
+        top.offer(before);
+        top.touched(now - 60_000);
+        check(top.offer(after, 0, 14, false, false, now) == ExploreRows.WAITING, "waits");
+        check(top.back(after, 0, 14, true, now) == ExploreRows.SHOWN, "back at the top at rest: shown");
+    }
+
+    /**
+     * Walk 10 of 1659, 51: a tap on "Räume öffnen", the section's row
+     * under 100 pages, flashed and opened nothing, while the chip came.
+     * ListView takes the click at the lift and runs it a moment later
+     * (AOSP {@code onTouchUp} posts it after the pressed state's
+     * duration); a {@code notifyDataSetChanged} before it ran sets
+     * {@code mDataChanged}, and {@code PerformClick} drops the click. The
+     * shape of 1653 with the answer that shows at once: pages heard above
+     * the screen land while the finger is down (offered at the lift) or
+     * between the lift and the click (the answer to the lift's own
+     * {@code touch} verb), anchored, so the row stays at its pixel and
+     * yet the adapter is told. The answer that waits (the order chip) was
+     * no harm already. While a click is owed, an answer waits for it and
+     * is offered once the click ran.
+     */
+    private static void aTapOnTheSectionRowSurvivesAnAnswerBeforeItsClick() {
+        List<String> before = new ArrayList<String>();
+        before.add("title:pages");
+        before.add("heading:Heute");
+        for (int i = 0; i < 100; i++) {
+            before.add("page:" + i);
+        }
+        before.add("title:rooms");
+        before.add("note:joined_empty");
+        before.add("open:rooms");
+        before.add("heading:servers");
+        before.add("server:a");
+        before.add("server:b");
+        before.add("server:c");
+        int open = before.indexOf("open:rooms");
+        int first = open - 4;
+        int last = open + 5;
+        // Pages heard above the screen: shown at once, anchored.
+        List<String> above = new ArrayList<String>(before);
+        above.add(2, "page:fresh");
+        // The servers reordered on screen: it waits, the order chip.
+        List<String> reordered = new ArrayList<String>(before);
+        Collections.swap(reordered, reordered.size() - 1, reordered.size() - 3);
+        String[] cases = {"pages above, while down", "pages above, before the click",
+            "order on screen, while down"};
+        for (int kind = 0; kind < 3; kind++) {
+            ExploreRows<String> rows = new ExploreRows<String>(KEYS);
+            rows.offer(before);
+            Tap list = new Tap();
+            rows.press(open);
+            rows.down();
+            if (kind != 1) {
+                list.answer(rows, kind == 0 ? above : reordered, first, last);
+            }
+            list.lift(rows, first, last);
+            if (kind == 1) {
+                list.answer(rows, above, first, last);
+            }
+            String hit = list.click(rows, open);
+            check(hit != null, cases[kind] + ": ListView did not drop the click");
+            check("open:rooms".equals(hit), cases[kind] + ": the tap opens the rooms: " + hit);
+            // Once the click ran, what came is offered as the screen stands.
+            int shift = kind == 2 ? 0 : 1;
+            int said = rows.settle(first + shift, last + shift);
+            if (kind == 2) {
+                check(rows.waits() && rows.fresh() == 0, "the order chip: " + rows.fresh());
+            } else {
+                check(said == ExploreRows.SHOWN, cases[kind] + ": offered after the click: " + said);
+                check(rows.size() == above.size(), cases[kind] + ": the new page is in: " + rows.size());
+            }
+        }
     }
 
     private static void check(boolean ok, String what) {

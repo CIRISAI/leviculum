@@ -16,6 +16,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
@@ -135,6 +136,15 @@ final class ExplorePane {
     private String drawnFor;
     /** What the tab showed last: Back decides by it. */
     private Map<String, Object> last;
+    /** The next answer comes after Back from what the list opened (1659, walk 10, 50). */
+    private boolean returning;
+    /** The bar over the list (1659, walk 10, 54): Seiten · Räume · Server, a tap jumps there. */
+    private final LinearLayout jumps;
+    private final TextView[] jump = new TextView[3];
+    private static final String[] JUMP_TO = {"title:pages", "title:rooms", "heading:servers"};
+    private static final String[] JUMP_WORDS = {"pages_title", "rooms_title", "servers_title"};
+    private static final String[] JUMP_TAGS = {"explore_jump_pages", "explore_jump_rooms",
+        "explore_jump_servers"};
     /** The server's sheet on screen, its server, its body and what it shows. */
     private AlertDialog sheet;
     private String sheetFor = "";
@@ -218,6 +228,39 @@ final class ExplorePane {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         column.addView(top);
 
+        // Three chips that jump to the list's sections (1659, walk 10, 54:
+        // "Räume öffnen" was 20 swipes under 100 pages). The sections keep
+        // their order; the bar stays over the list.
+        jumps = new LinearLayout(activity);
+        jumps.setPadding(dp(12), 0, dp(12), dp(4));
+        jumps.setGravity(Gravity.CENTER_VERTICAL);
+        for (int i = 0; i < jump.length; i++) {
+            final int section = i;
+            TextView chipView = new TextView(activity);
+            chipView.setTextSize(14);
+            chipView.setSingleLine(true);
+            chipView.setTextColor(activity.getColor(R.color.accent));
+            chipView.setPadding(dp(14), dp(6), dp(14), dp(6));
+            android.graphics.drawable.GradientDrawable outline =
+                    new android.graphics.drawable.GradientDrawable();
+            outline.setCornerRadius(dp(16));
+            outline.setStroke(dp(1), activity.getColor(R.color.accent));
+            chipView.setBackground(outline);
+            chipView.setTag(JUMP_TAGS[i]);
+            chipView.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    jumpTo(section);
+                }
+            });
+            LinearLayout.LayoutParams gap = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            gap.setMarginEnd(dp(8));
+            jumps.addView(chipView, gap);
+            jump[i] = chipView;
+        }
+        column.addView(jumps);
+
         // New pages that would move a row on screen wait behind this chip
         // (1621); a tap shows them, from the top. It floats over the list
         // (1629, walk 3: as a row above it, it pushed every row 87 px down
@@ -287,12 +330,15 @@ final class ExplorePane {
                 // position now (1632, walk 4: an answer between the lift
                 // and this click had put the row above there).
                 tapped(rows.hit(position));
+                // What came while the click was owed, now (1659, walk 10, 51).
+                settled();
             }
         });
         list.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
             @Override
             public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
                 Row row = rows.hit(position);
+                settled();
                 if (row.kind != Row.PAGE) {
                     return false;
                 }
@@ -334,10 +380,11 @@ final class ExplorePane {
         View.OnLayoutChangeListener edge = new View.OnLayoutChangeListener() {
             @Override
             public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
-                fresh.setTranslationY(top.getBottom() - fresh.getHeight() / 2f);
+                fresh.setTranslationY(jumps.getBottom() - fresh.getHeight() / 2f);
             }
         };
         top.addOnLayoutChangeListener(edge);
+        jumps.addOnLayoutChangeListener(edge);
         fresh.addOnLayoutChangeListener(edge);
     }
 
@@ -370,8 +417,54 @@ final class ExplorePane {
     /** The tab came to the front: its list, nothing it opened. */
     void show() {
         forced = true;
+        returning = false;
         verb("tab", "", "", 0);
     }
+
+    /**
+     * Back from a page or the rooms the list opened (1659, walk 10, 50):
+     * the list as it stood, the chip with it; no verb of the reader's.
+     */
+    void returned() {
+        forced = false;
+        returning = true;
+        verb("tab", "", "", 0);
+    }
+
+    /** A jump chip: the section's heading to the list's top (1659, walk 10, 54). */
+    private void jumpTo(int section) {
+        int at = rows.find(JUMP_TO[section]);
+        if (at < 0) {
+            return;
+        }
+        rows.touched(SystemClock.uptimeMillis());
+        rows.release();
+        list.setSelectionFromTop(at, 0);
+        restLater();
+    }
+
+    /** The click owed ran, or will not come: what came meanwhile is offered (1659, 51). */
+    private void settled() {
+        list.removeCallbacks(settleLater);
+        int top = topOfFirst();
+        int said = rows.settle(firstOnScreen(), list.getLastVisiblePosition());
+        if (said == ExploreRows.SHOWN) {
+            place(top);
+        } else if (said == ExploreRows.WAITING) {
+            rebind();
+        }
+        chip();
+    }
+
+    /** No click came after the lift (a row that takes none): settle anyway. */
+    private final Runnable settleLater = new Runnable() {
+        @Override
+        public void run() {
+            if (!screen.isDestroyed()) {
+                settled();
+            }
+        }
+    };
 
     /** The bar's magnifier on Explore (walk 14): the tab's own field, with the keyboard. */
     void focus() {
@@ -413,6 +506,9 @@ final class ExplorePane {
             }
             chip();
             restLater();
+            // A click owed that never comes still lets what waits through.
+            list.removeCallbacks(settleLater);
+            list.postDelayed(settleLater, ViewConfiguration.getPressedStateDuration() + 200);
             verb("touch", "", "", 0);
         }
     }
@@ -649,8 +745,20 @@ final class ExplorePane {
         boolean own = forced || searched;
         forced = false;
         int top = topOfFirst();
-        int said = rows.offer(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(), own,
-                atTop(), SystemClock.uptimeMillis());
+        int said;
+        if (returning && !own) {
+            said = rows.back(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(),
+                    atTop(), SystemClock.uptimeMillis());
+        } else {
+            said = rows.offer(flatten(shown), firstOnScreen(), list.getLastVisiblePosition(), own,
+                    atTop(), SystemClock.uptimeMillis());
+        }
+        returning = false;
+        for (int i = 0; i < jump.length; i++) {
+            String words = Core.str(shown, JUMP_WORDS[i]);
+            jump[i].setText(words);
+            jump[i].setVisibility(words.isEmpty() ? View.GONE : View.VISIBLE);
+        }
         if (said == ExploreRows.SHOWN) {
             place(top);
         } else if (said == ExploreRows.WAITING) {

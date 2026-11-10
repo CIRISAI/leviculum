@@ -425,6 +425,9 @@ public class ConversationsActivity extends Activity implements Events.Listener {
      * the browser, a hub it picks the rooms; both come back here.
      */
     private void explore() {
+        // Back from what Explore opened keeps its list as it stood (1659,
+        // walk 10, 50); the tab's button shows it anew.
+        boolean returning = onBrowse || onRooms;
         if (query.getVisibility() == View.VISIBLE) {
             searching(false);
         }
@@ -474,7 +477,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         boolean wide = getResources().getConfiguration().orientation
                 == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
         findViewById(R.id.bar).setVisibility(wide ? View.GONE : View.VISIBLE);
-        explorePane.show();
+        if (returning) {
+            explorePane.returned();
+        } else {
+            explorePane.show();
+        }
     }
 
     /** Explore's list gives way to what it opened; the model keeps it open beneath. */
