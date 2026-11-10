@@ -968,6 +968,7 @@ public class ChatActivity extends Activity implements Events.Listener {
                     public void onFinger() {}
                 });
                 map.setId(R.id.sheet_map);
+                map.ownOnly();
                 long lat = Core.num(answer, "fix_lat_e6");
                 long lon = Core.num(answer, "fix_lon_e6");
                 map.centreAt(lat, lon, 16_000);

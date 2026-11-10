@@ -377,7 +377,12 @@ fn the_first_start_has_one_primary_button_and_the_command_stands_alone() {
         Button join = button(getString(R.string.join_existing));
         Button move = button(getString(R.string.move_from_old));
         Button have = button(getString(R.string.have_address));"#;
-    assert_eq!(problems(before).len(), 4, "the control: {:?}", problems(before));
+    assert_eq!(
+        problems(before).len(),
+        4,
+        "the control: {:?}",
+        problems(before)
+    );
 
     let command = "loquax mailbox setup";
     for dir in LANGUAGES {

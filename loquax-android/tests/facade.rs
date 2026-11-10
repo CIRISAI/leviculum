@@ -4397,7 +4397,8 @@ async fn the_compose_bar_stages_a_camera_photo_through_the_gallery_path() {
         session.request(Request::NoFix).expect("no fix");
         let none = bar(&session);
         assert_eq!(none.sheet, "position");
-        assert_eq!(none.sheet_title, "My position");
+        // Whom it goes to (1448): the peer's name, nameless here.
+        assert_eq!(none.sheet_title, "Send position to Unknown");
         assert!(!none.has_fix);
         assert_eq!(none.fix_words, "Loquax does not know where you are yet.");
         assert_eq!(none.sheet_rows[0].id, "sheet_location_on");

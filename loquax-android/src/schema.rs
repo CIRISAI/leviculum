@@ -2761,6 +2761,11 @@ pub struct MapRequest {
     /// inside the tracks' time window in view.
     #[serde(default)]
     pub fit_window: bool,
+    /// The position sheet's map (1448, walk finding 16): the own fix
+    /// alone, no one else's pin or track and never the radar; where no
+    /// region covers the fix, the world's outline around it.
+    #[serde(default)]
+    pub own_only: bool,
 }
 
 /// One region of the maps directory, for the Maps page (1201, 1207).

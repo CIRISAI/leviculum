@@ -2916,3 +2916,54 @@ fn the_screen_at_its_zoom_draws_first_on_the_phone() {
         "a cell before the screen's box, or no tile of the screen: {late:?}"
     );
 }
+
+/// The position sheet's map (1448, UI walk 1 finding 16): a radar without
+/// a map, the own fix under a pin's number over the ring's label, and
+/// nothing saying whose dot it was. With `own_only` the frame draws the
+/// own fix alone, no one's pin or cluster and never the radar; where no
+/// region covers the fix, the world's outline around it at the outline's
+/// deepest zoom. Control: the same request without it is the radar at the
+/// sheet's z16, with the pin as a mark.
+#[test]
+fn the_position_sheet_shows_a_map_with_the_own_dot_alone() {
+    // Bremen, far from the Florence region the home holds.
+    let (lat, lon) = (53_105_960, 9_159_300);
+    let sheet = |own_only: bool| {
+        let home = home();
+        let ask = MapRequest {
+            x: None,
+            y: None,
+            zoom: None,
+            at_lat_e6: Some(lat),
+            at_lon_e6: Some(lon),
+            at_zoom_milli: Some(16_000),
+            own_lat_e6: Some(lat),
+            own_lon_e6: Some(lon),
+            avatars: true,
+            own_only,
+            ..request(home.path(), false)
+        };
+        let pins = vec![
+            pin(0x21, "Anna", 53.1061, 9.1597),
+            pin(0x22, "Ben", 53.1058, 9.1590),
+        ];
+        frame(&loquax_android::map::render(&ask, Some(pins), now())).0
+    };
+    let shown = sheet(true);
+    assert!(
+        shown.zoom <= leviculum_map::outline::MAX_ZOOM,
+        "the outline's zoom, not the radar's: {}",
+        shown.zoom
+    );
+    assert!(shown.marks.is_empty(), "nobody else: {:?}", shown.marks);
+    assert_eq!(shown.pins, 0);
+    let (x, y) = (shown.own_x.expect("own x"), shown.own_y.expect("own y"));
+    assert!(
+        (x - W as i32 / 2).abs() <= 1 && (y - H as i32 / 2).abs() <= 1,
+        "the own dot in the middle: {x},{y}"
+    );
+
+    let control = sheet(false);
+    assert!(control.zoom >= 15, "the radar's zoom: {}", control.zoom);
+    assert!(!control.marks.is_empty(), "the pins as marks");
+}

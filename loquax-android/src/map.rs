@@ -415,6 +415,12 @@ impl Renderer {
         pins: &[MapPin],
         draw: impl FnOnce(&mut Frames, &Ask<'_>) -> Result<Framed, String>,
     ) -> MapShown {
+        // The position sheet's map (1448, walk finding 16) shows the own
+        // dot alone: nobody else's pin, cluster or track.
+        let pins = match request.own_only {
+            true => &[][..],
+            false => pins,
+        };
         let started = Instant::now();
         let mut notice = None;
         let now = self.now_ms();
@@ -470,6 +476,17 @@ impl Renderer {
                     )
                 }
                 None => fit_to(&mut view, fit_at(at, area, &setup)),
+            }
+            if request.own_only && radar::shows(&view.at_zoom(view.tile_zoom()), &setup.regions) {
+                // No region at the own fix (1448): the world's outline
+                // around it, a map and not a radar.
+                view = ExactView::new(
+                    at,
+                    (u32::from(leviculum_map::outline::MAX_ZOOM) * MILLI)
+                        .clamp(floor, ceiling.max(floor)),
+                    view.size().0,
+                    view.size().1,
+                );
             }
             self.fitted_at = None;
             if let Some(want) = want_place(at, &setup.regions) {
@@ -578,15 +595,20 @@ impl Renderer {
             .as_deref()
             .and_then(TrackWindow::of_word);
         let unit = (24.0 - f64::from(view.tile_zoom())).exp2();
-        let (tracks, window, lang) = match crate::current() {
+        let (mut tracks, window, lang) = match crate::current() {
             Some(session) => session.map_tracks(unit, scale, chosen),
             None => (Vec::new(), TrackWindow::default(), Lang::En),
         };
+        if request.own_only {
+            tracks.clear();
+        }
         // No region touches the view: the radar (1386), every pin saying
         // how far and which way it is from the centre.
+        // Never under the position sheet (1448): its own dot alone over
+        // rings read as a place called by a number.
         let radar = match radar::shows(&view.at_zoom(rest_zoom), &setup.regions) {
-            true => radar::radar(pins, view.unit(), view.size(), lang),
-            false => None,
+            true if !request.own_only => radar::radar(pins, view.unit(), view.size(), lang),
+            _ => None,
         };
         let mut labelled;
         let pins = match &radar {

@@ -974,11 +974,14 @@ pub struct Colours {
     /// A field's placeholder (1448, walk finding 4): lighter than any
     /// written text, so an empty field never reads as filled.
     pub hint: u32,
+    /// The own position on a map (1448, walk findings 8 and 16): blue, as
+    /// the maps people know draw it. A mark, so 3:1 is its floor.
+    pub own_dot: u32,
 }
 
 impl Colours {
     /// Each colour by its name, in the table's order.
-    pub fn named(&self) -> [(&'static str, u32); 30] {
+    pub fn named(&self) -> [(&'static str, u32); 31] {
         [
             ("background", self.background),
             ("text", self.text),
@@ -1010,6 +1013,7 @@ impl Colours {
             ("rec_red", self.rec_red),
             ("rec_amber", self.rec_amber),
             ("hint", self.hint),
+            ("own_dot", self.own_dot),
         ]
     }
 }
@@ -1046,6 +1050,7 @@ pub const LIGHT: Colours = Colours {
     rec_red: 0xffc62828,
     rec_amber: 0xff9a5b00,
     hint: 0xff8b8e95,
+    own_dot: 0xff1a73e8,
 };
 
 /// The dark theme.
@@ -1080,6 +1085,7 @@ pub const DARK: Colours = Colours {
     rec_red: 0xffee6464,
     rec_amber: 0xffffb74d,
     hint: 0xff7c7f86,
+    own_dot: 0xff8ab4f8,
 };
 
 /// The sizes of a pixel screen, in the phone's dp and sp, which the

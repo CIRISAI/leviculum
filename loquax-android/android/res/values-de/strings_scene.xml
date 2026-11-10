@@ -407,6 +407,7 @@
     <string name="rec_cap">Länger kann eine Sprachnachricht nicht sein</string>
     <string name="scene_attach">Anhängen</string>
     <string name="scene_locate">Meine Position</string>
+    <string name="scene_send_position_to">Position an %1$s senden</string>
     <string name="scene_camera">Foto aufnehmen</string>
     <string name="camera_no_app">Auf diesem Gerät gibt es keine Kamera-App.</string>
     <string name="scene_staged">Foto zum Senden, %1$s</string>

@@ -516,6 +516,7 @@ leviculum_ui::catalogue! {
     // position button and its sheet, the camera and the staged photo.
     Attach = "scene_attach", "Attach", "Anhängen";
     Locate = "scene_locate", "My position", "Meine Position";
+    SendPositionTo = "scene_send_position_to", "Send position to %1$s", "Position an %1$s senden";
     Camera = "scene_camera", "Take a photo", "Foto aufnehmen";
     CameraNoApp = "camera_no_app", "There is no camera app on this device.", "Auf diesem Gerät gibt es keine Kamera-App.";
     Staged = "scene_staged", "Photo to send, %1$s", "Foto zum Senden, %1$s";

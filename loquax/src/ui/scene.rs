@@ -1913,7 +1913,7 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
     };
     let (title, rows, whereabouts) = match open {
         compose::Sheet::Attach { .. } => (
-            StrId::Attach,
+            Text::key(StrId::Attach),
             compose::attach_rows(model.bar.abilities),
             None,
         ),
@@ -1932,8 +1932,12 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
                 fix: fix.map(|f| (f.latitude_e6, f.longitude_e6)),
                 words,
             };
+            // Whom the position goes to (1448, walk finding 16).
             (
-                StrId::Locate,
+                Text::Key(
+                    StrId::SendPositionTo,
+                    Vec::from([Arg::Str(model.names.label(&peer, model.lang))]),
+                ),
                 compose::position_rows(fix, model.bar.abilities, model.map_centre().is_some()),
                 Some(whereabouts),
             )
@@ -1964,10 +1968,10 @@ pub fn bar_sheet<B>(model: &UiModel<B>, peer: [u8; 16]) -> (Option<Sheet>, Optio
         .collect();
     let sheet = Sheet {
         id: NodeId::Sheet,
-        title: Text::key(title),
+        title: title.clone(),
         rows: Vec::new(),
         actions,
-        a11y: A11y::of(NodeId::Sheet, Role::Sheet, Text::key(title)),
+        a11y: A11y::of(NodeId::Sheet, Role::Sheet, title),
     };
     (Some(sheet), whereabouts)
 }
@@ -2770,7 +2774,11 @@ mod tests {
         assert_eq!(there.words.resolve(Lang::En), "Found 5 min ago");
         assert_eq!(there.words.resolve(Lang::De), "Ermittelt vor 5 Min.");
         let sheet = scene.sheet.as_ref().expect("the position sheet");
-        assert_eq!(sheet.title.resolve(Lang::En), "My position");
+        // Whom it goes to (1448, walk finding 16), by the name every
+        // screen gives the peer, in the model's language: nameless here,
+        // so "Unknown".
+        assert_eq!(sheet.title.resolve(Lang::En), "Send position to Unknown");
+        assert_eq!(sheet.title.resolve(Lang::De), "Position an Unknown senden");
         assert_eq!(
             scene
                 .action(NodeId::SheetRow(SheetRow::ShareNow))

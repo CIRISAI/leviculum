@@ -238,6 +238,8 @@ final class MapView extends View {
     private Long ownLat;
     private Long ownLon;
     private Long ownX;
+    /** The position sheet's map (1448): the own dot alone, never the radar. */
+    private boolean ownOnly;
     private Long ownY;
     /** A frame is owed: the view changed since the last request. */
     private boolean owed;
@@ -373,6 +375,19 @@ final class MapView extends View {
             atLat = latE6;
             atLon = lonE6;
             atZoom = zoomMilli;
+            owed = true;
+            notifyAll();
+        }
+    }
+
+    /**
+     * The position sheet's map (1448, walk finding 16): the library draws
+     * the own fix alone, no one's pin and never the radar, and a map of the
+     * world's outline where no region covers it.
+     */
+    void ownOnly() {
+        synchronized (this) {
+            ownOnly = true;
             owed = true;
             notifyAll();
         }
@@ -722,7 +737,10 @@ final class MapView extends View {
         drawMarks(canvas);
     }
 
-    /** The phone's own position (1201): an accent dot in a ring of the background. */
+    /**
+     * The phone's own position (1201): a blue dot in a ring of the background, as the maps people
+     * know draw it (1448, walk findings 8 and 16), never an avatar.
+     */
     private void drawOwn(Canvas canvas) {
         if (ownX == null || ownY == null || ownLat == null) {
             return;
@@ -731,7 +749,7 @@ final class MapView extends View {
         float cy = offY + scale * ownY;
         ring.setColor(getContext().getColor(R.color.background));
         canvas.drawCircle(cx, cy, 9 * density, ring);
-        circle.setColor(getContext().getColor(R.color.accent));
+        circle.setColor(getContext().getColor(R.color.own_dot));
         canvas.drawCircle(cx, cy, 6 * density, circle);
     }
 
@@ -955,6 +973,9 @@ final class MapView extends View {
                     request.put("at_lat_e6", atLat);
                     request.put("at_lon_e6", atLon);
                     if (atZoom != null) request.put("at_zoom_milli", atZoom);
+                }
+                if (ownOnly) {
+                    request.put("own_only", true);
                 }
                 if (ownLat != null) {
                     request.put("own_lat_e6", ownLat);
