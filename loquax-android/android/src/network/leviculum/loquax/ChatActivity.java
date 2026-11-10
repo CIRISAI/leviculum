@@ -28,6 +28,8 @@ import android.view.Gravity;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.AbsListView;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
@@ -669,18 +671,39 @@ public class ChatActivity extends Activity implements Events.Listener {
         super.onDestroy();
     }
 
-    /** Back closes a sheet first, then a selection, then a reply being written, then the screen. */
+    /**
+     * Back closes a sheet first, then a selection, then the keyboard, then
+     * the screen ({@link BackRule}, walk finding 5). A reply being written
+     * stays until its "x" or Send, as WhatsApp has it; leaving keeps it in
+     * the draft.
+     */
     @Override
     public void onBackPressed() {
-        if (sheet != null) {
-            closeSheet();
-        } else if (selection != null) {
-            select(null);
-        } else if (replyTo != null) {
-            replyTo(null);
-        } else {
-            super.onBackPressed();
+        switch (BackRule.next(sheet != null, selection != null, keyboardShown(), replyTo != null)) {
+            case SHEET:
+                closeSheet();
+                break;
+            case SELECTION:
+                select(null);
+                break;
+            case KEYBOARD:
+                InputMethodManager keys = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (keys != null) {
+                    keys.hideSoftInputFromWindow(compose.getWindowToken(), 0);
+                }
+                break;
+            default:
+                super.onBackPressed();
         }
+    }
+
+    /** Whether the keyboard is up; a phone below API 30 closes it before Back reaches the screen. */
+    private boolean keyboardShown() {
+        if (Build.VERSION.SDK_INT < 30) {
+            return false;
+        }
+        WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+        return insets != null && insets.isVisible(WindowInsets.Type.ime());
     }
 
     private void say(String error) {

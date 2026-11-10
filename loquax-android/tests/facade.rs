@@ -4294,6 +4294,21 @@ async fn a_draft_survives_another_chat_and_a_new_session() {
             asked(&session, schema::Query::Messages { peer: a.clone() });
         assert_eq!(messages.draft, "");
         assert_eq!(messages.draft_reply, "");
+        // 1449 item 1 (walk finding 5): the reply chosen, Back (the
+        // keyboard, then the screen: a Close and nothing else since 1449,
+        // no draft without its reply), the chat again, Send: the message
+        // that went out carries the quote.
+        let sent = messages
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.ours && m.body == "half a thought")
+            .expect("the reply sent");
+        assert_eq!(sent.quote_to.as_deref(), Some(target.as_str()), "{sent:?}");
+        assert!(
+            sent.quote.as_deref().is_some_and(|q| !q.is_empty()),
+            "{sent:?}"
+        );
         session.request(Request::Close).expect("close");
         let list: schema::Conversations =
             asked(&session, schema::Query::Conversations { search: None });

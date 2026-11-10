@@ -221,6 +221,10 @@ command:java loquax-android/fling the_server_field_follows_a_typed_code
 command:javac loquax-android/fling the_join_form_says_a_failure_only_after_a_join
 command:java loquax-android/fling the_join_form_says_a_failure_only_after_a_join
 
+# The chat's Back (1449): BackRule.java run with its host test.
+command:javac loquax-android/fling back_closes_the_keyboard_and_keeps_the_reply
+command:java loquax-android/fling back_closes_the_keyboard_and_keeps_the_reply
+
 # A new conversation's picker rows (1448): PeopleRows.java with its host test.
 command:javac loquax-android/fling the_group_picker_is_the_people_list_with_check_marks
 command:java loquax-android/fling the_group_picker_is_the_people_list_with_check_marks

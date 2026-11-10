@@ -411,3 +411,41 @@ fn a_question_that_throws_reaches_its_failure_path() {
     );
     assert!(out.contains("checks passed"), "{out}");
 }
+
+/// The chat's Back (1449 item 1, walk finding 5): `BackRule.java` run on
+/// the host with `tests/java/BackRuleTest.java`. A reply being written
+/// survives Back: the keyboard closes first, the screen leaves with the
+/// reply in the draft. The control in the Java, the rule before, ended it.
+#[test]
+fn back_closes_the_keyboard_and_keeps_the_reply() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("back-rule-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/BackRule.java"))
+        .arg(manifest.join("tests/java/BackRuleTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.BackRuleTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}
