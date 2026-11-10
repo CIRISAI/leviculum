@@ -84,9 +84,9 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 23 | Delete all downloaded maps | `SettingsActivity.java:720` | `loquax/src/gui.rs:1330` | `loquax/src/ui.rs:5819` (palette `delete all maps`), `loquax/src/shell.rs:447` (1371) |
 | 24 | Mesh positions (nodes nearby) | `MapPane.java:483` | `loquax/src/gui.rs:2148` | `loquax/src/tui/map.rs:1540` |
 | 25 | Share the position, once or timed | `ChatActivity.java:977`, `ShareService.java:39` | `loquax/src/gui.rs:1422`, `loquax/src/gui.rs:1430`, position by hand `loquax/src/ui/by_hand.rs:27` (1371) | `loquax/src/ui.rs:5810` (palette `position`), `loquax/src/ui.rs:5814` (`share position`, `stop sharing`) (1371) |
-| 26 | Pin | `ConversationsActivity.java:719` | row menu `loquax/src/gui/chat.rs:2262`, `loquax/src/gui.rs:1682` (1371) | `loquax/src/ui.rs:5704` |
+| 26 | Pin | `ConversationsActivity.java:733` | row menu `loquax/src/gui/chat.rs:2262`, `loquax/src/gui.rs:1682` (1371) | `loquax/src/ui.rs:5704` |
 | 27 | Mute | `ContactActivity.java:479` | row menu (1371) | `loquax/src/ui.rs:5800` (palette `mute`) (1371) |
-| 28 | Archive | `ConversationsActivity.java:649` | row menu (1371) | `loquax/src/ui.rs:5731` |
+| 28 | Archive | `ConversationsActivity.java:663` | row menu (1371) | `loquax/src/ui.rs:5731` |
 | 29 | Block | `ContactActivity.java:447` | row menu (1371) | `loquax/src/ui.rs:5555` |
 | 30 | Verify | `ContactActivity.java:299` | row menu (1371) | `loquax/src/ui.rs:5801` (palette `verify`) (1371) |
 | 31 | Mark unread | `ConversationsActivity.java:643` | row menu (1371) | `loquax/src/ui.rs:5805` (palette `mark unread`) (1371) |
@@ -99,13 +99,13 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 38 | Link a device | `ProfileActivity.java:385` | CLI (`loquax/src/main.rs:241`, `loquax/src/main.rs:225`) | CLI (`loquax/src/main.rs:239`, `loquax/src/main.rs:223`) |
 | 39 | Move the phone | `ProfileActivity.java:433` | MISSING | MISSING |
 | 40 | Backup | `BackupActivity.java:130` | MISSING | MISSING |
-| 41 | Help | `ConversationsActivity.java:671` | `loquax/src/gui.rs:1444`, `loquax/src/gui.rs:2908` (the shared overlay) (1371) | `loquax/src/ui.rs:5657` |
+| 41 | Help | `ConversationsActivity.java:685` | `loquax/src/gui.rs:1444`, `loquax/src/gui.rs:2908` (the shared overlay) (1371) | `loquax/src/ui.rs:5657` |
 | 42 | Settings, nine sections in one order (1450) | `SettingsActivity.java:179` | `loquax/src/gui/chat.rs:435` (gear) | `loquax/src/ui.rs:7722` (`S`, palette `settings`) |
 | 43 | Browse tab | `BrowsePane.java:342` (behind `browse_tab`) | `loquax/src/gui.rs:2933`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1707`, behind `browse_tab` (1369) |
 | 44 | Notifications of new messages | `LoquaxService.java:331` | `loquax/src/gui.rs:427`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:743`, bell and `loquax/src/desktop.rs:118` (1341) |
 | 45 | Icon and application id | `AndroidManifest.xml:69` | `loquax/src/gui.rs:567` (1341) | n/a |
-| 46 | Rooms tab (RRC), a room as a chat (1450) | `RoomsPane.java:306`, behind `rooms_hub` (1384) | `loquax/src/gui/chat.rs:742`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1737`, behind `rooms_hub` (1379) |
-| 47 | Explore: pages and public rooms under one button, the bar's third (1578) | `ExplorePane.java:146`, `loquax-android/src/explore.rs` | `loquax/src/gui/chat.rs:906` | `loquax/src/tui.rs:1888` (`E`, palette `explore`) |
+| 46 | Rooms tab (RRC), a room as a chat (1450) | `RoomsPane.java:309`, behind `rooms_hub` (1384) | `loquax/src/gui/chat.rs:742`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1737`, behind `rooms_hub` (1379) |
+| 47 | Explore: pages and public rooms under one button, the bar's third (1578) | `ExplorePane.java:156`, `loquax-android/src/explore.rs` | `loquax/src/gui/chat.rs:906` | `loquax/src/tui.rs:1888` (`E`, palette `explore`) |
 
 ## Counts
 
