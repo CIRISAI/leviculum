@@ -662,28 +662,32 @@ fn far(hops: Option<u8>) -> Option<Text> {
     }
 }
 
-/// The servers the section lists, in one list (1621): the first
-/// [`super::settings::HUB_PAGE`] shipped ones in the settings' order
-/// (heard first, then the closest), the one in force always among them,
-/// and the reader's own; then the ones heard on the mesh and not shipped.
-/// The settings list every shipped hub; Explore is a list to pick from,
-/// not the whole catalogue.
+/// The servers the section lists, in one list (1621): every server
+/// heard, shipped or not, last seen first, so a server once heard never
+/// leaves the list (1655, walk 9, 44: the list showed only the first
+/// [`super::settings::HUB_PAGE`] shipped ones, and twenty heard after
+/// Whatcom pushed it out); then the shipped ones never heard, in the
+/// file's order, as many as make [`super::settings::HUB_PAGE`] shipped
+/// rows, all of them under a search (Explore is a list to pick from, the
+/// search reaches the whole catalogue); the one in force and the
+/// reader's own always among them.
 fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
     let offered = super::settings::offered_hubs(&model.rooms);
-    let (shipped, heard): (Vec<_>, Vec<_>) = offered.into_iter().partition(|o| o.shipped);
+    let searching = !model.explore.query.trim().is_empty();
+    let heard_shipped = offered.iter().filter(|o| o.heard && o.shipped).count();
+    let mut unheard = super::settings::HUB_PAGE.saturating_sub(heard_shipped);
     let chosen = model.rooms.hub;
-    let mut hubs: Vec<_> = shipped
-        .iter()
-        .take(super::settings::HUB_PAGE)
-        .cloned()
-        .collect();
-    if let Some(hub) = shipped.into_iter().find(|o| Some(o.hash) == chosen) {
-        if !hubs.iter().any(|o| o.hash == hub.hash) {
+    let mut hubs: Vec<super::settings::Offered> = Vec::new();
+    for hub in offered {
+        if hub.heard || searching || Some(hub.hash) == chosen {
+            hubs.push(hub);
+        } else if hub.shipped && unheard > 0 {
+            unheard -= 1;
             hubs.push(hub);
         }
     }
-    if let Some(own) = model.rooms.hub {
-        if !hubs.iter().chain(heard.iter()).any(|o| o.hash == own) {
+    if let Some(own) = chosen {
+        if !hubs.iter().any(|o| o.hash == own) {
             hubs.push(super::settings::Offered {
                 hash: own,
                 name: None,
@@ -701,7 +705,6 @@ fn hub_list<B>(model: &UiModel<B>) -> Vec<super::settings::Offered> {
         let name = hub_name(model, o).resolve(model.lang);
         matches_name(Some(&name), &o.hash, &query)
     };
-    hubs.extend(heard);
     // The suggested one first, the rest in their order (1632, walk 4 new
     // 17: it stood fourth, and a newcomer looks for it on top).
     if let Some(first) = suggested(model) {
@@ -1954,6 +1957,84 @@ mod tests {
         // The control: the order without the hold is the fresh one.
         let fresh: Vec<[u8; 16]> = fresh(&model).into_iter().map(|(k, _)| k.dest).collect();
         assert_eq!(order(&model), fresh);
+    }
+
+    /// A server heard once stays in the list (1655, walk 9, 44: Whatcom
+    /// stood first at 17:03 and was gone at 17:11, while servers heard
+    /// five hours before stayed). Twenty other shipped servers heard over
+    /// the next ten minutes pushed it past the ten shipped ones the list
+    /// showed; the heard ones that are not shipped were never cut.
+    #[test]
+    fn a_server_heard_stays_listed_while_twenty_others_are_heard_after_it() {
+        let shipped = crate::ui::hubs::shipped();
+        assert!(shipped.len() > 22, "the shipped list holds 68");
+        let mut model = phone();
+        let hear = |model: &mut UiModel<Buffer>, hub: &crate::ui::hubs::Hub, at: i64| {
+            update(
+                model,
+                UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                    hash: hub.hash,
+                    name: Some(hub.name.clone()),
+                    hops: Some(3),
+                    first: at,
+                    last: at,
+                    answered: None,
+                })),
+            );
+        };
+        // Another server heard before holds "suggested", which stands
+        // first whatever was heard after it; the one watched is not it.
+        let t0 = NOW - 600;
+        hear(&mut model, &shipped[0], t0 - 60);
+        let first = &shipped[1];
+        hear(&mut model, first, t0);
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let listed = |model: &UiModel<Buffer>, hash: [u8; 16]| {
+            node(model).rooms.hubs.iter().any(|h| h.hash == hash)
+        };
+        assert!(listed(&model, first.hash), "listed when heard");
+        assert_eq!(suggested(&model), Some(shipped[0].hash));
+        for (i, hub) in shipped[2..22].iter().enumerate() {
+            hear(
+                &mut model,
+                hub,
+                t0 + 30 * (i64::try_from(i).unwrap_or(0) + 1),
+            );
+        }
+        assert!(
+            listed(&model, first.hash),
+            "still listed ten minutes and twenty servers later"
+        );
+        // Every one of the 22 heard is listed.
+        for hub in &shipped[..22] {
+            assert!(listed(&model, hub.hash), "{}", hub.name);
+        }
+    }
+
+    /// The search reaches every server Loquax offers (1655, walk 9, 44:
+    /// "Colorado" and "Salon" found nothing while both stood in the
+    /// shipped list, past the ten the list shows).
+    #[test]
+    fn the_search_finds_a_shipped_server_never_heard() {
+        let shipped = crate::ui::hubs::shipped();
+        let Some(colorado) = shipped.iter().find(|h| h.name == "Colorado Mesh") else {
+            panic!("Colorado Mesh is shipped");
+        };
+        let at = shipped.iter().position(|h| h.hash == colorado.hash);
+        assert!(
+            at.is_some_and(|at| at >= crate::ui::settings::HUB_PAGE),
+            "past the first page: {at:?}"
+        );
+        let mut model = phone();
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        explore(&mut model, ExploreEvent::Typed("Colorado".into()));
+        let shown = node(&model);
+        assert!(
+            shown.rooms.hubs.iter().any(|h| h.hash == colorado.hash),
+            "{:?}",
+            shown.rooms.servers_empty
+        );
+        assert_eq!(shown.rooms.servers_empty, None);
     }
 
     /// Searching filters the servers too (1618), by their names.

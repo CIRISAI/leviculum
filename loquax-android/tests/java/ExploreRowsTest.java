@@ -57,6 +57,7 @@ final class ExploreRowsTest {
         aWaitingAnswerStillRefreshesTheWords();
         aTapWorksWhileTheChipShows();
         atRestAtTheTopARefreshAlsoSorts();
+        aWaitingAnswerWithFewerRowsKeepsTheOthers();
 
         check(ExploreRows.id("page:aa") == ExploreRows.id("page:aa"), "an id is stable");
         check(ExploreRows.id("page:aa") != ExploreRows.id("page:ab"), "two rows, two ids");
@@ -531,6 +532,35 @@ final class ExploreRowsTest {
                 "at rest at the top: shown");
         check("server:kj5|gerade eben".equals(rows.at(3)), "sorted: " + rows.at(3));
         check(!rows.waits(), "no chip");
+    }
+
+    /**
+     * Walk 9 of 1655, 44: servers left the list within minutes. One
+     * hypothesis was 1639's refresh in place replacing the rows by the
+     * newest answer's keys, so an answer naming fewer servers would drop
+     * the rest. Measured here, it does not: a waiting or held answer that
+     * names fewer rows keeps every row it does not name, the list its
+     * length. (The cause was the library's list, which showed ten
+     * shipped servers only; loquax/src/ui/explore.rs, hub_list.)
+     */
+    private static void aWaitingAnswerWithFewerRowsKeepsTheOthers() {
+        List<String> before = Arrays.asList("title:pages|Seiten", "page:A|vor 3 Min.",
+                "title:rooms|Räume", "server:whatcom|vor 6 Min.", "server:vallei|vor 10 Min.",
+                "server:old|vor 5 Std.");
+        List<String> after = Arrays.asList("title:pages|Seiten", "page:new|gerade eben",
+                "page:A|vor 3 Min.", "title:rooms|Räume", "server:old|vor 5 Std.");
+        ExploreRows<String> rows = new ExploreRows<String>(WORDS);
+        rows.offer(before);
+        check(rows.offer(after, 1, 5, false) == ExploreRows.WAITING, "it would move rows: waits");
+        check(rows.size() == before.size(), "every row stays: " + rows.size());
+        check("server:whatcom|vor 6 Min.".equals(rows.at(3)), "Whatcom stays: " + rows.at(3));
+        check("server:vallei|vor 10 Min.".equals(rows.at(4)), "ValleiRug stays: " + rows.at(4));
+        ExploreRows<String> held = new ExploreRows<String>(WORDS);
+        held.offer(before);
+        held.down();
+        check(held.offer(after, 1, 5, false) == ExploreRows.HELD, "held");
+        check(held.size() == before.size(), "held, every row stays: " + held.size());
+        check(held.at(3).startsWith("server:whatcom"), "held, Whatcom stays: " + held.at(3));
     }
 
     private static void check(boolean ok, String what) {
