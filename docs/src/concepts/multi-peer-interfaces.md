@@ -58,7 +58,7 @@ leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4573`).
   `InterfaceHandle`,
   `leviculum-std/src/interfaces/auto_interface/orchestrator.rs:943`).
 - Every accepted I2P stream becomes a handle
-  (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:560`).
+  (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:603`).
 - Every accepted shared-instance IPC client becomes a handle
   (`add_spawned`, `leviculum-std/src/interfaces/local.rs:222`).
 

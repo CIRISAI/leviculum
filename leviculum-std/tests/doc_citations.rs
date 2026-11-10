@@ -168,6 +168,11 @@ const EXTERNAL_PREFIXES: &[&str] = &[
     // cited from a clone of github.com/adafruit/Adafruit_nRF52_Bootloader at
     // tag 0.9.0 (a73fe207), which no host keeps beside this tree.
     "Adafruit_nRF52_Bootloader/",
+    // i2pd, the I2P router the I2P interface talks SAM to (1654, its
+    // five-second session linger): cited from a clone of
+    // github.com/PurpleI2P/i2pd at tag 2.56.0 (fb90b01f), the version
+    // Debian ships, which no host keeps beside this tree.
+    "i2pd/",
 ];
 
 /// The vendored references. A citation into one of these that is not

@@ -98,6 +98,38 @@ const I2P_READ_TIMEOUT: Duration = Duration::from_secs((9 * 5 + 10) * 2);
 /// 90 s later.
 const I2P_STALE_AFTER: Duration = Duration::from_secs(2 * 10);
 
+/// How long the endpoint holds its first `SESSION CREATE` on a stored key
+/// after the process starts (1654).
+///
+/// i2pd 2.56 (tag 2.56.0) destroys a closed SAM session five seconds after
+/// its control socket closes (`SAMBridge::CloseSession`,
+/// i2pd/libi2pd_client/SAM.cpp:1484-1491, with the default
+/// `sam.singlethread = true`), and the destructor deletes and stops the
+/// session's local destination (`~SAMSingleSession`,
+/// i2pd/libi2pd_client/SAM.cpp:1261-1264). A `SESSION CREATE` with the same
+/// key inside those five seconds is handed that old destination
+/// (`Local destination ... exists`,
+/// i2pd/libi2pd_client/ClientContext.cpp:402-411) and answered OK; five
+/// seconds later the old session's destructor stops it under the new
+/// session. The new session then has no tunnel pool: the pending
+/// `STREAM ACCEPT` is reset without its socket closing ("I2P acceptor has
+/// been reset", i2pd/libi2pd_client/SAM.cpp:1136), and the router logs
+/// "Can't publish LeasetSet because destination is not ready" every 1.8 s,
+/// for as long as the session lives. A fast restart of the daemon on a
+/// running i2pd lands exactly there: on the private bed 0 of 4 clients
+/// reached the restarted endpoint in 150 s with a 2 s gap, and lnsd's
+/// clients reached it again with a 60 s gap.
+///
+/// The reference has the same exposure (its endpoint creates the session as
+/// soon as the transport identity exists, I2PInterface.py:264-310). Holding
+/// the first session on a stored key past i2pd's five seconds, plus two of
+/// margin, changes nothing on the wire and costs a cold start seven seconds
+/// against a tunnel build of 9 to 39 s. A fresh key cannot collide
+/// (TRANSIENT makes a new destination), and a rebuild inside the process
+/// already waits [`I2P_DEFAULT_RECONNECT_WAIT`], so only the first session
+/// is held.
+pub(crate) const I2P_STORED_KEY_HOLD: Duration = Duration::from_secs(5 + 2);
+
 /// Upper bound on the read-watchdog polling period. At the production
 /// threshold this puts the check on a one-second cadence, as in Python.
 const WATCHDOG_MAX_PERIOD: Duration = Duration::from_secs(1);
@@ -118,6 +150,9 @@ pub(crate) struct I2pTimeouts {
     pub read_idle: Duration,
     /// How long it may go without one before its tunnel state reads stale.
     pub stale_after: Duration,
+    /// How long the endpoint holds its first session on a stored key
+    /// ([`I2P_STORED_KEY_HOLD`]). Unused by a client.
+    pub stored_key_hold: Duration,
 }
 
 impl Default for I2pTimeouts {
@@ -126,6 +161,7 @@ impl Default for I2pTimeouts {
             sam_command: sam::SAM_COMMAND_TIMEOUT,
             read_idle: I2P_READ_TIMEOUT,
             stale_after: I2P_STALE_AFTER,
+            stored_key_hold: I2P_STORED_KEY_HOLD,
         }
     }
 }
@@ -419,8 +455,10 @@ async fn resolve_destination(
 /// peer via `new_interface_tx`. Returns immediately; all work is async.
 pub(crate) fn spawn_i2p_server(config: I2pServerConfig) {
     tokio::spawn(async move {
+        let mut first = true;
         loop {
-            let result = run_server_session(&config).await;
+            let result = run_server_session(&config, first).await;
+            first = false;
             config.endpoint.set_online(false);
             match result {
                 Ok(()) => {
@@ -448,8 +486,10 @@ pub(crate) fn spawn_i2p_server(config: I2pServerConfig) {
 /// One server session lifecycle: create the persistent-destination session,
 /// then loop accepting inbound streams. Returns `Ok(())` when the event loop
 /// shuts down; returns `Err` when the session/bridge fails so the caller
-/// rebuilds it.
-async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
+/// rebuilds it. `first` is the process's first session, which on a stored
+/// key waits out a destination the previous process may have left in i2pd
+/// ([`I2P_STORED_KEY_HOLD`]).
+async fn run_server_session(config: &I2pServerConfig, first: bool) -> Result<(), SamError> {
     let nick = generate_session_id();
     let stored_key = load_keyfile(&config.keyfile);
     // A stored key names the address before any session exists, as the
@@ -460,6 +500,14 @@ async fn run_server_session(config: &I2pServerConfig) -> Result<(), SamError> {
         .and_then(|k| Destination::from_private_base64(k).ok())
     {
         config.endpoint.set_b32(&dest.base32());
+    }
+    if first && stored_key.is_some() && !config.timeouts.stored_key_hold.is_zero() {
+        tracing::info!(
+            "{}: holding the I2P endpoint {} ms so i2pd drops a destination a previous session left on this key",
+            config.name_prefix,
+            config.timeouts.stored_key_hold.as_millis()
+        );
+        tokio::time::sleep(config.timeouts.stored_key_hold).await;
     }
 
     // Control socket for the session; kept open for its whole lifetime.

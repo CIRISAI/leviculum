@@ -358,6 +358,7 @@ async fn a_silent_sam_bridge_does_not_wedge_the_client() {
             sam_command: Duration::from_millis(200),
             read_idle: Duration::from_secs(60),
             stale_after: Duration::from_secs(60),
+            ..I2pTimeouts::default()
         },
         ifac: None,
         reconnect_notify: None,
@@ -418,6 +419,7 @@ async fn read_watchdog_tears_down_a_silent_stream() {
                 sam_command: Duration::from_secs(2),
                 read_idle: Duration::from_millis(300),
                 stale_after: Duration::from_millis(300),
+                ..I2pTimeouts::default()
             },
             Arc::new(I2pTunnelState::default()),
         ),
@@ -496,6 +498,7 @@ async fn a_dead_tunnel_behind_a_live_socket_is_rebuilt() {
             sam_command: Duration::from_secs(2),
             read_idle: Duration::from_millis(300),
             stale_after: Duration::from_millis(300),
+            ..I2pTimeouts::default()
         },
         ifac: None,
         reconnect_notify: None,
@@ -685,7 +688,9 @@ async fn lnsd_takes_over_the_key_rnsd_wrote() {
 
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sam_addr = start_recording_sam(Arc::clone(&seen)).await;
-    let (config, _rx) = server_config(sam_addr, keyfile);
+    let (mut config, _rx) = server_config(sam_addr, keyfile);
+    // The hold for a stored key is its own test below.
+    config.timeouts.stored_key_hold = Duration::ZERO;
     spawn_i2p_server(config);
     assert!(
         wait_until(Duration::from_secs(5), || !session_creates(&seen)
@@ -818,6 +823,7 @@ async fn the_tunnel_state_follows_the_read_clock() {
             sam_command: Duration::from_secs(2),
             read_idle: Duration::from_secs(60),
             stale_after: Duration::from_secs(2),
+            ..I2pTimeouts::default()
         },
         Arc::clone(&tunnel),
     ));
@@ -1076,4 +1082,58 @@ async fn i2p_sam_refuses_invalid_key() {
 #[tokio::test]
 async fn i2p_sam_refuses_hello_noversion() {
     sam_refusal_is_retried(Refusal::Hello, true).await;
+}
+
+/// 1654: the first SESSION CREATE on a stored key waits out the destination
+/// a previous process may have left in i2pd, whose postponed destructor
+/// would otherwise stop it under the new session five seconds later
+/// (`I2P_STORED_KEY_HOLD`). Only the first session is held: a rebuild inside
+/// the process asks again after `reconnect_wait` alone. A fresh key is not
+/// held at all; the `i2p_sam_refuses_*` endpoints run on a fresh key with the
+/// default hold and ask three times within five seconds.
+#[tokio::test]
+async fn a_stored_key_holds_the_first_session_only() {
+    assert!(
+        I2pTimeouts::default().stored_key_hold > Duration::from_secs(5),
+        "the default hold must outlast i2pd's five-second session linger"
+    );
+    let hold = Duration::from_secs(2);
+    let asked = Arc::new(AtomicUsize::new(0));
+    let sam_addr = start_refusing_sam(Refusal::Session("I2P_ERROR"), Arc::clone(&asked)).await;
+    let tmp = tempfile::tempdir().unwrap();
+    let keyfile = tmp.path().join("srv.i2p");
+    save_keyfile(&keyfile, GOLDEN_PRIV);
+    let (mut config, _rx) = server_config(sam_addr, keyfile);
+    config.reconnect_wait = Duration::from_millis(50);
+    config.timeouts.stored_key_hold = hold;
+    let endpoint = Arc::clone(&config.endpoint);
+    let started = std::time::Instant::now();
+    spawn_i2p_server(config);
+
+    // The address is known during the hold, from the key alone.
+    assert!(
+        wait_until(Duration::from_secs(1), || endpoint.b32().is_some()).await,
+        "the stored key's b32 is known while the session is held"
+    );
+    let count = || asked.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        wait_until(Duration::from_secs(10), || count() >= 1).await,
+        "the endpoint never created its session"
+    );
+    let first_ask = started.elapsed();
+    assert!(
+        first_ask >= hold,
+        "the first SESSION CREATE on a stored key came {first_ask:?} after the start, inside the {hold:?} hold"
+    );
+    let after_first = std::time::Instant::now();
+    assert!(
+        wait_until(Duration::from_secs(10), || count() >= 3).await,
+        "the endpoint asked again after the refusal (asked {} times)",
+        count()
+    );
+    let rebuilds = after_first.elapsed();
+    assert!(
+        rebuilds < hold,
+        "two rebuilds took {rebuilds:?}: a rebuild must wait reconnect_wait, not the {hold:?} hold"
+    );
 }

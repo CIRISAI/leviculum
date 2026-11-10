@@ -474,13 +474,28 @@ The endpoint's private key is what keeps its address. It lives in
 `<storage>/i2p/<hex>.i2p`, the file name the reference uses:
 `<hex>` is `sha256(sha256(name) + sha256(transport identity hash))` with
 `name` the section's name, and an older `sha256(sha256(name))` file is
-preferred when present (`resolve_keyfile` (`interfaces/i2p/mod.rs:802-850`)).
+preferred when present (`resolve_keyfile` (`interfaces/i2p/mod.rs:845-893`)).
 So an `rnsd` user who switches to `lnsd` on the same configuration directory
 keeps the address, and the other way round. A key without a file is
 generated as an Ed25519 destination and written there, mode 0600. A key
 from an lnsd older than 1576, `i2p_iface_<n>.i2p`, is renamed to the new
 name once, and the rename is logged. Renaming the section, or replacing
 the transport identity, gives the endpoint a new address.
+
+**Restarting on a running i2pd.** i2pd keeps a closed SAM session's
+destination for five seconds before it destroys it, and a new session on
+the same key inside those five seconds is handed that old destination and
+then loses it under its feet: it answers `OK`, but never publishes a
+LeaseSet, so nobody reaches the endpoint until the daemon is restarted
+again (measured on i2pd 2.56, see the I2P concept page). `lnsd` therefore
+holds the endpoint's first session on a stored key for seven seconds after
+it starts, and logs `holding the I2P endpoint 7000 ms`; a restart through
+`systemctl restart lnsd` needs nothing else. `rnsd` does not hold, so an
+`rnsd` restarted within five seconds on a running i2pd stays unreachable
+over I2P: leave five seconds between stop and start, or restart i2pd too.
+Peers that dialled the endpoint while its old LeaseSet was still in the
+network attach to a dead tunnel and find the new one only after their read
+timeout (about two minutes, on both stacks).
 
 ```ini
 [interfaces]

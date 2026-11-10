@@ -187,7 +187,7 @@ since 1576, the third and fourth since 1588:
    the file, so an rnsd user who switched to lnsd on the same config
    directory got a new address. Since 1576 the key file is named as the
    reference names it, old format first (`resolve_keyfile`,
-   `leviculum-std/src/interfaces/i2p/mod.rs:802`), and an existing
+   `leviculum-std/src/interfaces/i2p/mod.rs:845`), and an existing
    `i2p_iface_<index>.i2p` is renamed to the new name once, logged, so no
    lnsd user loses an address either. Measured on the bed: a DSA key left
    as `i2p_iface_0.i2p` was adopted (`I2P key adopted: .../i2p_iface_0.i2p
@@ -429,6 +429,52 @@ file, so its log needs `PYTHONUNBUFFERED=1`.
   2.56 hands the new session the destination the closed one left behind
   and never publishes its LeaseSet. The rnsd-as-S run was at
   `loglevel=warn` and logged no such line, so its mechanism is not shown.
+- **Restarted server, the mechanism and the hold (1654).** i2pd 2.56
+  (source at tag 2.56.0, fb90b01f) defers the destruction of a closed SAM
+  session by five seconds (`SAMBridge::CloseSession`,
+  `i2pd/libi2pd_client/SAM.cpp:1484-1491`, `sam.singlethread` defaults to
+  true, `i2pd/libi2pd/Config.cpp:174`). The session's destructor deletes
+  and stops its local destination (`~SAMSingleSession`,
+  i2pd/libi2pd_client/SAM.cpp:1261-1264,
+  `ClientContext::DeleteLocalDestination`,
+  i2pd/libi2pd_client/ClientContext.cpp:372-385), but until then the
+  destination stays in the router's table keyed by its ident hash, and a
+  `SESSION CREATE` with the same key is handed it (`Local destination ...
+  exists`, i2pd/libi2pd_client/ClientContext.cpp:402-411). Five seconds
+  after the old control socket closed, the old session's destructor stops
+  that destination under the new session: its pending `STREAM ACCEPT` is
+  reset without its socket closing (`I2P acceptor has been reset`,
+  i2pd/libi2pd_client/SAM.cpp:1136), its tunnel pool is gone, and every
+  publish attempt ends in `destination is not ready`. The session id plays
+  no part (lnsd already takes a fresh random one per session,
+  `generate_session_id`); the reuse is by key. The reference creates its
+  endpoint session as soon as the transport identity exists
+  (`RNS/Interfaces/I2PInterface.py:264-310`) and retries only on an error
+  status, which this state never raises, so it has the same exposure. lnsd
+  now holds its first session on a stored key for `I2P_STORED_KEY_HOLD` =
+  7 s (`interfaces/i2p/mod.rs`); a fresh key cannot collide and an
+  in-process rebuild already waits the 15 s reconnect interval. Measured
+  with `just i2p-live` stage `restart` (`I2P_LIVE_STAGES=restart
+  RESTART_STACKS=lnsd RESTART_WALL_S=150 LOGLEVEL=info`, knob
+  `RESTART_GAP_S`), S=lnsd on router 2, one old and one fresh client of
+  each stack, probe wall 150 s:
+
+  | lnsd S | gap | router reused the destination | SESSION CREATE answered | old lnsd | old rnsd | fresh lnsd | fresh rnsd |
+  |---|---|---|---|---|---|---|---|
+  | before the hold | 2 s | yes, acceptor reset at +5 s | 2 ms (no tunnel build) | no | no | no | no |
+  | before the hold | 60 s | no | not kept | 85.9 s | no | 17.4 s | no |
+  | with the hold | 2 s | no | 7 s hold + 12 s | 19.3 s | no | 144.4 s | no |
+
+  With the hold the endpoint comes up exactly as after a long pause. The
+  remaining delay is the clients': a client that dials while the old
+  LeaseSet is still in the network gets a stream that `STREAM CONNECT`
+  answers OK with nothing behind it, goes stale at 20 s and is torn down
+  at the read timeout (100 s after it came up on lnsd, 102 s on rnsd), and only its next
+  dial reaches the new destination (lnsd's fresh client at 144 s, both
+  rnsd clients re-established at about 130 s, after the 150 s probe wall
+  had little left). The `not ready` count in the router log is no
+  indicator on its own: the stopped old destination keeps logging it
+  after it has been replaced; `reused=` is.
 
 ## The cells
 
