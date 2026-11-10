@@ -408,7 +408,7 @@ final class ExplorePane {
         adapter.notifyDataSetChanged();
         int anchor = rows.anchor();
         if (anchor >= 0) {
-            list.setSelectionFromTop(anchor, top);
+            list.setSelectionFromTop(anchor, ExploreRows.fromTop(top, list.getPaddingTop()));
         }
     }
 

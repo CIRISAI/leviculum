@@ -53,6 +53,7 @@ final class ExploreRowsTest {
         stillBetweenLookingAndTapping();
         theTopAtRestFills();
         aTapOpensTheRowItHit();
+        theScrolledListHoldsStill();
 
         check(ExploreRows.id("page:aa") == ExploreRows.id("page:aa"), "an id is stable");
         check(ExploreRows.id("page:aa") != ExploreRows.id("page:ab"), "two rows, two ids");
@@ -313,6 +314,44 @@ final class ExploreRowsTest {
         // A click with no finger before it (a key, accessibility) is the
         // row at its position, and a press is used once.
         check(walk.hit(5).equals(walk.at(5)), "a click without a press");
+    }
+
+    /**
+     * Walk 5 of 1639, new 21: untouched, the scrolled list crept down, the
+     * "Server" heading from y 561 to 911 in 60 s, in steps of exactly
+     * 50 px (20 dp at 2.5) per answer. The list has a 20 dp top band
+     * (1632, {@code clipToPadding false}); a row's {@code getTop()} counts
+     * from the list's edge, {@code setSelectionFromTop}'s {@code y} from
+     * inside the band. The screen here is ListView's arithmetic: answers
+     * land above the screen and show at once, anchored; the first row on
+     * screen stays on its pixel. The control, the row's top handed back as
+     * it was read, moves it one band down per answer.
+     */
+    private static void theScrolledListHoldsStill() {
+        final int band = 50;
+        for (int startTop : new int[] {-40, 10, band}) {
+            ExploreRows<String> rows = new ExploreRows<String>(KEYS);
+            List<String> list = explore(40);
+            rows.offer(list);
+            int first = 14;
+            int top = startTop;
+            int controlTop = startTop;
+            String aimed = list.get(first);
+            for (int n = 0; n < 10; n++) {
+                list = new ArrayList<String>(list);
+                list.add(2, "page:heard" + n);
+                int said = rows.offer(list, first, first + 10, false);
+                check(said == ExploreRows.SHOWN, "a page above the screen shows: " + said);
+                first = rows.anchor();
+                check(aimed.equals(list.get(first)), "the anchor is the row on top: " + list.get(first));
+                // ListView: the row lands at the band plus y.
+                top = band + ExploreRows.fromTop(top, band);
+                controlTop = band + controlTop;
+            }
+            check(top == startTop, "the first row stays at " + startTop + ", not " + top);
+            check(controlTop == startTop + 10 * band,
+                    "the control drifts one band per answer: " + controlTop);
+        }
     }
 
     private static void check(boolean ok, String what) {

@@ -183,6 +183,18 @@ final class ExploreRows<T> {
         waiting = null;
     }
 
+    /**
+     * The {@code y} for {@code setSelectionFromTop} that puts a row back
+     * where {@code getTop()} read it, in a list with a top band of
+     * {@code padding} pixels (1639, walk 5 new 21). {@code getTop()}
+     * counts from the list's edge, the {@code y} from inside the band:
+     * handed back as read, every anchored answer moved the list one band
+     * down, 20 dp, and an untouched list crept down the screen.
+     */
+    static int fromTop(int rowTop, int padding) {
+        return rowTop - padding;
+    }
+
     /** The row that stood first on screen, where it stands now; -1 to keep the scroll as it is. */
     int anchor() {
         return anchor;
