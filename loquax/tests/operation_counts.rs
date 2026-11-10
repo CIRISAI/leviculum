@@ -490,3 +490,69 @@ fn the_register_judges_both_ways() {
         "a registered bar went green unnoticed"
     );
 }
+
+/// The terminal over a chat of 3000 one-line bubbles (1487, the window
+/// bench's long chat): a scroll key, a page and a pass without a change
+/// lay the rows on screen and as many again at most, as in the real
+/// store's chat ([`a_key_in_the_terminals_messages_lays_the_rows_on_screen`]);
+/// a message that arrives in it is printed with what it laid.
+#[test]
+fn the_terminal_lays_the_rows_on_screen_in_a_chat_of_3000() {
+    if !real_store::counting() {
+        return;
+    }
+    let peer = [0x3a; 16];
+    let mut model: UiModel<Line> = real_store::model();
+    for n in 0..3000u32 {
+        update(
+            &mut model,
+            received(
+                peer,
+                n,
+                &format!("Message {n}, a line about the market and the apples."),
+            ),
+        );
+    }
+    update(
+        &mut model,
+        UiEvent::Resize {
+            width: SCREEN.0,
+            height: SCREEN.1,
+        },
+    );
+    update(&mut model, UiEvent::Open { peer });
+    model.focus = Pane::Messages;
+    terminal_pass(&model);
+    let most = 2 * u32::from(SCREEN.1);
+    for (name, event) in [
+        ("up", key(KeyCode::Up)),
+        ("page_up", key(KeyCode::PageUp)),
+        ("page_up_again", key(KeyCode::PageUp)),
+        ("down", key(KeyCode::Down)),
+    ] {
+        update(&mut model, event);
+        terminal_pass(&model);
+        let counts = counted(&model);
+        println!("COUNTS terminal.long_chat_{name} {counts}");
+        bar(
+            &format!("terminal.long_chat_{name}_lays_the_rows_on_screen"),
+            counts.rows_laid <= most && counts.bubbles_built == 0,
+            &format!(
+                "rows_laid {} (bar {most}), bubbles_built {} (bar 0)",
+                counts.rows_laid, counts.bubbles_built
+            ),
+        );
+    }
+    model.reset_counters();
+    terminal_pass(&model);
+    let counts = counted(&model);
+    println!("COUNTS terminal.long_chat_pass {counts}");
+    bar(
+        "terminal.long_chat_pass_lays_nothing",
+        counts.rows_laid == 0,
+        &format!("rows_laid {} (bar 0)", counts.rows_laid),
+    );
+    update(&mut model, received(peer, 5000, "a new one"));
+    terminal_pass(&model);
+    println!("COUNTS terminal.long_chat_arrival {}", counted(&model));
+}
