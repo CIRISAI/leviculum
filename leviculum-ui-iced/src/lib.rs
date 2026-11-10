@@ -14,7 +14,8 @@
 //! drawn into pixels for the goldens, clicked for the tests. The desktop's
 //! light or dark, which iced alone does not read on Linux ([`desktop`]).
 //! The suite's window icon ([`window_icon`]). A list whose wheel scrolls
-//! softly ([`smooth`]). The window's frame meter ([`fps`]). Text that can be
+//! softly ([`smooth`]). A list that lays out only the rows on screen
+//! ([`rows`]). The window's frame meter ([`fps`]). Text that can be
 //! selected ([`select`]).
 //!
 //! Generic over the program's message: a press is the `M` it was given.
@@ -37,6 +38,7 @@ pub mod help;
 pub mod icon;
 pub mod key;
 pub mod paint;
+pub mod rows;
 pub mod select;
 pub mod smooth;
 pub mod wave;
