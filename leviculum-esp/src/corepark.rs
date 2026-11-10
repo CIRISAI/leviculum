@@ -110,8 +110,15 @@ pub fn stats() -> (u32, u32, u32) {
     )
 }
 
+/// Whether [`arm`] ran: the boot waits for it before its restore's
+/// first flash op (1622).
+pub fn armed() -> bool {
+    ARMED.load(Ordering::Acquire)
+}
+
 /// Bind the park interrupt on the core that calls this — the UI core,
-/// first thing in its main. From here on every flash op parks core 1
+/// first thing after its start, before it waits for the boot's restore
+/// (1622). From here on every flash op parks core 1
 /// cooperatively instead of stalling it.
 pub fn arm(mut park: SoftwareInterrupt<'static, 2>) {
     // The handler resets the latch through its own register writes;
@@ -133,7 +140,9 @@ pub fn arm(mut park: SoftwareInterrupt<'static, 2>) {
 pub fn hold<R>(f: impl FnOnce() -> R) -> (R, u64) {
     if !is_running(Cpu::AppCpu) {
         // Boot, before the UI core starts: nothing else runs from
-        // flash, esp-storage's own lock is all the op needs.
+        // flash, esp-storage's own lock is all the op needs. Since 1622
+        // only a new board's first identity save comes here; the
+        // restore runs after the UI core armed the park.
         return (f(), 0);
     }
     // Core 0's interrupts off for the whole hold: the UART interrupt

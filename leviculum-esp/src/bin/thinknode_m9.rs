@@ -311,6 +311,40 @@ static CENSUS_RUNNING: AtomicBool = AtomicBool::new(true);
 /// that stalled must not take the line down with it.
 const CENSUS_WAIT_MS: u64 = 30_000;
 
+/// How long core 0 waits for the UI core to arm the park before the
+/// boot's restore runs anyway (1622): arming is the UI core's first
+/// act, microseconds after its start; a miss leaves the restore's ops
+/// to the fallback stall, counted as `park_fallback=`.
+const ARM_WAIT_MS: u64 = 100;
+
+/// What the UI core starts with that core 0 has only after the boot's
+/// restore (1622): the UI core is started before the restore, so the
+/// restore's flash ops park it cooperatively, and waits for these.
+struct UiStart {
+    model: Box<UiModel<Field>>,
+    shown: Shown,
+    seed: [u8; 32],
+}
+
+static UI_START: Mutex<RefCell<Option<UiStart>>> = Mutex::new(RefCell::new(None));
+/// Set once [`UI_START`] holds the start: the UI core polls this word,
+/// not the global critical section, while core 0 restores.
+static UI_START_READY: AtomicBool = AtomicBool::new(false);
+
+/// The UI core's wait for its start (1622), spinning on
+/// [`UI_START_READY`]; the park interrupt it armed before preempts the
+/// spin for each of the restore's flash ops.
+fn ui_start() -> UiStart {
+    loop {
+        if UI_START_READY.load(Ordering::Acquire) {
+            if let Some(start) = critical_section::with(|cs| UI_START.borrow_ref_mut(cs).take()) {
+                return start;
+            }
+        }
+        core::hint::spin_loop();
+    }
+}
+
 /// The least PSRAM the UI heap wants: the plan's 1.1 MB, model, scene,
 /// renderer and two frames on the 64-bit host
 /// (`handheld-messenger.md`, "Memory budgets, measured").
@@ -1929,6 +1963,74 @@ fn main() -> ! {
     // restore, the loop, the flash, after the session census above
     // painted and read its own.
     let watch = StackWatch::paint(stack_bounds().0);
+    // The UI core (1493): model, scene, renderer, panel. Everything it
+    // says goes through the queue to this core's UART writer. The guard
+    // must live as long as the image: dropping it parks the core.
+    //
+    // Started before the restore since 1622, idle until the restore
+    // hands it the model (`UI_START`): the first thing it does is arm the
+    // park interrupt (1613), so the restore's erases park it
+    // cooperatively and its spin keeps polling the receive FIFO through
+    // each masked window. Before, the boot's restore ran with the UI core
+    // not yet started, every erase masked core 0's interrupts for 35 to
+    // 57 ms with no popper anywhere, and a rebuild boot counted
+    // `overrun=2` before its first `[IDLE]` line (windows 23 and 24).
+    let mut cpu = CpuControl::new(p.CPU_CTRL);
+    // The park interrupt's latch (1613), bound over there.
+    let park_intr = p.FROM_CPU_INTR2;
+    // SAFETY: the one place this static is taken, before the core starts.
+    let ui_stack = unsafe { &mut *addr_of_mut!(APP_CORE_STACK) };
+    let started = cpu.start_app_core(ui_stack, move || {
+        stall::stage(Core::Ui, Stage::Boot);
+        leviculum_esp::corepark::arm(esp_hal::interrupt::software::SoftwareInterrupt::new(
+            park_intr,
+        ));
+        let UiStart { model, shown, seed } = ui_start();
+        ui_main(
+            panel,
+            model,
+            shown,
+            kb,
+            seed,
+            wdt1,
+            UiWakes {
+                io,
+                te: lcd_te,
+                tick: ui_timer,
+                regions: area_regions,
+            },
+        )
+    });
+    match &started {
+        Ok(_) => log.line(
+            "[CORES] ",
+            format_args!("ui=core1 stack={UI_STACK} io=core0"),
+        ),
+        Err(e) => log.line("[CORES] ", format_args!("ui=down reason={e:?}")),
+    }
+    if started.is_err() {
+        halt_with_banner(&mut log, bytes);
+    }
+    // The restore's first erase waits for the park to be armed: an op
+    // before it would stall the UI core the old way (a fallback). The
+    // line's bytes are pumped meanwhile, as through the restore.
+    let arming = uptime_ms();
+    while !leviculum_esp::corepark::armed() && uptime_ms().saturating_sub(arming) < ARM_WAIT_MS {
+        leviculum_esp::pump_rx();
+        core::hint::spin_loop();
+    }
+    log.line(
+        "[CORES] ",
+        format_args!(
+            "park={} waited_ms={}",
+            if leviculum_esp::corepark::armed() {
+                "armed"
+            } else {
+                "late"
+            },
+            uptime_ms().saturating_sub(arming)
+        ),
+    );
     // A device of a home draws its home's chats: what its message store
     // kept (1476), then every pull; a board that is none opens on the
     // pairing, and Back from there shows the fixture as before (1415).
@@ -1968,42 +2070,13 @@ fn main() -> ! {
     // across reboots — the home reads a repeated id as the same message.
     let mut seed = [0u8; 32];
     rand_core::RngCore::fill_bytes(&mut rng, &mut seed);
-
-    // The UI core (1493): model, scene, renderer, panel. Everything it
-    // says goes through the queue to this core's UART writer. The guard
-    // must live as long as the image: dropping it parks the core.
-    let mut cpu = CpuControl::new(p.CPU_CTRL);
-    // The park interrupt's latch (1613), bound over there by `ui_main`.
-    let park_intr = p.FROM_CPU_INTR2;
-    // SAFETY: the one place this static is taken, before the core starts.
-    let ui_stack = unsafe { &mut *addr_of_mut!(APP_CORE_STACK) };
-    let started = cpu.start_app_core(ui_stack, move || {
-        ui_main(
-            panel,
-            model,
-            shown,
-            kb,
-            seed,
-            wdt1,
-            UiWakes {
-                io,
-                te: lcd_te,
-                tick: ui_timer,
-                park: esp_hal::interrupt::software::SoftwareInterrupt::new(park_intr),
-                regions: area_regions,
-            },
-        )
+    // What the UI core waited for (1622): it starts its census now.
+    critical_section::with(|cs| {
+        UI_START
+            .borrow_ref_mut(cs)
+            .replace(UiStart { model, shown, seed })
     });
-    match &started {
-        Ok(_) => log.line(
-            "[CORES] ",
-            format_args!("ui=core1 stack={UI_STACK} io=core0"),
-        ),
-        Err(e) => log.line("[CORES] ", format_args!("ui=down reason={e:?}")),
-    }
-    if started.is_err() {
-        halt_with_banner(&mut log, bytes);
-    }
+    UI_START_READY.store(true, Ordering::Release);
     // The UI core's census runs alone (1521b): what it counts and how
     // long it takes are its own.
     // Core 0 reads nothing from the line meanwhile: what the host sends
@@ -2611,10 +2684,6 @@ struct UiWakes {
     io: Io<'static>,
     te: m9::LcdTe<'static>,
     tick: esp_hal::timer::timg::Timer<'static>,
-    /// The park interrupt (1613, `leviculum_esp::corepark`): bound on
-    /// this core, so a flash op can ask it to spin in internal RAM and
-    /// poll the FIFOs instead of being hardware-stalled deaf.
-    park: esp_hal::interrupt::software::SoftwareInterrupt<'static, 2>,
     /// Not a wake: the map regions core 0 read from the flash's area
     /// (1477), handed over with the rest of what the UI core starts with.
     regions: Vec<&'static [u8]>,
@@ -2641,13 +2710,10 @@ fn ui_main(
         mut io,
         te: te_pin,
         tick,
-        park,
         regions: area_regions,
     } = wakes;
-    // First: from here every flash op parks this core cooperatively
-    // (1613) — it polls the FIFOs from internal RAM instead of going
-    // deaf under the hardware stall.
-    leviculum_esp::corepark::arm(park);
+    // The park interrupt (1613) was armed before this, first thing on
+    // the core (1622): the boot's restore ran with it.
     io.set_interrupt_handler(te_edge);
     let mut te_line = Input::new(te_pin, InputConfig::default());
     critical_section::with(|cs| {
