@@ -551,6 +551,12 @@ engine on the shared instance it is.
 - **Before 1132** the archive has no name entries: a client learns a
   peer's name from the first announce the home node hears after it runs
   this version.
+- **Every other name** (1643). The names of peers without a relation
+  are no archive entries but rows of the mailbox's `home_names` table,
+  every LXMF delivery announce's name with its first and last hearing
+  and hops, at most 4 096: they ride in the `/pages` delta as row kind
+  2, wake nobody, and the client folds them into its names as an
+  announce (`loquax-mailbox.md`, section 5).
 
 ## The reader's names on every device
 

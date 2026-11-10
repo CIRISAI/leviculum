@@ -687,7 +687,7 @@ terminal and window get no tab (the second question, answered no for now).
   page's `lxmf@` link raises lnomad's new `Effect::Write`
   (`lnomad/src/app/model.rs:455`) when hosted
   (`lnomad/src/app/event.rs:1572`), and Loquax opens that chat for
-  writing (`effects_of`, `loquax/src/ui/browse.rs:429`); the browser's
+  writing (`effects_of`, `loquax/src/ui/browse.rs:435`); the browser's
   quit leaves the tab, not the app. A `nomadnet://` URL in a chat is not
   a link shape `leviculum_ui::link::find_links` knows yet.
 - **The phone.** Request `browse` (a verb and a node's resource) and
@@ -787,9 +787,9 @@ two).** Slice 3's network seam: one node, lent, not a second one.
   `a_lent_fetch_hears_its_own_links_and_its_answers_alone`
   (`loquax/src/engine/shell.rs:1021`, the controls a link a peer opened
   and an event no fetch reads); `the_fetchs_words_reach_the_browser`
-  (`loquax/src/ui/browse.rs:820`) and
+  (`loquax/src/ui/browse.rs:894`) and
   `the_tab_opens_on_the_phones_start_page`
-  (`loquax/src/ui/browse.rs:886`); the facade end to end, both
+  (`loquax/src/ui/browse.rs:960`); the facade end to end, both
   nodes, with the node absent before its announce as the control. With
   the tap silenced the leaf's run goes red in 60 s with no node listed.
 
@@ -823,7 +823,7 @@ as the phone, on by default since 1618.
   so lnomad's whole key table works, its `q` leaves the tab, and the
   terminal's screen size is the page's (`loquax/src/ui.rs:3877`). `B` and
   the palette's `browse` bring the tab to the front
-  (`loquax/src/keys.rs:643`, `browse::open`, `loquax/src/ui/browse.rs:405`);
+  (`loquax/src/keys.rs:643`, `browse::open`, `loquax/src/ui/browse.rs:411`);
   with the tab off they say how to switch it on.
 - **The terminal** draws the tab with lnomad's terminal view over the
   whole screen (`draw_screen`, `loquax/src/tui.rs:1707`), in the

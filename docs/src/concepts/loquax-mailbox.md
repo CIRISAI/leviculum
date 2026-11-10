@@ -289,7 +289,7 @@ default for a user who runs two clients on the same identity, because the
 first one to sync takes the mail. This must be a visible setting with the
 consequence spelled out, not a config-file default nobody reads. Loquax
 does not expose it yet: it enables the client with
-`PropagationClientConfig::default()` (`loquax/src/engine.rs:1837`).
+`PropagationClientConfig::default()` (`loquax/src/engine.rs:1859`).
 
 Set to `true`, our client keeps every message on the node. That is a
 deviation from the reference client, whose flag only keeps messages it
@@ -488,12 +488,12 @@ which.
 
 `SIGUSR1` prints a `MAILBOX_CENSUS` line, one estimated heap figure per
 table the daemon holds (`COLUMNS` and `RUN_LOCALS`,
-`loquax/src/home/census.rs:67`), each embedded node's transport census
+`loquax/src/home/census.rs:69`), each embedded node's transport census
 under `--- node home ---` and `--- node group <address> ---`, and lnsd's
 process sections with one `gap:` line over all of it
 (`compose_multi_node_dump`, `leviculum-std/src/census.rs:59`). The same
 line goes into the log as a structured `MAILBOX_CENSUS` event every ten
-minutes (`CENSUS_PERIOD`, `loquax/src/home/census.rs:42`). A build with
+minutes (`CENSUS_PERIOD`, `loquax/src/home/census.rs:43`). A build with
 `--features heap-accounting` adds the measured live line and honours
 `LEVICULUM_HEAP_SAMPLE`, as lnpnd's does. A unit test reads the bindings
 of the daemon's loop out of its source and fails on a table without a
@@ -588,6 +588,7 @@ device.
 /pages    [since: uint, (page: uint)]   -> [status, stamp: uint, more: bool, [row, ...]]
   row:    [0, dest: bin16, name: str, first: int, last: int, hops: uint, count: uint]
         | [1, url: str, title: str, at: int, deleted: bool]
+        | [2, address: bin16, name: str, first: int, last: int, hops: uint]
 /bookmark [url: str, title: str, at: int, deleted: bool] -> [status]
 ```
 
@@ -605,3 +606,65 @@ full list of 2 000 rows with names of 15 to 18 characters and one
 bookmark is 100 969 bytes in four answers, each a resource, and took
 52 ms. Over BLE it is not measured yet: the same four answers, about 50
 bytes a row.
+
+## 5. Every name the mailbox hears (1643)
+
+Lew, 2026-11-10 (the mailbox split, step 3): a phone with an external
+mailbox takes its whole directory from the mailbox and hears no mesh of
+its own, so a stranger nobody wrote to yet stayed a hash on it. The
+archive's name entries cannot carry them: every archive entry wakes the
+devices, and 1136 limited them to peers the user has a relation to for
+that reason. The names get a table of their own beside the pages.
+
+**What the mailbox keeps.** Every LXMF delivery announce with a name its
+node hears (the engine's `OutboxEvent::NameHeard`, raised beside
+`Announced` because only it carries the hops) becomes a row of
+`home_names` (store schema 22, `Store::name_heard`,
+`loquax/src/store/pages.rs`): the address, the name as announced, first
+and last seen by the mailbox's clock, and hops (`home::pages::NameRow`).
+A row takes a new stamp when it is new, its name or hops changed, or an
+hour passed since its kept `last_seen` (`NAME_REFRESH_SECS`); any other
+announce changes nothing. Unknown hops never clear known ones. At most
+4 096 rows (`NAMES_CAP`), the one heard longest ago going first, never
+the one just heard. The mailbox's own announce is no row. The 1136
+filter stays for the archive's name entries.
+
+**The ask.** The rows share the stamp of the pages and bookmarks and ride
+in the same `/pages` delta as row kind 2, under the same 32 KiB bound and
+`more`; they wake nobody and move no cursor. A client from before 1643
+passes kind 2 by, as it passes every kind it does not know (the reader's
+rule since 1579, tested by `an_old_client_passes_the_name_rows_by`); a
+mailbox from before 1643 sends none.
+
+**On the device** the rows go through the path an announce takes
+(`ui::name_announced`): the screen's `Names` sanitise them and note a
+rename in a conversation, so the chats, the contacts and a new
+conversation name the strangers the mailbox heard. The rows are not
+written to the device's store: its `/pages` stamp lives in memory, so
+every start asks for the whole list again. A device whose mailbox is
+older keeps the names it heard itself (1632), and so does one out of
+its mailbox's reach.
+
+**Measured** (`home::client::tests::a_phone_names_the_two_thousand_strangers_its_mailbox_heard_after_one_pull`,
+2026-11-10, coder host, two nodes over loopback TCP, debug build): 2 000
+name rows with names of 10 to 13 characters are 88 899 bytes in one
+pull, answers of at most 32 KiB each, and took 45 ms; the 2 001 page
+rows of 1579 were 100 969 bytes.
+
+## 6. The rooms of the hubs the mailbox hears (1643)
+
+A device's server sheet listed a hub's rooms only once its own `/list`
+came back over a link it first had to build (1652). The mailbox asks
+every hub it hears instead (`loquax/src/home/hub_rooms.rs`): the sheet's
+own question (`rooms_link::Ask::Peek`, a link of its own, a throwaway
+identity and no nick, HELLO, `/list`, the notices read), over the
+mailbox's node lent to the Rooms, at most once an hour a hub
+(`LIST_EVERY_SECS`), one question at a time. The rooms named go into the
+hub's `KIND_HUB` archive entry as a fifth element
+(`wire::hub_entry_rooms`), a new entry only when they changed; the
+hourly refresh of the hearing keeps them. A client from before reads
+the four elements it knows. The pull hands them on as
+`Command::HomeHubRooms`, and the sheet lists them the moment it opens
+(`Rooms::mailbox_named`); the device's own answer, from the sheet's
+question or from `/list` after it connects, replaces them as the fresher
+copy. The census counts the questions' table (`hub_rooms`).

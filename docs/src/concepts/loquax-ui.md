@@ -850,7 +850,9 @@ hub's newest only, appended when the hub is new, its name or hops
 changed, or an hour passed since the kept hearing
 (`HUB_REFRESH_SECS`), bounded the same; like a name it wakes nobody and
 rides with the next pull, and a device that pulls it lists the hub as
-one it heard itself. A hub opened that did not answer stays listed,
+one it heard itself. Since 1643 the home also asks each hub it hears for
+its rooms, at most hourly, and the entry carries them, so a device's
+sheet lists them before it links (`loquax-mailbox.md`, section 6). A hub opened that did not answer stays listed,
 marked "no answer"; nothing is removed for that.
 
 **The settings row** shows one list (`settings::offered_hubs`): the
