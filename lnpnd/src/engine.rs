@@ -4816,6 +4816,205 @@ mod tests {
         }
     }
 
+    /// Order 1663: a node started without a config takes a voice message.
+    /// 60 KB is fifty seconds of Loquax voice (Opus at 1.2 KB/s,
+    /// docs/src/concepts/loquax-voice.md); under lnpnd's pre-1294 fallback
+    /// of 4 KB it was stored local only and never reached another node, so
+    /// a recipient collecting elsewhere never got it. The limits come from [`crate::config::SizeLimits::resolve`] over
+    /// an empty config, the path `main.rs` runs, so a regressed default
+    /// turns this red. The 60 KB upload is stored as one any peer is
+    /// offered (`local_only=false`), announced as field 3 = 256 (lxmd's
+    /// `PROPAGATION_LIMIT`), and its recipient collects it whole. The
+    /// control: one over lxmd's `DELIVERY_LIMIT` of 1000 KB is refused at
+    /// the advertisement with `PN_REJECT reason=too_large`, and nothing of
+    /// it is stored.
+    #[test]
+    fn a_node_without_a_config_takes_a_sixty_kb_voice_message_and_refuses_one_over_the_delivery_limit(
+    ) {
+        use leviculum_lxmf::propagation::{MessageGetRequest, MessageListResponse};
+        use leviculum_lxmf::{PeerSyncEnvelope, PropagationNodeAnnounce, TransferLimit};
+        use rand_core::RngCore as _;
+
+        let limits = crate::config::SizeLimits::resolve(
+            &crate::config::RawConfig::parse("").expect("an empty config parses"),
+            None,
+            None,
+        )
+        .expect("an empty config resolves");
+        assert_eq!(
+            limits,
+            crate::config::SizeLimits {
+                transfer_kb: 256,
+                sync_kb: 10_240,
+                delivery_kb: 1000,
+            },
+            "lxmd's PROPAGATION_LIMIT, SYNC_LIMIT and DELIVERY_LIMIT \
+             (reference/LXMF/LXMF/LXMRouter.py:55-60)"
+        );
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let store_bytes = 4_000_000;
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: PropagationNodeConfig {
+                transfer_limit_kb: limits.transfer_kb,
+                sync_limit_kb: limits.sync_kb,
+                ..cost_free()
+            },
+            store: MemoryPropagationStore::new(store_bytes),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: store_bytes,
+            delivery_limit_kb: limits.delivery_kb,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => {
+                let announce =
+                    PropagationNodeAnnounce::decode(&ready.node.announce_app_data(1_700_000_000))
+                        .expect("our announce decodes");
+                assert_eq!(
+                    announce.transfer_limit_kb, 256,
+                    "a stock peer offers us what fits field 3"
+                );
+                ready.destination_hash
+            }
+            _ => panic!("engine must be ready"),
+        };
+        let sender = leviculum_std::generate_identity();
+        let recipient = [0x3c; 16];
+
+        enable_log_dispatch();
+        let capture = LogCapture::default();
+        let uploads = tracing::subscriber::with_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .with_writer(capture.clone())
+                .finish(),
+            || {
+                let mut upload = |len: usize| {
+                    let link_id = identified_link(
+                        &mut engine,
+                        &mut server,
+                        &mut client,
+                        destination_hash,
+                        &signing_key,
+                        &sender,
+                    );
+                    // Random, so no compression shrinks the resource
+                    // under the limit it is meant to test.
+                    let mut message = vec![0u8; len];
+                    rand_core::OsRng.fill_bytes(&mut message);
+                    message[..16].copy_from_slice(&recipient);
+                    message.extend_from_slice(&[0x5b; STAMP_SIZE]);
+                    let envelope = PeerSyncEnvelope {
+                        timestamp: 1.0,
+                        messages: vec![message],
+                    }
+                    .encode();
+                    let (_, out) = client
+                        .send_resource(&link_id, &envelope, None, false)
+                        .expect("advertise");
+                    let _ = converse(&mut engine, &mut server, &mut client, out);
+                    await_validation(&mut engine);
+                    let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+                        State::Ready(ready) => ready,
+                        _ => panic!("engine must be ready"),
+                    };
+                    let mut out = TickOutput::empty();
+                    absorb(&mut engine, &mut ready, &mut server, &mut out);
+                    let stored = ready.node.store().len();
+                    engine.state = State::Ready(ready);
+                    (stored, envelope.len())
+                };
+                (upload(60_000), upload(1_000_001))
+            },
+        );
+        let ((voice, _), (after_over, over_len)) = uploads;
+        assert_eq!(voice, 1, "the 60 KB voice message must be stored");
+        assert_eq!(
+            after_over, 1,
+            "the one over the delivery limit must not be: the store still \
+             holds the voice message alone"
+        );
+
+        let log = capture.unquoted();
+        let accepts: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("event=PN_ACCEPT"))
+            .collect();
+        assert_eq!(accepts.len(), 1, "{log}");
+        assert!(
+            accepts[0].contains("local_only=false"),
+            "under the transfer limit, so offered to every peer: {}",
+            accepts[0]
+        );
+        let rejects: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("event=PN_REJECT"))
+            .collect();
+        assert_eq!(rejects.len(), 1, "{log}");
+        let bytes = format!("bytes={over_len} ");
+        for field in ["reason=too_large", "via=resource", "limit=1000000", &bytes] {
+            assert!(rejects[0].contains(field), "{field}: {}", rejects[0]);
+        }
+
+        // The recipient collects it: listed, then fetched whole under the
+        // reference client's own limit (`delivery_per_transfer_limit`,
+        // 1000 KB, `reference/LXMF/LXMF/LXMRouter.py:1592`).
+        let State::Ready(ready) = &mut engine.state else {
+            panic!("engine must be ready");
+        };
+        let listed = match ready
+            .node
+            .handle_get(
+                &MessageGetRequest::list().encode().expect("encodes"),
+                &recipient,
+                unix_secs(),
+            )
+            .expect("the recipient lists")
+        {
+            GetOutcome::List { response, .. } => {
+                match MessageListResponse::decode(&response).expect("decodes") {
+                    MessageListResponse::TransientIds(ids) => ids,
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("a list request must list: {other:?}"),
+        };
+        assert_eq!(listed.len(), 1, "the voice message waits for its recipient");
+        let fetch = MessageGetRequest {
+            wants: Some(listed.clone()),
+            haves: None,
+            transfer_limit_kb: Some(TransferLimit::Integer(1000)),
+        };
+        match ready
+            .node
+            .handle_get(&fetch.encode().expect("encodes"), &recipient, unix_secs())
+            .expect("the recipient fetches")
+        {
+            GetOutcome::Fetch { plan, .. } => {
+                assert_eq!(plan.served_ids(), listed, "served whole, in one fetch");
+                let served: Vec<u32> = plan.messages().map(|(_, len)| len).collect();
+                assert_eq!(served, vec![60_000], "the body ships unstamped");
+            }
+            other => panic!("a fetch must fetch: {other:?}"),
+        }
+    }
+
     /// A sync message the store cannot hold is an event, not silence: the
     /// round logs `PN_STORE_FULL` with what was offered and dropped, the
     /// next `/offer` is declined with `ERROR_THROTTLED` (the peer keeps

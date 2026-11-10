@@ -381,16 +381,6 @@ async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> Exi
     ExitCode::from(code)
 }
 
-/// The per-message transfer limit an unset key resolves to, lxmd's
-/// `PROPAGATION_LIMIT` (`reference/LXMF/LXMF/LXMRouter.py:55`). It was 4
-/// until 1294, against the example config's 256: a stock peer then sent
-/// us nothing above 4 KB, and an upload above it stayed here for good.
-const DEFAULT_TRANSFER_LIMIT_KB: u64 = 256;
-
-/// The per-sync limit an unset key resolves to, lxmd's `SYNC_LIMIT`,
-/// 40 transfers (`reference/LXMF/LXMF/LXMRouter.py:59`); 32 until 1294.
-const DEFAULT_SYNC_LIMIT_KB: u64 = 256 * 40;
-
 /// Everything the daemon reads from config + flags, resolved.
 struct Effective {
     node_name: Option<String>,
@@ -473,6 +463,8 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
                 .to_string(),
         });
     }
+    let limits =
+        lnpnd::config::SizeLimits::resolve(file, args.transfer_limit_kb, args.sync_limit_kb)?;
     Ok(Effective {
         node_name: args
             .name
@@ -505,17 +497,8 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
                 .get_u64("propagation", "message_storage_limit")?
                 .map(|megabytes| megabytes * 1000),
         },
-        transfer_limit_kb: args.transfer_limit_kb.unwrap_or(
-            // Both spellings, newer one wins, as in `apply_config`
-            // (`lxmd.py:165-177`).
-            file.get_u64("propagation", "propagation_message_max_accepted_size")?
-                .or(file.get_u64("propagation", "propagation_transfer_max_accepted_size")?)
-                .unwrap_or(DEFAULT_TRANSFER_LIMIT_KB),
-        ),
-        sync_limit_kb: args.sync_limit_kb.unwrap_or(
-            file.get_u64("propagation", "propagation_sync_max_accepted_size")?
-                .unwrap_or(DEFAULT_SYNC_LIMIT_KB),
-        ),
+        transfer_limit_kb: limits.transfer_kb,
+        sync_limit_kb: limits.sync_kb,
         // Unset costs are the role's own defaults, 13 / 0 / 1 (Lead,
         // 2026-09-12; flexibility 0 since 1294), one source with the board's.
         stamp_cost: args.stamp_cost.unwrap_or(
@@ -592,9 +575,7 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
             .map(|minutes| minutes * 60),
         // The reference clamps to ≥ 1 (`max(1, …)`, `lxmd.py:91`).
         mailbox_stamp_cost: file.get_u8("lxmf", "stamp_cost")?.unwrap_or(12).max(1),
-        delivery_limit_kb: file
-            .get_u64("lxmf", "delivery_transfer_max_accepted_size")?
-            .unwrap_or(1000),
+        delivery_limit_kb: limits.delivery_kb,
         on_inbound: args
             .on_inbound
             .clone()
