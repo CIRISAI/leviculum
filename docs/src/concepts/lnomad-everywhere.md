@@ -803,7 +803,7 @@ as the phone, on by default since 1618.
 - **One fetch, three hosts.** The phone's task moved from the Android
   crate into Loquax (`loquax/src/browse_fetch.rs`, feature `browse`,
   which `tui`, `gui` and the phone's build carry). It gained a page's
-  pictures (`Ask::Images`, `loquax/src/browse_fetch.rs:257`, lnomad's
+  pictures (`Ask::Images`, `loquax/src/browse_fetch.rs:266`, lnomad's
   `spawn_image_queue`; `Shot`, `loquax/src/browse_fetch.rs:79`). The
   desktop shell lends the node it attached to its daemon
   (`Browsing::start`, `loquax/src/browsing.rs:120`), the identity a
