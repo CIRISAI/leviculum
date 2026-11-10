@@ -39,6 +39,9 @@ final class RoomsPane {
     interface Host {
         /** The tab gave way to the chats. */
         void left();
+
+        /** The bar's title: "Räume auf EuskalReticulum" with no room open (1659). */
+        void title(String words);
     }
 
     private final Activity screen;
@@ -309,6 +312,10 @@ final class RoomsPane {
             host.left();
             return;
         }
+        String bar = Core.str(shown, "title");
+        if (!bar.isEmpty()) {
+            host.title(bar);
+        }
         String said = Core.str(shown, "status");
         status.setText(said);
         status.setVisibility(said.isEmpty() ? View.GONE : View.VISIBLE);
@@ -347,7 +354,10 @@ final class RoomsPane {
             // The rooms the hub names (1652): a tap joins one.
             String title = Core.str(shown, "listed_title");
             if (!title.isEmpty()) {
-                list.addView(heading(title));
+                // The bar says it already (1659): no second line of it.
+                if (!title.equals(bar)) {
+                    list.addView(heading(title));
+                }
                 List<?> named = (List<?>) shown.get("listed");
                 if (named != null) {
                     for (int i = 0; i < named.size(); i++) {

@@ -14,7 +14,7 @@
 use leviculum_rrc::LineKind;
 use loquax::ui::rooms::{self as model_rooms, RoomLineKind, RoomsEvent};
 use loquax::ui::scene::TabId;
-use loquax::ui::strings::{Lang, StrId, Text};
+use loquax::ui::strings::Lang;
 use loquax::ui::{UiEvent, UiModel};
 
 use crate::schema::{self, RoomsLine, RoomsRow, RoomsScreen, RoomsVerb};
@@ -35,7 +35,8 @@ pub fn screen<B>(model: &UiModel<B>, lang: Lang, v: u32) -> RoomsScreen {
         v,
         enabled: true,
         open: rooms.showing(),
-        title: Text::key(StrId::TabRooms).resolve(lang),
+        // "Räume auf EuskalReticulum" with no room open (1659, walk 10, 52).
+        title: node.title.resolve(lang),
         status: node
             .status
             .as_ref()

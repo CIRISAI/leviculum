@@ -102,6 +102,8 @@ leviculum_ui::catalogue! {
     RoomsNoHub = "rooms_no_hub", "No public rooms yet. Choose a server under Explore.", "Noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.";
     RoomsLinking = "rooms_linking", "Connecting…", "Verbinde…";
     RoomsLinkingFor = "rooms_linking_for", "Connecting… %1$d s", "Verbinde… %1$d s";
+    // 1659 (walk 10, 53): from 20 s until the patience of 45 s.
+    RoomsSlowFor = "rooms_slow_for", "The server is answering slowly… %1$d s", "Server antwortet langsam… %1$d s";
     RoomsNotLinked = "rooms_not_linked", "Not connected yet.", "Noch nicht verbunden.";
     RoomsLinked = "rooms_linked", "Connected", "Verbunden";
     RoomsConnect = "rooms_connect", "Connect", "Verbinden";

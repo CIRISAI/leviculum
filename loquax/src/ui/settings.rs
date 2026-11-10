@@ -417,8 +417,24 @@ pub struct Offered {
 /// The hubs in the order the settings offer them (1599): the heard ones
 /// by last seen, the closer first on a tie, a shipped one among them
 /// marked as such; then the shipped ones not heard, closest first, as the
-/// shipped file is ordered.
+/// shipped file is ordered. The hub in force stands first (1659, walk 10,
+/// 55: it was tenth in the settings while Explore, which draws this same
+/// order, showed it elsewhere), so the settings and Explore list the
+/// servers alike.
 pub fn offered_hubs(rooms: &super::rooms::Rooms) -> Vec<Offered> {
+    let mut out = offered_by_seen(rooms);
+    if let Some(at) = rooms
+        .hub
+        .and_then(|hub| out.iter().position(|o| o.hash == hub))
+    {
+        let chosen = out.remove(at);
+        out.insert(0, chosen);
+    }
+    out
+}
+
+/// [`offered_hubs`] before the hub in force is put first.
+fn offered_by_seen(rooms: &super::rooms::Rooms) -> Vec<Offered> {
     let shipped = super::hubs::shipped();
     let mut out: Vec<Offered> = rooms
         .heard
@@ -724,14 +740,15 @@ mod tests {
             })
             .collect();
         assert_eq!(said[0], "Server for public rooms: Villa");
+        // The one in use first (1659, walk 10, 55: it stood tenth), saying
+        // its link in the rooms screen's words (1655).
         assert_eq!(
-            said[1], "Server without a name: reachable over 2 stations",
-            "a tie: the closer first"
-        );
-        // The one in use says its link in the rooms screen's words (1655).
-        assert_eq!(
-            said[2],
+            said[1],
             "Villa: reachable over 4 stations · The server does not answer. · \u{2713}"
+        );
+        assert_eq!(
+            said[2], "Server without a name: reachable over 2 stations",
+            "the rest by last seen, the closer first on a tie"
         );
         // A server is in use: none is suggested (1621).
         assert_eq!(said[3], "HADARC: reachable over 4 stations");

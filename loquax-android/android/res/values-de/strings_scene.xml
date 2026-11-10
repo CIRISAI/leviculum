@@ -56,6 +56,7 @@
     <string name="rooms_no_hub">Noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.</string>
     <string name="rooms_linking">Verbinde…</string>
     <string name="rooms_linking_for">Verbinde… %1$d s</string>
+    <string name="rooms_slow_for">Server antwortet langsam… %1$d s</string>
     <string name="rooms_not_linked">Noch nicht verbunden.</string>
     <string name="rooms_linked">Verbunden</string>
     <string name="rooms_connect">Verbinden</string>

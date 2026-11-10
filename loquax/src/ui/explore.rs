@@ -847,6 +847,10 @@ fn rooms_note(
             Some(Text::key(StrId::RoomsNoAnswer))
         }
         Some(Named::Asking { since }) => Some(match (*since, now) {
+            // Slow from 20 s, as the rooms screen says it (1659, walk 10, 53).
+            (Some(since), Some(now)) if now - since >= super::rooms::SLOW_SECS => {
+                Text::Key(StrId::RoomsSlowFor, Vec::from([Arg::Int(now - since)]))
+            }
             (Some(since), Some(now)) if now - since >= super::rooms::LINKING_QUIET_SECS => {
                 Text::Key(
                     StrId::ExploreServerAskingFor,
@@ -1232,8 +1236,10 @@ fn bookmark<B: InputBuffer + Default>(model: &mut UiModel<B>, dest: [u8; 16]) ->
 /// window have their own field and say [`ExploreEvent::Typed`]): letters
 /// go to the search field, `Backspace` takes one back, `Up` and `Down`
 /// move the cursor over the rows, `Enter` opens the row under it, `Alt-b`
-/// bookmarks a page's row, `Alt-s` turns the order, `Esc` clears the
-/// field and, empty, leaves the tab for the chats, as `Ctrl-g` does.
+/// bookmarks a page's row, `Alt-s` turns the order, `Alt-1`, `Alt-2` and
+/// `Alt-3` put the cursor on the pages, the rooms and the servers (1659,
+/// walk 10, 54: the phone's jump chips), `Esc` clears the field and,
+/// empty, leaves the tab for the chats, as `Ctrl-g` does.
 pub(super) fn key<B: InputBuffer + Default>(
     model: &mut UiModel<B>,
     key: leviculum_ui::input::KeyEvent,
@@ -1285,6 +1291,11 @@ pub(super) fn key<B: InputBuffer + Default>(
                 return fold(model, ExploreEvent::Bookmark(dest));
             }
         }
+        KeyCode::Char(c @ '1'..='3') if alt => {
+            if let Some(at) = section_start(&picks, c) {
+                model.explore.cursor = at;
+            }
+        }
         KeyCode::Char(c) if !ctrl && !alt => {
             model.explore.query.push(c);
             model.explore.cursor = 0;
@@ -1318,6 +1329,20 @@ pub(super) fn key<B: InputBuffer + Default>(
         _ => {}
     }
     Vec::new()
+}
+
+/// The first pick of a section (1659, walk 10, 54): `'1'` the pages (the
+/// list's top), `'2'` the rooms (a room, "Open rooms", else the first
+/// server under the section), `'3'` the servers; `None` when the section
+/// has none.
+fn section_start(picks: &[Pick], section: char) -> Option<usize> {
+    match section {
+        '1' => (!picks.is_empty()).then_some(0),
+        '2' => picks
+            .iter()
+            .position(|p| matches!(p, Pick::Room(_) | Pick::OpenRooms | Pick::Hub(_))),
+        _ => picks.iter().position(|p| matches!(p, Pick::Hub(_))),
+    }
 }
 
 fn page_json(row: &PageRow) -> Value {
@@ -1796,7 +1821,10 @@ mod tests {
         let rooms = crate::ui::rooms::node(&model);
         assert_eq!(rooms.status, Some(Text::key(StrId::RoomsLinking)));
         assert_eq!(rooms.retry, None, "nothing to retry while it links");
-        assert!(rooms.listed.is_none(), "no list before the welcome");
+        // Before the welcome the title names the server, and nothing is
+        // known of its rooms yet (1659: the list stands whatever the link).
+        let listed = rooms.listed.expect("the title before the welcome");
+        assert!(listed.rooms.is_empty() && listed.note.is_none());
         // The welcome: the hub's rooms are asked; until they come, it says so.
         update(
             &mut model,
@@ -2063,6 +2091,63 @@ mod tests {
         for hub in &shipped[..22] {
             assert!(listed(&model, hub.hash), "{}", hub.name);
         }
+    }
+
+    /// 1659, walk 10, 55: the settings and Explore list the servers in one
+    /// order, the one in use first; the rest by last seen.
+    #[test]
+    fn the_server_in_use_stands_first_in_explore_and_in_the_settings() {
+        let shipped = crate::ui::hubs::shipped();
+        let mut model = phone();
+        for (i, hub) in shipped[..5].iter().enumerate() {
+            update(
+                &mut model,
+                UiEvent::Rooms(RoomsEvent::Heard(crate::ui::hubs::HeardHub {
+                    hash: hub.hash,
+                    name: Some(hub.name.clone()),
+                    hops: Some(3),
+                    first: NOW - 600,
+                    last: NOW - 600 + 60 * i64::try_from(i).unwrap_or(0),
+                    answered: None,
+                })),
+            );
+        }
+        let chosen = shipped[1].hash;
+        model.rooms.hub = Some(chosen);
+        model.rooms.enabled = true;
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let explore: Vec<[u8; 16]> = node(&model).rooms.hubs.iter().map(|h| h.hash).collect();
+        let settings: Vec<[u8; 16]> = crate::ui::settings::offered_hubs(&model.rooms)
+            .iter()
+            .map(|o| o.hash)
+            .collect();
+        assert_eq!(explore[0], chosen, "Explore: the one in use first");
+        assert_eq!(settings[0], chosen, "settings: the one in use first");
+        assert_eq!(explore[..5], settings[..5], "one order");
+        // The rest by last seen: the one heard last next.
+        assert_eq!(explore[1], shipped[4].hash);
+    }
+
+    /// 1659, walk 10, 54: the terminal's jumps, as the phone's chips:
+    /// `Alt-2` puts the cursor on "Open rooms" under the pages, `Alt-3` on
+    /// the first server, `Alt-1` back on top.
+    #[test]
+    fn the_terminal_jumps_to_the_rooms_and_the_servers() {
+        use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+        let mut model = phone();
+        let hub = crate::ui::hubs::shipped()[0].hash;
+        model.rooms.hub = Some(hub);
+        model.rooms.enabled = true;
+        update(&mut model, UiEvent::Tab(TabId::Explore));
+        let alt = |c| UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+        let picks = picks(&model);
+        update(&mut model, alt('2'));
+        assert_eq!(picks[model.explore.cursor], Pick::OpenRooms);
+        update(&mut model, alt('3'));
+        assert!(matches!(picks[model.explore.cursor], Pick::Hub(_)));
+        assert_eq!(picks[model.explore.cursor - 1], Pick::OpenRooms);
+        update(&mut model, alt('1'));
+        assert_eq!(model.explore.cursor, 0);
     }
 
     /// The search reaches every server Loquax offers (1655, walk 9, 44:
@@ -2617,8 +2702,11 @@ mod tests {
     /// again; the question is asked again on that tap, the sentence back
     /// to asking, and a late answer still fills the sheet. The control:
     /// 19 s in it still asks, and an answered sheet offers no retry.
+    /// Since 1659 (walk 10, 53: Minuteman answered after 45 s, the sheet
+    /// had said "does not answer" at 20 s) it says the server is slow from
+    /// 20 s, with the seconds, and gives up at 45 s, as the rooms screen.
     #[test]
-    fn a_silent_server_is_said_after_twenty_seconds_with_a_retry() {
+    fn a_silent_server_is_slow_at_twenty_seconds_and_silent_at_forty_five() {
         let mut model = phone();
         let hub = [0x98; 16];
         let at = |model: &mut UiModel<Buffer>, secs: i64| {
@@ -2665,9 +2753,29 @@ mod tests {
         at(&mut model, 1_000_020);
         let sheet = node(&model).sheet.expect("the sheet");
         assert_eq!(
+            sheet
+                .rooms_note
+                .as_ref()
+                .map(|t| t.resolve(Lang::De))
+                .as_deref(),
+            Some("Server antwortet langsam… 20 s"),
+            "20 s: slow, not silent"
+        );
+        assert_eq!(sheet.retry, None, "20 s: no retry yet");
+        at(&mut model, 1_000_044);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(
+            sheet.rooms_note,
+            Some(Text::Key(StrId::RoomsSlowFor, vec![Arg::Int(44)])),
+            "44 s"
+        );
+        assert_eq!(sheet.retry, None);
+        at(&mut model, 1_000_045);
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(
             sheet.rooms_note,
             Some(Text::key(StrId::RoomsNoAnswer)),
-            "20 s"
+            "45 s"
         );
         assert_eq!(sheet.retry, Some(Text::key(StrId::RoomsRetry)));
         assert_eq!(
@@ -2678,7 +2786,7 @@ mod tests {
                 .as_deref(),
             Some("Server antwortet nicht.")
         );
-        // The retry asks again, and the sentence asks again for 20 s.
+        // The retry asks again, and the sentence asks again.
         assert_eq!(
             explore(&mut model, ExploreEvent::AskAgain(hub)),
             [UiEffect::Rooms(RoomAsk::Peek { hub })]

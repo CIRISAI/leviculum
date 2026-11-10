@@ -25,8 +25,10 @@ use crate::engine::Lent;
 /// How long a path to the hub is looked for.
 const PATH_BUDGET: Duration = Duration::from_secs(30);
 const PATH_RETRY: Duration = Duration::from_secs(2);
-/// How long the link may take to come up.
-const LINK_BUDGET: Duration = Duration::from_secs(30);
+/// How long the link may take to come up: the rooms screen's patience
+/// (1659, walk 10, 53: at 30 s the screen gave up on a server the sheet
+/// had seen answer after 45 s).
+const LINK_BUDGET: Duration = Duration::from_secs(45);
 /// HELLO is sent this often until WELCOME comes, at most this many times.
 const HELLO_EVERY: Duration = Duration::from_secs(5);
 const HELLO_TRIES: u32 = 5;

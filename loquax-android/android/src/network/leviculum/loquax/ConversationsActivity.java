@@ -301,6 +301,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                         explore();
                     }
                 }
+
+                @Override
+                public void title(String words) {
+                    if (onRooms) {
+                        title.setText(words);
+                    }
+                }
             });
         }
         findViewById(R.id.pane_chats).setVisibility(View.GONE);

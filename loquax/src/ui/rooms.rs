@@ -88,12 +88,19 @@ pub enum Named {
     NoAnswer,
 }
 
-/// How long a server's sheet says "asking" before it says the server
-/// does not answer and offers to ask again (1653, walk 8, 42: the
-/// sentence stood 90 s, the question's whole budget, and the reader
-/// waited without end). The question itself runs on to its budget; an
-/// answer that comes later still fills the sheet.
-pub const ASK_PATIENCE_SECS: i64 = 20;
+/// How long a server's sheet asks, and the rooms screen connects, before
+/// either says the server does not answer and offers to try again (1653,
+/// walk 8, 42: the sentence stood 90 s, the question's whole budget, and
+/// the reader waited without end). One patience for both since 1659 (walk
+/// 10, 53: the sheet gave up at 20 s, the screen at 30 s, and Minuteman
+/// answered after 45 s). The question itself runs on to its budget; an
+/// answer that comes later still fills the sheet, and a welcome that
+/// comes later still opens the screen.
+pub const ASK_PATIENCE_SECS: i64 = 45;
+
+/// From this second on the sheet and the rooms screen say the server is
+/// slow, with the seconds (1659, walk 10, 53), until [`ASK_PATIENCE_SECS`].
+pub const SLOW_SECS: i64 = 20;
 
 /// The settings' hub row (1577): what a press on one of its lines asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -420,14 +427,18 @@ pub(super) fn tab<B>(model: &mut UiModel<B>, tab: TabId) -> Vec<UiEffect> {
     }
 }
 
-/// Link to the hub unless linked or linking.
+/// Link to the hub unless linked or linking; a link coming longer than
+/// [`ASK_PATIENCE_SECS`] is asked for again (1659, the "Try again" the
+/// screen offers then).
 fn link<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     let Some(hub) = model.rooms.hub else {
         return Vec::new();
     };
+    let again = overdue(&model.rooms, model.now);
     match model.rooms.state {
-        HubState::Linking | HubState::Ready => Vec::new(),
-        HubState::Off | HubState::Down(_) => {
+        HubState::Linking if !again => Vec::new(),
+        HubState::Ready => Vec::new(),
+        HubState::Linking | HubState::Off | HubState::Down(_) => {
             model.rooms.state = HubState::Linking;
             model.rooms.linking_since = model.now.map(|now| now.unix_secs);
             let mut effects = Vec::new();
@@ -684,7 +695,9 @@ fn fold_event<B: InputBuffer + Default>(
                 rooms.heard.answered(&hub, false);
             }
             let text = down(why).resolve(model.lang);
-            if why != Down::Left {
+            // The rooms screen in front says it in its state line; a toast
+            // as well stood doubled under it (1659, walk 10, 55).
+            if why != Down::Left && !rooms.open {
                 model.toast(ToastKind::Error, text);
             }
         }
@@ -910,6 +923,10 @@ pub fn down(why: Down) -> Text {
 /// the open one, drawn as a chat, and the compose field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomsNode {
+    /// The screen's title (1659, walk 10, 52): "Rooms on EuskalReticulum"
+    /// with no room open, "Rooms" without a server or with a room open,
+    /// whose header names it.
+    pub title: Text,
     /// How the link stands while it is not up ("Connecting…", why it is
     /// down); none while it is: a working link says nothing.
     pub status: Option<Text>,
@@ -1048,6 +1065,7 @@ pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
         _ if rooms.hub.is_none() => None,
         HubState::Off | HubState::Down(Down::Left) => Some(Text::key(StrId::RoomsConnect)),
         HubState::Down(_) => Some(Text::key(StrId::RoomsRetry)),
+        HubState::Linking if overdue(rooms, model.now) => Some(Text::key(StrId::RoomsRetry)),
         HubState::Linking | HubState::Ready => None,
     };
     let rows = rooms
@@ -1079,7 +1097,12 @@ pub fn node<B>(model: &UiModel<B>) -> RoomsNode {
             Some(Text::key(StrId::RoomsHowToJoin)),
         ),
     };
+    let title = match (&open, rooms.hub) {
+        (None, Some(_)) => on_hub(rooms),
+        _ => Text::key(StrId::TabRooms),
+    };
     RoomsNode {
+        title,
         status,
         rows,
         open,
@@ -1110,26 +1133,54 @@ pub fn link_words<B>(model: &UiModel<B>) -> Option<Text> {
 }
 
 fn linking(since: Option<i64>, now: Option<WallTime>) -> Text {
-    match (since, now) {
-        (Some(since), Some(now)) if now.unix_secs - since >= LINKING_QUIET_SECS => Text::Key(
-            StrId::RoomsLinkingFor,
-            Vec::from([Arg::Int(now.unix_secs - since)]),
-        ),
+    let waited = match (since, now) {
+        (Some(since), Some(now)) => now.unix_secs - since,
+        _ => 0,
+    };
+    match waited {
+        // The patience of the sheet (1659, walk 10, 53): the link may still
+        // come, and its welcome still opens the screen.
+        w if w >= ASK_PATIENCE_SECS => Text::key(StrId::RoomsNoAnswer),
+        w if w >= SLOW_SECS => Text::Key(StrId::RoomsSlowFor, Vec::from([Arg::Int(w)])),
+        w if w >= LINKING_QUIET_SECS => Text::Key(StrId::RoomsLinkingFor, Vec::from([Arg::Int(w)])),
         _ => Text::key(StrId::RoomsLinking),
     }
 }
 
+/// The link has been coming for [`ASK_PATIENCE_SECS`] (1659): the screen
+/// says the server does not answer and offers to try again.
+fn overdue(rooms: &Rooms, now: Option<WallTime>) -> bool {
+    match (rooms.state, rooms.linking_since, now) {
+        (HubState::Linking, Some(since), Some(now)) => now.unix_secs - since >= ASK_PATIENCE_SECS,
+        _ => false,
+    }
+}
+
 /// The rooms the chosen hub names that we are not in (1652): its `/list`
-/// answer once it came, before that what its sheet's question or the
-/// shipped list knew, while the link is up and its answer is asked.
+/// answer once it came; before it this run's sheet answer, merged with
+/// what the mailbox's question found (1643) and the shipped list. Since
+/// 1659 (walk 10, 52) they stand whatever the link does: a silent server's
+/// screen said only "The server does not answer." under a bare "Rooms",
+/// and a newcomer had to guess a name the store knew. A tap on one joins
+/// it once the server answers ([`ask`] queues it and links). The title
+/// names the server even when nothing is known of its rooms.
 fn listed(rooms: &Rooms) -> Option<ListedNode> {
     let hub = rooms.hub?;
-    let known: Vec<String> = match (&rooms.listed, rooms.named.get(&hub)) {
-        (Some(listed), _) => listed.clone(),
-        (None, Some(Named::Rooms(named))) => named.clone(),
-        (None, _) => super::hubs::named(&hub)
-            .map(|h| h.rooms)
-            .unwrap_or_default(),
+    // The link's own answer is the fresh one and stands alone; before it,
+    // all that is known of the server.
+    let known: Vec<String> = match &rooms.listed {
+        Some(listed) => listed.clone(),
+        None => {
+            let named = match rooms.named.get(&hub) {
+                Some(Named::Rooms(named)) => named.clone(),
+                _ => Vec::new(),
+            };
+            let mailbox = rooms.mailbox_named.get(&hub).cloned().unwrap_or_default();
+            let shipped = super::hubs::named(&hub)
+                .map(|h| h.rooms)
+                .unwrap_or_default();
+            super::hubs::rooms_merged(&super::hubs::rooms_merged(&named, &mailbox), &shipped)
+        }
     };
     let bare = |name: &str| name.trim_start_matches('#').to_lowercase();
     let names: Vec<String> = known
@@ -1138,22 +1189,28 @@ fn listed(rooms: &Rooms) -> Option<ListedNode> {
         .collect();
     let note = match (names.is_empty(), &rooms.listed) {
         (false, _) => None,
-        // Nothing to show while the link is not up: the state says why.
-        (true, _) if rooms.state != HubState::Ready => return None,
+        // Nothing known while the link is not up: the state says why.
+        (true, _) if rooms.state != HubState::Ready => None,
         (true, None) => Some(Text::key(StrId::RoomsAsking)),
         (true, Some(all)) if all.is_empty() => Some(Text::key(StrId::RoomsNoneNamed)),
         // We are in every room it names: the joined rows say it.
-        (true, Some(_)) => return None,
+        (true, Some(_)) => None,
     };
     Some(ListedNode {
-        title: Text::Key(
-            StrId::RoomsOnHub,
-            Vec::from([Arg::Text(alloc::boxed::Box::new(hub_label(rooms)))]),
-        ),
+        title: on_hub(rooms),
         other: (!names.is_empty()).then(|| Text::key(StrId::RoomsOther)),
         rooms: names,
         note,
     })
+}
+
+/// "Rooms on EuskalReticulum": the screen's title with no room open, and
+/// the heading over the rooms the server names (1659, walk 10, 52).
+fn on_hub(rooms: &Rooms) -> Text {
+    Text::Key(
+        StrId::RoomsOnHub,
+        Vec::from([Arg::Text(alloc::boxed::Box::new(hub_label(rooms)))]),
+    )
 }
 
 /// The open room as a chat.
@@ -1270,6 +1327,7 @@ impl RoomsNode {
     /// The surface as JSON for golden files, its texts unresolved.
     pub fn to_json(&self) -> Value {
         json!({
+            "title": self.title.to_json(),
             "status": self.status.as_ref().map(Text::to_json),
             "rows": self.rows.iter().map(|r| json!({
                 "name": r.name,
@@ -1959,7 +2017,10 @@ mod tests {
         rooms(&mut model, RoomsEvent::Down(Down::NoAnswer));
         assert_eq!(status(&model).as_deref(), Some("Server antwortet nicht."));
         assert_eq!(node(&model).retry, Some(Text::key(StrId::RoomsRetry)));
-        assert!(node(&model).listed.is_none(), "no list while it is down");
+        // Down, nothing known of its rooms: the title only, no note; the
+        // state line says why (1659).
+        let listed = node(&model).listed.expect("the title while it is down");
+        assert!(listed.rooms.is_empty() && listed.note.is_none());
         model.now = at(2_000);
         assert_eq!(
             rooms(&mut model, RoomsEvent::Retry),
@@ -2009,5 +2070,150 @@ mod tests {
                 key: None
             })]
         );
+    }
+
+    /// 1659, walk 10, 52: the chosen server's rooms screen while the
+    /// server is silent (EuskalReticulum answered nothing all evening):
+    /// the title names it, and the rooms known for it (the mailbox's
+    /// question, 1643; this run's sheet, 1621) stand as rows a tap joins,
+    /// with the state line above. The control: a server nothing is known
+    /// of keeps the typed-name sentence.
+    #[test]
+    fn a_chosen_hub_with_stored_rooms_and_a_dead_link_lists_them() {
+        use crate::ui::strings::Lang;
+        let euskal = crate::address::parse("14d0b712d769a243e700209f6c6f5af4").expect("hash");
+        let mut model = UiModel::<Buffer>::new(&[]);
+        model.rooms.enabled = true;
+        model.rooms.hub = Some(euskal);
+        model.rooms.told = Some(euskal);
+        model
+            .rooms
+            .mailbox_named
+            .insert(euskal, vec!["general".to_string()]);
+        update(&mut model, UiEvent::Tab(TabId::Rooms));
+        rooms(&mut model, RoomsEvent::Down(Down::NoAnswer));
+        let shown = node(&model);
+        let listed = shown.listed.expect("the known rooms, the link down");
+        assert_eq!(
+            shown.title.resolve(Lang::De),
+            "Räume auf EuskalReticulum",
+            "the screen's title names the server"
+        );
+        assert_eq!(listed.title.resolve(Lang::De), "Räume auf EuskalReticulum");
+        assert_eq!(listed.rooms, ["general"]);
+        assert_eq!(
+            shown.status.map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("Server antwortet nicht."),
+            "the state above them"
+        );
+        assert_eq!(shown.empty, None, "no guessing a name");
+        // A tap joins it once the server answers: it links again now.
+        assert_eq!(
+            rooms(&mut model, RoomsEvent::Join("general".into())),
+            [UiEffect::Rooms(RoomAsk::Open { hub: euskal })]
+        );
+        assert_eq!(
+            model.rooms.queued,
+            [RoomAsk::Join {
+                room: "general".into(),
+                key: None
+            }]
+        );
+        // This run's sheet answer counts too, merged with the mailbox's.
+        model
+            .rooms
+            .named
+            .insert(euskal, Named::Rooms(vec!["#lab".to_string()]));
+        let listed = node(&model).listed.expect("the sheet's rooms");
+        assert_eq!(listed.rooms, ["#lab", "general"]);
+        // The control: nothing known, the field's sentence stays, the
+        // title still names the server.
+        model.rooms.named.clear();
+        model.rooms.mailbox_named.clear();
+        let shown = node(&model);
+        let listed = shown.listed.expect("the title stays");
+        assert!(listed.rooms.is_empty());
+        assert_eq!(listed.title.resolve(Lang::De), "Räume auf EuskalReticulum");
+        assert_eq!(shown.empty, Some(Text::key(StrId::RoomsHowToJoin)));
+    }
+
+    /// 1659, walk 10, 53: the rooms screen keeps the sheet's patience.
+    /// "Connecting… N s" to 19 s, "The server is answering slowly… N s"
+    /// from 20 s, at 45 s "The server does not answer." with "Try again"
+    /// (the screen gave up at 30 s, Minuteman answered after 45 s); the
+    /// tap links anew. A welcome that comes after 45 s still opens the
+    /// screen. The state is said once: no toast while the screen shows it
+    /// (55: it stood doubled), a toast while the screen is behind.
+    #[test]
+    fn the_rooms_screen_waits_forty_five_seconds_and_a_late_welcome_still_counts() {
+        use crate::ui::strings::Lang;
+        let at = |secs| {
+            Some(WallTime {
+                unix_secs: secs,
+                offset_secs: 0,
+            })
+        };
+        let mut model = UiModel::<Buffer>::new(&[]);
+        model.rooms.enabled = true;
+        model.rooms.hub = Some(HUB);
+        model.rooms.told = Some(HUB);
+        model.now = at(1_000);
+        assert_eq!(
+            update(&mut model, UiEvent::Tab(TabId::Rooms)),
+            [UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
+        );
+        let status = |model: &UiModel<Buffer>| node(model).status.map(|t| t.resolve(Lang::De));
+        model.now = at(1_019);
+        assert_eq!(status(&model).as_deref(), Some("Verbinde… 19 s"));
+        model.now = at(1_020);
+        assert_eq!(
+            status(&model).as_deref(),
+            Some("Server antwortet langsam… 20 s")
+        );
+        assert_eq!(node(&model).retry, None, "slow is no failure");
+        model.now = at(1_044);
+        assert_eq!(
+            status(&model).as_deref(),
+            Some("Server antwortet langsam… 44 s")
+        );
+        assert!(
+            rooms(&mut model, RoomsEvent::Retry).is_empty(),
+            "nothing to retry yet"
+        );
+        model.now = at(1_045);
+        assert_eq!(status(&model).as_deref(), Some("Server antwortet nicht."));
+        assert_eq!(node(&model).retry, Some(Text::key(StrId::RoomsRetry)));
+        // The late welcome, before any retry: the screen is up.
+        rooms(
+            &mut model,
+            RoomsEvent::Welcomed {
+                name: None,
+                body_limit: 350,
+            },
+        );
+        assert_eq!(model.rooms.state, HubState::Ready);
+        assert_eq!(status(&model), None);
+        // Again, the retry this time: it links anew, counted from zero.
+        rooms(&mut model, RoomsEvent::Down(Down::Lost));
+        rooms(&mut model, RoomsEvent::Retry);
+        model.now = at(1_100);
+        assert_eq!(status(&model).as_deref(), Some("Server antwortet nicht."));
+        assert_eq!(
+            rooms(&mut model, RoomsEvent::Retry),
+            [UiEffect::Rooms(RoomAsk::Open { hub: HUB })]
+        );
+        assert_eq!(status(&model).as_deref(), Some("Verbinde…"), "counted anew");
+        // Said once: the screen in front has no toast for it ...
+        model.toasts.clear();
+        rooms(&mut model, RoomsEvent::Down(Down::NoAnswer));
+        assert!(
+            model.toasts.is_empty(),
+            "the state line says it: {:?}",
+            model.toasts
+        );
+        // ... the screen behind has.
+        update(&mut model, UiEvent::Tab(TabId::Chats));
+        rooms(&mut model, RoomsEvent::Down(Down::NoAnswer));
+        assert_eq!(model.toasts.len(), 1);
     }
 }
