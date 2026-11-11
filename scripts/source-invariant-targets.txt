@@ -168,6 +168,7 @@ skip  leviculum-lxmf-node telemetry_loopback     # tokio runtime, two nodes over
 skip  leviculum-lxmf-node tracing_reaches_stderr # runs the shipped lxmf-node executable as a process, plus a shared-instance daemon
 skip  leviculum-lxmf-node two_node_loopback      # tokio runtime, two nodes, sleeps
 skip  leviculum-map golden                    # golden renders and cell dumps per profile at pinned counts; subject is the draw
+skip  leviculum-map geoid                     # reads the committed geoid table, but the subject is the interpolation against EGM2008 reference values
 skip  leviculum-map labels                    # the pin label rule in cells and pixels; subject is the code
 skip  leviculum-map buildings                 # the building section format and its reader; subject is the code
 skip  leviculum-map lmr2                      # reads the committed region for its names, but the subject is the label format and the reader
