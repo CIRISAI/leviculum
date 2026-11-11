@@ -244,7 +244,12 @@ impl<B: InputBuffer> UiModel<B> {
             false => self.order().first().copied().unwrap_or(0),
         };
         self.selected = open;
-        self.read_out(open);
+        // Where the list is a screen of its own (1564: the phone, the M9)
+        // the start shows the list, not the chat under its cursor: nothing
+        // is read until the reader opens it ([`super::UiEvent::Open`]).
+        if !self.list_apart {
+            self.read_out(open);
+        }
         if let Some(conversation) = self.conversations.get(open) {
             self.message_cursor = conversation.messages.len().saturating_sub(1);
         }
@@ -765,7 +770,11 @@ impl<B> UiModel<B> {
             let conversation = &mut self.conversations[c];
             conversation.new_rule = conversation.rule_from_unread();
             if open {
-                self.read_out(c);
+                // The list apart (1564), the page a selection asked lands
+                // behind the list: the open reads ([`super::UiEvent::Open`]).
+                if !self.list_apart {
+                    self.read_out(c);
+                }
                 self.message_cursor = self.conversations[c].messages.len().saturating_sub(1);
                 self.scroll_top = None;
                 self.selection = None;

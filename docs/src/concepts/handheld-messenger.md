@@ -1524,6 +1524,24 @@ client from before reads the four it read. The home cuts the page
 counting with the longest such number, so the count never pushes an
 answer past the LoRa page.
 
+**A start reads nothing on the list (1564).** Lew's second finding the
+same day: after a watchdog reboot the first row under the cursor had
+lost its unread mark. The M9's boot did not reproduce it in the sim, at
+this tree or at 840cdaae, the image on the bench: a power cycle, a
+reset in the middle of a pull (the ring past its summary) and a reset
+whose rebuild folded the ring whole all kept the row's unread past the
+read dwell and kept no read mark (`boot_reads_nothing` in the sim's
+tests; `real.walk`'s dumps show "Hausprojekt Nordstadt [7]" through two
+reboots). The board's boot never reaches the core's two start reads: a
+resume lists the rows (`restore_rows`) and the cursor chat's page lands
+behind the list (`behind_the_list`). The phone does reach them, and the
+rule is the core's: `UiModel::restore` read the conversation it selected
+and the first fill of a page read the selected chat, wherever the list
+stood. Where the list is a screen of its own (`list_apart`: the phone,
+the M9) neither reads now; `UiEvent::Open` does, as 1546 has it. The
+desktop, list beside the chat, reads at the start as before
+(`a_start_on_the_list_reads_nothing_until_the_chat_is_opened`).
+
 **A stale link carries no answer.** The cell for a line cut mid-pull
 was red first: the core says `LinkStale` about ten seconds after the
 line went, but the request's timeout is the whole ask's budget, so the

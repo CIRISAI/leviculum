@@ -10550,6 +10550,82 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// A start reads nothing where the list is a screen of its own (1564,
+    /// the rule of 1529 and 1546): the phone and the M9 come up on the
+    /// list, its first row under the cursor, and that row's unread stay
+    /// unread until the reader opens it, through the start's own selection
+    /// (`restore`) and through the page the selection asks (the first
+    /// fill). Before, both read it: a restart took the badge off a chat
+    /// nobody had looked at, and told the home it was read. The control:
+    /// where the list stands beside the chat, the start shows the chat and
+    /// reads it, as before.
+    #[test]
+    fn a_start_on_the_list_reads_nothing_until_the_chat_is_opened() {
+        let theirs = |key: u64| stored(key, false, "ungelesen", None);
+        for apart in [true, false] {
+            // Restored whole: the start's selection is the only reader.
+            let mut model = UiModel::<Field>::new(&[]);
+            model.home_client = true;
+            model.list_apart = apart;
+            let mut whole = restored(PEER, vec![theirs(1), theirs(2), theirs(3)], 0);
+            whole.unread = 2;
+            model.restore(vec![whole]);
+            let marks = read_ids(&model.take_marks());
+            match apart {
+                true => {
+                    assert_eq!(model.conversations[0].unread, 2, "apart, restored");
+                    assert!(marks.is_empty(), "apart, restored: {marks:?}");
+                }
+                false => {
+                    assert_eq!(model.conversations[0].unread, 0, "beside, restored");
+                    assert_eq!(marks.len(), 2, "beside, restored");
+                }
+            }
+
+            // Restored from its row (1490): the selection asks the newest
+            // page, and the page's first fill is the reader.
+            let mut model = UiModel::<Field>::new(&[]);
+            model.home_client = true;
+            model.list_apart = apart;
+            let mut lazy = restored(PEER, Vec::new(), 3);
+            lazy.unread = 2;
+            lazy.listing = Some(listing::Listing {
+                moved: Some(3),
+                line: String::from("ungelesen"),
+                unread_rows: 2,
+                ..listing::Listing::default()
+            });
+            model.restore(vec![lazy]);
+            let _ = model.take_marks();
+            assert_eq!(model.selected, 0);
+            let _ = update(
+                &mut model,
+                UiEvent::Earlier {
+                    peer: PEER,
+                    messages: vec![theirs(1), theirs(2), theirs(3)],
+                    earlier: 0,
+                },
+            );
+            let marks = read_ids(&model.take_marks());
+            match apart {
+                true => {
+                    assert_eq!(model.conversations[0].unread, 2, "apart, paged");
+                    assert!(marks.is_empty(), "apart, paged: {marks:?}");
+                    // Opened, it is read, the two newest and only those.
+                    let _ = update(&mut model, UiEvent::Open { peer: PEER });
+                    assert_eq!(model.conversations[0].unread, 0, "apart, opened");
+                    assert_eq!(
+                        read_ids(&model.take_marks()),
+                        vec![[3u8; 32], [2u8; 32]],
+                        "apart, opened"
+                    );
+                }
+                // Beside the chat the start read it before the page came.
+                false => assert_eq!(model.conversations[0].unread, 0, "beside, paged"),
+            }
+        }
+    }
+
     /// A new device's first pull marks nothing read (1429): a device that
     /// joined a home with an archive of messages across three conversations
     /// pulls from cursor 0. On the terminal the first arriving conversation
