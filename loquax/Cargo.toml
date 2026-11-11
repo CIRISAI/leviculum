@@ -3,7 +3,7 @@ name = "loquax"
 # Versioned independently of the leviculum stack, like lnomad: a messenger's
 # releases track its own UI and message handling, not the protocol core it
 # happens to be built from.
-version = "0.1.8"
+version = "0.1.9"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
