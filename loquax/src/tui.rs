@@ -956,7 +956,14 @@ enum Until {
     /// The newest message we wrote in the selected conversation shows this
     /// state.
     Delivery(DeliveryState),
-    /// This many received messages, across every conversation.
+    /// This many received messages the model holds, across every
+    /// conversation. A conversation restored from its kept row and not
+    /// opened holds none (46f91e3c, "the boot reads rows not bodies"), so
+    /// a restarted TUI counts from 0 whatever its home received before:
+    /// a script asks for what arrives while it runs, and periculum's
+    /// receipts cells count that way since its 1670 (1559,
+    /// `a_restarted_model_counts_only_what_it_holds`).
+    /// [`Self::Verified`] counts the same way.
     Received(usize),
     /// This many peers' announces carried a name.
     Named(usize),
@@ -3859,6 +3866,59 @@ mod tests {
         assert!(!until.holds(&model, &[((0, 0), Leg::Direct)]));
         assert!(!until.holds(&model, &[((0, 1), Leg::Propagated)]));
         assert!(until.holds(&model, &[((0, 1), Leg::Direct)]));
+    }
+
+    /// 1559: after a restart a conversation known only by its kept row
+    /// counts no received message toward `until received`; one that
+    /// arrives while the script runs does. Bob's earlier reply sits in a
+    /// restored row (unread 1, the store holding 1 message), Dave's
+    /// arrives: `received 1` holds, `received 2` does not, as periculum's
+    /// `loquax_read_receipt_mixed` expects since its 1670.
+    #[test]
+    fn a_restarted_model_counts_only_what_it_holds() {
+        use loquax::outbox::OutboxEvent;
+        use loquax::ui::listing::{Listing, Row};
+        const BOB: [u8; 16] = [0xb0; 16];
+        const DAVE: [u8; 16] = [0xda; 16];
+        let mut model = Model::new(&[]);
+        model.restore_rows(
+            vec![(
+                Row {
+                    peer: BOB,
+                    unread: 1,
+                    activity: 1,
+                    unread_ids: vec![[0x0b; 32]],
+                    listing: Listing {
+                        line: "a reply".to_string(),
+                        unread_rows: 1,
+                        ..Listing::default()
+                    },
+                },
+                1,
+            )],
+            Vec::new(),
+        );
+        assert!(Until::Received(0).holds(&model, &[]));
+        assert!(
+            !Until::Received(1).holds(&model, &[]),
+            "a row is no message"
+        );
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Received {
+                sent_at: 0,
+                message_id: [0x0d; 32],
+                source: DAVE,
+                title: Vec::new(),
+                body: b"Dave's reply".to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            }),
+        );
+        assert!(Until::Received(1).holds(&model, &[]));
+        assert!(!Until::Received(2).holds(&model, &[]));
+        assert!(Until::Verified(1).holds(&model, &[]));
+        assert!(!Until::Verified(2).holds(&model, &[]));
     }
 
     fn render(model: &Model) -> String {

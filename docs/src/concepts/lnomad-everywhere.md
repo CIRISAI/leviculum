@@ -842,8 +842,8 @@ as the phone, on by default since 1618.
   (`loquax/src/keys.rs:643`, `browse::open`, `loquax/src/ui/browse.rs:453`);
   with the tab off they say how to switch it on.
 - **The terminal** draws the tab with lnomad's terminal view over the
-  whole screen (`draw_screen`, `loquax/src/tui.rs:1707`), in the
-  messenger's theme and colour depth (`loquax/src/tui.rs:2252`). It asks
+  whole screen (`draw_screen`, `loquax/src/tui.rs:1714`), in the
+  messenger's theme and colour depth (`loquax/src/tui.rs:2259`). It asks
   for no pictures (`no_images`): the map owns the terminal's picture
   protocol, and two pickers on one terminal is a later question.
 - **The window** draws it with lnomad's window view beside the rail

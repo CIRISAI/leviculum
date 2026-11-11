@@ -101,11 +101,11 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 40 | Backup | `BackupActivity.java:130` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:685` | `loquax/src/gui.rs:1534`, `loquax/src/gui.rs:3133` (the shared overlay) (1371) | `loquax/src/ui.rs:5781` |
 | 42 | Settings, nine sections in one order (1450) | `SettingsActivity.java:191` | `loquax/src/gui/chat.rs:444` (gear) | `loquax/src/ui.rs:7927` (`S`, palette `settings`) |
-| 43 | Browse tab | `BrowsePane.java:476` (behind `browse_tab`) | `loquax/src/gui.rs:3158`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1707`, behind `browse_tab` (1369) |
+| 43 | Browse tab | `BrowsePane.java:476` (behind `browse_tab`) | `loquax/src/gui.rs:3158`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1714`, behind `browse_tab` (1369) |
 | 44 | Notifications of new messages | `LoquaxService.java:339` | `loquax/src/gui.rs:441`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:743`, bell and `loquax/src/desktop.rs:118` (1341) |
 | 45 | Icon and application id | `AndroidManifest.xml:69` | `loquax/src/gui.rs:586` (1341) | n/a |
-| 46 | Rooms tab (RRC), a room as a chat (1450) | `RoomsPane.java:309`, behind `rooms_hub` (1384) | `loquax/src/gui/chat.rs:751`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1737`, behind `rooms_hub` (1379) |
-| 47 | Explore: pages and public rooms under one button, the bar's third (1578) | `ExplorePane.java:156`, `loquax-android/src/explore.rs` | `loquax/src/gui/chat.rs:915` | `loquax/src/tui.rs:1888` (`E`, palette `explore`) |
+| 46 | Rooms tab (RRC), a room as a chat (1450) | `RoomsPane.java:309`, behind `rooms_hub` (1384) | `loquax/src/gui/chat.rs:751`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1744`, behind `rooms_hub` (1379) |
+| 47 | Explore: pages and public rooms under one button, the bar's third (1578) | `ExplorePane.java:156`, `loquax-android/src/explore.rs` | `loquax/src/gui/chat.rs:915` | `loquax/src/tui.rs:1895` (`E`, palette `explore`) |
 
 ## Counts
 
@@ -232,7 +232,7 @@ alike over the node each already has; the desktop shell drains the
 browser's effects (`loquax/src/browsing.rs:142`) as the phone's session
 does. The window draws the tab with lnomad's window view
 (`lnomad/src/gui.rs:681`), pictures included, and the terminal with
-lnomad's terminal view (`loquax/src/tui.rs:1707`); neither has a renderer
+lnomad's terminal view (`loquax/src/tui.rs:1714`); neither has a renderer
 of its own. The switch is the phone's, `browse_tab`, on by default on
 all three since 1618 (off until then). Details in
 `lnomad-everywhere.md`, "The tab on the desktop".
