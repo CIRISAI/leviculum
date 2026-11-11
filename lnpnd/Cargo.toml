@@ -3,7 +3,7 @@ name = "lnpnd"
 # Versioned independently of the leviculum stack, like loquax and lnomad: a
 # mailbox daemon's releases track its own storage format and operator
 # surface, not the protocol core it is built from.
-version = "0.1.6"
+version = "0.1.7"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

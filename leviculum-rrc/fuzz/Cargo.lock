@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-rrc"
-version = "0.10.0-dev.9"
+version = "0.10.0-dev.10"
 
 [[package]]
 name = "leviculum-rrc-fuzz"
