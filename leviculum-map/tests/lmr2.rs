@@ -227,12 +227,12 @@ fn a_version_1_file_still_reads_without_names() {
 #[test]
 fn a_version_this_reader_does_not_know_is_refused() {
     let mut b = FLORENCE.to_vec();
-    b[4] = 5;
-    assert_eq!(Region::from_bytes(&b).err(), Some(RegionError::Version(5)));
+    b[4] = 6;
+    assert_eq!(Region::from_bytes(&b).err(), Some(RegionError::Version(6)));
     // A version 1 reader's check is the same field: it sees 2 and stops,
     // where reading on would take the label index for tiles. Here a v2
-    // file claiming version 1, 3 or 4 is caught by its header length.
-    for v in [1, 3, 4] {
+    // file claiming version 1, 3, 4 or 5 is caught by its header length.
+    for v in [1, 3, 4, 5] {
         let mut b = FLORENCE.to_vec();
         b[4] = v;
         assert_eq!(

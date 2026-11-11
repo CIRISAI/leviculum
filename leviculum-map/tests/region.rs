@@ -315,8 +315,8 @@ fn corrupted_bytes_are_an_error_not_a_panic() {
     b[0] = b'X';
     assert_eq!(survives(&b).err(), Some(RegionError::Magic));
     let mut b = FLORENCE.to_vec();
-    b[4] = 5;
-    assert_eq!(survives(&b).err(), Some(RegionError::Version(5)));
+    b[4] = 6;
+    assert_eq!(survives(&b).err(), Some(RegionError::Version(6)));
     let mut b = FLORENCE.to_vec();
     b[25] = 17;
     assert_eq!(survives(&b).err(), Some(RegionError::Header("zoom")));

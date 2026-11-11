@@ -20,10 +20,11 @@ use std::ops::RangeInclusive;
 use leviculum_map::buildings::{self, BUILDING_ZOOM};
 use leviculum_map::labels::{encode_section, encode_strings, LabelKind, LineLabel, PointLabel};
 use leviculum_map::mercator::{x_of_lon, y_of_lat};
+use leviculum_map::pois::{PoiRecord, WayRecord};
 use leviculum_map::profile::{self, ZoomLayers};
 use leviculum_map::region::{
-    Bounds, BuildingTables, Entry, Header, LabelTables, TileId, EMPTY_SLOT, ENTRY_LEN,
-    HEADER_LEN_3, LEN_AT, TILE_VIEW,
+    Bounds, BuildingTables, Entry, Header, LabelTables, PoiTables, TileId, EMPTY_SLOT, ENTRY_LEN,
+    LEN_AT, TILE_VIEW,
 };
 use leviculum_mapfill::fixture::{write, Kind};
 use leviculum_mapfill::style::Class;
@@ -72,6 +73,14 @@ pub struct CutOptions {
     /// sections (version 3, [`leviculum_map::buildings`]); without them,
     /// or without z15 in the zooms, the section count is 0.
     pub buildings: bool,
+    /// Cut every point of interest of the deepest zoom's tiles into poi
+    /// sections, with the travel attributes the source carries (version
+    /// 5, [`leviculum_map::pois`], 1685); without them the cut writes
+    /// version 4. Only the deepest zoom is cut: a source tile carries a
+    /// poi from its `min_zoom` on, so the deepest tiles hold every poi
+    /// the source shows by that zoom and the shallower tiles add none.
+    /// At a source's full depth (z15) that is every poi it has.
+    pub pois: bool,
     /// Tiles a round at most ([`ROUND`], and a round ends with its zoom,
     /// [`rounds`]): what a reader of the file still being written sees
     /// arrive at once. The bytes do not depend on it.
@@ -162,6 +171,13 @@ pub struct ZoomStats {
     /// Footprints over the device's capacity even at [`MAX_TOLERANCE`],
     /// left out.
     pub buildings_over_device: u64,
+    /// Points of interest kept, way records kept, attributes on both,
+    /// and the poi sections and their bytes written (1685).
+    pub pois: u64,
+    pub poi_ways: u64,
+    pub poi_attrs: u64,
+    pub poi_sections: u64,
+    pub poi_bytes: u64,
 }
 
 impl core::ops::AddAssign for ZoomStats {
@@ -188,6 +204,11 @@ impl core::ops::AddAssign for ZoomStats {
         self.building_bytes += o.building_bytes;
         self.buildings_degenerate += o.buildings_degenerate;
         self.buildings_over_device += o.buildings_over_device;
+        self.pois += o.pois;
+        self.poi_ways += o.poi_ways;
+        self.poi_attrs += o.poi_attrs;
+        self.poi_sections += o.poi_sections;
+        self.poi_bytes += o.poi_bytes;
     }
 }
 
@@ -237,6 +258,32 @@ pub fn cut_tile(raw: &[u8], layers: ZoomLayers) -> Res<(Option<Vec<u8>>, ZoomSta
     Ok((blob, st))
 }
 
+/// One tile's pois and travel attributes before the region's string
+/// table numbers them (1685).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TilePoiData {
+    /// Kind, name, min zoom, anchor at extent 4096, attributes.
+    pub pois: Vec<PoiData>,
+    /// Feature index in the tile's blob, attributes.
+    pub ways: Vec<(u16, Vec<(&'static str, String)>)>,
+}
+
+/// One point of interest as the cut keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoiData {
+    pub kind: String,
+    pub name: Option<Name>,
+    pub min_zoom: u8,
+    pub at: [i16; 2],
+    pub attrs: Vec<(&'static str, String)>,
+}
+
+impl TilePoiData {
+    pub fn is_empty(&self) -> bool {
+        self.pois.is_empty() && self.ways.is_empty()
+    }
+}
+
 /// What [`cut_tile_full`] makes of one tile.
 #[derive(Debug, Default)]
 pub struct CutTile {
@@ -246,6 +293,9 @@ pub struct CutTile {
     /// The building section, `None` when buildings were not asked for or
     /// the tile has none.
     pub buildings: Option<Vec<u8>>,
+    /// The pois and travel attributes, `None` when they were not asked
+    /// for; empty when the tile has none.
+    pub pois: Option<TilePoiData>,
     pub stats: ZoomStats,
 }
 
@@ -261,7 +311,7 @@ pub fn cut_tile_named(
     layers: ZoomLayers,
     names: Option<Names<'_>>,
 ) -> Res<(Option<Vec<u8>>, TileLabels, ZoomStats)> {
-    let t = cut_tile_full(raw, layers, names, false)?;
+    let t = cut_tile_full(raw, layers, names, false, false)?;
     Ok((t.blob, t.labels, t.stats))
 }
 
@@ -335,18 +385,43 @@ pub fn footprints(parts: &[Vec<Vec<Pt>>], st: &mut ZoomStats) -> Vec<Vec<Vec<(i1
 }
 
 /// [`cut_tile_named`], and with `with_buildings` the tile's building
-/// section ([`footprints`]), cut from the same decode.
+/// section ([`footprints`]) and with `with_pois` its pois and travel
+/// attributes, cut from the same decode.
 pub fn cut_tile_full(
     raw: &[u8],
     layers: ZoomLayers,
     names: Option<Names<'_>>,
     with_buildings: bool,
+    with_pois: bool,
 ) -> Res<CutTile> {
     let mut st = ZoomStats {
         tiles: 1,
         ..ZoomStats::default()
     };
-    let decoded = mvt::decode_named(raw, names.and_then(|n| n.locale), names.is_some())?;
+    let decoded = mvt::decode_named(
+        raw,
+        names.and_then(|n| n.locale),
+        names.is_some(),
+        with_pois,
+    )?;
+    let mut tile_pois = with_pois.then(TilePoiData::default);
+    if let Some(tp) = tile_pois.as_mut() {
+        for p in &decoded.pois {
+            // A poi in the buffer belongs to its neighbour, as a label
+            // point does.
+            let inside = (0..mvt::EXTENT as i32).contains(&p.at[0])
+                && (0..mvt::EXTENT as i32).contains(&p.at[1]);
+            if inside {
+                tp.pois.push(PoiData {
+                    kind: p.kind.clone(),
+                    name: p.name.clone(),
+                    min_zoom: p.min_zoom,
+                    at: [p.at[0] as i16, p.at[1] as i16],
+                    attrs: p.attrs.clone(),
+                });
+            }
+        }
+    }
     let mut labels = TileLabels::default();
     if let Some(n) = names {
         for p in &decoded.points {
@@ -366,6 +441,9 @@ pub fn cut_tile_full(
     let roads_named = names.is_some_and(|n| n.z >= ROAD_LABEL_ZOOM || n.deepest);
     // The road label of each feature pushed, by its source feature.
     let mut named: Vec<Option<(LabelKind, u8, Name)>> = Vec::new();
+    // The travel attributes of each feature pushed (1685): each piece of
+    // a split line carries them, as it carries its label.
+    let mut attred: Vec<Vec<(&'static str, String)>> = Vec::new();
     let k = 12 - u32::from(layers.extent_log2);
     let extent = 1i32 << layers.extent_log2;
     let tol = i64::from(layers.tolerance);
@@ -512,6 +590,7 @@ pub fn cut_tile_full(
             // joins the pieces back into the line its name goes along
             // (`leviculum_map::labels::join_pieces`).
             named.push(label.clone());
+            attred.push(f.attrs.clone());
             feats.push(write::Feature {
                 kind: f.kind,
                 class: f.class,
@@ -536,12 +615,17 @@ pub fn cut_tile_full(
     };
     if feats.is_empty() {
         // No entry, so no label section either: a reader looks names up
-        // by the tiles it draws.
+        // by the tiles it draws. The pois stay: a bench needs no geometry.
         st.empty = 1;
+        if let Some(tp) = &tile_pois {
+            st.pois = tp.pois.len() as u64;
+            st.poi_attrs = tp.pois.iter().map(|p| p.attrs.len() as u64).sum();
+        }
         return Ok(CutTile {
             blob: None,
             labels: TileLabels::default(),
             buildings: section,
+            pois: tile_pois,
             stats: st,
         });
     }
@@ -553,6 +637,19 @@ pub fn cut_tile_full(
             labels.lines.push((at, kind, min_zoom, name));
         }
     }
+    if let Some(tp) = tile_pois.as_mut() {
+        // The way records name features by their place in draw order,
+        // ascending, as the line labels do.
+        for (at, &i) in order.iter().enumerate() {
+            if let (false, Ok(at)) = (attred[i].is_empty(), u16::try_from(at)) {
+                tp.ways.push((at, core::mem::take(&mut attred[i])));
+            }
+        }
+        st.pois = tp.pois.len() as u64;
+        st.poi_ways = tp.ways.len() as u64;
+        st.poi_attrs = tp.pois.iter().map(|p| p.attrs.len() as u64).sum::<u64>()
+            + tp.ways.iter().map(|w| w.1.len() as u64).sum::<u64>();
+    }
     let mut slots: Vec<Option<write::Feature>> = feats.into_iter().map(Some).collect();
     let feats: Vec<write::Feature> = order.iter().filter_map(|&i| slots[i].take()).collect();
     st.point_labels = labels.points.len() as u64;
@@ -562,6 +659,7 @@ pub fn cut_tile_full(
         blob: Some(blob),
         labels,
         buildings: section,
+        pois: tile_pois,
         stats: st,
     })
 }
@@ -604,6 +702,46 @@ fn section(labels: &TileLabels, table: &[&str]) -> Res<Vec<u8>> {
         }
     }
     Ok(encode_section(&points, &lines, &alts))
+}
+
+/// One tile's poi section, its strings numbered by the region's sorted
+/// table. The name in the cut's locale, where it differs, goes as the
+/// `name:alt` attribute.
+fn poi_section(data: &TilePoiData, table: &[&str]) -> Res<Vec<u8>> {
+    let id = |s: &str| -> Res<u32> {
+        let i = table
+            .binary_search_by(|t| t.as_bytes().cmp(s.as_bytes()))
+            .map_err(|_| "a poi string missing from the table")?;
+        Ok(u32::try_from(i)?)
+    };
+    let attrs_of = |attrs: &[(&'static str, String)]| -> Res<Vec<(u32, u32)>> {
+        attrs.iter().map(|(k, v)| Ok((id(k)?, id(v)?))).collect()
+    };
+    let mut pois = Vec::new();
+    for p in &data.pois {
+        let mut attrs = attrs_of(&p.attrs)?;
+        if let Some(alt) = p.name.as_ref().and_then(|n| n.alternate.as_deref()) {
+            attrs.push((id("name:alt")?, id(alt)?));
+        }
+        pois.push(PoiRecord {
+            kind: id(&p.kind)?,
+            name: p.name.as_ref().map(|n| id(&n.local)).transpose()?,
+            min_zoom: p.min_zoom,
+            flags: 0,
+            x: p.at[0],
+            y: p.at[1],
+            attrs,
+        });
+    }
+    let mut ways = Vec::new();
+    for (feature, attrs) in &data.ways {
+        ways.push(WayRecord {
+            feature: *feature,
+            attrs: attrs_of(attrs)?,
+        });
+    }
+    leviculum_map::pois::encode_section(&pois, &ways)
+        .map_err(|e| format!("poi section: {e:?}").into())
 }
 
 /// How far a cut has come: after each round of tiles is written, and
@@ -673,31 +811,37 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
     ids.dedup();
 
     let with_buildings = opts.buildings && opts.zooms.contains(&BUILDING_ZOOM);
-    // The header, the texts and a slot per tile, all before any tile, so
-    // a reader opens the file from the first flush on.
-    let mut pos = HEADER_LEN_3 as u64;
+    // The pois are cut at the deepest zoom, which holds every poi the
+    // source has in the box (1685).
+    let with_pois = opts.pois;
     let text = |s: &str, pos: &mut u64| -> Res<(u32, u32)> {
         let at = u32::try_from(*pos)?;
         *pos += s.len() as u64;
         Ok((at, u32::try_from(s.len())?))
     };
-    let attribution = text(&opts.attribution, &mut pos)?;
-    let notice = text(&opts.notice, &mut pos)?;
-    let index = pos;
     let mut header = Header {
         bounds: opts.bounds,
         min_zoom: lo,
         max_zoom: hi,
         profile: opts.profile,
-        attribution,
-        notice,
+        attribution: (0, 0),
+        notice: (0, 0),
         tiles: u32::try_from(ids.len())?,
-        index,
+        index: 0,
         len: 0,
         labels: None,
         buildings: None,
+        // A cut without pois stays version 4 ([`Header::version_of`]).
+        pois: with_pois.then(PoiTables::default),
         streamed: true,
     };
+    // The header, the texts and a slot per tile, all before any tile, so
+    // a reader opens the file from the first flush on.
+    let mut pos = header.header_len() as u64;
+    header.attribution = text(&opts.attribution, &mut pos)?;
+    header.notice = text(&opts.notice, &mut pos)?;
+    let index = pos;
+    header.index = index;
     out.write_all(&header.encode())?;
     out.write_all(opts.attribution.as_bytes())?;
     out.write_all(opts.notice.as_bytes())?;
@@ -716,6 +860,7 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
     let mut shared: HashMap<Vec<u8>, (u64, u32)> = HashMap::new();
     let mut named: Vec<(TileId, TileLabels)> = Vec::new();
     let mut built: Vec<(TileId, Vec<u8>)> = Vec::new();
+    let mut poied: Vec<(TileId, TilePoiData)> = Vec::new();
     let threads = opts.threads.max(1);
     let locale = opts.locale.as_deref();
     let mut done = 0;
@@ -737,7 +882,8 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
                                     deepest: t.z == hi,
                                 };
                                 let b = with_buildings && t.z == BUILDING_ZOOM;
-                                cut_tile_full(&raw, layers[&t.z], Some(names), b)
+                                let p = with_pois && t.z == hi;
+                                cut_tile_full(&raw, layers[&t.z], Some(names), b, p)
                             })
                             .collect::<Vec<_>>()
                     })
@@ -757,6 +903,7 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
                 blob,
                 labels,
                 buildings: section,
+                pois: tile_pois,
                 stats: mut st,
             } = r.map_err(|e| format!("tile {}/{}/{}: {e}", t.z, t.x, t.y))?;
             if !labels.is_empty() {
@@ -764,6 +911,11 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
             }
             if let Some(section) = section {
                 built.push((*t, section));
+            }
+            if let Some(tp) = tile_pois {
+                if !tp.is_empty() {
+                    poied.push((*t, tp));
+                }
             }
             // A tile with nothing in it says so in its slot.
             let mut slot = Entry {
@@ -835,7 +987,7 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
     // The names: every string once, sorted, numbered by its place in the
     // table; the label sections after the tiles, then the table, then the
     // label index right before the building index, which ends the file.
-    let strings: BTreeSet<&str> = named
+    let mut strings: BTreeSet<&str> = named
         .iter()
         .flat_map(|(_, l)| {
             let points = l.points.iter().map(|p| &p.3);
@@ -844,6 +996,30 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
         })
         .flat_map(|n| std::iter::once(n.local.as_str()).chain(n.alternate.as_deref()))
         .collect();
+    // The pois' strings go into the same table: kinds, names, attribute
+    // keys and values (1685).
+    for (_, tp) in &poied {
+        for p in &tp.pois {
+            strings.insert(p.kind.as_str());
+            if let Some(n) = &p.name {
+                strings.insert(n.local.as_str());
+                if let Some(a) = n.alternate.as_deref() {
+                    strings.insert(a);
+                    strings.insert("name:alt");
+                }
+            }
+            for (k, v) in &p.attrs {
+                strings.insert(k);
+                strings.insert(v.as_str());
+            }
+        }
+        for (_, attrs) in &tp.ways {
+            for (k, v) in attrs {
+                strings.insert(k);
+                strings.insert(v.as_str());
+            }
+        }
+    }
     let table: Vec<&str> = strings.into_iter().collect();
     let mut label_entries: Vec<Entry> = Vec::new();
     for (t, labels) in &named {
@@ -871,6 +1047,21 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
         z.building_sections += 1;
         z.building_bytes += bytes.len() as u64;
     }
+    // The poi sections after the building sections (1685).
+    let mut poi_entries: Vec<Entry> = Vec::new();
+    for (t, tp) in &poied {
+        let bytes = poi_section(tp, &table)?;
+        out.write_all(&bytes)?;
+        poi_entries.push(Entry {
+            id: *t,
+            offset: pos,
+            len: u32::try_from(bytes.len())?,
+        });
+        pos += bytes.len() as u64;
+        let z = stats.zooms.entry(t.z).or_default();
+        z.poi_sections += 1;
+        z.poi_bytes += bytes.len() as u64;
+    }
     let (count, bytes) = encode_strings(table.iter().copied());
     let strings_at = pos;
     out.write_all(&bytes)?;
@@ -887,10 +1078,16 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
         out.write_all(&e.encode())?;
     }
     pos += (building_entries.len() * ENTRY_LEN) as u64;
+    // The poi index last (1685), where the building index ended before.
+    let poi_index = pos;
+    for e in &poi_entries {
+        out.write_all(&e.encode())?;
+    }
+    pos += (poi_entries.len() * ENTRY_LEN) as u64;
     out.flush()?;
 
-    // The names' and buildings' fields, then the length alone: a reader
-    // takes the file as complete only once the length is there.
+    // The names', buildings' and pois' fields, then the length alone: a
+    // reader takes the file as complete only once the length is there.
     header.labels = Some(LabelTables {
         index: label_index,
         sections: u32::try_from(label_entries.len())?,
@@ -902,6 +1099,12 @@ pub fn cut_streamed<S: TileSource + ?Sized, W: Write + Seek>(
         index: building_index,
         sections: u32::try_from(building_entries.len())?,
     });
+    if with_pois {
+        header.pois = Some(PoiTables {
+            index: poi_index,
+            sections: u32::try_from(poi_entries.len())?,
+        });
+    }
     out.seek(SeekFrom::Start(0))?;
     out.write_all(&header.encode())?;
     out.flush()?;

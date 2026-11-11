@@ -59,6 +59,7 @@ pub mod ladder;
 pub mod mercator;
 pub mod outline;
 pub mod pins;
+pub mod pois;
 pub mod profile;
 pub mod region;
 pub mod timezones;

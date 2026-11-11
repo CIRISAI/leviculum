@@ -643,6 +643,9 @@ impl Job {
             // The phone and the window draw them from z16 (1191); the
             // terminal and the M9 never read the section.
             buildings: true,
+            // Every point of interest rides along as a section a reader
+            // that shows none skips for free (1685).
+            pois: true,
         };
         let planned = plan(&archive, &want)?;
         let zooms = (*planned.zooms.start(), *planned.zooms.end());

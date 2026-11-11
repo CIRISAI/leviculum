@@ -35,6 +35,8 @@ pub struct Want {
     pub locale: Option<String>,
     /// Cut the buildings too ([`CutOptions::buildings`]).
     pub buildings: bool,
+    /// Cut the pois and travel attributes too ([`CutOptions::pois`]).
+    pub pois: bool,
 }
 
 /// What a load fetched and wrote.
@@ -218,6 +220,7 @@ pub fn cut_planned<R: RangeRead, W: Write + Seek>(
         threads,
         locale: want.locale.clone(),
         buildings: want.buildings,
+        pois: want.pois,
         round: crate::cut::ROUND,
     };
     let stats = cut_streamed(&fetched, &opts, out, progress)?;

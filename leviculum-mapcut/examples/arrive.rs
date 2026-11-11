@@ -60,6 +60,7 @@ fn main() -> Res<()> {
         profile: leviculum_map::profile::CUT_1,
         locale: None,
         buildings: true,
+        pois: true,
     };
     if whole {
         let located = archive.locate_in(&want.bounds, want.zooms.clone())?;
@@ -73,6 +74,7 @@ fn main() -> Res<()> {
             threads: 4,
             locale: None,
             buildings: true,
+            pois: true,
             round: leviculum_mapcut::cut::ROUND,
         };
         let stats =

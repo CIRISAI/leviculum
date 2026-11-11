@@ -61,6 +61,11 @@ enum Cmd {
         /// (region version 3); `--buildings false` writes version 2.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         buildings: bool,
+        /// Cut every point of interest of the deepest zoom into poi
+        /// sections, with the travel attributes the source carries
+        /// (region version 5, 1685); `--pois false` writes version 4.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        pois: bool,
     },
     /// Copy the tiles of a box of a PMTiles archive into a smaller one, as
     /// they are: the test fixture of the autoload (leviculum-mapcut/fixtures).
@@ -140,6 +145,7 @@ struct Keep {
     threads: Option<usize>,
     locale: Option<String>,
     buildings: bool,
+    pois: bool,
 }
 
 fn cmd_cut(inputs: &[String], output: &Path, bbox: &str, zooms: (u8, u8), keep: Keep) -> Res<()> {
@@ -148,6 +154,7 @@ fn cmd_cut(inputs: &[String], output: &Path, bbox: &str, zooms: (u8, u8), keep: 
         threads,
         locale,
         buildings,
+        pois,
     } = keep;
     let t = Instant::now();
     let bounds = parse_bbox(bbox)?;
@@ -170,6 +177,7 @@ fn cmd_cut(inputs: &[String], output: &Path, bbox: &str, zooms: (u8, u8), keep: 
             .unwrap_or(1),
         locale,
         buildings,
+        pois,
         round: leviculum_mapcut::cut::ROUND,
     };
     let file = BufWriter::new(File::create(output)?);
@@ -472,6 +480,7 @@ fn main() -> Res<()> {
             threads,
             locale,
             buildings,
+            pois,
         } => cmd_cut(
             &inputs,
             &output,
@@ -482,6 +491,7 @@ fn main() -> Res<()> {
                 threads,
                 locale,
                 buildings,
+                pois,
             },
         ),
         Cmd::Extract {

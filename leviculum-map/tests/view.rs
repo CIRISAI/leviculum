@@ -642,6 +642,7 @@ fn every_region_in_a_view_is_drawn_the_deepest_last() {
         len: 0,
         labels: None,
         buildings: None,
+        pois: None,
         streamed: false,
     };
     let regions = [

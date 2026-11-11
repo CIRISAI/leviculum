@@ -42,6 +42,7 @@ fn options(round: usize) -> CutOptions {
         threads: 2,
         locale: None,
         buildings: true,
+        pois: true,
         round,
     }
 }

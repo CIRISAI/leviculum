@@ -8,10 +8,15 @@
 //! the tile index first, then the tiles coarse to fine, the names and
 //! buildings last.
 //!
+//! From version 5 (LMR5, 1685) the points of interest and travel
+//! attributes: a poi section per tile of the deepest zoom
+//! ([`crate::pois`]), with its own index after the building index.
+//!
 //! All integers little-endian. Offsets are from the start of the file.
 //!
 //! ```text
-//! header  64 bytes (version 1), 96 (version 2), 112 (version 3 and 4)
+//! header  64 bytes (version 1), 96 (version 2), 112 (version 3 and 4),
+//!         128 (version 5)
 //!   0  "LMR1"
 //!   4  u16 version (1 to 4)     6  u16 header length (64, 96 or 112)
 //!   8  i32 west, south, east, north, degrees x 10^7 (west > east: the
@@ -28,6 +33,8 @@
 //!   version 3 and 4:
 //!  96  u64 building index offset  104 u32 building section count
 //! 108  u32 0
+//!   version 5:
+//! 112  u64 poi index offset  120 u32 poi section count  124 u32 0
 //! text    the attribution (one line, shown on the map) and the notice
 //!         (the licence and the source), UTF-8, both required
 //! tiles   one `LMF1` fixture per tile: view 256x256, one tile at offset
@@ -58,6 +65,14 @@
 //! labels, buildings, strings, label index, building index
 //!         as in version 3, after every tile, the building index last
 //! ```
+//!
+//! Version 5 (1685) keeps version 4's layout and adds the pois: a poi
+//! section per tile of the deepest zoom that has any, written after the
+//! building sections, and the poi index after the building index, last in
+//! the file. A cut without pois writes version 4, which a version 4
+//! reader still reads. Within a section, kinds, attribute keys and flag
+//! bits a reader does not know are skipped, so new ones need no version
+//! ([`crate::pois`]).
 //!
 //! A slot is filled after its blob is written, its offset before its
 //! length, and the file length is written last, after the names' and
@@ -92,12 +107,17 @@ use leviculum_mapfill::fixture::{Fixture, FixtureError, Kind};
 
 use crate::buildings::{BuildingError, Buildings};
 use crate::labels::{LabelError, Section};
+use crate::pois::{PoiError, Pois};
 
 /// The file's first four bytes.
 pub const MAGIC: [u8; 4] = *b"LMR1";
 /// The format version the writer writes, the newest this reader reads:
-/// the index first and the tiles coarse to fine (1291).
-pub const VERSION: u16 = 4;
+/// the pois and travel attributes (1685).
+pub const VERSION: u16 = 5;
+/// The version with the index first and the tiles coarse to fine (1291)
+/// and without pois, which a cut without pois writes and this reader
+/// reads too.
+pub const VERSION_4: u16 = 4;
 /// The version with names and buildings after the tiles and the index
 /// last, which this reader reads too.
 pub const VERSION_3: u16 = 3;
@@ -113,6 +133,8 @@ pub const HEADER_LEN: usize = 64;
 pub const HEADER_LEN_2: usize = 96;
 /// Header length in bytes of a version 3 or 4 file.
 pub const HEADER_LEN_3: usize = 112;
+/// Header length in bytes of a version 5 file.
+pub const HEADER_LEN_5: usize = 128;
 /// A version 4 slot's offset where the tile has nothing in it.
 pub const EMPTY_SLOT: u64 = u64::MAX;
 /// Where the header keeps the file length, which a version 4 writer
@@ -153,6 +175,9 @@ pub enum RegionError {
     Labels(TileId, LabelError),
     /// A tile's building section is not one.
     Buildings(TileId, BuildingError),
+    /// A tile's poi section is not one, or a way record names a feature
+    /// its tile does not hold.
+    Pois(TileId, PoiError),
     /// A version 4 file is not all there: a slot still waits for its
     /// tile. What [`Region::verify`] says of a file still arriving.
     Pending(TileId),
@@ -202,9 +227,20 @@ pub struct Header {
     /// names too; [`Header::encode`] writes empty ones where they are
     /// `None`.
     pub buildings: Option<BuildingTables>,
+    /// The pois and travel attributes: `None` before version 5 (1685).
+    pub pois: Option<PoiTables>,
     /// Version 4 (1291): the index first, its slots filled as the tiles
     /// are written coarse to fine, `len` 0 until the file is complete.
     pub streamed: bool,
+}
+
+/// Where a version 5 file keeps its pois.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PoiTables {
+    /// The poi index: entries like the tile index's, pointing at poi
+    /// sections.
+    pub index: u64,
+    pub sections: u32,
 }
 
 /// Where a version 3 file keeps its buildings.
@@ -250,16 +286,20 @@ impl Header {
         match version {
             VERSION_1 => Some(HEADER_LEN),
             VERSION_2 => Some(HEADER_LEN_2),
-            VERSION_3 | VERSION => Some(HEADER_LEN_3),
+            VERSION_3 | VERSION_4 => Some(HEADER_LEN_3),
+            VERSION => Some(HEADER_LEN_5),
             _ => None,
         }
     }
 
-    /// The version this header encodes as: 4 streamed, 3 with buildings,
-    /// 2 with names alone, 1 with neither.
+    /// The version this header encodes as: 5 streamed with pois, 4
+    /// streamed, 3 with buildings, 2 with names alone, 1 with neither.
     pub fn version_of(&self) -> u16 {
         if self.streamed {
-            return VERSION;
+            return match self.pois {
+                Some(_) => VERSION,
+                None => VERSION_4,
+            };
         }
         match (self.buildings, self.labels) {
             (Some(_), _) => VERSION_3,
@@ -268,11 +308,12 @@ impl Header {
         }
     }
 
-    /// This header's length: 112 bytes streamed or with buildings, 96
-    /// with names alone, 64 with neither.
+    /// This header's length: 128 bytes with pois, 112 streamed or with
+    /// buildings, 96 with names alone, 64 with neither.
     pub fn header_len(&self) -> usize {
         match self.version_of() {
-            VERSION | VERSION_3 => HEADER_LEN_3,
+            VERSION => HEADER_LEN_5,
+            VERSION_4 | VERSION_3 => HEADER_LEN_3,
             VERSION_2 => HEADER_LEN_2,
             _ => HEADER_LEN,
         }
@@ -301,9 +342,9 @@ impl Header {
     }
 
     /// Decode and check the fields that need nothing but the header: the
-    /// first 64 bytes, for version 2 the 32 after them, and for version 3
-    /// and 4 the 16 after those. The checks
-    /// against the file's length are [`Region::open`]'s.
+    /// first 64 bytes, for version 2 the 32 after them, for version 3
+    /// and 4 the 16 after those, and for version 5 the 16 after those.
+    /// The checks against the file's length are [`Region::open`]'s.
     pub fn parse(b: &[u8]) -> Result<Self, RegionError> {
         let head: &[u8; HEADER_LEN] = b
             .get(..HEADER_LEN)
@@ -339,7 +380,10 @@ impl Header {
         if min_zoom > max_zoom || max_zoom > MAX_ZOOM {
             return Err(RegionError::Header("zoom"));
         }
-        if b[27] != 0 || (version >= VERSION_3 && u32_at(b, 108) != 0) {
+        if b[27] != 0
+            || (version >= VERSION_3 && u32_at(b, 108) != 0)
+            || (version >= VERSION && u32_at(b, 124) != 0)
+        {
             return Err(RegionError::Header("reserved"));
         }
         Ok(Self {
@@ -363,7 +407,11 @@ impl Header {
                 index: u64_at(b, 96),
                 sections: u32_at(b, 104),
             }),
-            streamed: version == VERSION,
+            pois: (version >= VERSION).then(|| PoiTables {
+                index: u64_at(b, 112),
+                sections: u32_at(b, 120),
+            }),
+            streamed: version >= VERSION_4,
         })
     }
 
@@ -406,6 +454,11 @@ impl Header {
         if let Some(bt) = self.buildings {
             b[96..104].copy_from_slice(&bt.index.to_le_bytes());
             b[104..108].copy_from_slice(&bt.sections.to_le_bytes());
+        }
+        if version >= VERSION {
+            let p = self.pois.unwrap_or_default();
+            b[112..120].copy_from_slice(&p.index.to_le_bytes());
+            b[120..124].copy_from_slice(&p.sections.to_le_bytes());
         }
         b
     }
@@ -515,7 +568,7 @@ pub struct Region<S> {
 impl<S: Storage> Region<S> {
     /// Check the header against the storage and read the two texts.
     pub fn open(storage: S) -> Result<Self, RegionError> {
-        let mut hb = [0u8; HEADER_LEN_3];
+        let mut hb = [0u8; HEADER_LEN_5];
         if storage.size() < HEADER_LEN as u64 {
             // Too short for a header: say Magic when even that is wrong.
             let n = storage.size() as usize;
@@ -557,11 +610,12 @@ impl<S: Storage> Region<S> {
             if header.len == size {
                 (header, true)
             } else {
-                // The names and the buildings come last and count once the
-                // file is complete.
+                // The names, the buildings and the pois come last and
+                // count once the file is complete.
                 let header = Header {
                     labels: None,
                     buildings: None,
+                    pois: None,
                     ..header
                 };
                 (header, false)
@@ -577,8 +631,9 @@ impl<S: Storage> Region<S> {
         };
         // Blobs lie after the header (version 4: after the index) and
         // before the string table, which lies before the label index,
-        // which ends where the building index starts, which ends where the
-        // index starts (version 4: at the end of the file).
+        // which ends where the building index starts, which ends where
+        // the poi index starts (version 5) or the index (version 3), the
+        // last of which ends the file (version 4 and 5: the file's end).
         let (data_start, tail) = match header.streamed {
             true => (index_end, header.len),
             false => (first, header.index),
@@ -587,10 +642,19 @@ impl<S: Storage> Region<S> {
             true => tail,
             false => size,
         };
-        let mut labels_end = tail;
+        let mut buildings_end = tail;
+        if let Some(p) = header.pois {
+            let len = u64::from(p.sections) * ENTRY_LEN as u64;
+            if p.index.checked_add(len) != Some(tail) || p.index < data_start {
+                return Err(RegionError::Header("poi index"));
+            }
+            buildings_end = p.index;
+            data_end = p.index;
+        }
+        let mut labels_end = buildings_end;
         if let Some(bt) = header.buildings {
             let len = u64::from(bt.sections) * ENTRY_LEN as u64;
-            if bt.index.checked_add(len) != Some(tail) || bt.index < data_start {
+            if bt.index.checked_add(len) != Some(buildings_end) || bt.index < data_start {
                 return Err(RegionError::Header("building index"));
             }
             labels_end = bt.index;
@@ -874,6 +938,27 @@ impl<S: Storage> Region<S> {
         }
     }
 
+    /// Poi index entry `n`, checked as [`Region::entry`] checks a tile's.
+    pub fn poi_entry(&self, n: u32) -> Result<Entry, RegionError> {
+        let p = self.header.pois.ok_or(RegionError::Entry(n))?;
+        self.entry_in(p.index, p.sections, n)
+    }
+
+    /// Poi sections the region holds, 0 before version 5.
+    pub fn poi_sections(&self) -> u32 {
+        self.header.pois.map_or(0, |p| p.sections)
+    }
+
+    /// The poi section entry of `id`; `None` when the tile has no pois or
+    /// the file is older than version 5. Only a frontend that shows pois
+    /// asks, so they cost every other reader nothing.
+    pub fn find_pois(&self, id: TileId) -> Result<Option<Entry>, RegionError> {
+        match self.header.pois {
+            Some(p) => self.find_in(p.index, p.sections, id),
+            None => Ok(None),
+        }
+    }
+
     /// Byte range of string `n` in the storage.
     fn string_range(&self, n: u32) -> Result<(u64, u32), RegionError> {
         let l = self.header.labels.ok_or(RegionError::Strings(n))?;
@@ -928,10 +1013,11 @@ impl<S: Storage> Region<S> {
     /// Walk the whole index: every entry in range, strictly ascending, and
     /// every blob a one-tile fixture; from version 2 the string table and
     /// every label section too, from version 3 every building section and
-    /// every record in it. What the cut runs on its own output and a
-    /// frontend may run once on a file it did not make. A version 4 file
-    /// still arriving is [`RegionError::Pending`] at its first tile not
-    /// there.
+    /// every record in it, from version 5 every poi section against the
+    /// string table and its tile's features. What the cut runs on its own
+    /// output and a frontend may run once on a file it did not make. A
+    /// version 4 file still arriving is [`RegionError::Pending`] at its
+    /// first tile not there.
     pub fn verify(&self) -> Result<(), RegionError> {
         self.verify_tiles_and_labels()?;
         let mut prev: Option<TileId> = None;
@@ -946,6 +1032,26 @@ impl<S: Storage> Region<S> {
             Buildings::parse(&sec)
                 .and_then(|b| b.check())
                 .map_err(|err| RegionError::Buildings(e.id, err))?;
+        }
+        let mut prev: Option<TileId> = None;
+        let mut buf = Vec::new();
+        for n in 0..self.poi_sections() {
+            let e = self.poi_entry(n)?;
+            if prev.is_some_and(|p| p >= e.id) {
+                return Err(RegionError::Entry(n));
+            }
+            prev = Some(e.id);
+            self.read_tile(&e, &mut sec)?;
+            // A tile with pois but nothing drawn has no blob: its way
+            // records then have no features to name.
+            let features = match self.find(e.id)? {
+                Some(tile) => {
+                    self.read_tile(&tile, &mut buf)?;
+                    check_tile(e.id, &buf)?.features().count()
+                }
+                None => 0,
+            };
+            check_pois(e.id, &sec, self.string_count(), features)?;
         }
         Ok(())
     }
@@ -1036,6 +1142,24 @@ pub fn check_labels<'a>(
     for (n, l) in s.lines() {
         if !lines.get(usize::from(l.feature)).copied().unwrap_or(false) {
             return Err(RegionError::Labels(id, LabelError::Feature(n)));
+        }
+    }
+    Ok(s)
+}
+
+/// Parse tile `id`'s poi section against a table of `strings` strings and
+/// the count of features its tile's blob holds: every way record names
+/// one of them.
+pub fn check_pois<'a>(
+    id: TileId,
+    section: &'a [u8],
+    strings: u32,
+    features: usize,
+) -> Result<Pois<'a>, RegionError> {
+    let s = Pois::parse(section, strings).map_err(|e| RegionError::Pois(id, e))?;
+    for w in s.ways() {
+        if usize::from(w.feature) >= features {
+            return Err(RegionError::Pois(id, PoiError::Feature(w.feature)));
         }
     }
     Ok(s)
@@ -1133,6 +1257,24 @@ impl<'a> Region<&'a [u8]> {
         Buildings::parse(blob)
             .map(Some)
             .map_err(|err| RegionError::Buildings(id, err))
+    }
+
+    /// Tile `id`'s poi section, borrowed from the region, checked against
+    /// the string table; `None` when it has no pois or the file is older
+    /// than version 5. The way records' feature indices are checked by
+    /// [`Region::verify`], once for a file.
+    pub fn pois(&self, id: TileId) -> Result<Option<Pois<'a>>, RegionError> {
+        let Some(e) = self.find_pois(id)? else {
+            return Ok(None);
+        };
+        let start = e.offset as usize;
+        let blob = self
+            .storage
+            .get(start..start + e.len as usize)
+            .ok_or(RegionError::Truncated)?;
+        Pois::parse(blob, self.string_count())
+            .map(Some)
+            .map_err(|err| RegionError::Pois(id, err))
     }
 
     /// String `n` of the table, borrowed from the region.

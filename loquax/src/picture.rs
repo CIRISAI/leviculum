@@ -851,6 +851,7 @@ mod tests {
                 threads: 1,
                 locale: None,
                 buildings: true,
+                pois: true,
                 round: leviculum_mapcut::cut::ROUND,
             };
             let out = File::create(maps.join(format!("{name}.lmr"))).expect("create");

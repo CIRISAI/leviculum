@@ -405,6 +405,7 @@ mod tests {
             len: 0,
             labels: None,
             buildings: None,
+            pois: None,
             streamed: false,
         }
     }
