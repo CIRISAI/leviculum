@@ -239,3 +239,9 @@ command:java loquax-android/fling the_explore_field_keeps_every_character_and_ro
 # Handler, Looper and Log, run with its host test.
 command:javac loquax-android/fling a_question_that_throws_reaches_its_failure_path
 command:java loquax-android/fling a_question_that_throws_reaches_its_failure_path
+
+# The time zone readers against the host's own tzdata (1684): the system
+# zone files the TZif reader and the std path read, which a container
+# without the tzdata package lacks.
+/usr/share/zoneinfo/Europe/Berlin leviculum-map/timezones tzif_matches_the_hosts_libc
+/usr/share/zoneinfo/Europe/Berlin leviculum-map/timezones system_zone_bytes_reads_zoneinfo
