@@ -101,6 +101,11 @@ leviculum-ui = { path = "../leviculum-ui", default-features = false }
 # The AG3352's boot init (1477): the T1000-E's `$PAIR` sequence behind
 # the M9's sleep lock, pure and host-tested beside the nRF firmware.
 leviculum-gnss-init = { path = "../leviculum-nrf/gnss-init" }
+# The LR1110's board facts (1478): the M9's `Board` value, its RF switch
+# and its PA table, in the driver's own types, so the build checks them
+# against the driver the T1000-E runs and the next step drives the radio
+# with.
+leviculum-lr11xx = { path = "../leviculum-lr11xx" }
 # The map regions' area in flash (1477): the directory the board reads
 # and `lnflash --region` writes, one parser both sides.
 leviculum-map = { path = "../leviculum-map" }

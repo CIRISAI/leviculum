@@ -1294,6 +1294,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-gnss-init",
  "leviculum-log-line",
+ "leviculum-lr11xx",
  "leviculum-map",
  "leviculum-serial-mux",
  "leviculum-ui",
@@ -1310,6 +1311,17 @@ version = "0.1.0"
 [[package]]
 name = "leviculum-log-line"
 version = "0.1.0"
+
+[[package]]
+name = "leviculum-lr11xx"
+version = "0.1.0"
+dependencies = [
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "leviculum-core",
+ "leviculum-rx-arming",
+]
 
 [[package]]
 name = "leviculum-lxmf"
@@ -1344,6 +1356,10 @@ version = "0.10.0-dev.10"
 [[package]]
 name = "leviculum-rrc"
 version = "0.10.0-dev.10"
+
+[[package]]
+name = "leviculum-rx-arming"
+version = "0.1.0"
 
 [[package]]
 name = "leviculum-serial-mux"

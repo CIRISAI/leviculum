@@ -141,8 +141,10 @@ e516v03a.
 
 ### Worked example: ThinkNode M9 (incomplete)
 
-The M9 (ESP32-S3 with an LR1110) has no `Board` constant yet. These values
-are known from Meshtastic's `ELECROW-ThinkNode-M9` variant:
+The M9 (ESP32-S3 with an LR1110) has a provisional `Board` constant since
+order 1478, `leviculum_esp::boards::thinknode_m9::LR1110`, which states its
+choices field by field. These values are known from Meshtastic's
+`ELECROW-ThinkNode-M9` variant:
 
 | Field | Value |
 | --- | --- |
