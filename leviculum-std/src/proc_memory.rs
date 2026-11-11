@@ -9,7 +9,9 @@
 //! three sections are the measurements that tell the two apart:
 //!
 //! * `=== Allocator ===` is the allocator's own balance sheet (glibc
-//!   `mallinfo2()`), plus the thread count. musl has no such call, and the
+//!   `mallinfo2()`, looked up at run time with `mallinfo()` as the fallback
+//!   on a glibc older than 2.33), plus the thread count. musl has no such
+//!   call, and the
 //!   shipped musl-static lnsd runs mimalloc rather than libc's allocator
 //!   anyway (#437), so there the section says so instead of printing zeros.
 //! * `=== Mappings ===` buckets the anonymous writable regions of
@@ -239,10 +241,12 @@ pub fn render_mappings(regions: &[AnonRegion]) -> String {
     out
 }
 
-/// The glibc allocator's balance sheet (`mallinfo2()`), in bytes except the
-/// two counts.
+/// The glibc allocator's balance sheet (`mallinfo2()`, or `mallinfo()` on a
+/// glibc older than 2.33), in bytes except the two counts.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AllocatorView {
+    /// Which glibc call the numbers came from.
+    pub source: AllocatorSource,
     /// Non-mmapped space taken from the system (all arenas).
     pub arena: u64,
     /// Number of free chunks.
@@ -259,20 +263,82 @@ pub struct AllocatorView {
     pub keepcost: u64,
 }
 
+/// The glibc call an [`AllocatorView`] was read with.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AllocatorSource {
+    /// `mallinfo2()`, glibc 2.33 and later: `size_t` fields.
+    #[default]
+    Mallinfo2,
+    /// `mallinfo()`, the fallback on an older glibc: `int` fields, read
+    /// here as unsigned, so a total wraps once it passes 4 GiB.
+    Mallinfo,
+}
+
 /// The allocator's view, where the libc has one to give.
+///
+/// Both calls are looked up at run time, never linked by name: the packages
+/// link against glibc 2.31 (`GLIBC_FLOOR` in scripts/build-deb.sh) and
+/// `mallinfo2` arrived in 2.33, so a direct call would not link there
+/// (order 1674: the desktop loquax pulled this census in through the mailbox
+/// and every nightly package build failed on `undefined symbol: mallinfo2`).
+/// Whether the running glibc has it is a fact about the host the binary runs
+/// on, not about the one it was built on.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub fn allocator_view() -> Option<AllocatorView> {
-    // SAFETY: mallinfo2 takes no arguments and returns a struct by value;
-    // it walks the arenas under their own locks.
-    let m = unsafe { libc::mallinfo2() };
+    allocator_view_via(|name| {
+        // SAFETY: dlsym with RTLD_DEFAULT and a NUL-terminated name only
+        // reads the loaded objects' symbol tables.
+        unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) }
+    })
+}
+
+/// [`allocator_view`] over a symbol lookup, so a test can play a glibc
+/// without `mallinfo2`. `lookup` must answer null or the address of the
+/// glibc function of that name.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn allocator_view_via(
+    lookup: impl Fn(&std::ffi::CStr) -> *mut libc::c_void,
+) -> Option<AllocatorView> {
+    type Mallinfo2Fn = unsafe extern "C" fn() -> libc::mallinfo2;
+    type MallinfoFn = unsafe extern "C" fn() -> libc::mallinfo;
+
+    let sym = lookup(c"mallinfo2");
+    if !sym.is_null() {
+        // SAFETY: glibc's mallinfo2 has exactly this signature (malloc.h:
+        // `struct mallinfo2 mallinfo2 (void)`), and libc::mallinfo2 mirrors
+        // that struct. It takes no arguments and walks the arenas under
+        // their own locks.
+        let m = unsafe { std::mem::transmute::<*mut libc::c_void, Mallinfo2Fn>(sym)() };
+        return Some(AllocatorView {
+            source: AllocatorSource::Mallinfo2,
+            arena: m.arena as u64,
+            ordblks: m.ordblks as u64,
+            hblks: m.hblks as u64,
+            hblkhd: m.hblkhd as u64,
+            uordblks: m.uordblks as u64,
+            fordblks: m.fordblks as u64,
+            keepcost: m.keepcost as u64,
+        });
+    }
+    let sym = lookup(c"mallinfo");
+    if sym.is_null() {
+        return None;
+    }
+    // SAFETY: glibc's mallinfo is `struct mallinfo mallinfo (void)` and
+    // libc::mallinfo mirrors that struct.
+    let m = unsafe { std::mem::transmute::<*mut libc::c_void, MallinfoFn>(sym)() };
+    // The fields are C ints that wrap past 2 GiB; read them as the unsigned
+    // counters they are, which is right up to 4 GiB.
+    let u = |v: libc::c_int| u64::from(v as libc::c_uint);
     Some(AllocatorView {
-        arena: m.arena as u64,
-        ordblks: m.ordblks as u64,
-        hblks: m.hblks as u64,
-        hblkhd: m.hblkhd as u64,
-        uordblks: m.uordblks as u64,
-        fordblks: m.fordblks as u64,
-        keepcost: m.keepcost as u64,
+        source: AllocatorSource::Mallinfo,
+        arena: u(m.arena),
+        ordblks: u(m.ordblks),
+        hblks: u(m.hblks),
+        hblkhd: u(m.hblkhd),
+        uordblks: u(m.uordblks),
+        fordblks: u(m.fordblks),
+        keepcost: u(m.keepcost),
     })
 }
 
@@ -289,7 +355,13 @@ pub fn render_allocator(view: Option<AllocatorView>, threads: Option<u64>) -> St
     let mut out = String::new();
     match view {
         Some(v) => {
-            let _ = writeln!(out, "=== Allocator: glibc mallinfo2 ===");
+            let header = match v.source {
+                AllocatorSource::Mallinfo2 => "glibc mallinfo2",
+                AllocatorSource::Mallinfo => {
+                    "glibc mallinfo (no mallinfo2 on this glibc; 32-bit counters)"
+                }
+            };
+            let _ = writeln!(out, "=== Allocator: {header} ===");
             let _ = writeln!(
                 out,
                 "allocator: arena={} ordblks={} hblks={} hblkhd={} uordblks={} fordblks={} keepcost={}",
@@ -887,5 +959,60 @@ Swap:                356 kB
         let some = render_allocator(Some(AllocatorView::default()), None);
         assert!(some.contains("allocator: arena=0 ordblks=0 hblks=0 hblkhd=0 "));
         assert!(some.contains("threads: unknown\n"));
+        assert!(some.starts_with("=== Allocator: glibc mallinfo2 ===\n"));
+        let old = render_allocator(
+            Some(AllocatorView {
+                source: AllocatorSource::Mallinfo,
+                ..AllocatorView::default()
+            }),
+            None,
+        );
+        assert!(old.starts_with(
+            "=== Allocator: glibc mallinfo (no mallinfo2 on this glibc; 32-bit counters) ===\n"
+        ));
+    }
+
+    /// A gnu build resolves mallinfo2 at run time (every host the suite
+    /// runs on has glibc 2.33 or later) and reads a real arena: a lookup
+    /// that silently fell through to the fallback, or to None, would hide
+    /// the allocator's numbers on every current host.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn allocator_view_resolves_mallinfo2_at_run_time() {
+        let keep = vec![0u8; 1 << 16];
+        let view = allocator_view();
+        drop(keep);
+        let Some(view) = view else {
+            panic!("no allocator view on a glibc host");
+        };
+        assert_eq!(view.source, AllocatorSource::Mallinfo2);
+        assert!(view.arena > 0 || view.hblkhd > 0, "{view:?}");
+    }
+
+    /// A glibc older than 2.33 (the package floor is 2.31) has no
+    /// mallinfo2: the view falls back to mallinfo and says so, and a libc
+    /// with neither gives None rather than zeros.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn allocator_view_falls_back_to_mallinfo_without_mallinfo2() {
+        let real = |name: &std::ffi::CStr| {
+            // SAFETY: as in allocator_view.
+            unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) }
+        };
+        let keep = vec![0u8; 1 << 16];
+        let old = allocator_view_via(|name| {
+            if name == c"mallinfo2" {
+                std::ptr::null_mut()
+            } else {
+                real(name)
+            }
+        });
+        drop(keep);
+        let Some(old) = old else {
+            panic!("mallinfo is in every glibc");
+        };
+        assert_eq!(old.source, AllocatorSource::Mallinfo);
+        assert!(old.arena > 0 || old.hblkhd > 0, "{old:?}");
+        assert_eq!(allocator_view_via(|_| std::ptr::null_mut()), None);
     }
 }
