@@ -811,7 +811,7 @@ that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 one response packet once the response frame (1 + 18 bytes) is around
 it. The home cuts the page to that, keeping at least one entry, and
 says `more` (`fit_page`, `loquax/src/home/wire.rs:421`; the server's
-`sync`, `loquax/src/home/server.rs:1401`). A message larger than a page
+`sync`, `loquax/src/home/server.rs:1444`). A message larger than a page
 still comes alone, as a resource.
 
 **The bytes, measured** (`loquax-android/tests/m9_client.rs`). The

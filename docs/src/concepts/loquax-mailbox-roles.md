@@ -116,7 +116,7 @@ answers in the same cell. Owed by order 1677.
 
 A device away from home does not dial its home directly: that needs NAT
 help, an open port and widens the attack surface. It joins the mesh as a
-leaf anywhere, `leviculum.network:4343` being one such door (an access
+leaf anywhere, port 4343 of leviculum.network being one such door (an access
 point that floods no announces), and reaches its Mailbox by path and link.
 The home's own access point port serves the LAN. The ladder and the
 rendezvous are [reaching the mailbox from anywhere](loquax-reachability.md);

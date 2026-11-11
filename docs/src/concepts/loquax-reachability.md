@@ -460,7 +460,7 @@ the device keeps the most direct way that answers.
   The outbox's retries carry a send that was cut off; a message is never
   dropped by a change of way, and never sent twice: a send repeated
   after a cut is matched to the first by its client id
-  (`outbox_by_client`, `loquax/src/home/server.rs:208`).
+  (`outbox_by_client`, `loquax/src/home/server.rs:249`).
 - **The network change** (1298's `Network` word, below) restarts the
   race; the settle of 1298 folds a burst of callbacks into one race.
 - **The re-race.** A device kept on an indirect way (relayed or mesh)
