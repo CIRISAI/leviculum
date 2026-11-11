@@ -29,6 +29,8 @@
 //! - [`timezones`]: the world's time zones, which zone a point lies in,
 //!   where a view writes each zone's time, and the clock rules: TZif and
 //!   POSIX TZ strings, the system's tzdata, the board's table.
+//! - [`declination`]: magnetic declination and field from the World
+//!   Magnetic Model WMM2025, for turning a compass bearing into a true one.
 //! - [`style`]: the colour tables, `leviculum-mapfill`'s own.
 //!
 //! `no_std` with `alloc`; the feature `std` adds only a [`Storage`] for a
@@ -44,6 +46,7 @@ pub mod area;
 pub mod buildings;
 pub mod cells;
 pub mod choice;
+pub mod declination;
 pub mod draw;
 pub mod labels;
 pub mod ladder;
