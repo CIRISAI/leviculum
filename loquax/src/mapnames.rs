@@ -47,7 +47,9 @@ pub const REPEAT: f32 = 300.0;
 /// A name's text size in logical pixels, by what it names.
 pub fn size_of(kind: LabelKind) -> f32 {
     match kind {
+        LabelKind::Country => 17.0,
         LabelKind::City => 16.0,
+        LabelKind::Sea => 15.0,
         LabelKind::Town => 14.0,
         LabelKind::District | LabelKind::Village => 13.0,
         LabelKind::MajorRoad | LabelKind::SecondaryRoad | LabelKind::MinorRoad => 11.0,
@@ -56,14 +58,19 @@ pub fn size_of(kind: LabelKind) -> f32 {
 }
 
 /// A name's text colour and its halo's, RGB, in `theme`: the ground's
-/// colour as the halo, waters blue and parks green.
+/// colour as the halo, waters blue, parks green, ranges and deserts in
+/// the earth's own tones (1683).
 pub fn colours(kind: LabelKind, theme: MapTheme) -> ([u8; 3], [u8; 3]) {
     let dark = theme == MapTheme::Dark;
     let ink = match (kind, dark) {
-        (LabelKind::Water | LabelKind::River, false) => [0x1f, 0x4e, 0x8c],
-        (LabelKind::Water | LabelKind::River, true) => [0x8c, 0xb4, 0xe6],
+        (LabelKind::Water | LabelKind::River | LabelKind::Sea, false) => [0x1f, 0x4e, 0x8c],
+        (LabelKind::Water | LabelKind::River | LabelKind::Sea, true) => [0x8c, 0xb4, 0xe6],
         (LabelKind::Park, false) => [0x2e, 0x6b, 0x2e],
         (LabelKind::Park, true) => [0x94, 0xc8, 0x8c],
+        (LabelKind::Range, false) => [0x6e, 0x5a, 0x44],
+        (LabelKind::Range, true) => [0xb8, 0xa4, 0x8c],
+        (LabelKind::Desert, false) => [0x8a, 0x6a, 0x38],
+        (LabelKind::Desert, true) => [0xd0, 0xb0, 0x78],
         (_, false) => [0x26, 0x26, 0x26],
         (_, true) => [0xe6, 0xe6, 0xe6],
     };

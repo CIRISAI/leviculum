@@ -903,14 +903,7 @@ fn outline_under(
     let (bw, bh) = base.size();
     let mut fb = vec![0u16; bw as usize * bh as usize];
     if let Some(mut target) = Fb::new(&mut fb, bw, bh) {
-        let Ok(_) = outline::draw(
-            outline::WORLD_50M,
-            outline::BORDERS_50M,
-            &base,
-            Ink::Colour,
-            theme,
-            &mut target,
-        );
+        let Ok(_) = outline::draw_world(&outline::WORLD, &base, Ink::Colour, theme, &mut target);
     }
     let s = view.scale_at(z);
     let (w, h) = view.size();
@@ -1653,14 +1646,8 @@ mod tests {
             let whole = view.whole().expect("a whole step");
             let mut fb = vec![0u16; 400 * 300];
             let mut target = Fb::new(&mut fb, 400, 300).expect("a frame");
-            let Ok(_) = outline::draw(
-                outline::WORLD_50M,
-                outline::BORDERS_50M,
-                &whole,
-                Ink::Colour,
-                theme,
-                &mut target,
-            );
+            let Ok(_) =
+                outline::draw_world(&outline::WORLD, &whole, Ink::Colour, theme, &mut target);
             let drawn: Vec<u8> = fb.iter().flat_map(|&p| opaque(p)).collect();
             assert!(blank.rgba == drawn, "the outline, {theme:?}");
 

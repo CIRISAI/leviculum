@@ -303,6 +303,9 @@ pub struct Painter {
     scratch: FillScratch,
     /// When each autoloaded region was last marked viewed.
     viewed: HashMap<String, Instant>,
+    /// Place no names ([`Painter::set_names_off`]): a measuring tool's
+    /// ground.
+    names_off: bool,
 }
 
 /// The filler's storage for one region drawn ([`region_into`]). The filler
@@ -343,6 +346,7 @@ impl Painter {
             buildings: Vec::new(),
             scratch: FillScratch::new(),
             viewed: HashMap::new(),
+            names_off: false,
         }
     }
 
@@ -371,6 +375,11 @@ impl Painter {
 
     pub fn regions(&self) -> &[Installed] {
         &self.regions
+    }
+
+    /// Place and draw no names, or again: a measuring tool's ground.
+    pub fn set_names_off(&mut self, off: bool) {
+        self.names_off = off;
     }
 
     /// The regions' headers, which say how deep a fit goes, newest first
@@ -468,14 +477,8 @@ impl Painter {
         if !filled {
             // Hard, as the tile cache draws it under a composed frame
             // (`tiles::outline_under`): the two pictures agree there.
-            let Ok(_) = outline::draw(
-                outline::WORLD_50M,
-                outline::BORDERS_50M,
-                view,
-                ink,
-                style.theme,
-                &mut Hard(frame),
-            );
+            let Ok(_) =
+                outline::draw_world(&outline::WORLD, view, ink, style.theme, &mut Hard(frame));
         }
         for &i in &order {
             let installed = &self.regions[i];
@@ -508,7 +511,15 @@ impl Painter {
     /// region whose names do not read is left out. A version 1 region has
     /// none. Placed by the frontend, in its unit, by the core's rule
     /// ([`leviculum_map::labels::place`]).
+    ///
+    /// Where no region fills the view, the world view's own names follow
+    /// (1683): the countries, seas, ranges, deserts and places of
+    /// [`outline::NAMES_50M`] that the zoom shows, up to
+    /// [`outline::MAX_ZOOM`], which is as deep as that view reaches.
     pub fn labels(&mut self, view: &Viewport, lines: bool) -> Vec<ViewLabel> {
+        if self.names_off {
+            return Vec::new();
+        }
         self.refresh();
         let order = drawn(
             self.regions
@@ -517,7 +528,7 @@ impl Painter {
             view,
         );
         let mut out = Vec::new();
-        for i in order {
+        for i in order.iter().copied() {
             let mut found = Vec::new();
             if self.regions[i]
                 .region
@@ -526,6 +537,16 @@ impl Painter {
             {
                 out.extend(found);
             }
+        }
+        // Under the world picture, as `draw_into` drew it: no region fills
+        // the view, so the outline's own names are what is on screen.
+        let (w, h) = view.size();
+        let whole = Rectangle::new(Point::zero(), (w, h).into());
+        if !order
+            .iter()
+            .any(|&i| self.regions[i].region.area(view) == whole)
+        {
+            outline::names(outline::NAMES_50M, view, &mut out);
         }
         out
     }
@@ -623,6 +644,77 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1683: where no region fills the view the world view's own names
+    /// come with its picture — a country's, a sea's and a range's at the
+    /// zooms the outline draws — and none past its deepest zoom, nor
+    /// where a region fills the view.
+    #[test]
+    fn the_world_view_brings_its_names_where_no_region_fills_the_view() {
+        use leviculum_map::labels::LabelKind;
+        use leviculum_map::mercator::{project, LatLon};
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut painter = Painter::new(Maps::new(Some(dir.path().to_path_buf())));
+        let at = project(LatLon::from_degrees(50.0, 10.0));
+        for zoom in [2u8, 6] {
+            let view = Viewport::new(at, zoom, 480, 320);
+            let labels = painter.labels(&view, false);
+            println!("z{zoom}: {labels:?}");
+            assert!(
+                labels.iter().any(|l| l.kind == LabelKind::Country),
+                "z{zoom}: no country"
+            );
+            // At z6 the view is central Germany: no sea, and the Alps
+            // are south of it. The waters and the ranges show at z2.
+            if zoom == 2 {
+                assert!(
+                    labels
+                        .iter()
+                        .any(|l| matches!(l.kind, LabelKind::Sea | LabelKind::Range)),
+                    "z{zoom}: no sea or range"
+                );
+            }
+            // Every one is anchored in the view, in its sub-pixels.
+            let (w, h) = view.size();
+            let sub = i64::from(leviculum_mapfill::SUBPIXEL);
+            for l in &labels {
+                assert!(
+                    (0..i64::from(w) * sub).contains(&l.anchor.0)
+                        && (0..i64::from(h) * sub).contains(&l.anchor.1),
+                    "z{zoom}: {l:?} outside the view"
+                );
+            }
+        }
+        // The control: past the outline's deepest zoom there is nothing to
+        // name, and the picture is the outline's alone.
+        let past = Viewport::new(at, 12, 480, 320);
+        assert!(painter.labels(&past, false).is_empty());
+        // And a region that fills the view names the view itself.
+        let fixture =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        let mut painter = Painter::new(Maps::new(Some(fixture)));
+        painter.refresh();
+        let region = painter
+            .regions
+            .first()
+            .expect("the Florence cut")
+            .region
+            .header();
+        let view = Viewport::new(
+            project(LatLon {
+                lat_e7: (region.bounds.north + region.bounds.south) / 2,
+                lon_e7: (region.bounds.west + region.bounds.east) / 2,
+            }),
+            15,
+            480,
+            320,
+        );
+        let labels = painter.labels(&view, false);
+        assert!(
+            labels.iter().all(|l| !matches!(l.kind, LabelKind::Country)),
+            "a region's view took the world's country names: {labels:?}"
+        );
+    }
 
     #[test]
     fn the_map_theme_is_light_unless_asked_and_auto_follows_the_screen() {

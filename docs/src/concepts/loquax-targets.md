@@ -82,7 +82,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 21 | Buildings on the map | `loquax/src/picture.rs:45` (shared) | `loquax/src/picture.rs:45` | `loquax/src/picture.rs:45` (sixel, kitty) |
 | 22 | Load the map area | `MapPane.java:35` (autoload) | `loquax/src/gui.rs:1783` | `loquax/src/ui.rs:5851` |
 | 23 | Delete all downloaded maps | `SettingsActivity.java:720` | `loquax/src/gui.rs:1330` | `loquax/src/ui.rs:5830` (palette `delete all maps`), `loquax/src/shell.rs:451` (1371) |
-| 24 | Mesh positions (nodes nearby) | `MapPane.java:483` | `loquax/src/gui.rs:2148` | `loquax/src/tui/map.rs:1540` |
+| 24 | Mesh positions (nodes nearby) | `MapPane.java:483` | `loquax/src/gui.rs:2148` | `loquax/src/tui/map.rs:1556` |
 | 25 | Share the position, once or timed | `ChatActivity.java:977`, `ShareService.java:39` | `loquax/src/gui.rs:1422`, `loquax/src/gui.rs:1430`, position by hand `loquax/src/ui/by_hand.rs:27` (1371) | `loquax/src/ui.rs:5821` (palette `position`), `loquax/src/ui.rs:5825` (`share position`, `stop sharing`) (1371) |
 | 26 | Pin | `ConversationsActivity.java:696` | row menu `loquax/src/gui/chat.rs:2025`, `loquax/src/gui.rs:1682` (1371) | `loquax/src/ui.rs:5715` |
 | 27 | Mute | `ContactActivity.java:479` | row menu (1371) | `loquax/src/ui.rs:5811` (palette `mute`) (1371) |

@@ -176,9 +176,15 @@ pub(super) mod tests {
     /// asked for z0 is held at z3, the world 2048 pixels wide, and no
     /// column of its picture repeats. The view as asked, the control,
     /// repeats every 256.
+    ///
+    /// The names are off: since 1683 the world outline brings its own
+    /// names, and those are placed per copy of the world, so a copy with
+    /// several cities in it does not repeat the one beside it. What must
+    /// not repeat is the picture under them.
     #[test]
     fn the_window_never_shows_the_world_twice() {
         let mut frames = Frames::new(Maps::new(None));
+        frames.set_names_off(true);
         let setup = setup(frames.painter());
         let size = (1280u32, 800u32);
         let centre = project(LatLon::from_degrees(30.0, 10.0));
@@ -396,6 +402,106 @@ pub(super) mod tests {
                 same_as(&format!("gui-buildings-{t}-z{zoom}.png"), &rgb, 480, 320);
             }
         }
+    }
+
+    /// The world view of 1683, where no region covers the view: central
+    /// Europe at z2 and z6, the outline's lakes, rivers, ice, borders and
+    /// dashed disputed lines with the world's own names on them — a
+    /// country's, a sea's, and at z6 the names the places carry — set by
+    /// the map's one placement rule. The window's picture and the
+    /// phone's (2.75 pixels a logical one, its names at that size), each
+    /// as its golden; and the controls that the names are the world's
+    /// and that a name no table carries never appears.
+    #[test]
+    fn the_world_view_names_its_countries_and_seas_at_z2_and_z6() {
+        use leviculum_map::labels::LabelKind;
+        let dir = tempfile::tempdir().expect("tmp");
+        let at = project(LatLon::from_degrees(50.0, 10.0));
+        for zoom in [2u32, 6] {
+            for (scale, who) in [(1.0f32, "window"), (2.75, "phone")] {
+                let mut frames = Frames::new(Maps::new(Some(dir.path().to_path_buf())));
+                let shot = frames.frame(&Ask {
+                    view: ExactView::new(at, zoom * MILLI, 480, 320),
+                    margin: (0, 0),
+                    moving: false,
+                    style: Style::SCREEN,
+                    scale,
+                    pins: &[],
+                    selected: None,
+                    zooms: (0, 20),
+                    draw_pins: false,
+                    tracks: &[],
+                    radar: None,
+                    measure: Some(measure),
+                    now_ms: None,
+                    scaled_while_moving: false,
+                });
+                let names = frames.drawn_names();
+                println!("z{zoom} {who}: {names:?}");
+                // A country's name is the table's first, so it is placed
+                // wherever there is room; at z6 on the phone's letters a
+                // place name has grown larger than the country's box.
+                if !(zoom == 6 && scale > 1.0) {
+                    assert!(
+                        names.iter().any(|n| n.kind == LabelKind::Country),
+                        "z{zoom} {who}: no country's name in {names:?}"
+                    );
+                }
+                // Beyond the countries the table brings the waters and
+                // the ranges, but those are placed after the countries and
+                // the places, and at z6 over central Europe are crowded
+                // out (as they are on the phone's larger letters at z2):
+                // the control for them is the window at z2.
+                if zoom == 2 && scale == 1.0 {
+                    assert!(
+                        names
+                            .iter()
+                            .any(|n| matches!(n.kind, LabelKind::Sea | LabelKind::Range)),
+                        "z{zoom} {who}: no sea or range in {names:?}"
+                    );
+                }
+                if zoom == 6 {
+                    assert!(
+                        names.iter().any(|n| n.kind.is_place()),
+                        "z{zoom} {who}: no place's name in {names:?}"
+                    );
+                }
+                assert!(
+                    names.iter().all(|n| !n.text.contains('\u{fffd}')),
+                    "z{zoom} {who}: a name that did not read: {names:?}"
+                );
+                let rgb: Vec<u8> = shot
+                    .rgba
+                    .chunks(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect();
+                same_as(&format!("gui-world-{who}-z{zoom}.png"), &rgb, 480, 320);
+            }
+        }
+        // The control: a view past the outline's deepest zoom has no world
+        // names, and neither has one a region fills.
+        let mut frames = Frames::new(Maps::new(Some(dir.path().to_path_buf())));
+        frames.frame(&Ask {
+            view: ExactView::new(at, 12 * MILLI, 480, 320),
+            margin: (0, 0),
+            moving: false,
+            style: Style::SCREEN,
+            scale: 1.0,
+            pins: &[],
+            selected: None,
+            zooms: (0, 20),
+            draw_pins: false,
+            tracks: &[],
+            radar: None,
+            measure: Some(measure),
+            now_ms: None,
+            scaled_while_moving: false,
+        });
+        assert!(
+            frames.drawn_names().is_empty(),
+            "z12 has the world's names: {:?}",
+            frames.drawn_names()
+        );
     }
 
     /// The six track scenes (1385) through the window's own frames over
