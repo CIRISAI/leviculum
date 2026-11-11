@@ -160,6 +160,8 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
                 },
                 DeliveryState::Delivered if group => Text::key(StrId::StateGroupDelivered),
                 DeliveryState::Delivered => Text::Key(StrId::InfoDelivered, Vec::from([name()])),
+                // Read at no known time (1506): "Read", never the epoch.
+                DeliveryState::Read { at: 0 } => Text::key(StrId::StateReadUntimed),
                 DeliveryState::Read { at } => {
                     let at = WallTime {
                         unix_secs: i64::from(at),

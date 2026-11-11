@@ -530,7 +530,8 @@ pub fn list_row<B>(model: &UiModel<B>, peer: &[u8; 16]) -> ListRow {
         read_at: last
             .filter(|m| m.outbound)
             .and_then(|m| match shown(m.delivery, model) {
-                Some(DeliveryState::Read { at }) => Some(at),
+                // 0 is a read at no known time (1506): no time to say.
+                Some(DeliveryState::Read { at }) if at > 0 => Some(at),
                 _ => None,
             }),
         pinned: conversation.is_some_and(|c| c.pinned),
@@ -786,7 +787,7 @@ fn bubbles_of<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bu
                     .outbound
                     .then(|| Mark::of(shown(message.delivery, model))),
                 read_at: match shown(message.delivery, model) {
-                    Some(DeliveryState::Read { at }) if message.outbound => Some(at),
+                    Some(DeliveryState::Read { at }) if message.outbound && at > 0 => Some(at),
                     _ => None,
                 },
                 witness: match shown(message.delivery, model) {

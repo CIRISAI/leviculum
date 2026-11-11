@@ -1544,6 +1544,7 @@ impl Session {
                 target,
                 body: Some(body),
             } => UiEvent::Reply { peer, target, body },
+            Intent::NoticeReply { peer, key, body } => UiEvent::NoticeReply { peer, key, body },
             Intent::Forward { from, key, to } => UiEvent::Forward { from, key, to },
             Intent::SendAgain { peer, key } => UiEvent::SendAgain { peer, key },
             // Scaled and stripped off the lock: a 12 MP picture takes a
@@ -3577,6 +3578,7 @@ impl Inner {
                 .unwrap_or_default(),
             group_invited: group
                 .is_some_and(|g| g.standing == loquax::ui::groups::Standing::Invited),
+            notice_key: self.model.notice_key(&row.peer).map(schema::wire_key),
         }
     }
 
@@ -4443,6 +4445,11 @@ pub fn decode(request: schema::Request) -> Result<Decoded, String> {
             to: Target::Peer(parse_peer(&peer)?),
             target: parse_id(&target)?,
             body: Some(body),
+        },
+        R::NoticeReply { peer, key, body } => Intent::NoticeReply {
+            peer: parse_peer(&peer)?,
+            key: schema::model_key(key),
+            body,
         },
         R::Forward { peer, key, to } => Intent::Forward {
             from: parse_peer(&peer)?,

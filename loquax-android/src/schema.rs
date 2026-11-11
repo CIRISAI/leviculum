@@ -292,6 +292,17 @@ pub enum Request {
         target: String,
         body: String,
     },
+    /// Replied with `body` from the notification of `peer`'s messages
+    /// (1506, the notification's inline reply): `key` is the row's
+    /// [`ConversationRow::notice_key`] the notification was posted with.
+    /// Every message up to it is read and its read receipt rides on the
+    /// reply; a message that came later stays unread.
+    #[serde(rename = "noticereply")]
+    NoticeReply {
+        peer: String,
+        key: i64,
+        body: String,
+    },
     /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
     /// conversation to `to`: its text and content fields again.
     Forward {
@@ -1780,6 +1791,11 @@ pub struct ConversationRow {
     pub group_words: String,
     #[serde(default)]
     pub group_invited: bool,
+    /// The newest received message's key ([`MessageRow::key`]), what a
+    /// notification of this row shows (1506): its inline reply sends it
+    /// back in [`Request::NoticeReply`]. Absent without one.
+    #[serde(default)]
+    pub notice_key: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

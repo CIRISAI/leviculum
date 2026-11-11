@@ -327,6 +327,14 @@ pub const INVENTORY: &[Row] = &[
         m9: missing("no key replies"),
     },
     Row {
+        intent: "NoticeReply",
+        action: "a reply typed into a message notification: read up to what it showed",
+        phone: at(SESSION, "Intent::NoticeReply"),
+        window: missing("the desktop notification carries no actions"),
+        terminal: missing("the desktop notification carries no actions"),
+        m9: na("the board posts no notifications"),
+    },
+    Row {
         intent: "Forward",
         action: "Forward on a bubble, then a chat",
         phone: at(SESSION, "Intent::Forward"),

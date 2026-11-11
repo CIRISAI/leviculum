@@ -181,6 +181,11 @@ fn request() -> impl Strategy<Value = Request> {
             target,
             body
         }),
+        (text(), i64s(), text()).prop_map(|(peer, key, body)| Request::NoticeReply {
+            peer,
+            key,
+            body
+        }),
         (text(), i64s(), text()).prop_map(|(peer, key, to)| Request::Forward { peer, key, to }),
         (text(), i64s()).prop_map(|(peer, key)| Request::SendAgain { peer, key }),
         (text(), blob()).prop_map(|(peer, data)| Request::Photo { peer, data }),
@@ -770,6 +775,8 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
         any::<bool>(),
         // A group's count and words (1307).
         group_parts(),
+        // A notification's newest key (1506).
+        prop::option::of(i64s()),
     )
         .prop_map(
             |(
@@ -780,6 +787,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 (live, ring, pin, pin_label, draft),
                 sharing,
                 (group_members, group_words, _, group_invited, time),
+                notice_key,
             )| ConversationRow {
                 peer,
                 same_name: last.clone(),
@@ -813,6 +821,7 @@ fn conversation_row() -> BoxedStrategy<ConversationRow> {
                 group_members,
                 group_words,
                 group_invited,
+                notice_key,
             },
         )
         .boxed()

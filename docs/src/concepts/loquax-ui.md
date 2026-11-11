@@ -992,6 +992,7 @@ it). A missing cell is the next order.
 | `React` | a reaction on a bubble | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key reacts |
 | `Reply` | Reply on a bubble | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key replies |
 | `CancelReply` | the reply bar's cross | built (`ChatActivity.java`) | built (`gui.rs`) | **missing**: no way out of a reply but sending or clearing | **missing**: no key replies |
+| `NoticeReply` | a reply typed into a message notification: read up to what it showed | built (`session.rs`) | **missing**: the desktop notification carries no actions | **missing**: the desktop notification carries no actions | n/a: the board posts no notifications |
 | `Forward` | Forward on a bubble, then a chat | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key forwards |
 | `SendAgain` | the red mark of a message not sent | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key sends again |
 | `ViewPhoto` | a tap on a bubble's photo: the photo whole | built (`ChatActivity.java`) | built (`gui.rs`) | **missing**: no photo viewer | n/a: too large for the radio |

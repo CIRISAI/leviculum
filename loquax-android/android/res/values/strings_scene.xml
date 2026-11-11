@@ -223,6 +223,7 @@
     <string name="state_delivered">On the recipient\'s device</string>
     <string name="state_group_delivered">On the devices</string>
     <string name="state_read">Read at %1$s</string>
+    <string name="state_read_untimed">Read</string>
     <string name="state_collected">Collected from the propagation network</string>
     <string name="state_failed">Not sent. Double tap to send again</string>
     <string name="scene_send_again">Send again</string>

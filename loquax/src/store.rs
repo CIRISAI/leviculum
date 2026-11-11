@@ -3475,17 +3475,23 @@ fn import_in(
     let mut block = {
         let mut statement = tx.prepare(
             "SELECT id, direction, state, verification, timestamp, received_at, title, \
-             content, fields, origin_verdict, origin FROM messages \
+             content, fields, origin_verdict, origin, read_at FROM messages \
              WHERE identity = ?1 AND conversation = ?2 AND origin IS NOT NULL",
         )?;
         let rows = statement
             .query_map(params![&identity[..], &peer[..]], |row| {
                 let id: Vec<u8> = row.get(0)?;
+                let read: Option<i64> = row.get(11)?;
                 Ok((
                     ImportRow {
                         id: <[u8; 32]>::try_from(id.as_slice()).unwrap_or([0; 32]),
                         outbound: row.get::<_, i64>(1)? == 1,
-                        delivery: row.get::<_, Option<i64>>(2)?.and_then(state_of),
+                        // With its time (1506): a receipt that read an
+                        // imported message since keeps it through the
+                        // block's new layout.
+                        delivery: row
+                            .get::<_, Option<i64>>(2)?
+                            .and_then(|code| delivery_of(code, read)),
                         signature: signature_of(row.get(3)?),
                         timestamp: row.get(4)?,
                         received_at: row.get(5)?,
@@ -3531,8 +3537,8 @@ fn import_in(
         tx.execute(
             "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
              verification, timestamp, received_at, size, title, content, fields, origin, \
-             origin_verdict) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             origin_verdict, read_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 seq,
                 &identity[..],
@@ -3549,6 +3555,7 @@ fn import_in(
                 (!row.fields.is_empty()).then(|| pack_fields(&row.fields)),
                 origin,
                 row.origin_verdict,
+                read_at(row.delivery),
             ],
         )?;
         let name = origin_name(origin);
@@ -4207,10 +4214,12 @@ pub(crate) fn state_code(state: DeliveryState) -> i64 {
     }
 }
 
-/// `messages.read_at` for a state: the time of a read, NULL otherwise.
+/// `messages.read_at` for a state: the time of a read, NULL otherwise. A
+/// read at 0 is one whose time nobody knows (an import's, 1506): NULL as
+/// well, so no row ever keeps an invented epoch.
 fn read_at(state: Option<DeliveryState>) -> Option<i64> {
     match state {
-        Some(DeliveryState::Read { at }) => Some(i64::from(at)),
+        Some(DeliveryState::Read { at }) if at > 0 => Some(i64::from(at)),
         _ => None,
     }
 }
@@ -4387,6 +4396,114 @@ mod tests {
             vec![sent, message(2, false, "yes, from ten")]
         );
         assert_eq!(store.last_key().expect("last key"), key_of(2));
+    }
+
+    /// 1506: an imported message its source kept as read without a time
+    /// is read at no known time. The store keeps `read_at` NULL (the column
+    /// takes NULL since schema 9, no schema step), restores it as read at
+    /// 0, and the Info sheet says "Read" without a time, never the epoch's.
+    /// A read the store did know the time of keeps it when a second import
+    /// lays the imported block out again.
+    #[test]
+    fn an_imported_read_message_has_no_read_time_and_never_the_epoch() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let row = |n: u8, delivery| ImportRow {
+            id: [n; 32],
+            outbound: true,
+            timestamp: Some(1_700_000_000.0 + f64::from(n)),
+            received_at: Some(1_700_000_000 + i64::from(n)),
+            title: Vec::new(),
+            content: format!("imported {n}"),
+            fields: Vec::new(),
+            delivery,
+            signature: Signature::Unverified,
+            origin_verdict: None,
+            held: None,
+        };
+        let untimed = row(1, Some(DeliveryState::Read { at: 0 }));
+        let timed = row(2, Some(DeliveryState::Read { at: 1_700_000_100 }));
+        store
+            .import_conversation(ALICE, "ratspeak", &[untimed.clone(), timed])
+            .expect("import");
+        let read_at = |store: &Store, id: [u8; 32]| -> Option<i64> {
+            store
+                .conn
+                .query_row(
+                    "SELECT read_at FROM messages WHERE id = ?1",
+                    params![&id[..]],
+                    |row| row.get(0),
+                )
+                .expect("the row")
+        };
+        assert_eq!(read_at(&store, [1; 32]), None, "never an invented time");
+        assert_eq!(read_at(&store, [2; 32]), Some(1_700_000_100));
+        // The archive entry carries the state alone and reads back the same.
+        let entry = crate::import::archive::entry("ratspeak", &ALICE, &untimed);
+        let (_, _, back) = crate::import::archive::read_entry(&entry).expect("entry");
+        assert_eq!(back.delivery, Some(DeliveryState::Read { at: 0 }));
+        // A second import lays the block out again; both keep what they had.
+        store
+            .import_conversation(ALICE, "ratspeak", &[row(3, None)])
+            .expect("again");
+        assert_eq!(read_at(&store, [1; 32]), None);
+        assert_eq!(read_at(&store, [2; 32]), Some(1_700_000_100));
+        let restored = store.restore().expect("restore");
+        let alice = restored.iter().find(|c| c.peer == ALICE).expect("alice");
+        let untimed = alice
+            .messages
+            .iter()
+            .find(|m| m.id == Some([1; 32]))
+            .expect("the untimed one");
+        assert_eq!(untimed.delivery, Some(DeliveryState::Read { at: 0 }));
+
+        // The words: "Read" alone, the timed one with its time.
+        let mut model = crate::ui::UiModel::<crate::ui::tests::Field>::new(&[]);
+        crate::ui::update(
+            &mut model,
+            crate::ui::UiEvent::Clock(WallTime {
+                unix_secs: 1_700_100_000,
+                offset_secs: 0,
+            }),
+        );
+        model.restore(restored);
+        let words = |id: [u8; 32]| -> Vec<(String, String)> {
+            let key = model.conversations[0]
+                .messages
+                .iter()
+                .find(|m| m.id == Some(id))
+                .expect("it")
+                .activity;
+            crate::ui::info::message_info(&model, ALICE, key)
+                .expect("info")
+                .rows
+                .iter()
+                .map(|row| row.resolve(crate::ui::strings::Lang::En))
+                .collect()
+        };
+        let state = |rows: &[(String, String)]| {
+            rows.iter()
+                .find(|(label, _)| label == "Status")
+                .map(|(_, value)| value.clone())
+        };
+        let untimed_rows = words([1; 32]);
+        assert_eq!(
+            state(&untimed_rows).as_deref(),
+            Some("Read"),
+            "{untimed_rows:?}"
+        );
+        assert!(
+            !untimed_rows
+                .iter()
+                .any(|(_, v)| v.contains("1970") || v.contains("00:00")),
+            "no epoch: {untimed_rows:?}"
+        );
+        let timed_rows = words([2; 32]);
+        assert_eq!(
+            state(&timed_rows).as_deref(),
+            Some("Read at 22:15"),
+            "{timed_rows:?}"
+        );
     }
 
     #[test]

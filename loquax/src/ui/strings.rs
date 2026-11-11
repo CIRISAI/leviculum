@@ -313,6 +313,9 @@ leviculum_ui::catalogue! {
     // A group's two ticks (1466): every member's device said it has it.
     StateGroupDelivered = "state_group_delivered", "On the devices", "Auf den Geräten";
     StateRead = "state_read", "Read at %1$s", "Gelesen um %1$s";
+    // A read whose time nobody knows (1506): an imported message the
+    // source kept as read without a time; never the epoch's "01:00".
+    StateReadUntimed = "state_read_untimed", "Read", "Gelesen";
     // The arrived rung's words when the propagation node, not a proof,
     // witnessed it (1395, 1462, loquax-propagation-receipts.md).
     StateCollected = "state_collected", "Collected from the propagation network", "Aus dem Propagation-Netz abgeholt";

@@ -616,13 +616,18 @@ pub fn mark_words(
             _ => Text::key(StrId::StateArrived),
         },
         chat::Mark::Delivered => Text::key(StrId::StateDelivered),
-        chat::Mark::Read => {
-            let at = WallTime {
-                unix_secs: i64::from(read_at.unwrap_or(0)),
-                offset_secs: now.map_or(0, |now| now.offset_secs),
-            };
-            Text::Key(StrId::StateRead, Vec::from([Arg::Str(at.hh_mm())]))
-        }
+        // A read without its time (an import's, 1506) says "Read" alone:
+        // 0 is no time, never the epoch.
+        chat::Mark::Read => match read_at.filter(|&at| at > 0) {
+            Some(at) => {
+                let at = WallTime {
+                    unix_secs: i64::from(at),
+                    offset_secs: now.map_or(0, |now| now.offset_secs),
+                };
+                Text::Key(StrId::StateRead, Vec::from([Arg::Str(at.hh_mm())]))
+            }
+            None => Text::key(StrId::StateReadUntimed),
+        },
         chat::Mark::Failed => Text::key(StrId::StateFailed),
     }
 }
@@ -2691,6 +2696,24 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1506: a bubble read at no known time (an import's) is "Read", never
+    /// the epoch's "Read at 00:00"; a known time is said.
+    #[test]
+    fn a_read_without_its_time_says_read_alone() {
+        let untimed = mark_words(chat::Mark::Read, None, None, None);
+        assert_eq!(untimed, Text::key(StrId::StateReadUntimed));
+        assert_eq!(untimed.resolve(super::super::strings::Lang::En), "Read");
+        assert_eq!(
+            mark_words(chat::Mark::Read, Some(0), None, None),
+            Text::key(StrId::StateReadUntimed)
+        );
+        let timed = mark_words(chat::Mark::Read, Some(3_600 * 10 + 60 * 32), None, None);
+        assert_eq!(
+            timed.resolve(super::super::strings::Lang::En),
+            "Read at 10:32"
+        );
+    }
     use crate::ui::strings::Lang;
     use crate::ui::tests::Field as Line;
     use crate::ui::{Message, Signature, UiEvent};

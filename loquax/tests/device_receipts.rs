@@ -94,6 +94,17 @@ impl Side {
         }
     }
 
+    /// A phone with the app in the back (1506): its list is a screen of
+    /// its own and no chat is open, so what arrives stays unread and a
+    /// notification is what shows it.
+    fn phone_in_the_back(home_client: bool) -> Self {
+        let mut side = Self::new(home_client);
+        side.model.list_apart = true;
+        update(&mut side.model, UiEvent::Close);
+        update(&mut side.model, UiEvent::Front(false));
+        side
+    }
+
     /// Write `body` to `to` on the screen and sign what the screen hands
     /// the engine as the engine would, `fields` passed through `edit` (a
     /// writer that does not ask strips bit 2 there); the router queues it
@@ -138,6 +149,61 @@ impl Side {
         );
         update(&mut self.model, UiEvent::SendDone(Ok(())));
         message
+    }
+
+    /// A reply typed into the notification of `to`'s messages (1506),
+    /// `key` the newest message it showed: the reply as the engine signs
+    /// it, when the screen sends one.
+    fn notice_reply(&mut self, to: [u8; 16], key: u64, body: &str) -> Option<Lxm> {
+        let effects = update(
+            &mut self.model,
+            UiEvent::NoticeReply {
+                peer: to,
+                key,
+                body: body.to_string(),
+            },
+        );
+        let fields = effects.iter().find_map(|effect| match effect {
+            UiEffect::Send {
+                to: peer,
+                body: sent,
+                fields,
+            } if *peer == to && sent == body => Some(fields.clone()),
+            _ => None,
+        })?;
+        let message = Lxm::create(
+            to,
+            self.address,
+            &self.identity,
+            RT as f64 + 30.0,
+            Vec::new(),
+            body.as_bytes().to_vec(),
+            fields,
+            DeliveryMethod::Direct,
+        )
+        .expect("message");
+        update(
+            &mut self.model,
+            UiEvent::Engine(OutboxEvent::Queued {
+                message_id: message.message_id,
+            }),
+        );
+        update(&mut self.model, UiEvent::SendDone(Ok(())));
+        Some(message)
+    }
+
+    /// The key a notification of `peer`'s chat is posted with now.
+    fn notice_key(&self, peer: [u8; 16]) -> u64 {
+        self.model.notice_key(&peer).expect("a message to notify")
+    }
+
+    /// The conversation with `peer`'s unread count.
+    fn unread(&self, peer: [u8; 16]) -> usize {
+        self.model
+            .conversations
+            .iter()
+            .find(|c| c.peer == peer)
+            .map_or(0, |c| c.unread)
     }
 
     /// The proof of `message` came back: the recipient's identity, its
@@ -1190,4 +1256,132 @@ fn a_groups_lost_device_receipt_stays_at_one_tick() {
     }
     let info = alice.info(familie, &message.message_id);
     assert!(rung_of(&info, "Ben").starts_with("Arrived · "), "{info:?}");
+}
+
+/// The read receipt (`0x01`) a message carries, its reader's time and ids.
+fn read_receipt(message: &Lxm) -> Option<(u32, Vec<[u8; 32]>)> {
+    Lev::from_fields(&message.fields)
+        .and_then(|lev| lev.receipt)
+        .map(|r| (r.read_at, r.ids))
+}
+
+/// Cell N1, happy (1506): Bob answers Alice from the notification and never
+/// opens the chat. Whoever answers has read what the notification showed:
+/// the read receipt rides on the answer, and Alice's message turns read at
+/// Bob's clock. Bob's unread goes with it. Control: a plain write without
+/// a viewport reads nothing, so it is the notification's reply that reads.
+#[test]
+fn a_reply_from_the_notification_reads_the_message_for_its_writer() {
+    let mut alice = Side::new(false);
+    let mut bob = Side::phone_in_the_back(false);
+    let message = alice.write(bob.address, "kommst du?", |_| {});
+    bob.takes(&message, &alice.identity);
+    alice.proven(&message);
+    assert_eq!(bob.unread(alice.address), 1);
+    let key = bob.notice_key(alice.address);
+    let answer = bob
+        .notice_reply(alice.address, key, "bin gleich da")
+        .expect("the reply goes");
+    assert_eq!(
+        read_receipt(&answer),
+        Some((RT as u32, vec![message.message_id])),
+        "the read receipt rides on the reply"
+    );
+    assert_eq!(bob.unread(alice.address), 0, "the reply read the chat");
+    // Nothing more is owed alone: it rode.
+    let later = update(&mut bob.model, UiEvent::Elapsed(BATCH_MS * 3));
+    assert!(
+        !later
+            .iter()
+            .any(|e| matches!(e, UiEffect::Send { body, fields, .. }
+            if body.is_empty() && Lev::from_fields(fields).is_some_and(|l| l.receipt.is_some()))),
+        "no second receipt: {later:?}"
+    );
+    alice.takes(&answer, &bob.identity);
+    assert_eq!(
+        alice.ticks(&message.message_id),
+        (Some(DeliveryState::Read { at: RT as u32 }), Ticks::Read),
+        "Alice sees her message read"
+    );
+
+    // Control: the same answer written plainly, no viewport, reads nothing.
+    let mut alice = Side::new(false);
+    let mut bob = Side::phone_in_the_back(false);
+    let message = alice.write(bob.address, "kommst du?", |_| {});
+    bob.takes(&message, &alice.identity);
+    let answer = bob.write(alice.address, "bin gleich da", |_| {});
+    assert_eq!(read_receipt(&answer), None, "control: a write is no read");
+    alice.takes(&answer, &bob.identity);
+    assert_ne!(alice.ticks(&message.message_id).1, Ticks::Read);
+}
+
+/// Cell N2, unhappy (1506): a message that came after the notification was
+/// posted was not shown by it. The reply reads up to what it showed: the
+/// receipt names the first message only, and the second stays unread and
+/// unseen, so its own receipt waits for a viewport.
+#[test]
+fn a_reply_from_the_notification_leaves_a_later_message_unread() {
+    let mut alice = Side::new(false);
+    let mut bob = Side::phone_in_the_back(false);
+    let first = alice.write(bob.address, "eins", |_| {});
+    bob.takes(&first, &alice.identity);
+    let key = bob.notice_key(alice.address);
+    let second = alice.write(bob.address, "zwei", |_| {});
+    bob.takes(&second, &alice.identity);
+    assert_eq!(bob.unread(alice.address), 2);
+    let answer = bob
+        .notice_reply(alice.address, key, "ok")
+        .expect("the reply goes");
+    assert_eq!(
+        read_receipt(&answer).map(|(_, ids)| ids),
+        Some(vec![first.message_id]),
+        "only what the notification showed"
+    );
+    assert_eq!(bob.unread(alice.address), 1, "the later one stays unread");
+    alice.takes(&answer, &bob.identity);
+    assert_eq!(alice.ticks(&first.message_id).1, Ticks::Read);
+    assert_ne!(alice.ticks(&second.message_id).1, Ticks::Read);
+}
+
+/// Cell N3 (1506): the reply from the notification on a client of a
+/// mailbox, and with the switch off. On the client the device holds no
+/// identity: nothing rides on the reply, the seen mark goes to the mailbox
+/// (which signs the receipt, section 8). With read receipts off, the reply
+/// goes and no receipt and no seen mark does.
+#[test]
+fn a_reply_from_the_notification_on_a_mailbox_client_hands_a_seen_mark() {
+    let mut alice = Side::new(false);
+    let mut bob = Side::phone_in_the_back(true);
+    let message = alice.write(bob.address, "hallo", |_| {});
+    bob.takes(&message, &alice.identity);
+    let key = bob.notice_key(alice.address);
+    let answer = bob
+        .notice_reply(alice.address, key, "hi")
+        .expect("the reply goes");
+    assert_eq!(
+        read_receipt(&answer),
+        None,
+        "nothing rides on a client's reply"
+    );
+    let seen: Vec<Mark> = bob
+        .model
+        .take_marks()
+        .into_iter()
+        .filter(|m| matches!(m.flag, MarkFlag::Seen { .. }))
+        .collect();
+    assert_eq!(seen.len(), 1, "one seen mark: {seen:?}");
+    assert_eq!(seen[0].ids, vec![message.message_id]);
+    assert_eq!(seen[0].flag, MarkFlag::Seen { at: RT as u32 });
+
+    let mut alice = Side::new(false);
+    let mut bob = Side::phone_in_the_back(false);
+    update(&mut bob.model, UiEvent::ReadReceipts(false));
+    let message = alice.write(bob.address, "hallo", |_| {});
+    bob.takes(&message, &alice.identity);
+    let key = bob.notice_key(alice.address);
+    let answer = bob
+        .notice_reply(alice.address, key, "hi")
+        .expect("the reply goes with the switch off too");
+    assert_eq!(read_receipt(&answer), None, "the switch is off");
+    assert_eq!(bob.unread(alice.address), 0, "read all the same");
 }

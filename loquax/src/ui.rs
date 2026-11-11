@@ -2011,6 +2011,45 @@ impl<B> UiModel<B> {
         self.mark_out(crate::home::wire::MarkFlag::Read, ids);
     }
 
+    /// Conversation `index` was read up to the message `key` (its
+    /// activity), a reply from the notification (1506): the unread that
+    /// came after it stay unread, the rest are read as [`Self::read_out`]
+    /// reads them, here and, on a client of a home node, on the home's
+    /// other devices.
+    pub(crate) fn read_up_to(&mut self, index: usize, key: u64) {
+        let Some(conversation) = self.conversations.get_mut(index) else {
+            return;
+        };
+        let unread = conversation.unread;
+        if unread == 0 {
+            return;
+        }
+        let newest = conversation.received_by_arrival(true);
+        let later = newest
+            .iter()
+            .take(unread)
+            .filter(|&&m| conversation.messages[m].activity > key)
+            .count();
+        if later == 0 {
+            self.read_out(index);
+            return;
+        }
+        let ids: Vec<[u8; 32]> = newest
+            .iter()
+            .take(unread)
+            .filter(|&&m| conversation.messages[m].activity <= key)
+            .filter_map(|&m| conversation.messages[m].id)
+            .collect();
+        conversation.unread = later;
+        if let Some(listing) = conversation.listing.as_mut() {
+            listing.unread_rows = listing.unread_rows.min(later as u32);
+        }
+        self.changed_peers.insert(conversation.peer);
+        if self.home_client && !ids.is_empty() {
+            self.mark_out(crate::home::wire::MarkFlag::Read, ids);
+        }
+    }
+
     /// Queue marks for the home node, split to the most one carries.
     pub(crate) fn mark_out(&mut self, flag: crate::home::wire::MarkFlag, ids: Vec<[u8; 32]>) {
         for chunk in ids.chunks(crate::home::wire::MARK_IDS_MAX) {
@@ -2371,7 +2410,8 @@ impl<B> UiModel<B> {
                 .map(|m| chat::Mark::of(chat::shown(m.delivery, self))),
             read_at: last.filter(|m| m.outbound).and_then(|m| {
                 match chat::shown(m.delivery, self) {
-                    Some(DeliveryState::Read { at }) => Some(at),
+                    // 0 is a read at no known time (1506).
+                    Some(DeliveryState::Read { at }) if at > 0 => Some(at),
                     _ => None,
                 }
             }),
@@ -3153,6 +3193,15 @@ pub enum UiEvent {
     Reply {
         peer: [u8; 16],
         target: [u8; 32],
+        body: String,
+    },
+    /// A reply typed into the notification of `peer`'s messages (1506):
+    /// `key` is the newest message the notification showed (its
+    /// [`Message::activity`]); every message up to it is read, its receipt
+    /// rides on `body` ([`receipts`]).
+    NoticeReply {
+        peer: [u8; 16],
+        key: u64,
         body: String,
     },
     /// Send a copy of the message `key` (its [`Message::activity`]) of
@@ -4210,6 +4259,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             content,
         } => model.react(peer, target, &content),
         UiEvent::Reply { peer, target, body } => model.reply_to(peer, target, body),
+        UiEvent::NoticeReply { peer, key, body } => model.notice_reply(peer, key, body),
         UiEvent::Forward { from, key, to } => model.forward(from, key, to),
         UiEvent::SendAgain { peer, key } => model.send_again(peer, key),
         UiEvent::Delete { peer, keys } => {

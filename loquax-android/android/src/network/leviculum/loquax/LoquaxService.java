@@ -36,6 +36,11 @@ import java.util.Map;
  */
 public class LoquaxService extends Service implements Events.Listener {
     static final String STOP = "network.leviculum.loquax.STOP";
+    /** A message notification's inline reply (1506). */
+    static final String REPLY = "network.leviculum.loquax.REPLY";
+    private static final String REPLY_TEXT = "reply";
+    private static final String REPLY_PEER = "peer";
+    private static final String REPLY_KEY = "key";
     static final String SESSION_CHANNEL = "session";
     private static final String MESSAGES_CHANNEL = "messages";
     private static final int SESSION_ID = 1;
@@ -131,6 +136,9 @@ public class LoquaxService extends Service implements Events.Listener {
         if (intent != null && STOP.equals(intent.getAction())) {
             end();
             return START_NOT_STICKY;
+        }
+        if (intent != null && REPLY.equals(intent.getAction())) {
+            reply(intent);
         }
         if (foreground != this) {
             // The notice is posted here once; later posts come only from
@@ -397,6 +405,41 @@ public class LoquaxService extends Service implements Events.Listener {
                 .build();
     }
 
+    /**
+     * The inline reply of a message notification (1506): the text goes to
+     * the library with the key the notification showed, which reads the
+     * chat up to it and sends the read receipt with the reply. The
+     * notification goes then, as Android wants after an inline reply; one
+     * for a message that came since is posted again by the next look.
+     */
+    private void reply(Intent intent) {
+        android.os.Bundle results = android.app.RemoteInput.getResultsFromIntent(intent);
+        CharSequence text = results == null ? null : results.getCharSequence(REPLY_TEXT);
+        final String peer = intent.getStringExtra(REPLY_PEER);
+        final long key = intent.getLongExtra(REPLY_KEY, 0);
+        if (peer == null || text == null || text.toString().trim().isEmpty()) {
+            return;
+        }
+        final String body = text.toString();
+        Engine.run(new Engine.Call() {
+            @Override
+            public String run() {
+                return Core.noticeReply(peer, key, body);
+            }
+        }, new Engine.Said() {
+            @Override
+            public void said(String error) {
+                if (error != null) {
+                    Log.i(PhotoView.TAG, "notification reply: " + error);
+                }
+                getSystemService(NotificationManager.class).cancel(peer, 0);
+                if (unread != null) {
+                    unread.put(peer, 0L);
+                }
+            }
+        });
+    }
+
     /** New messages in one conversation: its name and last message; opens the chat. */
     private Notification message(Map<String, Object> row) {
         String peer = Core.str(row, "peer");
@@ -418,6 +461,26 @@ public class LoquaxService extends Service implements Events.Listener {
         android.graphics.Bitmap photo = AvatarView.photo(Core.str(row, "photo"));
         if (photo != null) {
             builder.setLargeIcon(photo);
+        }
+        // The inline reply (1506): it carries the newest message the
+        // notification shows, so the reply reads exactly up to it.
+        Object newest = row.get("notice_key");
+        if (newest instanceof Number) {
+            Intent answer = new Intent(this, LoquaxService.class).setAction(REPLY)
+                    .putExtra(REPLY_PEER, peer)
+                    .putExtra(REPLY_KEY, ((Number) newest).longValue());
+            // Mutable: the system writes the typed text into it.
+            int mutable = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
+            PendingIntent replying = PendingIntent.getService(this, peer.hashCode(), answer,
+                    mutable | PendingIntent.FLAG_UPDATE_CURRENT);
+            android.app.RemoteInput input = new android.app.RemoteInput.Builder(REPLY_TEXT)
+                    .setLabel(getString(R.string.action_reply))
+                    .build();
+            builder.addAction(new Notification.Action.Builder(null,
+                    getString(R.string.action_reply), replying)
+                    .addRemoteInput(input)
+                    .setAllowGeneratedReplies(false)
+                    .build());
         }
         return builder.build();
     }
