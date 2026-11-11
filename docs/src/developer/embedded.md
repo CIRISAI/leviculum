@@ -66,8 +66,8 @@ The shape is: compute the next deadline, wait for whichever of "a packet on any
 interface" or "the deadline" happens first, call the matching entry point,
 dispatch the resulting actions. This is exactly the `leviculum-nrf` T114 main
 loop: the deadline comes from `next_deadline`
-(`leviculum-nrf/src/node_loop.rs:875-880`) and the wait from Embassy's `select4`
-(`leviculum-nrf/src/node_loop.rs:933-960`). The board selects over ten event
+(`leviculum-nrf/src/node_loop.rs:880-885`) and the wait from Embassy's `select4`
+(`leviculum-nrf/src/node_loop.rs:938-965`). The board selects over ten event
 sources; the loop below narrows that to the three interfaces (serial, LoRa,
 BLE) and the timer:
 

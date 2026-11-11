@@ -122,9 +122,9 @@ the hint onto a per-link queue (`tx_fanout_task`,
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
 disappears (`handle_packet_from_peer`,
-`leviculum-nrf/src/node_loop.rs:1368`;
-`handle_interface_peer_lost`, `leviculum-nrf/src/node_loop.rs:1403`;
-`handle_interface_peer_up`, `leviculum-nrf/src/node_loop.rs:1415`; the
+`leviculum-nrf/src/node_loop.rs:1373`;
+`handle_interface_peer_lost`, `leviculum-nrf/src/node_loop.rs:1414`;
+`handle_interface_peer_up`, `leviculum-nrf/src/node_loop.rs:1429`; the
 T114 and the RAK4631 run that loop), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,

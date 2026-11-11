@@ -187,6 +187,21 @@ impl core::fmt::Write for ByteWriter<'_> {
     }
 }
 
+/// Between a panic's message and the allocation post-mortem appended to it
+/// ([`record_panic`]): a control character no panic message or census word
+/// contains, so the replay's split is unambiguous.
+pub const CENSUS_SEPARATOR: char = '\u{1e}';
+
+/// The two halves of a recorded panic message: the message itself and, when
+/// the panic was an allocation failure, the words
+/// [`crate::heap::write_alloc_postmortem`] appended.
+pub fn split_census(msg: &str) -> (&str, Option<&str>) {
+    match msg.split_once(CENSUS_SEPARATOR) {
+        Some((message, census)) => (message, Some(census)),
+        None => (msg, None),
+    }
+}
+
 /// Capture a panic's message into the retained record, magic last, so the
 /// next boot can log it, followed by ` phase=<name>`
 /// ([`crate::thread_watch::Phase`]). The log ring is unusable here: the executor is
@@ -213,6 +228,17 @@ pub fn record_panic(info: &core::panic::PanicInfo) {
                 crate::thread_watch::current_phase().name()
             ),
         );
+        // An allocation failure carries what the allocator froze and the
+        // last census behind a separator (order 1665); the boot replay
+        // splits it off as `[PANIC_CENSUS]`. Any other panic writes nothing
+        // here.
+        if crate::heap::alloc_failure().is_some() {
+            let _ = core::fmt::Write::write_char(&mut writer, CENSUS_SEPARATOR);
+            let _ = crate::heap::write_alloc_postmortem(
+                &mut writer,
+                embassy_time::Instant::now().as_millis(),
+            );
+        }
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).len), writer.pos as u32);
         // Magic last — partial write must not appear valid.
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), PANIC_PM.fresh);
@@ -360,7 +386,8 @@ pub fn log_postmortems(
         );
     }
     if let Some(pm) = panic_pm {
-        let msg = core::str::from_utf8(&pm.bytes[..pm.len]).unwrap_or("<non-utf8 panic msg>");
+        let whole = core::str::from_utf8(&pm.bytes[..pm.len]).unwrap_or("<non-utf8 panic msg>");
+        let (msg, census) = split_census(whole);
         // EscapeCtrl keeps this ONE line: the SD fault panic embeds a
         // raw '\n' after the source location, which split the line and
         // cost us the PC/PREGION tail in capture.
@@ -384,6 +411,15 @@ pub fn log_postmortems(
             "[INFO!] ",
             format_args!("[PANIC_PMRT_TAIL] {}", log::EscapeCtrl(&msg[tail_start..])),
         );
+        // What the allocator froze at the refusal and the last census before
+        // it (order 1665): the holder the message's size and phase cannot
+        // name.
+        if let Some(census) = census {
+            log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!("[PANIC_CENSUS] {}", log::EscapeCtrl(census)),
+            );
+        }
     }
 }
 
@@ -445,5 +481,21 @@ mod tests {
         assert!(take_hardfault_postmortem().is_none(), "taken twice");
         let peeked = peek_hardfault_postmortem().expect("a seen record stays readable");
         assert_eq!(peeked.xpsr, 0x6100_0000);
+    }
+
+    /// Order 1665: the allocation post-mortem rides behind the separator and
+    /// the replay splits it off; a panic without it keeps its whole message.
+    #[test]
+    fn the_census_splits_off_an_allocation_failure_only() {
+        let alloc = "panicked at alloc.rs:573:9:\nmemory allocation of 3456 bytes failed phase=ble-peer\u{1e}alloc size=3456 free=2100";
+        assert_eq!(
+            split_census(alloc),
+            (
+                "panicked at alloc.rs:573:9:\nmemory allocation of 3456 bytes failed phase=ble-peer",
+                Some("alloc size=3456 free=2100")
+            )
+        );
+        let other = "panicked at src/x.rs:1:1:\nindex out of bounds phase=timer";
+        assert_eq!(split_census(other), (other, None));
     }
 }

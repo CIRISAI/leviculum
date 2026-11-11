@@ -365,6 +365,30 @@ where
         .unwrap_or_default();
     let attributed = census.total() + ble + ble_sessions + pn.total();
     let other = used_now.max(used).saturating_sub(attributed);
+    // Kept for the panic record (order 1665): an allocation failure before
+    // the next census replays these words as `[PANIC_CENSUS]` on the next
+    // boot, in `leviculum_firmware::heap::CENSUS_KEYS` order.
+    leviculum_firmware::heap::note_census(
+        [
+            used_now,
+            free_now,
+            largest,
+            census.node_struct,
+            census.links,
+            census.events,
+            census.requests,
+            census.destinations,
+            census.transport,
+            census.storage,
+            ble_sessions,
+            pn.peers,
+            pn.work,
+            pn.link_maps,
+            pn.flush,
+            other,
+        ],
+        Instant::now().as_millis(),
+    );
     crate::log::log_fmt(
         "[HEAP_CENSUS] ",
         format_args!(

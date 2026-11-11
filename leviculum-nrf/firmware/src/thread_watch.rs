@@ -135,11 +135,24 @@ pub enum Phase {
     PnFlush,
     /// The USB serial task deframing what the host sent.
     SerialIngress,
+    /// Inside the BLE peer arm (order 1665): the core's peer-up or peer-lost
+    /// handling (path cull, peer-up pulls, the stored-announce re-offer).
+    BlePeerCore,
+    /// Inside the BLE peer arm: our own announce to the peer that came up.
+    BlePeerAnnounce,
+    /// Inside the BLE peer arm: the propagation role's peer-up (its
+    /// announce and the stored-mail solicit, which walks the store).
+    BlePeerSolicit,
+    /// Inside the BLE peer arm: handing its actions to the interfaces.
+    BlePeerDispatch,
+    /// A main-loop arm's core events before the propagation engine sees
+    /// them: the event lines, the `/status` and `/dfu` responders.
+    CoreEvents,
 }
 
 impl Phase {
     /// Every phase, in discriminant order.
-    pub const ALL: [Phase; 20] = [
+    pub const ALL: [Phase; 25] = [
         Self::Idle,
         Self::SerRx,
         Self::LoraRx,
@@ -160,6 +173,11 @@ impl Phase {
         Self::PnSyncIntake,
         Self::PnFlush,
         Self::SerialIngress,
+        Self::BlePeerCore,
+        Self::BlePeerAnnounce,
+        Self::BlePeerSolicit,
+        Self::BlePeerDispatch,
+        Self::CoreEvents,
     ];
 
     fn from_u8(v: u8) -> Self {
@@ -189,6 +207,11 @@ impl Phase {
             Self::PnSyncIntake => "pn-sync-intake",
             Self::PnFlush => "pn-flush",
             Self::SerialIngress => "serial-ingress",
+            Self::BlePeerCore => "ble-peer-core",
+            Self::BlePeerAnnounce => "ble-peer-announce",
+            Self::BlePeerSolicit => "ble-peer-solicit",
+            Self::BlePeerDispatch => "ble-peer-dispatch",
+            Self::CoreEvents => "core-events",
         }
     }
 }
@@ -304,9 +327,12 @@ pub fn beat_now() {
     THREAD.beat(embassy_time::Instant::now().as_millis() as u32);
 }
 
-/// [`THREAD`] entered `phase`.
+/// [`THREAD`] entered `phase`. Also restarts the allocator's per-phase
+/// counters ([`crate::heap::phase_entered`], order 1665), so a refused
+/// allocation names what the phase it died in had taken.
 pub fn set_phase(phase: Phase) {
     THREAD.set_phase(phase);
+    crate::heap::phase_entered();
 }
 
 /// The phase [`THREAD`] last entered; the panic handler's read.

@@ -175,7 +175,7 @@ drop, the stale drop and after a transmission,
 `leviculum-nrf/src/lora.rs:1875,2270,2515`). The button arm notes the
 count before and after its dispatch around the feedback policy's
 watch (`leviculum-nrf/firmware/src/feedback.rs:280`, called from each
-binary, e.g. `leviculum-nrf/src/bin/t1000e.rs:1153-1176`), and the
+binary, e.g. `leviculum-nrf/src/bin/t1000e.rs:1158-1181`), and the
 press's last LoRa packet settling keyed plays the pattern
 (`leviculum-nrf/firmware/src/feedback.rs:291`). The rule is
 `leviculum_feedback::AirWatch` (`leviculum-nrf/feedback/src/lib.rs:270`),

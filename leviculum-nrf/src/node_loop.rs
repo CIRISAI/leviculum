@@ -811,6 +811,11 @@ pub async fn run(
     let mut dfu_exit: Option<leviculum_core::transport::TickOutput> = None;
     macro_rules! pn_step {
         ($events:expr) => {
+            // The events' own phase until the engine names its steps
+            // (order 1665).
+            leviculum_firmware::thread_watch::set_phase(
+                leviculum_firmware::thread_watch::Phase::CoreEvents,
+            );
             // Board-visible core-event lines (LINK_REFUSED, #388) render
             // regardless of whether a propagation role runs.
             crate::events::log_events($events, node.now_ms());
@@ -1400,6 +1405,12 @@ pub async fn run(
                     // this one.
                     BleLinkEvent::Inbound { .. } => continue,
                     BleLinkEvent::PeerLost { identity: peer, .. } => {
+                        // Sub-phases (order 1665): all four of the T114's
+                        // 3456 B panics died in this arm after a stall of
+                        // seconds; these say which step held it.
+                        leviculum_firmware::thread_watch::set_phase(
+                            leviculum_firmware::thread_watch::Phase::BlePeerCore,
+                        );
                         let output = node.handle_interface_peer_lost(InterfaceId(2), peer);
                         info!(
                             "BLE peer lost, {} paths culled",
@@ -1412,6 +1423,9 @@ pub async fn run(
                         ("ble-peer-lost", output)
                     }
                     BleLinkEvent::PeerUp { identity: peer, .. } => {
+                        leviculum_firmware::thread_watch::set_phase(
+                            leviculum_firmware::thread_watch::Phase::BlePeerCore,
+                        );
                         let mut output = node.handle_interface_peer_up(InterfaceId(2), peer);
                         info!("BLE peer up, {} pull actions", output.actions.len());
                         // #376: and announce OURSELVES to that peer, on
@@ -1422,6 +1436,9 @@ pub async fn run(
                         // would reach the neighbour board, which forwards
                         // it, and the relayed copy racing the direct one
                         // is the two-hop reading this issue opened with.
+                        leviculum_firmware::thread_watch::set_phase(
+                            leviculum_firmware::thread_watch::Phase::BlePeerAnnounce,
+                        );
                         output.actions.extend(announce_gate.peer_up(
                             &mut node,
                             delivery_hash.as_ref(),
@@ -1431,6 +1448,9 @@ pub async fn run(
                         // that just linked is exactly the client that
                         // should learn its board is a mailbox.
                         if let Some(pn) = pn_engine.as_mut() {
+                            leviculum_firmware::thread_watch::set_phase(
+                                leviculum_firmware::thread_watch::Phase::BlePeerSolicit,
+                            );
                             output
                                 .actions
                                 .extend(pn.on_ble_peer_up(&mut node, 2, peer).actions);
@@ -1438,6 +1458,9 @@ pub async fn run(
                         ("ble-peer-up", output)
                     }
                 };
+                leviculum_firmware::thread_watch::set_phase(
+                    leviculum_firmware::thread_watch::Phase::BlePeerDispatch,
+                );
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
