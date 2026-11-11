@@ -176,12 +176,11 @@ pub(super) fn map_window(w: u32, h: u32) -> (App, Rectangle) {
     // The window without the frame meter's overlay, which stacks over it
     // and would move the path below (1456).
     let node = headless::layout(app.window_view(), w, h).expect("a renderer");
-    // The rail, then the map screen: the column, then the map over its bar.
+    // The rail, then the map screen: the map over its bar (1430).
     let map = Layout::new(&node)
         .children()
         .nth(1)
-        .and_then(|screen| screen.children().nth(1))
-        .and_then(|column| column.children().next())
+        .and_then(|screen| screen.children().next())
         .expect("the map")
         .bounds();
     (app, map)

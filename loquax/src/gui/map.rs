@@ -39,6 +39,31 @@ pub fn measure(text: &str, size: f32) -> u32 {
     paragraph.min_bounds().width.ceil() as u32
 }
 
+/// `words` cut to `width` pixels at `size` as the window sets them
+/// (1430): whole when they fit, else the longest start that fits with an
+/// ellipsis after it, and the ellipsis alone where not even one letter
+/// does. Measured with [`measure`], so the cut is where the box ends.
+pub fn fit(words: &str, size: f32, width: f32) -> String {
+    let fits = |s: &str| measure(s, size) as f32 <= width;
+    if fits(words) {
+        return words.to_string();
+    }
+    // The char boundaries a cut may fall on; the longest that fits.
+    let ends: Vec<usize> = words.char_indices().map(|(i, _)| i).skip(1).collect();
+    let (mut lo, mut hi) = (0usize, ends.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        match fits(&format!("{}…", words[..ends[mid - 1]].trim_end())) {
+            true => lo = mid,
+            false => hi = mid - 1,
+        }
+    }
+    match lo {
+        0 => "…".to_string(),
+        n => format!("{}…", words[..ends[n - 1]].trim_end()),
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;

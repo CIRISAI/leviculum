@@ -93,8 +93,6 @@ use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 /// The tabs' bar under a narrow window, in logical pixels: what the Browse
 /// tab's page leaves it (1369).
 const COMPACT_TABS: f32 = 72.0;
-/// The list of peers on the left, in logical pixels.
-const LIST_WIDTH: f32 = 260.0;
 /// The map bar's height: a line of 13 pixel text and its padding (1441).
 const MAP_BAR: f32 = 21.0;
 /// The window's size when it opens.
@@ -156,6 +154,10 @@ pub struct Seen {
     /// The own fix the position sheet set (1457): a pin's "Share my
     /// position" sends it once.
     pub own_fix: Option<leviculum_lxmf::telemetry::Location>,
+    /// Every pin as its card and the locations list say it (1430): the
+    /// selected one's card at the map's bottom, the list over its left
+    /// edge on demand.
+    pub cards: Vec<loquax::ui::pin_card::PinCard>,
 }
 
 /// The hosted browser as the window draws it (1369): lnomad's model as
@@ -241,6 +243,7 @@ impl Seen {
             hubs: loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Window),
             info: model.info_shown(),
             own_fix: model.bar.own_fix,
+            cards: loquax::ui::pin_card::cards(model),
         }
     }
 
@@ -318,6 +321,9 @@ pub enum Want {
     /// The window gained or lost the focus: a notification only shows
     /// while it has none (1341).
     Front(bool),
+    /// A link for the system's handler (1430): the card's Navigate, the
+    /// directions on OpenStreetMap's site in the browser.
+    Open(String),
 }
 
 /// `loquax gui`: the shell started as the terminal starts it, driven on
@@ -454,6 +460,11 @@ async fn drive(
                 Want::Record { peer, input } => shell.record(peer, input),
                 Want::Attach { peer, path, photo } => shell.attach(peer, &path, photo),
                 Want::Front(is) => front = is,
+                Want::Open(url) => {
+                    if let Err(error) = open::that(&url) {
+                        tracing::warn!("could not open {url}: {error}");
+                    }
+                }
             },
             _ = pump.tick() => shell.poll(),
             _ = tick.tick() => shell.tick(&mut clocks),
@@ -648,6 +659,14 @@ pub enum Message {
     TrackWindow(loquax::ui::tracks::TrackWindow),
     /// The map bar's More: its menu open, or closed again (1419).
     MapMenu,
+    /// The map menu's Locations (1430): the list over the map opens, and
+    /// the menu closes.
+    Locations,
+    /// A row of the locations list: its pin selected, the view on it, the
+    /// list closed.
+    Located([u8; 16]),
+    /// The card's Navigate (1430): the directions to its pin.
+    Navigate([u8; 16]),
     /// The mouse on the photo viewer (1269).
     Viewer(viewer::Input),
     /// The viewer's Close.
@@ -1007,6 +1026,9 @@ struct App {
     /// The map's menu over the map while it is open (1419): the tracks'
     /// time window and "fit all".
     map_menu: bool,
+    /// The locations list over the map's left edge while it is open
+    /// (1430): opened from the map's menu, closed by a choice or Escape.
+    locations: bool,
     /// The bubble whose Forward was pressed (1371): its menu lists the
     /// conversations to send the copy to.
     forwarding: Option<NodeId>,
@@ -1118,6 +1140,7 @@ impl App {
                 hubs: Vec::new(),
                 info: None,
                 own_fix: None,
+                cards: Vec::new(),
             },
             asks,
             track_cache: std::cell::RefCell::new(None),
@@ -1155,6 +1178,7 @@ impl App {
             map_shown: false,
             help: None,
             map_menu: false,
+            locations: false,
             forwarding: None,
             info_advanced: false,
             on_screen: None,
@@ -1517,6 +1541,7 @@ impl App {
                 self.tell(UiEvent::Profile { open: false })
             }
             Intent::Back | Intent::Dismiss if self.map_menu => self.map_menu = false,
+            Intent::Back | Intent::Dismiss if self.locations => self.locations = false,
             // "Share my address": the desktop's share is its clipboard.
             Intent::ShareCode => {
                 if let Some(code) = self.scene.profile.as_ref().and_then(|p| p.code.clone()) {
@@ -1935,6 +1960,7 @@ impl App {
             }
             MapCmd::Close => {
                 self.map_menu = false;
+                self.locations = false;
                 self.screen = Screen::Chats;
             }
             MapCmd::TrackWindow(forward) => {
@@ -2311,6 +2337,26 @@ impl App {
                 self.map_menu = !self.map_menu;
                 return Task::none();
             }
+            Message::Locations => {
+                self.map_menu = false;
+                self.locations = true;
+                return Task::none();
+            }
+            Message::Located(peer) => {
+                self.locations = false;
+                self.apply(Message::Select(peer));
+                return self.paint();
+            }
+            Message::Navigate(peer) => {
+                let own = self.seen.pins.iter().find(|p| p.own).map(|p| p.at);
+                if let Some(pin) = self.seen.pins.iter().find(|p| p.peer == peer) {
+                    let url = loquax::ui::pin_card::directions(pin.at, own);
+                    if let Some(asks) = &self.asks {
+                        let _ = asks.send(Want::Open(url));
+                    }
+                }
+                return Task::none();
+            }
             Message::CopyText(words) => {
                 self.seen.notice = Some(StrId::MailboxCopied.text(self.lang).to_string());
                 return iced::clipboard::write(words);
@@ -2677,9 +2723,6 @@ impl App {
         self.view = ExactView::new(centre, u32::from(zoom) * MILLI, size.0, size.1);
         self.hold();
         self.fitted_at = Some((self.view.centre, self.view.zoom_milli()));
-        if self.selected.is_none() {
-            self.selected = self.seen.pins.first().map(|p| p.peer);
-        }
         let first = !self.fitted && !self.seen.pins.is_empty();
         self.fitted = !self.seen.pins.is_empty();
         if first && self.seen.autoload {
@@ -2804,10 +2847,10 @@ impl App {
             }
             Pointer::Up => {
                 if let Some(press) = self.press.take() {
+                    // A click on a pin selects it and opens its card; on
+                    // the empty map it deselects and the card goes (1430).
                     if !press.dragging {
-                        if let Some(peer) = press.pin {
-                            self.selected = Some(peer);
-                        }
+                        self.selected = press.pin;
                     }
                 }
             }
@@ -3129,61 +3172,12 @@ impl App {
         self.rooms_pane()
     }
 
+    /// The map over the whole pane (1430): no column beside it. The peers
+    /// are their pins; a click on one opens its card at the map's bottom,
+    /// the map menu's Locations the list over its left edge. Every box
+    /// over the map has a fixed size, so the map's pane never follows its
+    /// words (1441).
     fn map_view(&self) -> Element<'_, Message> {
-        let list = self
-            .seen
-            .pins
-            .iter()
-            .fold(column![].spacing(2), |list, pin| {
-                let alpha = if pin.stale { 0.5 } else { 1.0 };
-                let age = pin.age.clone().unwrap_or_default();
-                let mut entry = column![text(pin.label.clone()).size(15), text(age).size(12),];
-                // A node nearby that is no contact (1302): its card says
-                // so and offers to add it.
-                if pin.nearby {
-                    entry = entry
-                        .push(text(StrId::NearbyCard.text(Lang::En)).size(12))
-                        .push(
-                            button(text(StrId::NearbyAdd.text(Lang::En)).size(12))
-                                .on_press(Message::AddNearby(pin.peer))
-                                .padding([0, 6]),
-                        );
-                }
-                // The selected friend's "Share position" (1457), the phone
-                // card's: the own fix to them once; without one, their chat
-                // with the position sheet, where it is set.
-                if Some(pin.peer) == self.selected && !pin.own && !pin.nearby {
-                    let share = match self.seen.own_fix {
-                        Some(location) => Intent::Share {
-                            peer: pin.peer,
-                            location,
-                        },
-                        None => Intent::Locate { peer: pin.peer },
-                    };
-                    entry = entry.push(
-                        button(text(StrId::Share.text(self.lang)).size(12))
-                            .on_press(Message::Intent(share))
-                            .padding([0, 6]),
-                    );
-                }
-                let style = match Some(pin.peer) == self.selected {
-                    true => button::primary,
-                    false => button::text,
-                };
-                let button = button(container(entry).width(Length::Fill))
-                    .on_press(Message::Select(pin.peer))
-                    .style(move |theme: &Theme, status| {
-                        let mut s = style(theme, status);
-                        s.text_color = s.text_color.scale_alpha(alpha);
-                        s
-                    })
-                    .width(Length::Fill);
-                list.push(button)
-            });
-        let list: Element<'_, Message> = match self.seen.pins.is_empty() {
-            true => Space::new().into(),
-            false => chat::soft(scrollable(list)),
-        };
         let credit = self
             .shown
             .as_ref()
@@ -3258,19 +3252,23 @@ impl App {
             .into(),
             false => Space::new().into(),
         };
+        let card: Element<'_, Message> = match self.selected_card() {
+            Some(card) => self.pin_card(card),
+            None => Space::new().into(),
+        };
+        let locations: Element<'_, Message> = match self.locations {
+            true => self.locations_list(),
+            false => Space::new().into(),
+        };
         let map = container(
-            stack![picture, canvas, empty, menu]
+            stack![picture, canvas, empty, card, locations, menu]
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)
         .clip(true);
-        row![
-            container(list).width(LIST_WIDTH).padding(6),
-            column![map, bar],
-        ]
-        .into()
+        column![map, bar].into()
     }
 }
 
@@ -3285,9 +3283,16 @@ impl App {
         let heading = text(StrId::TrackWindow.text(self.lang))
             .size(13)
             .color(chat::colour(t.text_secondary));
+        // The locations list (1430): everyone with a position, over the
+        // map's left edge, only on demand.
+        let locations = button(text(StrId::Locations.text(self.lang)).size(13))
+            .on_press(Message::Locations)
+            .padding([2, 8])
+            .width(Length::Fill)
+            .style(button::text);
         let choices = TrackWindow::CHOICES
             .iter()
-            .fold(column![heading].spacing(2), |list, &w| {
+            .fold(column![locations, heading].spacing(2), |list, &w| {
                 let style = match self.seen.track_window == w {
                     true => button::primary,
                     false => button::text,
@@ -3327,6 +3332,169 @@ impl App {
             .align_bottom(Length::Fill)
             .into()
     }
+}
+
+/// The selected pin's card at the map's bottom (1430), a fixed size
+/// whatever its words say: the avatar, the name, the status line and the
+/// phone card's actions.
+const CARD: Size = Size::new(380.0, 92.0);
+/// The locations list over the map's left edge (1430), this wide.
+const LOCATIONS_WIDTH: f32 = 260.0;
+/// The avatar on the card.
+const CARD_AVATAR: f32 = 40.0;
+/// Inside the card and the list, round their words.
+const PANEL_PAD: f32 = 10.0;
+
+impl App {
+    /// The selected pin's card, when the selected peer has a pin.
+    fn selected_card(&self) -> Option<&loquax::ui::pin_card::PinCard> {
+        let peer = self.selected?;
+        self.seen.cards.iter().find(|c| c.peer == peer)
+    }
+
+    /// A panel over the map: the background's ground with a line round
+    /// it, so it stands off the map under it, and a press on it is its
+    /// own and never the map's.
+    fn panel<'a>(&self, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+        let t = self.tokens();
+        iced::widget::opaque(
+            container(content)
+                .padding(PANEL_PAD)
+                .style(move |_: &Theme| container::Style {
+                    background: Some(iced::Background::Color(chat::colour(t.background))),
+                    border: iced::border::rounded(10)
+                        .color(chat::colour(t.dim))
+                        .width(1.0),
+                    ..container::Style::default()
+                }),
+        )
+    }
+
+    /// The card of `card` (1430), the phone's: the avatar, the name, the
+    /// status line ("live · every 1 min · Now · 300 m"), then Chat,
+    /// Navigate and Share mine; a node nearby that is no contact says so
+    /// and offers to add it, our own position has no actions.
+    fn pin_card<'a>(&'a self, card: &'a loquax::ui::pin_card::PinCard) -> Element<'a, Message> {
+        let t = self.tokens();
+        let words = CARD.width - 2.0 * PANEL_PAD - CARD_AVATAR - 10.0;
+        let status = match card.nearby {
+            true => StrId::NearbyCard.text(self.lang).to_string(),
+            false => card.status.clone(),
+        };
+        let head = row![
+            chat::avatar_of(&card.avatar, CARD_AVATAR, t),
+            column![
+                clipped(&card.name, 15.0, words, chat::colour(t.text)),
+                clipped(&status, 12.0, words, chat::colour(t.text_secondary)),
+            ]
+            .spacing(2),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+        let act = |id: StrId, on: Message| {
+            button(text(id.text(self.lang)).size(13))
+                .on_press(on)
+                .padding([2, 10])
+                .style(button::text)
+        };
+        let actions = match (card.own, card.nearby) {
+            (true, _) => row![],
+            (false, true) => row![act(StrId::NearbyAdd, Message::AddNearby(card.peer))],
+            (false, false) => {
+                // Share mine (1457): the own fix to them once; without
+                // one, their chat with the position sheet, where it is set.
+                let share = match self.seen.own_fix {
+                    Some(location) => Intent::Share {
+                        peer: card.peer,
+                        location,
+                    },
+                    None => Intent::Locate { peer: card.peer },
+                };
+                row![
+                    act(StrId::CardChat, Message::Intent(Intent::Map(MapCmd::Open))),
+                    act(StrId::CardNavigate, Message::Navigate(card.peer)),
+                    act(StrId::CardShare, Message::Intent(share)),
+                ]
+            }
+        }
+        .spacing(4);
+        let body = column![head, actions]
+            .spacing(6)
+            .width(Length::Fixed(CARD.width - 2.0 * PANEL_PAD))
+            .height(Length::Fixed(CARD.height - 2.0 * PANEL_PAD))
+            .clip(true);
+        container(self.panel(body))
+            .padding(10)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_bottom(Length::Fill)
+            .into()
+    }
+
+    /// The locations list over the map's left edge (1430): everyone with
+    /// a position but ourselves, the newest fix first, each with its age
+    /// and, where the own position is known, its distance. A click
+    /// selects the pin and closes it; Escape closes it.
+    fn locations_list(&self) -> Element<'_, Message> {
+        let t = self.tokens();
+        let words = LOCATIONS_WIDTH - 2.0 * PANEL_PAD - 12.0;
+        let heading = clipped(
+            StrId::Locations.text(self.lang),
+            13.0,
+            words,
+            chat::colour(t.text_secondary),
+        );
+        let cards = loquax::ui::pin_card::locations(&self.seen.cards);
+        let rows = cards.into_iter().fold(column![].spacing(2), |list, card| {
+            let line = match &card.distance {
+                Some(d) if !card.age.is_empty() => format!("{} · {d}", card.age),
+                Some(d) => d.clone(),
+                None => card.age.clone(),
+            };
+            let style = match Some(card.peer) == self.selected {
+                true => button::primary,
+                false => button::text,
+            };
+            list.push(
+                button(
+                    column![
+                        clipped(&card.name, 14.0, words, chat::colour(t.text)),
+                        clipped(&line, 12.0, words, chat::colour(t.text_secondary)),
+                    ]
+                    .spacing(1),
+                )
+                .on_press(Message::Located(card.peer))
+                .padding([3, 6])
+                .width(Length::Fill)
+                .style(style),
+            )
+        });
+        let body = column![heading, chat::soft(scrollable(rows))]
+            .spacing(6)
+            .width(Length::Fixed(LOCATIONS_WIDTH - 2.0 * PANEL_PAD));
+        container(self.panel(body))
+            .padding(8)
+            .height(Length::Fill)
+            .align_left(Length::Fill)
+            .align_top(Length::Fill)
+            .into()
+    }
+}
+
+/// `words` on one line in a box `width` pixels wide at `size` (1430):
+/// cut with an ellipsis where they are wider ([`map::fit`]), and clipped
+/// to the box besides, so no word runs past its edge.
+fn clipped<'a>(words: &str, size: f32, width: f32, ink: Color) -> Element<'a, Message> {
+    container(
+        text(map::fit(words, size, width))
+            .size(size)
+            .color(ink)
+            .wrapping(text::Wrapping::None),
+    )
+    .width(Length::Fixed(width))
+    .clip(true)
+    .into()
 }
 
 /// The frame on screen, where the view moved it.
@@ -3702,6 +3870,7 @@ mod tests {
             hubs: Vec::new(),
             info: None,
             own_fix: None,
+            cards: Vec::new(),
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -4338,6 +4507,7 @@ mod tests {
             hubs: loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Window),
             info: model.info_shown(),
             own_fix: model.bar.own_fix,
+            cards: loquax::ui::pin_card::cards(model),
         }
     }
 
@@ -6929,34 +7099,37 @@ mod tests {
         map::tests::same_as("gui-first-start-profile.png", &shoot(&app, w, h), w, h);
     }
 
-    /// 1451, the map in the window with two peers' pins: Anna and Ben
-    /// shared their positions in Florence's centre, inside the committed
-    /// region, five and eight minutes ago, the window shows the map screen over the
-    /// committed Florence region, Anna selected, her card marked in the
-    /// list and the view centred on her; pixel for pixel the golden,
-    /// light, 900 x 560.
-    #[test]
-    fn two_pins_with_one_selected_are_the_windows_map_golden() {
+    const BEN: [u8; 16] = [0xbe; 16];
+
+    /// 1451's two peers in the window over the committed Florence region:
+    /// Anna (named `anna`) and Ben shared their positions in Florence's
+    /// centre five and eight minutes ago, and our own fix `own`, when
+    /// given, is near them; the window `w` x `h` shows the map screen,
+    /// its canvas at the size the layout gives it, nothing selected.
+    fn florence_two(
+        anna: &str,
+        own: Option<(i32, i32)>,
+        w: u32,
+        h: u32,
+    ) -> (App, tokio::sync::mpsc::UnboundedReceiver<Want>) {
         use leviculum_lxmf::telemetry::Location;
-        const BEN: [u8; 16] = [0xbe; 16];
-        let (w, h) = (900, 560);
         let mut model = crate::shell::Model::new(&[]);
         update(&mut model, UiEvent::Viewing(loquax::ui::Viewing::ALL));
         model.address = Some(OWN);
-        model.names.remember(ANNA, "Anna");
+        model.names.remember(ANNA, anna);
         model.names.remember(BEN, "Ben");
         let now = at(29, 9, 30);
         update(&mut model, UiEvent::Clock(now));
+        let fix = |lat: i32, lon: i32, ago: i64| Location {
+            latitude_e6: lat,
+            longitude_e6: lon,
+            altitude_e2: 5_000,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 500,
+            last_update: now.unix_secs - ago,
+        };
         let mut report = |peer: [u8; 16], id: u8, lat: i32, lon: i32, ago: i64| {
-            let fix = Location {
-                latitude_e6: lat,
-                longitude_e6: lon,
-                altitude_e2: 5_000,
-                speed_e2: 0,
-                bearing_e2: 0,
-                accuracy_e2: 500,
-                last_update: now.unix_secs - ago,
-            };
             update(
                 &mut model,
                 UiEvent::Engine(OutboxEvent::Received {
@@ -6965,13 +7138,16 @@ mod tests {
                     source: peer,
                     title: Vec::new(),
                     body: Vec::new(),
-                    fields: loquax::ui::position_fields(fix),
+                    fields: loquax::ui::position_fields(fix(lat, lon, ago)),
                     verified: true,
                 }),
             );
         };
         report(ANNA, 1, 43_775_630, 11_260_220, 300);
         report(BEN, 2, 43_774_030, 11_255_720, 480);
+        if let Some((lat, lon)) = own {
+            model.bar.own_fix = Some(fix(lat, lon, 30));
+        }
         model.toasts.clear();
         let frames = map::tests::florence();
         let maps = frames.painter().epoch();
@@ -6984,9 +7160,47 @@ mod tests {
         let _ = app.update(Message::Intent(Intent::ShowMap { peer: None }));
         assert_eq!(app.screen, Screen::Map);
         let _ = told(&mut rx);
-        // The map's canvas in a 900 x 560 window: right of the rail and
-        // the list, above the bar.
-        app.apply(Message::MapSize(Size::new(568.0, 539.0)));
+        let canvas = map_pane(&app, w, h);
+        app.apply(Message::MapSize(canvas.size()));
+        (app, rx)
+    }
+
+    /// The map's pane in the window's layout: the rail, then the map
+    /// screen, the map over its bar.
+    fn map_pane(app: &App, w: u32, h: u32) -> Rectangle {
+        use iced::advanced::Layout;
+        let node = leviculum_ui_iced::headless::layout(app.view(), w, h).expect("a renderer");
+        let bounds = Layout::new(&node)
+            .children()
+            .nth(1)
+            .expect("the map screen")
+            .children()
+            .next()
+            .expect("the map")
+            .bounds();
+        bounds
+    }
+
+    /// 1451 and 1430, the map in the window with two peers' pins: the map
+    /// takes the whole pane right of the rail, no column beside it; Anna
+    /// selected, the view centred on her, her card at the map's bottom
+    /// with her name, the status line and Chat, Navigate and Share mine;
+    /// pixel for pixel the golden, light, 900 x 560.
+    #[test]
+    fn two_pins_with_one_selected_are_the_windows_map_golden() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = florence_two("Anna", None, w, h);
+        let pane = map_pane(&app, w, h);
+        assert_eq!(
+            pane.x,
+            leviculum_ui_iced::chrome::RAIL,
+            "the map starts at the rail"
+        );
+        assert_eq!(
+            pane.width,
+            w as f32 - pane.x,
+            "and takes the rest of the width"
+        );
         app.apply(Message::Select(ANNA));
         let (shown, _) = run(&mut app);
         assert!(shown.is_some(), "a frame of Florence at rest");
@@ -7002,7 +7216,153 @@ mod tests {
             .find(|p| p.peer == ANNA)
             .expect("Anna's pin");
         assert_eq!(app.view.centre, anna.at, "the view is on Anna");
+        let card = app.selected_card().expect("Anna's card");
+        assert_eq!(card.name, "Anna");
+        // One report five minutes ago: live for fifteen, the chat row's
+        // words.
+        assert_eq!(card.status, "live · 5 min ago");
+        assert!(card.actions());
         map::tests::same_as("gui-map-pins.png", &shoot(&app, w, h), w, h);
+    }
+
+    /// A click on a pin selects it and opens its card, a click on the
+    /// empty map deselects it and the card goes, a drag keeps it (1430);
+    /// the keys step the pins as before.
+    #[test]
+    fn a_click_on_the_empty_map_hides_the_card() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = florence_two("Anna", None, w, h);
+        let _ = run(&mut app);
+        assert_eq!(app.selected, None, "nothing selected when the map opens");
+        assert!(app.selected_card().is_none());
+        // Anna's pin where the frame on screen placed it.
+        let (shown, tx, ty, k) = app.onto().expect("a frame");
+        let placed = shown
+            .placed
+            .iter()
+            .find(|p| p.peer == ANNA)
+            .expect("Anna placed");
+        let at = Point::new(
+            ((tx + k * f64::from(placed.x)) / f64::from(app.scale)) as f32,
+            ((ty + k * f64::from(placed.y)) / f64::from(app.scale)) as f32,
+        );
+        let click = |app: &mut App, p: Point| {
+            app.apply(Message::Pointer(Pointer::Down(p)));
+            app.apply(Message::Pointer(Pointer::Up));
+        };
+        click(&mut app, at);
+        assert_eq!(app.selected, Some(ANNA), "a click on the pin selects it");
+        assert!(app.selected_card().is_some());
+        // A drag that starts on empty map keeps the card.
+        app.apply(Message::Pointer(Pointer::Down(Point::new(5.0, 5.0))));
+        app.apply(Message::Pointer(Pointer::Move(Point::new(60.0, 40.0))));
+        app.apply(Message::Pointer(Pointer::Up));
+        assert_eq!(app.selected, Some(ANNA), "a drag is no click");
+        let _ = run(&mut app);
+        click(&mut app, Point::new(5.0, 5.0));
+        assert_eq!(app.selected, None, "a click on the empty map deselects");
+        assert!(app.selected_card().is_none());
+        // The terminal's keys: the next pin.
+        let _ = app.update(Message::Intent(Intent::Map(MapCmd::Step(true))));
+        assert!(app.selected.is_some());
+    }
+
+    /// The locations list (1430): the map menu's Locations opens it over
+    /// the map's left edge and closes the menu; it lists everyone but us,
+    /// the newest fix first, with the age and the distance from our own
+    /// position; a row selects its pin, centres the view on it and closes
+    /// the list; Escape closes it before the map. Pixel for pixel the
+    /// golden, light, 900 x 560.
+    #[test]
+    fn the_locations_list_opens_from_the_menu_and_a_row_selects() {
+        let (w, h) = (900, 560);
+        let (mut app, mut rx) = florence_two("Anna", Some((43_773_500, 11_258_000)), w, h);
+        let _ = app.update(Message::MapMenu);
+        assert!(app.map_menu);
+        let _ = app.update(Message::Locations);
+        assert!(
+            app.locations && !app.map_menu,
+            "the list opens, the menu closes"
+        );
+        let list: Vec<_> = loquax::ui::pin_card::locations(&app.seen.cards)
+            .into_iter()
+            .map(|c| (c.name.clone(), c.distance.clone().expect("a distance")))
+            .collect();
+        assert_eq!(list.len(), 2, "{list:?}");
+        assert_eq!(list[0].0, "Anna", "the newest first: {list:?}");
+        assert_eq!(list[1].0, "Ben");
+        let _ = run(&mut app);
+        let pane = map_pane(&app, w, h);
+        map::tests::same_as("gui-map-locations.png", &shoot(&app, w, h), w, h);
+        let _ = app.update(Message::Located(BEN));
+        assert!(!app.locations, "a row closes the list");
+        assert_eq!(app.selected, Some(BEN));
+        let ben = app.seen.pins.iter().find(|p| p.peer == BEN).expect("Ben");
+        assert_eq!(app.view.centre, ben.at, "the view is on Ben");
+        assert_eq!(map_pane(&app, w, h), pane, "the list moved no pane");
+        // Escape closes the list, and the map stays.
+        let _ = app.update(Message::Locations);
+        let _ = app.update(Message::Intent(Intent::Back));
+        assert!(!app.locations);
+        assert_eq!(app.screen, Screen::Map);
+        assert!(told(&mut rx).is_empty());
+    }
+
+    /// The card's Navigate (1430) hands the shell OpenStreetMap's
+    /// directions to the pin, from our own position when known; Chat
+    /// opens the peer's chat.
+    #[test]
+    fn the_cards_navigate_opens_directions_and_chat_opens_the_chat() {
+        let (w, h) = (900, 560);
+        let (mut app, mut rx) = florence_two("Anna", Some((43_773_500, 11_258_000)), w, h);
+        app.apply(Message::Select(ANNA));
+        let _ = app.update(Message::Navigate(ANNA));
+        let mut opened = Vec::new();
+        while let Ok(want) = rx.try_recv() {
+            if let Want::Open(url) = want {
+                opened.push(url);
+            }
+        }
+        assert_eq!(opened.len(), 1, "{opened:?}");
+        assert!(
+            opened[0].starts_with("https://www.openstreetmap.org/directions?from=43.7735"),
+            "{opened:?}"
+        );
+        assert!(opened[0].contains("&to=43.7756"), "{opened:?}");
+        let _ = app.update(Message::Intent(Intent::Map(MapCmd::Open)));
+        assert_eq!(told(&mut rx), [UiEvent::Open { peer: ANNA }]);
+    }
+
+    /// A name wider than its box (1430): forty letters on the card and in
+    /// the locations list are cut with an ellipsis at the box's edge and
+    /// never run past it, and in a box twelve terminal cells wide too;
+    /// pixel for pixel the golden, light, 900 x 560, the list open beside
+    /// the card. The control: a short name stays whole.
+    #[test]
+    fn a_long_name_is_clipped_with_an_ellipsis_in_its_box() {
+        let long = "Annabella Theodora Maximiliane Hohenberg";
+        assert_eq!(long.chars().count(), 40);
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = florence_two(long, Some((43_773_500, 11_258_000)), w, h);
+        app.apply(Message::Select(ANNA));
+        let _ = app.update(Message::Locations);
+        let _ = run(&mut app);
+        let words = CARD.width - 2.0 * PANEL_PAD - CARD_AVATAR - 10.0;
+        let cut = map::fit(long, 15.0, words);
+        assert!(
+            cut.ends_with('…') && cut.chars().count() < long.chars().count(),
+            "{cut}"
+        );
+        assert!(long.starts_with(cut.trim_end_matches('…')), "{cut}");
+        assert!(map::measure(&cut, 15.0) as f32 <= words, "{cut}");
+        assert_eq!(map::fit("Anna", 15.0, words), "Anna");
+        // Twelve cells of the terminal's width, at the window's size.
+        let twelve = 12.0 * 8.0;
+        let small = map::fit(long, 15.0, twelve);
+        assert!(small.ends_with('…'), "{small}");
+        assert!(map::measure(&small, 15.0) as f32 <= twelve, "{small}");
+        assert_eq!(map::fit(long, 15.0, 2.0), "…");
+        map::tests::same_as("gui-map-long-name.png", &shoot(&app, w, h), w, h);
     }
 
     /// `pcm` as the microphone's levels for Anna's recording, a window
@@ -7137,53 +7497,39 @@ mod tests {
         assert_eq!(sent(), [Input::Verb(Verb::Pause)]);
     }
 
-    /// The map's pane keeps its size whatever its words say (1441): the
-    /// peers' column is the list's width with a short name and a long
-    /// one, and the map beside it the same rectangle with a long notice
-    /// and a long credit in its bar, which before wrapped to a second line
-    /// and took the map 17 pixels of height while a pan loaded its tiles,
-    /// the window Lew measured and a small one. The control: the column
-    /// is where the test looks for it, the list's width.
+    /// The map's pane keeps its size whatever its words say (1441, 1430):
+    /// the map is the same rectangle beside the rail with a short name and
+    /// a long one selected, their cards open, the locations list open, and
+    /// a long notice and a long credit in its bar, which before wrapped to
+    /// a second line and took the map 17 pixels of height while a pan
+    /// loaded its tiles; the window Lew measured and a small one. Before
+    /// 1430 a column of peers beside the map followed its text and the
+    /// map's width with it, which flickered while panning.
     #[test]
     fn the_maps_pane_keeps_its_size_whatever_its_words() {
-        use iced::advanced::Layout;
         let long = "a long notice that goes on past the bar's width: Loading the region of Frankfurt am Main and its surroundings, 45 of 120 tiles, about two minutes left";
         for (w, h) in [(1280u32, 1190u32), (900, 560)] {
             let mut panes = Vec::new();
-            for (label, notice) in [
-                ("al", None),
+            for (label, notice, open) in [
+                ("al", None, false),
                 (
                     "a peer whose name is far wider than the column of peers",
                     Some(long),
+                    true,
                 ),
             ] {
-                let mut app =
-                    window_over_florence(vec![pin(1, label, 43.7752, 11.2640)], 14 * MILLI);
-                app.window = Size::new(w as f32, h as f32);
+                let (mut app, _rx) = florence_two(label, None, w, h);
                 app.seen.notice = notice.map(str::to_string);
                 app.seen.loading = notice.map(str::to_string);
+                app.apply(Message::Select(ANNA));
+                app.locations = open;
                 let _ = run(&mut app);
-                let node =
-                    leviculum_ui_iced::headless::layout(app.view(), w, h).expect("a renderer");
-                // The rail, then the map screen: the column and the map
-                // over its bar.
-                let screen = Layout::new(&node)
-                    .children()
-                    .nth(1)
-                    .expect("the map screen");
-                let mut parts = screen.children();
-                let column = parts.next().expect("the column").bounds();
-                let map = parts
-                    .next()
-                    .expect("the map")
-                    .children()
-                    .next()
-                    .expect("the map")
-                    .bounds();
-                assert_eq!(column.width, LIST_WIDTH, "{label}");
-                panes.push((column.x, column.width, map));
+                assert!(app.selected_card().is_some(), "{label}");
+                panes.push(map_pane(&app, w, h));
             }
             assert_eq!(panes[0], panes[1], "{w} x {h}");
+            assert_eq!(panes[0].x, leviculum_ui_iced::chrome::RAIL, "{w} x {h}");
+            assert_eq!(panes[0].height, h as f32 - MAP_BAR, "{w} x {h}");
         }
     }
 

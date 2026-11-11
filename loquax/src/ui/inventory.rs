@@ -788,7 +788,7 @@ pub const INVENTORY: &[Row] = &[
             "loquax-android/android/src/network/leviculum/loquax/MapView.java",
             "pin",
         ),
-        window: at(GUI, "Message::Select(pin.peer)"),
+        window: at(GUI, "self.selected = press.pin"),
         terminal: at(UI, "Target::Pin(peer) => Some(peer)"),
         m9: missing("no key steps between pins"),
     },
