@@ -3,8 +3,8 @@
 //! when the view is at rest, so they ride along with it and cost nothing a
 //! frame. Placed by the map core's one rule ([`leviculum_map::labels::place`])
 //! in screen pixels, after the pins and their names, which nothing covers.
-//! The window (1100) and the Android app (1128) set them through this one
-//! module.
+//! The window (1100), the Android app (1128) and since 1565 the M9 set
+//! them through this one module.
 //!
 //! Places, waters and parks are set centred on their anchor; a street's
 //! or a river's name on the middle of the longest run of its line (its
@@ -21,15 +21,113 @@
 //! the face iced embeds, carried here as `fonts/FiraSans-Regular.ttf` (the
 //! same file, under the SIL Open Font License, `fonts/OFL.txt`): one font
 //! on every host and on the phone, so a picture and its golden agree.
+//! The M9 sets the same face through its own [`Shaper`]
+//! (`loquax_m9::glyphs`, ab_glyph's rasteriser), since cosmic-text needs
+//! `std`; everything but the shaping (the runs, the rule, the masks, the
+//! halos and the paint) is this module's, `no_std` with `alloc` under the
+//! `mapnames` feature, the cosmic-text [`Typesetter`] under `screenmap`.
 
+use alloc::string::String;
+#[cfg(feature = "screenmap")]
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+#[cfg(feature = "screenmap")]
 use std::collections::HashMap;
-use std::string::{String, ToString};
-use std::sync::Arc;
-use std::vec::Vec;
 
+#[cfg(feature = "screenmap")]
 use cosmic_text::{self as ct, fontdb, Attrs, Buffer, Family, FontSystem, Shaping, SwashCache};
+use embedded_graphics::pixelcolor::{Rgb565, Rgb888};
 use leviculum_map::labels::{self, Candidate, LabelKind, Rect, Rule, ViewLabel, SUBPIXEL};
+use leviculum_mapfill::coverage::Coverage;
 use leviculum_mapfill::style::MapTheme;
+
+#[cfg(not(feature = "std"))]
+use float::Float as _;
+
+/// The float methods the pass uses, from `libm` where the crate has no
+/// `std` (the M9, 1565). With `std` the inherent methods are used and
+/// this trait is not in scope, so the phone's and the window's pictures
+/// are the bytes they were.
+#[cfg(not(feature = "std"))]
+mod float {
+    pub trait Float {
+        fn ceil(self) -> Self;
+        fn floor(self) -> Self;
+        fn round(self) -> Self;
+        fn atan2(self, x: Self) -> Self;
+        fn hypot(self, y: Self) -> Self;
+        fn cos(self) -> Self;
+        fn sin(self) -> Self;
+        fn rem_euclid(self, rhs: Self) -> Self;
+    }
+
+    impl Float for f64 {
+        fn ceil(self) -> Self {
+            libm::ceil(self)
+        }
+        fn floor(self) -> Self {
+            libm::floor(self)
+        }
+        fn round(self) -> Self {
+            libm::round(self)
+        }
+        fn atan2(self, x: Self) -> Self {
+            libm::atan2(self, x)
+        }
+        fn hypot(self, y: Self) -> Self {
+            libm::hypot(self, y)
+        }
+        fn cos(self) -> Self {
+            libm::cos(self)
+        }
+        fn sin(self) -> Self {
+            libm::sin(self)
+        }
+        // As std defines it.
+        fn rem_euclid(self, rhs: Self) -> Self {
+            let r = self % rhs;
+            if r < 0.0 {
+                r + rhs.abs()
+            } else {
+                r
+            }
+        }
+    }
+
+    impl Float for f32 {
+        fn ceil(self) -> Self {
+            libm::ceilf(self)
+        }
+        fn floor(self) -> Self {
+            libm::floorf(self)
+        }
+        fn round(self) -> Self {
+            libm::roundf(self)
+        }
+        fn atan2(self, x: Self) -> Self {
+            libm::atan2f(self, x)
+        }
+        fn hypot(self, y: Self) -> Self {
+            libm::hypotf(self, y)
+        }
+        fn cos(self) -> Self {
+            libm::cosf(self)
+        }
+        fn sin(self) -> Self {
+            libm::sinf(self)
+        }
+        fn rem_euclid(self, rhs: Self) -> Self {
+            let r = self % rhs;
+            if r < 0.0 {
+                r + rhs.abs()
+            } else {
+                r
+            }
+        }
+    }
+}
 
 /// Fira Sans Regular 4.203, the file iced 0.14 embeds with its `fira-sans`
 /// feature, byte for byte.
@@ -220,19 +318,69 @@ impl Mask {
     }
 }
 
+#[cfg(feature = "screenmap")]
 /// A name's text set one way: the text, its size's bits, the pad, slanted.
 type SetKey = (String, u32, usize, bool);
 
+/// What the label pass asks of a font (1565): a name's size shaped and
+/// its coverage drawn, at `size` pixels with `pad` pixels around, slanted
+/// with `italic`. The window and the phone shape with cosmic-text
+/// ([`Typesetter`]); the M9, which has no `std`, lays its glyphs out
+/// itself (`loquax_m9::glyphs`). Both set Fira Sans
+/// ([`FIRA_SANS_REGULAR`]), so the picture is one picture.
+pub trait Shaper {
+    /// The size of the mask [`mask`](Self::mask) makes for the same
+    /// arguments: `(width, height)` with the pad on every side.
+    fn extent(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> (usize, usize);
+
+    /// `text`'s coverage at `size` pixels, with `pad` pixels around;
+    /// slanted with `italic`.
+    fn mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Mask;
+
+    /// [`mask`](Self::mask), kept where the shaper keeps masks.
+    fn kept_mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Arc<Mask> {
+        Arc::new(self.mask(text, size, pad, italic))
+    }
+
+    /// The halo of `mask`, made by [`kept_mask`](Self::kept_mask) for the
+    /// same text: its coverage widened by `r` pixels, kept where the
+    /// shaper keeps halos.
+    #[allow(clippy::too_many_arguments)]
+    fn kept_halo(
+        &mut self,
+        text: &str,
+        size: f32,
+        pad: usize,
+        italic: bool,
+        r: f32,
+        mask: &Mask,
+    ) -> Arc<Mask> {
+        let _ = (text, size, pad, italic);
+        Arc::new(mask.widened(r))
+    }
+
+    /// Set every name anew, the way before 1154: the reference a test
+    /// holds the kept path to.
+    #[cfg(test)]
+    fn unkept(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "screenmap")]
 /// The most masks, and the most halos, a [`Typesetter`] keeps.
 pub const MASKS_KEPT: usize = 8192;
+#[cfg(feature = "screenmap")]
 /// The most bytes of masks and halos together a [`Typesetter`] keeps:
 /// at the phone's density a frame over a city at z13 asks about 7 MB of
 /// them, so a bound below that drops them all every frame and shapes and
 /// rasterises them again (1225: 32 ms of a placement at 4 MB).
 pub const MASK_BYTES_KEPT: usize = 16 << 20;
+#[cfg(feature = "screenmap")]
 /// The most text sizes a [`Typesetter`] keeps.
 pub const EXTENTS_KEPT: usize = 32768;
 
+#[cfg(feature = "screenmap")]
 /// Shapes and rasterises names in the embedded font.
 ///
 /// It keeps what a frame at rest sets again in the next one (1154): every
@@ -259,12 +407,14 @@ pub struct Typesetter {
     pub(crate) unkept: bool,
 }
 
+#[cfg(feature = "screenmap")]
 impl Default for Typesetter {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "screenmap")]
 impl Typesetter {
     /// A font system holding Fira Sans alone, so no host font changes a
     /// picture.
@@ -407,6 +557,39 @@ impl Typesetter {
     }
 }
 
+#[cfg(feature = "screenmap")]
+impl Shaper for Typesetter {
+    fn extent(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> (usize, usize) {
+        Typesetter::extent(self, text, size, pad, italic)
+    }
+
+    fn mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Mask {
+        Typesetter::mask(self, text, size, pad, italic)
+    }
+
+    fn kept_mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Arc<Mask> {
+        Typesetter::kept_mask(self, text, size, pad, italic)
+    }
+
+    fn kept_halo(
+        &mut self,
+        text: &str,
+        size: f32,
+        pad: usize,
+        italic: bool,
+        r: f32,
+        _mask: &Mask,
+    ) -> Arc<Mask> {
+        Typesetter::kept_halo(self, text, size, pad, italic, r)
+    }
+
+    #[cfg(test)]
+    fn unkept(&self) -> bool {
+        self.unkept
+    }
+}
+
+#[cfg(feature = "screenmap")]
 /// The size of the mask of the shaped `buffer`, set at `size` pixels with
 /// `pad` pixels around, slanted with `italic`.
 fn extent_of(buffer: &Buffer, size: f32, pad: usize, italic: bool) -> (usize, usize) {
@@ -447,9 +630,9 @@ pub fn straight_runs(line: &[Vec<(f64, f64)>]) -> Vec<((f64, f64), f64, f64)> {
             let first = dir(start);
             let mut end = start + 1;
             while end + 1 < piece.len() {
-                let turn = (dir(end) - first + std::f64::consts::PI)
-                    .rem_euclid(2.0 * std::f64::consts::PI)
-                    - std::f64::consts::PI;
+                let turn = (dir(end) - first + core::f64::consts::PI)
+                    .rem_euclid(2.0 * core::f64::consts::PI)
+                    - core::f64::consts::PI;
                 if turn.abs() >= limit {
                     break;
                 }
@@ -459,10 +642,10 @@ pub fn straight_runs(line: &[Vec<(f64, f64)>]) -> Vec<((f64, f64), f64, f64)> {
             let len = (b.0 - a.0).hypot(b.1 - a.1);
             if len > 0.0 {
                 let mut angle = (b.1 - a.1).atan2(b.0 - a.0);
-                if angle > std::f64::consts::FRAC_PI_2 {
-                    angle -= std::f64::consts::PI;
-                } else if angle <= -std::f64::consts::FRAC_PI_2 {
-                    angle += std::f64::consts::PI;
+                if angle > core::f64::consts::FRAC_PI_2 {
+                    angle -= core::f64::consts::PI;
+                } else if angle <= -core::f64::consts::FRAC_PI_2 {
+                    angle += core::f64::consts::PI;
                 }
                 runs.push((((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0), angle, len));
             }
@@ -518,7 +701,7 @@ pub fn set(
     taken: &[Rect],
     scale: f32,
     theme: MapTheme,
-    type_: &mut Typesetter,
+    type_: &mut (impl Shaper + ?Sized),
 ) -> Vec<String> {
     let px = |v: (i64, i64)| (v.0 as f64 / SUBPIXEL as f64, v.1 as f64 / SUBPIXEL as f64);
     let placed = place(w, h, names, px, taken, scale, type_);
@@ -539,7 +722,7 @@ pub fn place<'a>(
     px: impl Fn((i64, i64)) -> (f64, f64),
     taken: &[Rect],
     scale: f32,
-    type_: &mut Typesetter,
+    type_: &mut (impl Shaper + ?Sized),
 ) -> Vec<PlacedName> {
     let pad = (HALO * scale).ceil() as usize + 1;
     let (wf, hf) = (f64::from(w), f64::from(h));
@@ -552,7 +735,7 @@ pub fn place<'a>(
         // lies wholly in the picture.
         #[cfg(test)]
         let mut mask: Option<Arc<Mask>> = type_
-            .unkept
+            .unkept()
             .then(|| Arc::new(type_.mask(&l.text, size, pad, river)));
         #[cfg(not(test))]
         let mut mask: Option<Arc<Mask>> = None;
@@ -619,12 +802,12 @@ pub fn place<'a>(
             let text = &candidates[i].text;
             let river = s.kind == LabelKind::River;
             #[cfg(test)]
-            let halo = match type_.unkept {
+            let halo = match type_.unkept() {
                 true => Arc::new(s.mask.widened_by_disc(HALO * scale)),
-                false => type_.kept_halo(text, s.size, pad, river, HALO * scale),
+                false => type_.kept_halo(text, s.size, pad, river, HALO * scale, &s.mask),
             };
             #[cfg(not(test))]
-            let halo = type_.kept_halo(text, s.size, pad, river, HALO * scale);
+            let halo = type_.kept_halo(text, s.size, pad, river, HALO * scale, &s.mask);
             PlacedName {
                 text: text.clone(),
                 kind: s.kind,
@@ -648,6 +831,61 @@ pub fn paint_placed(rgba: &mut [u8], w: u32, h: u32, placed: &[PlacedName], them
         let (ink, halo) = colours(p.kind, theme);
         paint(rgba, w, h, &p.halo, p.centre, p.angle, halo);
         paint(rgba, w, h, &p.mask, p.centre, p.angle, ink);
+    }
+}
+
+/// [`paint_placed`] into a target of the panel's colours (1565, the
+/// M9): each name's halo then its glyphs, blended by the target
+/// ([`Coverage::blend`]) at the coverage the RGBA paint blends with, in
+/// the colours [`colours`] gives, made Rgb565. A target that does not
+/// blend takes a pixel the glyphs cover at least half as the ink, and
+/// the halo likewise.
+pub fn paint_placed_on<C>(target: &mut C, placed: &[PlacedName], theme: MapTheme)
+where
+    C: Coverage<Color = Rgb565> + ?Sized,
+{
+    for p in placed {
+        let (ink, halo) = colours(p.kind, theme);
+        paint_on(target, &p.halo, p.centre, p.angle, halo);
+        paint_on(target, &p.mask, p.centre, p.angle, ink);
+    }
+}
+
+/// [`paint`] into a [`Coverage`] target.
+fn paint_on<C>(target: &mut C, mask: &Mask, centre: (f64, f64), angle: f64, colour: [u8; 3])
+where
+    C: Coverage<Color = Rgb565> + ?Sized,
+{
+    let size = target.bounding_box().size;
+    let (w, h) = (i64::from(size.width), i64::from(size.height));
+    let colour: Rgb565 = Rgb888::new(colour[0], colour[1], colour[2]).into();
+    let smooth = target.smooth();
+    let turn = (angle.cos(), angle.sin());
+    let (x0, x1, y0, y1) = reach(mask, centre);
+    let (x0, x1) = (x0.max(0), x1.min(w));
+    let (y0, y1) = (y0.max(0), y1.min(h));
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let a = level(cover_turned(mask, centre, angle, turn, x, y));
+            let (Ok(xi), Ok(yi)) = (i32::try_from(x), i32::try_from(y)) else {
+                continue;
+            };
+            let _ = match (a, smooth) {
+                (0, _) => Ok(()),
+                (255, _) => target.draw_iter(core::iter::once(embedded_graphics::Pixel(
+                    embedded_graphics::prelude::Point::new(xi, yi),
+                    colour,
+                ))),
+                (a, true) => target.blend(xi, yi, colour, a),
+                (a, false) if a >= 128 => {
+                    target.draw_iter(core::iter::once(embedded_graphics::Pixel(
+                        embedded_graphics::prelude::Point::new(xi, yi),
+                        colour,
+                    )))
+                }
+                _ => Ok(()),
+            };
+        }
     }
 }
 
@@ -1081,12 +1319,14 @@ impl Sprite {
     /// The sprites of `names`, in their order, worked out on up to
     /// `workers` threads: thread `t` takes every `workers`-th name from
     /// the `t`-th, so a run of long street names does not land on one.
+    #[cfg(feature = "std")]
     pub fn of_all(names: &[PlacedName], workers: usize) -> Vec<Self> {
         Self::all_of(names, workers, Self::of)
     }
 
     /// The sprite `make` gives each of `names`, in their order, on up to
     /// `workers` threads as [`of_all`](Self::of_all) deals them.
+    #[cfg(feature = "std")]
     pub fn all_of<T: Sync>(
         names: &[T],
         workers: usize,
@@ -1120,7 +1360,7 @@ impl Sprite {
 
     /// The bytes its coverage holds: the measuring tool's sprite memory.
     pub fn bytes(&self) -> usize {
-        std::mem::size_of_val(self.cover.as_slice())
+        core::mem::size_of_val(self.cover.as_slice())
     }
 
     /// Draw it into `rgba`, `w` by `h` pixels, in `theme`'s colours,
@@ -1249,7 +1489,7 @@ mod tests {
         let mask = type_.mask("Via dei Calzaiuoli", 11.0 * 2.75, pad, false);
         let halo = mask.widened(HALO * 2.75);
         for k in -8..=8 {
-            let angle = f64::from(k) * std::f64::consts::FRAC_PI_2 / 8.0;
+            let angle = f64::from(k) * core::f64::consts::FRAC_PI_2 / 8.0;
             for centre in [(100.0, 80.0), (100.37, 80.81), (-3.5, 2.25)] {
                 let name = PlacedName {
                     text: "Via dei Calzaiuoli".to_string(),
@@ -1290,7 +1530,7 @@ mod tests {
             let mask = type_.mask(text, 11.0 * scale, pad, kind == LabelKind::River);
             let halo = mask.widened(HALO * scale);
             for k in -8..=8 {
-                let angle = f64::from(k) * std::f64::consts::FRAC_PI_2 / 8.0;
+                let angle = f64::from(k) * core::f64::consts::FRAC_PI_2 / 8.0;
                 for centre in [(160.0, 100.0), (150.37, 90.81), (2.5, 3.25)] {
                     let name = PlacedName {
                         text: text.to_string(),

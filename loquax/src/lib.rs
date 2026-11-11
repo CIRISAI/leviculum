@@ -99,7 +99,7 @@ pub mod mailbox_state;
 pub mod mapframe;
 #[cfg(feature = "mapload")]
 pub mod mapload;
-#[cfg(feature = "screenmap")]
+#[cfg(feature = "mapnames")]
 pub mod mapnames;
 pub mod mesh_position;
 pub mod name_match;
