@@ -20,7 +20,8 @@ use crate::image::{ImageSlot, SlotState};
 use crate::names::{PinStore, SearchHit};
 use crate::page_cache::PageCache;
 use crate::render::{
-    insert_image_rows, layout_blocks, FieldValue, RLine, RenderedField, RenderedLink,
+    insert_image_rows, layout_blocks, layout_blocks_wrapping, FieldValue, RLine, RenderedField,
+    RenderedLink,
 };
 use crate::theme::Theme;
 use crate::url::Target;
@@ -656,6 +657,11 @@ pub struct Model {
     /// viewport's lines from `scroll`. [`scroll`](Model::scroll) keeps its
     /// meaning either way, the top line the reader sees.
     pub window: Option<usize>,
+    /// A host that scrolls the page sideways as well (1667, the phone): a
+    /// line of art without a space stays whole past the width instead of
+    /// breaking into pieces. `false`, the terminal's rule: every line
+    /// fits the width.
+    pub sideways: bool,
     /// The current page's inline images, one slot per standalone image link,
     /// in link order. Rebuilt on every page load; drives both the rows the
     /// relayout reserves and what is drawn into them.
@@ -771,7 +777,7 @@ impl Model {
         self.width = width;
         let values = self.field_values();
         let (mut page, mut links, mut block_lines, mut field_defs) =
-            layout_blocks(&self.doc, width, self.theme, &values);
+            layout_blocks_wrapping(&self.doc, width, self.theme, &values, self.sideways);
         // Inline pictures are reserved AFTER the text is laid out: their height
         // is not known until the image has arrived and been decoded, which is
         // long after the page first appeared.

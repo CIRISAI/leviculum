@@ -206,7 +206,28 @@ pub fn layout_blocks(
     Vec<usize>,
     Vec<RenderedField>,
 ) {
+    layout_blocks_wrapping(doc, width, theme, field_values, false)
+}
+
+/// [`layout_blocks`] for a host that may also scroll sideways (1667, walk
+/// 11, finding 60: the phone broke a line of text art into short and long
+/// pieces). With `sideways` set, a run without a space that is wider than
+/// `width` stays whole on its own line rather than being broken at the
+/// width; prose still wraps at its spaces.
+pub fn layout_blocks_wrapping(
+    doc: &MicronDocument,
+    width: usize,
+    theme: Theme,
+    field_values: &[FieldValue],
+    sideways: bool,
+) -> (
+    Vec<RLine>,
+    Vec<RenderedLink>,
+    Vec<usize>,
+    Vec<RenderedField>,
+) {
     let mut renderer = Renderer {
+        sideways,
         lines: Vec::new(),
         links: Vec::new(),
         fields: Vec::new(),
@@ -375,6 +396,8 @@ struct Renderer<'a> {
     field_values: &'a [FieldValue],
     width: usize,
     theme: Theme,
+    /// A run without a space stays whole past `width` (1667).
+    sideways: bool,
 }
 
 impl Renderer<'_> {
@@ -464,7 +487,7 @@ impl Renderer<'_> {
         }
         let indent = Self::indent_for(depth);
         let content_width = self.width.saturating_sub(indent).max(MIN_WIDTH);
-        for visual in wrap(chars, content_width) {
+        for visual in wrap(chars, content_width, self.sideways) {
             self.emit_aligned(visual, indent, content_width, align);
         }
     }
@@ -482,7 +505,7 @@ impl Renderer<'_> {
         let visuals = if chars.is_empty() {
             vec![Vec::new()]
         } else {
-            wrap(chars, content_width)
+            wrap(chars, content_width, self.sideways)
         };
         for content in visuals {
             let lead = leading_pad(align, content_width, content.len());
@@ -774,8 +797,10 @@ fn leading_pad(align: Align, width: usize, len: usize) -> usize {
 }
 
 /// Word-wrap styled characters to `width` columns, breaking at spaces where
-/// possible and hard-breaking over-long runs. Always yields at least one line.
-fn wrap(chars: Vec<StyledChar>, width: usize) -> Vec<Vec<StyledChar>> {
+/// possible and hard-breaking over-long runs, unless `sideways`: then an
+/// over-long run stays whole on its line for a host that scrolls sideways
+/// (1667). Always yields at least one line.
+fn wrap(chars: Vec<StyledChar>, width: usize, sideways: bool) -> Vec<Vec<StyledChar>> {
     let width = width.max(MIN_WIDTH);
     let mut lines: Vec<Vec<StyledChar>> = Vec::new();
     let mut cur: Vec<StyledChar> = Vec::new();
@@ -791,6 +816,7 @@ fn wrap(chars: Vec<StyledChar>, width: usize) -> Vec<Vec<StyledChar>> {
                     lines.push(core::mem::take(&mut cur));
                     cur = rest;
                 }
+                None if sideways => {}
                 None => {
                     let rest = cur.split_off(width);
                     lines.push(core::mem::take(&mut cur));
@@ -1209,6 +1235,41 @@ mod tests {
         // depth 2 => indent 2 each side => 12 - 4 = 8 rule chars, 2 leading spaces.
         assert!(line.starts_with("  --------"), "got: {line:?}");
         assert_eq!(line.chars().filter(|&c| c == '-').count(), 8);
+    }
+
+    /// 1667: for a host that scrolls sideways a run without a space stays
+    /// whole past the width; prose still wraps. Control: the terminal's
+    /// layout breaks the same run at the width.
+    #[test]
+    fn a_sideways_layout_keeps_an_art_run_whole() {
+        let art: String = "\u{28ff}".repeat(30);
+        let text = alloc::format!("ab {art} cd ef gh ij");
+        let d = doc(vec![Block::Paragraph {
+            depth: 0,
+            line: Line::new(vec![plain_span(&text)]),
+        }]);
+        let rows = |sideways| {
+            let (lines, _, _, _) = layout_blocks_wrapping(&d, 12, Theme::Dark, &[], sideways);
+            lines
+                .iter()
+                .map(|l| {
+                    l.cells
+                        .iter()
+                        .map(|c| c.ch)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+        let wide = rows(true);
+        assert!(wide.contains(&art), "{wide:?}");
+        assert!(wide
+            .iter()
+            .filter(|l| !l.contains('\u{28ff}'))
+            .all(|l| l.chars().count() <= 12));
+        let narrow = rows(false);
+        assert!(!narrow.contains(&art), "control: {narrow:?}");
     }
 
     #[test]
