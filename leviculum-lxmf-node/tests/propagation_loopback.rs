@@ -55,6 +55,24 @@ async fn one_message_stored(
     recipient: &mut Helper,
     pn_enable: &str,
 ) -> (String, String) {
+    one_message_of(
+        hub,
+        sender,
+        recipient,
+        pn_enable,
+        "stored and drained through the helper pn",
+    )
+    .await
+}
+
+/// [`one_message_stored`] with the message's text named.
+async fn one_message_of(
+    hub: &mut Helper,
+    sender: &mut Helper,
+    recipient: &mut Helper,
+    pn_enable: &str,
+    text: &str,
+) -> (String, String) {
     let ready = pump3(
         hub,
         sender,
@@ -122,7 +140,7 @@ async fn one_message_stored(
     // Upload: one propagated message for the recipient's mailbox. The
     // sender's packet is proven only after the hub's store append returned,
     // and the store probe must count exactly one message.
-    let body = body_b64("stored and drained through the helper pn");
+    let body = body_b64(text);
     sender.command(&format!("send_propagated {recipient_hash} {body}"));
     let stored = pump3(
         hub,
@@ -272,5 +290,47 @@ async fn a_serve_limit_the_message_does_not_fit_serves_nothing_and_keeps_it() {
         kept,
         "the unserved message must stay in the store: {:?}",
         hub.find_last("lxmf_pn_store")
+    );
+}
+
+/// A bare `pn_enable` announces and enforces the reference's limits, lxmd's
+/// 256 KB per message and 40 times that per sync
+/// (`reference/LXMF/LXMF/LXMRouter.py:55`, `:59`), as the Python helper's
+/// stock router does (order 1664). Until then the helper ran the board's
+/// 4 KB / 32 KB, so a cell comparing the two stacks without naming a limit
+/// compared two node classes. An upload is held to the sync limit
+/// (`propagation_resource_advertised`, `LXMRouter.py:2220-2224`): 40 000
+/// bytes is above the old 32 KB and far below 10 240 KB, so the hub storing
+/// it is the default under test. Negative control, run when the test was
+/// written: the same script with `pn_enable 1 transfer_limit_kb=4
+/// sync_limit_kb=32` never stores it.
+#[tokio::test]
+async fn a_bare_pn_enable_takes_an_upload_above_the_board_limits() {
+    let (mut hub, mut sender, mut recipient) = three_helpers().await;
+    let text = "x".repeat(40_000);
+    let (sender_hash, body) =
+        one_message_of(&mut hub, &mut sender, &mut recipient, "pn_enable 1", &text).await;
+
+    recipient.command("sync");
+    let drained = pump3(
+        &mut hub,
+        &mut sender,
+        &mut recipient,
+        Duration::from_secs(30),
+        |_, _, c| {
+            c.find_last("lxmf_sync_done")
+                .and_then(|event| event.field("count"))
+                == Some("1")
+        },
+    )
+    .await;
+    assert!(
+        drained,
+        "the sync must fetch the 40 kB message; recipient events: {:?}; recipient logs: {:?}",
+        recipient.events, recipient.logs
+    );
+    assert!(
+        recipient.received(&sender_hash, &body).is_some(),
+        "the 40 kB message must arrive intact"
     );
 }

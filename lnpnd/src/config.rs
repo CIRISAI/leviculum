@@ -287,12 +287,12 @@ pub const DEFAULT_AUTOPEER_MAXDEPTH: u8 = 6;
 /// and lxmd's own fallback for both key spellings,
 /// `reference/LXMF/LXMF/Utilities/lxmd.py:165-177`). It was 4 until 1294,
 /// against the example config's 256: a stock peer then sent us nothing
-/// above 4 KB, and an upload above it stayed here for good.
-pub const DEFAULT_TRANSFER_LIMIT_KB: u64 = 256;
+/// above 4 KB, and an upload above it stayed here for good (1664: shared).
+pub const DEFAULT_TRANSFER_LIMIT_KB: u64 = leviculum_lxmf::constants::PROPAGATION_LIMIT_KB;
 
 /// The per-sync limit an unset key resolves to, lxmd's `SYNC_LIMIT`,
 /// 40 transfers (`reference/LXMF/LXMF/LXMRouter.py:59`); 32 until 1294.
-pub const DEFAULT_SYNC_LIMIT_KB: u64 = DEFAULT_TRANSFER_LIMIT_KB * 40;
+pub const DEFAULT_SYNC_LIMIT_KB: u64 = leviculum_lxmf::constants::SYNC_LIMIT_KB;
 
 /// The largest client upload an unset key resolves to, lxmd's
 /// `DELIVERY_LIMIT` of 1000 KB (`reference/LXMF/LXMF/LXMRouter.py:60`):

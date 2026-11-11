@@ -392,24 +392,36 @@ fn a_body_larger_than_the_store_evicts_nothing() {
 
 #[test]
 fn the_resource_gate_follows_the_announced_sync_limit() {
-    let node = node(64 * 1024);
-    // Default field 4 is 32 (kilobytes of 1000 bytes).
+    // Field 4 named, 32 (kilobytes of 1000 bytes), under what the store
+    // holds, so the announced limit is the one the gate applies.
+    let node = PropagationNode::new(
+        MemoryPropagationStore::new(64 * 1024),
+        PropagationNodeConfig {
+            sync_limit_kb: 32,
+            ..cost_free()
+        },
+    );
     assert!(node.accepts_resource_of(32_000));
     assert!(!node.accepts_resource_of(32_001));
 }
 
+/// A host node that names no limit announces lxmd's, `PROPAGATION_LIMIT`
+/// 256 and `SYNC_LIMIT` 40 times that (`reference/LXMF/LXMF/LXMRouter.py:55`,
+/// `:59`), so lnpnd and the interop helper look like stock lxmd to a peer
+/// (order 1664). The store holds the whole sync limit, which a node's
+/// announce is otherwise held to. A board names its own, `board_role_config`.
 #[test]
-fn announce_defaults_are_the_concept_papers_numbers() {
+fn announce_defaults_are_the_references_numbers() {
     let node = PropagationNode::new(
-        MemoryPropagationStore::new(64 * 1024),
+        MemoryPropagationStore::new(20_000_000),
         PropagationNodeConfig::default(),
     );
     let announce = PropagationNodeAnnounce::decode(&node.announce_app_data(1_700_000_000)).unwrap();
     assert!(!announce.legacy_support);
     assert!(announce.enabled);
     assert_eq!(announce.timebase, 1_700_000_000);
-    assert_eq!(announce.transfer_limit_kb, 4);
-    assert_eq!(announce.sync_limit_kb, 32);
+    assert_eq!(announce.transfer_limit_kb, 256);
+    assert_eq!(announce.sync_limit_kb, 10_240);
     assert!(announce.metadata.is_empty());
 }
 

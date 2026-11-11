@@ -390,13 +390,13 @@ pub const fn serve_cap_for_live_heap(
     }
 }
 
-/// Configuration of the role. The numeric defaults are the concept paper's
-/// §2 recommendation ("What we announce",
-/// `docs/src/concepts/propagation-node-on-a-board.md`): field 3 = 4 is the
-/// largest whole kilobyte whose worst case still fits the one flash page a
-/// board record may not straddle, and field 4 = 32 is about a hundred median
-/// field messages — well under a lap of the 64 KiB region. The host uses the
-/// same numbers so a peer sees one node class, not two.
+/// Configuration of the role. The size defaults are lxmd's, 256 KB and 40
+/// times that ([`crate::constants::PROPAGATION_LIMIT_KB`], [`crate::constants::SYNC_LIMIT_KB`]),
+/// so lnpnd without a config and the interop helper's bare `pn_enable`
+/// announce what stock lxmd does (order 1664; the board's 4/32 until then).
+/// A board never runs them: `board_role_config` (`leviculum-nrf/pn-store`)
+/// sets the concept paper's §2 limits ("What we announce",
+/// `docs/src/concepts/propagation-node-on-a-board.md`) from `heap-budget`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropagationNodeConfig {
     /// Announce field 3: per-transfer limit in kilobytes of 1000 bytes
@@ -507,8 +507,8 @@ pub struct PropagationNodeConfig {
 impl Default for PropagationNodeConfig {
     fn default() -> Self {
         Self {
-            transfer_limit_kb: 4,
-            sync_limit_kb: 32,
+            transfer_limit_kb: crate::constants::PROPAGATION_LIMIT_KB,
+            sync_limit_kb: crate::constants::SYNC_LIMIT_KB,
             // The Lead's decision of 2026-09-12, one source with the
             // board's persisted defaults: 13 is the reference's own
             // announce floor, and peering cost 1 rather than 0 because a

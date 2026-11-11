@@ -1,12 +1,12 @@
 /// Per-transfer limit for message propagation, in kilobytes: Python
 /// `PROPAGATION_LIMIT` (`reference/LXMF/LXMF/LXMRouter.py:55`).
 ///
-/// No consumer in this crate yet. It binds in the propagation-node hosting
-/// paths this crate does not implement: announce field 3
-/// (`reference/LXMF/LXMF/LXMRouter.py:331`) and the incoming sync-resource
-/// refusal in `propagation_resource_advertised`
-/// (`reference/LXMF/LXMF/LXMRouter.py:2206`). The client-side `/get` request
-/// limit is the delivery limit instead, see
+/// A host propagation node's announce field 3 when nothing names one
+/// (`PropagationNodeConfig::default`: lnpnd's unset key, the interop
+/// helper's bare `pn_enable`, order 1664), with [`SYNC_LIMIT_KB`] as field
+/// 4. It also binds the incoming sync-resource refusal in
+/// `propagation_resource_advertised` (`reference/LXMF/LXMF/LXMRouter.py:2206`).
+/// The client-side `/get` request limit is the delivery limit instead, see
 /// [`DELIVERY_LIMIT_KB`].
 pub const PROPAGATION_LIMIT_KB: u64 = 256;
 
@@ -88,6 +88,11 @@ pub const FIELD_CONTINUATION: i64 = 0x42;
 /// `FIELD_REACTION` dict keys (`reference/LXMF/LXMF/LXMF.py:109-110`).
 pub const REACTION_TO: i64 = 0x00;
 pub const REACTION_CONTENT: i64 = 0x01;
+
+/// Per-sync limit for message propagation, in kilobytes: Python
+/// `SYNC_LIMIT`, forty transfers (`reference/LXMF/LXMF/LXMRouter.py:59`).
+/// A host propagation node's announce field 4 when nothing names one.
+pub const SYNC_LIMIT_KB: u64 = PROPAGATION_LIMIT_KB * 40;
 
 /// The single-packet size limits are written here as literals; Python
 /// computes them. This module proves the two agree.

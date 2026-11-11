@@ -1069,12 +1069,12 @@ impl LxmfHelperProcessor {
             self.emitter.error("propagation node already enabled");
             return;
         }
-        // The interop helper keeps the costs its scenarios were written
-        // against, 0 and 0, rather than the role's shipped 13 / 1: a cell
-        // that wants costs names them as `pn_enable` options. Flexibility
-        // stays the reference's 3, what the Python helper's router runs
-        // (`PROPAGATION_COST_FLEX`, `reference/LXMF/LXMF/LXMRouter.py:53`),
-        // where the role's default is 0 since order 1294.
+        // Costs 0 and 0, what the cells were written against, not the
+        // role's 13 / 1; a cell names others as `pn_enable` options. The
+        // Python helper's router runs flexibility 3 (`PROPAGATION_COST_FLEX`,
+        // `reference/LXMF/LXMF/LXMRouter.py:53`), the role 0 since 1294.
+        // Size limits stay the role's default, lxmd's 256 KB and 40 times
+        // that, as the Python helper's stock router announces (order 1664).
         let mut node_config = PropagationNodeConfig {
             name: Some(self.config.display_name.clone()),
             stamp_cost: 0,
