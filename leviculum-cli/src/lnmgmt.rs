@@ -28,7 +28,7 @@ use clap::{Parser, Subcommand};
 
 use leviculum_cli::daemon_rpc;
 use leviculum_cli::remote_mgmt;
-use leviculum_std::config::Config;
+use leviculum_std::config_dir::ConfigDirChoice;
 use leviculum_std::remote_dfu::{send_dfu, DfuOutcome, DfuVerdict};
 
 /// Exit status for an accepted command.
@@ -170,10 +170,9 @@ async fn run_dfu(args: &Args, dfu: &DfuArgs) -> u8 {
         }
     };
 
-    let config_dir = args
-        .config
-        .clone()
-        .unwrap_or_else(Config::default_config_dir);
+    // Which directory, and why: every failure below names it (order 1675).
+    let choice = ConfigDirChoice::resolve(args.config.as_deref());
+    let config_dir = choice.dir.clone();
     let config = daemon_rpc::load_config(&config_dir);
     let instance_name = args
         .instance_name
@@ -193,6 +192,7 @@ async fn run_dfu(args: &Args, dfu: &DfuArgs) -> u8 {
         Err(e) => {
             eprintln!("No shared RNS instance available");
             eprintln!("({e})");
+            eprintln!("{}", choice.hint_for(&instance_name));
             return EXIT_FAILED;
         }
     };
@@ -208,6 +208,7 @@ async fn run_dfu(args: &Args, dfu: &DfuArgs) -> u8 {
         Err(e) => {
             eprintln!("No shared RNS instance available");
             eprintln!("({e})");
+            eprintln!("{}", choice.hint_for(&instance_name));
             return EXIT_FAILED;
         }
     };

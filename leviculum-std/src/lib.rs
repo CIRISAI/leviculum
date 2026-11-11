@@ -23,6 +23,9 @@ pub(crate) mod autoconnect;
 pub mod census;
 pub(crate) mod clock;
 pub mod config;
+/// Which config directory a client tool took, why, and which other
+/// candidates hold a config: the voice of a connect or auth failure.
+pub mod config_dir;
 pub(crate) mod counter64;
 /// Reaching a running daemon's shared-instance RPC from a client tool: the
 /// instance name and authkey a config directory implies.
@@ -115,7 +118,7 @@ pub use reticulum::Reticulum;
 /// Client for the shared-instance RPC socket (`rnstatus`/`rnpath` protocol).
 /// Used by `lnstest diag` to query a running `lnsd`/`rnsd`.
 pub use rpc::{
-    rpc_drop_path, rpc_query, rpc_query_hash_param, rpc_query_transport_tables,
+    rpc_authenticates, rpc_drop_path, rpc_query, rpc_query_hash_param, rpc_query_transport_tables,
     TRANSPORT_TABLE_NAMES,
 };
 /// Writers for private key material: owner-only from creation (L-0039).

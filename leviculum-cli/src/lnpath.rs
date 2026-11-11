@@ -34,7 +34,7 @@ use clap::{ArgAction, Parser};
 use tracing_subscriber::EnvFilter;
 
 use leviculum_core::constants::PATH_REQUEST_TIMEOUT_MS;
-use leviculum_std::config::Config;
+use leviculum_std::config_dir::ConfigDirChoice;
 use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 use leviculum_std::DestinationHash;
 
@@ -139,10 +139,9 @@ async fn run(args: Args) -> i32 {
         }
     };
 
-    let config_dir = args
-        .config
-        .clone()
-        .unwrap_or_else(Config::default_config_dir);
+    // Which directory, and why: every failure below names it (order 1675).
+    let choice = ConfigDirChoice::resolve(args.config.as_deref());
+    let config_dir = choice.dir.clone();
     let config = daemon_rpc::load_config(&config_dir);
     let instance_name = daemon_rpc::resolve_instance_name(None, config.as_ref());
     // Find the shared instance, or start lnsd as our child (#471 step 4),
@@ -157,17 +156,18 @@ async fn run(args: Args) -> i32 {
     ) {
         Ok(instance) => instance,
         Err(e) => {
-            eprintln!("lnpath: {e}");
+            eprintln!("lnpath: {e}\n{}", choice.hint_for(&instance_name));
             return 1;
         }
     };
     let config = config.or_else(|| daemon_rpc::load_config(&config_dir));
+    let hint = choice.hint_for(&instance_name);
     let authkey = daemon_rpc::resolve_authkey(&config_dir, config.as_ref())
         .ok()
         .map(|(key, _)| key);
 
     if args.drop {
-        return drop_path(&instance_name, authkey.as_deref(), &dest_hash).await;
+        return drop_path(&instance_name, authkey.as_deref(), &dest_hash, &hint).await;
     }
     query_path(
         &instance_name,
@@ -175,6 +175,7 @@ async fn run(args: Args) -> i32 {
         authkey.as_deref(),
         &dest_hash,
         args.timeout.unwrap_or(DEFAULT_TIMEOUT),
+        &hint,
     )
     .await
 }
@@ -191,13 +192,14 @@ async fn drop_path(
     instance_name: &str,
     authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
+    hint: &str,
 ) -> i32 {
     let pretty = prettyhexrep(dest_hash.as_bytes());
     let Some(authkey) = authkey else {
         eprintln!(
             "No transport identity under the config directory, so the daemon's \
              RPC cannot be authenticated. Is this the config directory the \
-             daemon runs with?"
+             daemon runs with?\n{hint}"
         );
         println!("Unable to drop path to {pretty}. Does it exist?");
         return 1;
@@ -212,7 +214,7 @@ async fn drop_path(
             1
         }
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{e}\n{hint}");
             println!("Unable to drop path to {pretty}. Does it exist?");
             1
         }
@@ -228,11 +230,12 @@ async fn query_path(
     authkey: Option<&[u8]>,
     dest_hash: &DestinationHash,
     timeout: f64,
+    hint: &str,
 ) -> i32 {
     let mut node = match build_client(instance_name, storage_path).await {
         Ok(node) => node,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{e}\n{hint}");
             return 1;
         }
     };

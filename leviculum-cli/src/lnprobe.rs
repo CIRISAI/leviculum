@@ -14,7 +14,7 @@ use clap::{ArgAction, Parser};
 use tracing_subscriber::EnvFilter;
 
 use leviculum_core::constants::DEFAULT_PER_HOP_TIMEOUT;
-use leviculum_std::config::Config;
+use leviculum_std::config_dir::ConfigDirChoice;
 use leviculum_std::driver::{EventReceiver, ReticulumNode, ReticulumNodeBuilder};
 use leviculum_std::{Destination, DestinationHash, DestinationType, Direction, NodeEvent};
 
@@ -170,10 +170,9 @@ async fn run(args: Args) -> i32 {
     let size = args.size.unwrap_or(DEFAULT_PROBE_SIZE);
     let more_output = args.verbose > 0;
 
-    let config_dir = args
-        .config
-        .clone()
-        .unwrap_or_else(Config::default_config_dir);
+    // Which directory, and why: every failure below names it (order 1675).
+    let choice = ConfigDirChoice::resolve(args.config.as_deref());
+    let config_dir = choice.dir.clone();
     let config = daemon_rpc::load_config(&config_dir);
     let instance_name = daemon_rpc::resolve_instance_name(None, config.as_ref());
     // Find the shared instance, or start lnsd as our child (#471 step 4),
@@ -188,7 +187,7 @@ async fn run(args: Args) -> i32 {
     ) {
         Ok(instance) => instance,
         Err(e) => {
-            eprintln!("lnprobe: {e}");
+            eprintln!("lnprobe: {e}\n{}", choice.hint_for(&instance_name));
             return EXIT_NO_PATH;
         }
     };
@@ -204,7 +203,7 @@ async fn run(args: Args) -> i32 {
     let mut node = match build_client(&instance_name, &storage_path).await {
         Ok(node) => node,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{e}\n{}", choice.hint_for(&instance_name));
             return EXIT_NO_PATH;
         }
     };

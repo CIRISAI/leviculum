@@ -513,9 +513,9 @@ census column.
   builds through the same place.
 - **Known destinations in memory.** The newest `identity_cap` by announce
   time, at load and after every flush (`newest_known_destinations`,
-  `leviculum-std/src/storage.rs:539`); the file keeps all of them. The
+  `leviculum-std/src/storage.rs:545`); the file keeps all of them. The
   remember stamps a flush folds are held to what the identity table still
-  holds (`leviculum-std/src/storage.rs:1195`): the growth soak found them
+  holds (`leviculum-std/src/storage.rs:1201`): the growth soak found them
   rising 111 kB/min at 40 announces a second, cleared only by the hourly
   flush.
 - **Names heard from strangers.** The newest 4 096 (`HEARD_CAP`,

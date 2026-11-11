@@ -77,6 +77,14 @@ impl SharedInstanceTransport {
         }
     }
 
+    /// The address of the channel `abstract_name` (`rns/<instance>` or
+    /// `rns/<instance>/rpc`) as an operator reads it: `@rns/<name>` for the
+    /// Linux abstract socket, the file on another Unix, `127.0.0.1:<port>`
+    /// on the TCP path. For a client tool's failure message.
+    pub fn describe(&self, abstract_name: &str) -> String {
+        self.endpoint(abstract_name).to_string()
+    }
+
     /// The endpoint of the channel `abstract_name` (`rns/<instance>` or
     /// `rns/<instance>/rpc`) under this transport.
     pub(crate) fn endpoint(&self, abstract_name: &str) -> IpcEndpoint {

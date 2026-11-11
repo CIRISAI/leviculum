@@ -159,7 +159,7 @@ and are best set in a TOML config or left at their defaults.
 everywhere: `lnsd --storage`, then the config key, then
 `<config_dir>/storage` (Python's only choice, `Reticulum.py:246`). The
 client tools resolve it the same way (`resolve_storage_path`,
-`config.rs:1671`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
+`config.rs:1666`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
 same directory as the daemon and derive the same RPC authkey from its
 `transport_identity`. Point the key at an external disk and nothing else
 has to be told about it — but note that `--storage` moves the daemon

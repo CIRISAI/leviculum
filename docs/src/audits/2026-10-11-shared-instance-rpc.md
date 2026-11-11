@@ -29,7 +29,7 @@ socket `\0rns/{instance_name}/rpc` (`spawn_rpc_server_with_limits`,
 `leviculum-std/src/rpc/mod.rs:98-113`, against
 `reference/Reticulum/RNS/Reticulum.py:349`), with TCP loopback under
 `shared_instance_type = tcp` and on Windows (`endpoint`,
-`leviculum-std/src/interfaces/ipc.rs:82`, against the AF_INET arm,
+`leviculum-std/src/interfaces/ipc.rs:90`, against the AF_INET arm,
 `reference/Reticulum/RNS/Reticulum.py:352`); the framing is the
 CPython `multiprocessing.connection` 4-byte big-endian length prefix
 (`read_message_bounded`, `leviculum-std/src/rpc/connection.rs:82`);
@@ -104,17 +104,17 @@ Linux, `rnstatus` against both daemons.
 *Fixed in 217fc8f6.* Both channels move to TCP loopback when the key says
 `tcp`, on every platform, at the configured ports or 37428/37429, the
 instance name unused, as the reference resolves them
-(`endpoint`, `leviculum-std/src/interfaces/ipc.rs:82`). One module binds and
+(`endpoint`, `leviculum-std/src/interfaces/ipc.rs:90`). One module binds and
 dials for the data channel (`spawn_local_server`,
 `leviculum-std/src/interfaces/local.rs:140`; `spawn_local_client`,
 `leviculum-std/src/interfaces/local.rs:471`) and the RPC channel
 (`spawn_rpc_server`, `leviculum-std/src/rpc/mod.rs:50`; `rpc_client_call_at`,
 `leviculum-std/src/rpc/mod.rs:428`), through `bind`
-(`leviculum-std/src/interfaces/ipc.rs:166`) and `connect`
-(`leviculum-std/src/interfaces/ipc.rs:188`). A node takes the
+(`leviculum-std/src/interfaces/ipc.rs:174`) and `connect`
+(`leviculum-std/src/interfaces/ipc.rs:196`). A node takes the
 transport from the config it is built from; our client tools take it from
 the config they read (`dial_as_configured`,
-`leviculum-std/src/daemon_rpc.rs:41`). In that mode the server and its
+`leviculum-std/src/daemon_rpc.rs:42`). In that mode the server and its
 clients carry the reference's TCP names, `Shared Instance[<port>]` and
 `LocalInterface[<peer port>]` (`LocalInterface.py:497-498`, `:374`). Pinned
 by `test_rnstatus_over_tcp_shared_instance_against_rust_daemon`: the
@@ -140,7 +140,7 @@ fix). No tool-visible consequence.
 
 Platform note, already stated in the code: the non-Linux Unix fallback
 binds a filesystem socket under the temp directory
-(`bind_unix`, `leviculum-std/src/interfaces/ipc.rs:211-226`), which no
+(`bind_unix`, `leviculum-std/src/interfaces/ipc.rs:219-234`), which no
 Python client dials; the macOS/BSD path is community-supported and
 outside the drop-in contract (`leviculum-std/src/interfaces/ipc.rs:17-20`).
 
@@ -156,7 +156,7 @@ read the answers:
   stats, battery) and the post-1.3.5 key set a 1.5.2 `rnstatus`
   indexes unguarded (`mtu`, `txdrp`, the sort keys; pinned with types
   and defaults in `test_rpc_interface_stats_round_trip`,
-  `leviculum-std/src/rpc/mod.rs:845`). Display names reproduce the
+  `leviculum-std/src/rpc/mod.rs:869`). Display names reproduce the
   reference's `str(interface)` forms byte for byte, including the
   prefixes `rnstatus` hides rows by and the `Shared Instance[` prefix
   its client arithmetic keys on (`tcp_spawned_name`,
@@ -169,7 +169,7 @@ read the answers:
   `reference/Reticulum/RNS/Utilities/rnstatus.py:432`) reads the same
   against either daemon. Announce-rate defaults follow Python's
   transport branch (3600/0/5 when transport is on, None when off;
-  pinned in `leviculum-std/src/rpc/mod.rs:1076-1122`).
+  pinned in `leviculum-std/src/rpc/mod.rs:1173-1219`).
 * **`path_table`** — six keys, units, the direct-path `via` spelled as
   the destination hash exactly as Python's `received_from` makes it
   (`build_path_table`, `leviculum-std/src/rpc/handlers.rs:1207`,
@@ -194,7 +194,7 @@ read the answers:
   `source`/`until`/`reason`, and the membership bool
   (`build_blackholed_identities`,
   `leviculum-std/src/rpc/handlers.rs:1993`, round-tripped in
-  `test_rpc_blackhole_round_trip`, `leviculum-std/src/rpc/mod.rs:1202`;
+  `test_rpc_blackhole_round_trip`, `leviculum-std/src/rpc/mod.rs:1299`;
   consumed by `rnpath -b/-B/-U`,
   `reference/Reticulum/RNS/Utilities/rnpath.py:185-199`).
 * **`destination_data` and `identity_data`** — all five ops parsed and
@@ -524,7 +524,7 @@ comments and quote stripping to ConfigObj's own rules
 (`strip_value`, `leviculum-std/src/ini_config.rs:1190`); the config
 directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 `~/.reticulum` (`resolve_config_dir`,
-`leviculum-std/src/config.rs:1631`, against
+`leviculum-std/src/config.rs:1633`, against
 `reference/Reticulum/RNS/Reticulum.py:229-236`); `ifac_size` in bits
 with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:975-985`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
@@ -686,7 +686,7 @@ tunes the ingress/egress limiters globally
 per-interface spellings (`leviculum-std/src/ini_config.rs:937-947`)
 but the global ones fall into the catch-all, so our
 transport-enabled defaults are the hardcoded 3600/0/5
-(`leviculum-std/src/rpc/mod.rs:956-967` pins them). A config that
+(`leviculum-std/src/rpc/mod.rs:980-991` pins them). A config that
 raises the global target gets Python's enforcement and ours at the
 defaults — different rebroadcast rate limiting on the same mesh.
 Class: **silently ignored config**. Test: drop-in — a config with

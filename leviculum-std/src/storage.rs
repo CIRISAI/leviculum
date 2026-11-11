@@ -428,9 +428,15 @@ pub fn narrow_secret_mode(path: &Path) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        // Both errors name the file: an EPERM on a key another user owns
+        // (a client tool reading `/etc/reticulum`'s identity) said only
+        // "Operation not permitted" before (order 1675).
+        let named =
+            |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        let mode = std::fs::metadata(path).map_err(named)?.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(named)?;
             tracing::warn!(
                 "{} holds a private key and was mode {mode:03o}; narrowed to 600",
                 path.display()
@@ -1525,6 +1531,22 @@ impl leviculum_core::traits::Storage for Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Order 1675: a key the tool cannot inspect or narrow names its path.
+    /// Before, `lnpath` on a host with another user's `/etc/reticulum`
+    /// printed "failed to load identity: Operation not permitted" and no
+    /// file. A missing file stands in for the EPERM: same `?`, same wrap.
+    #[test]
+    fn narrow_secret_mode_errors_name_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("transport_identity");
+        let err = narrow_secret_mode(&path).expect_err("no such file");
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "{err}"
+        );
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
 
     use crate::file_ratchet_store::{RATCHETKEYS_DIR, RATCHETS_DIR};
     use crate::known_destinations::{

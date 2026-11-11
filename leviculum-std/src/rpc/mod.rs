@@ -523,6 +523,30 @@ pub async fn rpc_query(
     Ok(pickle_value_to_json(&response))
 }
 
+/// Whether the daemon on `rns/{instance_name}/rpc` accepts `authkey`:
+/// `Ok(true)` when a read-only `link_count` query under it is answered,
+/// `Ok(false)` when the handshake is refused, `Err` for anything else (no
+/// daemon, a timeout). A client tool that failed authentication asks this
+/// for the keys of the other candidate config directories, so it can say
+/// which one the daemon answers to (order 1675). A full query rather than
+/// a bare handshake, so the daemon, ours or Python's, sees an ordinary
+/// client; `link_count` changes nothing.
+pub async fn rpc_authenticates(instance_name: &str, authkey: &[u8]) -> Result<bool, crate::Error> {
+    let abstract_name = format!("rns/{}/rpc", instance_name);
+    let request = pickle::pickle_dict(vec![(
+        pickle::pickle_str_key("get"),
+        pickle::pickle_str("link_count"),
+    )]);
+    match rpc_client_call(&abstract_name, authkey, &request).await {
+        Ok(_) => Ok(true),
+        Err(RpcError::AuthFailed) => Ok(false),
+        Err(RpcError::Io(io)) => Err(crate::Error::Io(io)),
+        Err(other) => Err(crate::Error::Config(format!(
+            "shared-instance RPC error: {other}"
+        ))),
+    }
+}
+
 /// Ask a daemon for its transport tables (Codeberg #174), naming the tables
 /// whose ROWS are wanted.
 ///
@@ -1067,6 +1091,79 @@ mod tests {
             }
             other => panic!("expected dict response, got: {:?}", other),
         }
+    }
+
+    /// Order 1675: the hamster layout in miniature. The system directory
+    /// holds a config whose key the daemon refuses, the home's
+    /// `.reticulum` one whose key it accepts. `rpc_authenticates` tells the
+    /// two apart, and the hint `lnstatus` prints names the second.
+    #[tokio::test]
+    async fn the_auth_probe_names_the_directory_whose_key_the_daemon_takes() {
+        let (core, _storage) = make_test_core(false);
+        let authkey = derive_authkey(&core);
+        let instance_name = format!(
+            "rpctest_probe_{}_{}",
+            std::process::id(),
+            RPC_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        spawn_rpc_server(
+            &instance_name,
+            &SharedInstanceTransport::default(),
+            Arc::clone(&core),
+            authkey,
+            std::time::Instant::now(),
+            empty_stats_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
+            AutoPeerCount::default(),
+            None,
+            radio_cache::shared(),
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let system = root.path().join("etc/reticulum");
+        let home = root.path().join("home");
+        let user = home.join(".reticulum");
+        let hex = |k: &[u8]| k.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        for (dir, key) in [(&system, vec![0u8; 32]), (&user, authkey.to_vec())] {
+            std::fs::create_dir_all(dir).expect("config dir");
+            std::fs::write(
+                dir.join("config"),
+                format!("[reticulum]\n  rpc_key = {}\n", hex(&key)),
+            )
+            .expect("config");
+        }
+
+        assert!(!rpc_authenticates(&instance_name, &[0u8; 32]).await.unwrap());
+        assert!(rpc_authenticates(&instance_name, &authkey).await.unwrap());
+
+        let choice =
+            crate::config_dir::ConfigDirChoice::resolve_with(None, &system, Some(&home), |p| {
+                p.is_file()
+            });
+        assert_eq!(choice.dir, system);
+        assert_eq!(choice.others, vec![user.clone()]);
+        let hint = crate::daemon_rpc::auth_failure_hint(&choice, &instance_name).await;
+        println!("{hint}");
+        let socket = shared_instance_transport().describe(&format!("rns/{instance_name}"));
+        let want = format!(
+            "\nthe daemon on {socket} answers to ~/.reticulum's key; pass --config {}",
+            user.display()
+        );
+        assert!(hint.ends_with(&want), "hint:\n{hint}");
+        assert!(
+            hint.contains(&format!("{}/config exists", system.display())),
+            "hint:\n{hint}"
+        );
+
+        // Nobody's key fits: the hint says so instead of guessing.
+        std::fs::write(user.join("config"), "[reticulum]\n  rpc_key = 11\n").expect("config");
+        let hint = crate::daemon_rpc::auth_failure_hint(&choice, &instance_name).await;
+        assert!(
+            hint.ends_with("answers to none of the other directories' keys either"),
+            "hint:\n{hint}"
+        );
     }
 
     /// The announce-rate defaults track Python's transport branch: with

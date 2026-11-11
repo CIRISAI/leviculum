@@ -91,13 +91,22 @@ pub async fn build_bundle(opts: &DiagOptions) -> String {
     let _ = writeln!(out);
 
     // --- Config ---
-    let config_dir = opts
-        .config_dir
-        .clone()
-        .unwrap_or_else(Config::default_config_dir);
+    // The directory, why it was taken, and the other candidates holding a
+    // config (order 1675): a diag of the wrong directory says so.
+    let choice = leviculum_std::config_dir::ConfigDirChoice::resolve(opts.config_dir.as_deref());
+    let config_dir = choice.dir.clone();
     let config_file = config_dir.join("config");
     section_header(&mut out, "Config");
     let _ = writeln!(out, "config dir:  {}", config_dir.display());
+    let _ = writeln!(out, "{}", choice.why());
+    for other in &choice.others {
+        let _ = writeln!(
+            out,
+            "{} also holds a config; if your daemon runs on it, pass --config {}",
+            choice.short(other),
+            other.display()
+        );
+    }
     let _ = writeln!(out, "config file: {}", config_file.display());
     let loaded_config: Option<Config> = if config_file.exists() {
         match Config::load(&config_file) {
