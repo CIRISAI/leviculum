@@ -22,7 +22,7 @@ region into the maps directory. One request's whole budget is 60 s
 backs off 30 s doubling to an hour (`BACKOFF_FIRST_MS`,
 `loquax/src/mapload.rs:68`); autoloaded regions are a cache under
 500 MB by default (`CACHE_DEFAULT_MB`, `loquax/src/mapload.rs:66`),
-evicted least recently viewed (`evict`, `loquax/src/mapload.rs:715`).
+evicted least recently viewed (`evict`, `loquax/src/mapload.rs:718`).
 
 The sizes, measured 2026-11-01 from the Protomaps build of 2026-10-28
 ([Loquax: the map](loquax-map.md), section "Regions"): a city region,

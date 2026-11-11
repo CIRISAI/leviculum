@@ -510,14 +510,17 @@ whose module comment is the normative layout). All integers little-endian,
 offsets from the start of the file:
 
 - a header: `LMR1`, the version (1, 2 since 1100 with names, 3 since
-  1191 with buildings, 4 since 1291 in arrival order), the header length
-  (64, 96 for version 2, 112 for version 3 and 4), the bounds in
+  1191 with buildings, 4 since 1291 in arrival order, 5 since 1685 with
+  pois), the header length
+  (64, 96 for version 2, 112 for version 3 and 4, 128 for version 5),
+  the bounds in
   degrees x 10^7 (west, south, east, north; west greater than east means
   across the antimeridian), the zoom range (at most 16, so x and y fit a
   `u16`), the layer profile id, where the attribution and the notice lie,
   the tile count, where the index lies and the file's length; version 2
   adds where the label index and the string table lie, version 3 where
-  the building index lies and how many sections it lists;
+  the building index lies and how many sections it lists, version 5 the
+  same pair for the poi index;
 - the two texts, UTF-8 and both required: the attribution, one line every
   map view shows ("© OpenStreetMap contributors"), and the notice, the
   ODbL text, the derived-database sentence and the source the region was
@@ -568,7 +571,20 @@ offsets from the start of the file:
   are whole: a slot with a length whose bytes lie inside what is there.
   The rest are pending, and the draw stands the nearest coarser tile
   that is there in for each (`Region::stand_in`); the names and the
-  buildings show once the file is complete.
+  buildings show once the file is complete;
+- version 5 (LMR5, 1685): a poi section per tile of the region's deepest
+  zoom that has any, after the building sections, and a poi index after
+  the building index, last in the file. Every point of interest of the
+  `pois` layer goes in, every kind verbatim, named or not, and with it
+  the travel attributes the source carries about ways and areas: the
+  state of a way (surface, track grade, hiking difficulty, trail
+  visibility, fords, access), a marked route's `ref` and `network`, a
+  protected or military area's kind. Kinds, names, attribute keys and
+  values are all indices into the region's one string table, so a reader
+  skips a kind or key it does not know and new ones need no new version.
+  The layout is `leviculum-map/src/pois.rs`'s module comment; the header
+  grows to 128 bytes. A cut without pois writes version 4, which a
+  version 4 reader still reads.
 
 **Buildings** (1191, the format and the cut; 1192, the draw).
 Protomaps' z15 tiles carry every OSM building. They are not in the
@@ -605,8 +621,9 @@ before it reads past the version field, as a version 1 reader refuses
 version 2, so the reader has to ship before regions with buildings reach
 it; Loquax cuts its own regions, so in practice only a file copied by hand
 meets an older reader. Since 1291 every cut writes version 4, with
-buildings or without (a section count of 0), and this reader reads
-versions 1 to 4; a version 3 reader refuses it. No region file is
+buildings or without (a section count of 0), and since 1685 version 5
+when pois are cut (the autoload cuts them); this reader reads versions 1
+to 5, a version 4 reader refuses version 5. No region file is
 published anywhere today: the autoload cuts its regions on the device
 from the Protomaps archive, and the committed fixtures stay version 1 to
 3, which this reader keeps reading.
