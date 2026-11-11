@@ -52,6 +52,8 @@
 //!   image's walks (1540).
 //! - [`oplog`]: the bench image's ring of flash ops, said as `[FLASH]`
 //!   lines, and the ops it could not say counted (1613, 1622).
+//! - [`spi2`]: the panel and the LR1110 on one SPI bus, the radio first
+//!   between the panel's chunks, and the radio's boot lines (1478b).
 
 #![no_std]
 
@@ -82,6 +84,7 @@ pub mod pair;
 pub mod read;
 pub mod render;
 pub mod screen;
+pub mod spi2;
 pub mod splash;
 
 /// The language the board speaks (1447, walk 1 finding 23): German unless

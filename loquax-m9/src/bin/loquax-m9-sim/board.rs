@@ -51,6 +51,7 @@ use loquax_m9::pair::{self, Pairing};
 use loquax_m9::read::Reader;
 use loquax_m9::render::Renderer;
 use loquax_m9::screen::{self, Look, COLS, ROWS};
+use loquax_m9::spi2;
 
 use loquax_m9::bench::{self, Arrivals};
 use loquax_m9::{fixture, group, page};
@@ -237,6 +238,46 @@ pub struct Board {
     pulled: usize,
 }
 
+/// The LR1110's boot as the sim stands in for it (1478b): the sim has no
+/// radio and no SPI, so it says the board's `[LORA] init ok` line in the
+/// board's shape with versions 0 (`spi2::InitOk`, the formatter the image
+/// prints with), and the `[SPI]` line of the SPI2 arbiter stepped over a
+/// full frame with the bench image's 10 ms status read
+/// (`spi2::interleave` on `spi2::BOARD`): the model's numbers, which the
+/// bench's own `[SPI]` and `[DISP]` lines replace.
+fn say_radio(log: &mut Log) {
+    log.line(
+        "[LORA] ",
+        &format!(
+            "{}",
+            spi2::InitOk {
+                hw: 0,
+                fw: 0,
+                phy: spi2::DEFAULT_PHY,
+            }
+        ),
+    );
+    let with = spi2::interleave(spi2::BOARD);
+    let alone = spi2::interleave(spi2::Model {
+        radio_every_us: 0,
+        ..spi2::BOARD
+    });
+    let window = spi2::Window {
+        owner: Some(spi2::Owner::Free),
+        wait_max_us: with.wait_max_us,
+        grants: with.grants,
+        chunks: with.chunks,
+        yields: with.yields,
+    };
+    log.line(
+        "[SPI] ",
+        &format!(
+            "{window} held_max_us={} flush_us={} alone_us={} source=model",
+            with.gap_max_us, with.flush_us, alone.flush_us
+        ),
+    );
+}
+
 impl Board {
     /// Power on over `flash`: the store restored for its home, or the
     /// pairing over the fixture on a board without one, and the first
@@ -272,6 +313,7 @@ impl Board {
                 },
             ),
         );
+        say_radio(&mut log);
         let mut outgoing = Outgoing::default();
         let (model, shelf, shown) = match flash.home {
             None => {
