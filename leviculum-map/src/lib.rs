@@ -26,6 +26,9 @@
 //!   frontend offers.
 //! - [`area`]: the regions a board carries in a flash partition of their
 //!   own, and the directory that names them (1477).
+//! - [`timezones`]: the world's time zones, which zone a point lies in,
+//!   where a view writes each zone's time, and the clock rules: TZif and
+//!   POSIX TZ strings, the system's tzdata, the board's table.
 //! - [`style`]: the colour tables, `leviculum-mapfill`'s own.
 //!
 //! `no_std` with `alloc`; the feature `std` adds only a [`Storage`] for a
@@ -49,6 +52,7 @@ pub mod outline;
 pub mod pins;
 pub mod profile;
 pub mod region;
+pub mod timezones;
 pub mod viewport;
 
 /// The colour tables and classes, one table for the map and the filler.

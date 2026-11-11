@@ -230,3 +230,70 @@ above). The region's own 183 places stay; a name both tables carry is
 placed once, by its text.
 
 The same ODbL notice as above applies; the file carries it inside itself.
+
+## The time zones (1684)
+
+`../data/timezones.lwo`, `../data/timezones.lwl` and `../data/timezones.lwz`
+are the world's time zone outlines the crate's `timezones` module reads
+(`src/timezones/mod.rs`): timezone-boundary-builder release 2026f, the
+"same since now" variant with the oceans, 63 zones.
+
+| table | what | count | bytes | baked sha256 |
+|---|---|---|---|---|
+| `timezones.lwo` (`LWO2`) | every polygon of every zone, zones in name order | 3,004 rings, 1,334 holes, 598,780 points | 1,007,112 | `e7e1dd47991a3dbd0f58bc926f9f5f41c86f074fa294a6247dd26d527897ea1c` |
+| `timezones.lwl` (`LWL2`) | the borders between zones, each once | 2,909 lines, 302,268 points | 503,524 | `c31cc9e1af9028e327e8f1632bb51b79959abfbc7bab7d7e2c401aa7af2d3c19` |
+| `timezones.lwz` (`LWZ1`) | zone names; per ring its zone and label anchor | 63 zones, 436 labels | 9,515 | `5e19dbc13105006d974b04480b5c651a9f07b013a6fdac4e0cc0addd09782eb9` |
+
+Source:
+`https://github.com/evansiroky/timezone-boundary-builder/releases/download/2026f/timezones-with-oceans-now.geojson.zip`
+(26,768,042 bytes, sha256
+`5983306d5b8646ee834e9ab60a83fcf3330119260c9cd2a1f16c9690d008b4f0`),
+holding `combined-with-oceans-now.json` (86,399,837 bytes, sha256
+`016b2a6f78d53f079a400401a8d8d43fc75e3f40f62cdce34238c0f77c4bf69e`).
+Baked with python3-shapely 2.1.0 on GEOS 3.13.1, coverage simplification
+at a tolerance of 2 grid units (the world outline's 18-bit grid, 153 m at
+the equator), twice to the same bytes:
+
+```sh
+scripts/bake-timezones.py combined-with-oceans-now.json leviculum-map/data
+```
+
+The source is not a clean coverage (23 small gaps, 45 small overlaps,
+borders whose two sides differ vertex for vertex); the script rebuilds it
+as one before simplifying, so every border is simplified once and stays
+shared (its docstring has the steps). At tolerance 6 the three tables are
+793,101 bytes, at 3 1,175,882, at 2 1,520,151.
+
+**Licence.** The README of the release, section "Licenses": "The outputted
+data is licensed under the [Open Data Commons Open Database License
+(ODbL)](http://opendatacommons.org/licenses/odbl/)." The data is almost
+wholly OpenStreetMap's. These tables are derived databases under the ODbL
+1.0, <https://opendatacommons.org/licenses/odbl/1-0/>, not under the AGPL
+of the code; a view that draws them carries the attribution
+`timezones::ATTRIBUTION`, "Time zones: © OpenStreetMap contributors,
+timezone-boundary-builder (ODbL)".
+
+### The board's clock rules
+
+`../data/tz-rules.txt` (2,120 bytes, sha256
+`8a80139004ee15e30a1d26a8be9b90ae77b1a86037a2fd90aa0cd532a1731bce`) holds
+the POSIX TZ string of every zone above, from the footers of tzdata 2026f,
+which the board evaluates (`timezones::board_offset`). The build host had
+Debian's 2026b, which lacks 2026c to 2026f (Alberta, Morocco, the
+Northwest Territories, Manitoba, Cuba), so the zone files were compiled
+from IANA's release: `https://data.iana.org/time-zones/releases/tzdb-2026f.tar.lz`
+(569,858 bytes, sha256
+`357829e3a16a78224d23f1ae2327704c1da1fd35f6769a7aac0682755fb9027a`),
+public domain.
+
+```sh
+tar --lzip -xf tzdb-2026f.tar.lz && cd tzdb-2026f && make zic
+./zic -b fat -d ../zoneinfo-2026f tzdata.zi && cp tzdata.zi ../zoneinfo-2026f/
+scripts/gen-tz-table.py ../zoneinfo-2026f
+```
+
+`zoneinfo-2026f/` here is that output for the 63 zones and
+`Africa/Casablanca`, 64 files, 87,563 bytes: the test holds the board's
+strings to the TZif files they came from, every hour of 2026, and finds
+the one known disagreement, Havana from 2026-11-01T05:00Z (Cuba stays on
+-04 through 2027-11-07, an exception its lasting rule cannot express).

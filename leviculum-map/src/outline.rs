@@ -180,7 +180,7 @@ impl Ring<'_> {
 
 /// An unsigned LEB128 varint at `at`, which moves past it; `None` past the
 /// end or past 32 bits.
-fn varint(table: &[u8], at: &mut usize) -> Option<u32> {
+pub(crate) fn varint(table: &[u8], at: &mut usize) -> Option<u32> {
     let mut v = 0u32;
     for shift in (0..35).step_by(7) {
         let byte = *table.get(*at)?;

@@ -173,6 +173,7 @@ skip  leviculum-map buildings                 # the building section format and 
 skip  leviculum-map lmr2                      # reads the committed region for its names, but the subject is the label format and the reader
 skip  leviculum-map projection                # in-process projection and viewport arithmetic; subject is the code
 skip  leviculum-map region                    # reads the committed region, but the subject is the reader and the draw (golden counts)
+skip  leviculum-map timezones                 # the zone lookup, TZif and POSIX readers and the board table; reads host tzdata, takes seconds; subject is the code
 skip  leviculum-map view                      # the outline table and the region drawn at pinned counts; subject is the draw, choice and pin order
 skip  leviculum-mapcut cut                    # synthetic tiles through the cut; subject is the code
 skip  leviculum-mapcut http                   # a loopback server and threads; subject is the HTTP reader and the load

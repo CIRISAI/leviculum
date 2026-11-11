@@ -73,6 +73,10 @@ pub enum LabelKind {
     Range,
     /// A desert's name.
     Desert,
+    /// A time zone's label (1684): its IANA name, which the frontend
+    /// replaces with the zone's local time, at the zone's anchor
+    /// ([`crate::timezones::labels`]).
+    TimeZone,
     /// A lake, a river, a sea: the name of a water area.
     Water,
     Park,
@@ -88,7 +92,7 @@ pub enum LabelKind {
 
 impl LabelKind {
     /// Every kind, in the order [`place`] serves them.
-    pub const ALL: [LabelKind; 16] = [
+    pub const ALL: [LabelKind; 17] = [
         LabelKind::City,
         LabelKind::Town,
         LabelKind::District,
@@ -99,6 +103,7 @@ impl LabelKind {
         LabelKind::Sea,
         LabelKind::Range,
         LabelKind::Desert,
+        LabelKind::TimeZone,
         LabelKind::Water,
         LabelKind::Park,
         LabelKind::River,
@@ -120,6 +125,7 @@ impl LabelKind {
             LabelKind::Sea => 8,
             LabelKind::Range => 9,
             LabelKind::Desert => 10,
+            LabelKind::TimeZone => 11,
             LabelKind::Water => 16,
             LabelKind::Park => 17,
             LabelKind::River => 18,
