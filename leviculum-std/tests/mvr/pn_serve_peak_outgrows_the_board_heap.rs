@@ -202,6 +202,7 @@ fn field_fetch_plan() -> (PropagationNode<MemoryPropagationStore>, FetchPlan) {
     let mut role = PropagationNode::new(
         MemoryPropagationStore::new(64 * 1024),
         PropagationNodeConfig {
+            transfer_limit_kb: leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB,
             sync_limit_kb: leviculum_heap_budget::BOARD_SYNC_LIMIT_KB,
             serve_limit_bytes: Some(BOARD_SERVE_LIMIT_BYTES),
             // Placeholder stamps: the shipped cost of 13 would reject them.

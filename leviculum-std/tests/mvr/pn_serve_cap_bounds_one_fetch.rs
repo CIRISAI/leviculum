@@ -167,6 +167,7 @@ fn mailbox_node(
     let mut role = PropagationNode::new(
         MemoryPropagationStore::new(256 * 1024),
         PropagationNodeConfig {
+            transfer_limit_kb: leviculum_heap_budget::BOARD_TRANSFER_LIMIT_KB,
             sync_limit_kb: BOARD_SYNC_LIMIT_KB,
             serve_limit_bytes: Some(serve_limit_bytes),
             serve_cap_bytes: Some(cap),
