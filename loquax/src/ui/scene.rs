@@ -3453,8 +3453,15 @@ mod tests {
         let delivered = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 2 });
         assert!(delivered.is_empty(), "a delivered one is not sent again");
         let effects = super::super::update(&mut model, UiEvent::SendAgain { peer, key: 1 });
+        // The new send, and what the failed one saved goes with it (1662).
         assert!(
-            matches!(effects.as_slice(), [UiEffect::Send { to, body, .. }] if *to == peer && body == "m0"),
+            matches!(
+                effects.as_slice(),
+                [
+                    UiEffect::Send { to, body, .. },
+                    UiEffect::ForgetSaved { peer: gone, key: Some(1) },
+                ] if *to == peer && body == "m0" && *gone == peer
+            ),
             "{effects:?}"
         );
         let bodies: Vec<&str> = model.conversations[0]

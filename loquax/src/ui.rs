@@ -1450,6 +1450,10 @@ pub struct UiModel<B> {
     /// the note bumps their revision so every target draws it again, and
     /// nothing is written, as a transfer is not kept.
     transfer_poked: BTreeSet<[u8; 16]>,
+    /// What this device saved of deleted messages, owed to the shell
+    /// ([`UiEffect::ForgetSaved`], 1662): a conversation and a message's
+    /// key, or no key for the whole conversation.
+    saved_gone: Vec<([u8; 16], Option<u64>)>,
     /// The running position shares (1273).
     pub shares: share::Shares,
     /// The groups the reader is in, was invited to or left (1307), learned
@@ -1675,6 +1679,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             voice_tracks: BTreeMap::new(),
             transfers: transfer::Transfers::default(),
             transfer_poked: BTreeSet::new(),
+            saved_gone: Vec::new(),
             shares: share::Shares::default(),
             groups: groups::Groups::new(),
             group_draft: None,
@@ -3519,6 +3524,13 @@ pub enum UiEffect {
         key: u64,
         index: usize,
     },
+    /// Remove what this device saved of the message `key` of `peer`'s
+    /// conversation, or of the whole conversation for no key (1662): the
+    /// files [`UiEffect::OpenFile`] saved under the app's storage and the
+    /// photo [`UiEffect::ShowPhoto`] wrote for the viewer. The message was
+    /// deleted here, by the reader or by another device of the home. A
+    /// copy the reader exported elsewhere is theirs and stays.
+    ForgetSaved { peer: [u8; 16], key: Option<u64> },
     /// Play the voice message `key` of `peer`'s conversation (1222): the
     /// phone's player, the desktop's WAV file in the system's player. Its
     /// bytes are in the message's fields ([`voice::voice_parts`]).
@@ -3770,6 +3782,12 @@ fn step<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
     model.folding = true;
     let mut effects = fold(model, event);
     effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
+    effects.extend(
+        model
+            .saved_gone
+            .drain(..)
+            .map(|(peer, key)| UiEffect::ForgetSaved { peer, key }),
+    );
     // Whatever hid the open conversation, a block, the `blocked` view or a
     // restore, another the list shows takes its place.
     model.settle();
@@ -17279,6 +17297,92 @@ pub(crate) mod tests {
                 key: photo_key
             }]
         );
+    }
+
+    /// 1662: a deleted message's saved copies go with it. Deleting it,
+    /// another device of the home deleting it, sending a failed one again
+    /// and deleting the conversation each ask the shell to forget what it
+    /// saved ([`UiEffect::ForgetSaved`]); a message still being sent is
+    /// kept, and so is what it saved.
+    #[test]
+    fn a_deleted_message_asks_the_shell_to_forget_what_it_saved() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let received = |n: u8| OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [n; 32],
+            source: PEER,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: files::file_fields("a.txt", vec![n]),
+            verified: true,
+        };
+        for n in 1..=3 {
+            engine(&mut model, received(n));
+        }
+        let key = |model: &UiModel<Field>, n: u8| {
+            model.conversations[0]
+                .messages
+                .iter()
+                .find(|m| m.id == Some([n; 32]))
+                .map(|m| m.activity)
+                .expect("the message")
+        };
+        let forgets = |effects: &[UiEffect]| -> Vec<Option<u64>> {
+            effects
+                .iter()
+                .filter_map(|e| match e {
+                    UiEffect::ForgetSaved { peer, key } if *peer == PEER => Some(*key),
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = key(&model, 1);
+        let effects = update(
+            &mut model,
+            UiEvent::Delete {
+                peer: PEER,
+                keys: vec![first],
+            },
+        );
+        assert_eq!(forgets(&effects), vec![Some(first)]);
+        let second = key(&model, 2);
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::HomeMarked {
+                mark: crate::home::wire::Mark {
+                    flag: crate::home::wire::MarkFlag::Deleted,
+                    ids: vec![[2; 32]],
+                },
+            }),
+        );
+        assert_eq!(forgets(&effects), vec![Some(second)]);
+        // One being sent is kept, its copies too.
+        update(
+            &mut model,
+            UiEvent::SendFile {
+                peer: PEER,
+                name: "b.txt".into(),
+                data: vec![9],
+            },
+        );
+        let sending = model.conversations[0].messages.last().map(|m| m.activity);
+        let effects = update(
+            &mut model,
+            UiEvent::Delete {
+                peer: PEER,
+                keys: sending.into_iter().collect(),
+            },
+        );
+        assert_eq!(forgets(&effects), Vec::<Option<u64>>::new());
+        let effects = update(
+            &mut model,
+            UiEvent::DeleteConversation {
+                peer: PEER,
+                everywhere: false,
+            },
+        );
+        assert_eq!(forgets(&effects), vec![None]);
+        assert!(model.conversations.iter().all(|c| c.peer != PEER));
     }
 
     /// 1662: a picture sent as a file is the bubble's picture, told by

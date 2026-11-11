@@ -1444,6 +1444,7 @@ fn effect_name(effect: &UiEffect) -> &'static str {
         UiEffect::RememberHash { .. } => "remember-hash",
         UiEffect::ShowPhoto { .. } => "show-photo",
         UiEffect::OpenFile { .. } => "open-file",
+        UiEffect::ForgetSaved { .. } => "forget-saved",
         UiEffect::PlayVoice { .. } => "play-voice",
         UiEffect::PauseVoice { .. } => "pause-voice",
         UiEffect::CreateGroup { .. } => "create-group",

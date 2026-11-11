@@ -12,7 +12,7 @@ kept on the phone and opens in the app the phone has for it.
 | A file and text | A file is one message with an empty text, as the plus sheet's File row sends it. A received message with several files shows a row for each. |
 | Cap | 990 000 bytes a file: a receiver refuses a message past 1000 KB, and the message around the file needs room. Refused with both sizes said, before anything goes. |
 | Names | What the sender wrote is shown and saved only after [`safe_name`](#3-the-core): no path, no control character, no leading dot. |
-| Where it is kept | Under the home: `files/<peer>-<key>-<n>/<name>`, written once when the file is first opened. On the phone that is the app's own files; a provider of the app's lends that one file read only to the app that opens it. |
+| Where it is kept | Under the home: `files/<peer>-<key>-<n>/<name>`, written once when the file is first opened. On the phone that is the app's own files; a provider of the app's lends that one file read only to the app that opens it. Deleting the message removes it (1662); a copy the reader exported elsewhere stays. |
 | Where the work is done | In Rust: the field, the cap and its words, the names, the save. Java keeps the system picker, the open and share intents and the provider. |
 
 ## 1. The wire
@@ -89,6 +89,20 @@ held in memory to be refused.
   `Scene::action` resolves. A bubble with no text is said as its first
   file. The list says the first file's name, its kind is `file`.
 - `loquax::file_save::save` (std) writes the file under the home.
+- A saved file goes with its message (1662): deleting a message (`d`, the
+  selection's delete, the phone's `Request::Delete`), another device of the
+  home deleting it, sending a failed one again and deleting the
+  conversation each give `UiEffect::ForgetSaved { peer, key }` (no key for
+  the conversation). `loquax::file_save::forget` removes the message's
+  folders under `files/` and the copies a desktop wrote for its viewer and
+  player (`photos/<peer>-<key>.<ext>`, `voice/<peer>-<key>.wav`); the
+  delimiter after the key keeps key 1 from taking key 12, a link is
+  removed and never what it points at. A message still being sent is
+  kept, and what it saved with it. The window and the terminal run the
+  same shell, so their saved copies go the same way; the phone's session
+  removes them under the app's files, where the provider lends them from.
+  Nothing outside the home is touched: a file the reader shared or saved to
+  Downloads, or a copy the system's handler made, is the reader's.
 - A picture sent as a file (1662): `photos::picture_of` takes the image
   field's photo, else the first file whose bytes are a picture this build
   decodes, told by its first bytes (`photos::image_format`: PNG, JPEG,
@@ -173,14 +187,32 @@ transfer is not kept: it goes with the runner's end and with a restart.
   and the sent name, the cap's words in both languages, the scene node and
   its tap, the terminal's line and Enter, the save under the home.
 - The device walk's `file` step ([device walk](loquax-device-walk.md)).
+- 1662: `ui::tests::a_files_progress_is_in_its_bubble_while_it_goes` (both
+  feeds, the 250 ms rule, the bar gone once sent; positive control:
+  `EVERY_MS = 0` turns it red), the terminal golden
+  `tui-file-progress.txt` and its German twin at 43 %,
+  `facade.rs::a_file_under_way_carries_its_words_and_bar_to_the_phone`;
+  `photos::tests::a_picture_sent_as_a_file_is_told_by_its_bytes`,
+  `facade.rs::a_png_sent_as_a_file_shows_its_thumbnail_with_the_file_line`
+  (positive control: the bubble on `photo_of` turns it red);
+  `file_save::tests::a_saved_file_goes_with_its_message_and_an_exported_copy_stays`,
+  `ui::tests::a_deleted_message_asks_the_shell_to_forget_what_it_saved`,
+  and `a_file_travels_both_ways_with_python_lxmf` deletes the received
+  message after saving it: both paths gone, the exported copy whole
+  (positive control: forgetting under another folder turns it red).
 
 ## 7. Open
 
-1. Progress in the bubble (section 5).
-2. The propagation node's 256 KB per message (section 2), shared with
+1. The propagation node's 256 KB per message (section 2), shared with
    photos; lnpnd's fallback of 4 KB without a config is lower still.
-3. One file per message from the plus sheet; several picked at once are a
+2. One file per message from the plus sheet; several picked at once are a
    later slice. Received messages with several show all.
-4. No preview of a received picture sent as a file: it is a file row.
-5. A saved file stays under the app's files until the app is removed;
-   deleting the message does not remove it yet.
+3. Fetching progress has its words and its event and no feed (section 5):
+   a message is fetched whole before its bubble exists.
+4. A message deleted by another device while it is not loaded here (an
+   older page) leaves its saved files: the mark names its id, and the
+   folders are named by the device's own key, which only a loaded message
+   gives.
+
+Done: progress in the bubble, a picture sent as a file shows its
+thumbnail, a saved file goes with its message (1662).

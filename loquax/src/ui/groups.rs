@@ -3642,7 +3642,15 @@ mod tests {
         let Intent::Group(remove) = remove.intent else {
             panic!("a group verb");
         };
-        assert!(verb(&mut member, remove).is_empty(), "nobody to tell");
+        // Nobody to tell; what the group's messages saved here goes (1662).
+        assert_eq!(
+            verb(&mut member, remove),
+            vec![UiEffect::ForgetSaved {
+                peer: GROUP,
+                key: None
+            }],
+            "nobody to tell"
+        );
         assert!(member.group(&GROUP).is_none());
         assert!(member.conversations.iter().all(|c| c.peer != GROUP));
     }

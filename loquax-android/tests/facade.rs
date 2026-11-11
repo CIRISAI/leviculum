@@ -6520,6 +6520,7 @@ async fn a_file_travels_both_ways_with_python_lxmf() {
             (listed.last.as_str(), listed.kind.as_str()),
             ("Protokoll.pdf", "file")
         );
+        let mut kept = Vec::new();
         for (index, want) in [(0u32, &report[..]), (1, &b"#!/bin/sh\n"[..])] {
             let saved: schema::SavedFile = rmp_serde::from_slice(
                 &session
@@ -6542,6 +6543,7 @@ async fn a_file_travels_both_ways_with_python_lxmf() {
                 path.file_name().and_then(|n| n.to_str()),
                 Some(saved.name.as_str())
             );
+            kept.push(path);
         }
         assert!(session
             .query(schema::Query::SaveFile {
@@ -6550,6 +6552,28 @@ async fn a_file_travels_both_ways_with_python_lxmf() {
                 index: 2,
             })
             .is_err());
+        // 1662: a saved file goes with its message. The reader exported
+        // the report out of the app (the share sheet's "Save to
+        // Downloads"); deleting the message takes both saved files from
+        // the app's storage and leaves the exported copy.
+        let downloads = tempfile::tempdir().expect("downloads");
+        let exported = downloads.path().join("Protokoll.pdf");
+        std::fs::copy(&kept[0], &exported).expect("exported");
+        session
+            .request(Request::Delete {
+                peer: shown_python.clone(),
+                keys: vec![row.key],
+            })
+            .expect("deleted");
+        for path in &kept {
+            assert!(!path.exists(), "still saved: {}", path.display());
+            assert!(
+                !path.parent().is_some_and(Path::exists),
+                "its folder stays: {}",
+                path.display()
+            );
+        }
+        assert_eq!(std::fs::read(&exported).expect("exported"), report);
         session
     })
     .await

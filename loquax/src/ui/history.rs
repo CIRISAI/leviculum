@@ -958,6 +958,7 @@ impl<B> UiModel<B> {
         let Some(id) = self.remove_message(peer, key) else {
             return;
         };
+        self.saved_goes(peer, Some(key));
         self.forgotten.push(StoreWrite::ForgetMessage { key });
         let text = match (self.home_client, id) {
             (true, Some(id)) => {
@@ -993,6 +994,7 @@ impl<B> UiModel<B> {
             }
             if let Some(id) = self.remove_message(peer, key) {
                 self.forgotten.push(StoreWrite::ForgetMessage { key });
+                self.saved_goes(peer, Some(key));
                 ids.extend(id);
                 deleted += 1;
             }
@@ -1017,6 +1019,18 @@ impl<B> UiModel<B> {
         self.toast(ToastKind::Info, text);
     }
 
+    /// The message `key` of `peer`'s conversation, or the whole
+    /// conversation for no key, was deleted (1662): what this device saved
+    /// of it goes too ([`super::UiEffect::ForgetSaved`]), and a transfer
+    /// it had ends.
+    pub(super) fn saved_goes(&mut self, peer: [u8; 16], key: Option<u64>) {
+        match key {
+            Some(key) => self.transfers.end(&peer, key),
+            None => self.transfers.end_all(&peer),
+        }
+        self.saved_gone.push((peer, key));
+    }
+
     /// Another device of the home deleted the message `id`: gone here too,
     /// from the screen if it shows it and from the store either way.
     pub(super) fn forget_by_id(&mut self, id: &[u8; 32]) {
@@ -1028,6 +1042,7 @@ impl<B> UiModel<B> {
         });
         if let Some((peer, key)) = shown {
             self.remove_message(peer, key);
+            self.saved_goes(peer, Some(key));
         }
         self.forgotten.push(StoreWrite::ForgetId { id: *id });
     }
@@ -1199,6 +1214,7 @@ impl<B> UiModel<B> {
         let Some(removed) = self.remove_conversation(peer) else {
             return;
         };
+        self.saved_goes(peer, None);
         let everywhere = everywhere && self.home_client;
         if everywhere {
             let ids = removed.messages.iter().filter_map(|m| m.id).collect();

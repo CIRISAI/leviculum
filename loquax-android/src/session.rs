@@ -3016,6 +3016,18 @@ impl Inner {
                 // A setting changed on a page (1233): the config in the
                 // app's directory, which the next start reads; the
                 // screens draw the marks again.
+                // A deleted message's saved files go with it (1662):
+                // `Query::SaveFile` wrote them under the app's files, the
+                // provider lends them from there. What the reader shared
+                // or saved elsewhere is not under the app and stays.
+                UiEffect::ForgetSaved { peer, key } => {
+                    if let Err(error) = loquax::file_save::forget(&self.home, peer, key) {
+                        let _ = self.events.send(Event::Notice {
+                            v: VERSION,
+                            text: format!("not removed: {error}"),
+                        });
+                    }
+                }
                 // The public rooms' hub the Advanced page chose (1577).
                 UiEffect::RememberHash { key, hash } => {
                     if let Err(error) = loquax::config::save_hash(&self.home, key, hash) {

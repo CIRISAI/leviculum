@@ -462,6 +462,17 @@ impl Shell {
                     Ok(path) => self.outputs.push(Output::Photo(path)),
                     Err(line) => answers.push(UiEvent::Notice(line)),
                 },
+                // A deleted message's saved copies go with it (1662).
+                UiEffect::ForgetSaved { peer, key } => {
+                    match loquax::file_save::forget(&self.context.home, peer, key) {
+                        Ok(0) => {}
+                        Ok(gone) => tracing::info!(
+                            "FILES forgot {gone} saved of {} key={key:?}",
+                            short(&peer)
+                        ),
+                        Err(line) => answers.push(UiEvent::Notice(format!("not removed: {line}"))),
+                    }
+                }
                 // A file (1221): saved under the home's files/, as the
                 // phone keeps it under its app files, then the system's
                 // handler opens it.

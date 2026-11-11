@@ -190,6 +190,8 @@ impl<B> UiModel<B> {
             .collect();
         if let Some(id) = self.remove_message(peer, key) {
             self.forgotten.push(StoreWrite::ForgetMessage { key });
+            // What it saved goes with it: the new one has its own key (1662).
+            self.saved_goes(peer, Some(key));
             // The home's other devices drop the failed one too.
             if let (true, Some(id)) = (self.home_client, id) {
                 self.mark_out(MarkFlag::Deleted, alloc::vec![id]);
