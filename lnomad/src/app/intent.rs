@@ -248,6 +248,7 @@ pub fn apply(model: &mut Model, intent: Intent) -> Vec<Effect> {
             let raw = url.unwrap_or_else(|| InputBuffer::value(&model.input).to_string());
             go_to(model, raw.trim())
         }
+        Intent::Back if model.hosted && loading_past_the_page(model) => stop_loading(model),
         Intent::Back if model.hosted && !model.history.can_back() => leave_host(model),
         Intent::Back => go_back(model),
         Intent::Forward => go_forward(model),
@@ -440,6 +441,26 @@ fn dismiss(model: &mut Model) {
         model.field_focus = None;
         model.mode = Mode::Browse;
     }
+}
+
+/// A hosted browser fetches a page other than the one on screen (1669, walk
+/// 12, finding 73): a Back then means "not that one", as in any phone's
+/// browser. A first page from the host (nothing on screen yet) and the
+/// fresh copy of a cached page on screen are not this.
+fn loading_past_the_page(model: &Model) -> bool {
+    match (&model.pending, model.history.current()) {
+        (Some(pending), Some(shown)) => pending.target != *shown,
+        _ => false,
+    }
+}
+
+/// Stop the fetch in flight and stay on the page on screen
+/// ([`Effect::Cancel`], which the host's fetch says as `stopped`).
+fn stop_loading(model: &mut Model) -> Vec<Effect> {
+    model.pending = None;
+    model.pending_anchor = None;
+    model.download = None;
+    vec![Effect::Cancel]
 }
 
 #[cfg(test)]

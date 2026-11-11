@@ -929,9 +929,9 @@ mod tests {
 
     /// 1337 pass two: what the phone's fetch says back. The identify
     /// word follows the page and sets the bar's flag for its node, and for
-    /// another node only what is known (the control); a failure in the
-    /// catalogue's words is said in the reader's language and ends the
-    /// loading; a download's end is a toast.
+    /// another node only what is known (the control); a failure ends the
+    /// loading and is said on the page in the reader's language (1669); a
+    /// download's end is a toast.
     #[test]
     fn the_fetchs_words_reach_the_browser() {
         let mut model = phone();
@@ -976,10 +976,34 @@ mod tests {
             UiEvent::Browse(BrowseEvent::FailedText(no_path.clone())),
         );
         assert!(model.browse.model.pending.is_none(), "no longer loading");
-        let said = model.browse.model.toast_text.clone().expect("a toast");
-        assert_eq!(said, no_path);
-        let toast = model.browse.model.toast.clone().expect("a toast").text;
-        assert_eq!(toast, no_path.resolve(Lang::De), "said in German");
+        // Said on the page, in German, not in a toast (1669, walk 12,
+        // finding 69), and the page before is one Back away.
+        assert!(model.browse.model.toast.is_none(), "no toast");
+        assert!(
+            page_text(&model).contains("Keine Verbindung zu Marcel's node."),
+            "{}",
+            page_text(&model)
+        );
+        assert_eq!(
+            model
+                .browse
+                .model
+                .history
+                .current()
+                .map(|t| t.path.as_str()),
+            Some("/page/next.mu")
+        );
+        browse(&mut model, BrowseIntent::Back);
+        assert!(page_text(&model).contains("Hallo"), "{}", page_text(&model));
+        assert_eq!(
+            model
+                .browse
+                .model
+                .history
+                .current()
+                .map(|t| t.path.as_str()),
+            Some("/page/index.mu")
+        );
 
         update(
             &mut model,

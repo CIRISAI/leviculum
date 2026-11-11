@@ -627,6 +627,10 @@ pub struct Model {
     /// than a fresh fetch. Drives the subtle "cached" top-bar marker; cleared on
     /// the next fresh load.
     pub cached_view: bool,
+    /// The page on screen is a hosted browser's word that this target did
+    /// not come (1669, [`crate::app::event`]'s failure page): its retry
+    /// replaces the entry rather than pushing a second one.
+    pub failed: Option<Target>,
     /// lnomad's own identity fingerprint as lowercase hex. Stable for the whole
     /// session, so the IO shell sets it ONCE at model construction from
     /// [`Session::fingerprint_hex`](crate::fetch::Session::fingerprint_hex).

@@ -718,3 +718,148 @@ fn a_page_opened_again_from_explore_shows_the_cached_copy_first() {
         again.status
     );
 }
+
+/// What the fetch says of a page that did not come, as the phone's
+/// fetch hands it in.
+fn fail(model: &mut UiModel<session::Line>) {
+    update(
+        model,
+        UiEvent::Browse(BrowseEvent::FailedText(
+            lnomad::FetchError::LinkFailed.text(),
+        )),
+    );
+}
+
+/// 1669, walk 12, finding 69: a page that did not come left an empty page
+/// under "Seiten", the address field back to its placeholder, two toasts
+/// ("Link fehlgeschlagen") and no way to try again. Now the failure is the
+/// page: the bar and the address keep the node's name, the page says there
+/// was no connection to it and offers "Erneut versuchen" as a line a tap
+/// follows, which asks for the same page again; no toast. Back leaves it
+/// for where the reader came from, as from any first page.
+#[test]
+fn a_page_that_did_not_come_says_so_on_the_page_and_offers_to_try_again() {
+    let (_home, mut model) = opened();
+    let asked = open_node(&mut model);
+    assert!(
+        asked
+            .iter()
+            .any(|e| matches!(e, UiEffect::Browse(lnomad::Effect::Navigate(_)))),
+        "{asked:?}"
+    );
+    fail(&mut model);
+    let failed = screen(&model);
+    let texts: Vec<String> = failed.lines.iter().map(line_text).collect();
+    eprintln!(
+        "FACADE failed: title={:?} address={:?} toast={:?} lines={texts:?}",
+        failed.title, failed.address, failed.toast
+    );
+    assert!(!failed.loading, "no longer loading");
+    assert_eq!(failed.title, "Marcels Knoten", "the bar keeps the name");
+    assert_eq!(failed.address, "Marcels Knoten", "the address stays");
+    assert!(failed.toast.is_empty(), "no toast: {:?}", failed.toast);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Keine Verbindung zu Marcels Knoten.")),
+        "{texts:?}"
+    );
+    let retry = failed
+        .lines
+        .iter()
+        .flat_map(|l| l.runs.iter())
+        .find(|r| r.text.contains("Erneut versuchen"))
+        .expect("the retry line");
+    assert!(!retry.node.is_empty(), "a tap follows it: {retry:?}");
+    // The tap asks for the same page again, and its arrival replaces the
+    // failure: one Back from it leaves the browser.
+    let again = tap(
+        &mut model,
+        &[
+            ("verb", Java::Str("activate")),
+            ("node", Java::Str(&retry.node)),
+        ],
+    );
+    let wanted = lnomad::Target {
+        dest_hash: NODE,
+        path: "/page/index.mu".into(),
+        fields: Vec::new(),
+        is_file: false,
+    };
+    assert!(
+        again.contains(&UiEffect::Browse(lnomad::Effect::Navigate(wanted))),
+        "{again:?}"
+    );
+    assert!(screen(&model).loading);
+    arrive(&mut model, "Endlich da");
+    let loaded = screen(&model);
+    assert!(loaded
+        .lines
+        .iter()
+        .any(|l| line_text(l).contains("Endlich da")));
+    let back = tap(&mut model, &[("verb", Java::Str("back"))]);
+    assert!(back.is_empty(), "the browser gave way: {back:?}");
+    assert!(!model.browse.open, "Back leaves for Explore");
+}
+
+/// The control: the refresh of a cached copy on screen that fails keeps
+/// the copy, which the status line says is the cache's.
+#[test]
+fn a_cached_copy_whose_refresh_fails_stays() {
+    let (_home, mut model) = opened();
+    open_node(&mut model);
+    arrive(&mut model, "Zeile aus dem Speicher");
+    update(&mut model, UiEvent::Tab(TabId::Explore));
+    open_node(&mut model);
+    fail(&mut model);
+    let kept = screen(&model);
+    assert!(
+        kept.lines
+            .iter()
+            .any(|l| line_text(l).contains("Zeile aus dem Speicher")),
+        "{:?}",
+        kept.lines.iter().map(line_text).collect::<Vec<_>>()
+    );
+}
+
+/// 1669, walk 12, finding 73: Back while a page of the node is on its way
+/// left the browser for Explore (STRUDEL's "Sites", Back after 0.9 s), and
+/// the fetch's end said `superseded`. Back now stops the fetch and stays on
+/// the page on screen; the cancel is what the fetch says as `stopped`
+/// (`loquax::browse_fetch`). A second Back leaves, as from any first page.
+#[test]
+fn back_while_a_page_comes_stops_it_and_stays_on_the_page() {
+    let (_home, mut model) = opened();
+    open_node(&mut model);
+    arrive(&mut model, "`[Sites`:/page/sites.mu]");
+    let sites = screen(&model)
+        .lines
+        .iter()
+        .flat_map(|l| l.runs.iter())
+        .find(|r| r.text.contains("Sites"))
+        .map(|r| r.node.clone())
+        .expect("the link");
+    let asked = tap(
+        &mut model,
+        &[("verb", Java::Str("activate")), ("node", Java::Str(&sites))],
+    );
+    assert!(
+        asked
+            .iter()
+            .any(|e| matches!(e, UiEffect::Browse(lnomad::Effect::Navigate(_)))),
+        "{asked:?}"
+    );
+    assert!(screen(&model).loading);
+    let back = tap(&mut model, &[("verb", Java::Str("back"))]);
+    assert_eq!(back, vec![UiEffect::Browse(lnomad::Effect::Cancel)]);
+    assert!(model.browse.open, "still in the browser");
+    let stayed = screen(&model);
+    assert!(!stayed.loading);
+    assert!(
+        stayed.lines.iter().any(|l| line_text(l).contains("Sites")),
+        "the index page stands"
+    );
+    let back = tap(&mut model, &[("verb", Java::Str("back"))]);
+    assert!(back.is_empty(), "{back:?}");
+    assert!(!model.browse.open, "the second Back leaves");
+}

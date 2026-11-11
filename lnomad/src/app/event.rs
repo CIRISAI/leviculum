@@ -126,11 +126,17 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
         AppEvent::PageLoaded { doc, title } => apply_loaded(model, doc, title),
         AppEvent::Intent(intent) => super::intent::apply(model, intent),
         AppEvent::LoadFailed(msg) => {
+            if show_failed(model) {
+                return Vec::new();
+            }
             model.pending = None;
             model.set_toast(ToastKind::Error, msg);
             Vec::new()
         }
         AppEvent::LoadFailedText(text) => {
+            if show_failed(model) {
+                return Vec::new();
+            }
             model.pending = None;
             model.say(ToastKind::Error, text);
             Vec::new()
@@ -245,33 +251,12 @@ pub fn update(model: &mut Model, event: AppEvent) -> Vec<Effect> {
 pub(crate) fn apply_loaded(model: &mut Model, doc: MicronDocument, title: String) -> Vec<Effect> {
     let pending = model.pending.take();
     let anchor = model.pending_anchor.take();
-    // A fresh fetch, not a cache hit: clear the "cached" marker.
-    model.cached_view = false;
-    model.doc = doc;
-    // A fresh document replaces the old fields: clear the store so the relayout
-    // lays them out from the new prefill, then rebuild the editable store from it.
-    model.field_state.clear();
-    model.relayout(content_width(model.size.0));
-    model.rebuild_field_state();
-    model.scroll = 0;
-    model.title = title;
-    model.dismiss_toast();
-    // A fresh page invalidates any focus/hover cursor into the old link set, and
-    // any search match highlights against the old page.
-    model.focus = None;
-    model.field_focus = None;
-    model.mode = Mode::Browse;
-    model.hover = None;
-    model.matches.clear();
-    model.current_match = None;
+    show_doc(model, doc, title);
     let loaded_target = pending.map(|pending| {
-        model.current_dest = Some(pending.target.dest_hash);
-        match pending.action {
-            HistoryAction::Push => model.history.visit(pending.target.clone()),
-            HistoryAction::Goto(idx) => model.history.goto(idx),
-        }
+        enter_history(model, &pending);
         pending.target
     });
+    model.failed = None;
     // The loaded page's node may differ from the previous one: refresh the
     // identify display flag from what the model has learned so far. The IO
     // shell follows up with the session's authoritative answer for this load.
@@ -404,6 +389,102 @@ pub(crate) fn start_page(lang: Lang, hosted: bool) -> String {
 
 /// The title shown for the start screen, in place of a page's node name.
 pub(crate) const START_TITLE: &str = "lnomad";
+
+/// Put `doc` on screen under `title`, at its top, every cursor into the
+/// page before gone: a fresh fetch's page, or a hosted browser's failure
+/// page ([`show_failed`]).
+fn show_doc(model: &mut Model, doc: MicronDocument, title: String) {
+    // A fresh fetch, not a cache hit: clear the "cached" marker.
+    model.cached_view = false;
+    model.doc = doc;
+    // A fresh document replaces the old fields: clear the store so the relayout
+    // lays them out from the new prefill, then rebuild the editable store from it.
+    model.field_state.clear();
+    model.relayout(content_width(model.size.0));
+    model.rebuild_field_state();
+    model.scroll = 0;
+    model.title = title;
+    model.dismiss_toast();
+    // A fresh page invalidates any focus/hover cursor into the old link set, and
+    // any search match highlights against the old page.
+    model.focus = None;
+    model.field_focus = None;
+    model.mode = Mode::Browse;
+    model.hover = None;
+    model.matches.clear();
+    model.current_match = None;
+}
+
+/// The navigation `pending` arrived: its destination is the current one and
+/// the history moves to it. The retry of a failure page replaces that page's
+/// entry rather than pushing the same target a second time (1669).
+fn enter_history(model: &mut Model, pending: &Pending) {
+    model.current_dest = Some(pending.target.dest_hash);
+    match pending.action {
+        HistoryAction::Push
+            if model.failed.as_ref() == Some(&pending.target)
+                && model.history.current() == Some(&pending.target) => {}
+        HistoryAction::Push => model.history.visit(pending.target.clone()),
+        HistoryAction::Goto(idx) => model.history.goto(idx),
+    }
+}
+
+/// A hosted browser's page that did not come (1669, walk 12, finding 69:
+/// the phone showed an empty page under "Pages", the address field back to
+/// its placeholder and two toasts in jargon, with no way to try again). The
+/// failure is the page now: its address stays the target's, it says that
+/// there was no connection to the page's node by the name the host gave it
+/// ([`Model::label`]) and offers to try again as a link to the same target,
+/// and it is an entry of the history, so Back leaves it as it leaves a
+/// page. Nothing of it is cached or pinned. `false`, and nothing changed,
+/// where it does not apply: the standalone browser, a download, no fetch
+/// out, and the refresh of a cached copy on screen, which stays.
+fn show_failed(model: &mut Model) -> bool {
+    if !model.hosted {
+        return false;
+    }
+    let Some(pending) = model.pending.clone() else {
+        return false;
+    };
+    if pending.target.is_file
+        || (model.cached_view && model.history.current() == Some(&pending.target))
+    {
+        return false;
+    }
+    model.pending = None;
+    model.pending_anchor = None;
+    let name = model
+        .label
+        .clone()
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| short_hex(&pending.target.dest_hash));
+    let said = with(StrId::FetchNoConnection, escape_micron(&name)).resolve(model.lang);
+    let micron = format!(
+        "\n{said}\n\n`[{}`{}]\n",
+        escape_micron(StrId::FetchTryAgain.text(model.lang)),
+        target_url(&pending.target)
+    );
+    show_doc(model, leviculum_micron::parse(&micron), name);
+    enter_history(model, &pending);
+    model.failed = Some(pending.target);
+    if let Some(dest) = model.current_dest {
+        model.identifying = model.identify_known.contains(&dest);
+    }
+    true
+}
+
+/// `text` as micron shows it verbatim: the escape before each character
+/// micron reads as markup inside a line.
+fn escape_micron(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '`' | '\\' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// Show the start screen and open the places panel over it.
 ///

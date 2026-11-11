@@ -278,9 +278,16 @@ async fn serve(
                 if let Some(handle) = inflight.take() {
                     handle.abort();
                     // A page whose fetch ends here says so (1667, walk 11,
-                    // finding 65: an abandoned fetch left no end line).
+                    // finding 65: an abandoned fetch left no end line): a
+                    // cancel is the reader stopping it, a Back or the
+                    // browser left (1669, walk 12, finding 73), anything
+                    // else another ask taking its place.
                     if let Some(target) = asked_page.take() {
-                        crate::events::browse_fetch(&target.dest_hash, &target.path, "aborted", "superseded");
+                        let why = match ask {
+                            Ask::Cancel => "stopped",
+                            _ => "superseded",
+                        };
+                        crate::events::browse_fetch(&target.dest_hash, &target.path, "aborted", why);
                     }
                 }
                 generation = generation.wrapping_add(1);

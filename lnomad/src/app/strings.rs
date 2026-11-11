@@ -146,6 +146,9 @@ leviculum_ui::catalogue! {
     FetchSave = "browser_fetch_save", "could not save download: %1$s", "Download nicht gespeichert: %1$s";
     FetchDecode = "browser_fetch_decode", "malformed response payload", "fehlerhafte Antwort";
     FetchNode = "browser_fetch_node", "node error: %1$s", "Knotenfehler: %1$s";
+    // A hosted browser's page that did not come, said on the page (1669).
+    FetchNoConnection = "browser_fetch_no_connection", "No connection to %1$s.", "Keine Verbindung zu %1$s.";
+    FetchTryAgain = "browser_fetch_try_again", "Try again", "Erneut versuchen";
     // The name search's rows (1227).
     NameRow = "browser_name_row", "%1$s  ·  %2$s  ·  %3$s%4$s", "%1$s  ·  %2$s  ·  %3$s%4$s";
     OneHop = "browser_one_hop", "1 hop", "1 Sprung";
