@@ -136,6 +136,11 @@ pub struct Look {
     /// joining, fetched N of M, unreachable. None on a board that is no
     /// device of a home, which draws the bar as before.
     pub home: Option<loquax::home::board::Word>,
+    /// The board's path to its home (1478): the medium of its first hop
+    /// and its hops, which the home's word says where it is connected,
+    /// and whose absence it says where it is not. None where the board
+    /// holds no path.
+    pub way: Option<loquax::home::board::Way>,
     /// An error that is a state, not a log line (1493): a write that did
     /// not reach the flash, a join the record could not keep. It takes
     /// the home word's place at the bar's right end until it clears.
@@ -157,6 +162,7 @@ impl Look {
             caret: None,
             row: 0,
             home: None,
+            way: None,
             fault: None,
             map: crate::map::Overlay {
                 hint: None,
@@ -337,7 +343,9 @@ pub fn lines_seen(
 
 /// The word at the top bar's right end (1564): a fault, else the home's
 /// state (1561 took the type switch's note out with the held house key), each one short word
-/// that stands on its own ([`Word::bar`](loquax::home::board::Word::bar)).
+/// that stands on its own ([`Word::bar`](loquax::home::board::Word::bar)),
+/// or since 1478 the way to the home where the board knows it
+/// ([`Word::bar_by`](loquax::home::board::Word::bar_by)).
 /// None on a board that is no device of a home and has nothing to say.
 pub fn bar_word(look: &Look) -> Option<alloc::string::String> {
     use loquax::ui::strings::{StrId, Text as Words};
@@ -350,7 +358,24 @@ pub fn bar_word(look: &Look) -> Option<alloc::string::String> {
         };
         return Some(Words::key(id).resolve(look.lang));
     }
-    look.home.map(|word| word.bar().resolve(look.lang))
+    look.home
+        .map(|word| word.bar_by(look.way).resolve(look.lang))
+}
+
+/// [`bar_word`] in at most `room` cells (1478): the long form where it
+/// fits, else its short form where there is one and that fits, else none.
+/// The word stands whole or not at all (1564).
+pub fn bar_word_within(look: &Look, room: usize) -> Option<alloc::string::String> {
+    let long = bar_word(look)?;
+    if fit_width(&long) <= room {
+        return Some(long);
+    }
+    let short = look
+        .home
+        .filter(|_| look.fault.is_none())
+        .and_then(|word| word.bar_by_short(look.way))?
+        .resolve(look.lang);
+    (fit_width(&short) <= room).then_some(short)
 }
 
 /// The top bar (1564): in a chat the peer's avatar, then `title`, the
@@ -369,13 +394,12 @@ fn top_bar(top: &TopBar, title: &Text, look: &Look, cols: usize) -> RLine {
     let title = title.resolve(look.lang);
     // A cell before the title, one closing the bar.
     let room = cols.saturating_sub(bar.cells.len() + 2);
-    let word = bar_word(look).unwrap_or_default();
-    let words = fit_width(&word);
     let whole = fit_width(&narrow(&title));
-    let word = match words > 0 && whole + 1 + words <= room {
-        true => word,
-        false => alloc::string::String::new(),
+    let word = match room.checked_sub(whole + 1) {
+        Some(left) => bar_word_within(look, left).unwrap_or_default(),
+        None => alloc::string::String::new(),
     };
+    let words = fit_width(&word);
     let title = cut(&title, room);
     push(
         &mut bar,

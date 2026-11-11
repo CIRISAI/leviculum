@@ -341,8 +341,8 @@ impl Overview {
             },
         );
         // The list's bar's word (1564): one short word, whole or none.
-        let word = crate::screen::bar_word(look).unwrap_or_default();
         let room = cols.saturating_sub(bar.cells.len() + 2);
+        let word = crate::screen::bar_word_within(look, room).unwrap_or_default();
         if !word.is_empty() && word.chars().count() <= room {
             let gap = cols.saturating_sub(bar.cells.len() + word.chars().count() + 1);
             push(&mut bar, &" ".repeat(gap), chrome);

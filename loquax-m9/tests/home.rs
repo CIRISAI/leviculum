@@ -7,7 +7,7 @@ use leviculum_core::Identity;
 use leviculum_lxmf::{DeliveryMethod, Message};
 use leviculum_ui::style::RLine;
 use loquax::home::ask::Verb;
-use loquax::home::board::Word;
+use loquax::home::board::{Medium, Way, Word};
 use loquax::home::code::HomeCode;
 use loquax::home::wire::Entry;
 use loquax::home::{lxmf_address, KIND_RECEIVED, KIND_SENT};
@@ -66,7 +66,12 @@ fn the_top_bar_says_the_page_and_one_word() {
     };
     for (word, en, de) in [
         (Word::Joining, "Connecting…", "Verbindet…"),
-        (Word::Unreachable, "Disconnected", "Getrennt"),
+        // No way known: since 1478 the bar says there is none.
+        (
+            Word::Unreachable,
+            "No way to mailbox",
+            "Kein Weg zum Postfach",
+        ),
         (fetched, "Fetching…", "Holt ab…"),
         (Word::Connected, "Connected", "Verbunden"),
         (Word::Refused, "Refused", "Abgelehnt"),
@@ -77,6 +82,127 @@ fn the_top_bar_says_the_page_and_one_word() {
             assert_eq!(line.chars().count(), COLS, "{line:?}");
             let rest = line.trim().strip_prefix("Chats").map(str::trim);
             assert_eq!(rest, Some(said), "{line:?}");
+        }
+    }
+}
+
+/// The bar tells the way to the mailbox per interface (1478): connected
+/// over a path the board holds, the medium of its first hop and the hops;
+/// unreachable with no path at all, that there is none. A word whose way
+/// is not known, or a state the way does not change, says the 1564 word.
+/// A bar too narrow for the long form beside its title says the short
+/// one, the way without the mailbox's name (the default type's 35 cells
+/// hold "Postfach über Funk · 2 Stationen" beside "Chats" in neither
+/// language; the very small type's 53 hold every long form). Hops are
+/// said as stations, the catalogue's word for them (1618).
+#[test]
+fn the_top_bar_says_the_way_to_the_mailbox() {
+    const WIDE: usize = 53;
+    let me = Identity::generate(&mut OsRng);
+    let model = home::model(lxmf_address(&me.public_key_bytes()).expect("address"));
+    let scene = screen::scene(&model);
+    let bar = |word: Word, way: Option<Way>, lang, cols| {
+        let look = Look {
+            home: Some(word),
+            way,
+            lang,
+            ..Look::of(&model)
+        };
+        row_text(&screen::lines(&scene, &look, cols, ROWS)[0])
+    };
+    let radio = |hops| {
+        Some(Way {
+            medium: Medium::Radio,
+            hops,
+        })
+    };
+    let cable = |hops| {
+        Some(Way {
+            medium: Medium::Cable,
+            hops,
+        })
+    };
+    let fetched = Word::Fetched { taken: 3, of: None };
+    // (word, way, [wide en, wide de], [narrow en, narrow de])
+    let cases = [
+        (
+            Word::Connected,
+            radio(2),
+            [
+                "Mailbox over radio · 2 stations",
+                "Postfach über Funk · 2 Stationen",
+            ],
+            ["Radio · 2 stations", "Funk · 2 Stationen"],
+        ),
+        (
+            Word::Connected,
+            radio(1),
+            [
+                "Mailbox over radio · 1 station",
+                "Postfach über Funk · 1 Station",
+            ],
+            ["Radio · 1 station", "Funk · 1 Station"],
+        ),
+        (
+            Word::Connected,
+            cable(3),
+            [
+                "Mailbox over cable · 3 stations",
+                "Postfach über Kabel · 3 Stationen",
+            ],
+            ["Cable · 3 stations", "Kabel · 3 Stationen"],
+        ),
+        (
+            Word::Connected,
+            cable(1),
+            [
+                "Mailbox over cable · 1 station",
+                "Postfach über Kabel · 1 Station",
+            ],
+            ["Cable · 1 station", "Kabel · 1 Station"],
+        ),
+        (
+            Word::Unreachable,
+            None,
+            ["No way to mailbox", "Kein Weg zum Postfach"],
+            ["No way to mailbox", "Kein Weg zum Postfach"],
+        ),
+        // A path held and no answer: the way is there, the mailbox did
+        // not answer over it.
+        (
+            Word::Unreachable,
+            radio(2),
+            ["Disconnected", "Getrennt"],
+            ["Disconnected", "Getrennt"],
+        ),
+        // Connected with the path since expired: the ask got through.
+        (
+            Word::Connected,
+            None,
+            ["Connected", "Verbunden"],
+            ["Connected", "Verbunden"],
+        ),
+        (
+            fetched,
+            radio(2),
+            ["Fetching…", "Holt ab…"],
+            ["Fetching…", "Holt ab…"],
+        ),
+        (
+            Word::Joining,
+            None,
+            ["Connecting…", "Verbindet…"],
+            ["Connecting…", "Verbindet…"],
+        ),
+    ];
+    for (word, way, wide, narrow) in cases {
+        for (cols, said) in [(WIDE, wide), (COLS, narrow)] {
+            for (lang, said) in [(Lang::En, said[0]), (Lang::De, said[1])] {
+                let line = bar(word, way, lang, cols);
+                assert_eq!(line.chars().count(), cols, "{line:?}");
+                let rest = line.trim().strip_prefix("Chats").map(str::trim);
+                assert_eq!(rest, Some(said), "{word:?} {way:?} {cols} {line:?}");
+            }
         }
     }
 }

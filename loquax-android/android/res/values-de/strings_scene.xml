@@ -628,4 +628,13 @@
     <string name="m9_bar_fetching">Holt ab…</string>
     <string name="m9_bar_refused">Abgelehnt</string>
     <string name="m9_bar_not_saved">Nicht gespeichert</string>
+    <string name="m9_bar_way_radio">Postfach über Funk · %1$d Stationen</string>
+    <string name="m9_bar_way_radio_one">Postfach über Funk · %1$d Station</string>
+    <string name="m9_bar_way_cable">Postfach über Kabel · %1$d Stationen</string>
+    <string name="m9_bar_way_cable_one">Postfach über Kabel · %1$d Station</string>
+    <string name="m9_bar_no_way">Kein Weg zum Postfach</string>
+    <string name="m9_bar_radio">Funk · %1$d Stationen</string>
+    <string name="m9_bar_radio_one">Funk · %1$d Station</string>
+    <string name="m9_bar_cable">Kabel · %1$d Stationen</string>
+    <string name="m9_bar_cable_one">Kabel · %1$d Station</string>
 </resources>

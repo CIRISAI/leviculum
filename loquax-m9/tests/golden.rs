@@ -27,7 +27,7 @@ use leviculum_lxmf::lev::{
 use leviculum_ui::input::InputBuffer;
 use leviculum_ui::style::RLine;
 use leviculum_ui::text::fit_width;
-use loquax::home::board::Word;
+use loquax::home::board::{Medium, Way, Word};
 use loquax::outbox::OutboxEvent;
 use loquax::store::Store;
 use loquax::ui::scene::{LayoutClass, Scene};
@@ -1358,10 +1358,16 @@ fn the_list_and_the_chat_in_the_tiny_size_are_golden_frames() {
 /// The board's chats list (the fixture's, in English) with `word` at the
 /// top bar's right end, as the board's look carries the home's word.
 fn list_with_word(word: Option<Word>) -> (Frame, String) {
+    list_with_way(word, None)
+}
+
+/// [`list_with_word`] with the board's way to its home (1478).
+fn list_with_way(word: Option<Word>, way: Option<Way>) -> (Frame, String) {
     let mut model = loquax_m9::fixture::model();
     model.lang = Lang::En;
     let look = Look {
         home: word,
+        way,
         ..Look::of(&model)
     };
     let scene = screen::scene(&model);
@@ -1416,12 +1422,26 @@ fn the_homes_words_in_the_top_bar_are_golden_frames() {
     check("m9-joining.png", &joining);
 
     let (none, plain) = list_with_word(None);
+    // Out of reach with no path held: since 1478 the bar says there is
+    // no way, where it said "Disconnected".
     let (offline, bar) = list_with_word(Some(Word::Unreachable));
     assert!(
-        bar.trim_end().ends_with("Disconnected"),
+        bar.trim_end().ends_with("No way to mailbox"),
         "{bar:?} against {plain:?}"
     );
     check("m9-offline.png", &offline);
+    // `m9-way-radio.png` (1478): connected over a radio path of two hops,
+    // in the short form: the long one does not fit beside "Chats" in the
+    // default type's 35 cells.
+    let (way, bar) = list_with_way(
+        Some(Word::Connected),
+        Some(Way {
+            medium: Medium::Radio,
+            hops: 2,
+        }),
+    );
+    assert!(bar.trim_end().ends_with(" Radio · 2 stations"), "{bar:?}");
+    check("m9-way-radio.png", &way);
     let (online, bar) = list_with_word(Some(Word::Connected));
     assert!(bar.trim_end().ends_with(" Connected"), "{bar:?}");
     assert!(!bar.contains("You"), "{bar:?}");

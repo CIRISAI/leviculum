@@ -703,6 +703,32 @@ impl Word {
         })
     }
 
+    /// The bar's word with the way to the home in it (1478): where the
+    /// last ask got through and the board holds a path, which medium its
+    /// first hop takes and how many hops it is, said as stations, the
+    /// catalogue's word for them (1618: "Mailbox over radio · 2
+    /// stations"); where the last ask found nothing and the board holds no
+    /// path at all, that there is none ("No way to mailbox"). Every other
+    /// state, and a state whose way is not known, says [`Word::bar`].
+    pub fn bar_by(self, way: Option<Way>) -> Text {
+        match (self, way) {
+            (Self::Connected, Some(way)) => way.text(),
+            (Self::Unreachable, None) => Text::key(StrId::M9BarNoWay),
+            (word, _) => word.bar(),
+        }
+    }
+
+    /// The shorter form of [`Word::bar_by`] where it has one, for a bar
+    /// whose room does not hold the long one: the way without the
+    /// mailbox's name ("Radio · 2 stations"), which the bar's right end only
+    /// ever speaks of. None where the long form is already the short one.
+    pub fn bar_by_short(self, way: Option<Way>) -> Option<Text> {
+        match (self, way) {
+            (Self::Connected, Some(way)) => Some(way.short()),
+            _ => None,
+        }
+    }
+
     /// The word for a client in `session`: `admitted` or still joining,
     /// with `progress` of the pull in flight or just ended.
     pub fn of(session: &Session, admitted: bool, progress: Option<Progress>) -> Self {
@@ -720,6 +746,48 @@ impl Word {
             (Reach::Unreachable, true, _) => Self::Unreachable,
             (_, true, _) => Self::Connected,
         }
+    }
+}
+
+/// The medium a path to the home leaves the board on (1478): what its
+/// first hop's interface is, as the board names its interfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Medium {
+    /// A radio interface: LoRa.
+    Radio,
+    /// A cable: the serial line to a host's daemon.
+    Cable,
+}
+
+/// The board's path to its home (1478): the medium of its first hop and
+/// the hops the path table holds, 1 for a home the board hears directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Way {
+    pub medium: Medium,
+    pub hops: u8,
+}
+
+impl Way {
+    /// "Mailbox over radio · 2 stations", "Mailbox over cable · 1 station".
+    pub fn text(self) -> Text {
+        let id = match (self.medium, self.hops == 1) {
+            (Medium::Radio, true) => StrId::M9BarWayRadioOne,
+            (Medium::Radio, false) => StrId::M9BarWayRadio,
+            (Medium::Cable, true) => StrId::M9BarWayCableOne,
+            (Medium::Cable, false) => StrId::M9BarWayCable,
+        };
+        Text::Key(id, alloc::vec![Arg::Int(i64::from(self.hops))])
+    }
+
+    /// "Radio · 2 stations", "Cable · 1 station": [`Way::text`] for a narrow bar.
+    pub fn short(self) -> Text {
+        let id = match (self.medium, self.hops == 1) {
+            (Medium::Radio, true) => StrId::M9BarRadioOne,
+            (Medium::Radio, false) => StrId::M9BarRadio,
+            (Medium::Cable, true) => StrId::M9BarCableOne,
+            (Medium::Cable, false) => StrId::M9BarCable,
+        };
+        Text::Key(id, alloc::vec![Arg::Int(i64::from(self.hops))])
     }
 }
 

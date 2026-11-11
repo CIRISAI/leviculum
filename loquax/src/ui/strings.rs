@@ -796,6 +796,20 @@ leviculum_ui::catalogue! {
     M9BarFetching = "m9_bar_fetching", "Fetching…", "Holt ab…";
     M9BarRefused = "m9_bar_refused", "Refused", "Abgelehnt";
     M9BarNotSaved = "m9_bar_not_saved", "Not saved", "Nicht gespeichert";
+    // The way to the home in the top bar (1478): the medium its first hop
+    // takes and the path's hops, or that the board holds no path at all.
+    M9BarWayRadio = "m9_bar_way_radio", "Mailbox over radio · %1$d stations", "Postfach über Funk · %1$d Stationen";
+    M9BarWayRadioOne = "m9_bar_way_radio_one", "Mailbox over radio · %1$d station", "Postfach über Funk · %1$d Station";
+    M9BarWayCable = "m9_bar_way_cable", "Mailbox over cable · %1$d stations", "Postfach über Kabel · %1$d Stationen";
+    M9BarWayCableOne = "m9_bar_way_cable_one", "Mailbox over cable · %1$d station", "Postfach über Kabel · %1$d Station";
+    M9BarNoWay = "m9_bar_no_way", "No way to mailbox", "Kein Weg zum Postfach";
+    // The same without the mailbox's name, for a bar the long form does
+    // not fit beside its title (at the default type, "Chats" leaves 27
+    // cells).
+    M9BarRadio = "m9_bar_radio", "Radio · %1$d stations", "Funk · %1$d Stationen";
+    M9BarRadioOne = "m9_bar_radio_one", "Radio · %1$d station", "Funk · %1$d Station";
+    M9BarCable = "m9_bar_cable", "Cable · %1$d stations", "Kabel · %1$d Stationen";
+    M9BarCableOne = "m9_bar_cable_one", "Cable · %1$d station", "Kabel · %1$d Station";
 }
 
 /// [`leviculum_ui::strings::format`] over Loquax's catalogue.
