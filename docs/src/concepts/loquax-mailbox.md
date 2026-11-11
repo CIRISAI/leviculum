@@ -609,9 +609,26 @@ bytes a row.
 
 ## 5. Every name the mailbox hears (1643)
 
+**Two behaviours, not two modes (decided 2026-11-11, Lew; [the expedition
+map](loquax-expedition-map.md), section 11).** The mailbox split of
+2026-11-10 set two modes a user picks between: a Loquax on its own, or a
+Loquax with an external mailbox that takes its directory from the mailbox
+and hears no mesh. They become two behaviours one app switches between by
+itself. Every Loquax is always a home of its own; an external mailbox,
+once set up, is a second home of the same identity. While that mailbox is
+in reach, the device rests as its client, the behaviour this section
+describes; when it is not, the device is the node and hears the mesh
+itself. The first-start question on Android retires with the modes. This
+depends on the N homes of [N homes under one identity](loquax-homes.md),
+of which nothing is built; until they are, the two modes below are what
+runs. **Open:** what the node behaviour costs a phone's battery, which
+nobody has measured on a real phone; a bad number means the switch needs
+a brake ([what a Loquax Mailbox is](loquax-mailbox-roles.md), M6).
+
 Lew, 2026-11-10 (the mailbox split, step 3): a phone with an external
 mailbox takes its whole directory from the mailbox and hears no mesh of
-its own, so a stranger nobody wrote to yet stayed a hash on it. The
+its own while it rests as the mailbox's client, so a stranger nobody
+wrote to yet stayed a hash on it. The
 archive's name entries cannot carry them: every archive entry wakes the
 devices, and 1136 limited them to peers the user has a relation to for
 that reason. The names get a table of their own beside the pages. Why the

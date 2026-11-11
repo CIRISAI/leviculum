@@ -7,9 +7,9 @@ Decided by Lew on 2026-11-11 (order 1677, Refs #232). Part of the
 [the propagation node](loquax-mailbox.md).
 
 This page says how far a Loquax Mailbox is a Reticulum node. Each rule is
-an invariant with a number, **M1** to **M5**, so later orders cite it; each
+an invariant with a number, **M1** to **M6**, so later orders cite it; each
 says what enforces it today and what is not built yet. The open points
-carry numbers too, **O1** to **O5**.
+carry numbers too, **O1** to **O6**.
 
 ## M1. The Mailbox is an LXMF endpoint with a device sync, not a node
 
@@ -152,3 +152,36 @@ cannot read yet.
 **O5, the LoRa cadence for the Mailbox's announces, not built.** The
 Mailbox announces at start and every 360 minutes on every interface,
 `ANNOUNCE_EVERY` (`loquax/src/home/daemon.rs:74`), whatever moves.
+
+## M6. Every Loquax is a home; an external Mailbox is a second one
+
+Decided by Lew on 2026-11-11 ([the expedition map](loquax-expedition-map.md),
+section 11). The mailbox-first decision of 2026-11-10 had two modes the
+user picks at the first start on Android: the Mailbox on the phone, or an
+external one the phone is a client of. They become two behaviours of one
+app:
+
+- Every Loquax is always a home of its own, holding the identity, its
+  store and its ratchets, as the Mailbox on the phone does today
+  (`loquax-android/src/mailbox.rs`).
+- An external Mailbox, once set up, is a second home of the same
+  identity, the N homes of [N homes under one identity](loquax-homes.md).
+- While the external Mailbox is in reach, the device rests as its
+  client: it takes the directory, the names and the pages from it and
+  hears no mesh of its own ([the propagation node](loquax-mailbox.md),
+  section 5). When the Mailbox is out of reach, the device is the node:
+  its own home fans out, collects and hears the mesh, and the homes
+  reconcile when they see each other again.
+- The app switches by reachability; the user picks nothing. The
+  first-start question on Android retires. Setting up an external
+  Mailbox stays the one step a user takes.
+
+What enforces it today: nothing. It depends on the N homes, of which
+nothing is built, and on the phone as a full node
+([the phone as a full node](loquax-phone-node.md)), a concept with nothing
+built. Until both land the two modes run as built.
+
+**O6, the battery.** What the node behaviour costs a phone's battery has
+not been measured on a real phone. A bad number means the switch needs a
+brake (for instance a longer wait before the device becomes the node);
+the measurement comes before the switch is built.

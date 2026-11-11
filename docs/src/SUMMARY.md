@@ -41,6 +41,7 @@
   - [Loquax: the propagation node, and who you talk to](concepts/loquax-mailbox.md)
   - [Loquax: the map](concepts/loquax-map.md)
   - [Loquax: tracks on the map](concepts/loquax-tracks.md)
+  - [Loquax: the expedition map](concepts/loquax-expedition-map.md)
   - [Loquax: map data over Reticulum](concepts/loquax-map-over-reticulum.md)
   - [Loquax: the home node](concepts/loquax-home-node.md)
   - [Loquax: what a Loquax Mailbox is](concepts/loquax-mailbox-roles.md)
