@@ -3200,6 +3200,11 @@ pub enum UiEvent {
     /// The profile (1443), opened or closed: [`intent::Intent::Profile`],
     /// and Back from it.
     Profile { open: bool },
+    /// A message's Info (1457), the window's bubble menu: the message
+    /// `key` of `peer`'s chat in the detail view the terminal opens with
+    /// `details`, or `None` to close it. The window draws it from
+    /// [`info::MessageInfo`] as the phone does.
+    Info(Option<([u8; 16], u64)>),
     /// What the shell knows of the reader for the profile, anew.
     ProfileFacts(Box<profile::ProfileFacts>),
     /// What the mailbox said of itself (1642, `/about`), or that it is too
@@ -3991,6 +3996,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::StopShare { peer } => model.stop_share(peer),
         UiEvent::ShareFix { peer } => model.share_fix(peer),
         UiEvent::Profile { open } => model.show_profile(open),
+        UiEvent::Info(at) => model.show_info(at),
         UiEvent::ProfileFacts(facts) => {
             model.profile = *facts;
             Vec::new()

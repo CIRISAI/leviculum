@@ -1629,7 +1629,15 @@ pub fn share_words(share: &super::share::Share, now: i64) -> Text {
 pub fn share_chip<B>(model: &UiModel<B>, peer: &[u8; 16]) -> Option<ShareChip> {
     let share = model.share(peer)?;
     let now = model.now.map_or(share.started_at, |now| now.unix_secs);
-    let words = share_words(share, now);
+    let words = match model.bar.by_hand {
+        // A shell without a receiver shares the position entered by hand
+        // (1371): the chip says so (1457), as the position sheet does.
+        true => Text::Join(Vec::from([
+            share_words(share, now),
+            Text::key(StrId::FixByHand),
+        ])),
+        false => share_words(share, now),
+    };
     Some(ShareChip {
         id: NodeId::ShareChip,
         a11y: A11y::of(NodeId::ShareChip, Role::Chip, words.clone()),

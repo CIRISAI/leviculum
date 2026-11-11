@@ -201,6 +201,36 @@ pub fn message_info<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<M
     })
 }
 
+impl<B> UiModel<B> {
+    /// [`super::UiEvent::Info`]: the message `key` of `peer`'s chat in the
+    /// detail view, the terminal's `details` on it (1457); `None`, or a
+    /// message not there, closes it.
+    pub(super) fn show_info(&mut self, at: Option<([u8; 16], u64)>) -> Vec<super::UiEffect> {
+        self.detail = at.and_then(|(peer, key)| {
+            let c = self.conversations.iter().position(|c| c.peer == peer)?;
+            let m = self.conversations[c]
+                .messages
+                .iter()
+                .position(|m| m.activity == key)?;
+            Some((c, m))
+        });
+        if self.detail.is_some() {
+            self.profile_open = false;
+        }
+        self.detail_scroll = 0;
+        Vec::new()
+    }
+
+    /// The Info of the message whose detail view is up, as the window
+    /// draws it (1457); none while none is.
+    pub fn info_shown(&self) -> Option<MessageInfo> {
+        let (c, m) = self.detail?;
+        let conversation = self.conversations.get(c)?;
+        let key = conversation.messages.get(m)?.activity;
+        message_info(self, conversation.peer, key)
+    }
+}
+
 /// The group's counts of our message `id`, and since 1466 a row per member
 /// with its rung and since when (proof, device, read): none where `peer` is
 /// no group.
