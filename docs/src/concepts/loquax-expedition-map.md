@@ -437,15 +437,13 @@ Additions (decided):
      home fans it out. This is the path a phone in mailbox mode needs,
      since by the decision of 2026-11-10 it does not listen to the mesh
      itself, and it is the path Columba and Sideband members share
-     through 1307g. Open: the copy must keep the writer, since a
-     position read from a copy lands under the group's address today.
-     The tree as read on 2026-11-11 supports the mechanism, not yet
-     shown on a device: the group's copy carries every field of the
-     original but the custom ones verbatim, the telemetry field
-     included (`copy` (`loquax/src/home/group.rs:1397`), the field
-     loop at lines 1407 to 1426), and its LXMF source is the group;
-     `read` (`loquax/src/telemetry.rs:166`) books a plain telemetry
-     field under the message's source.
+     through 1307g. The copy keeps the writer: the group's copy carries
+     every field of the original but the custom ones verbatim, the
+     telemetry field included (`copy` (`loquax/src/home/group.rs:1397`),
+     the field loop at lines 1407 to 1426), and its LXMF source is the
+     group, so `read` (`loquax/src/telemetry.rs:169`) books a plain
+     telemetry field under the writer `lev.group_copy` names, not under
+     the group the copy came from (1687).
    - *Home out of reach* (the field): the position announce sealed
      under the group key. Announces travel several hops with no host,
      it is one transmission for all, and only members can read it. The
