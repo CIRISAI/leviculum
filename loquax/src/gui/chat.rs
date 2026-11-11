@@ -364,6 +364,14 @@ impl App {
                 t,
             ));
         }
+        // Fetch now (1457): the terminal's `fetch`, the phone's pull, for
+        // a reader who will not wait for the next round.
+        actions.push(self.icon_action(
+            Icon::Fetch,
+            self.word(Intent::Pull.label()),
+            Message::Intent(Intent::Pull),
+            t,
+        ));
         actions.push(self.icon_action(
             Icon::Settings,
             self.word(StrId::Settings),
@@ -1557,7 +1565,13 @@ impl App {
         };
         let bar = self.chat_bar(open, t);
         let messages = self.groups(open, t);
-        let mut pane = column![bar, messages];
+        let mut pane = column![bar];
+        // Our position share running here (1457): the phone's chip, its
+        // time left and its Stop.
+        if let Some(chip) = &open.share {
+            pane = pane.push(self.share_chip(chip, t));
+        }
+        let mut pane = pane.push(messages);
         // A group the reader is only invited to: its card above the
         // compose bar (1307).
         if let Some(invite) = &open.invite {
@@ -1580,6 +1594,40 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    }
+
+    /// The chip under the chat's bar while our position share runs there
+    /// (1457): "Sharing your position, 42 min left" and Stop, one click.
+    fn share_chip<'a>(&self, chip: &'a scene::ShareChip, t: Colours) -> Element<'a, Message> {
+        let line = row![
+            text(chip.words.resolve(self.lang))
+                .size(14)
+                .color(colour(t.text))
+                .width(Length::Fill),
+            link(
+                self.word(chip.stop.label_key),
+                Message::Intent(chip.stop.intent.clone()),
+                t,
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        container(
+            container(line)
+                .padding([4, 12])
+                .style(move |_: &Theme| container::Style {
+                    background: Some(Background::Color(colour(t.panel))),
+                    border: Border {
+                        radius: border::radius(16),
+                        width: 1.0,
+                        color: colour(t.accent),
+                    },
+                    ..container::Style::default()
+                }),
+        )
+        .padding([6, 12])
+        .width(Length::Fill)
+        .into()
     }
 
     /// Whether a group's screen is open (1307): "New group" or a member
@@ -1879,11 +1927,26 @@ impl App {
         // Only the lines on screen are built and laid out (1487): each
         // line of the chat named, the rows widget builds the ones in view.
         let (lines, items) = self.chat_lines(open, width);
+        // The message each line is, for what the rows say on screen
+        // (1457): a bubble's end, by the read rule.
+        let keys: Vec<Option<u64>> = lines
+            .iter()
+            .map(|line| match *line {
+                ChatLine::Bubble(g, n) | ChatLine::Note(g, n) => {
+                    Some(open.groups[g].bubbles[n].bubble.key)
+                }
+                _ => None,
+            })
+            .collect();
+        let peer = open.peer;
         let body = rows(items, move |i| {
             self.chat_line(open, lines[i], width, &picked, t)
         })
         .padding([0, 12])
-        .anchor_end();
+        .anchor_end()
+        .on_shown(move |shown| {
+            Message::Shown(peer, shown.iter().filter_map(|&i| keys[i]).collect())
+        });
         soft_picking(
             scrollable(body)
                 .anchor_bottom()
@@ -2391,6 +2454,12 @@ impl App {
                 }
             }
         }
+        // Info (1457): the phone's dialog, the core's rows over the chat.
+        actions = actions.push(link(
+            self.word(StrId::ActionInfo),
+            Message::Intent(Intent::Details),
+            t,
+        ));
         // Forward (1371): the phone's picker of conversations, here the
         // list's rows under the menu.
         actions = actions.push(link(

@@ -150,6 +150,12 @@ pub struct Seen {
     /// The public rooms' hub lines of the Advanced section (1577), as the
     /// core says them ([`loquax::ui::settings::hub_rows`]).
     pub hubs: Vec<loquax::ui::settings::PageRow>,
+    /// The Info of the message a bubble's menu opened it for (1457), the
+    /// core's plain rows and the terminal's lines for Advanced.
+    pub info: Option<loquax::ui::info::MessageInfo>,
+    /// The own fix the position sheet set (1457): a pin's "Share my
+    /// position" sends it once.
+    pub own_fix: Option<leviculum_lxmf::telemetry::Location>,
 }
 
 /// The hosted browser as the window draws it (1369): lnomad's model as
@@ -233,6 +239,8 @@ impl Seen {
             },
             copied: browsing.copied.clone(),
             hubs: loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Window),
+            info: model.info_shown(),
+            own_fix: model.bar.own_fix,
         }
     }
 
@@ -621,6 +629,11 @@ pub enum Message {
     Renaming(String),
     /// A bubble menu's Forward (1371): pick the conversation.
     ForwardPick(NodeId),
+    /// The open chat's messages whose end is on screen (1457), by the read
+    /// rule, as the chat's rows said them: `peer`'s chat, the keys.
+    Shown([u8; 16], Vec<u64>),
+    /// The Info's Advanced (1457): the terminal's lines under the rows.
+    InfoAdvanced,
     NewGo,
     Compose(text_editor::Action),
     /// What the user asks (1218): a press on a scene node raises the
@@ -997,6 +1010,13 @@ struct App {
     /// The bubble whose Forward was pressed (1371): its menu lists the
     /// conversations to send the copy to.
     forwarding: Option<NodeId>,
+    /// The Info's Advanced is open (1457).
+    info_advanced: bool,
+    /// The open chat's messages whose end the chat's rows last said on
+    /// screen (1457), and the viewport last told the model: what the
+    /// window shows of the chat, nothing while something covers it.
+    on_screen: Option<([u8; 16], Vec<u64>)>,
+    told_viewport: Option<([u8; 16], Vec<u64>)>,
     compose: text_editor::Content,
     /// The message a reply being written answers, with its first line.
     reply: Option<([u8; 32], String)>,
@@ -1096,6 +1116,8 @@ impl App {
                 browse: None,
                 copied: None,
                 hubs: Vec::new(),
+                info: None,
+                own_fix: None,
             },
             asks,
             track_cache: std::cell::RefCell::new(None),
@@ -1134,6 +1156,9 @@ impl App {
             help: None,
             map_menu: false,
             forwarding: None,
+            info_advanced: false,
+            on_screen: None,
+            told_viewport: None,
             compose: text_editor::Content::new(),
             reply: None,
             compose_for: None,
@@ -1264,6 +1289,8 @@ impl App {
             Message::NewAddress(typed) => self.new_address = Some(typed),
             Message::Position(typed) => self.position = Some(typed),
             Message::ForwardPick(id) => self.forwarding = Some(id),
+            Message::Shown(peer, keys) => self.on_screen = Some((peer, keys)),
+            Message::InfoAdvanced => self.info_advanced = true,
             Message::Renaming(typed) => {
                 if let Some((_, name)) = self.renaming.as_mut() {
                     *name = typed;
@@ -1410,6 +1437,11 @@ impl App {
             // model's; the window draws them from the scene.
             Intent::Attach { peer } => self.tell(UiEvent::OpenSheet(Sheet::Attach { peer })),
             Intent::Locate { peer } => {
+                // From a pin's share without a fix (1457): the chat first.
+                if self.screen == Screen::Map {
+                    self.screen = Screen::Chats;
+                    self.tell(UiEvent::Open { peer });
+                }
                 self.tell_map_centre();
                 self.tell(UiEvent::OpenSheet(Sheet::Position { peer }));
             }
@@ -1432,6 +1464,40 @@ impl App {
                 self.tell_map_centre();
                 self.tell(UiEvent::FixAtMapCentre);
             }
+            // The sheet's shares (1457), the phone's: "Send my position
+            // now" once, a share for a while, and the chip's Stop. The fix
+            // is the one the sheet set, by hand or at the map's centre,
+            // which the chip says.
+            Intent::ShareFix { peer } => {
+                self.position = None;
+                self.tell(UiEvent::ShareFix { peer });
+            }
+            Intent::StartShare { peer, span } => {
+                self.position = None;
+                self.tell(UiEvent::StartShare { peer, span });
+            }
+            Intent::StopShare { peer } => self.tell(UiEvent::StopShare { peer }),
+            // A pin's "Share my position" (1457): the own fix to that peer,
+            // once, as the phone's map card sends it.
+            Intent::Share { peer, location } => {
+                self.tell(UiEvent::SharePosition { peer, location })
+            }
+            // A bubble's Info (1457): the model's detail view of it, drawn
+            // from the core's rows as the phone's dialog.
+            Intent::Details => {
+                let peer = self.scene.chat.as_ref().map(|c| c.peer);
+                if let (Some(peer), Some(NodeId::Bubble(key))) = (peer, self.menu) {
+                    self.menu = None;
+                    self.info_advanced = false;
+                    self.tell(UiEvent::Info(Some((peer, key))));
+                }
+            }
+            Intent::Back | Intent::Dismiss if self.seen.info.is_some() => {
+                self.tell(UiEvent::Info(None))
+            }
+            // The list's fetch (1457): the terminal's `fetch`, the phone's
+            // pull.
+            Intent::Pull => self.tell(UiEvent::Run(leviculum_ui::commands::Command::Fetch)),
             // Gallery and File: the desktop's chooser picks (1341).
             Intent::SendPhoto { peer, .. } => {
                 return self.pick(peer, desktop::Pick::Picture, StrId::AttachPhoto)
@@ -1964,10 +2030,46 @@ impl App {
         self.browse_sync();
         self.rooms_sync();
         self.explore_sync();
+        self.viewport_sync();
         leviculum_ui_iced::fps::update(start, start.elapsed());
         match copy {
             Some(copy) => Task::batch([copy, task]),
             None => task,
+        }
+    }
+
+    /// The model is told which bubbles of the open chat are read (1457):
+    /// those whose end the chat's rows said on screen, the terminal's rule
+    /// (`ui::hit::viewport`, [`leviculum_ui::read::end_shown`]), and none
+    /// while the chat is not what the window shows (another screen, the
+    /// Info, the profile, the help, the photo viewer), as the terminal says
+    /// none under its map, help or detail. Said only when it changed.
+    /// Before 1457 the window said no viewport at all.
+    fn viewport_sync(&mut self) {
+        let Some(peer) = self.scene.chat.as_ref().map(|c| c.peer) else {
+            return;
+        };
+        let covered = self.screen != Screen::Chats
+            || self.group_screen()
+            || self.seen.info.is_some()
+            || self.scene.profile.is_some()
+            || self.help.is_some()
+            || self.viewer.is_some();
+        let keys = match (&self.on_screen, covered) {
+            (Some((shown, keys)), false) if *shown == peer => keys.clone(),
+            _ => Vec::new(),
+        };
+        // Nothing until the rows said something: a window not yet drawn
+        // (a test's) tells no empty viewport.
+        if self.told_viewport.is_none() && keys.is_empty() {
+            return;
+        }
+        let told = Some((peer, keys));
+        if self.told_viewport != told {
+            if let Some((peer, keys)) = told.clone() {
+                self.tell(UiEvent::Viewport { peer, keys });
+            }
+            self.told_viewport = told;
         }
     }
 
@@ -2771,11 +2873,91 @@ impl App {
             (Some(tabs), LayoutClass::Compact) => column![body, tabs].into(),
             (None, _) => body,
         };
-        match (self.help, &self.scene.profile) {
-            (Some(scroll), _) => stack![window, self.help_layer(scroll)].into(),
-            (None, Some(profile)) => stack![window, self.profile_layer(profile)].into(),
-            (None, None) => window,
+        match (self.help, &self.scene.profile, &self.seen.info) {
+            (Some(scroll), _, _) => stack![window, self.help_layer(scroll)].into(),
+            (None, Some(profile), _) => stack![window, self.profile_layer(profile)].into(),
+            (None, None, Some(info)) => stack![window, self.info_layer(info)].into(),
+            (None, None, None) => window,
         }
+    }
+
+    /// A message's Info over the window (1457): the core's plain rows, a
+    /// label over its value, as the phone's dialog has them; the
+    /// terminal's lines (the address, the id, the device's log) under
+    /// Advanced; Close.
+    fn info_layer<'a>(&'a self, info: &'a loquax::ui::info::MessageInfo) -> Element<'a, Message> {
+        let t = self.tokens();
+        let mut words = column![text(StrId::ActionInfo.text(self.lang))
+            .size(18)
+            .color(chat::colour(t.text))]
+        .spacing(2);
+        for row in &info.rows {
+            let (label, value) = row.resolve(self.lang);
+            words = words
+                .push(
+                    container(text(label).size(12).color(chat::colour(t.text_secondary)))
+                        .padding(iced::Padding::ZERO.top(6)),
+                )
+                .push(text(value).size(15).color(chat::colour(t.text)));
+        }
+        let link = |id: StrId, on: Message| {
+            button(
+                text(id.text(self.lang))
+                    .size(15)
+                    .color(chat::colour(t.accent)),
+            )
+            .on_press(on)
+            .padding(iced::Padding::ZERO.top(12))
+            .style(|_: &Theme, _| button::Style::default())
+        };
+        match self.info_advanced {
+            true => {
+                words = words.push(
+                    container(
+                        text(info.advanced.join("\n"))
+                            .size(12)
+                            .font(iced::Font::MONOSPACE)
+                            .color(chat::colour(t.text_secondary)),
+                    )
+                    .padding(iced::Padding::ZERO.top(12)),
+                );
+                words = words.push(link(StrId::Close, Message::Intent(Intent::Dismiss)));
+            }
+            false => {
+                words = words.push(
+                    row![
+                        link(StrId::InfoAdvanced, Message::InfoAdvanced),
+                        link(StrId::Close, Message::Intent(Intent::Dismiss)),
+                    ]
+                    .spacing(24),
+                );
+            }
+        }
+        let panel = container(
+            iced::widget::scrollable(words.width(Length::Fixed(380.0))).height(Length::Shrink),
+        )
+        .padding(20)
+        .style(move |_: &Theme| container::Style {
+            background: Some(iced::Background::Color(chat::colour(t.panel))),
+            border: iced::Border {
+                radius: 12.0.into(),
+                width: 1.0,
+                color: chat::colour(t.bar),
+            },
+            ..container::Style::default()
+        });
+        // A dialog's shade over the window, as the phone's: the chat under
+        // it is not what is read now.
+        container(panel)
+            .center(Length::Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(iced::Background::Color(Color {
+                    a: 0.35,
+                    ..Color::BLACK
+                })),
+                ..container::Style::default()
+            })
+            .into()
     }
 
     /// The profile over the window (1443): the scene's
@@ -2966,6 +3148,23 @@ impl App {
                                 .on_press(Message::AddNearby(pin.peer))
                                 .padding([0, 6]),
                         );
+                }
+                // The selected friend's "Share position" (1457), the phone
+                // card's: the own fix to them once; without one, their chat
+                // with the position sheet, where it is set.
+                if Some(pin.peer) == self.selected && !pin.own && !pin.nearby {
+                    let share = match self.seen.own_fix {
+                        Some(location) => Intent::Share {
+                            peer: pin.peer,
+                            location,
+                        },
+                        None => Intent::Locate { peer: pin.peer },
+                    };
+                    entry = entry.push(
+                        button(text(StrId::Share.text(self.lang)).size(12))
+                            .on_press(Message::Intent(share))
+                            .padding([0, 6]),
+                    );
                 }
                 let style = match Some(pin.peer) == self.selected {
                     true => button::primary,
@@ -3501,6 +3700,8 @@ mod tests {
             browse: None,
             copied: None,
             hubs: Vec::new(),
+            info: None,
+            own_fix: None,
         })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
@@ -4135,6 +4336,8 @@ mod tests {
             browse: None,
             copied: None,
             hubs: loquax::ui::settings::hub_rows(model, loquax::ui::settings::Target::Window),
+            info: model.info_shown(),
+            own_fix: model.bar.own_fix,
         }
     }
 
@@ -4212,6 +4415,278 @@ mod tests {
         assert_eq!(
             (fix.latitude_e6, fix.longitude_e6),
             (centre.latitude_e6, centre.longitude_e6)
+        );
+    }
+
+    /// 1457: the window's position sheet shares as the phone's. With the
+    /// fix the sheet took by hand, its "1 h" row tells the model
+    /// StartShare, the first report goes to Anna, and her chat shows the
+    /// chip with the time left and "Set by hand" over the report's bubble,
+    /// pixel for pixel the golden; the chip's Stop tells StopShare, the
+    /// last report goes and the chip is gone. "Now, once" tells ShareFix
+    /// and the report goes; a pin's "Share position" tells SharePosition.
+    /// Control: no chip before the share.
+    #[test]
+    fn the_window_shares_a_position_and_its_chip_stops_it() {
+        use loquax::ui::share::Span;
+        use loquax::ui::UiEffect;
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        model.bar.abilities = loquax::ui::compose::Abilities::desktop();
+        model.changed_outside();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        let sends_to_anna = |effects: &[UiEffect]| {
+            effects
+                .iter()
+                .any(|e| matches!(e, UiEffect::Send { to, .. } if *to == ANNA))
+        };
+        let fold = |app: &mut App, model: &mut crate::shell::Model, events: Vec<UiEvent>| {
+            let mut effects = Vec::new();
+            for event in events {
+                effects.extend(update(model, event));
+            }
+            app.apply(Message::Seen(Box::new(seen_of(model))));
+            effects
+        };
+        fold(&mut app, &mut model, Vec::new());
+        let _ = app.update(Message::Intent(Intent::Locate { peer: ANNA }));
+        let _ = app.update(Message::Intent(Intent::EnterPosition {
+            text: Some("52.5163, 13.3777".to_string()),
+        }));
+        let events = told(&mut rx);
+        fold(&mut app, &mut model, events);
+        let chip = |app: &App| app.scene.chat.as_ref().expect("the chat").share.clone();
+        assert!(chip(&app).is_none(), "control: no share, no chip");
+        let row = |app: &App, key: StrId| {
+            let sheet = app.scene.sheet.as_ref().expect("the sheet");
+            let row = sheet.actions.iter().find(|a| a.label_key == key);
+            row.expect("the row").intent.clone()
+        };
+
+        let _ = app.update(Message::Intent(row(&app, StrId::ShareFor1h)));
+        let events = told(&mut rx);
+        assert_eq!(
+            events,
+            [UiEvent::StartShare {
+                peer: ANNA,
+                span: Span::Hour1
+            }]
+        );
+        let effects = fold(&mut app, &mut model, events);
+        assert!(sends_to_anna(&effects), "the first report: {effects:?}");
+        let shown = chip(&app).expect("the chip");
+        let words = shown.words.resolve(app.lang);
+        assert!(
+            words.contains(StrId::FixByHand.text(app.lang)),
+            "the chip says the fix is by hand: {words}"
+        );
+        assert!(app.scene.sheet.is_none(), "the sheet closed");
+        map::tests::same_as("gui-share-chip-light.png", &shoot(&app, w, h), w, h);
+
+        let _ = app.update(Message::Intent(shown.stop.intent.clone()));
+        let events = told(&mut rx);
+        assert_eq!(events, [UiEvent::StopShare { peer: ANNA }]);
+        let effects = fold(&mut app, &mut model, events);
+        assert!(sends_to_anna(&effects), "the last report: {effects:?}");
+        assert!(chip(&app).is_none(), "stopped, the chip is gone");
+
+        let _ = app.update(Message::Intent(Intent::Locate { peer: ANNA }));
+        let events = told(&mut rx);
+        fold(&mut app, &mut model, events);
+        let _ = app.update(Message::Intent(row(&app, StrId::ShareNow)));
+        let events = told(&mut rx);
+        assert_eq!(events, [UiEvent::ShareFix { peer: ANNA }]);
+        assert!(sends_to_anna(&fold(&mut app, &mut model, events)));
+
+        let location = app.seen.own_fix.expect("the fix the sheet set");
+        let _ = app.update(Message::Intent(Intent::Share {
+            peer: ANNA,
+            location,
+        }));
+        let events = told(&mut rx);
+        assert_eq!(
+            events,
+            [UiEvent::SharePosition {
+                peer: ANNA,
+                location
+            }]
+        );
+        assert!(sends_to_anna(&fold(&mut app, &mut model, events)));
+    }
+
+    /// 1457: a bubble's menu has Info, which tells the model to open the
+    /// message's detail; the window draws the core's rows (who, sent, the
+    /// state, the size) as the phone's dialog has them, pixel for pixel
+    /// the golden; Advanced adds the terminal's lines; Back closes it.
+    /// Control: no Info before the menu's.
+    #[test]
+    fn a_bubbles_info_opens_over_the_window_and_back_closes_it() {
+        let (w, h) = (900, 560);
+        let mut model = chat_model();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.window = Size::new(w as f32, h as f32);
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(app.seen.info.is_none(), "control: no Info yet");
+        let key = app
+            .scene
+            .chat
+            .iter()
+            .flat_map(|c| &c.groups)
+            .flat_map(|g| &g.bubbles)
+            .find(|node| node.bubble.body == "Good morning!")
+            .map(|node| node.bubble.key)
+            .expect("Anna's morning");
+        let _ = app.update(Message::Intent(Intent::Menu(Some(NodeId::Bubble(key)))));
+        let menu = shoot(&app, w, h);
+        let _ = app.update(Message::Intent(Intent::Details));
+        let events = told(&mut rx);
+        assert_eq!(events, [UiEvent::Info(Some((ANNA, key)))]);
+        assert_eq!(app.menu, None, "the menu closed");
+        for event in events {
+            update(&mut model, event);
+        }
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        let info = app.seen.info.clone().expect("the Info");
+        assert_eq!(
+            Some(&info),
+            loquax::ui::info::message_info(&model, ANNA, key).as_ref()
+        );
+        let rows: Vec<String> = info.rows.iter().map(|r| r.resolve(app.lang).0).collect();
+        assert!(rows.contains(&"From".to_string()), "{rows:?}");
+        let shot = shoot(&app, w, h);
+        assert_ne!(shot, menu);
+        map::tests::same_as("gui-info-light.png", &shot, w, h);
+        let _ = app.update(Message::InfoAdvanced);
+        assert!(app.info_advanced);
+        assert_ne!(shoot(&app, w, h), shot, "Advanced shows its lines");
+        let _ = app.update(Message::Intent(Intent::Dismiss));
+        let events = told(&mut rx);
+        assert_eq!(events, [UiEvent::Info(None)]);
+        for event in events {
+            update(&mut model, event);
+        }
+        app.apply(Message::Seen(Box::new(seen_of(&model))));
+        assert!(app.seen.info.is_none());
+    }
+
+    /// 1457: the list's fetch button raises Pull, which the window tells
+    /// the model as the terminal's `fetch`, and the model asks the shell
+    /// to fetch.
+    #[test]
+    fn the_fetch_button_asks_the_mailbox_now() {
+        let (mut app, mut rx) = chat_window();
+        let pull = app
+            .scene
+            .top
+            .actions
+            .iter()
+            .any(|a| a.intent == Intent::Pull);
+        assert!(!pull, "the button is the window's, beside the gear");
+        let _ = app.update(Message::Intent(Intent::Pull));
+        let events = told(&mut rx);
+        assert_eq!(
+            events,
+            [UiEvent::Run(leviculum_ui::commands::Command::Fetch)]
+        );
+        let mut model = chat_model();
+        let effects: Vec<_> = events
+            .into_iter()
+            .flat_map(|e| update(&mut model, e))
+            .collect();
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, loquax::ui::UiEffect::Fetch)),
+            "{effects:?}"
+        );
+    }
+
+    /// 1457: the chat's rows say the bubbles whose end is on screen (the
+    /// terminal's read rule, `ui::hit::viewport`) once they held still:
+    /// through the window's real view every bubble of Anna's short chat
+    /// is; the window tells
+    /// the model that viewport once, nothing while it stays, none while
+    /// the map covers the chat, and the same again back on the chats. The
+    /// model counts from it: the received messages go seen.
+    #[test]
+    fn the_window_tells_the_model_what_of_the_chat_is_on_screen() {
+        let (w, h) = (900, 560);
+        let (mut app, mut rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let bubbles: Vec<u64> = app
+            .scene
+            .chat
+            .iter()
+            .flat_map(|c| &c.groups)
+            .flat_map(|g| &g.bubbles)
+            .map(|node| node.bubble.key)
+            .collect();
+        // Two frames the rows' settle apart: the set comes with the
+        // first and is said with the second.
+        let at = iced::Point::new(w as f32 - 100.0, h as f32 / 2.0);
+        let t0 = Instant::now();
+        let frame =
+            |after: Duration| iced::Event::Window(window::Event::RedrawRequested(t0 + after));
+        let mut screen =
+            leviculum_ui_iced::headless::Offscreen::new(w, h).expect("the software renderer");
+        let (text, ground) = (
+            chat::colour(app.tokens().text),
+            chat::colour(app.tokens().background),
+        );
+        let (_, _, said) = screen.redraws(
+            app.view(),
+            &[
+                frame(Duration::ZERO),
+                frame(leviculum_ui_iced::rows::SETTLE),
+            ],
+            at,
+            &app.theme(),
+            text,
+            ground,
+        );
+        let shown: Vec<Vec<u64>> = said
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Shown(peer, keys) if peer == ANNA => Some(keys),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            std::slice::from_ref(&bubbles),
+            "every bubble ends on screen"
+        );
+        assert!(told(&mut rx).is_empty(), "control: nothing before");
+
+        let _ = app.update(Message::Shown(ANNA, bubbles.clone()));
+        let viewport = UiEvent::Viewport {
+            peer: ANNA,
+            keys: bubbles.clone(),
+        };
+        assert_eq!(told(&mut rx), std::slice::from_ref(&viewport));
+        let _ = app.update(Message::Shown(ANNA, bubbles.clone()));
+        assert!(told(&mut rx).is_empty(), "the same viewport, nothing");
+        let _ = app.update(Message::Intent(Intent::ShowMap { peer: None }));
+        assert_eq!(
+            told(&mut rx),
+            [UiEvent::Viewport {
+                peer: ANNA,
+                keys: Vec::new()
+            }]
+        );
+        let _ = app.update(Message::Intent(Intent::Tab(TabId::Chats)));
+        assert_eq!(told(&mut rx), std::slice::from_ref(&viewport));
+
+        let mut model = chat_model();
+        update(&mut model, UiEvent::Front(true));
+        update(&mut model, viewport);
+        assert_eq!(
+            model.reading.viewport(),
+            Some(&(ANNA, bubbles)),
+            "the model holds the window's viewport"
         );
     }
 

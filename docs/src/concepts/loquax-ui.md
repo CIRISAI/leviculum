@@ -967,9 +967,9 @@ it). A missing cell is the next order.
 | `StagePhoto` | the camera's photo staged in the bar | built (`session.rs`) | n/a: no camera | n/a: no camera | n/a: no camera |
 | `Unstage` | the staged photo's cross | built (`session.rs`) | n/a: no camera | n/a: no camera | n/a: no camera |
 | `CloseSheet` | a sheet of the compose bar closed | built (`session.rs`) | built (`gui.rs`) | n/a: the terminal opens no sheet | n/a: the M9 opens no compose sheet |
-| `ShareFix` | the position sheet's "Send my position now" | built (`session.rs`) | **missing**: the window's sheet has no "Send my position now" | built (palette) | **missing**: no key shares the position |
-| `StartShare` | a share row of the position sheet: 15 min, 1 h, 8 h, until stopped | built (`session.rs`) | **missing**: the window's sheet has no share rows | **missing**: the palette shares once, never for a while | **missing**: no key shares the position |
-| `StopShare` | a running share's Stop: the chat's chip, Settings, the notification | built (`session.rs`) | **missing**: the window draws no share chip | built (palette) | **missing**: no key shares the position |
+| `ShareFix` | the position sheet's "Send my position now" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key shares the position |
+| `StartShare` | a share row of the position sheet: 15 min, 1 h, 8 h, until stopped | built (`session.rs`) | built (`gui.rs`) | **missing**: the palette shares once, never for a while | **missing**: no key shares the position |
+| `StopShare` | a running share's Stop: the chat's chip, Settings, the notification | built (`session.rs`) | built (`chat.rs`) | built (palette) | **missing**: no key shares the position |
 | `LocationOn` | the position sheet without a fix: turn location on | built (`Locator.java`) | n/a: no position receiver | n/a: no position receiver | **missing**: the M9's GNSS is not wired to the sheet |
 | `EnterPosition` | the position sheet's entry on a shell without a receiver | n/a: the phone has a receiver | built (`gui.rs`) | built (palette) | **missing**: no key enters a position |
 | `FixAtMapCentre` | the position sheet's "map centre" row | n/a: the phone has a receiver | built (`gui.rs`) | **missing**: no "map centre" in the palette | **missing**: no key enters a position |
@@ -982,7 +982,7 @@ it). A missing cell is the next order.
 | `PauseVoice` | a playing voice message's pause button | built (`session.rs`) | built (`gui.rs`) | **missing**: no key plays a voice message | n/a: too large for the radio |
 | `Delete` | Delete on a bubble, asked, then confirmed | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key deletes a message |
 | `Copy` | Copy on a bubble or a selection | built (`ChatActivity.java`) | built (`gui.rs`) | built (key) | n/a: no clipboard |
-| `Share` | a position shared from the map | built (`session.rs`) | **missing**: the window's map shares no position | n/a: the palette's position verbs share | **missing**: no key shares the position |
+| `Share` | a position shared from the map | built (`session.rs`) | built (`gui.rs`) | n/a: the palette's position verbs share | **missing**: no key shares the position |
 | `Pin` | a row's Pin | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
 | `Mute` | a row's Mute | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
 | `Archive` | a row's Archive | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no key opens a row's verbs |
@@ -1008,17 +1008,17 @@ it). A missing cell is the next order.
 | `OpenResult` | Enter on a search result | n/a: a result is a row; a tap opens it | n/a: a result is a row; a click opens it | built (key) | **missing**: no key searches |
 | `Match` | the next or previous match | n/a: the phone lists the results | n/a: the window lists the results | built (key) | **missing**: no key searches |
 | `OpenMessage` | Enter on a bubble: a position on the map, else its detail | n/a: a tap on the bubble is its own | n/a: a click on the bubble is its own | built (key) | **missing**: no key opens a message |
-| `Details` | a bubble's Info | built (`ChatActivity.java`) | **missing**: the bubble's menu has no Info | built (palette) | **missing**: no key opens a message |
+| `Details` | a bubble's Info | built (`ChatActivity.java`) | built (`chat.rs`) | built (palette) | **missing**: no key opens a message |
 | `ShowBlocked` | the blocked contacts | built (`ContactActivity.java`) | **missing**: the window lists no blocked contacts | built (palette) | **missing**: no list of the blocked |
 | `ShowArchived` | the archived chats | built (`ConversationsActivity.java`) | **missing**: the window lists no archived chats | built (palette) | **missing**: no list of the archived |
 | `Map` | zoom, pan, fit, step between pins, the map's drawing | n/a: pinch and pan are the map View's | built (`gui.rs`) | built (key) | **missing**: no key moves the map |
 | `SelectPin` | a tap or click on a pin: its card | built (`MapView.java`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: no key steps between pins |
 | `LoadMapArea` | load the map's area here | n/a: the map loads what it shows | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
 | `MapDrawing` | how the map is drawn | n/a: the phone's map draws one way | **missing**: the window offers no drawing | built (palette) | n/a: the board draws one way |
-| `Pull` | fetch messages now | built (`session.rs`) | **missing**: the window has no fetch button | built (palette) | n/a: the board pulls on its own |
+| `Pull` | fetch messages now | built (`session.rs`) | built (`chat.rs`) | built (palette) | n/a: the board pulls on its own |
 | `Front` | the app came to the front or left it | built (`session.rs`) | built (`gui.rs`) | n/a: a terminal is in front while it runs | n/a: the board's screen is always in front |
 | `Network` | the platform's network changed | built (`session.rs`) | n/a: the daemon follows the network | n/a: the daemon follows the network | n/a: the board's radio is its network |
-| `Viewport` | these bubbles are on screen: what was read | built (`session.rs`) | **missing**: the window marks the open chat read whole | n/a: the open conversation is read | n/a: the open conversation is read |
+| `Viewport` | these bubbles are on screen: what was read | built (`session.rs`) | built (`gui.rs`) | n/a: the open conversation is read | n/a: the open conversation is read |
 | `Theme` | light or dark | n/a: follows the phone | built (`gui.rs`) | built (palette) | n/a: the panel draws dark |
 | `SendOnEnter` | whether Enter sends | n/a: the platform's text field does it | **missing**: the window has no switch for Enter | built (palette) | n/a: Enter sends |
 | `Mouse` | the mouse captured or the terminal's own selection | n/a: no pointer | n/a: the window's pointer is its own | built (palette) | n/a: no pointer |
