@@ -269,7 +269,7 @@ use leviculum_esp::stall::{self, Core, Isr, Lock, Stage, Watchdog};
 use leviculum_esp::{boards::thinknode_m9 as m9, uptime_ms, UartLog};
 use leviculum_ui::input::{KeyCode, KeyEventKind};
 use loquax::home::ask::Verb;
-use loquax::home::board::Word;
+use loquax::home::board::{Way, Word};
 use loquax::home::wire::{Entry, Mark};
 use loquax::ui::listing::Row;
 use loquax::ui::strings::{StrId, Text};
@@ -503,8 +503,8 @@ enum ToUi {
     Entries(Vec<Entry>, [u8; 16]),
     /// How an ask ended, for the model.
     Answer(Answer),
-    /// The top bar's word moved.
-    Word(Option<Word>),
+    /// The top bar's word moved, or the way to the home it says (1478).
+    Word(Option<Word>, Option<Way>),
     /// The receiver made a fix (1477): the model's own.
     Fix(loquax_m9::gnss::Location),
     /// What the receiver says of the sky moved (1477): the map's corner.
@@ -1397,6 +1397,8 @@ fn halt_with_banner(log: &mut UartLog<'_>, heap: usize) -> ! {
 struct Shown {
     pairing: Option<Pairing>,
     word: Option<Word>,
+    /// The way to the home the word says (1478).
+    way: Option<Way>,
     fault: Option<StrId>,
     /// The map's key hint and corner credit (1531), as the loop's
     /// [`map::Chrome`] says them.
@@ -1456,6 +1458,7 @@ fn redraw(
     let look = screen::Look {
         row,
         home: shown.word,
+        way: shown.way,
         fault: shown.fault,
         map: shown.map,
         ..screen::Look::of(model)
@@ -2107,6 +2110,7 @@ fn main() -> ! {
     let shown = Shown {
         pairing: node.address().is_none().then(Pairing::new),
         word: node.word(),
+        way: node.way(uptime_ms()),
         fault: None,
         map: map::Overlay::default(),
         // The record's type (1532); a board without one shows the default.
@@ -2357,7 +2361,7 @@ fn main() -> ! {
                                 Ok(taken) => {
                                     if let Some(taken) = taken {
                                         to_ui(ToUi::Model(Box::new(taken)));
-                                        to_ui(ToUi::Word(node.word()));
+                                        to_ui(ToUi::Word(node.word(), node.way(uptime_ms())));
                                     }
                                     envelope::encode_ack(envelope::TYPE_HOME_CODE)
                                 }
@@ -2434,7 +2438,7 @@ fn main() -> ! {
                         }
                         if let Some(model) = node.bench_reopen(&mut stores, &mut log, &feed) {
                             to_ui(ToUi::Model(Box::new(model)));
-                            to_ui(ToUi::Word(node.word()));
+                            to_ui(ToUi::Word(node.word(), node.way(uptime_ms())));
                         }
                         log.line("[BENCH] ", format_args!("forget=reopened"));
                     }
@@ -2499,7 +2503,7 @@ fn main() -> ! {
             faulted = true;
             to_ui(ToUi::Fault(Some(StrId::M9NotSaved)));
         }
-        to_ui_word(node.word());
+        to_ui_word(node.word(), node.way(uptime_ms()));
 
         // What the UI core asked for. A dump's lines are timed apart
         // (1603): `turn.dump`, not the take.
@@ -2619,7 +2623,7 @@ fn main() -> ! {
                     }) {
                         Ok(Some(taken)) => {
                             to_ui(ToUi::Model(Box::new(taken)));
-                            to_ui(ToUi::Word(node.word()));
+                            to_ui(ToUi::Word(node.word(), node.way(uptime_ms())));
                         }
                         Ok(None) => {}
                         Err(CodeRefusal::Value) => {}
@@ -2710,14 +2714,15 @@ fn main() -> ! {
 
 /// The last word the UI core was told, so the queue carries changes, not
 /// a word per turn.
-fn to_ui_word(word: Option<Word>) {
-    static LAST: Mutex<RefCell<Option<Option<Word>>>> = Mutex::new(RefCell::new(None));
+fn to_ui_word(word: Option<Word>, way: Option<Way>) {
+    type Said = (Option<Word>, Option<Way>);
+    static LAST: Mutex<RefCell<Option<Said>>> = Mutex::new(RefCell::new(None));
     stall::locked(Core::Io, Lock::Word, || {
         critical_section::with(|cs| {
             let mut last = LAST.borrow_ref_mut(cs);
-            if last.as_ref() != Some(&word) {
-                *last = Some(word);
-                TO_UI.borrow_ref_mut(cs).push_back(ToUi::Word(word));
+            if last.as_ref() != Some(&(word, way)) {
+                *last = Some((word, way));
+                TO_UI.borrow_ref_mut(cs).push_back(ToUi::Word(word, way));
             }
         })
     });
@@ -3200,9 +3205,10 @@ fn ui_main(
                     dirty |= map::shown(&model);
                 }
                 ToUi::Sky(said) => sky = said,
-                ToUi::Word(word) => {
-                    if word != shown.word {
+                ToUi::Word(word, way) => {
+                    if word != shown.word || way != shown.way {
                         shown.word = word;
+                        shown.way = way;
                         dirty = true;
                     }
                 }
@@ -3245,6 +3251,7 @@ fn ui_main(
                         let fresh = Shown {
                             pairing: Some(Pairing::new()),
                             word: None,
+                            way: None,
                             fault: None,
                             map: map::Overlay::default(),
                             overview: Overview::default(),
