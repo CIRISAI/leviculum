@@ -295,7 +295,7 @@ LR1110MB1DXS shield's PA table (`LR1110MB1DXS_PA_TABLE`,
 `leviculum-nrf/src/boards/t1000e.rs:143-145`).
 
 The driver's README has a section headed "Worked example: ThinkNode M9
-(incomplete)" (`leviculum-lr11xx/README.md:142-163`). Its values come from
+(incomplete)" (`leviculum-lr11xx/README.md:142-165`). Its values come from
 Meshtastic's M9 variant, and some were probed on a bench:
 
 - the TCXO at 3.3 V;
@@ -304,7 +304,7 @@ Meshtastic's M9 variant, and some were probed on a bench:
   clean `GetErrors`, so a 32.768 kHz crystal is fitted.
 
 On one M9 the driver initialised, ran CAD, transmitted, and received
-frames over the air (`leviculum-lr11xx/README.md:261-269`). There is still
+frames over the air (`leviculum-lr11xx/README.md:263-271`). There is still
 no `Board` constant for the M9. The PA table and whether the DC-DC
 inductor is fitted cannot be settled without the Elecrow schematic.
 

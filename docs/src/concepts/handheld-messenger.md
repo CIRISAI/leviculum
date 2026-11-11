@@ -421,7 +421,7 @@ The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
 `thumbv7em-none-eabihf` and the M9's `xtensa-esp32s3-none-elf` by `just
 m9-render-no-std` (in `guards`, with an injected `std::fs` call as its
 positive control). It words the chats list scene in cells
-(`lines`, `loquax-m9/src/screen.rs:221`) and draws them through
+(`lines`, `loquax-m9/src/screen.rs:227`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
 mousefood (`draw`, `loquax-m9/src/render.rs:199`). Mousefood's own
@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:570`).
+  (`narrow`, `loquax-m9/src/screen.rs:594`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:514`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:538`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -510,8 +510,8 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   the cursor nine bubbles, opens the line and types an emoji with one
   renderer, and must equal a fresh draw.
 - **What the M9 shows of a model** (`scene`,
-  `loquax-m9/src/screen.rs:194`, and `Look::of`,
-  `loquax-m9/src/screen.rs:171`). The Compact scene, which is the open chat
+  `loquax-m9/src/screen.rs:200`, and `Look::of`,
+  `loquax-m9/src/screen.rs:177`). The Compact scene, which is the open chat
   alone, with the cursor of the pane the keys are in; and the list while
   the keys are on the list. The model's back from the chat moves the keys
   to the list and keeps the chat open, as the terminal's panes do, so a
@@ -1336,7 +1336,7 @@ below. The board keeps lnomad's 500 nodes (`REGISTRY` in
 The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
-a branch in `lines` (`loquax-m9/src/screen.rs:221`) for the scene's
+a branch in `lines` (`loquax-m9/src/screen.rs:227`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:1096`), which
 the model already returns while the tab is in front (`rooms_scene`,
 `loquax/src/ui/scene.rs:1227`), and its tab in the tab bar the screen
@@ -1374,7 +1374,7 @@ sends as the home's identity. This pass is the first of two; typing the
 code on the board and the bench walk are 1415.
 
 **The node in the image.** `thinknode_m9` now carries a `leviculum-core`
-node (`Handheld`, `leviculum-esp/src/handheld.rs:110`): its identity in a
+node (`Handheld`, `leviculum-esp/src/handheld.rs:121`): its identity in a
 flash sector of its own, saved on the first boot and loaded on every
 later one, said as `[IDENTITY] identity=<hash> ... source=<flash|generated>
 stored=<yes|no>`; one interface, the host's serial line
@@ -1510,14 +1510,14 @@ compares the panel with the same file. Written: `lnflash --home <code> --port <t
 as text with or without its rendezvous list. The M9 has no transport
 CDC, so the session opens the port it is named, which resets the board,
 and asks for the capability report until the boot is through (60 s at
-most). Both end in `Handheld::take_code` (`leviculum-esp/src/handheld.rs:229`):
+most). Both end in `Handheld::take_code` (`leviculum-esp/src/handheld.rs:248`):
 a new device identity, the pending record in flash before the ack, the
 client that joins with it. A text that is no code is refused
 `REFUSE_VALUE`, a record flash did not take `REFUSE_PERSIST`.
 
 **The join, the pull, the screen.** The client of 1414 now hands every
 pulled page to the board's loop, which folds it into the model the
-screen draws (`board::fold`, `loquax/src/home/board.rs:875`; the
+screen draws (`board::fold`, `loquax/src/home/board.rs:942`; the
 board's `take_in` without an engine: a message the home took in, one of
 the home's devices sent, a mark, a name). A board that is a device of a
 home draws that model from boot: its chats list and its chats come from
@@ -1607,7 +1607,7 @@ rendezvous, the home behind it. lnsd's serial interface to the M9 needs
 from the board for the home is not discovered onwards
 (`leviculum-core/src/transport.rs:12780`, only access point, gateway
 and roaming re-originate), and the join ends in `NoPath`. The M9 sets
-its own end to Gateway already (`leviculum-esp/src/handheld.rs:210`).
+its own end to Gateway already (`leviculum-esp/src/handheld.rs:228`).
 
 1. Build and flash: `just build-m9`, then `just flash-m9
    /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0` (it carries the
@@ -1998,7 +1998,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2871`).
+both (`thinknode_m9.rs:2876`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2069,7 +2069,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2883`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2888`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2177,7 +2177,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2944`), and the fold runs behind the list
+(`thinknode_m9.rs:2949`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2473,9 +2473,9 @@ the image, the 1489 store's long chat has 1200). It failed because the
 reopen held a second whole model in the IO pool: the UI core's, every
 message of the ring after the boot's own rebuild, and the old client's
 shelf. Now the UI core is handed an empty model first and frees its own
-(`Handheld::bench_release`, `leviculum-esp/src/handheld.rs:982`), and the
+(`Handheld::bench_release`, `leviculum-esp/src/handheld.rs:1028`), and the
 old client is dropped before the restore starts (`Handheld::bench_reopen`,
-`leviculum-esp/src/handheld.rs:966`); the sim's `bench forget` frees in
+`leviculum-esp/src/handheld.rs:1012`); the sim's `bench forget` frees in
 the same order.
 
 Two blocks of the rebuild grew with the ring whatever the chats were,
@@ -2503,7 +2503,7 @@ entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
 (the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
 could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
 heap at every step, as the forget's reopen and a taken code do
-(`leviculum-esp/src/bin/thinknode_m9.rs:2092`). The held bytes live in
+(`leviculum-esp/src/bin/thinknode_m9.rs:2095`). The held bytes live in
 2 KiB blocks, at most 35 s of the line (`RxHeld`,
 `leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
 the pool for 256 KiB in one piece, and 22 s was shorter than the
@@ -2523,13 +2523,13 @@ rebuild runs where nothing draws from the model yet (the boot, the
 forget's reopen, a code taken), so 1597's spacing, which was for the UI
 core, is not owed there. A reset during the rebuild itself still
 rebuilds. `a_reboot_right_after_a_rebuild_resumes_with_the_same_list`
-(`loquax-m9/tests/home.rs:412`) was red on both halves (the summary left
+(`loquax-m9/tests/home.rs:537`) was red on both halves (the summary left
 owed, the reboot `rebuilt`).
 
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside
 the take stage, so the walks read takes of 1 to 6 s. The dump is now
 timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
-`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2595`); `m9-walk.py`
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2599`); `m9-walk.py`
 takes `dump=` as the dump's turn and holds the rest of that turn to the
 bar.
 
