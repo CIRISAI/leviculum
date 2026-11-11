@@ -802,6 +802,13 @@ fn leading_pad(align: Align, width: usize, len: usize) -> usize {
 /// (1667). Always yields at least one line.
 fn wrap(chars: Vec<StyledChar>, width: usize, sideways: bool) -> Vec<Vec<StyledChar>> {
     let width = width.max(MIN_WIDTH);
+    // A line drawn with box-drawing characters is a table's or a frame's
+    // row, and its cells only line up whole (1669, walk 12, finding 71:
+    // rns.moscow's frame rows stood 132 cells wide while the rows between
+    // them, which have spaces, wrapped at 51).
+    if sideways && chars.iter().any(|c| is_box_drawing(c.ch)) {
+        return Vec::from([chars]);
+    }
     let mut lines: Vec<Vec<StyledChar>> = Vec::new();
     let mut cur: Vec<StyledChar> = Vec::new();
     for sc in chars {
@@ -827,6 +834,11 @@ fn wrap(chars: Vec<StyledChar>, width: usize, sideways: bool) -> Vec<Vec<StyledC
     }
     lines.push(cur);
     lines
+}
+
+/// Whether `ch` is in Unicode's Box Drawing block, U+2500 to U+257F.
+fn is_box_drawing(ch: char) -> bool {
+    ('\u{2500}'..='\u{257f}').contains(&ch)
 }
 
 /// Build one untagged styled cell.
@@ -1270,6 +1282,56 @@ mod tests {
             .all(|l| l.chars().count() <= 12));
         let narrow = rows(false);
         assert!(!narrow.contains(&art), "control: {narrow:?}");
+    }
+
+    /// 1669, walk 12, finding 71: a table row drawn with box-drawing
+    /// characters has spaces between its cells, so the art rule kept only
+    /// its frame rows whole; on a sideways host the row with words stays
+    /// whole too and lines up under its frame. Prose beside it still
+    /// wraps, and the terminal's layout (the control) wraps the row.
+    #[test]
+    fn a_sideways_layout_keeps_a_table_row_whole() {
+        let frame = alloc::format!("\u{2554}{}\u{2557}", "\u{2550}".repeat(28));
+        let row = "\u{2551} IP:Port \u{2551} Hostname \u{2551} TCP \u{2551}";
+        let d = doc(vec![
+            Block::Paragraph {
+                depth: 0,
+                line: Line::new(vec![plain_span(&frame)]),
+            },
+            Block::Paragraph {
+                depth: 0,
+                line: Line::new(vec![plain_span(row)]),
+            },
+            Block::Paragraph {
+                depth: 0,
+                line: Line::new(vec![plain_span("ab cd ef gh ij kl mn op")]),
+            },
+        ]);
+        let rows = |sideways| {
+            let (lines, _, _, _) = layout_blocks_wrapping(&d, 12, Theme::Dark, &[], sideways);
+            lines
+                .iter()
+                .map(|l| {
+                    l.cells
+                        .iter()
+                        .map(|c| c.ch)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+        let wide = rows(true);
+        assert!(wide.contains(&frame), "{wide:?}");
+        assert!(wide.iter().any(|l| l == row), "{wide:?}");
+        assert!(
+            wide.iter()
+                .filter(|l| !l.chars().any(is_box_drawing))
+                .all(|l| l.chars().count() <= 12),
+            "prose wraps: {wide:?}"
+        );
+        let narrow = rows(false);
+        assert!(!narrow.iter().any(|l| l == row), "control: {narrow:?}");
     }
 
     #[test]
