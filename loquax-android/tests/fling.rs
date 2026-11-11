@@ -449,3 +449,44 @@ fn back_closes_the_keyboard_and_keeps_the_reply() {
     );
     assert!(out.contains("checks passed"), "{out}");
 }
+
+/// The mailbox page holds still (1647, walk 6, finding 28):
+/// `MailboxLines.java` run on the host with
+/// `tests/java/MailboxLinesTest.java`. Twelve asks five seconds apart fit
+/// the page on screen and are written into its lines, so no view goes and
+/// the scroll stays (the control, comparing words, sees a change on
+/// nearly every ask, which the rule before drew into an emptied page); an
+/// answer of another shape is drawn whole.
+#[test]
+fn the_mailbox_page_writes_a_fitting_answer_into_its_lines() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mailbox-lines-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/MailboxLines.java"))
+        .arg(manifest.join("tests/java/MailboxLinesTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.MailboxLinesTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("checks passed"), "{out}");
+}

@@ -235,6 +235,10 @@ command:java loquax-android/fling the_group_picker_is_the_people_list_with_check
 command:javac loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
 command:java loquax-android/fling the_explore_field_keeps_every_character_and_rows_hold_under_a_finger
 
+# The mailbox page holds still (1647): MailboxLines.java with its host test.
+command:javac loquax-android/fling the_mailbox_page_writes_a_fitting_answer_into_its_lines
+command:java loquax-android/fling the_mailbox_page_writes_a_fitting_answer_into_its_lines
+
 # The engine's questions (1496): Engine.java over host stand-ins for
 # Handler, Looper and Log, run with its host test.
 command:javac loquax-android/fling a_question_that_throws_reaches_its_failure_path

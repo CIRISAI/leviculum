@@ -21,6 +21,7 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -61,6 +62,10 @@ public class SettingsActivity extends Activity implements Events.Listener {
     static final String PAGE_TITLE = "page_title";
 
     private LinearLayout body;
+    /** The page's scroll view: the mailbox page keeps its position (1647). */
+    private ScrollView scroll;
+    /** The mailbox page's lines on screen, written in place on each ask (1647). */
+    private final MailboxLines mailboxLines = new MailboxLines();
     /**
      * The page shown, its section's key (1450): the list's entries are the
      * library's one list of every target ({@link Core#settingsList}); null
@@ -101,7 +106,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
         bar.addView(title);
         screen.addView(bar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
-        ScrollView scroll = new ScrollView(this);
+        scroll = new ScrollView(this);
         body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(body);
@@ -149,7 +154,14 @@ public class SettingsActivity extends Activity implements Events.Listener {
     }
 
     private void refresh() {
+        if ("mailbox".equals(page) && body.getChildCount() > 0) {
+            // Asked again: written into the lines on screen, never an
+            // emptied page (1647, walk 6, finding 28).
+            mailbox();
+            return;
+        }
         body.removeAllViews();
+        mailboxLines.clear();
         if ("mailbox".equals(page)) {
             mailbox();
         } else if ("appearance".equals(page)) {
@@ -255,9 +267,15 @@ public class SettingsActivity extends Activity implements Events.Listener {
      * which mailbox, how the phone reaches it, which devices use it, drawn
      * group by group. While it is up it is asked again every few seconds, so
      * "since", the last contact and the mailbox's own answer move on it.
+     *
+     * <p>It holds still while it moves (1647, walk 6, finding 28: it jumped
+     * to the top every five seconds): an answer of the page's shape is
+     * written into the lines on screen ({@link MailboxLines}); one of
+     * another shape is drawn whole when it is there, never into an emptied
+     * page, and the scroll position is put back.
      */
     private void mailbox() {
-        section(new Engine.Ask<Map<String, Object>>() {
+        Engine.ask(new Engine.Ask<Map<String, Object>>() {
             @Override
             public Map<String, Object> ask() {
                 return Core.mailboxPage();
@@ -265,7 +283,24 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }, new Engine.Got<Map<String, Object>>() {
             @Override
             public void got(Map<String, Object> answer) {
-                mailbox(answer);
+                if (isDestroyed() || !"mailbox".equals(page)) {
+                    return;
+                }
+                if (mailboxLines.fits(answer)) {
+                    mailboxLines.said(answer);
+                    return;
+                }
+                final int y = scroll.getScrollY();
+                body.removeAllViews();
+                List<MailboxLines.Slot> slots = new ArrayList<MailboxLines.Slot>();
+                mailbox(answer, slots);
+                mailboxLines.drawn(answer, slots);
+                scroll.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        scroll.scrollTo(0, y);
+                    }
+                });
             }
         });
         again.removeCallbacks(mailboxAgain);
@@ -284,7 +319,7 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }
     };
 
-    private void mailbox(Map<String, Object> answer) {
+    private void mailbox(Map<String, Object> answer, List<MailboxLines.Slot> slots) {
         String error = Core.str(answer, "error");
         if (!error.isEmpty()) {
             body.addView(padded(text(error, 15, R.color.text_secondary)));
@@ -297,19 +332,28 @@ public class SettingsActivity extends Activity implements Events.Listener {
             header.setPadding(dp(16), dp(16), dp(16), dp(4));
             body.addView(header);
             for (Map<String, Object> line : Core.list(group, "lines")) {
-                mailboxLine(line, copyLabel, copied);
+                slots.add(mailboxLine(line, copyLabel, copied));
             }
         }
     }
 
-    /** One line of the mailbox page: label, value under it, a copy button, a tap. */
-    private void mailboxLine(Map<String, Object> line, String copyLabel, final String copied) {
+    /**
+     * One line of the mailbox page: label, value under it, a copy button, a
+     * tap. Its slot writes a later answer's words into the same views.
+     */
+    private MailboxLines.Slot mailboxLine(Map<String, Object> line, String copyLabel,
+            final String copied) {
         String label = Core.str(line, "label");
         if (Core.bool(line, "note")) {
-            TextView note = text(label, 13, R.color.text_secondary);
+            final TextView note = text(label, 13, R.color.text_secondary);
             note.setPadding(dp(16), 0, dp(16), dp(8));
             body.addView(note);
-            return;
+            return new MailboxLines.Slot() {
+                @Override
+                public void said(String label, String value) {
+                    same(note, label);
+                }
+            };
         }
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -319,13 +363,17 @@ public class SettingsActivity extends Activity implements Events.Listener {
         LinearLayout words = new LinearLayout(this);
         words.setOrientation(LinearLayout.VERTICAL);
         final String action = Core.str(line, "action");
-        words.addView(text(label, 16, "profile".equals(action) ? R.color.accent : R.color.text));
+        final TextView labelView = text(label, 16,
+                "profile".equals(action) ? R.color.accent : R.color.text);
+        words.addView(labelView);
         String value = Core.str(line, "value");
+        TextView valueView = null;
         if (!value.isEmpty()) {
-            TextView said = text(value, 14, R.color.text_secondary);
-            said.setTextIsSelectable(true);
-            words.addView(said);
+            valueView = text(value, 14, R.color.text_secondary);
+            valueView.setTextIsSelectable(true);
+            words.addView(valueView);
         }
+        final TextView said = valueView;
         row.addView(words, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         final String copy = Core.str(line, "copy");
         if (!copy.isEmpty()) {
@@ -340,8 +388,12 @@ public class SettingsActivity extends Activity implements Events.Listener {
                     if (clipboard != null) {
                         clipboard.setPrimaryClip(android.content.ClipData.newPlainText(copied, copy));
                     }
-                    android.widget.Toast.makeText(SettingsActivity.this, copied,
-                            android.widget.Toast.LENGTH_SHORT).show();
+                    // Android 13 shows its own preview of what was copied;
+                    // a toast on top says it twice (1647, walk 6, finding 35).
+                    if (android.os.Build.VERSION.SDK_INT < 33) {
+                        android.widget.Toast.makeText(SettingsActivity.this, copied,
+                                android.widget.Toast.LENGTH_SHORT).show();
+                    }
                 }
             });
             row.addView(button);
@@ -356,6 +408,25 @@ public class SettingsActivity extends Activity implements Events.Listener {
         }
         body.addView(row, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return new MailboxLines.Slot() {
+            @Override
+            public void said(String label, String value) {
+                same(labelView, label);
+                if (said != null) {
+                    same(said, value);
+                }
+            }
+        };
+    }
+
+    /**
+     * Write `words` into `view` only where they differ: a selectable value
+     * keeps its selection, and an unchanged line is not laid out again.
+     */
+    private static void same(TextView view, String words) {
+        if (!words.contentEquals(view.getText())) {
+            view.setText(words);
+        }
     }
 
     /**

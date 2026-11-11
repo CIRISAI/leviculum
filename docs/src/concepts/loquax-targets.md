@@ -68,9 +68,9 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 7 | Delete a message | `ChatActivity.java:2349` | `loquax/src/gui.rs:1834` | `loquax/src/ui.rs:5795` |
 | 8 | Copy a message | `ChatActivity.java:2470` | `loquax/src/gui.rs:1813` | `loquax/src/ui.rs:4550` (OSC 52) |
 | 9 | Search | `ConversationsActivity.java:70` | `loquax/src/gui.rs:1628` | `loquax/src/ui.rs:5791` |
-| 10 | Read receipts on/off | `SettingsActivity.java:800` | `loquax/src/gui.rs:1594` | `loquax/src/ui.rs:5769` |
+| 10 | Read receipts on/off | `SettingsActivity.java:871` | `loquax/src/gui.rs:1594` | `loquax/src/ui.rs:5769` |
 | 11 | Send a picture (Gallery) | `ChatActivity.java:1661` | `loquax/src/gui.rs:1311`, `loquax/src/desktop.rs:158` (1341) | `loquax/src/ui.rs:5834` (palette `send picture`, a typed path), `loquax/src/shell.rs:431` (1371) |
-| 12 | Photo size, three tiers | `SettingsActivity.java:470` | `loquax/src/gui/chat.rs:1376` (settings) (1371) | `loquax/src/ui.rs:5820` (palette `photo size`) (1371) |
+| 12 | Photo size, three tiers | `SettingsActivity.java:541` | `loquax/src/gui/chat.rs:1376` (settings) (1371) | `loquax/src/ui.rs:5820` (palette `photo size`) (1371) |
 | 13 | View a photo | `ChatActivity.java:1994` | `loquax/src/gui.rs:1824` (own viewer) | `loquax/src/ui.rs:4589`, `loquax/src/shell.rs:461` (system viewer) |
 | 14 | Camera | `ChatActivity.java:1214` | n/a | n/a |
 | 15 | Send a file | `ChatActivity.java:1714` | `loquax/src/gui.rs:1314`, `loquax/src/shell.rs:873` (1341) | `loquax/src/ui.rs:5838` (palette `send file`, a typed path), `loquax/src/shell.rs:431` (1371) |
@@ -81,7 +81,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 20 | Map with positions | `MapPane.java:445` | `loquax/src/gui.rs:1667` | `loquax/src/ui.rs:5855`, `tui/map.rs` |
 | 21 | Buildings on the map | `loquax/src/picture.rs:45` (shared) | `loquax/src/picture.rs:45` | `loquax/src/picture.rs:45` (sixel, kitty) |
 | 22 | Load the map area | `MapPane.java:35` (autoload) | `loquax/src/gui.rs:1849` | `loquax/src/ui.rs:5851` |
-| 23 | Delete all downloaded maps | `SettingsActivity.java:720` | `loquax/src/gui.rs:1357` | `loquax/src/ui.rs:5830` (palette `delete all maps`), `loquax/src/shell.rs:449` (1371) |
+| 23 | Delete all downloaded maps | `SettingsActivity.java:791` | `loquax/src/gui.rs:1357` | `loquax/src/ui.rs:5830` (palette `delete all maps`), `loquax/src/shell.rs:449` (1371) |
 | 24 | Mesh positions (nodes nearby) | `MapPane.java:483` | `loquax/src/gui.rs:2250` | `loquax/src/tui/map.rs:1540` |
 | 25 | Share the position, once or timed | `ChatActivity.java:977`, `ShareService.java:39` | `loquax/src/gui.rs:1454`, `loquax/src/gui.rs:1462`, position by hand `loquax/src/ui/by_hand.rs:27` (1371) | `loquax/src/ui.rs:5821` (palette `position`), `loquax/src/ui.rs:5825` (`share position`, `stop sharing`) (1371) |
 | 26 | Pin | `ConversationsActivity.java:733` | row menu `loquax/src/gui/chat.rs:2332`, `loquax/src/gui.rs:1748` (1371) | `loquax/src/ui.rs:5715` |
@@ -100,7 +100,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 39 | Move the phone | `ProfileActivity.java:433` | MISSING | MISSING |
 | 40 | Backup | `BackupActivity.java:130` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:685` | `loquax/src/gui.rs:1510`, `loquax/src/gui.rs:3090` (the shared overlay) (1371) | `loquax/src/ui.rs:5668` |
-| 42 | Settings, nine sections in one order (1450) | `SettingsActivity.java:179` | `loquax/src/gui/chat.rs:443` (gear) | `loquax/src/ui.rs:7733` (`S`, palette `settings`) |
+| 42 | Settings, nine sections in one order (1450) | `SettingsActivity.java:191` | `loquax/src/gui/chat.rs:443` (gear) | `loquax/src/ui.rs:7733` (`S`, palette `settings`) |
 | 43 | Browse tab | `BrowsePane.java:342` (behind `browse_tab`) | `loquax/src/gui.rs:3115`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1707`, behind `browse_tab` (1369) |
 | 44 | Notifications of new messages | `LoquaxService.java:331` | `loquax/src/gui.rs:435`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:743`, bell and `loquax/src/desktop.rs:118` (1341) |
 | 45 | Icon and application id | `AndroidManifest.xml:69` | `loquax/src/gui.rs:575` (1341) | n/a |
