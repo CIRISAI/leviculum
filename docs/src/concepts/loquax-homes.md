@@ -6,7 +6,9 @@ experiments E1 to E3 run today as periculum cells, red by design. The
 study with every claim checked line by line is
 `docs/drafts/mailbox-for-friends-study-2026-11.md`. A single home, as
 it runs today, is [the home node](loquax-home-node.md); how a phone
-reaches it is [Reaching the mailbox from anywhere](loquax-reachability.md).
+reaches it is [Reaching the mailbox from anywhere](loquax-reachability.md);
+what each home is and is not on the network, at home and in a car, is
+[what a Loquax Mailbox is](loquax-mailbox-roles.md).
 
 ## Words
 

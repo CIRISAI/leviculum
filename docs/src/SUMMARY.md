@@ -43,6 +43,7 @@
   - [Loquax: tracks on the map](concepts/loquax-tracks.md)
   - [Loquax: map data over Reticulum](concepts/loquax-map-over-reticulum.md)
   - [Loquax: the home node](concepts/loquax-home-node.md)
+  - [Loquax: what a Loquax Mailbox is](concepts/loquax-mailbox-roles.md)
   - [Loquax: reaching the mailbox from anywhere](concepts/loquax-reachability.md)
   - [Loquax: N homes under one identity](concepts/loquax-homes.md)
   - [Loquax on Android: navigation and views](concepts/loquax-android-navigation.md)

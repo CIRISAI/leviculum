@@ -614,7 +614,9 @@ mailbox takes its whole directory from the mailbox and hears no mesh of
 its own, so a stranger nobody wrote to yet stayed a hash on it. The
 archive's name entries cannot carry them: every archive entry wakes the
 devices, and 1136 limited them to peers the user has a relation to for
-that reason. The names get a table of their own beside the pages.
+that reason. The names get a table of their own beside the pages. Why the
+mailbox is the one that hears (an LXMF endpoint behind a full lnsd, the
+devices its leaves) is [what a Loquax Mailbox is](loquax-mailbox-roles.md).
 
 **What the mailbox keeps.** Every LXMF delivery announce with a name its
 node hears (the engine's `OutboxEvent::NameHeard`, raised beside

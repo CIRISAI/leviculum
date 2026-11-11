@@ -18,6 +18,11 @@ identity.
 The home node ends the sharing. One always-on Loquax holds the identity and
 keeps every message; the user's other devices read from it.
 
+How far the home node is a Reticulum node (an LXMF endpoint behind a full
+lnsd, never a transport or a propagation node, devices admitted by pairing
+and never by port) is [what a Loquax Mailbox is](loquax-mailbox-roles.md),
+invariants M1 to M5.
+
 ## Roles and keys
 
 | Role | Holds | Runs |
