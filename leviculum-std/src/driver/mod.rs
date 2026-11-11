@@ -7120,6 +7120,26 @@ pub(crate) async fn shared_instance_first_hop_timeout_ms(
     }
 }
 
+/// A pending link's figures for a caller beside the node (order 1669), kept
+/// apart from the main block so the lines the docs cite there stay where
+/// they are.
+impl ReticulumNode {
+    /// The establishment timeout of a pending link, in milliseconds, as the
+    /// core times its request out and retries it with fresh keys: the hop
+    /// term, the first hop's term and the link's jitter included.
+    ///
+    /// A caller waiting for the link sizes its patience by it (lnomad's
+    /// fetch, order 1669): a wait shorter than this gives up before the
+    /// core's own retry is due. `None` once the link is gone. Takes the
+    /// core lock: never from a `CoreProcessor` hook.
+    pub fn link_establishment_timeout_ms(&self, link_id: &LinkId) -> Option<u64> {
+        self.inner
+            .lock_recover()
+            .link(link_id)
+            .map(|l| l.establishment_timeout_ms())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

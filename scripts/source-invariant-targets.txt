@@ -256,6 +256,7 @@ skip  loquax           mailbox_mesh               # a mailbox on its own node th
 skip  loquax-android   browse                     # the Browse tab's verbs and scene through the facade in Java's bytes (1337); subject is the code
 skip  loquax-android   browse_census              # counts the Browse tab's heap with a global allocator (1337); subject is the code
 skip  loquax-android   browse_fetch               # the Browse tab's fetch through the phone's own node against an in-process transport and page node over loopback TCP (1337); subject is the code
+skip  loquax-android   browse_first_link          # the first fetch behind a relay that mends its path, through in-process relays over loopback TCP for about a minute (1669); subject is the code
 skip  loquax-android   device_walk_script         # starts python3 on the device walk's parser tests; subject is the script's code
 skip  loquax-android   explore                    # the Explore tab's verbs, order under a finger and server sheet through the facade in Java's bytes (1618); subject is the code
 skip  loquax-android   facade                     # the facade against an in-process home node and transport over a loopback TCP socket; subject is the code
