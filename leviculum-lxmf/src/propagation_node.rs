@@ -760,6 +760,10 @@ pub struct FetchPlan {
     /// Length of `msgpack [bin, ...]` over exactly those bodies.
     encoded_len: usize,
     served_bytes: u64,
+    /// Wanted bodies of the caller's mailbox that the heap cap
+    /// (`serve_cap_bytes`) alone kept out of this round: the client's
+    /// limit and the node's serve limit would have admitted them.
+    heap_withheld: usize,
 }
 
 impl FetchPlan {
@@ -796,6 +800,19 @@ impl FetchPlan {
     /// (`response_fits_packet`, `leviculum-core/src/node/mod.rs`).
     pub fn encoded_len(&self) -> usize {
         self.encoded_len
+    }
+
+    /// How many wanted messages of the caller's mailbox this round left
+    /// on the node because the heap cap was tighter than every other
+    /// bound: the bodies a host whose free heap had been larger would
+    /// have served. Zero when no heap cap is set or it did not bind.
+    ///
+    /// The messages stay in the store; a stock client keeps them listed
+    /// and asks again on its next sync
+    /// (`message_get_response`, `reference/LXMF/LXMF/LXMRouter.py:1620-1644`
+    /// confirms only what it received).
+    pub fn heap_withheld(&self) -> usize {
+        self.heap_withheld
     }
 }
 
@@ -1308,6 +1325,46 @@ impl<S: PropagationStore> PropagationNode<S> {
         self.config.serve_cap_bytes = cap;
     }
 
+    /// Whether `outcome`, answered under the current config, is a refusal
+    /// the heap cap ([`PropagationNodeConfig::serve_cap_bytes`]) alone
+    /// caused: the node had mail to give or a list to send, and only the
+    /// heap it stood on kept it from doing so.
+    ///
+    /// * The list form, when the heap cap funds no id at all while the
+    ///   serve limit would: the answer is then `ERROR_THROTTLED`
+    ///   ([`PeerError::Throttled`]), which a stock client takes as
+    ///   invalid list data and tears the link down on
+    ///   (`message_list_response`, `reference/LXMF/LXMF/LXMRouter.py:1602-1605`),
+    ///   to ask again on its next sync.
+    /// * The fetch form, when the round serves nothing and the heap cap
+    ///   withheld at least one wanted message ([`FetchPlan::heap_withheld`]):
+    ///   the answer is the empty list, which a stock client completes with
+    ///   zero messages and nothing confirmed, so the mail stays on the node.
+    ///
+    /// A fetch that served some messages and withheld others is not a
+    /// refusal; it is the short answer the protocol allows.
+    ///
+    /// Call it right after the `/get` that produced `outcome`, before the
+    /// cap moves again.
+    pub fn refused_for_heap(&self, outcome: &GetOutcome) -> bool {
+        match outcome {
+            GetOutcome::List { count, .. } => {
+                let heap_zero = self
+                    .config
+                    .serve_cap_bytes
+                    .map(Self::list_capacity)
+                    .is_some_and(|capacity| capacity == 0);
+                let limit_zero = self
+                    .config
+                    .serve_limit_bytes
+                    .map(Self::list_capacity)
+                    .is_some_and(|capacity| capacity == 0);
+                *count == 0 && heap_zero && !limit_zero
+            }
+            GetOutcome::Fetch { plan, .. } => plan.is_empty() && plan.heap_withheld() > 0,
+        }
+    }
+
     /// The minimum stamp value an upload must prove:
     /// `max(0, cost − flexibility)`
     /// (`reference/LXMF/LXMF/LXMRouter.py:2242`).
@@ -1799,13 +1856,27 @@ impl<S: PropagationStore> PropagationNode<S> {
         .fold(f64::INFINITY, f64::min);
 
         let mut budget = TransferBudget::new(limit);
+        // The same round without the heap cap, kept only to count what
+        // the cap alone withheld ([`FetchPlan::heap_withheld`]): a board
+        // logs a round that served nothing for that reason as its heap
+        // refusal. It never decides what is served.
+        let unheaped_limit = [
+            client_limit,
+            self.config.serve_limit_bytes.map(|bytes| bytes as f64),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f64::INFINITY, f64::min);
+        let heap_binds = limit < unheaped_limit;
+        let mut unheaped = TransferBudget::new(unheaped_limit);
+        let mut heap_withheld = 0usize;
 
         let mut served: Vec<(TransientId, u32)> = Vec::new();
         let mut served_bytes = 0u64;
         let mut payload_bytes = 0usize;
         if let Some(wants) = &request.wants {
             for transient_id in wants {
-                if !budget.can_admit_any() {
+                if !budget.can_admit_any() && !(heap_binds && unheaped.can_admit_any()) {
                     break;
                 }
                 let Some(&stored_size) = owned.get(transient_id) else {
@@ -1821,7 +1892,17 @@ impl<S: PropagationStore> PropagationNode<S> {
                 }
                 if !budget.admit(stored_size) {
                     // Too big for this round; keep scanning (:1547 `pass`).
+                    // Counted once when only the heap cap refused it: the
+                    // running totals only grow, so a repeat of the id
+                    // later in `wants` cannot fit either.
+                    if heap_binds && unheaped.admit(stored_size) {
+                        heap_withheld += 1;
+                        owned.remove(transient_id);
+                    }
                     continue;
+                }
+                if heap_binds {
+                    let _ = unheaped.admit(stored_size);
                 }
                 let servable = stored_size - STAMP_SIZE;
                 served_bytes += servable as u64;
@@ -1838,6 +1919,7 @@ impl<S: PropagationStore> PropagationNode<S> {
                 served,
                 encoded_len,
                 served_bytes,
+                heap_withheld,
             },
             purged,
         }))

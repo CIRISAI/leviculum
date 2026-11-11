@@ -30,7 +30,7 @@ src/events.rs (261): announce log pn transport_stats
 src/feedback.rs (289): led log
 src/flash.rs (149): log
 src/gnss.rs (598): boards log log_critical vext
-src/heap_census.rs (467): log pn
+src/heap_census.rs (479): log pn
 src/led.rs (52): feedback log
 src/lib.rs (757): log log_critical
 src/lora.rs (2757): announce chtm events log media pn radio radio_store set_irq_priorities
@@ -40,7 +40,7 @@ src/motion.rs (177): log
 src/name.rs (259): ble log media telemetry
 src/node_loop.rs (1598): announce banner ble ble_peripherals boards boot_count boot_trace button events feedback flash gnss heap_census init_heap init_vbus log log_boot_diagnostics log_stack lora media mgmt name paint_stack pn position radio radio_store record_store remote_dfu remote_status rng set_irq_priorities spawn_diagnostics_tasks store_spike take_hardfault_postmortem take_panic_postmortem telemetry time_floor transport_stats usb
 src/panel_facts.rs (30): lora pn
-src/pn.rs (4002): announce events heap_census log lora name record_store telemetry usb
+src/pn.rs (4028): announce events heap_census log lora name record_store telemetry usb
 src/position.rs (502): announce chtm log name telemetry
 src/power.rs (261): boards button log usb
 src/qspi.rs (1188): log

@@ -658,14 +658,14 @@ Read from the code, not measured on a board; each is a candidate for its
 own issue, not a finding of this page.
 
 - A miner whose `generate` fails sends no result, so `mining_peer` is never
-  cleared and every later sync pass skips (`leviculum-nrf/src/pn.rs:674`).
+  cleared and every later sync pass skips (`leviculum-nrf/src/pn.rs:676`).
   The third wave found the arm unreachable (row 48).
 - A store error in `start_round` returns before any backoff is booked, so
-  the peer stays due on every pass (`leviculum-nrf/src/pn.rs:3124`).
+  the peer stays due on every pass (`leviculum-nrf/src/pn.rs:3126`).
   Fixed by #583: it now books the backoff (row 56).
 - The offerable-entries walk is written twice, once where the link comes
-  up and once where the round starts: `leviculum-nrf/src/pn.rs:1812`
-  and `leviculum-nrf/src/pn.rs:3124`.
+  up and once where the round starts: `leviculum-nrf/src/pn.rs:1814`
+  and `leviculum-nrf/src/pn.rs:3126`.
 - A full `BLE_INCOMING` drops a completed packet with no line and no
   counter, on both GATT roles (`leviculum-nrf/src/ble/columba.rs:1106`,
   `leviculum-nrf/src/ble/columba.rs:2991`). Since the fifth wave it is
@@ -714,87 +714,87 @@ own issue, not a finding of this page.
 
 | # | Where | What it decides | State it reads | Cheapest rig cell | s | radios/boards | Host test |
 |---|---|---|---|---|---|---|---|
-| 1 | `leviculum-nrf/src/pn.rs:336` | persisted PN costs or the compiled defaults | load_pn_config result | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 2 | `leviculum-nrf/src/pn.rs:359` | merge a `--stamp-cost` frame: KEEP field keeps the configured value, else the wire value; persisted | wire frame, CONFIGURED_* atomics | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 1 | `leviculum-nrf/src/pn.rs:338` | persisted PN costs or the compiled defaults | load_pn_config result | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 2 | `leviculum-nrf/src/pn.rs:361` | merge a `--stamp-cost` frame: KEEP field keeps the configured value, else the wire value; persisted | wire frame, CONFIGURED_* atomics | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 3 | `leviculum-nrf/pn-store/src/lib.rs:446` | walk the workblock at cost 0 too: every accepted message is priced (was: only when some peer demands a value; moved into `board_role_config` by audit 2026-10-12 D10) | the role config | none | - | - | `leviculum_pn_store::tests::a_message_accepted_at_cost_0_before_any_demanding_peer_is_offered_to_one` |
-| 4 | `leviculum-nrf/src/pn.rs:1152` | loop wake deadline: now on a parked grind, +25 ms with work pending, else the earliest of announce/maintenance/stats/sync/outbound | grind, work, sync_batch, pending_ops, next_* | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 5 | `leviculum-nrf/src/pn.rs:1193` | seed the wall clock only when implausible and the input is non-zero | has_plausible_wall_clock, unix_secs | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 6 | `leviculum-nrf/src/pn.rs:1227` | after a clock jump move every stamp heard at or before the old time, and every backoff booking, by the jump, and persist the moved peers (leviculum#466; was: set to the new time) | peer table | none | - | - | `peering::tests::a_calendar_jump_carries_the_old_calendar_stamps_by_the_jump`<br>`peering::tests::a_calendar_jump_keeps_the_backoff_and_the_never_heard_static_peer`<br>`peering::tests::a_peer_silent_across_seeded_boots_ages_and_is_dropped_at_load`<br>`peering::tests::a_seed_that_does_not_move_the_calendar_forward_refreshes_nothing` |
-| 7 | `leviculum-nrf/src/pn.rs:1267` | a PN announce with our name hash and not our own goes to peering | announce name_hash, destination | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 8 | `leviculum-nrf/src/pn.rs:1280` | any other announce, or PathFound, triggers active delivery | event kind | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 4 | `leviculum-nrf/src/pn.rs:1154` | loop wake deadline: now on a parked grind, +25 ms with work pending, else the earliest of announce/maintenance/stats/sync/outbound | grind, work, sync_batch, pending_ops, next_* | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 5 | `leviculum-nrf/src/pn.rs:1195` | seed the wall clock only when implausible and the input is non-zero | has_plausible_wall_clock, unix_secs | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 6 | `leviculum-nrf/src/pn.rs:1229` | after a clock jump move every stamp heard at or before the old time, and every backoff booking, by the jump, and persist the moved peers (leviculum#466; was: set to the new time) | peer table | none | - | - | `peering::tests::a_calendar_jump_carries_the_old_calendar_stamps_by_the_jump`<br>`peering::tests::a_calendar_jump_keeps_the_backoff_and_the_never_heard_static_peer`<br>`peering::tests::a_peer_silent_across_seeded_boots_ages_and_is_dropped_at_load`<br>`peering::tests::a_seed_that_does_not_move_the_calendar_forward_refreshes_nothing` |
+| 7 | `leviculum-nrf/src/pn.rs:1269` | a PN announce with our name hash and not our own goes to peering | announce name_hash, destination | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 8 | `leviculum-nrf/src/pn.rs:1282` | any other announce, or PathFound, triggers active delivery | event kind | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
 | 9 | `leviculum-nrf/src/pn.rs:1138` | an inbound link to our destination gets ResourceStrategy::AcceptApp | is_initiator, destination | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 10 | `leviculum-nrf/src/pn.rs:1320` | a request timeout on the outbound round ends it (`offer_timeout`) and closes the link | outbound link_id/request_id | none | - | - | `sync_round::tests::only_the_rounds_own_offer_timing_out_ends_it` |
-| 11 | `leviculum-nrf/src/pn.rs:1349` | every link packet on our destination is queued as an upload | owns_link | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 12 | `leviculum-nrf/src/pn.rs:1396` | an accepted resource counts as inbound transfer only on a validated peer link (feeds the `/offer` gate) | validated_links | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 13 | `leviculum-nrf/src/pn.rs:1286` | outbound resource done only on the last segment; a failure ends the round | segment_index, total_segments | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 10 | `leviculum-nrf/src/pn.rs:1322` | a request timeout on the outbound round ends it (`offer_timeout`) and closes the link | outbound link_id/request_id | none | - | - | `sync_round::tests::only_the_rounds_own_offer_timing_out_ends_it` |
+| 11 | `leviculum-nrf/src/pn.rs:1351` | every link packet on our destination is queued as an upload | owns_link | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 12 | `leviculum-nrf/src/pn.rs:1398` | an accepted resource counts as inbound transfer only on a validated peer link (feeds the `/offer` gate) | validated_links | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 13 | `leviculum-nrf/src/pn.rs:1288` | outbound resource done only on the last segment; a failure ends the round | segment_index, total_segments | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
 | 14 | `leviculum-nrf/src/pn.rs:1244` | route a request on our destination by path to `/get` or `/offer` work | destination, path | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 15 | `leviculum-nrf/src/pn.rs:1587` | outbound link closed by the far side: drop the round, peer Idle, no PN_SYNC line | outbound link_id | none | - | - | no decision: the step has nothing to add |
-| 16 | `leviculum-nrf/src/pn.rs:1504` | delivery proof for the active push: purge from flash, clear, set the 1 s gap | active.packet_hash | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 17 | `leviculum-nrf/src/pn.rs:1519` | failed push: decrement attempts, give up at 0, else resend | active.attempts_left | none | - | - | `active_delivery::tests::a_failed_push_resends_until_the_last_attempt_and_then_gives_up` |
-| 18 | `leviculum-nrf/src/pn.rs:1611` | a link is ours when its destination is our PN destination (guards the upload/request arms) | node.link() | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 19 | `leviculum-nrf/src/pn.rs:1673` | capture the identity keys into a peer that lacks them | peer keys, storage | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 20 | `leviculum-nrf/src/pn.rs:1680` | PeerChange mapping: Added/Updated persist and sync now, Dropped removes from flash, Declined logs on TableFull | PeerChange | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 15 | `leviculum-nrf/src/pn.rs:1589` | outbound link closed by the far side: drop the round, peer Idle, no PN_SYNC line | outbound link_id | none | - | - | no decision: the step has nothing to add |
+| 16 | `leviculum-nrf/src/pn.rs:1506` | delivery proof for the active push: purge from flash, clear, set the 1 s gap | active.packet_hash | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 17 | `leviculum-nrf/src/pn.rs:1521` | failed push: decrement attempts, give up at 0, else resend | active.attempts_left | none | - | - | `active_delivery::tests::a_failed_push_resends_until_the_last_attempt_and_then_gives_up` |
+| 18 | `leviculum-nrf/src/pn.rs:1613` | a link is ours when its destination is our PN destination (guards the upload/request arms) | node.link() | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 19 | `leviculum-nrf/src/pn.rs:1675` | capture the identity keys into a peer that lacks them | peer keys, storage | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 20 | `leviculum-nrf/src/pn.rs:1682` | PeerChange mapping: Added/Updated persist and sync now, Dropped removes from flash, Declined logs on TableFull | PeerChange | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
 | 21 | `leviculum-nrf/src/pn.rs:1540` | act on link-up only for the outbound round's link | outbound link_id | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 22 | `leviculum-nrf/src/pn.rs:1763` | identify_link failed: end the round and close | node result | none | - | - | `sync_round::tests::a_link_that_cannot_identify_ends_the_round_and_keeps_the_peer_deferred` |
-| 23 | `leviculum-nrf/src/pn.rs:1775` | no peering key at link-up: end `no_key` and close | peer.peering_key | none | - | - | `sync_round::tests::an_identified_link_to_a_peer_without_a_key_ends_no_key_and_leaves_it_due` |
-| 24 | `leviculum-nrf/src/pn.rs:1784` | no link: end `link_gone` and close; else offer against its MDU with the timeout its RTT derives | node.link() | none | - | - | `sync_round::tests::a_link_gone_before_the_offer_is_sized_ends_link_gone`<br>`sync_round::tests::an_identified_link_with_a_key_offers_against_its_own_mdu`<br>`sync_round::tests::the_offer_times_out_on_the_reference_formula_over_the_links_rtt`<br>`sync_round::tests::the_offer_timeout_is_held_between_its_floor_and_the_old_fixed_minute` |
-| 25 | `leviculum-nrf/src/pn.rs:1812` | offerable entries: the store's ordered walk feeds an `OfferBuilder` (`board_offer_builder` since 1355), which takes the sequences above the cursor; a store error ends `store_error` (twin at 3032) | store, cursor | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
-| 26 | `leviculum-nrf/src/pn.rs:1828` | empty or absent offer plan: conclude the round and step the cursor to the target | plan | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
-| 27 | `leviculum-nrf/src/pn.rs:1851` | send `/offer` (RequestSent) or end `request_failed` and close | node result | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 28 | `leviculum-nrf/src/pn.rs:1883` | match an offer response to the outbound link and request id | outbound | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 29 | `leviculum-nrf/src/pn.rs:1922` | offer reply mapping: Send, Concluded, Backoff (defer and close), Unpeer (remove and close), RemineKey (clear key), Retry | OfferReply | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 30 | `leviculum-nrf/src/pn.rs:2016` | store error while sending the batch: end `store_error` and close | store result | none | - | - | `sync_round::tests::a_store_error_at_link_up_ends_the_round` |
-| 31 | `leviculum-nrf/src/pn.rs:2038` | nothing sent: conclude and advance if nothing was withheld, else end `heap_short` | batch.count, batch.withheld | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
-| 32 | `leviculum-nrf/src/pn.rs:2071` | resource sent: record it, lower the cursor target to the batch target; error ends `send_failed` | node result | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 33 | `leviculum-nrf/src/pn.rs:1924` | outbound resource finished: success concludes, failure ends `transfer_failed` | outbound, success | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 34 | `leviculum-nrf/src/pn.rs:2134` | concluding a round: cursor, Idle, next attempt 0, last_heard now, persist, close | peer | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 35 | `leviculum-nrf/src/pn.rs:2219` | an inbound resource is a sync envelope; `multi` means more than one message | resource data | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 36 | `leviculum-nrf/src/pn.rs:2242` | which remote to peer back: the validated hash, else the link identity's PN hash | validated_links, link identity | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 37 | `leviculum-nrf/src/pn.rs:2252` | not a validated peer with a decoded envelope: close on multi, else queue as a client upload | peer, envelope | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 38 | `leviculum-nrf/src/pn.rs:2272` | a second batch while one drains: close the link | sync_batch | none | - | - | `leviculum_sync_batch::tests::an_envelope_with_no_batch_held_is_taken`<br>`leviculum_sync_batch::tests::a_second_envelope_while_a_batch_is_held_closes_the_link` |
-| 39 | `leviculum-nrf/src/pn.rs:2330` | peer back from a recalled announce only when not peered yet | peer table | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 40 | `leviculum-nrf/src/pn.rs:2361` | capture keys from the link or the identity cache, persist, sync now | link identity, storage | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 41 | `leviculum-nrf/src/pn.rs:2437` | skip a push while one is in flight or the gap has not passed | active, next_active_at_ms | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 42 | `leviculum-nrf/src/pn.rs:2440` | which stored message to push: same destination, not too large, lowest sequence | store, too_large | `lora_pn_board_sync` | 1800 | 4/2 (>2) | `active_delivery::tests::the_oldest_message_for_the_destination_is_pushed_and_no_other_recipients`<br>`active_delivery::tests::a_message_known_too_large_is_skipped_for_the_next_oldest`<br>`active_delivery::tests::nothing_stored_for_the_destination_pushes_nothing` |
-| 43 | `leviculum-nrf/src/pn.rs:2473` | body missing or shorter than prefix plus stamp: no push and no gap | store body | none | - | - | no decision: unreachable guard |
-| 44 | `leviculum-nrf/src/pn.rs:2478` | what is pushed: the body minus its 16-byte prefix and the stamp, as one raw packet | body | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 45 | `leviculum-nrf/src/pn.rs:2499` | push result: Ok sets active; TooLarge joins the too-large list (cap 64, oldest out); other errors set the gap | node result | none | - | - | `active_delivery::tests::a_push_too_large_is_left_for_get_and_any_other_refusal_waits_the_gap`<br>`active_delivery::tests::the_too_large_list_holds_an_id_once_and_drops_the_oldest_past_its_cap` |
-| 46 | `leviculum-nrf/src/pn.rs:2562` | the boot re-price walk's parked grind first, else one work item per pass, else one sync-batch step, else one re-price step; an unfinished item goes back to the front | grind, work, sync_batch, reprice | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 47 | `leviculum-nrf/src/pn.rs:2638` | a mined key: clear mining_peer, set key and Idle, persist, sync now | MINE_RES | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 48 | `leviculum-nrf/src/pn.rs:674` | miner: a failed generate sends no result, so mining_peer is never cleared | stamper result | none | - | - | no decision: unreachable arm |
-| 49 | `leviculum-nrf/src/pn.rs:2670` | store not mounted: withhold the PN announce and defer it 60 s, logged once | record_store::mounted, cadence | none | - | - | `cadence::tests::an_unmounted_store_withholds_the_due_announce_one_retry_at_a_time` |
-| 50 | `leviculum-nrf/src/pn.rs:2753` | a commanded announce is refused while the store is unmounted | mounted() | none | - | - | no decision: early return |
-| 51 | `leviculum-nrf/src/pn.rs:2800` | the per-BLE-peer PN announce is skipped while unmounted | mounted() | none | - | - | no decision: early return |
-| 52 | `leviculum-nrf/src/pn.rs:2834` | maintenance due every 480 s | next_maintenance_at_ms | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 53 | `leviculum-nrf/src/pn.rs:3027` | outbound round past its deadline: end `timeout` and close | sync.deadline_ms | none | - | - | `sync_round::tests::a_round_past_its_deadline_times_out_and_one_at_it_does_not` |
-| 54 | `leviculum-nrf/src/pn.rs:3036` | skip the sync pass while a round runs or before it is due; else re-arm the interval (a mining key no longer holds it: the pick, `PeerTable::next_dialable`, skips the peers that need the miner, audit 2026-10-12 D8) | outbound, next_sync_at_ms | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 55 | `leviculum-nrf/src/pn.rs:3095` | key not ready: request a path without an identity hash, else, unless the miner is busy, hand the job to the miner (Idle if its channel is full) | peering_key_ready, identity_hash, mining_peer, MINE_REQ | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 56 | `leviculum-nrf/src/pn.rs:3124` | store error in start_round: book the backoff, log `store_error`, Idle | store result | none | - | - | `sync_round::tests::a_store_error_at_round_start_defers_the_peer_one_step` |
-| 57 | `leviculum-nrf/src/pn.rs:3155` | probe offer: none returns, an empty plan advances and persists the cursor | plan | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
-| 58 | `leviculum-nrf/src/pn.rs:3164` | no recalled signing key: request a path instead of dialling | recalled identity | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 22 | `leviculum-nrf/src/pn.rs:1765` | identify_link failed: end the round and close | node result | none | - | - | `sync_round::tests::a_link_that_cannot_identify_ends_the_round_and_keeps_the_peer_deferred` |
+| 23 | `leviculum-nrf/src/pn.rs:1777` | no peering key at link-up: end `no_key` and close | peer.peering_key | none | - | - | `sync_round::tests::an_identified_link_to_a_peer_without_a_key_ends_no_key_and_leaves_it_due` |
+| 24 | `leviculum-nrf/src/pn.rs:1786` | no link: end `link_gone` and close; else offer against its MDU with the timeout its RTT derives | node.link() | none | - | - | `sync_round::tests::a_link_gone_before_the_offer_is_sized_ends_link_gone`<br>`sync_round::tests::an_identified_link_with_a_key_offers_against_its_own_mdu`<br>`sync_round::tests::the_offer_times_out_on_the_reference_formula_over_the_links_rtt`<br>`sync_round::tests::the_offer_timeout_is_held_between_its_floor_and_the_old_fixed_minute` |
+| 25 | `leviculum-nrf/src/pn.rs:1814` | offerable entries: the store's ordered walk feeds an `OfferBuilder` (`board_offer_builder` since 1355), which takes the sequences above the cursor; a store error ends `store_error` (twin at 3032) | store, cursor | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
+| 26 | `leviculum-nrf/src/pn.rs:1830` | empty or absent offer plan: conclude the round and step the cursor to the target | plan | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
+| 27 | `leviculum-nrf/src/pn.rs:1853` | send `/offer` (RequestSent) or end `request_failed` and close | node result | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 28 | `leviculum-nrf/src/pn.rs:1885` | match an offer response to the outbound link and request id | outbound | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 29 | `leviculum-nrf/src/pn.rs:1924` | offer reply mapping: Send, Concluded, Backoff (defer and close), Unpeer (remove and close), RemineKey (clear key), Retry | OfferReply | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 30 | `leviculum-nrf/src/pn.rs:2018` | store error while sending the batch: end `store_error` and close | store result | none | - | - | `sync_round::tests::a_store_error_at_link_up_ends_the_round` |
+| 31 | `leviculum-nrf/src/pn.rs:2040` | nothing sent: conclude and advance if nothing was withheld, else end `heap_short` | batch.count, batch.withheld | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
+| 32 | `leviculum-nrf/src/pn.rs:2073` | resource sent: record it, lower the cursor target to the batch target; error ends `send_failed` | node result | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 33 | `leviculum-nrf/src/pn.rs:1926` | outbound resource finished: success concludes, failure ends `transfer_failed` | outbound, success | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 34 | `leviculum-nrf/src/pn.rs:2136` | concluding a round: cursor, Idle, next attempt 0, last_heard now, persist, close | peer | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 35 | `leviculum-nrf/src/pn.rs:2221` | an inbound resource is a sync envelope; `multi` means more than one message | resource data | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 36 | `leviculum-nrf/src/pn.rs:2244` | which remote to peer back: the validated hash, else the link identity's PN hash | validated_links, link identity | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 37 | `leviculum-nrf/src/pn.rs:2254` | not a validated peer with a decoded envelope: close on multi, else queue as a client upload | peer, envelope | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 38 | `leviculum-nrf/src/pn.rs:2274` | a second batch while one drains: close the link | sync_batch | none | - | - | `leviculum_sync_batch::tests::an_envelope_with_no_batch_held_is_taken`<br>`leviculum_sync_batch::tests::a_second_envelope_while_a_batch_is_held_closes_the_link` |
+| 39 | `leviculum-nrf/src/pn.rs:2332` | peer back from a recalled announce only when not peered yet | peer table | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 40 | `leviculum-nrf/src/pn.rs:2363` | capture keys from the link or the identity cache, persist, sync now | link identity, storage | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 41 | `leviculum-nrf/src/pn.rs:2439` | skip a push while one is in flight or the gap has not passed | active, next_active_at_ms | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 42 | `leviculum-nrf/src/pn.rs:2442` | which stored message to push: same destination, not too large, lowest sequence | store, too_large | `lora_pn_board_sync` | 1800 | 4/2 (>2) | `active_delivery::tests::the_oldest_message_for_the_destination_is_pushed_and_no_other_recipients`<br>`active_delivery::tests::a_message_known_too_large_is_skipped_for_the_next_oldest`<br>`active_delivery::tests::nothing_stored_for_the_destination_pushes_nothing` |
+| 43 | `leviculum-nrf/src/pn.rs:2475` | body missing or shorter than prefix plus stamp: no push and no gap | store body | none | - | - | no decision: unreachable guard |
+| 44 | `leviculum-nrf/src/pn.rs:2480` | what is pushed: the body minus its 16-byte prefix and the stamp, as one raw packet | body | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 45 | `leviculum-nrf/src/pn.rs:2501` | push result: Ok sets active; TooLarge joins the too-large list (cap 64, oldest out); other errors set the gap | node result | none | - | - | `active_delivery::tests::a_push_too_large_is_left_for_get_and_any_other_refusal_waits_the_gap`<br>`active_delivery::tests::the_too_large_list_holds_an_id_once_and_drops_the_oldest_past_its_cap` |
+| 46 | `leviculum-nrf/src/pn.rs:2564` | the boot re-price walk's parked grind first, else one work item per pass, else one sync-batch step, else one re-price step; an unfinished item goes back to the front | grind, work, sync_batch, reprice | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 47 | `leviculum-nrf/src/pn.rs:2640` | a mined key: clear mining_peer, set key and Idle, persist, sync now | MINE_RES | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 48 | `leviculum-nrf/src/pn.rs:676` | miner: a failed generate sends no result, so mining_peer is never cleared | stamper result | none | - | - | no decision: unreachable arm |
+| 49 | `leviculum-nrf/src/pn.rs:2672` | store not mounted: withhold the PN announce and defer it 60 s, logged once | record_store::mounted, cadence | none | - | - | `cadence::tests::an_unmounted_store_withholds_the_due_announce_one_retry_at_a_time` |
+| 50 | `leviculum-nrf/src/pn.rs:2755` | a commanded announce is refused while the store is unmounted | mounted() | none | - | - | no decision: early return |
+| 51 | `leviculum-nrf/src/pn.rs:2802` | the per-BLE-peer PN announce is skipped while unmounted | mounted() | none | - | - | no decision: early return |
+| 52 | `leviculum-nrf/src/pn.rs:2836` | maintenance due every 480 s | next_maintenance_at_ms | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 53 | `leviculum-nrf/src/pn.rs:3029` | outbound round past its deadline: end `timeout` and close | sync.deadline_ms | none | - | - | `sync_round::tests::a_round_past_its_deadline_times_out_and_one_at_it_does_not` |
+| 54 | `leviculum-nrf/src/pn.rs:3038` | skip the sync pass while a round runs or before it is due; else re-arm the interval (a mining key no longer holds it: the pick, `PeerTable::next_dialable`, skips the peers that need the miner, audit 2026-10-12 D8) | outbound, next_sync_at_ms | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 55 | `leviculum-nrf/src/pn.rs:3097` | key not ready: request a path without an identity hash, else, unless the miner is busy, hand the job to the miner (Idle if its channel is full) | peering_key_ready, identity_hash, mining_peer, MINE_REQ | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 56 | `leviculum-nrf/src/pn.rs:3126` | store error in start_round: book the backoff, log `store_error`, Idle | store result | none | - | - | `sync_round::tests::a_store_error_at_round_start_defers_the_peer_one_step` |
+| 57 | `leviculum-nrf/src/pn.rs:3157` | probe offer: none returns, an empty plan advances and persists the cursor | plan | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
+| 58 | `leviculum-nrf/src/pn.rs:3166` | no recalled signing key: request a path instead of dialling | recalled identity | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
 | 59 | `leviculum-nrf/src/pn.rs:3138` | book the sync backoff before dialling: accumulator plus one step, next attempt now plus the accumulator | peer backoff | none | - | - | `peering::tests::every_unanswered_sync_attempt_defers_the_peer_one_backoff_step_longer`<br>`peering::tests::a_sync_booking_is_cleared_by_a_link_and_handed_back_by_a_yield` |
-| 60 | `leviculum-nrf/src/pn.rs:3230` | connect refused by the link cap: defer, Idle, backoff kept | node result | none | - | - | `sync_round::tests::a_dial_the_link_cap_refuses_defers_the_peer_by_its_booking` |
-| 61 | `leviculum-nrf/src/pn.rs:3249` | round deadline is now plus 180 s | now_ms | none | - | - | `sync_round::tests::a_round_past_its_deadline_times_out_and_one_at_it_does_not` |
-| 62 | `leviculum-nrf/src/pn.rs:3319` | min_cost 0 and no value needed: accept with value 0 without walking | min_accepted_cost | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 63 | `leviculum-nrf/src/pn.rs:3324` | start a grind if none; undecodable material is Done(None); a resumed grind is not re-tied to its message | grind | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 64 | `leviculum-nrf/src/pn.rs:3349` | min_cost 0 computes the value, otherwise validates against min_cost | min_cost | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 65 | `leviculum-nrf/src/pn.rs:3437` | a parked upload goes back to the front | step | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 66 | `leviculum-nrf/src/pn.rs:3448` | seed the clock from the upload envelope if it decodes | upload data | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 67 | `leviculum-nrf/src/pn.rs:3453` | upload outcome mapping: Accepted flushes; InvalidStamp sends the reject and closes; PeerSyncForm closes; Malformed/StoreFailed log only | UploadOutcome | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 68 | `leviculum-nrf/src/pn.rs:3539` | `/get` without a remote identity: NoIdentity | link identity | none | - | - | `propagation_node::tests::a_get_over_an_unidentified_link_is_answered_no_identity` |
-| 69 | `leviculum-nrf/src/pn.rs:3539` | the mailbox is the identity's `lxmf.delivery` hash; an identity off a non-empty auth list is NoAccess (audit 2026-10-12 D18) | identity, auth list | `lora_pn_board_sync` | 1800 | 4/2 (>2) | `propagation_node::tests::a_get_over_an_identified_link_drains_that_identitys_delivery_mailbox`<br>`leviculum_pn_store::tests::an_unlisted_client_is_refused_its_mailbox_and_a_listed_one_served` |
-| 70 | `leviculum-nrf/src/pn.rs:3557` | `/get` outcome: List responds, Fetch flushes purges then serves, Err answers nil | GetOutcome | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 71 | `leviculum-nrf/src/pn.rs:3622` | `/offer` without an identity: NoIdentity | link identity | none | - | - | `propagation_node::tests::an_offer_over_an_unidentified_link_is_answered_no_identity`<br>`propagation_node::tests::an_offer_over_an_identified_link_names_the_identity_and_its_propagation_destination` |
-| 72 | `leviculum-nrf/src/pn.rs:3666` | our cost above 0 validates the peering key; a validator error counts as invalid | our_cost, key | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 73 | `leviculum-nrf/src/pn.rs:3684` | mark the link validated (decides 1201 and 1969 later) | link | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 74 | `leviculum-nrf/src/pn.rs:3687` | which offered ids to want; a store `contains` error counts as want | offer ids, store | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 75 | `leviculum-nrf/src/pn.rs:3728` | validate a synced message only when longer than a stamp; transient id is the unstamped hash; parked goes back | message | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 76 | `leviculum-nrf/src/pn.rs:3785` | count as transferred only when not a duplicate and durable; not durable is a store failure (`PN_STORE_FULL`, 1355) | duplicate, durable | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 77 | `leviculum-nrf/src/pn.rs:3806` | InvalidStamp, Malformed and PeerSyncForm count as rejects, StoreFailed does not | UploadOutcome | none | - | - | `propagation_node::tests::a_bad_stamp_a_bad_body_and_a_nested_transfer_count_against_the_sender`<br>`propagation_node::tests::a_store_failure_does_not_count_against_the_sender`<br>`propagation_node::tests::an_accepted_message_does_not_count_against_the_sender` |
-| 78 | `leviculum-nrf/src/pn.rs:3826` | batch drained: conclude; any invalid throttles the sender and closes | drained, invalid | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 79 | `leviculum-nrf/src/pn.rs:3864` | fetch response: one packet if it fits (encode error answers nil), else a resource | link MDU | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
-| 80 | `leviculum-nrf/src/pn.rs:3893` | response too large for a packet goes as a resource, other errors are dropped | node result | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
-| 81 | `leviculum-nrf/src/pn.rs:3916` | a failed append forgets its id so the client's retry is stored | flush result | none | - | - | `leviculum_pn_store::tests::an_append_the_flash_refused_forgets_its_id_and_the_retry_is_stored`<br>`leviculum_pn_store::tests::an_append_refused_by_an_unmounted_store_forgets_its_id`<br>`leviculum_pn_store::tests::an_append_into_a_full_region_lands_and_its_retry_is_a_duplicate` |
+| 60 | `leviculum-nrf/src/pn.rs:3232` | connect refused by the link cap: defer, Idle, backoff kept | node result | none | - | - | `sync_round::tests::a_dial_the_link_cap_refuses_defers_the_peer_by_its_booking` |
+| 61 | `leviculum-nrf/src/pn.rs:3251` | round deadline is now plus 180 s | now_ms | none | - | - | `sync_round::tests::a_round_past_its_deadline_times_out_and_one_at_it_does_not` |
+| 62 | `leviculum-nrf/src/pn.rs:3321` | min_cost 0 and no value needed: accept with value 0 without walking | min_accepted_cost | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 63 | `leviculum-nrf/src/pn.rs:3326` | start a grind if none; undecodable material is Done(None); a resumed grind is not re-tied to its message | grind | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 64 | `leviculum-nrf/src/pn.rs:3351` | min_cost 0 computes the value, otherwise validates against min_cost | min_cost | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 65 | `leviculum-nrf/src/pn.rs:3464` | a parked upload goes back to the front | step | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 66 | `leviculum-nrf/src/pn.rs:3475` | seed the clock from the upload envelope if it decodes | upload data | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 67 | `leviculum-nrf/src/pn.rs:3480` | upload outcome mapping: Accepted flushes; InvalidStamp sends the reject and closes; PeerSyncForm closes; Malformed/StoreFailed log only | UploadOutcome | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 68 | `leviculum-nrf/src/pn.rs:3566` | `/get` without a remote identity: NoIdentity | link identity | none | - | - | `propagation_node::tests::a_get_over_an_unidentified_link_is_answered_no_identity` |
+| 69 | `leviculum-nrf/src/pn.rs:3566` | the mailbox is the identity's `lxmf.delivery` hash; an identity off a non-empty auth list is NoAccess (audit 2026-10-12 D18) | identity, auth list | `lora_pn_board_sync` | 1800 | 4/2 (>2) | `propagation_node::tests::a_get_over_an_identified_link_drains_that_identitys_delivery_mailbox`<br>`leviculum_pn_store::tests::an_unlisted_client_is_refused_its_mailbox_and_a_listed_one_served` |
+| 70 | `leviculum-nrf/src/pn.rs:3583` | `/get` outcome under the live heap: List responds, Fetch flushes purges then serves, Err answers nil; an answer the heap alone refused logs `PN_REJECT reason=heap_low` (1676) | GetOutcome, free heap | `lora_pn_board_sync` | 1800 | 4/2 (>2) | `leviculum_pn_store::tests::a_heap_that_funds_no_message_refuses_the_get_and_the_next_one_is_served` |
+| 71 | `leviculum-nrf/src/pn.rs:3648` | `/offer` without an identity: NoIdentity | link identity | none | - | - | `propagation_node::tests::an_offer_over_an_unidentified_link_is_answered_no_identity`<br>`propagation_node::tests::an_offer_over_an_identified_link_names_the_identity_and_its_propagation_destination` |
+| 72 | `leviculum-nrf/src/pn.rs:3692` | our cost above 0 validates the peering key; a validator error counts as invalid | our_cost, key | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 73 | `leviculum-nrf/src/pn.rs:3710` | mark the link validated (decides 1201 and 1969 later) | link | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 74 | `leviculum-nrf/src/pn.rs:3713` | which offered ids to want; a store `contains` error counts as want | offer ids, store | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 75 | `leviculum-nrf/src/pn.rs:3754` | validate a synced message only when longer than a stamp; transient id is the unstamped hash; parked goes back | message | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 76 | `leviculum-nrf/src/pn.rs:3811` | count as transferred only when not a duplicate and durable; not durable is a store failure (`PN_STORE_FULL`, 1355) | duplicate, durable | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 77 | `leviculum-nrf/src/pn.rs:3832` | InvalidStamp, Malformed and PeerSyncForm count as rejects, StoreFailed does not | UploadOutcome | none | - | - | `propagation_node::tests::a_bad_stamp_a_bad_body_and_a_nested_transfer_count_against_the_sender`<br>`propagation_node::tests::a_store_failure_does_not_count_against_the_sender`<br>`propagation_node::tests::an_accepted_message_does_not_count_against_the_sender` |
+| 78 | `leviculum-nrf/src/pn.rs:3852` | batch drained: conclude; any invalid throttles the sender and closes | drained, invalid | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 79 | `leviculum-nrf/src/pn.rs:3890` | fetch response: one packet if it fits (encode error answers nil), else a resource | link MDU | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
+| 80 | `leviculum-nrf/src/pn.rs:3919` | response too large for a packet goes as a resource, other errors are dropped | node result | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
+| 81 | `leviculum-nrf/src/pn.rs:3942` | a failed append forgets its id so the client's retry is stored | flush result | none | - | - | `leviculum_pn_store::tests::an_append_the_flash_refused_forgets_its_id_and_the_retry_is_stored`<br>`leviculum_pn_store::tests::an_append_refused_by_an_unmounted_store_forgets_its_id`<br>`leviculum_pn_store::tests::an_append_into_a_full_region_lands_and_its_retry_is_a_duplicate` |
 
 ### BLE and Columba (`ble/`)
 
@@ -1138,7 +1138,7 @@ own issue, not a finding of this page.
 | 394 | `leviculum-nrf/src/qspi.rs:1142` | mount only after a successful identify | identify result | `boot_smoke_solarnode` | 300 | 1/1 |  |
 | 395 | `leviculum-nrf/src/qspi.rs:1150` | over budget: leak the future, release by hand, log, keep booting | with_timeout | none | - | - || rig-only by nature: a hung QSPI transfer; the deadline and its line are `leviculum_qspi_boot::outcome` and `Timeout`, host-tested |
 | 396 | `leviculum-nrf/src/heap_census.rs:257` | refuse to boot when the budget exceeds HEAP_SIZE or links are fewer than BLE sessions | budget values | `boot_smoke_t114` | 300 | 1/1 |  |
-| 397 | `leviculum-nrf/src/heap_census.rs:316` | largest allocatable block by binary search (feeds the live serve cap) | allocator | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
+| 397 | `leviculum-nrf/src/heap_census.rs:328` | largest allocatable block by binary search (feeds the live serve cap) | allocator | `lora_pn_board_offer_past_the_link` | 3600 | 3/2 (>2) |  |
 | 398 | `leviculum-nrf/src/heap_census.rs:152` | census due or requested by debug byte `c` | next, REQUESTED | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 399 | `leviculum-nrf/firmware/src/log.rs:184` | drop gated lines until DTR or 30 s and count them | RUNTIME_DRAIN_OPEN | `boot_smoke_t114` | 300 | 1/1 |  |
 | 402 | `leviculum-nrf/firmware/src/log.rs:103` | ring full overwrites the oldest bytes | wp, rp | none | - | - || `leviculum_boot_trace::tail::tests::a_writer_that_laps_the_reader_moves_it_to_the_oldest_byte`<br>`leviculum_boot_trace::tail::tests::the_lap_is_found_across_the_counters_wrap` |

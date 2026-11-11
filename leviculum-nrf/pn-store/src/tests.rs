@@ -2742,3 +2742,188 @@ fn an_undecodable_peer_record_is_counted() {
         assert_eq!(store.undecodable_peer_records(), 1);
     });
 }
+
+// ---- the serve gated live, not reserved (order 1676, LV-1006) ----
+
+/// The board's `/get` path end to end on a host: the role in the board's
+/// own configuration at the measured node box's boot cap (0 B), two
+/// stored messages for the client, and the heap the board reads at the
+/// `/get` set one byte under what serving the first of them needs.
+///
+/// "Need" here is per request: the serve gate is live, so what decides is
+/// whether the heap left after `SERVE_MARGIN_BYTES` funds the transient of
+/// ONE stored message, not the 17 264 B the full announced cap would cost.
+/// The threshold is searched, not hard-coded, so the test moves with the
+/// margin and the model; it is printed for the report.
+///
+/// One byte under: the fetch is the heap refusal (`heap_low`), its wire
+/// answer the empty list, and nothing is purged. A heap too tight to fund
+/// even the list answers `ERROR_THROTTLED`, also `heap_low`. At the
+/// threshold the same fetch is served. Positive control in both
+/// directions, so neither half can pass vacuously.
+#[test]
+fn a_heap_that_funds_no_message_refuses_the_get_and_the_next_one_is_served() {
+    use leviculum_lxmf::propagation::{
+        MessageGetRequest, MessageListResponse, PeerError, TransferLimit,
+    };
+    use leviculum_lxmf::GetOutcome;
+
+    let boot_cap = leviculum_heap_budget::budget_serve_cap(leviculum_heap_budget::NODE_BOX_BYTES);
+    assert_eq!(
+        boot_cap, 0,
+        "the boot plan funds no serve: the gate is live"
+    );
+
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let mut role = PropagationNode::new(
+        PnStore::new(region.clone(), SECTORS),
+        board_role_config(0, 0, b"bench".to_vec(), boot_cap),
+    );
+    let mut ids = Vec::new();
+    for seed in [1u8, 2] {
+        match role.handle_upload(&upload(seed), 1000, |_, _| Some(0)) {
+            leviculum_lxmf::UploadOutcome::Accepted { transient_id, .. } => ids.push(transient_id),
+            other => panic!("expected acceptance, got {other:?}"),
+        }
+        assert!(flush_front(&mut role, &region, &mut log));
+    }
+    let mailbox = [7u8; DESTINATION_LENGTH];
+    let fetch = MessageGetRequest {
+        wants: Some(ids.clone()),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(1000)),
+    }
+    .encode()
+    .unwrap();
+    let list = MessageGetRequest::list().encode().unwrap();
+
+    // The smallest free heap (largest block equal to it, an unfragmented
+    // heap) at which the live cap funds one stored message.
+    let one_message = directory(role.store())
+        .iter()
+        .map(|meta| meta.size as usize)
+        .min()
+        .unwrap()
+        + 24
+        + 16;
+    let funds =
+        |free: usize| leviculum_heap_budget::live_serve_cap(boot_cap, free, free) >= one_message;
+    let mut low = 0usize;
+    let mut high = leviculum_heap_budget::HEAP_SIZE;
+    assert!(funds(high) && !funds(low));
+    while high - low > 1 {
+        let mid = low + (high - low) / 2;
+        if funds(mid) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    let threshold = high;
+    std::eprintln!(
+        "SERVE_GATE one_message={one_message} threshold_free={threshold} margin={} need_at_cap={}",
+        leviculum_heap_budget::SERVE_MARGIN_BYTES,
+        leviculum_heap_budget::SERVE_PEAK_BYTES
+    );
+    assert!(threshold > leviculum_heap_budget::SERVE_MARGIN_BYTES);
+
+    // One byte under: refused for the heap, the empty list on the wire.
+    let under = board_answer_get(
+        &mut role,
+        boot_cap,
+        threshold - 1,
+        threshold - 1,
+        &fetch,
+        &mailbox,
+        1000,
+    )
+    .unwrap();
+    assert!(
+        under.heap_low,
+        "one byte under the need is the heap refusal"
+    );
+    assert!(under.live_cap < one_message);
+    let GetOutcome::Fetch { plan, purged } = &under.outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert!(plan.is_empty() && purged.is_empty());
+    assert_eq!(role.encode_fetch(plan).unwrap(), vec![0x90]);
+    assert_eq!(directory(role.store()).len(), 2, "the mail stays");
+
+    // A fragmented heap is refused the same way: the bytes are there,
+    // the block is not. One byte under the largest single allocation one
+    // message's serve asks for, after the margin.
+    let block = leviculum_lxmf::propagation_node::serve_largest_block_bytes(
+        one_message,
+        leviculum_heap_budget::SERVE_RESOURCE_SDU,
+    );
+    let fragmented = board_answer_get(
+        &mut role,
+        boot_cap,
+        2 * threshold,
+        leviculum_heap_budget::SERVE_MARGIN_BYTES + block - 1,
+        &fetch,
+        &mailbox,
+        1000,
+    )
+    .unwrap();
+    assert!(fragmented.heap_low, "the largest block decides as well");
+    let control = board_answer_get(
+        &mut role,
+        boot_cap,
+        2 * threshold,
+        leviculum_heap_budget::SERVE_MARGIN_BYTES + block,
+        &fetch,
+        &mailbox,
+        1000,
+    )
+    .unwrap();
+    assert!(!control.heap_low, "and one byte more block serves");
+
+    // Tighter still: not even the list is funded, the stock client's
+    // first request is answered ERROR_THROTTLED.
+    let starved = board_answer_get(
+        &mut role,
+        boot_cap,
+        leviculum_heap_budget::SERVE_MARGIN_BYTES,
+        leviculum_heap_budget::SERVE_MARGIN_BYTES,
+        &list,
+        &mailbox,
+        1000,
+    )
+    .unwrap();
+    assert!(starved.heap_low);
+    let GetOutcome::List { response, .. } = &starved.outcome else {
+        panic!("the list request must return a list");
+    };
+    assert_eq!(
+        MessageListResponse::decode(response).unwrap(),
+        MessageListResponse::Error(PeerError::Throttled)
+    );
+
+    // The heap frees to the threshold: the next fetch is served.
+    let freed = board_answer_get(
+        &mut role, boot_cap, threshold, threshold, &fetch, &mailbox, 1000,
+    )
+    .unwrap();
+    assert!(!freed.heap_low);
+    let GetOutcome::Fetch { plan, .. } = &freed.outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert_eq!(
+        plan.count(),
+        1,
+        "exactly one message is funded at the threshold"
+    );
+
+    // And with the heap the field board stood on (30 380 B free), both.
+    let field =
+        board_answer_get(&mut role, boot_cap, 30_380, 30_320, &fetch, &mailbox, 1000).unwrap();
+    assert!(!field.heap_low);
+    let GetOutcome::Fetch { plan, .. } = &field.outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert_eq!(plan.served_ids(), ids);
+}

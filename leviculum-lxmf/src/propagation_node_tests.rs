@@ -2467,3 +2467,147 @@ fn the_duplicate_bound_follows_the_store_without_a_tick() {
     assert!(counts.processed > DUP_IDS_FLOOR, "{counts:?}");
     assert!(counts.processed <= processed_cap, "{counts:?}");
 }
+
+// ---- the heap refusal a board logs (order 1676, LV-1006) ----
+
+/// A node over two stored 200 B messages for destination 7, serving to
+/// `serve_cap` beside an 8 000 B serve limit (the board's shape).
+fn heap_capped(serve_cap: Option<usize>) -> (PropagationNode<FakeBodySource>, [TransientId; 2]) {
+    let (first, first_body) = seeded(7, 1, 200);
+    let (second, second_body) = seeded(7, 2, 200);
+    let (mut store, _) = FakeBodySource::new(64 * 1024);
+    store.seed(first, 10, &first_body);
+    store.seed(second, 10, &second_body);
+    let node = PropagationNode::new(
+        store,
+        PropagationNodeConfig {
+            serve_limit_bytes: Some(8_000),
+            serve_cap_bytes: serve_cap,
+            ..cost_free()
+        },
+    );
+    (node, [first, second])
+}
+
+fn fetch_both(ids: [TransientId; 2], limit_kb: u64) -> Vec<u8> {
+    MessageGetRequest {
+        wants: Some(ids.to_vec()),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(limit_kb)),
+    }
+    .encode()
+    .unwrap()
+}
+
+/// One 200 B message accounts to 24 + 232 + 16 = 272 B. A heap cap one
+/// byte under that serves nothing although the client and the serve limit
+/// would take both: the round is the heap's refusal, and the mail stays.
+#[test]
+fn a_heap_cap_under_one_message_is_a_heap_refusal_and_keeps_the_mail() {
+    let (mut node, ids) = heap_capped(Some(271));
+    let outcome = node
+        .handle_get(&fetch_both(ids, 1000), &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    let GetOutcome::Fetch { plan, purged } = &outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert!(plan.is_empty());
+    assert!(purged.is_empty());
+    assert_eq!(plan.heap_withheld(), 2);
+    assert!(node.refused_for_heap(&outcome));
+    assert_eq!(
+        node.encode_fetch(plan).unwrap(),
+        vec![0x90],
+        "the wire answer is the empty list"
+    );
+    assert!(node.store().contains(&ids[0]).unwrap());
+    assert!(node.store().contains(&ids[1]).unwrap());
+
+    // The heap frees: the same request is served whole.
+    node.set_serve_cap_bytes(Some(8_000));
+    let outcome = node
+        .handle_get(&fetch_both(ids, 1000), &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    let GetOutcome::Fetch { plan, .. } = &outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert_eq!(plan.served_ids(), ids.to_vec());
+    assert_eq!(plan.heap_withheld(), 0);
+    assert!(!node.refused_for_heap(&outcome));
+}
+
+/// A cap that funds one of the two serves it and withholds the other: a
+/// short answer, which the protocol allows, not a refusal.
+#[test]
+fn a_heap_cap_that_funds_some_mail_is_a_short_answer_not_a_refusal() {
+    let (mut node, ids) = heap_capped(Some(272));
+    let outcome = node
+        .handle_get(&fetch_both(ids, 1000), &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    let GetOutcome::Fetch { plan, .. } = &outcome else {
+        panic!("a fetch request must produce a fetch outcome");
+    };
+    assert_eq!(plan.count(), 1);
+    assert_eq!(plan.heap_withheld(), 1);
+    assert!(!node.refused_for_heap(&outcome));
+}
+
+/// The client's own limit is not the heap: a round its limit empties,
+/// with or without a looser heap cap, withholds nothing for the heap.
+#[test]
+fn a_round_the_clients_limit_empties_is_no_heap_refusal() {
+    for cap in [None, Some(8_000)] {
+        let (mut node, ids) = heap_capped(cap);
+        // 0 kB: the client takes nothing at all.
+        let outcome = node
+            .handle_get(&fetch_both(ids, 0), &[7; DESTINATION_LENGTH], 0)
+            .unwrap();
+        let GetOutcome::Fetch { plan, .. } = &outcome else {
+            panic!("a fetch request must produce a fetch outcome");
+        };
+        assert!(plan.is_empty());
+        assert_eq!(plan.heap_withheld(), 0, "cap {cap:?}");
+        assert!(!node.refused_for_heap(&outcome), "cap {cap:?}");
+    }
+}
+
+/// The list form: a heap cap that funds no id answers `ERROR_THROTTLED`
+/// and is the heap's refusal; the same answer forced by the serve limit
+/// is not, and a list the heap funds is not either.
+#[test]
+fn a_throttled_list_is_a_heap_refusal_only_when_the_heap_caused_it() {
+    let list = MessageGetRequest::list().encode().unwrap();
+
+    let (mut node, _) = heap_capped(Some(34));
+    let outcome = node.handle_get(&list, &[7; DESTINATION_LENGTH], 0).unwrap();
+    let GetOutcome::List { response, count } = &outcome else {
+        panic!("the list request must return a list");
+    };
+    assert_eq!(*count, 0);
+    assert_eq!(
+        MessageListResponse::decode(response).unwrap(),
+        MessageListResponse::Error(PeerError::Throttled)
+    );
+    assert!(node.refused_for_heap(&outcome));
+
+    let (store, _) = FakeBodySource::new(64 * 1024);
+    let mut limited = PropagationNode::new(
+        store,
+        PropagationNodeConfig {
+            serve_limit_bytes: Some(34),
+            serve_cap_bytes: Some(34),
+            ..cost_free()
+        },
+    );
+    let outcome = limited
+        .handle_get(&list, &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    assert!(!limited.refused_for_heap(&outcome));
+
+    let (mut funded, _) = heap_capped(Some(8_000));
+    let outcome = funded
+        .handle_get(&list, &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    assert!(matches!(outcome, GetOutcome::List { count: 2, .. }));
+    assert!(!funded.refused_for_heap(&outcome));
+}

@@ -182,9 +182,11 @@
 //!                                               cache, flush queues
 //!         + (0)                                 SERVE_PEAK_BYTES, the
 //!                                               outbound serve transient —
-//!                                               48 922 B at the announced
-//!                                               cap and UNFUNDED, see the
-//!                                               arithmetic at the constant
+//!                                               17 264 B at the announced
+//!                                               cap, gated live and not
+//!                                               reserved (order 1676), see
+//!                                               the arithmetic at the
+//!                                               constant
 //!       + reserve                             fragmentation reserve
 //!                                             + the shared BLE channels
 //!                                             + one incoming resource at
@@ -3391,11 +3393,32 @@ impl Engine {
     /// `live_cap=` is what this fetch may ship, and `free=`/`largest=`
     /// beside `margin=` are every input it was computed from, so the
     /// arithmetic can be re-run from a capture.
-    fn read_serve_cap(&mut self) {
+    ///
+    /// The reading and the answer are one step
+    /// ([`leviculum_pn_store::board_answer_get`], host-tested there): the
+    /// cap is set, the role answers under it, and an answer the heap alone
+    /// refused is logged as `PN_REJECT reason=heap_low via=get` (order
+    /// 1676). That refusal is the serve transient's only protection, by
+    /// decision: the boot plan reserves nothing for it
+    /// (`HEAP_BUDGET_SERVE mode=live_gated reserve=0`).
+    fn answer_get_under_live_heap(
+        &mut self,
+        request: &[u8],
+        mailbox: &[u8; 16],
+        now: u64,
+    ) -> Result<GetOutcome, leviculum_lxmf::GetError> {
         let (_, free) = leviculum_firmware::heap::heap_stats();
         let largest = crate::heap_census::largest_free_block();
-        let live_cap = crate::heap_census::live_serve_cap(self.serve_boot_cap, free, largest);
-        self.role.set_serve_cap_bytes(Some(live_cap));
+        let answer = leviculum_pn_store::board_answer_get(
+            &mut self.role,
+            self.serve_boot_cap,
+            free,
+            largest,
+            request,
+            mailbox,
+            now,
+        )?;
+        let live_cap = answer.live_cap;
         crate::log::log_fmt(
             "SERVE_CAP ",
             format_args!(
@@ -3407,6 +3430,10 @@ impl Engine {
                 free
             ),
         );
+        if answer.heap_low {
+            Self::log_reject(leviculum_pn_store::HEAP_LOW, "get");
+        }
+        Ok(answer.outcome)
     }
 
     /// `Some(work)` gives the item back unperformed: its stamp grind needs
@@ -3553,8 +3580,7 @@ impl Engine {
                     }
                 };
                 let now = node.emission_secs();
-                self.read_serve_cap();
-                match self.role.handle_get(&data, &mailbox, now) {
+                match self.answer_get_under_live_heap(&data, &mailbox, now) {
                     Ok(GetOutcome::List { response, count }) => {
                         crate::log::log_fmt(
                             "PN_GET ",

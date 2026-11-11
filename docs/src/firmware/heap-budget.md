@@ -92,6 +92,50 @@ compile time. 16 B funds no serve, so the boot serve cap is still 0 B and the pr
 role serves only what the live heap funds at each `/get`
 (`live_serve_cap`).
 
+## The serve transient: gated live, not reserved
+
+Answering one `/get` costs the board a transient of its own: the record
+it streams, one part's scratch and the encrypted transfer
+(`serve_peak_bytes` in `leviculum-lxmf/src/propagation_node.rs`). At the
+announced cap that is `SERVE_PEAK_BYTES`, **17 264 B**, and the plan
+above funds none of it: the serve reserve is 0 and the slack is 16 B.
+Every boot says so in one line after `HEAP_BUDGET`:
+
+```text
+HEAP_BUDGET_SERVE mode=live_gated reserve=0 need=17264 free_at_boot=<n>
+```
+
+That is a decision (Lead, 2026-11-11, order 1676), not a gap. Funding
+the transient would take 17 248 B the plan does not have. With the four
+BLE sessions fixed, the remainder the endpoint links are divided out of
+is 10 800 B, so no link would be left and the binaries'
+`links >= ble_links` assert would refuse the build; taken from links
+with their sessions (2 696 + 3 948 = 6 644 B each) it is three of the
+four. A propagation node with one link is no propagation node.
+
+The protection is live instead. Every `/get` reads the free heap and its
+largest block, takes `SERVE_MARGIN_BYTES` (14 696 B) off for what can
+still arrive while the serve is in flight, and serves only what the rest
+funds (`live_serve_cap`, `leviculum_pn_store::board_answer_get`; the
+`SERVE_CAP` line carries every input). A heap that funds no message
+turns the `/get` into a refusal and `PN_REJECT reason=heap_low via=get`
+on the board:
+
+* the list form answers `ERROR_THROTTLED` (`0xf6`), which a stock client
+  logs as `Invalid message list data received from propagation node` and
+  tears the link down on (`reference/LXMF/LXMF/LXMRouter.py:1601-1604`);
+* the fetch form answers the empty list, which a stock client completes
+  with zero messages and no confirmation (`:1620-1644`).
+
+Either way nothing is purged, the mail stays in the store, and the next
+sync after the heap frees is served. The model is measured against the
+real path, advertisement and first send included
+(`a_streamed_serve_holds_only_the_transfer`,
+`leviculum-std/tests/mvr/pn_serve_peak_outgrows_the_board_heap.rs`), so
+the gate covers the whole serve. The host proof of the refusal is
+`a_heap_that_funds_no_message_refuses_the_get_and_the_next_one_is_served`
+in `leviculum-nrf/pn-store/src/tests.rs`.
+
 ## What the boot plan does not sum
 
 These live on the heap the board has, not in `budget_total`:

@@ -448,6 +448,55 @@ pub fn board_role_config(
     }
 }
 
+/// The `PN_REJECT` reason word of a `/get` the board refused because the
+/// heap it stood on funded no answer (order 1676, LV-1006).
+pub const HEAP_LOW: &str = "heap_low";
+
+/// One `/get` as the board answers it: the cap it was served to and
+/// whether the answer is the board's heap refusal.
+#[derive(Debug)]
+pub struct BoardGet {
+    /// What the role answered.
+    pub outcome: leviculum_lxmf::GetOutcome,
+    /// The cap this round was held to, `live_cap=` of the `SERVE_CAP` line.
+    pub live_cap: usize,
+    /// The answer is a refusal the heap alone caused
+    /// ([`PropagationNode::refused_for_heap`]): the board logs it as
+    /// `PN_REJECT reason=heap_low via=get`.
+    pub heap_low: bool,
+}
+
+/// Answer one `/get` the way the board does: re-read the serve cap from
+/// the heap it has now (`free`, `largest`, the census's two figures), hold
+/// the role to it, answer, and say whether the answer is a heap refusal.
+///
+/// This is the serve transient's whole protection (Lead, 2026-11-11, order
+/// 1676): the boot plan reserves nothing for it (`SERVE_RESERVE_BYTES` is
+/// 0, `HEAP_BUDGET_SERVE mode=live_gated`), so the gate is live. A heap
+/// that funds no message after [`leviculum_heap_budget::SERVE_MARGIN_BYTES`]
+/// turns the `/get` into the refusal a stock client retries on its next
+/// sync, never into an allocation the board cannot make. The refusal
+/// allocates nothing the funded serve would not.
+pub fn board_answer_get<S: PropagationStore>(
+    role: &mut PropagationNode<S>,
+    boot_cap: usize,
+    free: usize,
+    largest: usize,
+    request: &[u8],
+    mailbox: &[u8; DESTINATION_LENGTH],
+    now_secs: u64,
+) -> Result<BoardGet, leviculum_lxmf::GetError> {
+    let live_cap = leviculum_heap_budget::live_serve_cap(boot_cap, free, largest);
+    role.set_serve_cap_bytes(Some(live_cap));
+    let outcome = role.handle_get(request, mailbox, now_secs)?;
+    let heap_low = role.refused_for_heap(&outcome);
+    Ok(BoardGet {
+        outcome,
+        live_cap,
+        heap_low,
+    })
+}
+
 /// The fewest bytes an upload envelope (`[timestamp, [lxmf_data ‖ stamp]]`)
 /// can wrap a body of more than 255 B in: a fixarray, the timestamp as a
 /// one-byte fixint, a fixarray, and a `bin 16` header. A reference client

@@ -65,7 +65,7 @@ map as decided on 2026-10-25, and what is open.
 - **`leviculum-lxmf`, `no_std + alloc`** (`leviculum-lxmf/src/lib.rs:38`):
   - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:505`);
   - propagation nodes, both the client and the node
-    (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:1019`);
+    (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:1036`);
   - stamps (`CooperativeStamper`, `leviculum-lxmf/src/stamp.rs:269`).
 - **Telemetry.** [Telemetry](telemetry.md) settles positions as LXMF
   fields (`FIELD_TELEMETRY`, `FIELD_TELEMETRY_STREAM`) and the

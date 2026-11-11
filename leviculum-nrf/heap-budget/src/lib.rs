@@ -230,6 +230,18 @@ pub const SERVE_RESOURCE_SDU: usize = 500 - RESOURCE_SDU_OVERHEAD;
 /// stood on funds 7 252 B after the margin, which is all 24 of the
 /// field's messages in one fetch. Raising this reserve would buy a
 /// bigger floor, not a bigger serve, and it would cost a link.
+///
+/// **Decided, not open (Lead, 2026-11-11, order 1676): zero.** Funding
+/// the whole [`SERVE_PEAK_BYTES`] would take 17 248 B the plan does not
+/// have (16 B of slack), which is three of the four links with their
+/// BLE sessions ([`budget_per_link`] + [`SESSION_BUDGET_BYTES`] =
+/// 6 644 B each), and a propagation node with one link is no
+/// propagation node. The serve is gated live instead: every `/get`
+/// re-reads the heap ([`live_serve_cap`]) and a heap that funds no
+/// message answers with a refusal the client retries
+/// (`PN_REJECT reason=heap_low via=get`, `leviculum_pn_store::board_answer_get`).
+/// The boot line states it: `HEAP_BUDGET_SERVE mode=live_gated reserve=0
+/// need=17264 free_at_boot=…`.
 pub const SERVE_RESERVE_BYTES: usize = 0;
 
 /// Peak heap this board holds live AT ONCE while it serves one `/get`
@@ -263,8 +275,8 @@ pub const SERVE_RESERVE_BYTES: usize = 0;
 /// one part's scratch.
 ///
 /// **[`ROLE_BUDGET_BYTES`] below funds [`SERVE_RESERVE_BYTES`] of this,
-/// which is zero, and that is the open decision, not an oversight** —
-/// see the arithmetic there. What the plan does fund is the bound the
+/// which is zero by decision (order 1676), not an oversight** — see the
+/// arithmetic there. What the plan does fund is the bound the
 /// serve is held to ([`budget_serve_cap`]), so the
 /// board answers with what it can afford instead of attempting this
 /// number.
@@ -324,10 +336,11 @@ pub const SERVE_PEAK_BYTES: usize = serve_peak_bytes(SYNC_SLICE_BYTES, SERVE_RES
 ///
 /// Funding a bigger FLOOR still means taking bytes from a term above,
 /// from the link count, or from the reserve, and it would not change
-/// what the board serves in the field. That decision is the Lead's;
-/// [`SERVE_RESERVE_BYTES`] is where it is made, and the boot line
-/// reports the gap (`HEAP_BUDGET … serve= slack= serve_cap=`, and the
-/// `HEAP_BUDGET_UNFUNDED` line beside it) until it is.
+/// what the board serves in the field. The Lead decided it on
+/// 2026-11-11 (order 1676): [`SERVE_RESERVE_BYTES`] stays 0 and the
+/// serve is gated live, and the boot line says so
+/// (`HEAP_BUDGET … serve= slack= serve_cap=`, then
+/// `HEAP_BUDGET_SERVE mode=live_gated reserve=0 need=… free_at_boot=…`).
 pub const ROLE_BUDGET_BYTES: usize = SYNC_SLICE_BYTES
     + 2 * BOARD_TRANSFER_LIMIT_KB as usize * 1000
     + ROLE_STRUCTURAL_BYTES
