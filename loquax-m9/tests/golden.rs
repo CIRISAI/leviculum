@@ -1327,10 +1327,10 @@ fn list_with_word(word: Option<Word>) -> (Frame, String) {
 /// its bar "Joining your mailbox" where it said "Link this M9 to your
 /// mailbox" (the board keeps the pairing on the screen until the home
 /// takes the code). `m9-offline.png`: the chats list while the mailbox is
-/// out of reach, "Mailbox unreachable" at the bar's right end.
-/// `m9-online.png`: the return, the bar's right end with the word for
-/// `Connected`, whose catalogue sentence ("You. Your mailbox is
-/// connected.") is longer than the bar and is cut there.
+/// out of reach, "Disconnected" at the bar's right end (1564: one short
+/// word; "Mailbox unreachable" before). `m9-online.png`: the return,
+/// "Connected" there, where 1451 drew the catalogue's sentence ("You.
+/// Your mailbox is connected.") cut by the bar.
 #[test]
 fn the_homes_words_in_the_top_bar_are_golden_frames() {
     use loquax::home::code::HomeCode;
@@ -1369,13 +1369,13 @@ fn the_homes_words_in_the_top_bar_are_golden_frames() {
     let (none, plain) = list_with_word(None);
     let (offline, bar) = list_with_word(Some(Word::Unreachable));
     assert!(
-        bar.trim_end().ends_with("Mailbox unreachable"),
+        bar.trim_end().ends_with("Disconnected"),
         "{bar:?} against {plain:?}"
     );
     check("m9-offline.png", &offline);
     let (online, bar) = list_with_word(Some(Word::Connected));
-    assert!(bar.contains("You. Your"), "{bar:?}");
-    assert!(!bar.contains("unreachable"), "{bar:?}");
+    assert!(bar.trim_end().ends_with(" Connected"), "{bar:?}");
+    assert!(!bar.contains("You"), "{bar:?}");
     check("m9-online.png", &online);
     assert_ne!(none.pixels(), offline.pixels());
     assert_ne!(offline.pixels(), online.pixels());

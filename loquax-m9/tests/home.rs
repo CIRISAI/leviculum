@@ -40,11 +40,13 @@ fn pack(from: &Identity, to: [u8; 16], body: &str, at: f64) -> Vec<u8> {
     .pack()
 }
 
-/// The word stands at the bar's right end and the title gives way to it;
-/// the bar is the grid's width whatever the word; without a home the bar
-/// is the one the goldens pin.
+/// The word stands at the bar's right end, one short word whole (1564):
+/// "Chats" and "Verbunden", never "90 · Chats · Du. Dein Postfach ist…"
+/// (Lew at the M9, 2026-11-08). No avatar of the reader's, no count, no
+/// sentence, no word cut; the bar is the grid's width whatever the word;
+/// without a home the bar says the page alone.
 #[test]
-fn the_top_bar_says_the_home_at_its_right_end() {
+fn the_top_bar_says_the_page_and_one_word() {
     let me = Identity::generate(&mut OsRng);
     let model = home::model(lxmf_address(&me.public_key_bytes()).expect("address"));
     let scene = screen::scene(&model);
@@ -56,37 +58,27 @@ fn the_top_bar_says_the_home_at_its_right_end() {
         };
         row_text(&screen::lines(&scene, &look, COLS, ROWS)[0])
     };
-    let none = bar(None, Lang::En);
-    for (word, said) in [
-        (Word::Joining, "Joining your mailbox"),
-        (Word::Unreachable, "Mailbox unreachable"),
-        (
-            Word::Fetched {
-                taken: 12,
-                of: Some(40),
-            },
-            "Fetched 12 of 40",
-        ),
+    let none = bar(None, Lang::De);
+    assert_eq!(none.trim(), "Chats", "{none:?}");
+    let fetched = Word::Fetched {
+        taken: 12,
+        of: Some(40),
+    };
+    for (word, en, de) in [
+        (Word::Joining, "Connecting…", "Verbindet…"),
+        (Word::Unreachable, "Disconnected", "Getrennt"),
+        (fetched, "Fetching…", "Holt ab…"),
+        (Word::Connected, "Connected", "Verbunden"),
+        (Word::Refused, "Refused", "Abgelehnt"),
+        (Word::CodeRefused, "Refused", "Abgelehnt"),
     ] {
-        let line = bar(Some(word), Lang::En);
-        assert_eq!(line.chars().count(), COLS, "{line:?}");
-        assert!(line.trim_end().ends_with(said), "{line:?}");
-        assert_ne!(line, none);
+        for (lang, said) in [(Lang::En, en), (Lang::De, de)] {
+            let line = bar(Some(word), lang);
+            assert_eq!(line.chars().count(), COLS, "{line:?}");
+            let rest = line.trim().strip_prefix("Chats").map(str::trim);
+            assert_eq!(rest, Some(said), "{line:?}");
+        }
     }
-    let german = bar(
-        Some(Word::Fetched {
-            taken: 3,
-            of: Some(9),
-        }),
-        Lang::De,
-    );
-    assert!(
-        german.trim_end().ends_with("3 von 9 abgeholt"),
-        "{german:?}"
-    );
-    // A sentence longer than the bar is cut, the bar still whole.
-    let long = bar(Some(Word::CodeRefused), Lang::En);
-    assert_eq!(long.chars().count(), COLS, "{long:?}");
 }
 
 /// The pairing screen: the code in fives, the verdict, the keys, the
@@ -739,7 +731,9 @@ fn a_fault_is_a_word_in_the_top_bar() {
     };
     let lines = screen::lines(&scene, &look, COLS, ROWS);
     let top = row_text(&lines[0]);
-    assert!(top.contains("Not saved"), "{top:?}");
+    // The state in its short word (1564), the sentence is the log's.
+    assert!(top.trim_end().ends_with("Not saved"), "{top:?}");
+    assert!(!top.contains("memory"), "{top:?}");
     let clear = Look {
         fault: None,
         lang: Lang::En,

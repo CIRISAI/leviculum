@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:575`).
+  (`narrow`, `loquax-m9/src/screen.rs:577`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:519`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:521`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -528,7 +528,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   and reads nothing (`behind_the_list`, `loquax-m9/src/home.rs:292`); Enter
   reads, and an Enter before the page arrived names the row's kept unread
   ids. What a type size set asks of the model, the boot's cursor chat's
-  page among it, is routed (`set_size`, `loquax-m9/src/house.rs:304`).
+  page among it, is routed (`set_size`, `loquax-m9/src/house.rs:299`).
 - **The compose line** (`compose_line`, `loquax-m9/src/chat.rs:578`): the
   hint while empty and not typed into, the text scrolled so the caret
   shows and the caret's cell reversed while it is. The field is
@@ -1506,7 +1506,7 @@ client that joins with it. A text that is no code is refused
 
 **The join, the pull, the screen.** The client of 1414 now hands every
 pulled page to the board's loop, which folds it into the model the
-screen draws (`board::fold`, `loquax/src/home/board.rs:861`; the
+screen draws (`board::fold`, `loquax/src/home/board.rs:875`; the
 board's `take_in` without an engine: a message the home took in, one of
 the home's devices sent, a mark, a name). A board that is a device of a
 home draws that model from boot: its chats list and its chats come from
@@ -1523,6 +1523,23 @@ fifth element only a client that asked a page bound gets, so every
 client from before reads the four it read. The home cuts the page
 counting with the longest such number, so the count never pushes an
 answer past the LoRa page.
+
+**One word in the bar (1564).** Lew at the M9, 2026-11-08: the list's
+bar read "90 · Chats · Du. Dein Postfach ist…", a number with no noun
+(the reader's own avatar, its initials taken from the address hash; "?"
+since the hashes left the screen), the page's name and the phone's
+sentence cut mid-word by the bar. The bar now carries the page's name
+and at most one short word of state that stands on its own
+(`Word::bar`, catalogue `m9_bar_*`): "Verbunden", "Getrennt",
+"Verbindet…", "Holt ab…", "Abgelehnt", and for a write that did not land
+"Nicht gespeichert". The list's bar draws no avatar; a chat's keeps its
+peer's. The word stands whole or not at all: where it does not fit
+beside the whole title, the title has the bar. How far a pull came, the
+count the sentence carried, belongs to the overview's rows (1561), not
+to the bar. The pairing screen keeps the sentence as its title, a page
+with room for it. `just m9-sim-walk` says the bar in the small type, the
+large one and on the overview (`[SIM] bar=`) and refuses anything but
+the page and its word.
 
 **A start reads nothing on the list (1564).** Lew's second finding the
 same day: after a watchdog reboot the first row under the cursor had
@@ -2494,7 +2511,7 @@ rebuild runs where nothing draws from the model yet (the boot, the
 forget's reopen, a code taken), so 1597's spacing, which was for the UI
 core, is not owed there. A reset during the rebuild itself still
 rebuilds. `a_reboot_right_after_a_rebuild_resumes_with_the_same_list`
-(`loquax-m9/tests/home.rs:420`) was red on both halves (the summary left
+(`loquax-m9/tests/home.rs:412`) was red on both halves (the summary left
 owed, the reboot `rebuilt`).
 
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside

@@ -3130,6 +3130,12 @@ m9-sim-walk out="target/m9-sim-walk":
     grep -q '^\[TYPE\] size=large via=row ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the overview's row did not switch the type"; exit 1; }
     grep -q '^\[TYPE\] size=small via=hold ' "{{out}}/fixture/board.log" || { echo "m9-sim-walk: FAIL the held house key did not switch the type"; exit 1; }
     grep -q '^\[TYPE\] size=large via=boot ' "{{out}}/real/board.log" || { echo "m9-sim-walk: FAIL the record did not keep the large type across the reboot"; exit 1; }
+    # 1564: the top bar says the page and one word, in the small type, the
+    # large one and on the overview; no sentence, no avatar, no cut word.
+    grep '^\[SIM\] bar=' "{{out}}/real/board.log" || true
+    [ "$(grep -c '^\[SIM\] bar=' "{{out}}/real/board.log")" -eq 3 ] || { echo "m9-sim-walk: FAIL the real walk did not say its three bars"; exit 1; }
+    [ "$(grep -cE '^\[SIM\] bar="Chats +Verbunden" ' "{{out}}/real/board.log")" -eq 2 ] || { echo "m9-sim-walk: FAIL a list bar said more than the page and its word"; exit 1; }
+    [ "$(grep -cE '^\[SIM\] bar="Übersicht +Verbunden" ' "{{out}}/real/board.log")" -eq 1 ] || { echo "m9-sim-walk: FAIL the overview's bar said more than the page and its word"; exit 1; }
     # 1575: the pull walk, the fold costing the board's 3.6 ms an entry
     # (window 16b), with the drain's budget and without it (as before):
     # every key's frame under 100 ms with it, the control over it without.

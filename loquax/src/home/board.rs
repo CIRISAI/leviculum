@@ -689,6 +689,20 @@ impl Word {
         }
     }
 
+    /// Its one short word for a top bar (1564): a state that stands on
+    /// its own ("Connected", "Fetching…"), where [`Word::text`] is the
+    /// sentence a page with room says. No count: how far a pull came is
+    /// the overview's to say, not the bar's.
+    pub fn bar(self) -> Text {
+        Text::key(match self {
+            Self::Joining => StrId::M9BarConnecting,
+            Self::Fetched { .. } => StrId::M9BarFetching,
+            Self::Connected => StrId::M9BarConnected,
+            Self::Unreachable => StrId::M9BarDisconnected,
+            Self::CodeRefused | Self::Refused => StrId::M9BarRefused,
+        })
+    }
+
     /// The word for a client in `session`: `admitted` or still joining,
     /// with `progress` of the pull in flight or just ended.
     pub fn of(session: &Session, admitted: bool, progress: Option<Progress>) -> Self {

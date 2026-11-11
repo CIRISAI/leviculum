@@ -32,7 +32,7 @@ use loquax::ui::strings::{StrId, Text};
 
 use crate::font::Size;
 use crate::keyboard::{Key, Role};
-use crate::screen::{cut, fill, muted, painted, push, Look, BAR};
+use crate::screen::{fill, muted, painted, push, Look, BAR};
 
 /// How long the house key is held before the size switches.
 pub const HOLD_MS: u32 = 1000;
@@ -244,15 +244,10 @@ impl Overview {
                 ..chrome
             },
         );
-        let word = look
-            .note
-            .or(look.fault)
-            .map(|fault| Text::key(fault).resolve(look.lang))
-            .or_else(|| look.home.map(|word| word.text().resolve(look.lang)))
-            .unwrap_or_default();
+        // The list's bar's word (1564): one short word, whole or none.
+        let word = crate::screen::bar_word(look).unwrap_or_default();
         let room = cols.saturating_sub(bar.cells.len() + 2);
-        let word = cut(&word, room);
-        if !word.is_empty() {
+        if !word.is_empty() && word.chars().count() <= room {
             let gap = cols.saturating_sub(bar.cells.len() + word.chars().count() + 1);
             push(&mut bar, &" ".repeat(gap), chrome);
             push(&mut bar, &word, chrome);

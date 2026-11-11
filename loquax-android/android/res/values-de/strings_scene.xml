@@ -614,4 +614,10 @@
     <string name="m9_type_large">groß</string>
     <string name="m9_type_now_small">Schrift: klein</string>
     <string name="m9_type_now_large">Schrift: groß</string>
+    <string name="m9_bar_connected">Verbunden</string>
+    <string name="m9_bar_disconnected">Getrennt</string>
+    <string name="m9_bar_connecting">Verbindet…</string>
+    <string name="m9_bar_fetching">Holt ab…</string>
+    <string name="m9_bar_refused">Abgelehnt</string>
+    <string name="m9_bar_not_saved">Nicht gespeichert</string>
 </resources>

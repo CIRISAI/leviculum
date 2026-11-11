@@ -15,6 +15,8 @@
 //! text <words>        type the words, a press per character
 //! reboot              power-cycle the board on its flash
 //! dump <file.png>     the panel as it is now, as a PNG
+//! bar                 the top row's text as a `[SIM] bar="..."` line
+//!                     (1564): what the top bar says, for a walk to check
 //! screen <name> <file.png>
 //!                     the board's FRAME_DUMP of a fixture screen
 //!                     (`chats`, `chat`, `groups`, ..., `pan`, or
@@ -50,6 +52,8 @@ pub enum Step {
     Reboot,
     /// The panel as a PNG at this path.
     Dump(String),
+    /// The top row's text in a `[SIM] bar=` line (1564).
+    Bar,
     /// A `FRAME_DUMP` of the fixture's screen with this byte, as a PNG at
     /// this path.
     Screen(u8, String),
@@ -190,6 +194,7 @@ pub fn file(text: &str) -> Result<Vec<Step>, String> {
                 }
             }
             "reboot" => steps.push(Step::Reboot),
+            "bar" => steps.push(Step::Bar),
             "screen" => {
                 let (name, path) = rest
                     .split_once(char::is_whitespace)

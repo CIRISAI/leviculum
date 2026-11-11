@@ -773,6 +773,14 @@ leviculum_ui::catalogue! {
     M9TypeLarge = "m9_type_large", "large", "groß";
     M9TypeNowSmall = "m9_type_now_small", "Text: small", "Schrift: klein";
     M9TypeNowLarge = "m9_type_now_large", "Text: large", "Schrift: groß";
+    // The M9's top bar (1564): the page's name and at most one short word
+    // of state that stands on its own, never a sentence cut by the bar.
+    M9BarConnected = "m9_bar_connected", "Connected", "Verbunden";
+    M9BarDisconnected = "m9_bar_disconnected", "Disconnected", "Getrennt";
+    M9BarConnecting = "m9_bar_connecting", "Connecting…", "Verbindet…";
+    M9BarFetching = "m9_bar_fetching", "Fetching…", "Holt ab…";
+    M9BarRefused = "m9_bar_refused", "Refused", "Abgelehnt";
+    M9BarNotSaved = "m9_bar_not_saved", "Not saved", "Nicht gespeichert";
 }
 
 /// [`leviculum_ui::strings::format`] over Loquax's catalogue.

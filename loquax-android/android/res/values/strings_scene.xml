@@ -614,4 +614,10 @@
     <string name="m9_type_large">large</string>
     <string name="m9_type_now_small">Text: small</string>
     <string name="m9_type_now_large">Text: large</string>
+    <string name="m9_bar_connected">Connected</string>
+    <string name="m9_bar_disconnected">Disconnected</string>
+    <string name="m9_bar_connecting">Connecting…</string>
+    <string name="m9_bar_fetching">Fetching…</string>
+    <string name="m9_bar_refused">Refused</string>
+    <string name="m9_bar_not_saved">Not saved</string>
 </resources>

@@ -339,47 +339,49 @@ pub fn lines_seen(
     (out, window, seen)
 }
 
-/// The top bar: the reader's avatar (or the chat's), `title`.
+/// The word at the top bar's right end (1564): the type switch's note
+/// for a moment, else a fault, else the home's state, each one short word
+/// that stands on its own ([`Word::bar`](loquax::home::board::Word::bar)).
+/// None on a board that is no device of a home and has nothing to say.
+pub fn bar_word(look: &Look) -> Option<alloc::string::String> {
+    use loquax::ui::strings::{StrId, Text as Words};
+    if let Some(note) = look.note {
+        return Some(Words::key(note).resolve(look.lang));
+    }
+    if let Some(fault) = look.fault {
+        // A write that did not land matters more than the fetch (1493);
+        // its sentence is the log's, the bar says the state.
+        let id = match fault {
+            StrId::M9NotSaved | StrId::M9JoinNotSaved => StrId::M9BarNotSaved,
+            other => other,
+        };
+        return Some(Words::key(id).resolve(look.lang));
+    }
+    look.home.map(|word| word.bar().resolve(look.lang))
+}
+
+/// The top bar (1564): in a chat the peer's avatar, then `title`, the
+/// page's or the chat's name, and at the right end at most one short word
+/// of state ([`bar_word`]). The list's bar has no avatar: the reader's
+/// own, a sign with no name behind it on the M9 ("?", "90"), read as a
+/// number. The word stands whole or not at all: where it and the whole
+/// title do not both fit, the title has the bar, cut as a name is cut.
 fn top_bar(top: &TopBar, title: &Text, look: &Look, cols: usize) -> RLine {
     let chrome = painted(look.tokens.chrome);
-    let avatar = match &top.lead {
-        Lead::Me { avatar, .. } | Lead::Back { avatar, .. } => avatar,
-    };
     let mut bar = RLine::default();
-    push(&mut bar, " ", chrome);
-    push_avatar(&mut bar, avatar);
+    if let Lead::Back { avatar, .. } = &top.lead {
+        push(&mut bar, " ", chrome);
+        push_avatar(&mut bar, avatar);
+    }
     let title = title.resolve(look.lang);
-    let room = cols.saturating_sub(AVATAR + 2);
-    let tight = cols < NARROW_COLS;
-    // The home's word at the right end, the title cut before it. Wide,
-    // the title keeps a third of the bar at least and a cell closes the
-    // bar; narrow, the title takes its own width up to a third and the
-    // word the rest, to the last cell.
-    let budget = match tight {
-        false => (room * 2) / 3,
-        true => room.saturating_sub(fit_width(&narrow(&title)).min(room / 3) + 1),
-    };
-    // A fault outranks the home's word (1493): a write that did not
-    // land matters more than the fetch count.
-    let word = look
-        .note
-        .or(look.fault)
-        .map(|fault| {
-            cut(
-                &loquax::ui::strings::Text::Key(fault, alloc::vec::Vec::new()).resolve(look.lang),
-                budget,
-            )
-        })
-        .or_else(|| {
-            look.home
-                .map(|word| cut(&word.text().resolve(look.lang), budget))
-        })
-        .unwrap_or_default();
-    let words = word.chars().count();
-    let room = match (words, tight) {
-        (0, _) => room,
-        (n, false) => room.saturating_sub(n + 2),
-        (n, true) => room.saturating_sub(n + 1),
+    // A cell before the title, one closing the bar.
+    let room = cols.saturating_sub(bar.cells.len() + 2);
+    let word = bar_word(look).unwrap_or_default();
+    let words = fit_width(&word);
+    let whole = fit_width(&narrow(&title));
+    let word = match words > 0 && whole + 1 + words <= room {
+        true => word,
+        false => alloc::string::String::new(),
     };
     let title = cut(&title, room);
     push(
@@ -390,8 +392,8 @@ fn top_bar(top: &TopBar, title: &Text, look: &Look, cols: usize) -> RLine {
             ..chrome
         },
     );
-    if words > 0 {
-        let gap = cols.saturating_sub(bar.cells.len() + words + usize::from(!tight));
+    if !word.is_empty() {
+        let gap = cols.saturating_sub(bar.cells.len() + words + 1);
         push(&mut bar, &" ".repeat(gap), chrome);
         push(&mut bar, &word, chrome);
     }

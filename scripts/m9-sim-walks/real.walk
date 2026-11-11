@@ -14,6 +14,8 @@ back
 # page from the ring.
 reboot
 dump 04-list-after-reboot.png
+# The bar (1564): the page's name and one word, in the small type.
+bar
 down
 enter
 dump 05-chat-after-reboot.png
@@ -26,3 +28,10 @@ wait 400
 dump 06-list-large.png
 reboot
 dump 07-list-large-after-reboot.png
+# The bar in the large type, and the overview's own bar.
+bar
+home
+wait 700
+dump 08-overview.png
+bar
+back
