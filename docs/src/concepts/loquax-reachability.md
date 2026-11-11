@@ -87,7 +87,7 @@ path's interface changes. Nothing medium-aware enters transport
   `hops=0`.
 - **What the code does today (read 2026-11-04, not yet measured).** A
   desktop Loquax that is a client of a mailbox attaches to the shared
-  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1799`;
+  instance as `Role::Client` (`attach_as`, `loquax/src/shell.rs:1826`;
   `Upstream::Shared`, `loquax/src/engine/shell.rs:433`) and dials
   nothing: the only callers of the rendezvous rotation (`dial`,
   `loquax/src/engine/shell.rs:616`) are the leaf, the phone's own

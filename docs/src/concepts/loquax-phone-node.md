@@ -17,7 +17,7 @@ change to the interface seam keeps the way to the full node open.
 | Where messages wait while the phone sleeps | in the mailbox's archive | at a propagation node, as for any LXMF peer |
 
 **The client has no destination of its own.** `Engine::client`
-(`loquax/src/engine.rs:389`) says it "registers nothing, by
+(`loquax/src/engine.rs:394`) says it "registers nothing, by
 construction", and a guard test, `a_client_engine_registers_no_delivery_destination`,
 holds that. The session attaches through `attach_leaf`
 (`loquax-android/src/session.rs:574`) with `Role::Client`. That node runs

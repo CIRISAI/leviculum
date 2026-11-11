@@ -40,7 +40,7 @@ map as decided on 2026-10-25, and what is open.
   frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:543`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:547`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`loquax/Cargo.toml:284`, `loquax/Cargo.toml:288`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
@@ -216,7 +216,7 @@ messenger core holds the same types a board will.
 Lew, 2026-11-02: Loquax is the M9's UI. The board's facts are in one
 place on [The ThinkNode M9](thinknode-m9.md), "The board as the UI sees
 it"; the frontend renders the scene the other three targets already
-render (`Scene`, `loquax/src/ui/scene.rs:1017`), and this section records
+render (`Scene`, `loquax/src/ui/scene.rs:1040`), and this section records
 what was measured for the plan, the budgets, and the slices. The host
 numbers below are 64-bit figures from a counting allocator, upper bounds
 for the 32-bit board (the 1337 pattern); the spike code ran under
@@ -264,7 +264,7 @@ renderer can serve. Two findings the spike settles beyond the choice:
   atlas (embedded-graphics-unicodefonts 0.2.0, the 6x10 mapping) covers
   Latin, Greek, Cyrillic and the box/geometric runs, but not U+2713,
   U+2714 or U+25F7 — the tick ladder does not render. The model already
-  carries the switch (`ascii`, `loquax/src/ui.rs:1198`); the M9 frontend
+  carries the switch (`ascii`, `loquax/src/ui.rs:1199`); the M9 frontend
   sets it, which closes gui-toolkit's open glyph question without a
   custom font.
 - **mousefood's own frame is redundant on the M9.** Its `framebuffer`
@@ -487,12 +487,12 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
 - **The chat in cells** (`lines_at`, `loquax-m9/src/chat.rs:57`). The
   scene's chat set as the terminal sets a conversation: a bubble wrapped
   to three quarters of the 53 cells (`block_cap`,
-  `loquax/src/ui/layout.rs:410`), tinted with a margin cell either side,
+  `loquax/src/ui/layout.rs:433`), tinted with a margin cell either side,
   ours flush right, theirs flush left, the time and the mark's ASCII rung
   closing its last row, a blank row between two groups. The day line and
   a group's note line (who joined or left) are the terminal's own
-  (`date_line`, `loquax/src/ui/layout.rs:380`, and `note_line`,
-  `loquax/src/ui/layout.rs:364`, public since this slice). A group's chat
+  (`date_line`, `loquax/src/ui/layout.rs:403`, and `note_line`,
+  `loquax/src/ui/layout.rs:387`, public since this slice). A group's chat
   names the writer above a group of bubbles, which is how a digest's
   lines read (each a bubble under its writer, the model's work), and a
   line that came after newer ones says "arrived late" under it. Quotes,
@@ -518,7 +518,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   screen of one pane shows the pane the keys are in. That builds the Wide
   scene and drops its chat: the list's peak then carries the chat's.
 - **The list's cursor is the reader's** (1546, `list_top`,
-  `loquax/src/ui.rs:2576`). The model keeps the selected peer and the line
+  `loquax/src/ui.rs:2599`). The model keeps the selected peer and the line
   it stands on; while it stays selected, a pull or an arrival that sorts
   rows in above it moves the window, not the cursor. A key moves the line
   by as many rows as the selection moved in the order. Before, the window
@@ -529,7 +529,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   reads, and an Enter before the page arrived names the row's kept unread
   ids. What a type size set asks of the model, the boot's cursor chat's
   page among it, is routed (`set_size`, `loquax-m9/src/house.rs:304`).
-- **The compose line** (`compose_line`, `loquax-m9/src/chat.rs:576`): the
+- **The compose line** (`compose_line`, `loquax-m9/src/chat.rs:578`): the
   hint while empty and not typed into, the text scrolled so the caret
   shows and the caret's cell reversed while it is. The field is
   `loquax-m9`'s own (`Field`, `loquax-m9/src/field.rs:20`): the terminal's
@@ -655,13 +655,13 @@ half (1363, below) moved the rows up to the group verbs:
 
 | piece | where | what it needs on the board |
 |---|---|---|
-| the link loop: path, connect, identify | `open`, `loquax/src/home/client.rs:665` | nothing more: `Join` is its board form; other requests get the same steps |
-| one request and its answer | `request`, `loquax/src/home/client.rs:825` | the firmware's request over a core link, reported to `Join::answered` |
+| the link loop: path, connect, identify | `open`, `loquax/src/home/client.rs:691` | nothing more: `Join` is its board form; other requests get the same steps |
+| one request and its answer | `request`, `loquax/src/home/client.rs:885` | the firmware's request over a core link, reported to `Join::answered` |
 | the join | `join`, `loquax/src/home/client.rs:35` | none: `Join` replaces it |
-| the pull and its pages | `pull`, `loquax/src/home/client.rs:539`; `pages`, gone in 1363 | a `Pull` flow like `Join` with the page loop, and the batch size the session census fixes |
-| send, mark and the group verbs | `send`, `loquax/src/home/client.rs:155`; `mark`, `loquax/src/home/client.rs:178` | the same steps with their own request; slice five for the groups |
-| the client id | `client_id`, `loquax/src/home/client.rs:530` | a random source the firmware has |
-| being a client: the home's key, the cursor | `load_client`, `loquax/src/home/client.rs:857`; `save_client`, `loquax/src/home/client.rs:882`; `load_cursor`, `loquax/src/home/client.rs:888` | a record in flash beside the store, the device identity with it |
+| the pull and its pages | `pull`, `loquax/src/home/client.rs:565`; `pages`, gone in 1363 | a `Pull` flow like `Join` with the page loop, and the batch size the session census fixes |
+| send, mark and the group verbs | `send`, `loquax/src/home/client.rs:168`; `mark`, `loquax/src/home/client.rs:204` | the same steps with their own request; slice five for the groups |
+| the client id | `client_id`, `loquax/src/home/client.rs:556` | a random source the firmware has |
+| being a client: the home's key, the cursor | `load_client`, `loquax/src/home/client.rs:917`; `save_client`, `loquax/src/home/client.rs:942`; `load_cursor`, `loquax/src/home/client.rs:948` | a record in flash beside the store, the device identity with it |
 
 What moves to make the admit flow run on the board, in order: the
 pairing screen in `loquax-m9`, the typed code drawn grouped with its
@@ -1178,7 +1178,7 @@ its cells when the screen leaves the map (`leave_map`,
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:6598`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:6664`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1187,7 +1187,7 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:1384`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:1385`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
@@ -1328,7 +1328,7 @@ is not, because its renderer is still host-only. On the renderer it needs
 a branch in `lines` (`loquax-m9/src/screen.rs:225`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:1057`), which
 the model already returns while the tab is in front (`rooms_scene`,
-`loquax/src/ui/scene.rs:1204`), and its tab in the tab bar the screen
+`loquax/src/ui/scene.rs:1222`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
 list (name, unread count) or the open room's one live line and its lines
 as `who text`, and one input line at the bottom on the chat's editor
@@ -2018,7 +2018,7 @@ plus decode under 100 ms for the long chat, window 16's to prove.
 
 **An invitation keeps its row.** A group the reader is invited to that
 no message reached has the invitation's listing, "Einladung", from when
-the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:2304`);
+the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:2327`);
 the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
@@ -2075,7 +2075,7 @@ entries with a 360-entry tail resume in 22 ms decoding the 360, against
 That test found a model bug on the way: a chat listed from its kept row
 counted only its loaded messages once a live one came in, 96 of 776
 unread. The unread beyond the received messages loaded now counts a row
-each (`Conversation::unread_rows`, `loquax/src/ui.rs:987`), on a live
+each (`Conversation::unread_rows`, `loquax/src/ui.rs:988`), on a live
 pull as on the tail boot.
 
 ### The pull starved both cores in the allocator (1569)
@@ -2134,7 +2134,7 @@ the model, the model asks the cursor chat's page
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
-its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2367`, the
+its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2390`, the
 a80038c2 rule); the cursor moves because the folded page gives the
 chat its real activity and the list re-sorts under a selection that
 follows the chat. A preload, not an open: nothing to stop for 1562/1564.
@@ -2434,9 +2434,9 @@ the same order.
 Two blocks of the rebuild grew with the ring whatever the chats were,
 and both went: the batch's note scope held one peer per folded entry
 (8192 x 16 B), now each conversation once (`Batch::fold`,
-`loquax/src/ui.rs:3619`); and every received message left a toast that a
+`loquax/src/ui.rs:3661`); and every received message left a toast that a
 board, which never ticks, never aged out, now at most `TOAST_KEEP`
-(`loquax/src/ui.rs:197`). The model after a rebuild holds about 470 KB
+(`loquax/src/ui.rs:198`). The model after a rebuild holds about 470 KB
 less on the host. `a_rebuild_of_short_chats_asks_for_no_block_that_grows_with_the_ring`
 (`leviculum-heap-lab/tests/rebuild.rs:173`) rebuilds 4400 entries under
 the firmware's TLSF heap and holds the largest block to 64 KiB: red at
@@ -2494,7 +2494,7 @@ keys were never deaf. One Back frame was lost on the line before core 0
 took it (`keys_rx=` stayed at 41; why the frame went is the UART FIFO
 during an erase, 1613). The walker's next Enter then came inside the
 open chat, where the shared key table's Enter opens the message under
-the cursor (1076), its detail view (`loquax/src/ui.rs:5708`). The M9
+the cursor (1076), its detail view (`loquax/src/ui.rs:5770`). The M9
 draws no detail view and its `[PAGE]` line called it `chat`, so the next
 Back closed what nobody saw, and every Enter and Back after it did the
 same: each one a `KEY` line the UI core wrote itself, no page change. The
