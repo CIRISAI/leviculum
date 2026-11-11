@@ -84,9 +84,9 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:1035-1072`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:1039-1076`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:1062-1072`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:1066-1076`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
