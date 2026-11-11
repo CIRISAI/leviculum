@@ -831,7 +831,7 @@ out, because they are the nodes' cost and not the client's.
 | wake | 2 | 115 B | 83 B | channel message 83 (down), its proof 115 |
 | pull one message | 7 | 610 B | 345 B | link 102, 118, 83, 211; `/sync` 115, the page 227 (down); close 99 |
 | mark one read | 7 | 642 B | 217 B | link 102, 118, 83, 211; `/mark` 147, answer 99; close 99 |
-| keepalive | 2 | 20 B | 20 B | flags, hops, link id, context, one byte (`build_keepalive_packet`, `leviculum-core/src/link/mod.rs:2731`), every 230 s |
+| keepalive | 2 | 20 B | 20 B | flags, hops, link id, context, one byte (`build_keepalive_packet`, `leviculum-core/src/link/mod.rs:2753`), every 230 s |
 
 Five entries pulled in LoRa pages came as two pages, answers of 499 and
 467 bytes, each one packet of at most two LoRa frames. The control, the

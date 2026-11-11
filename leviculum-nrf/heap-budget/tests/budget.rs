@@ -361,3 +361,23 @@ fn four_links_advertising_at_once_get_what_the_reserve_funds() {
     // Over the sync limit is refused whatever is in flight.
     assert!(!admits_incoming_resource(false, 0));
 }
+
+/// Order 1666: the propagation role's peering leaves one slot of the link
+/// cap for a client. At today's cap of 4 it dials only while at most two
+/// entries are live, so its dial makes three and the fourth stays free.
+#[test]
+fn the_client_reserve_leaves_these_dial_ceilings() {
+    use leviculum_heap_budget::{peering_dial_ceiling, CLIENT_RESERVED_LINKS};
+    assert_eq!(CLIENT_RESERVED_LINKS, 1);
+    assert_eq!(peering_dial_ceiling(4), 2);
+    assert_eq!(peering_dial_ceiling(2), 0);
+    assert_eq!(peering_dial_ceiling(1), 0);
+    for max in 2..=8usize {
+        let ceiling = peering_dial_ceiling(max);
+        assert_eq!(
+            max - (ceiling + 1),
+            CLIENT_RESERVED_LINKS,
+            "a dial at the ceiling leaves exactly the reserve free (max={max})"
+        );
+    }
+}

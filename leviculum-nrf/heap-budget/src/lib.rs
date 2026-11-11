@@ -89,6 +89,39 @@ pub const fn admits_incoming_resource(within_sync_limit: bool, in_flight: usize)
     within_sync_limit && in_flight < INCOMING_RESOURCES_FUNDED
 }
 
+/// Reticulum link-table slots the propagation role's peering leaves free
+/// for a client's link request (order 1666, LV-1006, #24).
+///
+/// A propagation node exists to accept clients, so its own dials never take
+/// the last slot of the enforced cap (`max_endpoint_links`, handed to
+/// `NodeCoreBuilder::max_links`). The engine dials through
+/// `NodeCore::connect_keeping_free(.., CLIENT_RESERVED_LINKS)`, which goes
+/// ahead only while `links + 1 + CLIENT_RESERVED_LINKS <= max`. With
+/// today's cap of 4 ([`peering_dial_ceiling`]`(4)` = 2): a sync dial waits
+/// once 3 entries are live, whoever holds them, so the 4th stays free for
+/// an inbound request. The engine holds one outbound round at a time, so
+/// its own share is one slot of the 3; the reserve is what keeps that one
+/// slot from being the last.
+///
+/// The rule needs a cap of at least `2 + CLIENT_RESERVED_LINKS` for the
+/// role to peer while one client is connected; at a cap of
+/// `1 + CLIENT_RESERVED_LINKS` it peers only with the table empty. The
+/// assertion below pins the reserve below the BLE slot count the derived
+/// cap equals today; `the_client_reserve_leaves_these_dial_ceilings` pins
+/// the ceilings.
+pub const CLIENT_RESERVED_LINKS: usize = 1;
+
+const _: () = assert!(CLIENT_RESERVED_LINKS < MAX_LINKS);
+
+/// The most live link-table entries at which the propagation role may
+/// still dial a peer, for a cap of `max_links`: one dial on top leaves
+/// [`CLIENT_RESERVED_LINKS`] free. The same rule
+/// `NodeCore::connect_keeping_free` enforces, stated here so the budget's
+/// tests and the boot line can print it.
+pub const fn peering_dial_ceiling(max_links: usize) -> usize {
+    max_links.saturating_sub(1 + CLIENT_RESERVED_LINKS)
+}
+
 /// Slots in the per-connection HVN drain table (`HVN_DRAIN`, `leviculum-nrf/src/ble/mod.rs`).
 ///
 /// The #255 design headroom of 4 that this table was pre-sized to is

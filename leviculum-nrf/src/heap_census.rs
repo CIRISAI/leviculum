@@ -26,7 +26,7 @@
 //!   res=… events=… req=… dest=… transport=… storage=… ble_defrag=…
 //!   ble_sessions=… ble_s0=… ble_s1=… ble_s2=… ble_s3=…
 //!   pn_peers=… n_peers=… pn_work=… pn_batch=… pn_out=… pn_links=…
-//!   pn_role=… pn_flush=… held=… hold_refused=… other=…
+//!   pn_role=… pn_flush=… held=… hold_refused=… pn_dial_held=… other=…
 //! ```
 //!
 //! (one line on the wire; wrapped here for the page).
@@ -55,6 +55,11 @@
 //! LoRa and BLE only: the USB serial interface runs no limiter (#606);
 //! `hold_refused=` counts the
 //! announces refused at that cap since boot (#598).
+//!
+//! `pn_dial_held=` counts the propagation role's peering dials held since
+//! boot so a client's link request keeps a slot (order 1666,
+//! [`leviculum_heap_budget::CLIENT_RESERVED_LINKS`]); each one is also a
+//! `PN_SYNC … action=defer reason=client_pending|client_reserve` line.
 //!
 //! `other` is the
 //! honesty term: `used` minus everything the census attributes — the
@@ -392,7 +397,7 @@ where
     crate::log::log_fmt(
         "[HEAP_CENSUS] ",
         format_args!(
-            "used={} free={} largest={} node_box={} links={} n_links={} res={} events={} req={} dest={} transport={} storage={} ble_defrag={} ble_sessions={} ble_s0={} ble_s1={} ble_s2={} ble_s3={} pn_peers={} n_peers={} pn_work={} pn_batch={} pn_out={} pn_links={} pn_role={} pn_flush={} held={} hold_refused={} other={}",
+            "used={} free={} largest={} node_box={} links={} n_links={} res={} events={} req={} dest={} transport={} storage={} ble_defrag={} ble_sessions={} ble_s0={} ble_s1={} ble_s2={} ble_s3={} pn_peers={} n_peers={} pn_work={} pn_batch={} pn_out={} pn_links={} pn_role={} pn_flush={} held={} hold_refused={} pn_dial_held={} other={}",
             used_now,
             free_now,
             largest,
@@ -421,6 +426,7 @@ where
             pn.flush,
             census.held_announces,
             census.announces_hold_refused,
+            pn.dials_held,
             other,
         ),
     );

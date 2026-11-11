@@ -239,6 +239,7 @@ use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use leviculum_core::envelope::{PnConfigWire, PN_COST_KEEP};
 use leviculum_core::identity::Identity;
+use leviculum_core::link::LinkError;
 use leviculum_core::node::{NodeCore, NodeEvent};
 use leviculum_core::pn_config_store::StoredPnConfig;
 use leviculum_core::resource::ResourceStrategy;
@@ -733,6 +734,9 @@ pub struct EngineHeapCensus {
     pub role: usize,
     /// Unflushed writes queued at both store adapters.
     pub flush: usize,
+    /// Peering dials held for the client reserve since boot (order 1666):
+    /// a count, not bytes, and outside [`Self::total`].
+    pub dials_held: u32,
 }
 
 impl EngineHeapCensus {
@@ -746,6 +750,30 @@ impl EngineHeapCensus {
             + self.role
             + self.flush
     }
+}
+
+/// One held peering dial (order 1666): `PN_SYNC peer=… action=defer
+/// reason=client_pending|client_reserve links=… max=… clients_pending=…`.
+/// Same `action=defer` shape as the cap's `reason=link_cap`, so a capture
+/// counts every deferred round with one grep and splits them by reason.
+fn log_dial_held(
+    destination: &[u8; 16],
+    reason: &'static str,
+    links: usize,
+    max: usize,
+    clients_pending: usize,
+) {
+    crate::log::log_fmt(
+        "PN_SYNC ",
+        format_args!(
+            "peer={} action=defer reason={} links={} max={} clients_pending={}",
+            Hex(destination),
+            reason,
+            links,
+            max,
+            clients_pending
+        ),
+    );
 }
 
 /// A stamp validation parked between settle passes.
@@ -815,6 +843,9 @@ pub struct Engine {
     /// settle pass, has run (`PN_STORE_FULL`, lnpnd's rule, order 1355).
     store_full: bool,
     next_stats_at_ms: u64,
+    /// Peering dials held for the client reserve since boot (order 1666),
+    /// the census's `pn_dial_held=`.
+    dials_held: u32,
     announce_withheld_logged: bool,
     active: Option<ActiveDelivery>,
     next_active_at_ms: u64,
@@ -1037,6 +1068,7 @@ impl Engine {
             next_peer_refresh_at_ms: 0,
             store_full: false,
             next_stats_at_ms: 0,
+            dials_held: 0,
             announce_withheld_logged: false,
             active: None,
             next_active_at_ms: 0,
@@ -1107,6 +1139,7 @@ impl Engine {
             link_maps,
             role: self.role.heap_bytes(),
             flush: self.role.store().queued_heap_bytes() + self.peer_store.queued_heap_bytes(),
+            dials_held: self.dials_held,
         }
     }
 
@@ -3135,29 +3168,77 @@ impl Engine {
             out.merge(node.request_path_unthrottled(&DestinationHash::new(destination)));
             return;
         };
+        // The client reserve (order 1666, LV-1006): a propagation node
+        // exists to accept clients, so peering waits (a) while a client's
+        // link request is proved but not yet active, for at most that
+        // link's establishment timeout (6 s per hop plus the 54 s responder
+        // bonus, plus up to 25 % jitter: 60 to 75 s at one hop), and (b)
+        // while its dial would leave fewer than CLIENT_RESERVED_LINKS slots
+        // of the cap free. Checked before the backoff is booked: a held dial
+        // is the node's state, not the peer's fault, and the next sync pass
+        // asks again.
+        let links = node.link_count();
+        let max_links = node.transport_config().max_links;
+        let clients_pending = node.pending_inbound_links(&self.dest_hash);
+        let over_ceiling = max_links.is_some_and(|max| {
+            links > leviculum_heap_budget::peering_dial_ceiling(max) && links < max
+        });
+        if clients_pending > 0 || over_ceiling {
+            self.dials_held = self.dials_held.saturating_add(1);
+            log_dial_held(
+                &destination,
+                if clients_pending > 0 {
+                    "client_pending"
+                } else {
+                    "client_reserve"
+                },
+                links,
+                max_links.unwrap_or(0),
+                clients_pending,
+            );
+            return;
+        }
         peer.book_sync_attempt(now);
         peer.state = SyncPhase::LinkEstablishing;
-        let (link_id, _, core_out) =
-            match node.connect(DestinationHash::new(destination), &signing_key) {
-                Ok(connected) => connected,
-                Err(_) => {
-                    // Link-cap refusal (`MAX_ENDPOINT_LINKS`, #388): the
-                    // core has emitted LinkRefused, which the bins render
-                    // as a LINK_REFUSED line (`crate::events`); the
-                    // backoff above is already booked, so this round
-                    // retries on a later sync pass instead of spinning.
-                    if round_step(None, RoundEvent::DialRefused) == RoundStep::Defer {
-                        crate::log::log_fmt(
-                            "PN_SYNC ",
-                            format_args!("peer={} action=defer reason=link_cap", Hex(&destination)),
-                        );
-                        if let Some(peer) = self.peers.get_mut(&destination) {
-                            peer.state = SyncPhase::Idle;
-                        }
-                    }
-                    return;
+        let (link_id, _, core_out) = match node.connect_keeping_free(
+            DestinationHash::new(destination),
+            &signing_key,
+            leviculum_heap_budget::CLIENT_RESERVED_LINKS,
+        ) {
+            Ok(connected) => connected,
+            Err(LinkError::ReserveHeld {
+                links,
+                max,
+                keep_free: _,
+            }) => {
+                // The pre-check above makes this unreachable today; kept so
+                // a change to either rule cannot turn a held dial into a
+                // booked backoff without a line saying so.
+                self.dials_held = self.dials_held.saturating_add(1);
+                log_dial_held(&destination, "client_reserve", links, max, 0);
+                if let Some(peer) = self.peers.get_mut(&destination) {
+                    peer.state = SyncPhase::Idle;
                 }
-            };
+                return;
+            }
+            Err(_) => {
+                // Link-cap refusal (`MAX_ENDPOINT_LINKS`, #388): the
+                // core has emitted LinkRefused, which the bins render
+                // as a LINK_REFUSED line (`crate::events`); the
+                // backoff above is already booked, so this round
+                // retries on a later sync pass instead of spinning.
+                if round_step(None, RoundEvent::DialRefused) == RoundStep::Defer {
+                    crate::log::log_fmt(
+                        "PN_SYNC ",
+                        format_args!("peer={} action=defer reason=link_cap", Hex(&destination)),
+                    );
+                    if let Some(peer) = self.peers.get_mut(&destination) {
+                        peer.state = SyncPhase::Idle;
+                    }
+                }
+                return;
+            }
+        };
         out.merge(core_out);
         self.outbound = Some(OutboundSync {
             peer: destination,

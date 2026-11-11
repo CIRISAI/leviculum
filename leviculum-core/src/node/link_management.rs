@@ -324,6 +324,54 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.connect_with_first_hop_timeout(dest_hash, dest_signing_key, None)
     }
 
+    /// [`Self::connect`] that leaves `keep_free` slots of the configured
+    /// link cap ([`crate::transport::TransportConfig::max_links`]) free.
+    ///
+    /// For a node whose own dials compete with the links it exists to
+    /// accept: the board's propagation role keeps one slot for a client's
+    /// link request, so its peering never takes the last one (order 1666,
+    /// LV-1006). The dial goes ahead only while
+    /// `links + 1 + keep_free <= max`; an uncapped node always dials.
+    ///
+    /// # Errors
+    /// [`LinkError::ReserveHeld`] when the dial would eat into the reserve:
+    /// no link was created, nothing was sent, and no `LinkRefused` event is
+    /// emitted, because nothing was refused. Otherwise as [`Self::connect`].
+    pub fn connect_keeping_free(
+        &mut self,
+        dest_hash: DestinationHash,
+        dest_signing_key: &[u8; 32],
+        keep_free: usize,
+    ) -> Result<(LinkId, bool, crate::transport::TickOutput), LinkError> {
+        if let Some(max) = self.transport_config().max_links {
+            let links = self.links.len();
+            if links < max && links + 1 + keep_free > max {
+                return Err(LinkError::ReserveHeld {
+                    links,
+                    max,
+                    keep_free,
+                });
+            }
+        }
+        self.connect(dest_hash, dest_signing_key)
+    }
+
+    /// Inbound links to `dest_hash` whose request was proved but which are
+    /// not active yet: a client this node has answered and is waiting on.
+    /// Each holds its slot until it activates or its establishment timeout
+    /// (`ESTABLISHMENT_TIMEOUT_PER_HOP` per hop plus the responder bonus,
+    /// see [`crate::link::Link::establishment_timeout_ms`]) tears it down.
+    pub fn pending_inbound_links(&self, dest_hash: &DestinationHash) -> usize {
+        self.links
+            .values()
+            .filter(|link| {
+                !link.is_initiator()
+                    && link.destination_hash() == dest_hash
+                    && link.pending_since_ms().is_some()
+            })
+            .count()
+    }
+
     /// [`Self::connect`] with the first hop's timeout supplied by the caller.
     ///
     /// `first_hop_timeout_ms` is Python's whole `first_hop_timeout` for the

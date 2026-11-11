@@ -237,6 +237,19 @@ pub enum LinkError {
         /// The configured cap the table is at.
         max: usize,
     },
+    /// [`crate::node::NodeCore::connect_keeping_free`] held the dial back:
+    /// opening it would leave fewer than `keep_free` slots of the
+    /// configured cap free for inbound links. No link was created and
+    /// nothing was sent; this is the caller's own reserve, not a refusal by
+    /// the cap, so no `LinkRefused` event is emitted.
+    ReserveHeld {
+        /// Live entries in the link table when the dial was held.
+        links: usize,
+        /// The configured cap.
+        max: usize,
+        /// The slots the caller asked to leave free.
+        keep_free: usize,
+    },
 }
 
 impl core::fmt::Display for LinkError {
@@ -267,6 +280,15 @@ impl core::fmt::Display for LinkError {
             LinkError::TableFull { max } => {
                 write!(f, "link table at its configured cap of {}", max)
             }
+            LinkError::ReserveHeld {
+                links,
+                max,
+                keep_free,
+            } => write!(
+                f,
+                "dial held: {} of {} links taken, {} kept free for inbound",
+                links, max, keep_free
+            ),
         }
     }
 }
