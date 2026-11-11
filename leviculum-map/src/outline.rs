@@ -28,7 +28,30 @@
 //! border colour under [`Ink::Colour`] and in the ink under [`Ink::Lines`], clipped
 //! segment by segment; only down to [`MAX_ZOOM`], below which 1:50m lines
 //! would be off by more than a pixel beside a region's own data.
+//!
+//! Around the land and the borders the world view draws the rest of the
+//! far picture (1683, `expedition-map-concept-2026-11.md` section 2), the
+//! same version and source, each a table of the same two formats:
+//! [`LAKES_50M`] (44,502 bytes) fills water over the land and strokes the
+//! shore under [`Ink::Lines`], [`RIVERS_50M`] (36,236) draws the rivers
+//! and lake centre lines whose `scalerank` is 4 or less, [`ICE_50M`]
+//! (16,422) the glaciated areas of `scalerank` 1 or less and
+//! [`SHELVES_50M`] (14,344) Antarctica's ice shelves, both in
+//! [`ice`]'s colour, and [`DISPUTED_50M`] (1,828) the disputed boundary
+//! lines, stroked dashed. [`draw_world`] draws them all in that order;
+//! [`draw`] is the land and the borders alone.
+//!
+//! The names the world view sets come from [`NAMES_50M`] (59,859 bytes,
+//! `LWN1`): populated places, country names, the seas, the mountain
+//! ranges, deserts and peaks, each a point with the kind, rank and
+//! shallowest zoom [`crate::labels::LabelKind`] gives it, and the German
+//! name where it differs (the locale the table is baked for, as the
+//! region fixtures are cut for German). [`names`] reads the ones a view
+//! shows; the frontends place them by the core's one rule. The M9 carries
+//! [`NAMES_M9`] (12,146 bytes), the same names down to its z0 to z3
+//! overview without the places it draws from that overview.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -41,6 +64,7 @@ use leviculum_mapfill::style::{Class, MapTheme};
 use leviculum_mapfill::SUBPIXEL;
 
 use crate::draw::Ink;
+use crate::labels::{LabelKind, ViewLabel};
 use crate::viewport::Viewport;
 
 /// The table, Natural Earth 1:50m land.
@@ -48,6 +72,28 @@ pub const WORLD_50M: &[u8] = include_bytes!("../data/ne_50m_land.lwo");
 
 /// The borders, Natural Earth 1:50m land boundary lines.
 pub const BORDERS_50M: &[u8] = include_bytes!("../data/ne_50m_admin_0_boundary_lines_land.lwl");
+
+/// The lakes, Natural Earth 1:50m.
+pub const LAKES_50M: &[u8] = include_bytes!("../data/ne_50m_lakes.lwo");
+
+/// The rivers and lake centre lines, `scalerank` 4 or less.
+pub const RIVERS_50M: &[u8] = include_bytes!("../data/ne_50m_rivers_lake_centerlines.lwl");
+
+/// The glaciated areas, `scalerank` 1 or less.
+pub const ICE_50M: &[u8] = include_bytes!("../data/ne_50m_glaciated_areas.lwo");
+
+/// Antarctica's ice shelves.
+pub const SHELVES_50M: &[u8] = include_bytes!("../data/ne_50m_antarctic_ice_shelves_polys.lwo");
+
+/// The disputed boundary lines, drawn dashed.
+pub const DISPUTED_50M: &[u8] =
+    include_bytes!("../data/ne_50m_admin_0_boundary_lines_disputed_areas.lwl");
+
+/// The names of the world view.
+pub const NAMES_50M: &[u8] = include_bytes!("../data/ne_50m_names.lwn");
+
+/// The names the M9 carries over its world overview.
+pub const NAMES_M9: &[u8] = include_bytes!("../data/ne_50m_names_m9.lwn");
 
 /// The attribution line a view of the outline carries.
 pub const ATTRIBUTION: &str = "Natural Earth";
@@ -215,10 +261,37 @@ pub fn water(theme: MapTheme) -> Rgb565 {
     theme.palette().area(Class::Water)
 }
 
+/// The ice colour in `theme`: the snow and ice no region renderer draws,
+/// so the palette has none; a pale blue-white on the light table, a step
+/// paler than the land on the dark one.
+pub fn ice(theme: MapTheme) -> Rgb565 {
+    match theme {
+        MapTheme::Light => Rgb565::new(29, 60, 30),
+        MapTheme::Dark => Rgb565::new(12, 26, 16),
+    }
+}
+
+/// What one layer of the world added to a view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayerStats {
+    /// Ring copies (or lines) at least partly in view.
+    pub rings: u32,
+    /// Ring copies wholly outside it.
+    pub culled: u32,
+    /// Points handed to the filler after the clip.
+    pub vertices: u32,
+    /// Areas filled ([`Ink::Colour`]).
+    pub fill: FillStats,
+    /// Lines stroked ([`Ink::Lines`], and rivers under both inks).
+    pub stroke: FillStats,
+    /// Rings dropped because the edge storage was too small.
+    pub overflows: u32,
+}
+
 /// What one outline view drew.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OutlineStats {
-    /// Ring copies at least partly in view.
+    /// The land: ring copies at least partly in view.
     pub rings: u32,
     /// Ring copies wholly outside it.
     pub culled: u32,
@@ -234,6 +307,19 @@ pub struct OutlineStats {
     pub border: FillStats,
     /// Rings dropped because the edge storage was too small.
     pub overflows: u32,
+    /// The lakes: ring copies in view, and what they filled or stroked.
+    pub lakes: u32,
+    pub lake: FillStats,
+    /// The rivers: lines in view, and their strokes.
+    pub rivers: u32,
+    pub river: FillStats,
+    /// The glaciated areas and the ice shelves: ring copies in view, and
+    /// what they filled or stroked.
+    pub ice: u32,
+    pub snowy: FillStats,
+    /// The disputed boundary lines in view, and their dashed strokes.
+    pub disputed: u32,
+    pub dash: FillStats,
 }
 
 /// Clip `ring` to `[x0, x1] x [y0, y1]`, Sutherland-Hodgman, edge by edge.
@@ -327,6 +413,49 @@ fn clip_segment(
     Some((a, b))
 }
 
+/// Every table the world view draws, empty for one it does not (1683).
+#[derive(Clone, Copy, Debug)]
+pub struct World<'a> {
+    /// The land, [`WORLD_50M`].
+    pub land: &'a [u8],
+    /// The lakes, [`LAKES_50M`].
+    pub lakes: &'a [u8],
+    /// The rivers and lake centre lines, [`RIVERS_50M`].
+    pub rivers: &'a [u8],
+    /// The glaciated areas, [`ICE_50M`].
+    pub ice: &'a [u8],
+    /// The Antarctic ice shelves, [`SHELVES_50M`].
+    pub shelves: &'a [u8],
+    /// The country borders, [`BORDERS_50M`].
+    pub borders: &'a [u8],
+    /// The disputed boundary lines, [`DISPUTED_50M`].
+    pub disputed: &'a [u8],
+}
+
+/// The whole world view, the tables of the crate.
+pub const WORLD: World<'static> = World {
+    land: WORLD_50M,
+    lakes: LAKES_50M,
+    rivers: RIVERS_50M,
+    ice: ICE_50M,
+    shelves: SHELVES_50M,
+    borders: BORDERS_50M,
+    disputed: DISPUTED_50M,
+};
+
+/// The boundary lines alone, for a picture drawn from another source
+/// (1683): the M9's overview region carries no boundary class, so its
+/// borders and disputed lines come from this.
+pub const BOUNDARIES: World<'static> = World {
+    land: &[],
+    lakes: &[],
+    rivers: &[],
+    ice: &[],
+    shelves: &[],
+    borders: BORDERS_50M,
+    disputed: DISPUTED_50M,
+};
+
 /// Draw the outline of `table` (normally [`WORLD_50M`]) and the borders of
 /// `borders` (normally [`BORDERS_50M`], or empty for none) for `view` into
 /// `target` in `theme`'s colours, which is cleared first: to water under
@@ -342,6 +471,35 @@ pub fn draw<D>(
 where
     D: Coverage<Color = Rgb565>,
 {
+    let world = World {
+        land: table,
+        lakes: &[],
+        rivers: &[],
+        ice: &[],
+        shelves: &[],
+        borders,
+        disputed: &[],
+    };
+    draw_world(&world, view, ink, theme, target)
+}
+
+/// Draw the world view of `world` for `view` into `target` in `theme`'s
+/// colours, which is cleared first: to water under [`Ink::Colour`], to the
+/// background under [`Ink::Lines`]. The layers go in the order the map
+/// reads them: the land, the lakes over it, the rivers, the ice and the
+/// shelves, then the borders and the disputed lines dashed over all.
+/// Nothing is drawn past [`MAX_ZOOM`] but the land, which the drawer itself
+/// does not limit.
+pub fn draw_world<D>(
+    world: &World,
+    view: &Viewport,
+    ink: Ink,
+    theme: MapTheme,
+    target: &mut D,
+) -> Result<OutlineStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
     let mut st = OutlineStats::default();
     let palette = theme.palette();
     let land = palette.background;
@@ -349,6 +507,166 @@ where
         Ink::Colour => water(theme),
         Ink::Lines(_) => land,
     })?;
+    // The colour a layer fills in, or the ink it is stroked in.
+    let shade = |fill: Rgb565| match ink {
+        Ink::Colour => fill,
+        Ink::Lines(colour) => colour,
+    };
+    // Room for the largest polygon of every ring table, its holes in,
+    // twice over for the corners the clip may add.
+    let mut room = 16usize;
+    for table in [world.land, world.lakes, world.ice, world.shelves] {
+        let mut polygon = 0usize;
+        for r in rings(table) {
+            polygon = match r.hole {
+                true => polygon + r.len(),
+                false => r.len(),
+            };
+            room = room.max(2 * polygon + 16);
+        }
+    }
+    let room = room.min(usize::from(u16::MAX));
+    let (_, h) = view.size();
+    let mut edges = vec![Edge::EMPTY; room];
+    let mut active = vec![0u16; room];
+    let mut heads = vec![0u16; h as usize];
+    let mut scratch = Scratch {
+        edges: &mut edges,
+        heads: &mut heads,
+        active: &mut active,
+    };
+    let mut filler = Filler::new(&mut scratch, target.bounding_box());
+    let here = view.zoom() <= MAX_ZOOM;
+    let landst = rings_into(world.land, view, ink, shade(land), &mut filler, target)?;
+    st.rings = landst.rings;
+    st.culled = landst.culled;
+    st.vertices = landst.vertices;
+    st.fill = landst.fill;
+    st.stroke = landst.stroke;
+    st.overflows = landst.overflows;
+    if here {
+        let water = water(theme);
+        let s = rings_into(world.lakes, view, ink, shade(water), &mut filler, target)?;
+        st.lakes = s.rings;
+        st.lake += match ink {
+            Ink::Colour => s.fill,
+            Ink::Lines(_) => s.stroke,
+        };
+        st.overflows += s.overflows;
+        let rivers = lines_into(
+            world.rivers,
+            view,
+            Point::zero(),
+            shade(water),
+            None,
+            &mut filler,
+            target,
+        )?;
+        st.rivers = rivers.rings;
+        st.river += rivers.stroke;
+        let ice = ice(theme);
+        for table in [world.ice, world.shelves] {
+            let s = rings_into(table, view, ink, shade(ice), &mut filler, target)?;
+            st.ice += s.rings;
+            st.snowy += match ink {
+                Ink::Colour => s.fill,
+                Ink::Lines(_) => s.stroke,
+            };
+            st.overflows += s.overflows;
+        }
+    }
+    if !here || self::bits(world.borders) != self::bits(world.land) {
+        return Ok(st);
+    }
+    let colour = match ink {
+        Ink::Colour => palette.border,
+        Ink::Lines(colour) => colour,
+    };
+    let b = lines_into(
+        world.borders,
+        view,
+        Point::zero(),
+        colour,
+        None,
+        &mut filler,
+        target,
+    )?;
+    st.borders = b.rings;
+    st.border += b.stroke;
+    let d = lines_into(
+        world.disputed,
+        view,
+        Point::zero(),
+        colour,
+        Some(DASH),
+        &mut filler,
+        target,
+    )?;
+    st.disputed = d.rings;
+    st.dash += d.stroke;
+    Ok(st)
+}
+
+/// Stroke the borders of `world` and its disputed lines, dashed, over a
+/// picture already drawn for `view` (1683): the M9's overview, whose
+/// region carries no boundary class. Nothing is filled or cleared, and
+/// `filler` is the caller's, so a firmware with fixed buffers sizes it
+/// itself. `at` is where the view's top-left lies on `target`, which is
+/// how a frontend draws the picture below its bars. Past [`MAX_ZOOM`], or
+/// with no border table, nothing is drawn.
+pub fn bounds<D>(
+    world: &World,
+    view: &Viewport,
+    at: Point,
+    colour: Rgb565,
+    filler: &mut Filler<'_, '_>,
+    target: &mut D,
+) -> Result<OutlineStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
+    let mut st = OutlineStats::default();
+    if view.zoom() > MAX_ZOOM {
+        return Ok(st);
+    }
+    let (Some(bits), disputed) = (self::bits(world.borders), self::bits(world.disputed)) else {
+        return Ok(st);
+    };
+    let b = lines_into(world.borders, view, at, colour, None, filler, target)?;
+    st.borders = b.rings;
+    st.border += b.stroke;
+    if disputed == Some(bits) {
+        let d = lines_into(world.disputed, view, at, colour, Some(DASH), filler, target)?;
+        st.disputed = d.rings;
+        st.dash += d.stroke;
+    }
+    Ok(st)
+}
+
+/// A dashed line's lengths in sub-pixels: [`DASH_ON`] drawn, [`DASH_OFF`]
+/// left.
+const DASH: (i64, i64) = (DASH_ON * SUBPIXEL as i64, DASH_OFF * SUBPIXEL as i64);
+/// A dash's length in pixels, and the gap after it (1683): the disputed
+/// boundary lines' pattern, short enough to read as dashed at z0.
+pub const DASH_ON: i64 = 4;
+/// The gap after a dash, in pixels.
+pub const DASH_OFF: i64 = 3;
+
+/// Fill every ring of `table` in `colour` under [`Ink::Colour`], or stroke
+/// them closed in it under [`Ink::Lines`], for `view`, through `filler`:
+/// what the layer added.
+fn rings_into<D>(
+    table: &[u8],
+    view: &Viewport,
+    ink: Ink,
+    colour: Rgb565,
+    filler: &mut Filler<'_, '_>,
+    target: &mut D,
+) -> Result<LayerStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
+    let mut st = LayerStats::default();
     let (w, h) = view.size();
     let (left, top) = view.top_left_sub();
     let sub = i64::from(SUBPIXEL);
@@ -366,27 +684,6 @@ where
         }
     };
     let world = 1i64 << (12 + u32::from(view.zoom()));
-    // Room for the largest polygon, its holes in, twice over for the
-    // corners the clip may add.
-    let mut largest = 0usize;
-    let mut polygon = 0usize;
-    for r in rings(table) {
-        polygon = match r.hole {
-            true => polygon + r.len(),
-            false => r.len(),
-        };
-        largest = largest.max(polygon);
-    }
-    let room = (2 * largest + 16).min(usize::from(u16::MAX));
-    let mut edges = vec![Edge::EMPTY; room];
-    let mut active = vec![0u16; room];
-    let mut heads = vec![0u16; h as usize];
-    let mut scratch = Scratch {
-        edges: &mut edges,
-        heads: &mut heads,
-        active: &mut active,
-    };
-    let mut filler = Filler::new(&mut scratch, target.bounding_box());
     let mut ring = Vec::new();
     let mut clipped = Vec::new();
     let mut points: Vec<Point> = Vec::new();
@@ -395,7 +692,7 @@ where
         for r in rings(table) {
             // A new polygon: fill the one before, whose holes are in.
             if !r.hole && ink == Ink::Colour && !filler.is_empty() {
-                st.fill += filler.fill(target, land, FillRule::EvenOdd)?;
+                st.fill += filler.fill(target, colour, FillRule::EvenOdd)?;
             }
             let [x0, y0, x1, y1] = r.bbox;
             if scale(x1) + dx < -GUARD
@@ -423,35 +720,65 @@ where
                         st.overflows += 1;
                     }
                 }
-                Ink::Lines(colour) => {
+                Ink::Lines(_) => {
                     points.push(points[0]);
-                    st.stroke += stroke(&mut filler, &points, SUBPIXEL, target, colour)?;
+                    st.stroke += stroke(filler, &points, SUBPIXEL, target, colour)?;
                 }
             }
         }
         if ink == Ink::Colour && !filler.is_empty() {
-            st.fill += filler.fill(target, land, FillRule::EvenOdd)?;
+            st.fill += filler.fill(target, colour, FillRule::EvenOdd)?;
         }
     }
-    if view.zoom() > MAX_ZOOM || self::bits(borders) != Some(bits) {
+    Ok(st)
+}
+
+/// Stroke every line of `table` in `colour`, dashed when `dash` gives the
+/// lengths of a dash and its gap, for `view`, through `filler`: what the
+/// layer added. A segment is clipped to the box around the view first; runs
+/// the clip keeps joined are stroked as one line.
+fn lines_into<D>(
+    table: &[u8],
+    view: &Viewport,
+    at: Point,
+    colour: Rgb565,
+    dash: Option<(i64, i64)>,
+    filler: &mut Filler<'_, '_>,
+    target: &mut D,
+) -> Result<LayerStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
+    let mut st = LayerStats::default();
+    let (w, h) = view.size();
+    let (left, top) = view.top_left_sub();
+    let sub = i64::from(SUBPIXEL);
+    let (vw, vh) = (i64::from(w) * sub, i64::from(h) * sub);
+    let Some(bits) = bits(table) else {
         return Ok(st);
-    }
-    let colour = match ink {
-        Ink::Colour => palette.border,
-        Ink::Lines(colour) => colour,
     };
+    let up = i32::from(view.zoom()) + 12 - bits as i32;
+    let scale = |v: u32| -> i64 {
+        match up >= 0 {
+            true => i64::from(v) << up,
+            false => i64::from(v) >> -up,
+        }
+    };
+    let world = 1i64 << (12 + u32::from(view.zoom()));
+    let mut points: Vec<Point> = Vec::new();
     for k in left.div_euclid(world)..=(left + vw - 1).div_euclid(world) {
         let dx = k * world - left;
-        for l in lines(borders) {
+        for l in lines(table) {
             let [x0, y0, x1, y1] = l.bbox;
             if scale(x1) + dx < -GUARD
                 || scale(x0) + dx > vw + GUARD
                 || scale(y1) - top < -GUARD
                 || scale(y0) - top > vh + GUARD
             {
+                st.culled += 1;
                 continue;
             }
-            st.borders += 1;
+            st.rings += 1;
             // Runs of segments the clip keeps joined, stroked one by one.
             points.clear();
             let mut prev: Option<(i64, i64)> = None;
@@ -465,22 +792,224 @@ where
                     continue;
                 };
                 let (a, b) = (
-                    Point::new(a.0 as i32, a.1 as i32),
-                    Point::new(b.0 as i32, b.1 as i32),
+                    Point::new(a.0 as i32 + at.x, a.1 as i32 + at.y),
+                    Point::new(b.0 as i32 + at.x, b.1 as i32 + at.y),
                 );
                 if points.last() != Some(&a) {
-                    if points.len() > 1 {
-                        st.border += stroke(&mut filler, &points, SUBPIXEL, target, colour)?;
-                    }
+                    st.stroke += flush(points.as_slice(), dash, filler, target, colour)?;
                     points.clear();
                     points.push(a);
                 }
                 points.push(b);
             }
-            if points.len() > 1 {
-                st.border += stroke(&mut filler, &points, SUBPIXEL, target, colour)?;
-            }
+            st.stroke += flush(points.as_slice(), dash, filler, target, colour)?;
         }
     }
     Ok(st)
+}
+
+/// Stroke `points`, wholly or in its dashes.
+fn flush<D>(
+    points: &[Point],
+    dash: Option<(i64, i64)>,
+    filler: &mut Filler<'_, '_>,
+    target: &mut D,
+    colour: Rgb565,
+) -> Result<FillStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
+    if points.len() < 2 {
+        return Ok(FillStats::default());
+    }
+    let Some((on, off)) = dash else {
+        return stroke(filler, points, SUBPIXEL, target, colour);
+    };
+    let mut st = FillStats::default();
+    for run in dashes(points, on, off) {
+        if run.len() > 1 {
+            st += stroke(filler, &run, SUBPIXEL, target, colour)?;
+        }
+    }
+    Ok(st)
+}
+
+/// The square root of `v`, rounded down: integer, so a dash falls on the
+/// same sub-pixel on every target.
+fn isqrt(v: u64) -> u64 {
+    if v < 2 {
+        return v;
+    }
+    let (mut x, mut y) = (v, v.div_ceil(2));
+    while y < x {
+        x = y;
+        y = (x + v / x) / 2;
+    }
+    x
+}
+
+/// The pieces of `line` a dash pattern of `on` drawn and `off` left paints,
+/// in sub-pixels: every dash a line of its own, the pattern carrying on
+/// across the line's segments.
+fn dashes(line: &[Point], on: i64, off: i64) -> Vec<Vec<Point>> {
+    let mut out: Vec<Vec<Point>> = Vec::new();
+    let period = on + off;
+    if period <= 0 {
+        return vec![line.to_vec()];
+    }
+    let mut current: Option<Vec<Point>> = None;
+    // How far into the pattern the last segment ended.
+    let mut phase = 0i64;
+    for w in line.windows(2) {
+        let ((x0, y0), (x1, y1)) = ((w[0].x, w[0].y), (w[1].x, w[1].y));
+        let (dx, dy) = (i64::from(x1 - x0), i64::from(y1 - y0));
+        let len = isqrt(dx.unsigned_abs().pow(2) + dy.unsigned_abs().pow(2)) as i64;
+        if len == 0 {
+            continue;
+        }
+        let mut at = 0i64;
+        while at < len {
+            let into = phase % period;
+            let left = match into < on {
+                true => on - into,
+                false => period - into,
+            };
+            let take = left.min(len - at);
+            let a = Point::new(x0 + (dx * at / len) as i32, y0 + (dy * at / len) as i32);
+            let b = Point::new(
+                x0 + (dx * (at + take) / len) as i32,
+                y0 + (dy * (at + take) / len) as i32,
+            );
+            if into < on {
+                match current {
+                    Some(ref mut run) => {
+                        if run.last() != Some(&a) {
+                            run.push(a);
+                        }
+                        run.push(b);
+                    }
+                    None => current = Some(vec![a, b]),
+                }
+            } else if let Some(run) = current.take() {
+                out.push(run);
+            }
+            at += take;
+            phase += take;
+        }
+    }
+    if let Some(run) = current.take() {
+        out.push(run);
+    }
+    out.retain(|r| r.len() > 1);
+    out
+}
+
+/// The magic of a table of names.
+const NAMES: &[u8; 4] = b"LWN1";
+
+/// The bits a coordinate of a name table has, `None` for no name table.
+fn name_bits(table: &[u8]) -> Option<u32> {
+    match table.get(..5) {
+        Some(head) if head[..4] == *NAMES && (8..=24).contains(&head[4]) => {
+            Some(u32::from(head[4]))
+        }
+        _ => None,
+    }
+}
+
+/// The names of the table `table` ([`NAMES_50M`], or the M9's
+/// [`NAMES_M9`]) that `view` shows, appended to `out` (1683): the names
+/// whose shallowest zoom is at most the view's and whose point lies in
+/// it, once for every copy of the world the point falls in. The reader
+/// places nothing; the frontend hands them to the core's one rule. A table
+/// cut short ends there and a kind this reader does not know is skipped,
+/// never a panic. Past [`MAX_ZOOM`] it appends nothing: the table is
+/// thinned for the zooms the outline draws ([`draw`]).
+pub fn names(table: &[u8], view: &Viewport, out: &mut Vec<ViewLabel>) {
+    if view.zoom() > MAX_ZOOM {
+        return;
+    }
+    let _ = read_names(table, view, out);
+}
+
+fn read_names(table: &[u8], view: &Viewport, out: &mut Vec<ViewLabel>) -> Option<()> {
+    let bits = name_bits(table)?;
+    let mut at = 5usize;
+    let count = usize::try_from(varint(table, &mut at)?).ok()?;
+    let head = at;
+    let offsets = table.get(head..head + count.checked_add(1)?.checked_mul(4)?)?;
+    let get = |i: usize| -> Option<u32> {
+        let b = offsets.get(i * 4..i * 4 + 4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let data_at = head + offsets.len();
+    let data = table.get(data_at..data_at + usize::try_from(get(count)?).ok()?)?;
+    let mut at = data_at + data.len();
+    let points = varint(table, &mut at)?;
+    let string = |i: u32| -> Option<&str> {
+        let n = usize::try_from(i).ok()?;
+        if n >= count {
+            return None;
+        }
+        let (a, b) = (
+            usize::try_from(get(n)?).ok()?,
+            usize::try_from(get(n + 1)?).ok()?,
+        );
+        core::str::from_utf8(data.get(a..b)?).ok()
+    };
+    let (w, h) = view.size();
+    let (left, top) = view.top_left_sub();
+    let sub = i64::from(SUBPIXEL);
+    let (vw, vh) = (i64::from(w) * sub, i64::from(h) * sub);
+    let up = i32::from(view.zoom()) + 12 - bits as i32;
+    let scale = |v: u32| -> i64 {
+        match up >= 0 {
+            true => i64::from(v) << up,
+            false => i64::from(v) >> -up,
+        }
+    };
+    let world = 1i64 << (12 + u32::from(view.zoom()));
+    for _ in 0..points {
+        let (kind, rank, min_zoom, _) = (
+            *table.get(at)?,
+            *table.get(at + 1)?,
+            *table.get(at + 2)?,
+            *table.get(at + 3)?,
+        );
+        at += 4;
+        let (x, y) = (varint(table, &mut at)?, varint(table, &mut at)?);
+        let string_at = varint(table, &mut at)?;
+        let alternate = varint(table, &mut at)?;
+        let Some(kind) = LabelKind::from_wire(kind) else {
+            continue;
+        };
+        if min_zoom > view.zoom() {
+            continue;
+        }
+        let Some(local) = string(string_at) else {
+            continue;
+        };
+        let text = match alternate.checked_sub(1) {
+            Some(a) => string(a).unwrap_or(local),
+            None => local,
+        };
+        let (sx, sy) = (scale(x), scale(y) - top);
+        for k in left.div_euclid(world)..=(left + vw - 1).div_euclid(world) {
+            let (ax, ay) = (sx + k * world - left, sy);
+            if !(0..vw).contains(&ax) || !(0..vh).contains(&ay) {
+                continue;
+            }
+            out.push(ViewLabel {
+                kind,
+                rank,
+                min_zoom,
+                text: String::from(text),
+                local: String::from(local),
+                at: (x, y),
+                anchor: (ax, ay),
+                line: Vec::new(),
+            });
+        }
+    }
+    Some(())
 }

@@ -112,6 +112,86 @@ from
 again gives the same bytes (sha256
 `bf43e6ed683d1aca77f9c737e5e8d702fb24185c1580a7a3c65494a3273eeb6e`).
 
+### The layers over the land (1683)
+
+Five more tables go over the land and under the borders, and the disputed
+boundary lines dashed over all of them. Each is baked from its own file of
+the same Natural Earth 5.1.2 release, at
+`https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/`,
+and each reproduces byte for byte:
+
+| table | source (bytes, sha256) | filter | rings/lines, points | bytes | baked sha256 |
+|---|---|---|---|---|---|
+| `ne_50m_lakes.lwo` | `ne_50m_lakes.geojson` (876,018, `d350b759…378a52`) | none | 465 rings, 53 holes, 18,149 points | 44,502 | `04042ea3…392d0` |
+| `ne_50m_rivers_lake_centerlines.lwl` | `ne_50m_rivers_lake_centerlines.geojson` (827,318, `f286e0ce…73ccc51`) | `scalerank <= 4` | 411 lines, 13,536 points | 36,236 | `efe2a2f0…beda698` |
+| `ne_50m_glaciated_areas.lwo` | `ne_50m_glaciated_areas.geojson` (512,453, `c7a097b4…8e9c0a7`) | `scalerank <= 1` | 31 rings, 13 holes, 5,720 points | 16,422 | `e9191d76…6620ba` |
+| `ne_50m_antarctic_ice_shelves_polys.lwo` | `ne_50m_antarctic_ice_shelves_polys.geojson` (131,055, `fedf866d…d547e790`) | none | 101 rings, 36 holes, 4,905 points | 14,344 | `a8290d6e…061bbd` |
+| `ne_50m_admin_0_boundary_lines_disputed_areas.lwl` | `ne_50m_admin_0_boundary_lines_disputed_areas.geojson` (51,158, `5bf5312a…5bb64e`) | none | 34 lines, 646 points | 1,828 | `09a3f7de…b9524d` |
+
+The filters are the script's `--max-scalerank`: the whole river file is
+69,984 bytes and the whole glaciated file 40,892, and the world view only
+shows the features a `scalerank` of 4 or 1 reaches. The lakes and the
+shelves are small enough whole. The disputed lines are the boundaries
+Natural Earth marks as disputed; the drawer strokes them dashed (4 pixels
+on, 3 off, `outline::DASH_ON`/`DASH_OFF`), so they read apart from the
+borders without a legend.
+
+```sh
+scripts/bake-world-outline.py ne_50m_lakes.geojson \
+    leviculum-map/data/ne_50m_lakes.lwo
+scripts/bake-world-outline.py --max-scalerank 4 ne_50m_rivers_lake_centerlines.geojson \
+    leviculum-map/data/ne_50m_rivers_lake_centerlines.lwl
+scripts/bake-world-outline.py --max-scalerank 1 ne_50m_glaciated_areas.geojson \
+    leviculum-map/data/ne_50m_glaciated_areas.lwo
+scripts/bake-world-outline.py ne_50m_antarctic_ice_shelves_polys.geojson \
+    leviculum-map/data/ne_50m_antarctic_ice_shelves_polys.lwo
+scripts/bake-world-outline.py ne_50m_admin_0_boundary_lines_disputed_areas.geojson \
+    leviculum-map/data/ne_50m_admin_0_boundary_lines_disputed_areas.lwl
+```
+
+### The names (1683)
+
+A table of names, `LWN1` (`scripts/bake-world-outline.py`'s docstring, and
+`src/outline.rs` for its reader): a point at the world coordinate, a kind,
+a rank, the shallowest zoom that shows it, and the local name with the
+German one where it differs. The locale is German as the region fixtures
+are cut for German; a frontend that would rather read the local name has
+it in the same point, and a reader's language rule picks.
+
+| table | kinds | points | alternates | strings | bytes | baked sha256 |
+|---|---|---|---|---|---|---|
+| `ne_50m_names.lwn` | city, town, village, country, sea, mountain range and peak, desert | 1,851 | 702 | 2,504 | 59,859 | `2df7ebaa…6d89565` |
+| `ne_50m_names_m9.lwn` | the same, zooms 0 to 3 only | 337 | 205 | 534 | 12,146 | `adca2556…624b499` |
+
+The full table is the one the desktop, the terminal and the phone read
+where no region covers the view; the M9's is cut to its z0 to z3 overview
+and costs it about 12 KB of flash. The sources, all of the same release:
+
+| source | bytes | sha256 | what becomes names |
+|---|---|---|---|
+| `ne_50m_populated_places.geojson` | 3,350,885 | `da4662b7…f67828ee7` | every place, `SCALERANK` 0-2 a city, 3-5 a town, else a village; `MIN_ZOOM` its zoom, `LABELRANK` its rank |
+| `ne_50m_admin_0_countries.geojson` | 3,083,490 | `3e458fc0…2b7fdeb` | every country, its `LABEL_X`/`LABEL_Y` the point |
+| `ne_50m_geography_marine_polys.geojson` | 1,163,418 | `6fe58083…43e912f97` | every sea, gulf and bay, `min_label` its zoom |
+| `ne_50m_geography_regions_polys.geojson` | 4,305,815 | `33396643…0f8b91fe76` | the regions whose `FEATURECLA` is `Range/mtn` or `Desert`, and no other |
+| `ne_50m_geography_regions_elevation_points.geojson` | 104,139 | `ebe76e87…8ccd16b60` | the `mountain`s and `volcano`s, as a range's name |
+
+```sh
+scripts/bake-world-outline.py --names leviculum-map/data/ne_50m_names.lwn \
+    ne_50m_populated_places.geojson ne_50m_admin_0_countries.geojson \
+    ne_50m_geography_marine_polys.geojson ne_50m_geography_regions_polys.geojson \
+    ne_50m_geography_regions_elevation_points.geojson
+scripts/bake-world-outline.py --names-max-zoom 3 \
+    leviculum-map/data/ne_50m_names_m9.lwn \
+    ne_50m_populated_places.geojson ne_50m_admin_0_countries.geojson \
+    ne_50m_geography_marine_polys.geojson ne_50m_geography_regions_polys.geojson \
+    ne_50m_geography_regions_elevation_points.geojson
+```
+
+A kind a reader does not know is skipped, so a later release may add one.
+The whole world view — land, borders, these five layers and both name
+tables — is 394,206 bytes, under the 400 KB the concept pins and a test
+holds it to (`leviculum-map/tests/golden.rs`).
+
 **Natural Earth** is in the public domain
 (<https://www.naturalearthdata.com/about/terms-of-use/>); no permission is
 needed and none is claimed. The map names it on the view anyway, as the
@@ -140,5 +220,13 @@ OpenStreetMap data of 2026-11-08T04:00:00Z), which the bucket keeps for
 about a week; cutting it twice gave the same bytes. Zooms 0 to 4 would be
 1,950,000 bytes and 0 to 5 5,238,084 bytes, over the 1 MiB the image
 grants the world.
+
+Since 1683 the board draws the country borders and the disputed lines of
+`../data/ne_50m_admin_0_boundary_lines_land.lwl` and
+`../data/ne_50m_admin_0_boundary_lines_disputed_areas.lwl` over that
+region — 51,340 bytes — with the world view's own names over them from
+`../data/ne_50m_names_m9.lwn` (12,146 bytes, zooms 0 to 3, the layers
+above). The region's own 183 places stay; a name both tables carry is
+placed once, by its text.
 
 The same ODbL notice as above applies; the file carries it inside itself.

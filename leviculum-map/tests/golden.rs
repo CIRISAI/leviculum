@@ -211,8 +211,18 @@ fn unpng(bytes: &[u8]) -> (Vec<u8>, u32, u32) {
     (buf, info.width, info.height)
 }
 
+/// `LEVICULUM_WRITE_GOLDEN=1` writes the goldens anew, for a change that
+/// means to move them.
+fn writing() -> bool {
+    std::env::var_os("LEVICULUM_WRITE_GOLDEN").is_some()
+}
+
 /// Hold `rgb` to the PNG golden `name`, pixel for pixel.
 fn same_as(name: &str, rgb: &[u8], w: u32, h: u32) {
+    if writing() {
+        std::fs::write(golden(name), png(rgb, w, h)).expect("write the golden");
+        return;
+    }
     let Ok(bytes) = std::fs::read(golden(name)) else {
         let path = kept(name, &png(rgb, w, h));
         panic!("no golden {name}; this run's is {}", path.display());
@@ -442,7 +452,135 @@ fn the_buildings_draw_their_goldens_from_z16() {
     assert!(moved.is_empty(), "moved:\n{}", moved.join("\n"));
 }
 
-/// The frames at z15 and shallower are today's with buildings on (1192):
+/// The world view before any region covers it (1683): `view` drawn from
+/// the outline's own tables — land, lakes, rivers, ice, the shelves, the
+/// country borders and the disputed lines dashed — in `style` and `ink`,
+/// on the table's background, as RGB.
+fn draw_world(view: &Viewport, ink: Ink, style: Style) -> Vec<u8> {
+    let (w, h) = view.size();
+    let mut fb = vec![0u16; (w * h) as usize];
+    let mut frame = Frame::new(&mut fb, w, h).expect("frame");
+    let Ok(_) = leviculum_map::outline::draw_world(
+        &leviculum_map::outline::WORLD,
+        view,
+        ink,
+        style.theme,
+        &mut frame,
+    );
+    let mut rgb = Vec::with_capacity(fb.len() * 3);
+    let frame = Frame::new(&mut fb, w, h).expect("frame");
+    frame.rgb888_into(&mut rgb);
+    rgb
+}
+
+/// The world view at z2 and z6, where no region of the app's own is
+/// loaded (1683): central Europe, drawn the way the M9 and the window
+/// draw it, and the terminal's cells, each pinned pixel for pixel
+/// (`.cells` byte for byte). The phone draws the window's bytes: the
+/// outline's widths are in sub-pixels of the view, not of the density,
+/// and a world view has no tiles to gain the density's width from; its
+/// names at 2.75 are pinned by the window's map tests. The layers the outline gained in 1683
+/// are in these: the lakes and rivers of Europe, the ice of the Alps, the
+/// coasts, and the borders, some of them a disputed line dashed.
+#[test]
+fn the_world_view_draws_its_goldens_at_z2_and_z6() {
+    let at = project(LatLon::from_degrees(50.0, 10.0));
+    for zoom in [2u8, 6] {
+        for (name, style, (w, h)) in [
+            (
+                format!("world-m9-320x240-z{zoom}.png"),
+                Style::M9,
+                (320, 240),
+            ),
+            (
+                format!("world-window-480x320-z{zoom}.png"),
+                Style::SCREEN,
+                (480, 320),
+            ),
+        ] {
+            let view = Viewport::new(at, zoom, w, h);
+            let rgb = draw_world(&view, Ink::Colour, style);
+            same_as(&name, &rgb, w, h);
+        }
+        // The terminal's technique: the view a text cell level deeper,
+        // twice as wide, in the window's finish, as cells of glyphs.
+        let (cols, rows) = (60usize, 16usize);
+        let (w, h) = ((cols * cells::SX) as u32, (rows * cells::SY) as u32);
+        let view = Viewport::new(at, zoom + 1, w, h);
+        let style = Style::PC;
+        let to_rgb = |v: Vec<u8>| -> Vec<cells::Rgb> {
+            v.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect()
+        };
+        let ground = cells::rgb_of(style.theme.palette().background);
+        let ink = Ink::Lines(embedded_graphics::pixelcolor::Rgb565::new(0, 0, 0));
+        let inked: Vec<bool> = to_rgb(draw_world(&view, ink, style))
+            .into_iter()
+            .map(|c| c != ground)
+            .collect();
+        let source = cells::Source {
+            cols,
+            rows,
+            rgb: to_rgb(draw_world(&view, Ink::Colour, style)),
+            line: inked.clone(),
+            thin: inked,
+            theme: style.theme,
+        };
+        let sets = Sets::default();
+        let text = dump(
+            &cells::encode(&source, Encoding::Octant, &sets),
+            cols,
+            style.theme,
+        );
+        let name = format!("world-octant-pc-light-z{zoom}.cells");
+        if writing() {
+            std::fs::write(golden(&name), &text).expect("write the golden");
+            continue;
+        }
+        let want = std::fs::read_to_string(golden(&name)).unwrap_or_default();
+        assert_eq!(
+            want,
+            text,
+            "the frame moved; this run's is {}",
+            kept(&name, text.as_bytes()).display()
+        );
+    }
+}
+
+/// The world view's data is small enough for a phone to carry it whole
+/// (1683): every table the outline draws, its names included, under
+/// 400 KB — the pin the concept sets, and a budget the firmware's flash
+/// and a package both feel.
+#[test]
+fn the_world_tables_stay_under_four_hundred_kilobytes() {
+    use leviculum_map::outline::{
+        DISPUTED_50M, ICE_50M, LAKES_50M, NAMES_50M, NAMES_M9, RIVERS_50M, SHELVES_50M, WORLD_50M,
+    };
+    let tables: [(&str, &[u8]); 8] = [
+        ("land", WORLD_50M),
+        ("lakes", LAKES_50M),
+        ("rivers", RIVERS_50M),
+        ("ice", ICE_50M),
+        ("shelves", SHELVES_50M),
+        ("disputed", DISPUTED_50M),
+        ("names", NAMES_50M),
+        ("names for the M9", NAMES_M9),
+    ];
+    let mut total = 0usize;
+    let mut lines = Vec::new();
+    for (name, bytes) in tables {
+        total += bytes.len();
+        lines.push(format!("{name}: {} B", bytes.len()));
+    }
+    let borders = leviculum_map::outline::BORDERS_50M;
+    total += borders.len();
+    lines.push(format!("borders: {} B", borders.len()));
+    assert!(
+        total < 400 * 1024,
+        "the world view: {total} B\n{}",
+        lines.join("\n")
+    );
+}
+
 /// the region with building sections, drawn in the window's and the
 /// phone's finish, gives the committed goldens byte for byte, and z11 to
 /// z14 the frames of the region without them. A view the terminal draws

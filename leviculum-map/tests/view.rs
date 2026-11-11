@@ -127,6 +127,134 @@ fn the_outline_table_is_natural_earth_50m() {
     }
 }
 
+/// The world view's layers (1683) over the land: central Europe at z2
+/// draws its lakes and rivers and the Alps' ice over the earth, the
+/// disputed lines dashed beside the borders; past the outline's deepest
+/// zoom none of them is drawn, and no lake lands on the water it does
+/// not own.
+#[test]
+fn the_world_view_draws_its_layers_over_the_land() {
+    use leviculum_map::outline::WORLD;
+    let view = Viewport::new(project(LatLon::from_degrees(50.0, 10.0)), 2, 240, 160);
+    let mut fb = vec![0u16; 240 * 160];
+    let mut frame = Frame::new(&mut fb, 240, 160).expect("frame");
+    let st =
+        outline::draw_world(&WORLD, &view, Ink::Colour, MapTheme::Light, &mut frame).expect("draw");
+    assert!(st.overflows == 0, "{st:?}");
+    assert!(st.lakes > 0 && st.lake.pixels > 0, "{st:?}");
+    assert!(st.rivers > 0 && st.river.pixels > 0, "{st:?}");
+    assert!(st.ice > 0, "{st:?}");
+    // The Alps' ice is a sliver at z2, drawn but below a pixel; the ice
+    // sheets over Greenland are what fills.
+    let icy = Viewport::new(project(LatLon::from_degrees(60.0, -45.0)), 2, 240, 160);
+    let mut ifb = vec![0u16; 240 * 160];
+    let mut frame = Frame::new(&mut ifb, 240, 160).expect("frame");
+    let ice_st =
+        outline::draw_world(&WORLD, &icy, Ink::Colour, MapTheme::Light, &mut frame).expect("draw");
+    assert!(
+        ice_st.ice > 0 && ice_st.snowy.pixels > 0,
+        "Greenland: {ice_st:?}"
+    );
+    assert!(
+        st.disputed > 0 && st.dash.pixels > 0,
+        "the Alps' disputed lines: {st:?}"
+    );
+    assert!(st.borders > 0 && st.border.pixels > 0, "{st:?}");
+    // Every pixel is one the layers know: water, land, a lake, ice or a
+    // border line (the disputed ones stroked in the same colour, dashed).
+    // A colour none of them paints means a layer painted outside its own.
+    let water = outline::water(MapTheme::Light);
+    let ice = outline::ice(MapTheme::Light);
+    let mut known = 0;
+    for colour in [water, ice, BACKGROUND, BORDER] {
+        known += count(&mut fb, 240, 160, colour);
+    }
+    assert_eq!(known, 240 * 160, "a pixel no layer paints");
+    // The control: past the deepest zoom only the land is drawn.
+    let deep = Viewport::new(
+        project(LatLon::from_degrees(50.0, 10.0)),
+        outline::MAX_ZOOM + 1,
+        240,
+        160,
+    );
+    let mut frame = Frame::new(&mut fb, 240, 160).expect("frame");
+    let st =
+        outline::draw_world(&WORLD, &deep, Ink::Colour, MapTheme::Light, &mut frame).expect("draw");
+    assert!(
+        (st.lakes, st.rivers, st.ice, st.disputed, st.borders) == (0, 0, 0, 0, 0),
+        "{st:?}"
+    );
+}
+
+/// The name table (1683): at z2 over Europe it holds a country's name, a
+/// sea's and a range's, each inside the view with its own anchor; past
+/// the outline's deepest zoom it holds none; a kind the reader does not
+/// know is skipped and a table cut short anywhere ends without a panic.
+#[test]
+fn the_name_table_gives_the_world_views_names() {
+    use leviculum_map::labels::LabelKind;
+    use leviculum_map::outline::{NAMES_50M, NAMES_M9};
+    let view = Viewport::new(project(LatLon::from_degrees(50.0, 10.0)), 2, 240, 160);
+    let mut out = Vec::new();
+    outline::names(NAMES_50M, &view, &mut out);
+    assert!(out.len() > 10, "{out:?}");
+    let kinds = |k: LabelKind| out.iter().filter(|l| l.kind == k).count();
+    assert!(kinds(LabelKind::Country) > 0, "no country: {out:?}");
+    assert!(kinds(LabelKind::Sea) > 0, "no sea: {out:?}");
+    let (w, h) = view.size();
+    let sub = i64::from(leviculum_mapfill::SUBPIXEL);
+    for l in &out {
+        assert!(
+            (0..i64::from(w) * sub).contains(&l.anchor.0)
+                && (0..i64::from(h) * sub).contains(&l.anchor.1),
+            "{l:?} outside the view"
+        );
+        assert!(!l.text.is_empty());
+    }
+    let full = out.clone();
+    let deep = Viewport::new(
+        project(LatLon::from_degrees(50.0, 10.0)),
+        outline::MAX_ZOOM + 1,
+        240,
+        160,
+    );
+    out.clear();
+    outline::names(NAMES_50M, &deep, &mut out);
+    assert!(out.is_empty(), "{out:?}");
+    // The M9's cut is the same format, thinned to its zooms: at z2 it
+    // carries every name the full table has in view, and no point above
+    // z3.
+    out.clear();
+    outline::names(NAMES_M9, &view, &mut out);
+    assert_eq!(out.len(), full.len(), "the M9's cut thins only past z3");
+    assert!(out.iter().all(|l| l.min_zoom <= 3), "{out:?}");
+    // A kind the reader does not know: one point of kind 200 in the
+    // middle of a z2 view, skipped rather than guessed.
+    let mut table = Vec::new();
+    table.extend_from_slice(b"LWN1");
+    table.push(18);
+    table.push(1); // one string
+    table.extend_from_slice(&0u32.to_le_bytes());
+    table.extend_from_slice(&1u32.to_le_bytes());
+    table.push(b'X');
+    table.push(1); // one point
+    table.extend_from_slice(&[200, 0, 0, 0]);
+    table.extend_from_slice(&[0x80, 0x80, 0x02]); // x = 32768, centre-ish
+    table.extend_from_slice(&[0x80, 0x80, 0x02]);
+    table.push(0);
+    table.push(0);
+    out.clear();
+    outline::names(&table, &view, &mut out);
+    assert!(out.is_empty(), "{out:?}");
+    // Cut short anywhere, no name invented and never a panic: the reader
+    // keeps the points it has whole and stops at the rest.
+    for cut in [0, 4, 5, 6, 7, 12, NAMES_50M.len() - 1] {
+        out.clear();
+        outline::names(&NAMES_50M[..cut], &view, &mut out);
+        assert!(out.len() <= full.len(), "{cut}: {out:?}");
+    }
+}
+
 /// The 1:50m land boundary lines: every line decodes inside its box, the
 /// ring reader sees none of them, and a table cut short anywhere yields
 /// fewer lines and never panics.

@@ -60,6 +60,19 @@ pub enum LabelKind {
     Village,
     Suburb,
     Neighbourhood,
+    /// A country's name, over the world outline where no region covers
+    /// the view (1683). Declared before [`LabelKind::Water`], so it is
+    /// neither a place, a line nor a road, and [`place`] serves it after
+    /// the place names and before the waters.
+    Country,
+    /// A sea, a gulf, a bay: [`LabelKind::Water`] names a lake's area,
+    /// this the ocean's.
+    Sea,
+    /// A mountain range's name, and a peak's
+    /// (`expedition-map-concept-2026-11.md`, section 2).
+    Range,
+    /// A desert's name.
+    Desert,
     /// A lake, a river, a sea: the name of a water area.
     Water,
     Park,
@@ -75,13 +88,17 @@ pub enum LabelKind {
 
 impl LabelKind {
     /// Every kind, in the order [`place`] serves them.
-    pub const ALL: [LabelKind; 12] = [
+    pub const ALL: [LabelKind; 16] = [
         LabelKind::City,
         LabelKind::Town,
         LabelKind::District,
         LabelKind::Village,
         LabelKind::Suburb,
         LabelKind::Neighbourhood,
+        LabelKind::Country,
+        LabelKind::Sea,
+        LabelKind::Range,
+        LabelKind::Desert,
         LabelKind::Water,
         LabelKind::Park,
         LabelKind::River,
@@ -99,6 +116,10 @@ impl LabelKind {
             LabelKind::Village => 4,
             LabelKind::Suburb => 5,
             LabelKind::Neighbourhood => 6,
+            LabelKind::Country => 7,
+            LabelKind::Sea => 8,
+            LabelKind::Range => 9,
+            LabelKind::Desert => 10,
             LabelKind::Water => 16,
             LabelKind::Park => 17,
             LabelKind::River => 18,
