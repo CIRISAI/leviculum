@@ -201,7 +201,7 @@ stores runs instead of cells; the M9 slice measures and picks (slice 4).
 | Chip | `Chip` (`leviculum-ui/src/scene.rs:303`) | **reused**: download running, cached view |
 | Accessibility | `A11y` (`leviculum-ui/src/scene.rs:119`) and `Role` (`leviculum-ui/src/scene.rs:69`) | **parametrised**: moved to `leviculum-ui` in slice 0, `Role` gains `Page`, `Link`, `Field`, `Image` in slice 1 |
 | Strings | `Text`, `Lang`, `format`, the `catalogue!` macro (`leviculum-ui/src/strings.rs:180`, `leviculum-ui/src/strings.rs:27`, `leviculum-ui/src/strings.rs:144`, `leviculum-ui/src/strings.rs:80`) | **parametrised**: the machinery moved to `leviculum-ui` in slice 0; each program declares its own `StrId` with the macro, keys prefixed `browser_` so the Android files do not collide |
-| Key bindings | the mechanism `leviculum_ui::keymap`; Loquax's rows `ROWS` (`loquax/src/keys.rs:225`); `Intent::from_action` (`loquax/src/ui/intent.rs:510`) | **adds** its own rows table (browse, address, hint, search, field, places) with the vi, Emacs and arrow spellings, replacing the per-mode `match`es; the help and footer derive from it as Loquax's do. Chords that mean the same keep the same key (`q`, `?`, `:`, `/`, [Loquax: keys, mouse and layout](loquax-keys-and-layout.md)) |
+| Key bindings | the mechanism `leviculum_ui::keymap`; Loquax's rows `ROWS` (`loquax/src/keys.rs:228`); `Intent::from_action` (`loquax/src/ui/intent.rs:510`) | **adds** its own rows table (browse, address, hint, search, field, places) with the vi, Emacs and arrow spellings, replacing the per-mode `match`es; the help and footer derive from it as Loquax's do. Chords that mean the same keep the same key (`q`, `?`, `:`, `/`, [Loquax: keys, mouse and layout](loquax-keys-and-layout.md)) |
 | Android host and renderers | Loquax's tab host (`ConversationsActivity`), node binders from slice 8 of the study | **reused** in the Loquax APK: one `PageBinder` added |
 | iced window | `loquax/src/gui.rs`, `loquax/src/gui/chat.rs` | **extracted**: the top bar, sheet, toast, list item and search field widgets move into a crate `leviculum-ui-iced`, the iced twin of `leviculum-ui-ratatui`; both programs draw through it. Not a second layer: the same extraction #475 did for ratatui |
 | Terminal widgets | `leviculum-ui-ratatui` | **reused**; the scene-node widgets (top bar, sheet, list item) are added there, so the M9's mousefood draws them too |
@@ -270,7 +270,7 @@ and ships on its own.
 
 | # | Slice | Files | Tests | Accepted by | Depends on |
 |---|---|---|---|---|---|
-| 0 | **The contract's vocabulary moves into `leviculum-ui`**: `A11y`, `Role`, `Action<I>`, `TopBar`, `Lead`, `Tabs`, `Sheet`, `Chip`, a list item; `Text<K>`, `Lang`, `Arg`, `format`, the `catalogue!` macro, `android_xml`. Loquax re-exports, its `StrId` and node types stay its own. No behaviour change | `leviculum-ui/src/scene.rs`, `leviculum-ui/src/strings.rs` (new), `loquax/src/ui/scene.rs`, `loquax/src/ui/strings.rs`, `loquax/src/ui/intent.rs` | `loquax/tests/scene_golden.rs` unchanged; `the_phone_reads_the_catalogue` (`loquax/src/ui/strings.rs:925`) | the three `loquax/tests/golden/scene-*.json` and the generated `strings_scene.xml` byte-identical; `just ui-no-terminal`, `just loquax-core-no-std` green | Loquax slice one (`bb0e9f77`..`af8fa5c1`, here) |
+| 0 | **The contract's vocabulary moves into `leviculum-ui`**: `A11y`, `Role`, `Action<I>`, `TopBar`, `Lead`, `Tabs`, `Sheet`, `Chip`, a list item; `Text<K>`, `Lang`, `Arg`, `format`, the `catalogue!` macro, `android_xml`. Loquax re-exports, its `StrId` and node types stay its own. No behaviour change | `leviculum-ui/src/scene.rs`, `leviculum-ui/src/strings.rs` (new), `loquax/src/ui/scene.rs`, `loquax/src/ui/strings.rs`, `loquax/src/ui/intent.rs` | `loquax/tests/scene_golden.rs` unchanged; `the_phone_reads_the_catalogue` (`loquax/src/ui/strings.rs:927`) | the three `loquax/tests/golden/scene-*.json` and the generated `strings_scene.xml` byte-identical; `just ui-no-terminal`, `just loquax-core-no-std` green | Loquax slice one (`bb0e9f77`..`af8fa5c1`, here) |
 | 1 | **The proof: lnomad's TUI draws through a scene** (2 passes). `lnomad/src/app/scene.rs`: `Model::scene(class)` builds `TopBar`, `Page` (window of runs), the places `Sheet`, chips, toast; `lnomad::Intent`; `lnomad/src/app/strings.rs`, English and German, for the 37 toasts, the start page and the help groups. `tui::view` (`lnomad/src/tui.rs:99`) renders the scene; the cell mouse arms stay as they are, as in the Loquax study | `lnomad/src/app/{scene,strings}.rs` (new), `app/event.rs`, `app/chrome.rs`, `tui.rs` | the 241 `#[test]`s of `tui.rs` unchanged; `render_golden.rs`; new `lnomad/tests/scene_golden.rs` with `scene-page-{53,80}.json` of the README; positive control: shift a link by one cell and the golden fails | every `TestBackend` frame unchanged; the README window at 53×22 holds at most 67 runs (asserted, from 2.2); the build time of a README scene measured and written into this page | slice 0 |
 | 1b | **Keys become a table and intents**: lnomad's rows over `leviculum_ui::keymap`, vi, Emacs and arrows; `update_*_key` resolve to `lnomad::Intent`; help and footer derived | `lnomad/src/app/keys.rs` (new), `app/event.rs`, `app/chrome.rs` | a table test: each chord the old `match`es honoured resolves to the same intent; no chord resolves to two intents in one mode | the help overlay lists exactly the chords the handler honours | slice 1 |
 | 2 | **The window** (2 passes): `leviculum-ui-iced` extracted from `loquax/src/gui*.rs` (top bar, sheet, toast, list item, search field); `lnomad --gui` behind a `gui` feature draws the scene, the page as monospace `rich_text` runs | `leviculum-ui-iced/` (new), `loquax/src/gui.rs`, `loquax/src/gui/chat.rs`, `lnomad/src/gui.rs` (new), `lnomad/Cargo.toml` | `loquax/tests/golden/gui-chat-{light,dark}.png` byte-identical; new `lnomad/tests/golden/gui-page-{light,dark}.png` of the README fixture | Loquax's goldens unchanged; a click on a link run raises `Activate(Link(n))` in a headless test; frame time for the README at 1280×800 measured | slice 1; Loquax study slices 2 and 3 (iced draws the scene, the top bar and tab bar in the model) |
@@ -391,7 +391,7 @@ branch close the slice.
 - **The table.** `lnomad/src/app/keys.rs` holds lnomad's rows
   (`ROWS`, `lnomad/src/app/keys.rs:150`) over `leviculum_ui::keymap`,
   beside the shared `SCROLL_ROWS`, the way Loquax holds its own
-  (`loquax/src/keys.rs:225`). A mode is a pane: browse, address, search,
+  (`loquax/src/keys.rs:228`). A mode is a pane: browse, address, search,
   field, hint, and the overlays that own the keys while open (help,
   places, the name list, and the name list while it asks). Two contexts:
   a fetch in flight (`Esc` and `Ctrl-g` cancel it) and a checkbox or radio
@@ -683,7 +683,7 @@ terminal and window get no tab (the second question, answered no for now).
   address field as they are. An announce is kept while the tab is off.
 - **Chat and page hand over.** A NomadNet page link in a chat
   (`<hash>:/page/...`) opens the tab at that page where the host has the
-  tab (`loquax/src/ui.rs:5335`) and is copied for lnomad where not. A
+  tab (`loquax/src/ui.rs:5340`) and is copied for lnomad where not. A
   page's `lxmf@` link raises lnomad's new `Effect::Write`
   (`lnomad/src/app/model.rs:455`) when hosted
   (`lnomad/src/app/event.rs:1572`), and Loquax opens that chat for
@@ -819,11 +819,11 @@ as the phone, on by default since 1618.
   the bookmarks and pins to their files. A write and a quit stay the
   core's (`effects_of`).
 - **The keys.** While the tab is in front the core hands keys and the
-  mouse to the browser (`loquax/src/ui.rs:3840`, `loquax/src/ui.rs:3895`),
+  mouse to the browser (`loquax/src/ui.rs:3844`, `loquax/src/ui.rs:3899`),
   so lnomad's whole key table works, its `q` leaves the tab, and the
-  terminal's screen size is the page's (`loquax/src/ui.rs:3893`). `B` and
+  terminal's screen size is the page's (`loquax/src/ui.rs:3897`). `B` and
   the palette's `browse` bring the tab to the front
-  (`loquax/src/keys.rs:643`, `browse::open`, `loquax/src/ui/browse.rs:405`);
+  (`loquax/src/keys.rs:646`, `browse::open`, `loquax/src/ui/browse.rs:405`);
   with the tab off they say how to switch it on.
 - **The terminal** draws the tab with lnomad's terminal view over the
   whole screen (`draw_screen`, `loquax/src/tui.rs:1707`), in the
@@ -831,17 +831,17 @@ as the phone, on by default since 1618.
   for no pictures (`no_images`): the map owns the terminal's picture
   protocol, and two pickers on one terminal is a later question.
 - **The window** draws it with lnomad's window view beside the rail
-  (`browse_view`, `loquax/src/gui.rs:2933`; `lnomad::gui::view`,
+  (`browse_view`, `loquax/src/gui.rs:2983`; `lnomad::gui::view`,
   `lnomad/src/gui.rs:681`). The pictures are lnomad's window code too:
   `Pictures` (`lnomad/src/gui.rs:272`), moved out of lnomad's `Window`
   so a host keeps it beside a model it hosts; the shell holds it and the
   window draws from it. What lnomad's view says is folded as lnomad's
-  window folds it (`App::browse`, `loquax/src/gui.rs:2091`, with
+  window folds it (`App::browse`, `loquax/src/gui.rs:2120`, with
   `wheel_mice` and `pointer_mouse`, `lnomad/src/gui.rs:433` and
   `lnomad/src/gui.rs:433`, and `type_address`,
   `lnomad/src/app/event.rs:465`, which lnomad's own window now calls as
   well). The window tells the browser its light or dark and the page's
-  cells (`browse_sync`, `loquax/src/gui.rs:1977`). The tab's icon
+  cells (`browse_sync`, `loquax/src/gui.rs:2006`). The tab's icon
   borrows the search glass; the shared icons have no globe yet.
 - **What the standalone has that the tab lacked (1337's list), and what
   the desktop tab has now.** Inline pictures: the window, yes; the

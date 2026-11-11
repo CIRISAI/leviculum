@@ -316,8 +316,8 @@ stays the separate renderer it is.
 ### The input model
 
 One table. The M9's keyboard feeds the same resolver the terminal uses:
-a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:1059`)
-through the shared rows (`ROWS`, `loquax/src/keys.rs:225`, over
+a key becomes a `keys::Action` (`resolve`, `loquax/src/keys.rs:1069`)
+through the shared rows (`ROWS`, `loquax/src/keys.rs:228`, over
 `leviculum_ui::keymap`'s scroll rows), and the action becomes a scene
 intent (`Intent::from_action`, `loquax/src/ui/intent.rs:510`). Nothing
 M9-specific enters the model; what the platform layer owns is the I2C
@@ -518,7 +518,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   screen of one pane shows the pane the keys are in. That builds the Wide
   scene and drops its chat: the list's peak then carries the chat's.
 - **The list's cursor is the reader's** (1546, `list_top`,
-  `loquax/src/ui.rs:2597`). The model keeps the selected peer and the line
+  `loquax/src/ui.rs:2601`). The model keeps the selected peer and the line
   it stands on; while it stays selected, a pull or an arrival that sorts
   rows in above it moves the window, not the cursor. A key moves the line
   by as many rows as the selection moved in the order. Before, the window
@@ -916,8 +916,8 @@ host half. Nothing was flashed: the board half is the rig's.
 verbs, the yes/no question, "New group" with its friends, ticks and
 name, the invitation card with its Join. A phone taps a node and runs
 its `Action`. The terminal reaches these verbs through its palette only:
-the rows from `new group` (`loquax/src/keys.rs:930`) to `start again`
-(`loquax/src/keys.rs:962`) have no chord. The M9 has no palette. So its
+the rows from `new group` (`loquax/src/keys.rs:940`) to `start again`
+(`loquax/src/keys.rs:972`) have no chord. The M9 has no palette. So its
 group keys run the node's `Action` the way a tap does (`hit`,
 `loquax-m9/src/group.rs:137`), and nothing new enters the model. The
 cursor over the sheet's and the picker's rows is the M9's own, as a
@@ -1110,7 +1110,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
   feature range-checked. The region's tiles are already geometry; there
   is no other decode.
 - **Pixels** is the map core's filler painting the view straight into
-  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:830`); the
+  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:874`); the
   whole screen adds the bar's and the legend's cells and the pins
   (`Renderer::show`, `loquax-m9/src/render.rs:260`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
@@ -1129,7 +1129,7 @@ in place:
 | the 2 km region, z10 to z15 | 820,244 B | flash, read in place: none in PSRAM |
 | the fixture region the image carries | 197,972 B | flash |
 | the view's tiles, read out of a card instead | 81,850 to 201,070 B | PSRAM, per view |
-| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:783`) | 217,508 B | PSRAM |
+| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:827`) | 217,508 B | PSRAM |
 | a map draw's heap peak (census, below) | 75,404 B | PSRAM |
 | the cells' own per view, besides the painter's (source and cells) | 191,436 B braille, 120,204 B quadrants | PSRAM |
 | the panel's frame | 153,600 B | SRAM or PSRAM |
@@ -1151,21 +1151,21 @@ same code the phone, the window and the terminal draw through, so no
 renderer is written twice; the cell renderer keeps the bar and the
 legend.
 
-**The screen** (`lines`, `loquax-m9/src/map.rs:245`; `pins`,
-`loquax-m9/src/map.rs:898`), as 1531 left it after Lew's evening at
+**The screen** (`lines`, `loquax-m9/src/map.rs:246`; `pins`,
+`loquax-m9/src/map.rs:972`), as 1531 left it after Lew's evening at
 the board on 2026-11-07: the map is in the light table, in the M9's
 finish (square caps, no casings, no buildings); the UI around it keeps
 its dark tokens. There is no title row and no legend: the picture is
 the whole panel, rows 0 to 10 for the model's fit and pins (320 x 220),
 and row 11 is the picture too whenever it has no words. Its words
-(`Chrome`, `loquax-m9/src/map.rs:308`; `bottom`,
-`loquax-m9/src/map.rs:422`): the key hint, "T näher  Y weiter
+(`Chrome`, `loquax-m9/src/map.rs:309`; `bottom`,
+`loquax-m9/src/map.rs:423`): the key hint, "T näher  Y weiter
 Pfeile schieben", for three seconds after the map opens and after a key
 it does not know, the pins' page for three more when there is a pin;
 then the chosen pin's card, its age and the data's credit, "©
 OpenStreetMap", at the right end; and the credit for five seconds in the
 picture's top right corner the first time the map opens after a boot.
-The names (`names`, `loquax-m9/src/map.rs:552`) are set after the
+The names (`names`, `loquax-m9/src/map.rs:553`) are set after the
 picture and before the pins, by the map core's placement rule in three
 rounds: places, then streets and rivers centred on a straight stretch
 of their line (horizontal, the atlas cannot turn text), then from z15
@@ -1174,11 +1174,11 @@ cells first, every row in the map's ground, then the map over them, the
 names, the pins and the words; ratatui draws only cells that changed,
 so the next map leaves the blank rows alone, and the renderer clears
 its cells when the screen leaves the map (`leave_map`,
-`loquax-m9/src/render.rs:385`), or the list would keep map pixels where
+`loquax-m9/src/render.rs:396`), or the list would keep map pixels where
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
-`loquax/src/ui.rs:6583`): the shares the store kept, a `lev.position`
+`loquax/src/ui.rs:6588`): the shares the store kept, a `lev.position`
 announce, and the board's own fix. That last one is new in the core:
 the shell's own fix (`UiEvent::OwnFix`, from the receiver or typed by
 hand) is now our pin where it is newer than our last share, so a board
@@ -1187,14 +1187,14 @@ places them in the picture's cells (`map::place`), the M9 asks for the
 ASCII markers: the atlas has `●` but not the chosen pin's `◉`. Each pin
 is set in the atlas on the bar's colours, the chosen one reversed, an
 old one's and a nearby node's muted. Where the picture is, the M9 tells
-the model (`map_picture`, `loquax/src/ui.rs:1401`): the fit, the pan's
+the model (`map_picture`, `loquax/src/ui.rs:1404`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
-**The keys** (`ROWS`, `loquax-m9/src/map.rs:157`) are the terminal's map
+**The keys** (`ROWS`, `loquax-m9/src/map.rs:158`) are the terminal's map
 keys where the M9 has the key; Space and Backspace stand in for Tab and
 Shift-Tab, which it has not, and T, I, Y, O for `+` and `-`, which sit on
-the controller's Sym layer (`key`, `loquax-m9/src/map.rs:180`). A test
+the controller's Sym layer (`key`, `loquax-m9/src/map.rs:181`). A test
 takes every row through the shared resolver
 (`every_map_key_runs_the_terminals_map_command`).
 
@@ -1211,7 +1211,7 @@ takes every row through the shared resolver
 
 **The fixture** (`map`, `loquax-m9/src/fixture.rs:328`) gives the
 board's model the map core's Florence region (`FIXTURE`,
-`loquax-m9/src/map.rs:84`, read in place from the image), the picture,
+`loquax-m9/src/map.rs:85`, read in place from the image), the picture,
 and five positions: the board's GNSS fix by the cathedral, Jürgen's and
 Mum's shares, Zoë's three hours old, and Rifugio, a node nearby that
 announced itself. The existing screens' goldens did not move. Two
@@ -1342,7 +1342,7 @@ the tab), so a `ROOMS_ROWS` table beside `LIST_ROWS` and `CHAT_ROWS` in
 erase and the character keys onto those events through `keys::event`,
 with a test that resolves each row as the list's and the chat's tests do,
 and one row in the list pane for the terminal's `R`
-(`loquax/src/keys.rs:651`) to bring the tab. Two things beyond the
+(`loquax/src/keys.rs:654`) to bring the tab. Two things beyond the
 screen decide whether it is worth building there: the hub link is `std`
 on tokio (`loquax/src/rooms_link.rs`, behind `std`), so the board drives
 `leviculum_rrc::Session` (`no_std` already) over a link of its own once
@@ -1940,7 +1940,7 @@ words, and the picture was the shorter one while the bottom row had
 words. Now the picture always takes the bottom row and its names keep
 clear of the pins only; the hint, the pin's card and the credit are
 drawn over the copy (`Renderer::show`, `loquax-m9/src/render.rs:260`;
-`Kept`, `loquax-m9/src/map.rs:1133`), so a word that goes uncovers the
+`Kept`, `loquax-m9/src/map.rs:1207`), so a word that goes uncovers the
 picture kept under it. A name under a word stays hidden while the word
 stands. `the_words_over_the_map_never_draw_its_picture_again`
 (`loquax-m9/tests/map.rs:219`) walks the board's chrome clock: open with
@@ -2018,7 +2018,7 @@ plus decode under 100 ms for the long chat, window 16's to prove.
 
 **An invitation keeps its row.** A group the reader is invited to that
 no message reached has the invitation's listing, "Einladung", from when
-the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:2325`);
+the invitation came (`UiModel::listing_for`, `loquax/src/ui.rs:2329`);
 the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
@@ -2134,7 +2134,7 @@ the model, the model asks the cursor chat's page
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
-its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2388`, the
+its unread as it was (`UiModel::row`, `loquax/src/ui.rs:2392`, the
 a80038c2 rule); the cursor moves because the folded page gives the
 chat its real activity and the list re-sorts under a selection that
 follows the chat. A preload, not an open: nothing to stop for 1562/1564.
@@ -2434,7 +2434,7 @@ the same order.
 Two blocks of the rebuild grew with the ring whatever the chats were,
 and both went: the batch's note scope held one peer per folded entry
 (8192 x 16 B), now each conversation once (`Batch::fold`,
-`loquax/src/ui.rs:3625`); and every received message left a toast that a
+`loquax/src/ui.rs:3629`); and every received message left a toast that a
 board, which never ticks, never aged out, now at most `TOAST_KEEP`
 (`loquax/src/ui.rs:196`). The model after a rebuild holds about 470 KB
 less on the host. `a_rebuild_of_short_chats_asks_for_no_block_that_grows_with_the_ring`
@@ -2494,7 +2494,7 @@ keys were never deaf. One Back frame was lost on the line before core 0
 took it (`keys_rx=` stayed at 41; why the frame went is the UART FIFO
 during an erase, 1613). The walker's next Enter then came inside the
 open chat, where the shared key table's Enter opens the message under
-the cursor (1076), its detail view (`loquax/src/ui.rs:5708`). The M9
+the cursor (1076), its detail view (`loquax/src/ui.rs:5713`). The M9
 draws no detail view and its `[PAGE]` line called it `chat`, so the next
 Back closed what nobody saw, and every Enter and Back after it did the
 same: each one a `KEY` line the UI core wrote itself, no page change. The

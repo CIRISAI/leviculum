@@ -585,7 +585,7 @@ field docs, 3 looks like a serde-default convenience that nothing
 argues against the reference (the INI path inherits it silently).
 Mitigation in practice: every config we ship or generate writes all
 three keys explicitly (`example_config`,
-`leviculum-cli/src/lnsd.rs:541`). Bears on: the drop-in goal; any
+`leviculum-cli/src/lnsd.rs:554`). Bears on: the drop-in goal; any
 stranger's minimal config. Test: drop-in — a config of nothing but
 `[interfaces]` with one keyless section, both daemons, compare
 `rnstatus` reachability, transport state, and interface count.
