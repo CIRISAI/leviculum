@@ -122,6 +122,12 @@ fn the_top_bar_says_the_way_to_the_mailbox() {
             hops,
         })
     };
+    let wifi = |hops| {
+        Some(Way {
+            medium: Medium::Wifi,
+            hops,
+        })
+    };
     let fetched = Word::Fetched { taken: 3, of: None };
     // (word, way, [wide en, wide de], [narrow en, narrow de])
     let cases = [
@@ -160,6 +166,25 @@ fn the_top_bar_says_the_way_to_the_mailbox() {
                 "Postfach über Kabel · 1 Station",
             ],
             ["Cable · 1 station", "Kabel · 1 Station"],
+        ),
+        // 1479: the LAN rung, a mailbox in the WLAN the board joined.
+        (
+            Word::Connected,
+            wifi(1),
+            [
+                "Mailbox over WiFi · 1 station",
+                "Postfach über WLAN · 1 Station",
+            ],
+            ["WiFi · 1 station", "WLAN · 1 Station"],
+        ),
+        (
+            Word::Connected,
+            wifi(2),
+            [
+                "Mailbox over WiFi · 2 stations",
+                "Postfach über WLAN · 2 Stationen",
+            ],
+            ["WiFi · 2 stations", "WLAN · 2 Stationen"],
         ),
         (
             Word::Unreachable,

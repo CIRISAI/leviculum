@@ -757,6 +757,9 @@ pub enum Medium {
     Radio,
     /// A cable: the serial line to a host's daemon.
     Cable,
+    /// The WLAN the board joined (1479): its AutoInterface, the LAN rung
+    /// of the reachability ladder, a mailbox in the same network.
+    Wifi,
 }
 
 /// The board's path to its home (1478): the medium of its first hop and
@@ -775,6 +778,8 @@ impl Way {
             (Medium::Radio, false) => StrId::M9BarWayRadio,
             (Medium::Cable, true) => StrId::M9BarWayCableOne,
             (Medium::Cable, false) => StrId::M9BarWayCable,
+            (Medium::Wifi, true) => StrId::M9BarWayWifiOne,
+            (Medium::Wifi, false) => StrId::M9BarWayWifi,
         };
         Text::Key(id, alloc::vec![Arg::Int(i64::from(self.hops))])
     }
@@ -786,6 +791,8 @@ impl Way {
             (Medium::Radio, false) => StrId::M9BarRadio,
             (Medium::Cable, true) => StrId::M9BarCableOne,
             (Medium::Cable, false) => StrId::M9BarCable,
+            (Medium::Wifi, true) => StrId::M9BarWifiOne,
+            (Medium::Wifi, false) => StrId::M9BarWifi,
         };
         Text::Key(id, alloc::vec![Arg::Int(i64::from(self.hops))])
     }
