@@ -100,6 +100,7 @@ pub(crate) mod tracing {
 }
 
 pub(crate) mod announce;
+pub mod auto_wire;
 pub mod bounded_map;
 #[cfg(feature = "compression")]
 pub mod compression;
