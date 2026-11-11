@@ -52,7 +52,7 @@ lnomad-core-no-tui` (`Justfile:647`) and stated in the module doc of
   `lnomad/src/app/keys.rs:150`; `resolve`, `lnomad/src/app/keys.rs:386`). The top
   bar is a cell layout (`TopBar`, `lnomad/src/app/chrome.rs:29`), and the
   click and hover tests run against it (`handle_click`,
-  `lnomad/src/app/event.rs:1829`). There is no intent and no scene.
+  `lnomad/src/app/event.rs:1834`). There is no intent and no scene.
 - **The core was `std`.** `PathBuf` for `bookmarks_path`, `SystemTime`
   in discovery, and the parser crate used `std::collections::BTreeMap`
   and `std::borrow::Cow`, all of which `alloc` has. The crate as a whole
@@ -107,9 +107,9 @@ means only the browser has it. Catalogue keys named `browser_*` are new.
 | Top bar: title, address, star, identity, cache bolt, hops (`topbar_layout`, `lnomad/src/app/chrome.rs:101`) | `TopBar` (`leviculum-ui/src/scene.rs:206`) with `Lead::Back` while history has a past, title, and `actions` (star, identify, reload) | `Back`, `Bookmark{on}`, `Identify{on}`, `Reload` | `browser_bookmark`, `browser_identify`, `browser_reload`, `browser_hops` | shared, moved; the actions browser |
 | Address field (the `Address` arm of `Mode`, `lnomad/src/app/model.rs:101`) | a field node: the platform's text field, the scene names its hint and its go, as `Compose` does (`loquax/src/ui/scene.rs:630`) | `Go` (the URL is the platform's text, as Loquax's `Search` is) | `browser_address_hint` | browser node, shared shape |
 | Page view (`model.page`, laid out by `layout`, `lnomad/src/render.rs:187`) | `Page`: a window of `PageLine`s, each a list of runs (see 2.2) | `Scroll(ScrollCmd)` (exists) | none: page text is `Text::Raw` | browser |
-| Link focus, hint labels, follow (`focus`, `visible_links`, `lnomad/src/app/model.rs:937`) | a run carries its link index; `Page.focus` names the focused link | `FocusNext(dir)`, `Activate(NodeId::Link(n))`, `Hint` | `browser_hint` | `Activate` exists (`Intent`, `loquax/src/ui/intent.rs:167`); the link node browser |
+| Link focus, hint labels, follow (`focus`, `visible_links`, `lnomad/src/app/model.rs:948`) | a run carries its link index; `Page.focus` names the focused link | `FocusNext(dir)`, `Activate(NodeId::Link(n))`, `Hint` | `browser_hint` | `Activate` exists (`Intent`, `loquax/src/ui/intent.rs:167`); the link node browser |
 | Form fields (`RenderedField`, `lnomad/src/render.rs:114`) | a run carries its field index; the edited field is a platform text field like the address | `Edit`, `Toggle(field)`, `Submit` | `browser_submit` | browser |
-| Back and forward (`go_back`, `lnomad/src/app/event.rs:1522`; `go_forward`, `lnomad/src/app/event.rs:1532`) | `Lead::Back`; forward as a `TopBar` action | `Back` (exists), `Forward` | `back` (exists), `browser_forward` | `Back` exists |
+| Back and forward (`go_back`, `lnomad/src/app/event.rs:1527`; `go_forward`, `lnomad/src/app/event.rs:1537`) | `Lead::Back`; forward as a `TopBar` action | `Back` (exists), `Forward` | `back` (exists), `browser_forward` | `Back` exists |
 | History (`History`, `lnomad/src/app/model.rs:303`) | a `Sheet` of rows | `Activate(row)` | `browser_history` | sheet exists, rows browser |
 | Places: bookmarks and discovered nodes (`Place`, `lnomad/src/app/event.rs:808`; `places`, `lnomad/src/app/event.rs:848`) | `Sheet` (`leviculum-ui/src/scene.rs:293`) of list rows | `Activate(row)`, `Menu(row)` → `Rename`, `Forget` | `browser_places`, `browser_nodes` | sheet exists; `Rename` and `Forget` exist |
 | The name search of 1227 (not in this tree: no `1227` in `lnomad/` or `docs/src/` at `af8fa5c1`) | the address field's results: the places `Sheet`, rows from 1227's announce search | `Search` (exists), `Bookmark{on}` for its pinning | `browser_find_name` | lands with 1227 into the shapes above, no new node |
@@ -642,7 +642,7 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   `f64::floor`, which core lacks; for its non-negative products the
   values are the same (`lnomad/src/image.rs:221`). Without a system
   clock the model's wall clock is `Model::clock` or the epoch
-  (`lnomad/src/app/model.rs:682`); a board sets it.
+  (`lnomad/src/app/model.rs:693`); a board sets it.
 - **The check.** A `std::fs` call injected into a temp copy of
   `lnomad/src/app/model.rs` is refused first; then `cargo check -p
   leviculum-micron -p lnomad --lib --no-default-features --target
@@ -674,7 +674,7 @@ terminal and window get no tab (the second question, answered no for now).
   `browse_scene`, `loquax/src/ui/scene.rs:1175`). Loquax's `Intent` gains
   one arm, `Browse(lnomad::Intent)`, carried, never a browser verb of its
   own; the model folds `UiEvent::Tab` and `UiEvent::Browse`
-  (`BrowseEvent`, `loquax/src/ui/browse.rs:239`): a verb, the page a fetch
+  (`BrowseEvent`, `loquax/src/ui/browse.rs:271`): a verb, the page a fetch
   brought as micron (the core parses it, no platform does), an announced
   node, the cell size, the tick.
 - **Discovery.** The tab opens on lnomad's start screen with the places
@@ -686,20 +686,34 @@ terminal and window get no tab (the second question, answered no for now).
   tab (`loquax/src/ui.rs:5335`) and is copied for lnomad where not. A
   page's `lxmf@` link raises lnomad's new `Effect::Write`
   (`lnomad/src/app/model.rs:455`) when hosted
-  (`lnomad/src/app/event.rs:1572`), and Loquax opens that chat for
-  writing (`effects_of`, `loquax/src/ui/browse.rs:436`); the browser's
+  (`lnomad/src/app/event.rs:1577`), and Loquax opens that chat for
+  writing (`effects_of`, `loquax/src/ui/browse.rs:477`); the browser's
   quit leaves the tab, not the app. A `nomadnet://` URL in a chat is not
   a link shape `leviculum_ui::link::find_links` knows yet.
 - **The phone.** Request `browse` (a verb and a node's resource) and
-  query `browse` (`screen`, `loquax-android/src/browser.rs:27`; `event`,
-  `loquax-android/src/browser.rs:207`) cross the scene flat for
+  query `browse` (`screen`, `loquax-android/src/browser.rs:44`; `event`,
+  `loquax-android/src/browser.rs:273`) cross the scene flat for
   `MsgPack.java` in the phone's words: the bar, the address, the page's
-  window of lines of runs with their inks and the node a tap raises, the
-  sheet's rows. `BrowsePane`
-  (`loquax-android/android/src/network/leviculum/loquax/BrowsePane.java:55`)
-  draws the runs as spans in a monospace `TextView` and a field in the
-  platform's editor, handed in whole as lnomad's `Intent::Fill`
-  (`lnomad/src/app/intent.rs:98`). Java parses no micron.
+  lines of runs with their inks and the node a tap raises, the sheet's
+  rows. `BrowsePane`
+  (`loquax-android/android/src/network/leviculum/loquax/BrowsePane.java:66`)
+  draws the runs as spans in a monospace `TextView`. Java parses no
+  micron. Since 1650 the phone takes the page whole, up to 4000 lines
+  (lnomad's `Model::window`, set in `session::known`), and its own
+  `ScrollView` scrolls it under the finger; the line the finger leaves
+  it at goes back as the verb `at`, so a fresh copy of the same page,
+  Back and the paging arrows start there. Only a longer page comes as a
+  window, and only then are the arrows shown. The bar's `actions`
+  (forward, reload, bookmark, identify on and off) are a menu Java draws
+  from the list as the library words and enables it, and the `chips` a
+  line under the bar, the key before the identity while it identifies;
+  the first switch-on says "The page learns your address while this is
+  on". The `fields` carry their kind, whether they mask, their value and
+  label: a text field opens the platform's editor with its value (a
+  password editor when masked), handed in whole as lnomad's
+  `Intent::Fill` (`lnomad/src/app/intent.rs:98`); a checkbox or a radio
+  is toggled by `activate` alone; the focused field is drawn in the
+  accent; a submit carries them all.
 - **The fetch** came with pass two, below. The facade test here hands
   the page in as micron, as the fetch does.
 - **The M9.** There is no M9 renderer in this tree (Loquax study slice
@@ -757,7 +771,7 @@ two).** Slice 3's network seam: one node, lent, not a second one.
   session's pump (`browse`, `loquax-android/src/session.rs:2460`) hands it
   the owed effects and folds back what it says: `BrowseEvent::FailedText`,
   `Identifying`, `Downloaded` and `DownloadFailed` are new
-  (`loquax/src/ui/browse.rs:238`). A download is kept under the app's
+  (`loquax/src/ui/browse.rs:270`). A download is kept under the app's
   files as a bubble's file is, `files/browse/` (`keep_download`,
   `loquax-android/src/session.rs:2522`), and the clipboard text and the
   file go to Java once with the next screen; `BrowsePane` writes the
@@ -779,17 +793,19 @@ two).** Slice 3's network seam: one node, lent, not a second one.
   again: the unopened tab 0 B, open on twenty nodes 13.4 KB (the shorter
   start page), the README laid out 1.30 MB, one scene 19.3 KB held and
   21.2 KB at its peak.
-- **Still not on the phone:** inline pictures, an external link opened,
-  bookmarks and pins kept past the session, in-page search and the
-  history list.
+- **Still not on the phone** (1650): inline pictures, an external link
+  opened, in-page search and the history list. Built since: the whole
+  page under the finger, form fields of every kind with the platform's
+  editor, identify on and off with its state, bookmark, forward and
+  reload in the bar's menu.
 - **Tests.** `a_lent_node_fetches_as_its_own_does_and_stays_its_hosts`
   (`lnomad/tests/fetch_integ.rs:302`, the control a node let go of);
   `a_lent_fetch_hears_its_own_links_and_its_answers_alone`
   (`loquax/src/engine/shell.rs:1021`, the controls a link a peer opened
   and an event no fetch reads); `the_fetchs_words_reach_the_browser`
-  (`loquax/src/ui/browse.rs:895`) and
+  (`loquax/src/ui/browse.rs:936`) and
   `the_tab_opens_on_the_phones_start_page`
-  (`loquax/src/ui/browse.rs:961`); the facade end to end, both
+  (`loquax/src/ui/browse.rs:1002`); the facade end to end, both
   nodes, with the node absent before its announce as the control. With
   the tap silenced the leaf's run goes red in 60 s with no node listed.
 
@@ -823,7 +839,7 @@ as the phone, on by default since 1618.
   so lnomad's whole key table works, its `q` leaves the tab, and the
   terminal's screen size is the page's (`loquax/src/ui.rs:3887`). `B` and
   the palette's `browse` bring the tab to the front
-  (`loquax/src/keys.rs:643`, `browse::open`, `loquax/src/ui/browse.rs:412`);
+  (`loquax/src/keys.rs:643`, `browse::open`, `loquax/src/ui/browse.rs:453`);
   with the tab off they say how to switch it on.
 - **The terminal** draws the tab with lnomad's terminal view over the
   whole screen (`draw_screen`, `loquax/src/tui.rs:1707`), in the

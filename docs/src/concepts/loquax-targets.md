@@ -10,7 +10,7 @@ page is the measured state of that rule, feature by feature (1341).
 
 Each row is a user-facing feature of the phone build, found by walking the
 Android facade's `Request` and `Query` enums
-(`loquax-android/src/schema.rs:268`, `loquax-android/src/schema.rs:726`),
+(`loquax-android/src/schema.rs:268`, `loquax-android/src/schema.rs:727`),
 the bridge methods Java calls (`Core.java`), the activities that call them,
 and the scene's node kinds (`loquax/src/ui/scene.rs`). For every target a
 cell names the place that does it, `file:line`, or says MISSING. A MISSING
@@ -101,7 +101,7 @@ Rows marked (1341) or (1371) were MISSING before that pass and are closed by it.
 | 40 | Backup | `BackupActivity.java:130` | MISSING | MISSING |
 | 41 | Help | `ConversationsActivity.java:685` | `loquax/src/gui.rs:1510`, `loquax/src/gui.rs:3090` (the shared overlay) (1371) | `loquax/src/ui.rs:5668` |
 | 42 | Settings, nine sections in one order (1450) | `SettingsActivity.java:191` | `loquax/src/gui/chat.rs:443` (gear) | `loquax/src/ui.rs:7733` (`S`, palette `settings`) |
-| 43 | Browse tab | `BrowsePane.java:342` (behind `browse_tab`) | `loquax/src/gui.rs:3115`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1707`, behind `browse_tab` (1369) |
+| 43 | Browse tab | `BrowsePane.java:476` (behind `browse_tab`) | `loquax/src/gui.rs:3115`, behind `browse_tab` (1369) | `loquax/src/tui.rs:1707`, behind `browse_tab` (1369) |
 | 44 | Notifications of new messages | `LoquaxService.java:331` | `loquax/src/gui.rs:435`, `loquax/src/desktop.rs:118` (1341) | `loquax/src/tui.rs:743`, bell and `loquax/src/desktop.rs:118` (1341) |
 | 45 | Icon and application id | `AndroidManifest.xml:69` | `loquax/src/gui.rs:575` (1341) | n/a |
 | 46 | Rooms tab (RRC), a room as a chat (1450) | `RoomsPane.java:309`, behind `rooms_hub` (1384) | `loquax/src/gui/chat.rs:750`, behind `rooms_hub` (1379) | `loquax/src/tui.rs:1737`, behind `rooms_hub` (1379) |

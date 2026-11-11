@@ -506,7 +506,8 @@ pub enum Request {
     /// node's resource: `link_3`, `field_1`, `place_0`, `name_2`,
     /// `address`), `go` with the address field's `text`, `fill` with a
     /// field's `node` and `text`, `scroll` with `text` `up`, `down`,
-    /// `pageup`, `pagedown`, `top` or `bottom`, and `size` with the page
+    /// `pageup`, `pagedown`, `top` or `bottom`, `at` with the top line
+    /// the native scroll shows in `text` (1650), and `size` with the page
     /// view's `cols` and `rows` in cells.
     Browse {
         verb: String,
@@ -2223,13 +2224,28 @@ pub struct BrowseScreen {
     pub loading_words: String,
     /// The page: the window's lines, the line it starts at, how many the
     /// page has, and the focused node's resource (`link_2`, `field_1`) or
-    /// empty.
+    /// empty. Since 1650 the window is the whole page up to
+    /// [`crate::browser::WHOLE_PAGE`] lines, which the phone scrolls
+    /// natively; only a longer page comes as a window, and only then are
+    /// `first` and `total` apart and the paging arrows shown.
     #[serde(default)]
     pub lines: Vec<BrowseLine>,
     pub first: u32,
     pub total: u32,
     #[serde(default)]
     pub focus: String,
+    /// The page line the reader's view starts at (1650), absolute like
+    /// `first`: the browser's scroll, which Java reports back with the
+    /// verb `at` as the finger moves it. When the browser moves it itself
+    /// (a new page, an anchor, Back to a cached page, the arrows) Java
+    /// scrolls its view to it.
+    #[serde(default)]
+    pub at: u32,
+    /// The page's form fields (1650), for the platform's editor: a text
+    /// field opens a dialog with its value, a checkbox or a radio is
+    /// toggled by `activate` alone.
+    #[serde(default)]
+    pub fields: Vec<BrowseField>,
     /// The places panel or the name results, while open: its title and
     /// rows.
     #[serde(default)]
@@ -2257,6 +2273,28 @@ pub struct BrowseAction {
     pub verb: String,
     pub label: String,
     pub enabled: bool,
+}
+
+/// A form field of [`BrowseScreen`]'s page (1650).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseField {
+    /// Its node's resource, as its runs carry it (`field_1`).
+    pub node: String,
+    /// `text`, `checkbox` or `radio`.
+    pub kind: String,
+    /// A text field that hides what is typed (a password).
+    #[serde(default)]
+    pub masked: bool,
+    /// A text field's current text; a checkbox's or radio's value.
+    #[serde(default)]
+    pub value: String,
+    /// What the field is called on the page: a checkbox's or radio's
+    /// label, a text field's name.
+    #[serde(default)]
+    pub label: String,
+    /// A checkbox or radio is ticked.
+    #[serde(default)]
+    pub checked: bool,
 }
 
 /// One line of [`BrowseScreen`]'s page.

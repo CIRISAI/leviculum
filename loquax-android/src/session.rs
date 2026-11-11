@@ -3967,6 +3967,9 @@ impl Inner {
 pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
     let contacts = loquax::names::load_contacts(home).map_err(|error| error.to_string())?;
     let mut model = UiModel::<Line>::new(&[]);
+    // The phone scrolls the browser's page natively (1650): the scene
+    // carries it whole, up to the cap.
+    model.browse.model.window = Some(crate::browser::WHOLE_PAGE);
     model.names.contacts = contacts;
     for (peer, name) in store.names().map_err(|error| error.to_string())? {
         model.names.remember(peer, &name);

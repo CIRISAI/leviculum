@@ -243,3 +243,8 @@ command:java loquax-android/fling the_mailbox_page_writes_a_fitting_answer_into_
 # Handler, Looper and Log, run with its host test.
 command:javac loquax-android/fling a_question_that_throws_reaches_its_failure_path
 command:java loquax-android/fling a_question_that_throws_reaches_its_failure_path
+
+# What a whole browser page costs to cross (1650): the facade's answer read
+# by MsgPack.java with its host test.
+command:javac loquax-android/browse a_long_page_crosses_in_time
+command:java loquax-android/browse a_long_page_crosses_in_time
