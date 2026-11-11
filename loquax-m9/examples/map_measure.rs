@@ -9,7 +9,16 @@
 //!
 //! ```sh
 //! cargo run --release -p loquax-m9 --example map_measure -- REGION...
+//! cargo run --release -p loquax-m9 --example map_measure -- --world REGION...
 //! ```
+//!
+//! `--world` measures the world overview instead (1683): each region is
+//! drawn at its centre at zooms 0 to 3 as the board draws it, borders and
+//! all ([`loquax_m9::map::Painter::picture`] with `overview`), and the
+//! board's own name pass over it ([`loquax_m9::map::names`]), each a line
+//! shaped like the board's `[MAP]` one. That line is the board's to say
+//! with the board's clock; here it is the host's, so it ranks the zooms
+//! and bounds nothing.
 //!
 //! Each region is viewed at its centre at zooms 13 to 15 over the M9's
 //! picture, 320 x 180 pixels (32 x 9 cells of the 10 x 20 atlas; 318 x 210
@@ -31,7 +40,7 @@ use leviculum_map::draw::{draw_in_scaled, Ink};
 use leviculum_map::region::Region;
 use leviculum_map::viewport::Viewport;
 use leviculum_map::World;
-use leviculum_mapfill::fill::{Edge, Scratch};
+use leviculum_mapfill::fill::{Edge, Filler, Scratch};
 use leviculum_mapfill::frame::Frame as FillFrame;
 use leviculum_mapfill::render::{NoClock, Work};
 use leviculum_mapfill::style::Profile;
@@ -185,8 +194,10 @@ impl FillScratch {
 }
 
 fn main() {
-    let paths: Vec<String> = std::env::args().skip(1).collect();
-    assert!(!paths.is_empty(), "usage: map_measure REGION...");
+    let mut paths: Vec<String> = std::env::args().skip(1).collect();
+    paths.retain(|arg| arg != "--world");
+    assert!(!paths.is_empty(), "usage: map_measure [--world] REGION...");
+    let world = std::env::args().skip(1).any(|arg| arg == "--world");
     let (pw, ph) = (
         u32::from(PICTURE.width * CELL_PX.0),
         u32::from(PICTURE.height * CELL_PX.1),
@@ -214,10 +225,90 @@ fn main() {
             h.max_zoom,
             h.tiles
         );
-        for z in 13..=15u8 {
-            row(&bytes, &region, centre, z, pw, ph);
+        match world {
+            true => {
+                for z in 0..=3u8 {
+                    world_row(&region, centre, z, pw, ph);
+                }
+            }
+            false => {
+                for z in 13..=15u8 {
+                    row(&bytes, &region, centre, z, pw, ph);
+                }
+            }
         }
     }
+}
+
+/// The board's overview row (1683): the picture as the board draws it,
+/// the borders and disputed lines over it included, and the board's name
+/// pass over both tables, said in the board's `[MAP]` line's shape.
+fn world_row(region: &Region<&[u8]>, centre: World, z: u8, pw: u32, ph: u32) {
+    let view = Viewport::new(centre, z, pw, ph);
+    let mut painter = Painter::new();
+    let mut frame = Frame::new();
+    let mut stats = None;
+    let picture = time(|i| {
+        stats = Some(
+            painter
+                .picture(region, &pan(&view, i), &mut frame, true)
+                .expect("draw"),
+        );
+    });
+    let rows = PICTURE.height;
+    let mut found = None;
+    let names = time(|i| {
+        found = Some(map::names(region, &pan(&view, i), rows, &[], true).1);
+    });
+    let st = stats.unwrap_or_default();
+    let n = found.unwrap_or_default();
+    let (borders, b) = border_row(&view);
+    println!(
+        "[MAP] zoom={z} picture_ms={picture:.3} names_ms={names:.3} names={} dropped={} \
+         features={} overflows={} pixels={}",
+        n.drawn,
+        n.dropped(),
+        st.features,
+        st.overflows,
+        st.fill.pixels + st.stroke.pixels
+    );
+    println!(
+        "      borders {borders:.3} ms: {} in view, {} edges + {} disputed ({} dashed) on the scratch's {} edge slots",
+        b.borders,
+        b.border.edges,
+        b.disputed,
+        b.dash.edges,
+        map::EDGES
+    );
+}
+
+/// The border table over `view` on the board's own scratch sizes: the
+/// millisecond median, and what it stroked — the edges are summed over
+/// every fill the pass made, so more than [`map::EDGES`] is the scratch
+/// filling and going on, no line lost.
+fn border_row(view: &Viewport) -> (f64, leviculum_map::outline::OutlineStats) {
+    let (w, h) = view.size();
+    let mut fb = vec![0u16; (w * h) as usize];
+    let mut frame = FillFrame::new(&mut fb, w, h).expect("frame");
+    let mut fill = FillScratch::new();
+    let (mut scratch, _work) = fill.parts(h);
+    let mut filler = Filler::new(&mut scratch, frame.bounding_box());
+    let colour = map::style().theme.palette().border;
+    let mut stats = None;
+    let ms = time(|_| {
+        stats = Some(
+            leviculum_map::outline::bounds(
+                &leviculum_map::outline::BOUNDARIES,
+                view,
+                Point::zero(),
+                colour,
+                &mut filler,
+                &mut frame,
+            )
+            .expect("stroke"),
+        );
+    });
+    (ms, stats.unwrap_or_default())
 }
 
 fn row(bytes: &[u8], region: &Region<&[u8]>, centre: World, z: u8, pw: u32, ph: u32) {
@@ -241,7 +332,7 @@ fn row(bytes: &[u8], region: &Region<&[u8]>, centre: World, z: u8, pw: u32, ph: 
     let picture = time(|i| {
         stats = Some(
             painter
-                .picture(region, &pan(&view, i), &mut frame)
+                .picture(region, &pan(&view, i), &mut frame, false)
                 .expect("draw"),
         );
     });

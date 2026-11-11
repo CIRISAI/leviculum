@@ -1110,7 +1110,7 @@ twenty times slower (`docs/drafts/map-measurement-2026-10.md`).
   feature range-checked. The region's tiles are already geometry; there
   is no other decode.
 - **Pixels** is the map core's filler painting the view straight into
-  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:815`); the
+  the panel's frame (`Painter::picture`, `loquax-m9/src/map.rs:830`); the
   whole screen adds the bar's and the legend's cells and the pins
   (`Renderer::show`, `loquax-m9/src/render.rs:260`).
 - **Cells** is the terminal's way (`leviculum_map::cells`): the view
@@ -1129,7 +1129,7 @@ in place:
 | the 2 km region, z10 to z15 | 820,244 B | flash, read in place: none in PSRAM |
 | the fixture region the image carries | 197,972 B | flash |
 | the view's tiles, read out of a card instead | 81,850 to 201,070 B | PSRAM, per view |
-| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:771`) | 217,508 B | PSRAM |
+| the painter's storage, made once (`Painter`, `loquax-m9/src/map.rs:783`) | 217,508 B | PSRAM |
 | a map draw's heap peak (census, below) | 75,404 B | PSRAM |
 | the cells' own per view, besides the painter's (source and cells) | 191,436 B braille, 120,204 B quadrants | PSRAM |
 | the panel's frame | 153,600 B | SRAM or PSRAM |
@@ -1151,21 +1151,21 @@ same code the phone, the window and the terminal draw through, so no
 renderer is written twice; the cell renderer keeps the bar and the
 legend.
 
-**The screen** (`lines`, `loquax-m9/src/map.rs:244`; `pins`,
-`loquax-m9/src/map.rs:861`), as 1531 left it after Lew's evening at
+**The screen** (`lines`, `loquax-m9/src/map.rs:245`; `pins`,
+`loquax-m9/src/map.rs:898`), as 1531 left it after Lew's evening at
 the board on 2026-11-07: the map is in the light table, in the M9's
 finish (square caps, no casings, no buildings); the UI around it keeps
 its dark tokens. There is no title row and no legend: the picture is
 the whole panel, rows 0 to 10 for the model's fit and pins (320 x 220),
 and row 11 is the picture too whenever it has no words. Its words
-(`Chrome`, `loquax-m9/src/map.rs:307`; `bottom`,
-`loquax-m9/src/map.rs:421`): the key hint, "T näher  Y weiter
+(`Chrome`, `loquax-m9/src/map.rs:308`; `bottom`,
+`loquax-m9/src/map.rs:422`): the key hint, "T näher  Y weiter
 Pfeile schieben", for three seconds after the map opens and after a key
 it does not know, the pins' page for three more when there is a pin;
 then the chosen pin's card, its age and the data's credit, "©
 OpenStreetMap", at the right end; and the credit for five seconds in the
 picture's top right corner the first time the map opens after a boot.
-The names (`names`, `loquax-m9/src/map.rs:546`) are set after the
+The names (`names`, `loquax-m9/src/map.rs:552`) are set after the
 picture and before the pins, by the map core's placement rule in three
 rounds: places, then streets and rivers centred on a straight stretch
 of their line (horizontal, the atlas cannot turn text), then from z15
@@ -1174,7 +1174,7 @@ cells first, every row in the map's ground, then the map over them, the
 names, the pins and the words; ratatui draws only cells that changed,
 so the next map leaves the blank rows alone, and the renderer clears
 its cells when the screen leaves the map (`leave_map`,
-`loquax-m9/src/render.rs:383`), or the list would keep map pixels where
+`loquax-m9/src/render.rs:385`), or the list would keep map pixels where
 its cells are blank.
 
 **The pins are the model's**, as on every target (`map_pins`,
@@ -1191,10 +1191,10 @@ the model (`map_picture`, `loquax/src/ui.rs:1401`): the fit, the pan's
 step and the pins' cells go by its 53 x 21 cells, not by the terminal's
 conversation pane.
 
-**The keys** (`ROWS`, `loquax-m9/src/map.rs:156`) are the terminal's map
+**The keys** (`ROWS`, `loquax-m9/src/map.rs:157`) are the terminal's map
 keys where the M9 has the key; Space and Backspace stand in for Tab and
 Shift-Tab, which it has not, and T, I, Y, O for `+` and `-`, which sit on
-the controller's Sym layer (`key`, `loquax-m9/src/map.rs:179`). A test
+the controller's Sym layer (`key`, `loquax-m9/src/map.rs:180`). A test
 takes every row through the shared resolver
 (`every_map_key_runs_the_terminals_map_command`).
 
@@ -1211,7 +1211,7 @@ takes every row through the shared resolver
 
 **The fixture** (`map`, `loquax-m9/src/fixture.rs:328`) gives the
 board's model the map core's Florence region (`FIXTURE`,
-`loquax-m9/src/map.rs:83`, read in place from the image), the picture,
+`loquax-m9/src/map.rs:84`, read in place from the image), the picture,
 and five positions: the board's GNSS fix by the cathedral, Jürgen's and
 Mum's shares, Zoë's three hours old, and Rifugio, a node nearby that
 announced itself. The existing screens' goldens did not move. Two
@@ -1940,7 +1940,7 @@ words, and the picture was the shorter one while the bottom row had
 words. Now the picture always takes the bottom row and its names keep
 clear of the pins only; the hint, the pin's card and the credit are
 drawn over the copy (`Renderer::show`, `loquax-m9/src/render.rs:260`;
-`Kept`, `loquax-m9/src/map.rs:1096`), so a word that goes uncovers the
+`Kept`, `loquax-m9/src/map.rs:1133`), so a word that goes uncovers the
 picture kept under it. A name under a word stays hidden while the word
 stands. `the_words_over_the_map_never_draw_its_picture_again`
 (`loquax-m9/tests/map.rs:219`) walks the board's chrome clock: open with

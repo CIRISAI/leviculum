@@ -533,7 +533,7 @@ fn the_map_carries_names_at_z13_and_z16() {
         let (view, pins) = map::view(&model).expect("map");
         let tall = map::with_bottom(&view);
         let taken = map::pin_cells(&pins);
-        let (names, stats) = map::names(&region.region, &tall, map::BOTTOM + 1, &taken);
+        let (names, stats) = map::names(&region.region, &tall, map::BOTTOM + 1, &taken, false);
         println!("z{zoom}: {stats:?} {names:?}");
         assert_eq!(stats.drawn, names.len());
         assert!(names.len() <= map::NAMES_MAX);
@@ -570,7 +570,7 @@ fn places_come_first_and_parks_from_z15() {
     let at = project(LatLon::from_e6(52_517_500, 13_395_000));
     for zoom in 12..=16 {
         let view = Viewport::new(at, zoom, 320, 240);
-        let (names, stats) = map::names(&region, &view, map::BOTTOM + 1, &[]);
+        let (names, stats) = map::names(&region, &view, map::BOTTOM + 1, &[], false);
         println!("z{zoom}: {stats:?} {names:?}");
         let first = names.first().expect("a name");
         assert_eq!(
@@ -592,7 +592,7 @@ fn places_come_first_and_parks_from_z15() {
         );
     }
     let view = Viewport::new(at, 15, 320, 240);
-    let (names, _) = map::names(&region, &view, map::BOTTOM + 1, &[]);
+    let (names, _) = map::names(&region, &view, map::BOTTOM + 1, &[], false);
     assert!(
         names.iter().any(|n| n.kind == LabelKind::Park),
         "the control: z15 sets a park"

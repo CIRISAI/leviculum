@@ -44,9 +44,10 @@ use embedded_graphics::primitives::Rectangle;
 use embedded_graphics::text::{Baseline, Text};
 use leviculum_map::draw::{draw_in_scaled, Ink};
 use leviculum_map::labels::{place, Candidate, LabelKind, Rect as LabelRect, Rule, ViewLabel};
+use leviculum_map::outline;
 use leviculum_map::region::{Header, Region, RegionError};
 use leviculum_map::viewport::Viewport;
-use leviculum_mapfill::fill::{Edge, Scratch};
+use leviculum_mapfill::fill::{Edge, Filler, Scratch};
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
 use leviculum_mapfill::style::{Profile, Style};
 use leviculum_ui::color::Ink as UiInk;
@@ -543,15 +544,24 @@ fn candidates(labels: &[ViewLabel], cols: i64, rows: i64) -> Vec<Candidate> {
 /// parks and waters. Never over `taken` (the pins and the words over the
 /// picture: col, row, width) nor a name of an earlier round, one per
 /// [`NAME_BLOCK`] in a round, at most [`NAMES_MAX`] in all.
+///
+/// With `overview` the world region is what is shown, whose own names are
+/// only the places at z3: the world view's names ([`outline::NAMES_M9`],
+/// countries, seas, ranges, deserts and its places) join them (1683). A
+/// name both tables carry is placed once, by its text.
 pub fn names(
     region: &Region<&[u8]>,
     view: &Viewport,
     rows: u16,
     taken: &[(u16, u16, u16)],
+    overview: bool,
 ) -> (Vec<NameCell>, NameStats) {
     let mut found: Vec<ViewLabel> = Vec::new();
     if region.view_labels(view, true, &mut found).is_err() {
-        return (Vec::new(), NameStats::default());
+        found.clear();
+    }
+    if overview {
+        outline::names(outline::NAMES_M9, view, &mut found);
     }
     let zoom = view.zoom();
     let poi = |k: LabelKind| matches!(k, LabelKind::Park | LabelKind::Water);
@@ -628,7 +638,9 @@ pub fn pin_cells(pins: &[PinCell]) -> Vec<(u16, u16, u16)> {
 /// parks green, every other dark grey (the terminal's light colours).
 fn name_ink(kind: LabelKind) -> Rgb565 {
     match kind {
-        LabelKind::Water | LabelKind::River => Rgb888::new(0x1f, 0x4e, 0x8c).into(),
+        LabelKind::Water | LabelKind::River | LabelKind::Sea => {
+            Rgb888::new(0x1f, 0x4e, 0x8c).into()
+        }
         LabelKind::Park => Rgb888::new(0x2e, 0x6b, 0x2e).into(),
         _ => Rgb888::new(0x20, 0x20, 0x20).into(),
     }
@@ -811,12 +823,16 @@ impl Painter {
 
     /// Draw `view` of `region` into `panel`'s picture rows: the
     /// background, then the tiles the region holds there, class by class.
-    /// What the filler counted.
+    /// What the filler counted. With `overview` — the world region, which
+    /// carries no boundary class — the country borders and the disputed
+    /// boundary lines go over it too (1683), from the world outline's
+    /// tables.
     pub fn picture<D>(
         &mut self,
         region: &Region<&[u8]>,
         view: &Viewport,
         panel: &mut D,
+        overview: bool,
     ) -> Result<RenderStats, MapError>
     where
         D: DrawTarget<Color = Rgb565>,
@@ -839,7 +855,7 @@ impl Painter {
             points: &mut self.points,
             ring_ends: &mut self.ring_ends,
         };
-        draw_in_scaled(
+        let stats = draw_in_scaled(
             &tiles,
             region.area(view),
             Profile::Full,
@@ -851,7 +867,28 @@ impl Painter {
             &mut work,
             &mut NoClock,
         )
-        .map_err(|_| MapError::Draw)
+        .map_err(|_| MapError::Draw)?;
+        if overview {
+            // The overview has no boundary class, so the countries are
+            // parted by the world outline's own lines (1683), drawn over
+            // the land the region filled. The scratch is this painter's,
+            // freed again by the pass just gone.
+            let mut scratch = Scratch {
+                edges: &mut self.edges,
+                heads: &mut self.heads,
+                active: &mut self.active,
+            };
+            let mut filler = Filler::new(&mut scratch, target.bounding_box());
+            let _ = outline::bounds(
+                &outline::BOUNDARIES,
+                view,
+                Point::new(0, top),
+                style.theme.palette().border,
+                &mut filler,
+                &mut target,
+            );
+        }
+        Ok(stats)
     }
 }
 
@@ -1137,9 +1174,12 @@ impl Kept {
 
     /// Draw `view` of `map`'s region and its names into the kept pixels,
     /// clear of `taken`, with `font`: what [`Renderer::show`] draws on the
-    /// panel without a cache. The label pass's count.
+    /// panel without a cache. The label pass's count. `overview` says the
+    /// view shows the world overview, which brings the border table and
+    /// the world's names (1683).
     ///
     /// [`Renderer::show`]: crate::render::Renderer::show
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         painter: &mut Painter,
@@ -1147,15 +1187,16 @@ impl Kept {
         view: &Viewport,
         taken: &[(u16, u16, u16)],
         font: &MonoFont<'_>,
+        overview: bool,
         clock: &dyn Fn() -> u64,
     ) -> Result<(NameStats, u64, u64), MapError> {
         self.holds = None;
         self.size = view.size();
         let t0 = clock();
-        painter.picture(region, view, self)?;
+        painter.picture(region, view, self, overview)?;
         let t1 = clock();
         let rows = (view.size().1 / u32::from(CELL_PX.1)) as u16;
-        let (names, found) = names(region, view, rows, taken);
+        let (names, found) = names(region, view, rows, taken, overview);
         draw_names(&names, font, self)?;
         let t2 = clock();
         self.holds = Some((*view, taken.to_vec()));

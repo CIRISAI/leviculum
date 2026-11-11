@@ -325,8 +325,9 @@ where
                     stats.kept = true;
                     stats.names = self.names_kept;
                 } else {
+                    let overview = drawn == map::Drawn::Overview;
                     let (found, picture_us, names_us) = kept
-                        .draw(painter, region, &painted, &taken, &font, &now)
+                        .draw(painter, region, &painted, &taken, &font, overview, &now)
                         .map_err(|_| DrawError)?;
                     stats.picture_us = picture_us;
                     stats.names_us = names_us;
@@ -336,12 +337,13 @@ where
             }
             (None, Some(region)) => {
                 let t0 = now();
+                let overview = drawn == map::Drawn::Overview;
                 painter
-                    .picture(region, &painted, panel)
+                    .picture(region, &painted, panel, overview)
                     .map_err(|_| DrawError)?;
                 let t1 = now();
                 let rows = (painted.size().1 / u32::from(map::CELL_PX.1)) as u16;
-                let (names, found) = map::names(region, &painted, rows, &taken);
+                let (names, found) = map::names(region, &painted, rows, &taken, overview);
                 map::draw_names(&names, &font, panel).map_err(|_| DrawError)?;
                 let t2 = now();
                 stats.picture_us = t1.saturating_sub(t0);
