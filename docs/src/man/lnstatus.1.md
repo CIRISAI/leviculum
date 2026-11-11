@@ -96,6 +96,14 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
     `rnstatus` may take later collides. Against a Python `rnsd`, which serves
     neither, the flag prints nothing extra.
 
+**--src-tags**
+:   Under the name of each accepted TCP connection (shown with **-a**), print
+    a `Log tag   : src=<tag>` line: the daily pseudonym lnsd's log names the
+    connection by instead of its address (see lnsd(1), PEER ADDRESSES), so
+    a log line can be matched to the live connection. Leviculum extension,
+    off by default, so the output stays byte-identical to `rnstatus`'s. The
+    tag is the `src_tag` key of **-j**; `rnsd` serves none.
+
 **-m**, **--monitor**
 :   Continuously monitor status, clearing and redrawing on each interval.
 

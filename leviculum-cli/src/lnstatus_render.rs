@@ -51,6 +51,10 @@ pub struct StatusOptions {
     /// trailer line (#471). Ours, off by default, so the default render
     /// against lnsd stays byte-identical to rnstatus's.
     pub origin: bool,
+    /// `--src-tags`: print the `Log tag` line of every accepted TCP
+    /// connection, the daily pseudonym its log lines carry in place of the
+    /// address (order 1678). Ours, off by default, like `origin`.
+    pub src_tags: bool,
     /// How many of a shared instance's counted clients are the observing
     /// program itself — the footprint every Shared Instance figure has to be
     /// discounted by. Not a flag; a property of how the observer reached the
@@ -875,6 +879,15 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
     }
 
     pln(out, &format!(" {name}"));
+
+    // Order 1678: the tag the daemon's log names this connection by, so a
+    // log line can be matched to the live connection the name above shows
+    // by address. Ours, so only behind `--src-tags`.
+    if opts.src_tags {
+        if let Some(tag) = js(ifstat, "src_tag") {
+            pln(out, &format!("    Log tag   : src={tag}"));
+        }
+    }
 
     if let Some(src) = js(ifstat, "autoconnect_source") {
         if not_null(ifstat, "autoconnect_source") {

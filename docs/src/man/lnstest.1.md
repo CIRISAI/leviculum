@@ -65,6 +65,8 @@ Every single-packet phase waits for what is still in flight before it reads the 
 
 Collect a self-contained diagnostic bundle from a running **lnsd** (or **rnsd**) for attaching to bug reports: versions/build, the secret-redacted config and configured interfaces, the daemon's live view via the shared-instance RPC (interface stats, path table, link count), best-effort system info, and an event-log pointer. Printed to stdout by default. Use the global **-c**/**--config** to point at the daemon's config directory.
 
+The bundle holds no client address: wherever the daemon's answers or the event-log tail name an IP address, the bundle writes `src=<tag>`, the connection's daily pseudonym as lnsd logs it (see lnsd(1), PEER ADDRESSES), or `<address>` where the daemon serves no tag (an **rnsd**, an address no connection carries). The bind wildcards `0.0.0.0` and `::` name nobody and stay. Addresses in the configuration section are the operator's own configuration and stay as written.
+
 Secrets are redacted — IFAC `passphrase` and `networkname` never appear, and the node identity private key (`storage/transport_identity`) is never read into the bundle (it is used only to derive the RPC authkey). Queries the daemon doesn't support (e.g. when run against Python **rnsd**) are reported as unavailable rather than failing.
 
 Options:

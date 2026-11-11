@@ -96,6 +96,14 @@ The three configuration directories are tried in that order, the lookup order of
 
 Without **--config**, **lnsd** and every client tool take the first directory of that order, so a tool started without flags reaches the daemon started without flags. A tool that cannot reach or authenticate to the daemon names the directory it took and why, the socket, and every other candidate holding a `config`; see **lnstatus**(1).
 
+## PEER ADDRESSES
+
+**lnsd** writes no IP address of a client or neighbour into its log or its event log. Where a line would name one, it names the source's daily pseudonym instead, `src=3f9a01c2` in a sentence and `source=3f9a01c2` in an event: the first four bytes of HMAC-SHA256 over the address, under a key the daemon draws at start and redraws every 24 hours, held only in memory and never written. Within a day the same source carries the same tag, so a log still tells 412 connections from one host from one connection each from 412; after the key turns nothing written before can be linked to anything written after, nor back to an address. The port is dropped. An accepted TCP connection is named `tcp_server/<tag>`, an AutoInterface peer `auto/<nic>/<tag>`. A peer that announces is known by its transport hash, which is what debugging needs; the address is not. Addresses the operator configured (a TCP client's target, a UDP forward address, the daemon's own bind address) are configuration, not a client, and are logged as before.
+
+The running daemon still holds a connection's address while the connection lives, and **lnstatus -a** shows it as **rnstatus** does; **lnstatus -a --src-tags** prints each connection's tag beside it, so a log line can be matched to a live connection while it exists. Nothing else carries an address: the SIGUSR1 dump names interfaces by the same tags, and **lnstest diag** writes `src=<tag>` or `<address>` wherever the daemon's answers name one.
+
+`[logging] log_addresses = full` turns raw addresses back on for an operator who wants them; **lnsd** then says so at start with one `LOG_ADDRESSES_FULL` warning line. The default is `pseudonym`, and any other value keeps it. **rnsd** logs addresses raw; this is a deliberate deviation, with nothing on the wire changed: a log that holds no address has nothing to leak and nothing to declare.
+
 ## SIGNALS
 
 **SIGINT**, **SIGTERM**

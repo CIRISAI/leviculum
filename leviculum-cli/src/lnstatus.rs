@@ -141,6 +141,15 @@ struct Args {
     #[arg(long = "origin", default_value_t = false)]
     origin: bool,
 
+    /// show the log tag of every accepted TCP connection (with -a)
+    ///
+    /// Additive Leviculum extension (order 1678): lnsd logs a client by a
+    /// daily pseudonym, never by its address, and serves the pseudonym as
+    /// `src_tag` beside the address this table shows while the connection
+    /// lives. Off by default so the render stays rnstatus's.
+    #[arg(long = "src-tags", default_value_t = false)]
+    src_tags: bool,
+
     /// transport identity hash of remote instance to get status from
     #[arg(short = 'R')]
     remote: Option<String>,
@@ -199,6 +208,7 @@ impl Args {
             reverse: self.reverse,
             name_filter: self.filter.clone(),
             origin: self.origin,
+            src_tags: self.src_tags,
             // We reach the daemon over the RPC socket only and never attach
             // as a shared-instance client, so none of the clients the daemon
             // counts is us. See `StatusOptions::observer_clients`.
@@ -647,6 +657,7 @@ mod cli_tests {
         assert!(!o.burst_filter && !o.totals && !o.reverse);
         assert!(o.sort.is_none() && o.name_filter.is_none());
         assert!(!o.origin, "rnstatus's render unless asked (#471)");
+        assert!(!o.src_tags, "rnstatus's render unless asked (1678)");
         assert!(!a.json && !a.monitor && !a.discovered);
         assert_eq!(a.monitor_interval, 1.0);
     }
@@ -676,6 +687,7 @@ mod cli_tests {
         assert!(parse(&["--burst"]).status_options().burst_filter);
         assert!(parse(&["--totals"]).status_options().totals);
         assert!(parse(&["--origin"]).status_options().origin);
+        assert!(parse(&["--src-tags"]).status_options().src_tags);
         assert!(parse(&["--reverse"]).status_options().reverse);
         assert!(parse(&["--json"]).json);
         assert!(parse(&["--monitor"]).monitor);

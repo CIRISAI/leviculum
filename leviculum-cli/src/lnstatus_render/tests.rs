@@ -36,6 +36,7 @@ fn opts_from_json(o: &Value) -> StatusOptions {
         observer_clients: 1,
         // rnstatus has no `--origin`; the golden cases are its default render.
         origin: false,
+        src_tags: false,
     }
 }
 
@@ -967,6 +968,58 @@ fn origin_renders_where_lnsd_serves_it_and_nowhere_else() {
     let ifs = json["interfaces"].as_array().unwrap();
     assert_eq!(ifs[0]["origin"], serde_json::json!("default"));
     assert!(ifs[2].get("origin").is_none());
+}
+
+#[test]
+fn src_tag_renders_behind_its_flag_and_nowhere_else() {
+    // Order 1678: an accepted TCP connection is logged by its daily
+    // pseudonym, served as `src_tag`. Behind `--src-tags` a line under the
+    // name; without the flag the render is rnstatus's, byte for byte.
+    let mut client = iface(
+        "TCPInterface[Client on Srv/192.0.2.7:40000]",
+        10_000_000,
+        0,
+        0,
+    );
+    client["src_tag"] = serde_json::json!("ab12cd34");
+    let rnsd_shaped = iface(
+        "TCPInterface[Client on Srv/192.0.2.8:40001]",
+        10_000_000,
+        0,
+        0,
+    );
+    let stats = serde_json::json!({
+        "interfaces": [client.clone(), rnsd_shaped.clone()],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+    let without_key = serde_json::json!({
+        "interfaces": [iface("TCPInterface[Client on Srv/192.0.2.7:40000]", 10_000_000, 0, 0), rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+    let all = StatusOptions {
+        dispall: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        render_status(&stats, None, &all),
+        render_status(&without_key, None, &all),
+        "without --src-tags the served key renders nothing"
+    );
+    let tagged = StatusOptions {
+        dispall: true,
+        src_tags: true,
+        ..Default::default()
+    };
+    let text = render_status(&stats, None, &tagged);
+    let blocks: Vec<&str> = text.split("\n\n").collect();
+    assert!(
+        blocks[0].contains("192.0.2.7:40000]\n    Log tag   : src=ab12cd34\n"),
+        "the tag sits under the name it belongs to:\n{text}"
+    );
+    assert!(
+        !blocks[1].contains("Log tag"),
+        "a row without the key renders no line:\n{text}"
+    );
 }
 
 #[test]
