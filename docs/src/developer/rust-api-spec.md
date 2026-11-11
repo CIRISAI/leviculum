@@ -165,7 +165,7 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 
 The core is the no_std engine the std layer drives. You use these types directly
 only when building on `leviculum-core` — see [Embedded development](embedded.md).
-All are re-exported from `leviculum-core/src/lib.rs:164-189`.
+All are re-exported from `leviculum-core/src/lib.rs:166-191`.
 
 ### `NodeCore<R, C, S>`
 

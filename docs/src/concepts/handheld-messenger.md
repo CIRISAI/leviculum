@@ -692,7 +692,7 @@ draws is the scene the terminal, the window and the phone already draw.
   it changed as runs (`take_runs`, `loquax-m9/src/frame.rs:141`), and
   since 1507 the board sends each run through its own row window by DMA
   straight out of the frame (`window`,
-  `leviculum-esp/src/bin/thinknode_m9.rs:1259`): the full frame is the
+  `leviculum-esp/src/bin/thinknode_m9.rs:1260`): the full frame is the
   first draw's cost, a moved cursor sends two entries. The redraw test
   drives one renderer through four keys and must equal a fresh draw, its
   runs flushed into a second frame
@@ -1517,7 +1517,7 @@ client that joins with it. A text that is no code is refused
 
 **The join, the pull, the screen.** The client of 1414 now hands every
 pulled page to the board's loop, which folds it into the model the
-screen draws (`board::fold`, `loquax/src/home/board.rs:942`; the
+screen draws (`board::fold`, `loquax/src/home/board.rs:950`; the
 board's `take_in` without an engine: a message the home took in, one of
 the home's devices sent, a mark, a name). A board that is a device of a
 home draws that model from boot: its chats list and its chats come from
@@ -1998,7 +1998,7 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:3032`).
+both (`thinknode_m9.rs:3059`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
@@ -2069,7 +2069,7 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:3044`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:3071`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
@@ -2103,7 +2103,7 @@ of it waiting (`a_flush_gets_a_gap_between_two_flash_ops`,
 `loquax-m9/src/mspi/tests.rs:122`). On the board the flush line says
 `waited_ms=`, the wait before a draw is its own stall stage, `flush`,
 and a wait that moves feeds MWDT1 once per chunk started
-(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1153`); one
+(`Panel::settle_fed`, `leviculum-esp/src/bin/thinknode_m9.rs:1154`); one
 that stopped does not.
 
 **A reset reads the tail.** The summary written before a reset stands
@@ -2177,7 +2177,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:3105`), and the fold runs behind the list
+(`thinknode_m9.rs:3132`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2503,7 +2503,7 @@ entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
 (the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
 could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
 heap at every step, as the forget's reopen and a taken code do
-(`leviculum-esp/src/bin/thinknode_m9.rs:2198`). The held bytes live in
+(`leviculum-esp/src/bin/thinknode_m9.rs:2225`). The held bytes live in
 2 KiB blocks, at most 35 s of the line (`RxHeld`,
 `leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
 the pool for 256 KiB in one piece, and 22 s was shorter than the
@@ -2523,13 +2523,13 @@ rebuild runs where nothing draws from the model yet (the boot, the
 forget's reopen, a code taken), so 1597's spacing, which was for the UI
 core, is not owed there. A reset during the rebuild itself still
 rebuilds. `a_reboot_right_after_a_rebuild_resumes_with_the_same_list`
-(`loquax-m9/tests/home.rs:537`) was red on both halves (the summary left
+(`loquax-m9/tests/home.rs:563`) was red on both halves (the summary left
 owed, the reboot `rebuilt`).
 
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside
 the take stage, so the walks read takes of 1 to 6 s. The dump is now
 timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
-`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2750`); `m9-walk.py`
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2777`); `m9-walk.py`
 takes `dump=` as the dump's turn and holds the rest of that turn to the
 bar.
 
