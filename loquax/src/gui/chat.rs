@@ -134,7 +134,7 @@ fn bubble_stamp(node: &BubbleNode) -> u64 {
         .as_ref()
         .map(|q| (q.ours, &q.text))
         .hash(&mut h);
-    node.photo.is_some().hash(&mut h);
+    node.photo.as_ref().map(|p| p.file).hash(&mut h);
     node.progress.is_some().hash(&mut h);
     for file in &node.files {
         (&file.name, &file.size).hash(&mut h);
@@ -2164,7 +2164,9 @@ impl App {
         // The media first, inside the one bubble (1268). A photo (1220):
         // its words, a press shows it whole in the system's viewer. The
         // thumbnail in the window is a later slice.
-        if let Some(photo) = &node.photo {
+        // A picture sent as a file (1662) is its file's line here: the
+        // window draws no thumbnail.
+        if let Some(photo) = node.photo.as_ref().filter(|p| p.file.is_none()) {
             inside = inside.push(flat(
                 text(format!("▣ {}", photo.words.resolve(self.lang)))
                     .size(size::BODY - 2.0)

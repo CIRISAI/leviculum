@@ -77,8 +77,15 @@ impl PhotoSize {
 pub struct PhotoRef {
     /// The format word the sender wrote: `jpg`, `webp`, `png`.
     pub format: String,
-    /// The picture's bytes on the wire.
-    pub bytes: usize,
+    /// The picture's bytes on the wire; a message carries at most 1000
+    /// KB, so 32 bits hold any, and the bubble stays the size it had
+    /// before [`PhotoRef::file`] (the M9's heap census).
+    pub bytes: u32,
+    /// Where a picture sent as a file is among the message's files
+    /// (1662): its bubble shows the thumbnail and the file's line under
+    /// it. None for the image field's photo; a message's 65 536th file
+    /// and later show no picture.
+    pub file: Option<u16>,
 }
 
 /// The format word and the picture's bytes `fields` carry, borrowed;
@@ -109,13 +116,62 @@ pub fn photo_parts(fields: &[Field]) -> Option<(String, &[u8])> {
 pub fn photo_of(fields: &[Field]) -> Option<PhotoRef> {
     photo_parts(fields).map(|(format, data)| PhotoRef {
         format,
-        bytes: data.len(),
+        bytes: u32::try_from(data.len()).unwrap_or(u32::MAX),
+        file: None,
     })
 }
 
 /// The picture's bytes `fields` carry, if a photo.
 pub fn photo_bytes(fields: &[Field]) -> Option<&[u8]> {
     photo_parts(fields).map(|(_, data)| data)
+}
+
+/// The format word of `data` by its first bytes, for a picture this
+/// build decodes (`crate::photo`: JPEG, PNG, WebP, GIF); none for any
+/// other bytes, whatever a name says (1662).
+pub fn image_format(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("png")
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+/// The picture a bubble shows (1662): its photo, else the first of its
+/// files whose bytes are a picture, its format word, bytes and place
+/// among the files. A picture sent as a file shows its thumbnail as a
+/// photo does, with the file's line under it.
+pub fn picture_parts(fields: &[Field]) -> Option<(String, &[u8], Option<u16>)> {
+    if let Some((format, data)) = photo_parts(fields) {
+        return Some((format, data, None));
+    }
+    super::files::file_parts(fields)
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, (_, data))| {
+            let index = u16::try_from(index).ok()?;
+            image_format(data).map(|format| (String::from(format), data, Some(index)))
+        })
+}
+
+/// [`picture_parts`] without its bytes.
+pub fn picture_of(fields: &[Field]) -> Option<PhotoRef> {
+    picture_parts(fields).map(|(format, data, file)| PhotoRef {
+        format,
+        bytes: u32::try_from(data.len()).unwrap_or(u32::MAX),
+        file,
+    })
+}
+
+/// The bytes of the picture a bubble shows ([`picture_parts`]).
+pub fn picture_bytes(fields: &[Field]) -> Option<&[u8]> {
+    picture_parts(fields).map(|(_, data, _)| data)
 }
 
 /// The fields of a photo: the image field alone, `[format, bytes]`.
@@ -178,7 +234,7 @@ impl<B> UiModel<B> {
             .iter()
             .find(|c| c.peer == peer)
             .and_then(|c| c.messages.iter().find(|m| m.activity == key))
-            .is_some_and(|m| photo_of(&m.fields).is_some());
+            .is_some_and(|m| picture_of(&m.fields).is_some());
         match carries {
             true => alloc::vec![UiEffect::ShowPhoto { peer, key }],
             false => Vec::new(),
@@ -208,7 +264,8 @@ mod tests {
             photo_of(&fields),
             Some(PhotoRef {
                 format: "jpg".into(),
-                bytes: 2
+                bytes: 2,
+                file: None,
             })
         );
         assert_eq!(photo_bytes(&fields), Some(&[0xff, 0xd8][..]));
@@ -222,6 +279,51 @@ mod tests {
         ];
         let fields = vec![(FIELD_IMAGE, value)];
         assert_eq!(photo_parts(&fields), Some(("webp".into(), &[0x09][..])));
+    }
+
+    /// 1662: a file whose bytes are a picture is the bubble's picture,
+    /// told by its bytes and not its name; a photo comes first; a file
+    /// that is no picture is none, whatever it is called.
+    #[test]
+    fn a_picture_sent_as_a_file_is_told_by_its_bytes() {
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0];
+        assert_eq!(image_format(&png), Some("png"));
+        assert_eq!(image_format(&[0xff, 0xd8, 0xff, 0xe0]), Some("jpg"));
+        assert_eq!(image_format(b"GIF89a.."), Some("gif"));
+        assert_eq!(image_format(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(image_format(b"RIFF\0\0\0\0WAVEfmt "), None);
+        assert_eq!(image_format(b"%PDF-1.7"), None);
+        assert_eq!(image_format(&[]), None);
+        let mut fields = super::super::files::file_fields("notes.txt", b"hello".to_vec());
+        assert_eq!(picture_of(&fields), None, "a text file is no picture");
+        let disguised = MessageAttachments {
+            files: vec![
+                leviculum_lxmf::attachments::FileAttachment {
+                    name: "report.pdf".into(),
+                    data: b"%PDF".to_vec(),
+                },
+                leviculum_lxmf::attachments::FileAttachment {
+                    name: "scan.dat".into(),
+                    data: png.to_vec(),
+                },
+            ],
+            ..MessageAttachments::default()
+        }
+        .into_fields();
+        assert_eq!(
+            picture_of(&disguised),
+            Some(PhotoRef {
+                format: "png".into(),
+                bytes: 10,
+                file: Some(1),
+            })
+        );
+        assert_eq!(picture_bytes(&disguised), Some(&png[..]));
+        assert_eq!(photo_of(&disguised), None, "still no photo field");
+        // The image field's photo comes first.
+        fields.extend(photo_fields("jpg", vec![0xff, 0xd8, 0xff]));
+        assert_eq!(picture_of(&fields).and_then(|p| p.file), None);
+        assert_eq!(picture_of(&fields).map(|p| p.format), Some("jpg".into()));
     }
 
     #[test]

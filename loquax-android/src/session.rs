@@ -3771,7 +3771,7 @@ impl Inner {
             .messages
             .iter()
             .find(|m| m.activity == key)
-            .and_then(|m| loquax::ui::photos::photo_bytes(&m.fields))
+            .and_then(|m| loquax::ui::photos::picture_bytes(&m.fields))
             .map(<[u8]>::to_vec)
     }
 
@@ -4093,7 +4093,7 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
                     .messages
                     .iter()
                     .find(|m| m.activity == node.bubble.key)
-                    .and_then(|m| loquax::ui::photos::photo_bytes(&m.fields))
+                    .and_then(|m| loquax::ui::photos::picture_bytes(&m.fields))
                     .and_then(loquax::photo::dimensions)
                     .unwrap_or((0, 0));
                 (
@@ -4156,7 +4156,7 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
             }
             if let Some((format, bytes, (w, h), words)) = photo {
                 row.photo = format;
-                row.photo_bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+                row.photo_bytes = bytes;
                 row.photo_w = w;
                 row.photo_h = h;
                 row.photo_words = words;

@@ -608,7 +608,7 @@ impl Shell {
             .find(|c| c.peer == peer)
             .and_then(|c| c.messages.iter().find(|m| m.activity == key))
             .and_then(|m| {
-                let (format, data) = loquax::ui::photos::photo_parts(&m.fields)?;
+                let (format, data, _) = loquax::ui::photos::picture_parts(&m.fields)?;
                 Some((format, data.to_vec()))
             })
             .ok_or_else(|| "that message has no photo".to_string())?;

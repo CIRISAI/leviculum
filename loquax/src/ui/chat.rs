@@ -815,7 +815,9 @@ fn bubbles_of<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bu
                 updates,
                 since,
                 liveness: liveness.filter(|_| newest_report == Some(m)),
-                photo: super::photos::photo_of(&message.fields),
+                // A picture sent as a file shows as a photo does (1662),
+                // its file's line under it.
+                photo: super::photos::picture_of(&message.fields),
                 files: super::files::files_of(&message.fields),
                 voice: super::voice::voice_of(&message.fields),
                 transfer: model

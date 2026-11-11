@@ -6993,7 +6993,7 @@ impl<B> UiModel<B> {
 /// The bytes a message's transfer counts (1662): its photo's, files'
 /// and voice's on the wire, or its body's when it carries none.
 fn transfer_bytes(message: &Message) -> u64 {
-    let media = photos::photo_of(&message.fields).map_or(0, |p| p.bytes)
+    let media = photos::photo_of(&message.fields).map_or(0, |p| p.bytes as usize)
         + files::files_of(&message.fields)
             .iter()
             .map(|f| f.bytes)
@@ -17279,6 +17279,60 @@ pub(crate) mod tests {
                 key: photo_key
             }]
         );
+    }
+
+    /// 1662: a picture sent as a file is the bubble's picture, told by
+    /// its bytes: the scene's photo node names the file, a tap shows it
+    /// whole, a screen reader says the file; the terminal, which draws no
+    /// thumbnail, draws the file's line alone.
+    #[test]
+    fn a_picture_sent_as_a_file_is_the_bubbles_picture_and_the_terminals_file() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                sent_at: 0,
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: Vec::new(),
+                fields: files::file_fields("scan.dat", png.to_vec()),
+                verified: true,
+            },
+        );
+        let chat = scene::chat(&model, 0);
+        let node = chat
+            .groups
+            .iter()
+            .flat_map(|g| g.bubbles.iter())
+            .next()
+            .expect("the bubble");
+        let photo = node.photo.as_ref().expect("its picture");
+        assert_eq!((photo.format.as_str(), photo.file), ("png", Some(0)));
+        assert_eq!(node.files.len(), 1, "the file's line stays");
+        assert_eq!(
+            node.a11y.label.resolve(strings::Lang::En),
+            "File scan.dat, 12 B"
+        );
+        let key = node.bubble.key;
+        assert_eq!(
+            update(&mut model, UiEvent::ViewPhoto { peer: PEER, key }),
+            vec![UiEffect::ShowPhoto { peer: PEER, key }]
+        );
+        let rows: Vec<String> = view(&model).messages.iter().map(text_of).collect();
+        assert!(
+            rows.iter().any(|r| r.contains("▤ scan.dat · 12 B")),
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("▣")), "{rows:#?}");
     }
 
     /// 1662: a file's progress reaches its bubble. The engine's word

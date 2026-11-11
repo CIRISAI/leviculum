@@ -530,11 +530,17 @@ pub struct MarkNode {
 pub struct PhotoNode {
     pub id: NodeId,
     pub format: String,
-    pub bytes: usize,
+    /// Its bytes on the wire, [`super::photos::PhotoRef::bytes`].
+    pub bytes: u32,
     /// `Photo, 312 KB`.
     pub words: Text,
     /// [`Intent::ViewPhoto`].
     pub open: Action,
+    /// A picture sent as a file (1662): its place among the bubble's
+    /// files, whose line is drawn under the thumbnail. A target that
+    /// draws no thumbnail (the window, the terminal, the M9) draws the
+    /// file's line alone.
+    pub file: Option<u16>,
 }
 
 /// A bubble's bytes under way (1662): how far, for the bar, and the
@@ -2056,6 +2062,7 @@ fn bubble_node(
             peer,
             key: bubble.key,
         }),
+        file: photo.file,
     });
     let files: Vec<FileNode> = bubble
         .files
@@ -2102,7 +2109,8 @@ fn bubble_node(
         bubble.body.trim().is_empty(),
     ) {
         (Some(live), _, _, _, true) => live.clone(),
-        (_, Some(photo), _, _, true) => photo.words.clone(),
+        // A picture sent as a file is said as its file, by its name (1662).
+        (_, Some(photo), _, _, true) if photo.file.is_none() => photo.words.clone(),
         (_, _, Some(file), _, true) => file.words.clone(),
         (_, _, _, Some(voice), true) => voice.words.clone(),
         _ => Text::Raw(bubble.body.clone()),
@@ -2470,13 +2478,21 @@ impl BubbleNode {
                 "words": m.words.to_json(),
                 "activate": opt(m.activate.as_ref(), Action::to_json),
             })),
-            "photo": opt(self.photo.as_ref(), |p| json!({
-                "id": p.id.resource(),
-                "format": p.format,
-                "bytes": p.bytes,
-                "words": p.words.to_json(),
-                "open": p.open.to_json(),
-            })),
+            "photo": opt(self.photo.as_ref(), |p| {
+                let mut photo = json!({
+                    "id": p.id.resource(),
+                    "format": p.format,
+                    "bytes": p.bytes,
+                    "words": p.words.to_json(),
+                    "open": p.open.to_json(),
+                });
+                // A picture sent as a file only (1662): the goldens of
+                // a photo stay as they were.
+                if let (Some(file), Value::Object(map)) = (p.file, &mut photo) {
+                    map.insert("file".into(), json!(file));
+                }
+                photo
+            }),
             "files": self.files.iter().map(|f| json!({
                 "id": f.id.resource(),
                 "name": f.name,

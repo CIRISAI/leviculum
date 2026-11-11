@@ -4162,6 +4162,84 @@ fn a_file_under_way_carries_its_words_and_bar_to_the_phone() {
     assert_eq!(theirs.progress_percent, 41);
 }
 
+/// 1662, a picture sent as a file shows its thumbnail: a PNG that goes
+/// through the file path, ours and theirs, gives its row the photo's
+/// format, its size upright and its words, as a photo's row has them, with
+/// the file's line under it; the library draws its pixels. A file that
+/// only calls itself `.png` is a file row alone.
+#[test]
+fn a_png_sent_as_a_file_shows_its_thumbnail_with_the_file_line() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{files, photos, update, UiEvent, UiModel};
+    use loquax_android::session::{self, Line};
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, 40, 30);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer
+            .write_image_data(&[0xc0; 40 * 30 * 4])
+            .expect("png data");
+    }
+    let peer = ugly_store::peer(94);
+    let mut model = UiModel::<Line>::new(&[peer]);
+    update(
+        &mut model,
+        UiEvent::SendFile {
+            peer,
+            name: "Bild.png".into(),
+            data: png.clone(),
+        },
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [0x64; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: files::file_fields("scan.dat", png.clone()),
+            verified: true,
+        }),
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [0x65; 32],
+            source: peer,
+            title: Vec::new(),
+            body: Vec::new(),
+            fields: files::file_fields("not-a-picture.png", b"%PDF-1.7".to_vec()),
+            verified: true,
+        }),
+    );
+    let rows = session::rows(&model, 0, Lang::En);
+    assert_eq!(rows.len(), 3, "{rows:#?}");
+    for (row, name) in [(&rows[0], "Bild.png"), (&rows[1], "scan.dat")] {
+        assert_eq!(row.photo, "png", "{row:#?}");
+        assert_eq!((row.photo_w, row.photo_h), (40, 30));
+        assert_eq!(row.photo_bytes as usize, png.len());
+        assert!(
+            row.photo_words.starts_with("Photo, "),
+            "{}",
+            row.photo_words
+        );
+        let names: Vec<&str> = row.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, [name], "the file's line stays under it");
+    }
+    let lie = &rows[2];
+    assert_eq!((lie.photo.as_str(), lie.photo_w), ("", 0), "{lie:#?}");
+    assert_eq!(lie.files.len(), 1);
+    // What the phone's thumbnail asks for: the file's bytes, drawn.
+    let theirs = &model.conversations[0].messages[1];
+    let bytes = photos::picture_bytes(&theirs.fields).expect("the picture's bytes");
+    let pixels = loquax::photo::fit(bytes, 20).expect("drawn");
+    assert_eq!((pixels.width, pixels.height), (20, 15));
+}
+
 /// The map's Friends sheet (1200), as the facade answers it from the
 /// session's model: everyone with a position, newest first, the last 24 h
 /// marked recent and the older after them; ourselves apart as `me`, the

@@ -89,6 +89,15 @@ held in memory to be refused.
   `Scene::action` resolves. A bubble with no text is said as its first
   file. The list says the first file's name, its kind is `file`.
 - `loquax::file_save::save` (std) writes the file under the home.
+- A picture sent as a file (1662): `photos::picture_of` takes the image
+  field's photo, else the first file whose bytes are a picture this build
+  decodes, told by its first bytes (`photos::image_format`: PNG, JPEG,
+  WebP, GIF), never by its name. The bubble's `photo` is then that file's,
+  `PhotoRef::file` and `PhotoNode::file` its place among the files; the
+  file's line stays under it, and a screen reader says the file. The phone
+  draws the thumbnail as a photo's (`MessageRow::photo`, `Query::Photo`
+  read through `photos::picture_bytes`); the window, the terminal and the
+  M9, which draw no thumbnail, draw the file's line alone.
 
 The terminal draws `▤ report.pdf · 313 KB` (`[f] report.pdf - 313 KB` in
 ASCII) above the text or alone; Enter saves the first file and hands it to
