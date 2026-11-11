@@ -125,6 +125,9 @@ pub enum Stage {
     /// the line it shared before, as `[LOOP]`'s `dump=` is apart from
     /// `take=`.
     Dump = 14,
+    /// Core 0: the LR1110's task polled (1478b): its boot probe, a bus
+    /// transaction on SPI2 between the panel's chunks.
+    Radio = 15,
     /// Core 1: the I/O core's messages folded.
     Drain = 20,
     /// Core 1: the key presses folded.
@@ -161,6 +164,7 @@ impl Stage {
             12 => "kb-count",
             13 => "idle",
             14 => "dump",
+            15 => "radio",
             20 => "drain",
             21 => "keys",
             22 => "draw",

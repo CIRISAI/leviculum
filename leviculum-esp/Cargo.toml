@@ -72,6 +72,14 @@ rand_core = { version = "0.6", default-features = false }
 # The SX1262 buses are async, because `leviculum_core::sx126x`'s traits
 # are. `Spi<'_, Async>` implements `embedded_hal_async::spi::SpiBus`.
 embedded-hal-async = "1"
+# The LR1110's pins and bus errors in embedded-hal's names (1478b,
+# `src/m9_radio.rs`); the version leviculum-lr11xx takes.
+embedded-hal = "1"
+# `leviculum-lr11xx` waits on embassy-time; the ESP firmware has no
+# executor and implements the driver over esp-hal's clock (1478b,
+# `src/time_driver.rs`). Both already in the graph through the driver.
+embassy-time = "0.5"
+embassy-time-driver = "0.2"
 # The allocator.
 # `leviculum-core` is `no_std + alloc`, so linking it into a binary
 # requires a `#[global_allocator]` whether or not anything allocates yet.

@@ -42,12 +42,14 @@ pub mod flash;
 pub mod gnss_uart;
 pub mod handheld;
 pub mod idle;
+pub mod m9_radio;
 pub mod mspi;
 pub mod pool_tlsf;
 pub mod pools;
 pub mod serial_iface;
 pub mod stall;
 pub mod sx1262;
+pub mod time_driver;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::RefCell;
