@@ -527,7 +527,7 @@ impl<B> UiModel<B> {
 
     /// The newest message of `peer`'s that a notification of the chat
     /// shows, by its key ([`super::Message::activity`]): what a reply from
-    /// that notification reads up to ([`Self::notice_reply`], 1506).
+    /// that notification reads up to (`notice_reply`, 1506).
     pub fn notice_key(&self, peer: &[u8; 16]) -> Option<u64> {
         let conversation = self.conversations.iter().find(|c| c.peer == *peer)?;
         let newest = *conversation.received_by_arrival(true).first()?;
