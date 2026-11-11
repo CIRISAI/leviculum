@@ -2,7 +2,7 @@
 name = "loquax-android"
 # The app's own version, like loquax's: it tracks the Android frontend, not
 # the protocol core underneath.
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ publish = false
 # so scripts/bump-touched.py raises it by one whenever this crate's version
 # moves; the Makefile stamps it and the version above into the manifest.
 [package.metadata.android]
-version-code = 8
+version-code = 9
 
 # A cdylib for the app (`make` in this directory builds it for Android and
 # puts it in the APK), an rlib so the host's `cargo test` runs its tests.

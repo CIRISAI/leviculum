@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-core"
-version = "0.10.0-dev.9"
+version = "0.10.0-dev.10"
 dependencies = [
  "aes",
  "cbc",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-lxmf"
-version = "0.10.0-dev.9"
+version = "0.10.0-dev.10"
 dependencies = [
  "leviculum-core",
  "rand_core",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-std"
-version = "0.10.0-dev.9"
+version = "0.10.0-dev.10"
 dependencies = [
  "bluer",
  "clap",

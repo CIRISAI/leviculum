@@ -214,7 +214,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "leviculum-map"
-version = "0.10.0-dev.9"
+version = "0.10.0-dev.10"
 dependencies = [
  "embedded-graphics",
  "leviculum-mapfill",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-mapcut"
-version = "0.10.0-dev.9"
+version = "0.10.0-dev.10"
 dependencies = [
  "flate2",
  "leviculum-map",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "leviculum-mapfill"
-version = "0.10.0-dev.9"
+version = "0.10.0-dev.10"
 dependencies = [
  "embedded-graphics",
 ]
