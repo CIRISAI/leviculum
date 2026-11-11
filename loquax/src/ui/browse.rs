@@ -154,6 +154,38 @@ impl Browse {
         Some(text.resolve(lang))
     }
 
+    /// Fold a page that arrived. The fresh copy of the cached page on
+    /// screen keeps the reader's line when its content is the cached one's
+    /// (1650: the phone showed the copy, the reader scrolled, the fresh one
+    /// came and threw them to the top); a page that changed starts at its
+    /// top, as every other arriving page does.
+    pub fn fold_loaded(&mut self, event: AppEvent) -> Vec<Effect> {
+        let model = &self.model;
+        let fresh_copy = model.cached_view
+            && model
+                .pending
+                .as_ref()
+                .is_some_and(|p| model.history.current() == Some(&p.target));
+        let before = fresh_copy.then(|| (model.doc.clone(), model.title.clone(), model.scroll));
+        let effects = self.fold(event);
+        if let Some((doc, title, scroll)) = before {
+            if self.model.doc == doc && self.model.title == title {
+                let viewport = self.model.viewport();
+                self.model.scroll = scroll.min(self.model.max_scroll(viewport));
+            }
+        }
+        effects
+    }
+
+    /// The platform scrolled the page itself (1650, the phone's native
+    /// scroll): `line` is the top line the reader sees now. The browser's
+    /// [`lnomad::app::Model::scroll`] follows, so a fresh copy, a Back to
+    /// this page and the paging arrows start from where the reader is.
+    pub fn read_at(&mut self, line: usize) {
+        let viewport = self.model.viewport();
+        self.model.scroll = line.min(self.model.max_scroll(viewport));
+    }
+
     /// The tab is on this host and in front: the browser has the keys.
     pub fn showing(&self) -> bool {
         self.enabled && self.open
@@ -267,6 +299,8 @@ pub enum BrowseEvent {
     Home(crate::home::pages::Delta),
     /// The page's area in cells, columns by rows.
     Resize { cols: u16, rows: u16 },
+    /// The platform scrolled the page itself to this top line (1650).
+    Reading(usize),
     /// The platform draws in this theme now (the window's light or dark,
     /// 1369): the page is laid out again in its accents, as lnomad's own
     /// toggle does.
@@ -300,6 +334,7 @@ impl BrowseEvent {
             BrowseEvent::Node(node) => AppEvent::NodeDiscovered(node),
             BrowseEvent::Home(delta) => return Err(Aside::Home(delta)),
             BrowseEvent::Resize { cols, rows } => AppEvent::Resize(cols, rows),
+            BrowseEvent::Reading(line) => return Err(Aside::Reading(line)),
             BrowseEvent::Address(value) => return Err(Aside::Typed(value)),
             BrowseEvent::Theme(theme) => return Err(Aside::Theme(theme)),
             BrowseEvent::Tick => AppEvent::Tick,
@@ -310,6 +345,7 @@ impl BrowseEvent {
 /// What a [`BrowseEvent`] is when it is no event of the browser's.
 enum Aside {
     Identify([u8; 16], bool),
+    Reading(usize),
     Home(crate::home::pages::Delta),
     Typed(String),
     Theme(leviculum_ui::theme::Theme),
@@ -340,7 +376,12 @@ pub(super) fn fold<B: InputBuffer + Default>(
         super::explore::owe_page(model, node);
     }
     let effects = match event.into_app() {
+        Ok(event @ AppEvent::PageLoaded { .. }) => model.browse.fold_loaded(event),
         Ok(event) => model.browse.fold(event),
+        Err(Aside::Reading(line)) => {
+            model.browse.read_at(line);
+            Vec::new()
+        }
         Err(Aside::Identify(dest, on)) => {
             model.browse.model.note_identify(dest, on);
             Vec::new()
