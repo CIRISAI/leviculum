@@ -34,13 +34,23 @@
 //! bottom) the place is kept as its distance from the end, as the
 //! scrollable keeps its offset, so rows added at the end lay out where
 //! the scrollable will show them.
+//!
+//! With [`Rows::on_shown`] (1457) the widget says which rows have their end
+//! on screen, by the read rule the terminal applies in rows
+//! ([`leviculum_ui::read::end_shown`]), each time that set changed and then
+//! held still for [`SETTLE`]: the window's chat tells the model what was
+//! read from it. Not on every frame of a scroll: a message published makes
+//! iced build the whole view again, which 1431 took out of the scroll's
+//! frames, and a row that flies past is not read. The widget asks for a
+//! frame at the end of the wait, so the set is said without another event.
 
 use std::collections::HashMap;
 
 use iced::advanced::overlay::Group;
 use iced::advanced::widget::{tree, Operation, Tree};
 use iced::advanced::{layout, overlay, renderer, Clipboard, Layout, Shell, Widget};
-use iced::{mouse, touch, Element, Event, Length, Padding, Rectangle, Size, Vector};
+use iced::time::{Duration, Instant};
+use iced::{mouse, touch, window, Element, Event, Length, Padding, Rectangle, Size, Vector};
 
 /// A row of the list: `key` names it from frame to frame (unique within
 /// the list), `stamp` changes whenever what it shows could change its
@@ -62,6 +72,7 @@ pub fn rows<'a, M, Theme, Renderer>(
         build: Box::new(build),
         padding: Padding::ZERO,
         anchor_end: false,
+        on_shown: None,
         built: Vec::new(),
         laid: false,
     }
@@ -73,6 +84,10 @@ pub struct Rows<'a, M, Theme, Renderer> {
     build: Box<dyn Fn(usize) -> Element<'a, M, Theme, Renderer> + 'a>,
     padding: Padding,
     anchor_end: bool,
+    /// What the rows whose end is on screen are told as, by their places
+    /// in `items` (1457).
+    #[allow(clippy::type_complexity)]
+    on_shown: Option<Box<dyn Fn(Vec<usize>) -> M + 'a>>,
     /// The rows the last layout built: their place in `items` and the
     /// element, in order; `tree.children` holds their states in the same
     /// order and the layout's children their places.
@@ -82,7 +97,7 @@ pub struct Rows<'a, M, Theme, Renderer> {
     laid: bool,
 }
 
-impl<M, Theme, Renderer> Rows<'_, M, Theme, Renderer> {
+impl<'a, M, Theme, Renderer> Rows<'a, M, Theme, Renderer> {
     /// The padding around the rows, as a column's.
     pub fn padding(mut self, padding: impl Into<Padding>) -> Self {
         self.padding = padding.into();
@@ -93,6 +108,14 @@ impl<M, Theme, Renderer> Rows<'_, M, Theme, Renderer> {
     /// place on screen is kept as its distance from the end.
     pub fn anchor_end(mut self) -> Self {
         self.anchor_end = true;
+        self
+    }
+
+    /// Say the rows whose end is on screen ([`leviculum_ui::read::end_shown`]
+    /// in pixels), by their places in the items, as `shown` of them,
+    /// whenever that set changed (1457).
+    pub fn on_shown(mut self, shown: impl Fn(Vec<usize>) -> M + 'a) -> Self {
+        self.on_shown = Some(Box::new(shown));
         self
     }
 }
@@ -148,6 +171,12 @@ struct State {
     cross: f32,
     /// The padding's top the sums began at.
     pad_top: f32,
+    /// The keys of the rows last said shown ([`Rows::on_shown`]), none
+    /// before the first.
+    shown: Option<Vec<u64>>,
+    /// The set on screen now, by keys and places, and since when: said
+    /// once it held still for [`SETTLE`].
+    pending: Option<(Vec<u64>, Vec<usize>, Instant)>,
     /// The states of rows measured or built before and not built now, by
     /// key: a row that scrolls in again keeps its shaped text, as every
     /// row of a column keeps its own. At most [`PARKED`].
@@ -198,6 +227,24 @@ impl State {
         };
         top.min(total - seen.height).max(0.0)
     }
+}
+
+/// How long the rows on screen hold still before [`Rows::on_shown`] says
+/// them (1457).
+pub const SETTLE: Duration = Duration::from_millis(250);
+
+/// The rows whose end lies in the view `top..top + height` (the list's
+/// own coordinates, below the padding's top) by the read rule, given each
+/// row's end from the padding's corner (`ends`, in order).
+fn ends_shown(ends: &[f32], pad_top: f32, top: f32, height: f32) -> Vec<usize> {
+    let first = ends.partition_point(|&e| e - pad_top <= top);
+    (first..ends.len())
+        .take_while(|&i| ends[i] - pad_top <= top + height)
+        .filter(|&i| {
+            let start = if i == 0 { pad_top } else { ends[i - 1] };
+            leviculum_ui::read::end_shown(start - pad_top, ends[i] - pad_top, top, height)
+        })
+        .collect()
 }
 
 /// How far past the visible part, above and below, rows are built: half
@@ -531,6 +578,33 @@ where
         };
         let first = state.seen.is_none();
         state.seen = Some(seen);
+        // The rows whose end is on screen (1457), said once they changed
+        // and held still: a frame's own time, else the clock's.
+        if let Some(on_shown) = &self.on_shown {
+            if state.ends.len() == self.items.len() {
+                let now = match event {
+                    Event::Window(window::Event::RedrawRequested(at)) => *at,
+                    _ => Instant::now(),
+                };
+                let shown = ends_shown(&state.ends, pad_top, top, viewport.height);
+                let keys: Vec<u64> = shown.iter().map(|&i| self.items[i].key).collect();
+                let moved = state.pending.as_ref().is_none_or(|(p, _, _)| *p != keys);
+                if moved {
+                    if state.shown.as_ref() != Some(&keys) {
+                        shell.request_redraw_at(window::RedrawRequest::At(now + SETTLE));
+                    }
+                    state.pending = Some((keys, shown, now));
+                }
+                if let Some((keys, shown, since)) = &state.pending {
+                    if state.shown.as_ref() != Some(keys)
+                        && now.saturating_duration_since(*since) >= SETTLE
+                    {
+                        state.shown = Some(keys.clone());
+                        shell.publish(on_shown(shown.clone()));
+                    }
+                }
+            }
+        }
         let (lo, hi) = (top.max(0.0), (top + viewport.height).min(state.total));
         let edge = margin(viewport.height) / 2.0;
         let short = lo - edge < state.span.0 - 0.5 && state.span.0 > 0.0
@@ -788,6 +862,69 @@ mod tests {
             events.push(redraw());
         }
         events
+    }
+
+    /// 1457: the rows whose end is on screen are said, by the read rule,
+    /// once they held still for [`SETTLE`], and again only when the set
+    /// moved: rows of 50 pixels in a view of 300 have rows 0 to 5 ending
+    /// in it (the sixth's end on the bottom edge counts), after a scroll of
+    /// 75 rows 1 to 6 (row 0 ended above, row 7 ends below). A frame
+    /// before the wait is over says nothing, nor one that moved nothing.
+    /// Control: the list without [`Rows::on_shown`] says nothing at all.
+    #[test]
+    fn the_rows_whose_end_is_on_screen_are_said_when_they_change() {
+        type Shown = Vec<usize>;
+        let run = |said: bool| -> (Vec<Shown>, Vec<usize>) {
+            let r = rows(items(40), |_| Space::new().height(50.0).into());
+            let r = match said {
+                true => r.on_shown(|shown| shown),
+                false => r,
+            };
+            let view: Element<'_, Shown, Theme, Renderer> = scrollable(r)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into();
+            let mut renderer = software(iced::Font::DEFAULT).expect("a renderer");
+            let mut ui =
+                UserInterface::build(view, Size::new(W, H), Cache::default(), &mut renderer);
+            let cursor = mouse::Cursor::Available(Point::new(W / 2.0, H / 2.0));
+            let t0 = Instant::now();
+            let at = |ms: u64| {
+                Event::Window(window::Event::RedrawRequested(
+                    t0 + Duration::from_millis(ms),
+                ))
+            };
+            let events = [
+                at(0),
+                at(100),
+                at(300),
+                wheel(-75.0),
+                at(400),
+                at(600),
+                at(700),
+                at(900),
+            ];
+            let mut messages = Vec::new();
+            let mut per_event = Vec::new();
+            for event in events {
+                let before = messages.len();
+                let _ = ui.update(
+                    std::slice::from_ref(&event),
+                    cursor,
+                    &mut renderer,
+                    &mut clipboard::Null,
+                    &mut messages,
+                );
+                per_event.push(messages.len() - before);
+            }
+            (messages, per_event)
+        };
+        let (said, per_event) = run(true);
+        assert_eq!(said, [vec![0, 1, 2, 3, 4, 5], vec![1, 2, 3, 4, 5, 6]]);
+        // Said 250 ms after the set came: at 300 for the one of 0 ms, at
+        // 700 for the one the scroll brought at 400.
+        assert_eq!(per_event, [0, 0, 1, 0, 0, 0, 1, 0]);
+        assert!(run(false).0.is_empty());
     }
 
     /// The rows draw every frame of a scroll as the column draws it, to the

@@ -111,9 +111,10 @@ impl Window {
 }
 
 /// Whether the last line of `lines` is in `top..top + rows`: the read
-/// rule (1529).
+/// rule (1529), [`leviculum_ui::read::end_shown`] in rows, which the
+/// window's chat applies in pixels (1457).
 pub fn last_line_shown(lines: Lines, top: usize, rows: usize) -> bool {
-    lines.drawn() && lines.end > top && lines.end - 1 < top + rows
+    leviculum_ui::read::end_shown(lines.start, lines.end, top, rows)
 }
 
 /// The rows a page moves: a screen less one line of overlap.
