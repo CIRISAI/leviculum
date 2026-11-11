@@ -4045,6 +4045,30 @@ impl Drop for RunningLnsd {
     }
 }
 
+/// Wait until the daemon's `log` holds at least `wanted` `Local client
+/// connected` lines (`leviculum-std/src/interfaces/local.rs`), and return
+/// how many it holds. The line is written by the daemon's accept task,
+/// which is asynchronous to the client's `connect()`: that lands in the
+/// kernel's backlog and succeeds with the daemon not yet scheduled, and the
+/// messenger runs its whole start and exits against such a daemon (the land
+/// gate on a0cbebd4, loaded host). Bounded: a daemon that stays below
+/// `wanted` fails with `context` and its log.
+fn wait_for_client_connects(log: &Path, wanted: usize, context: &str) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        let count = text.matches("Local client connected").count();
+        if count >= wanted {
+            return count;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{context}: the daemon logged {count} client connect(s), waited for {wanted}:\n{text}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Start the release lnsd on `config_dir`, its output in `log`, and wait
 /// until its shared instance `instance` answers.
 fn run_lnsd(lnsd: &Path, config_dir: &Path, instance: &str, log: &Path) -> RunningLnsd {
@@ -4101,10 +4125,12 @@ fn with_only_lnmsg_home_set_the_messenger_finds_the_users_running_daemon() {
         .expect("config");
         let daemon_log = home.path().join("running-lnsd.log");
         let mut running = run_lnsd(&lnsd, &users, &instance, &daemon_log);
+        // `run_lnsd`'s own find probe is one connect: logged before the
+        // messenger runs, so what the messenger adds is counted from here.
+        let baseline = wait_for_client_connects(&daemon_log, 1, "the harness's probe");
 
         let (code, stdout, stderr) =
             run_messenger(front, "C.UTF-8", lnmsg_home.path(), home.path(), &lnsd);
-        running.stop();
         assert_eq!(code, Some(1), "{front:?} stderr: {stderr}");
         assert!(stdout.is_empty(), "{front:?} stdout: {stdout}");
         assert_eq!(
@@ -4113,6 +4139,15 @@ fn with_only_lnmsg_home_set_the_messenger_finds_the_users_running_daemon() {
              run it in one, or \"loquax gui\" for the window\n",
             "{front:?}: the daemon answered, so the screen is what failed"
         );
+        // The messenger's connects (the lookup's probe, the engine) land in
+        // the kernel's backlog, and its exit does not wait for the daemon's
+        // accept: the daemon is stopped only once it logged them.
+        wait_for_client_connects(
+            &daemon_log,
+            baseline + 1,
+            &format!("{front:?}: the messenger never reached the running daemon"),
+        );
+        running.stop();
 
         let started = lnmsg_home.path().join("reticulum").join("lnsd.log");
         assert!(
@@ -4130,11 +4165,6 @@ fn with_only_lnmsg_home_set_the_messenger_finds_the_users_running_daemon() {
             "{front:?}: {line}"
         );
         assert!(line.contains("source=default-dir"), "{front:?}: {line}");
-        let log = std::fs::read_to_string(&daemon_log).expect("running lnsd log");
-        assert!(
-            log.contains("Local client connected"),
-            "{front:?}: the messenger never reached the running daemon:\n{log}"
-        );
     }
 }
 
