@@ -137,16 +137,20 @@ fn wait_started(session: &Session) {
 }
 
 /// Wait until `window` from now does not turn the wall clock's minute
-/// (1600): the model's look counts the minute (`look_fingerprint`, the
-/// rows' ago-words move by it), so the lists are made again once a
-/// minute, as they should be. The fixture's own idle keeps inside a
-/// minute for the same reason (`real_store::idle`).
+/// (1600), and have the pump fold the minute it is in: the model's look
+/// counts the minute (`look_fingerprint`, the rows' ago-words move by it),
+/// so the lists are made again once a minute, as they should be. The
+/// fixture's own idle keeps inside a minute for the same reason
+/// (`real_store::idle`).
 ///
-/// A wait into the next minute ends once `session`'s pump has made the
-/// lists for it, not half a second in: an idle pump sleeps between turns
-/// (`idle_wait`), and a turn that folded the new minute inside the window
-/// was its one list (1649: the pump's last turn at …:57, its next five
-/// seconds later at …:02, the window from …:00.5).
+/// An idle pump sleeps seconds between turns (`idle_wait`), so a minute
+/// that turned just before the window is folded by the pump's next turn,
+/// inside it (1649: the pump's last turn at …:57, its next five seconds
+/// later at …:02, the window from …:00.5; 1679: a window from …:00.10 got
+/// the minute's lists at …:01.51, red in the land gate's forge stage). The
+/// end of the window is kept out of the next minute by waiting; its start
+/// by one pump turn here, held, which folds the wall clock as the pump's
+/// thread does and makes the minute's lists before the bar counts.
 fn inside_a_minute(session: &Session, window: Duration) {
     let second = || {
         std::time::SystemTime::now()
@@ -157,18 +161,10 @@ fn inside_a_minute(session: &Session, window: Duration) {
     let room = 60.0 - window.as_secs_f64() - 1.0;
     let at = second();
     if at > room {
-        let before = session.scene_builds();
         std::thread::sleep(Duration::from_secs_f64(60.0 - at + 0.5));
-        let begin = Instant::now();
-        while session.scene_builds() == before {
-            assert!(
-                begin.elapsed() < Duration::from_secs(30),
-                "the pump never made the lists for the new minute"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(second() <= room, "the new minute's lists came too late");
     }
+    session.with_pump_held(|session| session.pump_once());
+    assert!(second() <= room, "the window would turn a minute");
 }
 
 /// Wait until the session made no list for `quiet`, at most `most`:
