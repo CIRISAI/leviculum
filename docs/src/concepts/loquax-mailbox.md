@@ -539,7 +539,7 @@ census column.
 
 ### The soak
 
-`just mailbox-growth-soak` (`Justfile:2471`) runs the release mailbox
+`just mailbox-growth-soak` (`Justfile:2494`) runs the release mailbox
 beside an in-process shared instance that hears new named delivery
 destinations every second, takes a census every ten minutes for two
 hours, and prints the slope of every mailbox column and node table after

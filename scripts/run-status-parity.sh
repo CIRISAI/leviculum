@@ -44,7 +44,7 @@ cd "$(dirname "$0")/.."
 # for the same reason as the other three -- it drives lnstatus and rnstatus
 # against both daemons -- and 898723d4 added it without moving this pin, so
 # the gate has reported "expected 3 tests to run, 4 did" and failed
-# `just standard` (Justfile:1725) on every sha since.
+# `just standard` (Justfile:1733) on every sha since.
 #
 # 5 -> 6 (2026-11-01): a_path_request_burst_is_answered_alike_on_both_stacks
 # (1169), the reference arm of the board's queued-copy drop: the same three

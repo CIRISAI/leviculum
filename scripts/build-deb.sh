@@ -25,6 +25,17 @@
 #   scripts/build-deb.sh armhf
 #   LEVICULUM_ALLOC=system scripts/build-deb.sh amd64
 #   scripts/build-deb.sh --check [amd64|arm64|armhf]   (default: the host's)
+#   scripts/build-deb.sh --floor [amd64|arm64]          (default: the host's)
+#
+# --floor (1674) links what the packages link against glibc, at the floor
+# GLIBC_FLOOR below, and stops there: the desktop loquax with DESKTOP_ARGS,
+# and lnsd on the same gnu triple. A check (--check) links nothing, so a
+# call to a glibc symbol newer than the floor compiles there and fails only
+# in the package build: 42cae4a2 put `mallinfo2` (glibc 2.33) into the
+# mailbox's census path and every nightly from 2026-11-08 on died in
+# `ld.lld: error: undefined symbol: mallinfo2`. lnsd ships musl-static, but
+# its gnu link at the floor is the cheap witness for the daemon code that a
+# desktop binary may pull in next. `just deb-floor-check` calls it.
 #
 # --check (1593) runs `cargo check --release` over exactly the target triples
 # and feature sets the packages are built with, and stops there: no stamps, no
@@ -83,8 +94,9 @@ TARGET="$(cargo_target_dir "$ROOT")"
 GLIBC_FLOOR=2.31
 DESKTOP_TRIPLE=
 CHECK_ONLY=
-if [ "${1:-}" = --check ]; then
-    CHECK_ONLY=1
+FLOOR_ONLY=
+if [ "${1:-}" = --check ] || [ "${1:-}" = --floor ]; then
+    if [ "$1" = --check ]; then CHECK_ONLY=1; else FLOOR_ONLY=1; fi
     shift
     # Without an architecture, --check takes the host's: the coder gate
     # checks what this machine's nightly would package.
@@ -115,7 +127,7 @@ arm64)
 # 2026-10-30, lnsd on mimalloc included.
 armhf) TRIPLE=armv7-unknown-linux-musleabihf ;;
 *)
-    echo "usage: $0 [--check] <amd64|arm64|armhf>" >&2
+    echo "usage: $0 [--check|--floor] <amd64|arm64|armhf>" >&2
     exit 2
     ;;
 esac
@@ -185,6 +197,18 @@ LNPND_SYSTEM_ARGS=(-p lnpnd --bin lnpnd "${lnpnd_alloc_args[@]}")
 build_cmd=(cargo build)
 [ "$ARCH" != amd64 ] && build_cmd=(cargo zigbuild)
 check_cmd=(cargo check)
+
+if [ -n "$FLOOR_ONLY" ]; then
+    if [ -z "$DESKTOP_TRIPLE" ]; then
+        echo "error: --floor ${ARCH}: no glibc build on this architecture" >&2
+        exit 2
+    fi
+    echo "[build-deb] --floor ${ARCH} (${DESKTOP_TRIPLE}.${GLIBC_FLOOR})"
+    cargo zigbuild --release --target "${DESKTOP_TRIPLE}.${GLIBC_FLOOR}" "${DESKTOP_ARGS[@]}"
+    cargo zigbuild --release --target "${DESKTOP_TRIPLE}.${GLIBC_FLOOR}" -p leviculum-cli --bin lnsd
+    echo "[build-deb] --floor ${ARCH}: loquax and lnsd link against glibc ${GLIBC_FLOOR}"
+    exit 0
+fi
 
 if [ -n "$CHECK_ONLY" ]; then
     echo "[build-deb] --check ${ARCH} (${TRIPLE}${DESKTOP_TRIPLE:+, ${DESKTOP_TRIPLE}}) allocator=${LEVICULUM_ALLOC}"

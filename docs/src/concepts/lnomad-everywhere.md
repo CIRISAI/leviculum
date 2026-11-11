@@ -605,7 +605,7 @@ desktop's colour scheme on Linux and a screenshot over a live node.
   picture's fitted size, not its cell box, in which iced centred it.
 
 **Slice 4a, built 2026-11-02 (1303).** The core is `no_std` plus `alloc`;
-`just lnomad-core-no-std` (`Justfile:2669`) holds it.
+`just lnomad-core-no-std` (`Justfile:2692`) holds it.
 
 - **`leviculum-micron` is `no_std` always** (`leviculum-micron/src/lib.rs:25`):
   a parser has no use for a file or a clock, and its `std` paths were
