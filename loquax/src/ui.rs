@@ -160,6 +160,7 @@ pub mod map;
 pub mod owed;
 pub mod pager;
 pub mod photos;
+pub mod pin_card;
 pub mod profile;
 pub mod radar;
 pub mod reactions;
@@ -14978,6 +14979,67 @@ pub(crate) mod tests {
             }),
         );
         model
+    }
+
+    /// A name far wider than its box (1430): forty letters in a list
+    /// entry whose name has twelve cells are cut to twelve with an
+    /// ellipsis, and the row stays its width, never past the column's
+    /// edge. The control: a short name is whole.
+    #[test]
+    fn a_long_name_in_a_twelve_cell_box_is_clipped() {
+        let long = "Annabella Theodora Maximiliane Hohenberg";
+        assert_eq!(long.chars().count(), 40);
+        for (name, cut) in [(long, true), ("bob", false)] {
+            let mut model = UiModel::<Field>::new(&[PEER]);
+            model.names.remember(PEER, name);
+            // The bar's margin, the twelve cells of the name, one blank
+            // before the (empty) time, the margin.
+            let width = 15;
+            let rows = layout::list(&model, width, 6);
+            // After the selection's bar in the first cell.
+            let top: String = rows[0].cells.iter().skip(1).map(|c| c.ch).collect();
+            assert_eq!(rows[0].cells.len(), width, "{top:?}");
+            let shown = top.trim();
+            match cut {
+                true => {
+                    assert!(shown.ends_with('…'), "{top:?}");
+                    assert_eq!(leviculum_ui::text::fit_width(shown), 12, "{top:?}");
+                    assert!(long.starts_with(shown.trim_end_matches('…')), "{top:?}");
+                }
+                false => assert_eq!(shown, "bob", "{top:?}"),
+            }
+        }
+    }
+
+    /// The map's cards (1430): every pin as the window's card says it,
+    /// the peers with their distance from our own position after the
+    /// status, ours without a distance and without actions; the locations
+    /// list leaves us out and puts the newest fix first.
+    #[test]
+    fn the_cards_say_status_and_distance_and_the_list_is_newest_first() {
+        let model = mapped();
+        let cards = pin_card::cards(&model);
+        assert_eq!(cards.len(), 3);
+        let card = |name: &str| {
+            cards
+                .iter()
+                .find(|c| c.name.starts_with(name))
+                .unwrap_or_else(|| panic!("{name} in {cards:?}"))
+        };
+        let (bob, alice, us) = (card("bob"), card("Alice"), card("you"));
+        assert_eq!(bob.distance.as_deref(), Some("270 m"));
+        assert_eq!(alice.distance.as_deref(), Some("680 m"));
+        assert!(bob.status.ends_with(" · 270 m"), "{}", bob.status);
+        assert!(bob.status.contains("4 min"), "{}", bob.status);
+        assert!(alice.status.contains("3 h"), "{}", alice.status);
+        assert!(bob.actions() && alice.actions());
+        assert!(us.own && !us.actions() && us.distance.is_none());
+        let list: Vec<&str> = pin_card::locations(&cards)
+            .into_iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(list.len(), 2, "{list:?}");
+        assert!(list[0].starts_with("bob") && list[1].starts_with("Alice"));
     }
 
     /// The shell's own fix is our pin where it is newer than the one we

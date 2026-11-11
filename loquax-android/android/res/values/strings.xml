@@ -40,8 +40,6 @@
     <string name="friends_older">Older than a day</string>
     <string name="friends_none">Nobody shares a position with you yet. When someone does, they appear here.</string>
     <string name="friends_no_match">Nobody by that name.</string>
-    <string name="card_chat">Chat</string>
-    <string name="card_navigate">Navigate</string>
     <string name="card_ago">%1$s ago</string>
     <string name="back">Back</string>
     <string name="menu">More</string>
@@ -245,7 +243,6 @@
     <string name="location_finding">Finding your position…</string>
     <string name="location_none">The phone does not know where you are yet. Try again outside.</string>
     <string name="share_position">Share my position</string>
-    <string name="card_share">Share mine</string>
     <string name="share_with">Share your position with</string>
     <string name="share_nobody">Start a chat first, then share your position in it.</string>
     <string name="shared_to">Your position went to %1$s</string>

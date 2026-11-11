@@ -709,6 +709,13 @@ leviculum_ui::catalogue! {
     TracksAll = "scene_tracks_all", "All", "Alles";
     // 1386: every peer with a position inside the time window in view.
     FitWindow = "scene_fit_window", "Fit all", "Alle zeigen";
+    // 1430: the window's map card has the phone's actions, one catalogue
+    // for both; the map's menu opens the locations list over the map
+    // (devices send positions: never "friends", never "contacts").
+    CardChat = "card_chat", "Chat", "Chat";
+    CardNavigate = "card_navigate", "Navigate", "Navigieren";
+    CardShare = "card_share", "Share mine", "Meine teilen";
+    Locations = "scene_locations", "Locations", "Standorte";
     LoadMapArea = "scene_load_map_area", "Load this map area", "Diesen Kartenausschnitt laden";
     // The day line: the weekday, the day and the month, the year when it
     // is not this one.
