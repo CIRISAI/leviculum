@@ -263,7 +263,7 @@ And no `block_on` is needed. The number is **63**, and it is a number
 rather than a phrase on purpose: `scripts/check-core-lock-census.py`
 rebuilds the list of public methods that lock the core out of the
 sources on every `just fast` and pins it, name by name, in a
-checked-in file (its `TOTAL` line, `scripts/core-lock-census.txt:30`). Two
+checked-in file (its `TOTAL 63` line, `scripts/core-lock-census.txt:30`). Two
 earlier revisions of this page estimated the size of this set in words
 and were low by nearly half — which is what an estimate nothing can
 check is worth.
