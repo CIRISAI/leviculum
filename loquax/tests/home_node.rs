@@ -2113,6 +2113,192 @@ async fn a_group_copy_for_an_offline_member_reaches_the_homes_node() {
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 
+/// 1687: a line a member writes into a group while the host is off waits
+/// at the propagation node under the group's address. The home's own
+/// collection identifies as the home, so the node serves it the home's
+/// mailbox alone; unless each group's engine asks for its own, the line is
+/// never collected and never fanned out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_line_written_while_the_host_was_off_reaches_its_members() {
+    use loquax::home::group;
+    use loquax::store::Store;
+
+    let events = leviculum_std::test_support::event_log::init_event_log();
+    let writer_peer = PythonPeer::start();
+    let writer = writer_peer.lxmf_init();
+    let reader_peer = PythonPeer::start();
+    let reader = reader_peer.lxmf_init();
+    let mut mesh = Mesh::start_many(&[writer_peer.rns_port, reader_peer.rns_port]).await;
+    let pn = lnpnd_node::PropagationNode::start(&mesh.instance, 8).await;
+    let pn_hash = pn.hex();
+    let home = mesh.home.path().to_path_buf();
+    let address = local(&home, &["address"]);
+    assert_eq!(address.code, Some(0), "{address}");
+    let owner: [u8; 16] = hex::decode(address.stdout.trim())
+        .expect("hex")
+        .try_into()
+        .expect("16 bytes");
+    let code = admit(&home, "laptop");
+    let node = HomeNode::start_as(
+        &home,
+        &mesh.instance,
+        &["--pn", &pn_hash, "--sync-interval", "10s"],
+        Some("Lew"),
+    )
+    .await;
+    let client = joined(&mesh, &node, &code).await;
+    // Both announce, as stock clients do at start: the home learns their
+    // keys, and the group's own announce teaches them its address.
+    writer_peer.lxmf_announce();
+    reader_peer.lxmf_announce();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    tui(
+        &mesh,
+        client.path(),
+        &writer,
+        &format!(
+            "until ready 20\nkey :\ntype new group\nkey enter\ntype {writer}\nkey enter\n\
+             type {reader}\nkey enter\nkey enter\ntype Familie\nkey enter\n\
+             until groups 1 40\nkey q\n"
+        ),
+        &node,
+    )
+    .await;
+    node.wait_for("GROUP hosted name=Familie address=", 20)
+        .await;
+    let hosted = {
+        let store = Store::open_in(&home, owner).expect("the owner's store");
+        let mut hosted = group::hosted(&home, &store).expect("hosted");
+        assert_eq!(hosted.len(), 1, "one group, made once");
+        hosted.remove(0)
+    };
+    let group_hex = hex::encode(hosted.group.address);
+
+    // Both members hold the invitation before the host goes off: the
+    // home's own message carries the group's code, which makes the group
+    // known to their routers. (The home signs it, not the group: a stock
+    // member must be able to answer the home.)
+    let invited = |peer: &PythonPeer| {
+        peer.received().iter().any(|m| {
+            m.get("content")
+                .and_then(|v| v.as_str())
+                .and_then(|hex| hex::decode(hex).ok())
+                .is_some_and(|bytes| String::from_utf8_lossy(&bytes).contains(&group_hex))
+        })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while !(invited(&writer_peer) && invited(&reader_peer)) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the invitation never reached both members; writer {:?}, reader {:?}\nhome \
+             node:\n{}",
+            writer_peer.received(),
+            reader_peer.received(),
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    drop(node);
+
+    // The writer goes through the node, the only way in while the host is
+    // off: the node keeps the line for the group's address.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while let Err(error) = writer_peer.try_rpc(
+        "lxmf_set_propagation_node",
+        serde_json::json!({ "dest_hash": pn_hash }),
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the writer never heard the propagation node: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let body = "Brot ist da";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        match writer_peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": group_hex,
+                "method": "propagated",
+                "content": hex::encode(body),
+            }),
+        ) {
+            Ok(_) => break,
+            Err(error) => assert!(
+                tokio::time::Instant::now() < deadline,
+                "the writer never sent to the group: {error}\nwriter {:?}",
+                writer_peer.received()
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        while let Ok(event) = pn.events.try_recv() {
+            seen.push(format!("{event:?}"));
+        }
+        let accept = events.dump().into_iter().find(|line| {
+            line.starts_with("PN_ACCEPT ") && line.contains(&format!(" dst={group_hex} "))
+        });
+        if accept.is_some() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the node never took the line for {group_hex}; node events {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // The host comes back and collects: the group's engine asks the node
+    // for the group's mailbox, and the line fans out to every member.
+    let node = HomeNode::start_as(
+        &home,
+        &mesh.instance,
+        &["--pn", &pn_hash, "--sync-interval", "10s"],
+        Some("Lew"),
+    )
+    .await;
+    node.wait_for("GROUP Familie collect received=1", 180).await;
+    // The copy a stock member gets is the writer's name and his text
+    // (`group::copy_text`), so the body is looked for at the end. The
+    // writer's own copy is not fanned out to the writer: their device
+    // wrote the line, and the home sends copies to the other members and
+    // to the owner's devices (`group::accept`'s outgoing, the sibling
+    // test's "Lew and Bob").
+    let copy_of_body = |peer: &PythonPeer| {
+        peer.received().into_iter().find(|m| {
+            m.get("content")
+                .and_then(|v| v.as_str())
+                .and_then(|hex| hex::decode(hex).ok())
+                .is_some_and(|bytes| String::from_utf8_lossy(&bytes).ends_with(body))
+        })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while copy_of_body(&reader_peer).is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the other member never got the line; reader {:?}\nhome node:\n{}",
+            reader_peer.received(),
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let copy = copy_of_body(&reader_peer).expect("the member's copy");
+    assert_eq!(
+        copy["source_hash"],
+        group_hex.as_str(),
+        "the copy comes from the group, signed by it: {copy:?}"
+    );
+
+    drop(node);
+    drop(pn);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
 /// One scripted `loquax tui` run on a client home: the script runs to its
 /// end, and the run must leave with 0.
 async fn tui(mesh: &Mesh, client: &std::path::Path, to: &str, script: &str, node: &HomeNode) {

@@ -578,6 +578,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut census: Option<crate::outbox::EngineCensus> = None;
     let mut next_census = tokio::time::Instant::now() + super::census::CENSUS_PERIOD;
     let mut census_owed: Option<(tokio::time::Instant, bool)> = None;
+    // Whether this round's collections for the groups are still to start:
+    // the first round begins before the home's engine has said which node
+    // it selected (1687).
+    let mut groups_owed = false;
     let mut usr1 = match terminate {
         Some(_) => Some(
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
@@ -788,6 +792,13 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         OutboxEvent::PnSelected { destination, .. } => {
                             selected_pn = Some(destination);
+                            // The round began before the engine had said
+                            // which node it selected: the groups' mailboxes
+                            // are asked for now (1687).
+                            if groups_owed {
+                                groups_owed = false;
+                                collect_groups(&collector, &mut groups, destination);
+                            }
                         }
                         OutboxEvent::Census(answer) => census = Some(answer),
                         // A node proved an upload (1409): asked about at the
@@ -956,6 +967,16 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         if schedule.due(now_ms()).is_some() {
                             schedule.begin(now_ms());
                             fetch = Some(collector.collect(&mut fanout));
+                            // 1687: the groups' mailboxes at the node too.
+                            // The home's drain identifies as the home, so
+                            // the node serves it the home's mail alone;
+                            // each group's engine identifies as the group
+                            // and is asked for its own.
+                            groups_owed = true;
+                            if let Some(node) = selected_pn.or(preferred_pn) {
+                                groups_owed = false;
+                                collect_groups(&collector, &mut groups, node);
+                            }
                         }
                     }
                 }
@@ -1098,6 +1119,14 @@ struct GroupEngine<O> {
     ended: bool,
     /// What its engine answered to the last census request (order 1585).
     census: Option<crate::outbox::EngineCensus>,
+    /// The engine's events, copied to the tap of a collection running on
+    /// it (1687): the node serves the mailbox of the address the link
+    /// identifies as, so a group's own mail needs a drain on the group's
+    /// engine and the home's drain makes an event of the very same queue.
+    fanout: Fanout,
+    /// The collection running on this engine, while one is: one a round at
+    /// most per group.
+    collecting: Option<tokio::task::JoinHandle<Option<usize>>>,
 }
 
 /// Start the engine of one hosted group, announced with the group's name,
@@ -1163,6 +1192,8 @@ async fn attach_group(
         selected_pn: None,
         ended: false,
         census: None,
+        fanout: Fanout::default(),
+        collecting: None,
     })
 }
 
@@ -1177,164 +1208,204 @@ fn pump_group<O: Outbox>(
     selected_pn: Option<[u8; 16]>,
 ) {
     loop {
-        let event = match group.engine.try_next_event() {
-            Ok(Some(event)) => event,
-            Ok(None) => {
-                if send_statuses(store, sender, group, selected_pn) {
-                    continue;
-                }
-                return;
-            }
+        // The tap's commands reach the engine here, and every event is
+        // copied to it before the daemon folds it: a collection on the tap
+        // needs both (1687).
+        let events = match group.fanout.pump(&mut group.engine) {
+            Ok(events) => events,
             Err(gone) => {
                 tracing::warn!("GROUP {} engine: {gone}", group.hosted.group.name);
                 return;
             }
         };
-        match event {
-            OutboxEvent::Census(answer) => group.census = Some(answer),
-            OutboxEvent::Packed {
-                message_id, packed, ..
-            } if group.ended => {
-                // A deleted group keeps nothing and sends nothing on: the
-                // writer's client stops retrying (as for a stranger).
+        if events.is_empty() {
+            // A collection that ended with no word (its budget ran out)
+            // frees the group for the next round: `SyncDone`/`SyncFailed`
+            // say it directly when one comes.
+            if group
+                .collecting
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                group.collecting = None;
                 tracing::info!(
-                    "GROUP {} ended: refused message={}",
+                    "GROUP {} collect no word{}",
                     group.hosted.group.name,
-                    crate::address::to_hex(&message_id)
+                    node_field(group.selected_pn)
                 );
-                drop(packed);
-                let _ = group.engine.submit(Command::Prove { message_id });
             }
-            OutboxEvent::Packed {
-                message_id, packed, ..
-            } => {
-                let now = unix_now();
-                let new = match store.archive_append(
-                    crate::home::KIND_GROUP,
-                    &message_id,
-                    &packed,
-                    now,
-                    sender.cap_bytes,
-                ) {
-                    Ok(new) => new,
-                    Err(error) => {
-                        // Not archived, so not proven: the member tries again.
-                        tracing::warn!("GROUP archive: {error}");
-                        continue;
-                    }
-                };
-                let _ = group.engine.submit(Command::Prove { message_id });
-                if new.is_none() {
-                    continue;
+            if send_statuses(store, sender, group, selected_pn) {
+                continue;
+            }
+            return;
+        }
+        for event in events {
+            match event {
+                OutboxEvent::Census(answer) => group.census = Some(answer),
+                OutboxEvent::SyncDone {
+                    received,
+                    duplicates,
+                } => {
+                    group.collecting = None;
+                    tracing::info!(
+                        "GROUP {} collect received={received} duplicates={duplicates}{}",
+                        group.hosted.group.name,
+                        node_field(group.selected_pn)
+                    );
                 }
-                let message = match leviculum_lxmf::Message::unpack(
-                    &packed,
-                    None,
-                    None,
-                    leviculum_lxmf::DeliveryMethod::Direct,
-                ) {
-                    Ok(message) => message,
-                    Err(error) => {
-                        tracing::warn!("GROUP unreadable message: {error:?}");
-                        continue;
-                    }
-                };
-                let arrival = match group::accept(store, &group.hosted, &message, now as f64) {
-                    Ok(arrival) => arrival,
-                    Err(error) => {
-                        tracing::warn!("GROUP fan-out: {error}");
-                        continue;
-                    }
-                };
-                for out in arrival.outgoing() {
-                    group
-                        .outgoing
-                        .add(out.id, out.destination, out.packed, now, false);
+                OutboxEvent::SyncFailed { detail, .. } => {
+                    group.collecting = None;
+                    tracing::info!(
+                        "GROUP {} collect failed{}: {detail}",
+                        group.hosted.group.name,
+                        node_field(group.selected_pn)
+                    );
                 }
-                let acts = group.outgoing.tick(now);
-                sender.carry_out(
-                    &mut group.engine,
-                    store,
-                    &mut group.outgoing,
-                    acts,
-                    selected_pn,
-                    group.selected_pn,
-                );
+                OutboxEvent::Packed {
+                    message_id, packed, ..
+                } if group.ended => {
+                    // A deleted group keeps nothing and sends nothing on: the
+                    // writer's client stops retrying (as for a stranger).
+                    tracing::info!(
+                        "GROUP {} ended: refused message={}",
+                        group.hosted.group.name,
+                        crate::address::to_hex(&message_id)
+                    );
+                    drop(packed);
+                    let _ = group.engine.submit(Command::Prove { message_id });
+                }
+                OutboxEvent::Packed {
+                    message_id, packed, ..
+                } => {
+                    let now = unix_now();
+                    let new = match store.archive_append(
+                        crate::home::KIND_GROUP,
+                        &message_id,
+                        &packed,
+                        now,
+                        sender.cap_bytes,
+                    ) {
+                        Ok(new) => new,
+                        Err(error) => {
+                            // Not archived, so not proven: the member tries again.
+                            tracing::warn!("GROUP archive: {error}");
+                            continue;
+                        }
+                    };
+                    let _ = group.engine.submit(Command::Prove { message_id });
+                    if new.is_none() {
+                        continue;
+                    }
+                    let message = match leviculum_lxmf::Message::unpack(
+                        &packed,
+                        None,
+                        None,
+                        leviculum_lxmf::DeliveryMethod::Direct,
+                    ) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            tracing::warn!("GROUP unreadable message: {error:?}");
+                            continue;
+                        }
+                    };
+                    let arrival = match group::accept(store, &group.hosted, &message, now as f64) {
+                        Ok(arrival) => arrival,
+                        Err(error) => {
+                            tracing::warn!("GROUP fan-out: {error}");
+                            continue;
+                        }
+                    };
+                    for out in arrival.outgoing() {
+                        group
+                            .outgoing
+                            .add(out.id, out.destination, out.packed, now, false);
+                    }
+                    let acts = group.outgoing.tick(now);
+                    sender.carry_out(
+                        &mut group.engine,
+                        store,
+                        &mut group.outgoing,
+                        acts,
+                        selected_pn,
+                        group.selected_pn,
+                    );
+                }
+                OutboxEvent::Announced {
+                    destination,
+                    path_response,
+                    ..
+                } => {
+                    let acts =
+                        group
+                            .outgoing
+                            .announced(destination, heard(path_response), unix_now());
+                    sender.carry_out(
+                        &mut group.engine,
+                        store,
+                        &mut group.outgoing,
+                        acts,
+                        selected_pn,
+                        group.selected_pn,
+                    );
+                }
+                OutboxEvent::Left {
+                    message_id,
+                    last,
+                    failure,
+                } => {
+                    let (outcome, reason) = left_outcome(last, failure);
+                    sender.left(
+                        &mut group.engine,
+                        store,
+                        &mut group.outgoing,
+                        &message_id,
+                        outcome,
+                        reason.as_deref(),
+                        selected_pn,
+                        group.selected_pn,
+                    );
+                }
+                OutboxEvent::Queued { message_id } => {
+                    sender.queued(&group.outgoing, &message_id);
+                }
+                OutboxEvent::State { message_id, state } => {
+                    leg_sign(&mut group.outgoing, &message_id, state);
+                }
+                OutboxEvent::Unsent { message_id, detail } => {
+                    sender.left(
+                        &mut group.engine,
+                        store,
+                        &mut group.outgoing,
+                        &message_id,
+                        Outcome::Failed,
+                        Some(&format!("unsent: {detail}")),
+                        selected_pn,
+                        group.selected_pn,
+                    );
+                }
+                OutboxEvent::KeyMissing {
+                    message_id,
+                    destination,
+                } => {
+                    sender.left(
+                        &mut group.engine,
+                        store,
+                        &mut group.outgoing,
+                        &message_id,
+                        Outcome::NoKey,
+                        Some(&no_key_reason(&destination)),
+                        selected_pn,
+                        group.selected_pn,
+                    );
+                }
+                OutboxEvent::PnSelected { destination, .. } => {
+                    group.selected_pn = Some(destination);
+                }
+                OutboxEvent::Refused { detail } => {
+                    tracing::info!("GROUP {} outbox refused: {detail}", group.hosted.group.name);
+                }
+                _ => {}
             }
-            OutboxEvent::Announced {
-                destination,
-                path_response,
-                ..
-            } => {
-                let acts = group
-                    .outgoing
-                    .announced(destination, heard(path_response), unix_now());
-                sender.carry_out(
-                    &mut group.engine,
-                    store,
-                    &mut group.outgoing,
-                    acts,
-                    selected_pn,
-                    group.selected_pn,
-                );
-            }
-            OutboxEvent::Left {
-                message_id,
-                last,
-                failure,
-            } => {
-                let (outcome, reason) = left_outcome(last, failure);
-                sender.left(
-                    &mut group.engine,
-                    store,
-                    &mut group.outgoing,
-                    &message_id,
-                    outcome,
-                    reason.as_deref(),
-                    selected_pn,
-                    group.selected_pn,
-                );
-            }
-            OutboxEvent::Queued { message_id } => {
-                sender.queued(&group.outgoing, &message_id);
-            }
-            OutboxEvent::State { message_id, state } => {
-                leg_sign(&mut group.outgoing, &message_id, state);
-            }
-            OutboxEvent::Unsent { message_id, detail } => {
-                sender.left(
-                    &mut group.engine,
-                    store,
-                    &mut group.outgoing,
-                    &message_id,
-                    Outcome::Failed,
-                    Some(&format!("unsent: {detail}")),
-                    selected_pn,
-                    group.selected_pn,
-                );
-            }
-            OutboxEvent::KeyMissing {
-                message_id,
-                destination,
-            } => {
-                sender.left(
-                    &mut group.engine,
-                    store,
-                    &mut group.outgoing,
-                    &message_id,
-                    Outcome::NoKey,
-                    Some(&no_key_reason(&destination)),
-                    selected_pn,
-                    group.selected_pn,
-                );
-            }
-            OutboxEvent::PnSelected { destination, .. } => {
-                group.selected_pn = Some(destination);
-            }
-            OutboxEvent::Refused { detail } => {
-                tracing::info!("GROUP {} outbox refused: {detail}", group.hosted.group.name);
-            }
-            _ => {}
         }
     }
 }
@@ -2460,13 +2531,36 @@ impl Collector {
     /// One collection, on a tap of its own, the way `loquax fetch` runs it:
     /// how many messages it brought, `None` when it failed.
     fn collect(&self, fanout: &mut Fanout) -> tokio::task::JoinHandle<Option<usize>> {
+        let mailbox = (self.mailbox)();
+        self.spawn(fanout, self.preferred, self.source, Some(mailbox))
+    }
+
+    /// One collection for a hosted group, on the group's engine (1687).
+    /// The node is always named, since the home selected it for its own
+    /// drain: no mailbox rule runs, and the group's link identifies as the
+    /// group, so the node hands over the group's mailbox.
+    fn collect_group(
+        &self,
+        fanout: &mut Fanout,
+        node: [u8; 16],
+    ) -> tokio::task::JoinHandle<Option<usize>> {
+        self.spawn(fanout, Some(node), self.source, None)
+    }
+
+    fn spawn(
+        &self,
+        fanout: &mut Fanout,
+        preferred: Option<[u8; 16]>,
+        source: &'static str,
+        mailbox: Option<Pin<Box<dyn Future<Output = MailboxRun> + Send>>>,
+    ) -> tokio::task::JoinHandle<Option<usize>> {
         let mut tap = fanout.tap();
         let home = self.home.clone();
         let mut options = FetchOptions::new(self.instance.clone(), self.budget);
-        let (preferred, source) = (self.preferred, self.source);
-        let mailbox = (self.mailbox)();
         tokio::spawn(async move {
-            options.mailbox = mailbox.await;
+            if let Some(mailbox) = mailbox {
+                options.mailbox = mailbox.await;
+            }
             let mut seen = match SeenStore::load(&home) {
                 Ok(seen) => seen,
                 Err(error) => {
@@ -2494,6 +2588,28 @@ impl Collector {
             }
         })
     }
+}
+
+/// Start one collection on every hosted group's engine (1687): the node
+/// serves the mailbox of the address the link identifies as, so group mail
+/// waits there until each group asks for its own. `node` is the one the
+/// home's round selected, named to every group so the copies it sends and
+/// the mail it collects meet at the same place. A group whose collection
+/// is still running is left alone; the count is how many started.
+fn collect_groups<O: Outbox>(
+    collector: &Collector,
+    groups: &mut [GroupEngine<O>],
+    node: [u8; 16],
+) -> usize {
+    let mut started = 0;
+    for group in groups.iter_mut().filter(|group| !group.ended) {
+        if group.collecting.is_some() {
+            continue;
+        }
+        group.collecting = Some(collector.collect_group(&mut group.fanout, node));
+        started += 1;
+    }
+    started
 }
 
 #[cfg(test)]
@@ -3024,6 +3140,8 @@ mod tests {
             selected_pn: None,
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -3144,6 +3262,8 @@ mod tests {
             selected_pn: None,
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -3272,6 +3392,8 @@ mod tests {
             selected_pn: Some(PN),
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -3393,6 +3515,8 @@ mod tests {
             selected_pn: Some(PN),
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         let mut sender = Sender {
             cap_bytes: u64::MAX,
@@ -3543,6 +3667,8 @@ mod tests {
             selected_pn: None,
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         let mut first_sender = sender();
         pump_group(&mut store, &mut first_sender, &mut engine, None);
@@ -3577,6 +3703,8 @@ mod tests {
                 selected_pn: None,
                 ended: false,
                 census: None,
+                fanout: Fanout::default(),
+                collecting: None,
             };
             if resume {
                 resume_group(store, &mut engine, unix_now());
@@ -3738,6 +3866,8 @@ mod tests {
             selected_pn: None,
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         pump_group(&mut store, &mut sender(), &mut engine, None);
         let before = sends(engine.engine.commands.take());
@@ -3784,6 +3914,8 @@ mod tests {
             selected_pn: None,
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         assert_eq!(resume_group(&mut store, &mut engine, unix_now()), 2);
         let acts = engine.outgoing.tick(unix_now());
@@ -3881,6 +4013,8 @@ mod tests {
             selected_pn: Some(PN),
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         let mut first = sender();
         pump_group(&mut store, &mut first, &mut engine, Some(PN));
@@ -3934,6 +4068,8 @@ mod tests {
             selected_pn: Some(PN),
             ended: false,
             census: None,
+            fanout: Fanout::default(),
+            collecting: None,
         };
         assert_eq!(resume_group(&mut store, &mut engine, unix_now()), 2);
         let mut again = sender();

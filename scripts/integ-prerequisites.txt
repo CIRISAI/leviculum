@@ -144,6 +144,8 @@ reference/LXMF/LXMF/__init__.py loquax/home_node the_owner_deletes_a_group_and_e
 # 1462: the stock Python recipient's proof is one tick, never two.
 reference/Reticulum/RNS/__init__.py loquax/home_node a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two
 reference/LXMF/LXMF/__init__.py loquax/home_node a_stock_python_recipient_shows_one_tick_on_its_proof_and_never_two
+reference/Reticulum/RNS/__init__.py loquax/home_node a_group_line_written_while_the_host_was_off_reaches_its_members
+reference/LXMF/LXMF/__init__.py loquax/home_node a_group_line_written_while_the_host_was_off_reaches_its_members
 
 # loquax-android fling compiles Fling.java and its host test with javac and
 # runs them with java (1209). rust:bookworm carries no JDK, and the land gate
