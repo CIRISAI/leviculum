@@ -385,6 +385,8 @@ mod a_dead_sync_link_ends_the_round_beside_a_second_node;
 // to test (#463, `just lnsd-minimal`).
 #[cfg(feature = "serial")]
 mod a_frame_the_modem_consumed_without_transmitting;
+#[cfg(feature = "serial")]
+mod a_frame_torn_by_a_gap_leaves_the_serial_decoder_in_phase;
 mod a_link_proof_later_than_six_rtts_fails_the_python_receipt;
 mod a_lost_link_rtt_strands_the_resource_transfer;
 mod a_new_interface_hears_an_announce_made_before_it;
