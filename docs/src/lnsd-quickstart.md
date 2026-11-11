@@ -53,6 +53,14 @@ sudo usermod -aG leviculum "$USER"
 # log out and back in, or `newgrp leviculum` for this shell only
 ```
 
+The tools find the daemon's directory, `/etc/reticulum`, without flags
+because it comes first in the lookup order the installation guide
+states in its "Configuration directory" section
+(`docs/src/guide/installation.md:104-117`). If you also run a daemon of your own on
+`~/.reticulum`, the tools still take `/etc/reticulum` while its
+`config` exists; a tool that then fails says so and prints the
+`--config` that selects the other directory.
+
 Verify the installation:
 
 ```sh
@@ -168,6 +176,7 @@ daemon version: not exposed by the shared-instance RPC ...
 
 ----- Config -----
 config dir:  /etc/reticulum
+config /etc/reticulum (given by --config)
 config file: /etc/reticulum/config
 config file: present, parsed OK
 

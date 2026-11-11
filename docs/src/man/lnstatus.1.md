@@ -138,6 +138,10 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
 **-D**
 :   Show details and config entries for discovered interfaces.
 
+## CONFIGURATION DIRECTORY
+
+Without **--config**, **lnstatus** takes the first directory of the lookup order **rnsd** uses, stated once in the installation guide, section "Configuration directory" (`docs/src/guide/installation.md:104-117`); the order is what lets Python clients find the system daemon without flags. When **lnstatus** cannot reach or authenticate to the daemon, it names the directory it took and why, the socket it dialled, and every other candidate directory that holds a `config`, with the **--config** that selects it. On a refused RPC key **lnstatus** also tries the other candidates' keys against the same socket, read-only, and names the one the daemon accepts.
+
 ## EXIT STATUS
 
 **0**

@@ -42,6 +42,10 @@ It connects to a running daemon (**lnsd** or **rnsd**) via shared instance IPC, 
 **-v**, **--verbose**
 :   Print the steps of the request (path, link, request) on standard error.
 
+## CONFIGURATION DIRECTORY
+
+Without **--config**, **lnmgmt** takes the first directory of the lookup order **rnsd** uses, stated once in the installation guide, section "Configuration directory" (`docs/src/guide/installation.md:104-117`); the order is what lets Python clients find the system daemon without flags. When **lnmgmt** cannot reach or authenticate to the daemon, it names the directory it took and why, the socket it dialled, and every other candidate directory that holds a `config`, with the **--config** that selects it.
+
 ## EXIT STATUS
 
 0 when the board accepted. 1 when it refused, for either reason. 2 on a usage error, including an identity file that cannot be read. 3 when nothing answered within **-w**: no path to the board, or no reply; the line on standard error says which. 4 on any other failure: no shared instance, the link closed, an unreadable reply.

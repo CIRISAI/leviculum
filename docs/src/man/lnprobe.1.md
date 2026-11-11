@@ -37,6 +37,10 @@ lnprobe -- Reticulum probe utility
 **-v**, **--verbose**
 :   Show the next hop and interface for each probe; repeat to raise log verbosity.
 
+## CONFIGURATION DIRECTORY
+
+Without **--config**, **lnprobe** takes the first directory of the lookup order **rnsd** uses, stated once in the installation guide, section "Configuration directory" (`docs/src/guide/installation.md:104-117`); the order is what lets Python clients find the system daemon without flags. When **lnprobe** cannot reach or authenticate to the daemon, it names the directory it took and why, the socket it dialled, and every other candidate directory that holds a `config`, with the **--config** that selects it.
+
 ## EXIT STATUS
 
 0 when every probe was answered. 1 when no path to the destination could be found. 2 when at least one probe went unanswered (the summary line reports the loss). 3 when the requested probe size does not fit the Reticulum MTU.

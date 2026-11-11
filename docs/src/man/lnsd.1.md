@@ -90,7 +90,11 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 *<config_dir>/storage/*
 :   Storage directory for identities, known destinations, and cached path state.
 
-The three configuration directories are tried in that order, matching Python-Reticulum's own lookup.
+The three configuration directories are tried in that order, the lookup order of Python-Reticulum, stated once in the installation guide, section "Configuration directory" (`docs/src/guide/installation.md:104-117`).
+
+## CONFIGURATION DIRECTORY
+
+Without **--config**, **lnsd** and every client tool take the first directory of that order, so a tool started without flags reaches the daemon started without flags. A tool that cannot reach or authenticate to the daemon names the directory it took and why, the socket, and every other candidate holding a `config`; see **lnstatus**(1).
 
 ## SIGNALS
 
