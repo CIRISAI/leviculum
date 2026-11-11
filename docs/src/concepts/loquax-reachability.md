@@ -78,7 +78,7 @@ path's interface changes. Nothing medium-aware enters transport
 - **Mechanism.** When Loquax and the mailbox run on one computer, both
   are clients of the same daemon's shared instance, an abstract AF_UNIX
   socket `\0rns/<instance_name>` (`shared_instance`,
-  `leviculum-std/src/config.rs:96-115`); TCP loopback only where a
+  `leviculum-std/src/config.rs:102-121`); TCP loopback only where a
   configuration asks for it, as Python does
   (`reference/Reticulum/RNS/Reticulum.py:683`). The path request and the
   link run inside the daemon over its local interfaces: zero network

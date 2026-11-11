@@ -951,6 +951,15 @@ impl ReticulumNodeBuilder {
             || self.config_path.as_ref().is_some_and(|path| path.exists());
         let config = self.resolve_config()?;
 
+        // What the logs write for a peer's address (order 1678). Set before
+        // any interface starts, so no line is written under the wrong mode.
+        crate::peer_tag::set_mode(config.reticulum.log_addresses);
+        if config.reticulum.log_addresses == crate::peer_tag::LogAddresses::Full {
+            // `[logging] log_addresses = full`: from here on peer IP addresses
+            // are written to the log and the event log as they are.
+            tracing::warn!(event = "LOG_ADDRESSES_FULL", log_addresses = "full");
+        }
+
         // Apply enable_transport: explicit override > config value
         let enable_transport = self
             .enable_transport_explicit

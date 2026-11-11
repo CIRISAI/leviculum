@@ -505,7 +505,7 @@ census column.
   local client of its shared instance, and so is every hosted group's
   engine: one node more per group. A local client keeps at most
   `TableCaps::local_client` (`leviculum-core/src/memory_storage.rs:194`,
-  applied in `client_table_caps`, `leviculum-std/src/driver/builder.rs:1336`):
+  applied in `client_table_caps`, `leviculum-std/src/driver/builder.rs:1345`):
   2 048 identities and destinations, 1 024 paths, 10 000 packet hashes,
   about 10 MB at the ceiling where the desktop profile allows 339 MB. The
   instance holds the network's tables and answers a client's path

@@ -105,6 +105,18 @@ impl From<IpAddr> for SourceKey {
     }
 }
 
+impl SourceKey {
+    /// The address a log line tags this source by: the IPv4 address, or the
+    /// /64 prefix with its host half zero. Every host in one /64 is one
+    /// source, so they share a tag (order 1678).
+    pub(crate) fn ip(&self) -> IpAddr {
+        match self {
+            SourceKey::V4(v4) => IpAddr::V4(*v4),
+            SourceKey::V6Prefix(p) => IpAddr::V6(Ipv6Addr::from(u128::from(*p) << 64)),
+        }
+    }
+}
+
 impl fmt::Display for SourceKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -781,7 +781,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // is `cap` (the table holds `max_peers`), `source` (this source holds
     // `max_peers_per_source`) or `rate` (this source registered a peer
     // inside `peer_admission_interval`). Rate-limited to
-    // one line per 10 s; `suppressed` counts the refusals in between.
+    // one line per 10 s; `suppressed` counts the refusals in between. `src`
+    // is the source's daily pseudonym (`peer_tag`, order 1678), the address
+    // only under `[logging] log_addresses = full`.
     EventSchema {
         name: "AUTO_PEER_REFUSED",
         required_keys: &["reason", "src", "port", "nic", "peers", "suppressed"],
@@ -795,7 +797,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     },
     // A new connection from a source (IPv4 address or IPv6 /64) that holds
     // `max_connections_per_source` was closed right after accept; once per
-    // source per minute.
+    // source per minute. `source` here and in the two events below is the
+    // source's daily pseudonym (`peer_tag`, order 1678), the address only
+    // under `[logging] log_addresses = full`.
     EventSchema {
         name: "TCP_SOURCE_CAPPED",
         required_keys: &["iface", "source", "held"],
@@ -827,6 +831,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     EventSchema {
         name: "TCP_SILENT_CLOSED",
         required_keys: &["iface", "source", "after_s", "reason", "suppressed"],
+    },
+    // `[logging] log_addresses = full` is in force: from here on the log
+    // names peers by address, not by pseudonym (order 1678). Once, at start.
+    EventSchema {
+        name: "LOG_ADDRESSES_FULL",
+        required_keys: &["log_addresses"],
     },
     // The descriptor limit a TCP server found and raised, once per process.
     EventSchema {

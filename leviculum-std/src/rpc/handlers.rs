@@ -468,6 +468,9 @@ struct StatRow {
     admission: Option<crate::interfaces::tcp_admission::AdmissionStats>,
     /// The I2P keys of an I2P row; `None` for every other row.
     i2p: Option<I2pRow>,
+    /// The daily pseudonym of an accepted TCP connection's source, the tag
+    /// its log lines carry (order 1678); `None` for every other row.
+    src_tag: Option<String>,
 }
 
 /// The I2P keys of one row (Reticulum.py:1346-1367). A parent row carries
@@ -792,6 +795,14 @@ fn row_fields(row: &StatRow, epoch_base: f64) -> Value {
         ));
     }
 
+    // Order 1678: the source pseudonym of an accepted TCP connection, the
+    // tag its log lines carry in place of the address. Additive like
+    // `origin`; lnstatus prints it behind `--src-tags`, `lnstest diag` puts
+    // it in place of the address.
+    if let Some(tag) = &row.src_tag {
+        fields.push((pickle_str_key("src_tag"), pickle_str(tag)));
+    }
+
     match &row.i2p {
         Some(I2pRow::Parent { connectable, b32 }) => {
             fields.push((pickle_str_key("i2p_connectable"), pickle_bool(*connectable)));
@@ -1057,6 +1068,7 @@ pub(crate) fn build_interface_stats(
             i2p: inv.i2p_tunnel(entry.id).map(|t| I2pRow::Peer {
                 tunnelstate: t.description(),
             }),
+            src_tag: inv.src_tag(entry.id).map(str::to_owned),
         });
     }
 
@@ -1121,6 +1133,7 @@ pub(crate) fn build_interface_stats(
                 connectable: e.connectable,
                 b32: e.b32().map(|b| format!("{b}.b32.i2p")),
             }),
+            src_tag: None,
         });
     }
 
@@ -4168,7 +4181,7 @@ mod tests {
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the
-    // bitrate guess (handlers.rs:818-827), so the radio is advertised at 10 Mbps.
+    // bitrate guess (handlers.rs:829-838), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;

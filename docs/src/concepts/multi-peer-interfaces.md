@@ -28,7 +28,7 @@ own `InterfaceHandle` with its own id, drawn from the shared counter
 (`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:563`). The
 child is built from the already-connected stream
 (`spawn_tcp_interface_from_stream`,
-`leviculum-std/src/interfaces/tcp.rs:692`), inherits IFAC, mode and
+`leviculum-std/src/interfaces/tcp.rs:701`), inherits IFAC, mode and
 ingress control from the listener, and is handed to the event loop,
 which registers it in the routing map like any other interface
 (`registry`, `leviculum-std/src/driver/mod.rs:5523`).
@@ -37,8 +37,8 @@ The listener itself is deliberately **not** in that map. It carries no
 packets, so it would be a send target that cannot send; it is recorded
 in the reporting inventory instead, where the child registers its
 display identity and its parent link (`add_spawned`,
-`leviculum-std/src/interfaces/tcp.rs:679`; `listener_id`,
-`leviculum-std/src/interfaces/tcp.rs:687`). The split between the
+`leviculum-std/src/interfaces/tcp.rs:687`; `listener_id`,
+`leviculum-std/src/interfaces/tcp.rs:695`). The split between the
 routing map and the reporting inventory is the point of that module
 (`interface_names`, `leviculum-std/src/interfaces/inventory.rs:7`).
 
@@ -56,7 +56,7 @@ leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4581`).
   `leviculum-std/src/interfaces/auto_interface/orchestrator.rs:284`;
   the per-peer handle at
   `InterfaceHandle`,
-  `leviculum-std/src/interfaces/auto_interface/orchestrator.rs:943`).
+  `leviculum-std/src/interfaces/auto_interface/orchestrator.rs:953`).
 - Every accepted I2P stream becomes a handle
   (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:603`).
 - Every accepted shared-instance IPC client becomes a handle
@@ -370,8 +370,8 @@ what Codeberg #365 and #376 built, and what runs today.
 inventory.** C, plus the one thing A gives away for free: the
 inventory already models a parent with spawned children and merges a
 departed child's bytes into its parent (`add_spawned`,
-`leviculum-std/src/interfaces/inventory.rs:378`; `remove_spawned`,
-`leviculum-std/src/interfaces/inventory.rs:384`), and it is
+`leviculum-std/src/interfaces/inventory.rs:383`; `remove_spawned`,
+`leviculum-std/src/interfaces/inventory.rs:399`), and it is
 driver-owned and deliberately outside the routing map. A BLE peer
 appearing and disappearing already crosses the driver boundary as a
 peer event, so it can create and retire an inventory row without ever

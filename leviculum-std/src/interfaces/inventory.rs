@@ -358,6 +358,11 @@ pub(crate) struct InterfaceInventory {
     /// (I2PInterface.py:940-941) and never adds to the list its client count
     /// is the length of.
     uncounted: BTreeSet<usize>,
+    /// The daily pseudonym of an accepted TCP connection's source, by
+    /// interface id (order 1678): the tag every log line about the
+    /// connection carries, served beside its address as `src_tag` so the
+    /// operator can match the two while the connection lives.
+    src_tags: BTreeMap<usize, String>,
 }
 
 /// Shared handle: the accept loops write, the stats builder reads.
@@ -379,10 +384,21 @@ impl InterfaceInventory {
         self.spawned.insert(id, identity);
     }
 
+    /// Record the source pseudonym of a spawned connection (order 1678).
+    pub(crate) fn set_src_tag(&mut self, id: usize, tag: String) {
+        self.src_tags.insert(id, tag);
+    }
+
+    /// The source pseudonym of a spawned connection, if it has one.
+    pub(crate) fn src_tag(&self, id: usize) -> Option<&str> {
+        self.src_tags.get(&id).map(String::as_str)
+    }
+
     /// Drop a spawned interface and bank its byte counters on its parent, so a
     /// listener's totals do not fall when a client disconnects.
     pub(crate) fn remove_spawned(&mut self, id: usize, rxb: u64, txb: u64) {
         self.i2p_tunnels.remove(&id);
+        self.src_tags.remove(&id);
         let counted = !self.uncounted.remove(&id);
         if let Some(identity) = self.spawned.remove(&id) {
             if !counted {

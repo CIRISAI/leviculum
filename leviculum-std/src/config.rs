@@ -93,6 +93,12 @@ pub struct ReticulumConfig {
     /// tracing filter with CLI `-v/-q` and `RUST_LOG` taking precedence.
     #[serde(default)]
     pub loglevel: Option<u8>,
+    /// `[logging] log_addresses` (order 1678): what the daemon writes where
+    /// a peer's network address would go, a daily pseudonym by default or
+    /// the address itself under `full`. lnsd only; rnsd ignores the key and
+    /// logs addresses raw. See [`crate::peer_tag`].
+    #[serde(default)]
+    pub log_addresses: crate::peer_tag::LogAddresses,
     /// Allow sharing instance across processes via local Unix socket.
     /// When enabled, the daemon listens on `\0rns/{instance_name}` for local clients.
     #[serde(default)]
@@ -644,6 +650,7 @@ impl Default for ReticulumConfig {
             enable_transport_defaulted: true,
             use_implicit_proof: true,
             loglevel: None,
+            log_addresses: crate::peer_tag::LogAddresses::Pseudonym,
             shared_instance: false,
             instance_name: default_instance_name(),
             shared_instance_type: None,

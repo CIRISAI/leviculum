@@ -11,7 +11,7 @@ The hands-on introduction is the [tutorial](rust-api-tutorial.md); the layer
 overview is [Choosing a layer](choosing-a-layer.md).
 
 All `leviculum-std` types are re-exported from the crate root
-(`leviculum-std/src/lib.rs:89-117`), so `use leviculum_std::{NodeEvent, LinkHandle,
+(`leviculum-std/src/lib.rs:90-118`), so `use leviculum_std::{NodeEvent, LinkHandle,
 …}` works without naming submodules.
 
 ## `leviculum-std` (std / tokio)
@@ -56,7 +56,7 @@ returns `self`.
 | `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:303` | Identity / known-destinations / ratchet store dir |
 | `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:803` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
 | `fn without_events(self) -> Self` — `builder.rs:237` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1278` | Build the node (not yet running) |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1287` | Build the node (not yet running) |
 | `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:948` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
@@ -158,8 +158,8 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 | Signature | Purpose |
 |-----------|---------|
 | `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:901` | Load an INI config (the `rnsd`/`lnsd` format) |
-| `fn default_config_dir() -> PathBuf` — `config.rs:1604` | Default config directory |
-| `fn default_config_path() -> PathBuf` — `config.rs:1613` | Default config file path |
+| `fn default_config_dir() -> PathBuf` — `config.rs:1611` | Default config directory |
+| `fn default_config_path() -> PathBuf` — `config.rs:1620` | Default config file path |
 
 ## `leviculum-core` (no_std, sans-IO)
 

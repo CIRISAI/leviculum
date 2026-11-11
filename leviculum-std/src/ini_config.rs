@@ -710,15 +710,27 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
     Ok(())
 }
 
-/// Apply one `key = value` from the `[logging]` section. Only `loglevel` (the
-/// RNS 0-7 level, Reticulum.py:66-73) is consumed; other keys (`logtimestamps`,
-/// `logfile`, ...) are tolerated so a stock rnsd config is not rejected. Before
-/// this the whole `[logging]` section was silently dropped.
+/// Apply one `key = value` from the `[logging]` section. `loglevel` (the RNS
+/// 0-7 level, Reticulum.py:66-73) and lnsd's own `log_addresses` (order 1678)
+/// are consumed; other keys (`logtimestamps`, `logfile`, ...) are tolerated so
+/// a stock rnsd config is not rejected. Before this the whole `[logging]`
+/// section was silently dropped.
 fn apply_logging_key(config: &mut ReticulumConfig, key: &str, value: &str) {
     if key == "loglevel" {
         // A non-numeric or out-of-u8-range value leaves loglevel unset rather
         // than aborting the parse (matches the tolerant reticulum-key contract).
         config.loglevel = value.trim().parse().ok();
+    } else if key == "log_addresses" {
+        // Anything but the two names keeps the pseudonym: an unreadable value
+        // must never turn raw addresses on.
+        match crate::peer_tag::LogAddresses::parse(value) {
+            Some(mode) => config.log_addresses = mode,
+            None => tracing::warn!(
+                "[logging] log_addresses = {} is neither pseudonym nor full; \
+                 keeping pseudonym",
+                value.trim()
+            ),
+        }
     }
 }
 
@@ -3019,6 +3031,21 @@ mod tests {
             config.reticulum.flush_interval_secs,
             crate::config::DEFAULT_FLUSH_INTERVAL_SECS
         );
+    }
+
+    #[test]
+    fn test_parse_logging_log_addresses() {
+        use crate::peer_tag::LogAddresses;
+        // Order 1678: the pseudonym unless the file asks for `full`, and an
+        // unreadable value never turns raw addresses on.
+        let none = parse_ini("[logging]\n  loglevel = 4\n").unwrap();
+        assert_eq!(none.reticulum.log_addresses, LogAddresses::Pseudonym);
+        let full = parse_ini("[logging]\n  log_addresses = full\n").unwrap();
+        assert_eq!(full.reticulum.log_addresses, LogAddresses::Full);
+        let pseudo = parse_ini("[logging]\n  log_addresses = pseudonym\n").unwrap();
+        assert_eq!(pseudo.reticulum.log_addresses, LogAddresses::Pseudonym);
+        let junk = parse_ini("[logging]\n  log_addresses = raw\n").unwrap();
+        assert_eq!(junk.reticulum.log_addresses, LogAddresses::Pseudonym);
     }
 
     #[test]

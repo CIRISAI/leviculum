@@ -675,7 +675,15 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                                 close: Some(close),
                             };
                             let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
-                            let name = format!("tcp_server/{}", peer_addr);
+                            // The driver's name goes into every log line about
+                            // this connection, so it carries the source's
+                            // daily pseudonym, not its address (order 1678).
+                            // The live inventory row below keeps the address
+                            // while the connection lives, with the same tag
+                            // beside it.
+                            let src_tag = crate::peer_tag::tag(peer_addr.ip());
+                            let shown = crate::peer_tag::show_addr(peer_addr);
+                            let name = format!("tcp_server/{shown}");
                             inventory.lock_recover().add_spawned(
                                 id.0,
                                 InterfaceIdentity {
@@ -687,6 +695,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                                     parent: Some(listener_id),
                                 },
                             );
+                            inventory.lock_recover().set_src_tag(id.0, src_tag.to_string());
                             stream.set_nodelay(true).ok();
                             apply_liveness_options(&stream, &liveness).ok();
                             let mut handle = spawn_tcp_interface_from_stream(
@@ -708,7 +717,7 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
                             // which is the only entry a config file has for an
                             // accepted connection.
                             handle.info.ingress_control = Some(ingress_control);
-                            tracing::info!("Accepted connection: {} ({})", name, id);
+                            tracing::info!("Accepted connection: {} ({}) src={}", name, id, shown);
                             if new_interface_tx.send(handle).await.is_err() {
                                 break; // event loop shut down
                             }
@@ -780,13 +789,13 @@ fn refuse(
         Refusal::Source => tracing::warn!(
             event = "TCP_SOURCE_CAPPED",
             iface = %section,
-            source = %source,
+            source = %crate::peer_tag::show_ip(source.ip()),
             held = held,
         ),
         Refusal::Total => tracing::warn!(
             event = "TCP_TOTAL_CAPPED",
             iface = %section,
-            source = %peer.ip(),
+            source = %crate::peer_tag::show_ip(peer.ip()),
             held = held,
         ),
     }
@@ -799,7 +808,7 @@ fn report_silent_close(tracker: &Mutex<ConnTracker>, section: &str, closed: &Clo
         tracing::info!(
             event = "TCP_SILENT_CLOSED",
             iface = %section,
-            source = %closed.peer,
+            source = %crate::peer_tag::show_ip(closed.peer),
             after_s = closed.after.as_secs(),
             reason = closed.reason,
             suppressed = suppressed,
@@ -1989,6 +1998,108 @@ mod tests {
         let mut rng = Xorshift64::from_entropy();
         let count = maybe_corrupt(&mut buf, 1, &mut rng);
         assert_eq!(count, 0);
+    }
+
+    /// Order 1678: no line the TCP server writes on its connect, refusal and
+    /// disconnect paths carries the client's address or port; each names the
+    /// client by its daily tag, and the live inventory keeps the tag beside
+    /// the address.
+    #[tokio::test]
+    async fn test_tcp_server_logs_name_a_client_by_tag_not_address() {
+        use crate::test_support::log_capture::{capture_logs, captured};
+        use tokio::io::AsyncReadExt;
+
+        let (logs, guard) = capture_logs();
+        let next_id = Arc::new(AtomicUsize::new(0));
+        let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
+        // The wildcard bind, so the listener's own startup line names no
+        // address either and every address in the capture is the client's.
+        let std_listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = std_listener.local_addr().unwrap().port();
+        let inventory = crate::interfaces::inventory::InterfaceInventory::shared();
+        spawn_tcp_server(TcpServerConfig {
+            bind_addr: std_listener.local_addr().unwrap(),
+            prebound: Some(std_listener),
+            section: "Tag Server".to_string(),
+            next_id,
+            new_interface_tx: tx,
+            buffer_size: 16,
+            corrupt_every: None,
+            ifac: None,
+            mode: leviculum_core::traits::InterfaceMode::default(),
+            ingress_control: false,
+            listener_id: 99,
+            inventory: Arc::clone(&inventory),
+            announce_rate: (None, None, None),
+            admission: AdmissionConfig {
+                max_connections_per_source: 1,
+                ..AdmissionConfig::default()
+            },
+            liveness: TcpLiveness::default(),
+        })
+        .unwrap();
+
+        let client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let client_port = client.local_addr().unwrap().port();
+        let mut handle = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout waiting for handle")
+            .expect("channel closed");
+
+        // A second connection from the same source meets the cap of one and
+        // is closed right after accept: the refusal line.
+        let mut refused = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut byte = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(2), refused.read(&mut byte))
+            .await
+            .expect("the refused connection is closed");
+        assert!(matches!(n, Ok(0) | Err(_)), "refused, not served: {n:?}");
+
+        // The client leaves: the disconnect path runs until the interface's
+        // channel closes.
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while handle.incoming.recv().await.is_some() {}
+        })
+        .await
+        .expect("the server side sees the disconnect");
+
+        let tag = crate::peer_tag::tag("127.0.0.1".parse().unwrap()).to_string();
+        let live = inventory
+            .lock_recover()
+            .src_tag(handle.info.id.0)
+            .map(str::to_owned);
+        drop(guard);
+        let text = captured(&logs);
+
+        assert_eq!(handle.info.name, format!("tcp_server/{tag}"));
+        assert_eq!(
+            live.as_deref(),
+            Some(tag.as_str()),
+            "the live row keeps the tag"
+        );
+        assert!(
+            !text.contains("127.0.0.1"),
+            "an address in the log:\n{text}"
+        );
+        assert!(
+            !text.contains(&client_port.to_string()),
+            "the client's port in the log:\n{text}"
+        );
+        assert!(
+            text.contains(&format!("Accepted connection: tcp_server/{tag} ")),
+            "the accept line names the tag:\n{text}"
+        );
+        assert!(text.contains(&format!("src={tag}")), "{text}");
+        let capped = text
+            .lines()
+            .find(|l| l.contains("TCP_SOURCE_CAPPED"))
+            .unwrap_or_else(|| panic!("no TCP_SOURCE_CAPPED line:\n{text}"));
+        assert!(capped.contains(&format!("source={tag}")), "{capped}");
     }
 
     #[tokio::test]

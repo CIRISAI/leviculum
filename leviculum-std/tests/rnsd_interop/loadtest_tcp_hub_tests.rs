@@ -1503,8 +1503,8 @@ async fn loadtest_tcp_hub_soak() {
 
 /// The per-source cap (1190) the load hub raises, at its default: 16 clients
 /// from 127.0.0.2 are held and lose nothing, the 17th and 18th are closed
-/// right after accept, and `TCP_SOURCE_CAPPED` names the source and the held
-/// count. It is reported once per source per minute, so the two refusals are
+/// right after accept, and `TCP_SOURCE_CAPPED` names the source (by its
+/// daily tag, order 1678) and the held count. It is reported once per source per minute, so the two refusals are
 /// one line. The sink connects from 127.0.0.1 and stays outside the count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "spawns lnsd binary; run on demand"]
@@ -1664,10 +1664,18 @@ async fn a_seventeenth_client_from_one_source_is_refused_and_the_sixteen_lose_no
         1,
         "two refusals inside a minute are one TCP_SOURCE_CAPPED line: {capped:#?}"
     );
+    // The source is named by its daily tag, eight hex characters, never by
+    // its address (order 1678); the tag's key lives only inside lnsd.
+    let tag = capped[0]
+        .split_whitespace()
+        .find_map(|f| f.strip_prefix("source="))
+        .unwrap_or_default();
     assert!(
-        capped[0].contains(&format!("source={SOURCE}"))
+        tag.len() == 8
+            && tag.bytes().all(|b| b.is_ascii_hexdigit())
+            && !capped[0].contains(&SOURCE.to_string())
             && capped[0].contains(&format!("held={CAP}")),
-        "TCP_SOURCE_CAPPED must name the source and the held count: {}",
+        "TCP_SOURCE_CAPPED must name the source by its tag and the held count: {}",
         capped[0]
     );
     drop(held);
