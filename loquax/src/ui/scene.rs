@@ -1403,13 +1403,7 @@ fn me_bar<B>(model: &UiModel<B>) -> TopBar {
         // The own name (1452 rule 4): the names' word for us, else the
         // name the profile has from the mailbox; never the own hash.
         Some(own) => Avatar::of(
-            chat::initials(
-                model
-                    .names
-                    .shown(&own)
-                    .or(Some(model.profile.name.as_str()).filter(|n| !n.is_empty())),
-                &own,
-            ),
+            chat::initials(super::profile::own_name(model), &own),
             &own,
             None,
             None,

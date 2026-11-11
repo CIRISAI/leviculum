@@ -2578,17 +2578,33 @@ async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
         let answer = started(&loquax_android::start(&schema::encode(&first)));
         assert!(answer.ok, "{answer:?}");
         link_event(true, 30);
-        let reachable = until("the mailbox's devices", &|l| {
+        // The connection is the watching link to the mailbox (1647).
+        let reachable = until("the mailbox's devices, connected", &|l| {
             l.iter().any(|l| l == "phone: this device")
+                && l.iter().any(|l| l.starts_with("Connected"))
         });
         let said = lines(&reachable);
-        let version = format!("Version: {}", loquax::VERSION);
-        let way = format!("Connection over 127.0.0.1, port {port}");
+        // The version's words, never a commit (1647, finding 30).
+        let words = loquax::VERSION
+            .split(" (")
+            .next()
+            .expect("the words")
+            .to_string();
+        let version = format!("Version: {words}");
+        // The machine the mailbox says it runs on, an unusual port said.
+        let host = reachable.groups[0]
+            .lines
+            .iter()
+            .find(|l| l.label == "Runs on")
+            .and_then(|l| l.value.clone())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let way = format!("Connection to {host}, port {port}");
         for want in [
             "Which mailbox",
             version.as_str(),
             way.as_str(),
             "Last contact: now",
+            "This is your address too: the mailbox and you are one identity.",
         ] {
             assert!(
                 said.iter().any(|l| l == want) || reachable.groups.iter().any(|g| g.title == want),
@@ -2611,9 +2627,61 @@ async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
             .find(|l| l.action.as_deref() == Some("profile"))
             .expect("Show my code");
         assert_eq!(code.label, "Show my code");
+        for line in &said {
+            assert!(
+                !line.contains(loquax::VERSION.split(['(', ')']).nth(1).unwrap_or("-")),
+                "no commit on the page: {line}"
+            );
+        }
         println!(
             "FACADE mailboxpage reachable:\n{}",
             serde_json::to_string_pretty(&reachable).expect("json")
+        );
+        // 1647, walk 6, finding 28: the page asked again five seconds
+        // later has the same shape (groups, lines, their kinds), so the
+        // phone writes it into the lines on screen and the scroll anchor
+        // stays (`MailboxLines.java`, `fling.rs`). Only words move.
+        let shape = |page: &schema::MailboxPage| -> Vec<String> {
+            page.groups
+                .iter()
+                .flat_map(|g| {
+                    std::iter::once(format!("group {}", g.title)).chain(g.lines.iter().map(|l| {
+                        let kind = match (l.note, l.copy.is_some(), &l.action) {
+                            (true, _, _) => "note".to_string(),
+                            (false, true, _) => "copy".to_string(),
+                            (false, false, Some(action)) => format!("action {action}"),
+                            (false, false, None) => "line".to_string(),
+                        };
+                        match &l.value {
+                            Some(_) => format!("{kind} value"),
+                            None => kind,
+                        }
+                    }))
+                })
+                .collect()
+        };
+        let mut asks = Vec::new();
+        for _ in 0..2 {
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(5) {
+                let _ = loquax_android::next_event(Duration::from_millis(200));
+            }
+            asks.push(page());
+        }
+        for (i, again) in asks.iter().enumerate() {
+            assert_eq!(
+                shape(again),
+                shape(&reachable),
+                "ask {} five seconds on changed the page's shape:\n{:#?}\nvs\n{:#?}",
+                i + 1,
+                lines(again),
+                said
+            );
+        }
+        println!(
+            "FACADE mailboxpage anchor: shape {:?} held over two asks five seconds apart; last ask {:?}",
+            shape(&reachable),
+            lines(&asks[1])
         );
     });
     up.await.expect("the page while the mailbox runs");

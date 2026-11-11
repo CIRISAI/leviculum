@@ -9,13 +9,18 @@
 //!
 //! ```text
 //! /about []  -> [status, name: str, host: str, version: str,
-//!                [[device: bin16, name: str, admitted_at: int, last_seen: int], ...]]
+//!                [[device: bin16, name: str, admitted_at: int, last_seen: int], ...],
+//!                started: int]
 //! ```
 //!
 //! `host` is the machine's name as the mailbox reads it (`miauhaus`), empty
 //! where it knows none; `version` the build's (`loquax::VERSION`).
 //! `last_seen` is 0 for a device the mailbox has not heard since it
-//! started keeping it. Only an admitted device is answered. A mailbox from
+//! started keeping it. `started` (1647) is when the mailbox's daemon came
+//! up, unix seconds, 0 for unknown: a device's link to the mailbox counts
+//! from no earlier than that, so a mailbox restart shows on the page even
+//! where the device's transport stayed up through it. A reader from 1642
+//! reads five fields and leaves the sixth. Only an admitted device is answered. A mailbox from
 //! before 1642 has no handler for the path and stays silent: the device
 //! shows what it knows itself and says the mailbox is older.
 
@@ -37,6 +42,9 @@ pub struct About {
     pub version: String,
     /// The devices it admitted, the earliest first.
     pub devices: Vec<KnownDevice>,
+    /// When the mailbox came up, unix seconds; `None` from a mailbox that
+    /// does not say it (1642).
+    pub started: Option<i64>,
 }
 
 /// A device the mailbox admitted.
@@ -70,7 +78,7 @@ pub fn read_about_request(data: &[u8]) -> Result<(), Malformed> {
 /// The answer to an admitted device.
 pub fn about_answer(about: &About) -> Vec<u8> {
     let mut out = Vec::new();
-    msgpack::array(&mut out, 5);
+    msgpack::array(&mut out, 6);
     msgpack::uint(&mut out, 0);
     msgpack::string(&mut out, &about.name);
     msgpack::string(&mut out, &about.host);
@@ -83,6 +91,7 @@ pub fn about_answer(about: &About) -> Vec<u8> {
         msgpack::int(&mut out, device.admitted_at);
         msgpack::int(&mut out, device.last_seen.unwrap_or(0));
     }
+    msgpack::int(&mut out, about.started.unwrap_or(0));
     out
 }
 
@@ -93,7 +102,8 @@ pub fn read_about_answer(data: &[u8]) -> Result<Result<About, Status>, Malformed
         return Ok(Err(status));
     }
     let mut p = 0;
-    if msgpack::array_len(data, &mut p)? < 5 {
+    let fields = msgpack::array_len(data, &mut p)?;
+    if fields < 5 {
         return Err(Malformed);
     }
     msgpack::read_uint(data, &mut p)?;
@@ -122,11 +132,16 @@ pub fn read_about_answer(data: &[u8]) -> Result<Result<About, Status>, Malformed
             last_seen,
         });
     }
+    let started = match fields {
+        5 => None,
+        _ => Some(msgpack::read_int(data, &mut p)?).filter(|at| *at > 0),
+    };
     Ok(Ok(About {
         name,
         host,
         version,
         devices,
+        started,
     }))
 }
 
@@ -163,8 +178,23 @@ mod tests {
                     last_seen: None,
                 },
             ]),
+            started: Some(1_800_000_050),
         };
-        assert_eq!(read_about_answer(&about_answer(&about)), Ok(Ok(about)));
+        assert_eq!(
+            read_about_answer(&about_answer(&about)),
+            Ok(Ok(about.clone()))
+        );
+        // A mailbox from 1642 says five fields: no start, the rest read.
+        let mut five = Vec::new();
+        msgpack::array(&mut five, 5);
+        msgpack::uint(&mut five, 0);
+        msgpack::string(&mut five, "Lew Palm");
+        msgpack::string(&mut five, "miauhaus");
+        msgpack::string(&mut five, "0.9.7");
+        msgpack::array(&mut five, 0);
+        let old = read_about_answer(&five).expect("decodes").expect("ok");
+        assert_eq!(old.started, None);
+        assert_eq!(old.host, "miauhaus");
         assert_eq!(
             read_about_answer(&wire::status_answer(Status::NotAdmitted)),
             Ok(Err(Status::NotAdmitted))

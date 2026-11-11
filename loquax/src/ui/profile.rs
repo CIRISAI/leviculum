@@ -273,19 +273,40 @@ impl<B> UiModel<B> {
     }
 }
 
+/// The reader's own name, wherever this device has it (1452 rule 4): the
+/// names' word for us, else the name the profile has, else the one the
+/// mailbox says in `/about` (1647, walk 6, finding 31: the mailbox page
+/// said "lew" from `/about` while the profile's avatar, which read the
+/// names only, said "?" until a pull brought the archived name). One chain
+/// for the list's bar, the profile and the phone's list.
+pub fn own_name<B>(model: &UiModel<B>) -> Option<&str> {
+    let own = model.address?;
+    let said = |name: &str| !name.trim().is_empty();
+    model
+        .names
+        .shown(&own)
+        .filter(|n| said(n))
+        .or(Some(model.profile.name.as_str()).filter(|n| said(n)))
+        .or(match &model.profile.told {
+            super::mailbox_page::Told::Told(about) => Some(about.name.as_str()).filter(|n| said(n)),
+            _ => None,
+        })
+}
+
 /// The profile of `model`, open or not.
 pub fn profile<B>(model: &UiModel<B>) -> ProfileScreen {
     let own = model.address.unwrap_or([0; 16]);
     let avatar = Avatar::of(
-        super::chat::initials(model.names.shown(&own), &own),
+        super::chat::initials(own_name(model), &own),
         &own,
         None,
         None,
     );
+    // The name the profile keeps first, as before 1647; else the chain.
     let name = match model.profile.name.trim() {
-        "" => match model.names.shown(&own) {
-            Some(known) if !known.is_empty() => Text::Raw(String::from(known)),
-            _ => Text::key(StrId::ProfileNameElsewhere),
+        "" => match own_name(model) {
+            Some(known) => Text::Raw(String::from(known.trim())),
+            None => Text::key(StrId::ProfileNameElsewhere),
         },
         name => Text::Raw(String::from(name)),
     };
@@ -387,6 +408,41 @@ impl ProfileScreen {
 mod tests {
     use super::*;
     use crate::ui::strings::Lang;
+
+    /// 1647, walk 6, finding 31: the mailbox page said "lew" (its
+    /// `/about`) while the avatar said "?" until a pull brought the
+    /// archived name. The mailbox's own word names the avatar, the
+    /// profile and the list's bar at once; a name already known wins.
+    #[test]
+    fn the_mailboxs_about_names_the_avatar_before_any_pull() {
+        use crate::home::about::About;
+        use crate::ui::mailbox_page::Told;
+        use crate::ui::tests::Field;
+        let own = [0x90; 16];
+        let mut model = UiModel::<Field>::new(&[]);
+        model.address = Some(own);
+        model.profile.mailbox = Mailbox::Away {
+            name: None,
+            rung: None,
+            word: None,
+        };
+        let before = profile(&model);
+        assert_eq!(before.avatar.initials, "?", "the control: Lew's '?'");
+        model.profile.told = Told::Told(About {
+            name: String::from("lew"),
+            ..About::default()
+        });
+        let after = profile(&model);
+        assert_eq!(after.avatar.initials, "L");
+        assert_eq!(after.name.resolve(Lang::De), "lew");
+        // The list's bar and the phone's list read the same `own_name`.
+        model.profile.name = String::from("Lew Palm");
+        assert_eq!(
+            own_name(&model),
+            Some("Lew Palm"),
+            "the profile's name first"
+        );
+    }
 
     /// 1449 item 2 (walk 1 finding 8): the mailbox's archive hands the
     /// reader's own name as an announce of the reader's own address; the

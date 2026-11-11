@@ -263,8 +263,12 @@ struct Inner {
     /// none before the first, and when that look was.
     link: Option<bool>,
     link_looked: Option<u64>,
-    /// When the link last changed, and when it was last seen up, unix
-    /// seconds (1642): the mailbox page's "since" and "last contact".
+    /// When the watching link to the mailbox last changed, and when it was
+    /// last seen up, unix seconds (1642): the mailbox page's "since" and
+    /// "last contact". The watching link, not the TCP interface (1647,
+    /// walk 6, finding 37: the page counted "connected for" through a
+    /// mailbox restart, which the TCP connection to the lnsd in front of
+    /// it never saw). `None` before the link said anything.
     link_since: Option<i64>,
     last_contact: Option<i64>,
     /// What the mailbox said of itself (1642, `/about`), and whether an
@@ -996,7 +1000,7 @@ impl Session {
         use loquax::ui::profile::{Device, Mailbox, ProfileFacts, Rung};
         let rendezvous = self.rendezvous();
         let relayed = rendezvous.iter().any(|(_, up)| *up);
-        let (link, heard, since, last_contact, entry, told, device) = {
+        let (link, watching, heard, since, last_contact, entry, told, device) = {
             let inner = self.lock();
             // The mailbox announces this identity under the name it keeps
             // (1447): what the profile calls it, never the server the
@@ -1014,6 +1018,7 @@ impl Session {
             let told = lock_about(&inner.about).told.clone();
             (
                 inner.link,
+                inner.link_since.map(|_| inner.watching),
                 heard,
                 inner.link_since,
                 inner.last_contact,
@@ -1049,7 +1054,7 @@ impl Session {
             devices,
             told,
             reach: Reach {
-                up: link,
+                up: watching,
                 since,
                 last_contact,
                 entry,
@@ -2712,6 +2717,18 @@ impl Inner {
                 WatchEvent::Watching(up) => {
                     // The list's status dot (1199) shows it: a `changed`.
                     self.dirty |= self.watching != up;
+                    // The mailbox page's "connected for" (1647): from
+                    // the watching link's change, and the mailbox asked
+                    // again for its word on each new link, which may be
+                    // to a mailbox that restarted.
+                    if self.watching != up || self.link_since.is_none() {
+                        let wall = wall_now(self.offset).unix_secs;
+                        self.link_since = Some(wall);
+                        if up {
+                            self.last_contact = Some(wall);
+                            self.ask_about(0);
+                        }
+                    }
                     self.watching = up;
                 }
                 WatchEvent::Wake(newest) => {
@@ -2757,13 +2774,11 @@ impl Inner {
         if up && self.link == Some(false) {
             self.ask_for_home_path();
         }
-        let wall = wall_now(self.offset).unix_secs;
-        if up {
-            self.last_contact = Some(wall);
+        if self.watching {
+            self.last_contact = Some(wall_now(self.offset).unix_secs);
         }
         if self.link != Some(up) {
             self.link = Some(up);
-            self.link_since = Some(wall);
             let _ = self.events.send(Event::Link { v: VERSION, up });
             // The mailbox's own word, once per connection (1642).
             if up {
@@ -2799,10 +2814,13 @@ impl Inner {
             let told = match loquax::home::client::about(&node, &public_key, &device, BUDGET).await
             {
                 Ok(about) => {
+                    // The commits stay here, never on the page (1647).
                     tracing::info!(
-                        "HOME about host={:?} version={} devices={}",
+                        "HOME about host={:?} version={:?} ours={:?} started={:?} devices={}",
                         about.host,
                         about.version,
+                        loquax::VERSION,
+                        about.started,
                         about.devices.len()
                     );
                     Some(Told::Told(about))
@@ -3379,13 +3397,9 @@ impl Inner {
             None => self.cached_rows(order),
         };
         let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
-            // The own avatar (1452 rule 4): the own name, the names' word
-            // for us else the profile's from the mailbox; never the hash.
-            let named = self
-                .model
-                .names
-                .shown(&own)
-                .or(Some(self.model.profile.name.as_str()).filter(|name| !name.is_empty()));
+            // The own avatar (1452 rule 4): the core's one chain for the
+            // own name (1647); never the hash.
+            let named = loquax::ui::profile::own_name(&self.model);
             (loquax::address::to_hex(&own), chat::initials(named, &own))
         });
         schema::Conversations {

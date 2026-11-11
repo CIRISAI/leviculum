@@ -811,7 +811,7 @@ that a home from before reads past. The board asks `LORA_PAGE_BYTES`
 one response packet once the response frame (1 + 18 bytes) is around
 it. The home cuts the page to that, keeping at least one entry, and
 says `more` (`fit_page`, `loquax/src/home/wire.rs:421`; the server's
-`sync`, `loquax/src/home/server.rs:1393`). A message larger than a page
+`sync`, `loquax/src/home/server.rs:1401`). A message larger than a page
 still comes alone, as a resource.
 
 **The bytes, measured** (`loquax-android/tests/m9_client.rs`). The
@@ -1295,7 +1295,7 @@ All targets:
   our pin on the map where it is newer than our last share; otherwise
   unchanged.
 - **Android:** the phone's own fix (`Intent::OwnFix`,
-  `loquax-android/src/session.rs:1708`) is our pin the same way;
+  `loquax-android/src/session.rs:1713`) is our pin the same way;
   otherwise unchanged.
 - **The home:** unchanged; it carries no region yet (above).
 

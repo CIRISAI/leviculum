@@ -2641,9 +2641,10 @@ mod tests {
             "Adresse: 5a3e910c7742d81b6f03a4e258c92d80",
             "Läuft auf: miauhaus",
             "Verbunden seit 12 Min.",
-            "Verbindung über leviculum.network, Tor 4343, geschirmt",
+            "Verbindung zu miauhaus, geschirmt",
             "Fairphone: dieses Gerät",
             "M9: zuletzt da vor 2 Std.",
+            "Laptop",
             "c  Meinen Code zeigen",
         ] {
             says(&german, words);
@@ -2651,14 +2652,11 @@ mod tests {
         same_text(&german_name("tui-settings-mailbox.txt"), &german);
         let mut model = open(Lang::En, true);
         let shown = screen(&model);
-        says(
-            &shown,
-            "Connection over leviculum.network, port 4343, shielded",
-        );
+        says(&shown, "Connection to miauhaus, shielded");
         same_text("tui-settings-mailbox.txt", &shown);
         let away = screen(&open(Lang::En, false));
         says(&away, "Not connected for 2 h");
-        says(&away, "port 4242, not shielded");
+        says(&away, "Connection to leviculum.network, not shielded");
         says(&away, "Version: older than this device");
         update(&mut model, key('c'));
         assert!(model.profile_open, "c shows the code");

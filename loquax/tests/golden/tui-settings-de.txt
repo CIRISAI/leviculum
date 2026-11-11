@@ -2,7 +2,7 @@
 │N│1  Profil                                                                 │ │
 │U│   Name, Adresse, QR-Code                                                 │ │
 │c│2  Postfach                                                               │ │
-│e│   Wo es liegt                                                            │ │
+│e│   Welches Postfach, Verbindung, Geräte                                   │ │
 │K│3  Darstellung                                                            │ │
 │ │   Hell oder dunkel, die Karte                                            │ │
 │ │4  Chats                                                                  │ │

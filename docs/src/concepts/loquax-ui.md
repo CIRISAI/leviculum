@@ -618,6 +618,42 @@ and its German twin, and the phone's answers
 `mailbox-page-reachable.json` and `mailbox-page-unreachable.json`, all
 from `loquax/tests/support/mailbox_page.rs`.
 
+**Walk 6 (1647, 2026-11-10, the Pixel against Lew's mailbox on
+miauhaus).** What the page says now:
+
+- It holds still. The phone asks every five seconds; an answer of the
+  same shape (groups, lines, their kinds) is written into the lines on
+  screen (`MailboxLines.java`), so no view goes and the scroll position
+  stays; one of another shape is drawn whole when it is there and the
+  position put back. Before, each ask emptied the page and it jumped to
+  the top, and "Show my code" below the fold was out of reach.
+- A device the mailbox has not heard since it began keeping the time
+  (`last_seen` NULL after the schema 20 migration) is named without a
+  time: unknown is not never.
+- The version is words only, never a commit: "0.1.8", "0.1.9, newer",
+  "0.1.7, older", "0.1.8, another build" where the words agree and the
+  commits do not; the commits are in the phone's `HOME about` log line.
+  The Loquax build stamp marks a tree with uncommitted changes
+  `<hash>-dirty` (the 1642 APK was built before its own commits and
+  named the one before).
+- Under the address: "This is your address too: the mailbox and you are
+  one identity."
+- The way names the mailbox's machine from `/about` ("Connection to
+  miauhaus, shielded (the phone hears only its mailbox)"), else the
+  server; a port only where it is neither 4343 nor 4242.
+- "Connected for" counts the phone's watching link to the mailbox, and
+  no earlier than the mailbox's own start, which `/about` now says
+  (`started`, a sixth field a 1642 reader leaves): a mailbox restarted
+  under a TCP connection that stayed up says "less than a minute".
+- This device is said once ("This device" alone where it has no name).
+- The avatar, the profile and the list's bar read one chain for the own
+  name (`profile::own_name`): the names' word, the profile's name, then
+  the mailbox's `/about` name. The page said "lew" while the avatar said
+  "?" until a pull; the window's profile golden had that "?" in it.
+- The settings list says "Which mailbox, connection, devices" under
+  Mailbox, and the phone shows no toast of its own on a copy from
+  Android 13 on, where the system previews what was copied.
+
 ### Built 2026-11-09, the public rooms' hubs
 
 Lew, 2026-11-08 (1577): Loquax offers the popular public room hubs, and
