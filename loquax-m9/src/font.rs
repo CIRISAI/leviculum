@@ -48,28 +48,40 @@
 //! large one's, every glyph, and a third more rows (16 against 12) on a
 //! panel it tiles from top to bottom (5 pixels stay blank at the right).
 
+//!
+//! Three sizes since 1561: Lew at the board on 2026-11-08 asked for a
+//! third, smaller one, "sehr klein", the 6 x 12 above: every glyph the
+//! board draws, an x of 5 px. He found 5 px hard at arm's length on
+//! 2026-11-04 (the 6 x 10's); offering it is his choice, the default
+//! stays the 9 x 15. The 6 x 12 tiles the panel's height (20 rows of 12
+//! px) and leaves 2 pixels at the right (53 cells of 6 px).
+
 use embedded_graphics::mono_font::MonoFont;
 
-/// The two sizes the M9's cells come in (1532): the small one the
-/// default, the large one the 10 x 20 of 1428.
+/// The three sizes the M9's cells come in (1532, 1561): the small one the
+/// default, the large one the 10 x 20 of 1428, the very small one the
+/// 6 x 12.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Size {
-    /// The 9 x 15: 35 x 16 cells.
+    /// The 6 x 12: 53 x 20 cells ("sehr klein", 1561).
+    Tiny,
+    /// The 9 x 15: 35 x 16 cells ("klein").
     #[default]
     Small,
-    /// The 10 x 20: 32 x 12 cells.
+    /// The 10 x 20: 32 x 12 cells ("groß").
     Large,
 }
 
 impl Size {
     /// What a board shows before the reader chose.
     pub const DEFAULT: Size = Size::Small;
-    /// Both, small first.
-    pub const ALL: [Size; 2] = [Size::Small, Size::Large];
+    /// All three, smallest first: the order the settings row offers them.
+    pub const ALL: [Size; 3] = [Size::Tiny, Size::Small, Size::Large];
 
     /// One cell's pixels, across and down.
     pub const fn cell_px(self) -> (u16, u16) {
         match self {
+            Size::Tiny => (6, 12),
             Size::Small => (9, 15),
             Size::Large => CELL_PX,
         }
@@ -87,35 +99,48 @@ impl Size {
     /// The atlas, built (and leaked, as [`atlas`] says) on each call.
     pub fn atlas(self) -> MonoFont<'static> {
         match self {
+            Size::Tiny => mousefood::fonts::mono_6x12_atlas(),
             Size::Small => mousefood::fonts::mono_9x15_atlas(),
             Size::Large => atlas(),
         }
     }
 
-    /// The other size: what the switch makes of this one.
-    pub const fn toggled(self) -> Size {
+    /// Its place in [`Size::ALL`]: the renderer's grids and atlases are
+    /// kept in that order.
+    pub const fn index(self) -> usize {
         match self {
-            Size::Small => Size::Large,
-            Size::Large => Size::Small,
+            Size::Tiny => 0,
+            Size::Small => 1,
+            Size::Large => 2,
         }
     }
 
-    /// Whether this is the large size, as the client record keeps it.
-    pub const fn large(self) -> bool {
-        matches!(self, Size::Large)
+    /// The size as the client record keeps it (`loquax::home::record`,
+    /// byte 6 bits 0-1): 0 the default, 1 the large one (the 1532 flag,
+    /// so a record written before 1561 reads as it was), 2 the very small
+    /// one.
+    pub const fn record(self) -> u8 {
+        match self {
+            Size::Small => 0,
+            Size::Large => 1,
+            Size::Tiny => 2,
+        }
     }
 
-    /// The size the client record's flag names.
-    pub const fn of_large(large: bool) -> Size {
-        match large {
-            true => Size::Large,
-            false => Size::Small,
+    /// The size a record's two bits name; a value no build wrote (3) is
+    /// the default.
+    pub const fn of_record(bits: u8) -> Size {
+        match bits & 0b11 {
+            1 => Size::Large,
+            2 => Size::Tiny,
+            _ => Size::DEFAULT,
         }
     }
 
     /// Its name in a log line.
     pub const fn name(self) -> &'static str {
         match self {
+            Size::Tiny => "tiny",
             Size::Small => "small",
             Size::Large => "large",
         }
@@ -249,13 +274,44 @@ mod tests {
         assert!(top < cap, "Ä inks from {top}, A from {cap}");
     }
 
+    /// The very small atlas (1561) is the 6 x 12 the table says: an x of
+    /// 5 px, a capital of 7, every glyph the board draws, a 53 x 20 grid.
     #[test]
-    fn the_sizes_toggle_and_keep_as_a_flag() {
+    fn the_tiny_atlas_measures_as_the_table_and_draws_every_mark() {
+        let font = Size::Tiny.atlas();
+        let size = font.character_size;
+        assert_eq!((size.width as u16, size.height as u16), (6, 12));
+        assert_eq!(Size::Tiny.grid(), (53, 20));
+        assert_eq!(HEIGHT % size.height, 0);
+        assert_eq!(WIDTH - 53 * size.width, 2, "two pixels stay blank");
+        let (top, bottom) = inked(&font, "x");
+        assert_eq!(bottom - top + 1, 5);
+        assert_eq!(mm_x1000(bottom - top + 1), 762);
+        let (top, bottom) = inked(&font, "H");
+        assert_eq!(bottom - top + 1, 7);
+        let missing = font.glyph_mapping.index('\u{e000}');
+        let lacks: String = "ÄÖÜßäöü✓◷▌…·!"
+            .chars()
+            .filter(|&c| font.glyph_mapping.index(c) == missing)
+            .collect();
+        assert_eq!(lacks, "");
+        let (cap, _) = inked(&font, "A");
+        let (top, _) = inked(&font, "Ä");
+        assert!(top < cap, "Ä inks from {top}, A from {cap}");
+    }
+
+    /// The record's two bits name each size, a record before 1561 (0 or
+    /// the 1532 flag 1) reads as it was written, a value no build writes
+    /// is the default; the index is the place in [`Size::ALL`].
+    #[test]
+    fn the_sizes_keep_as_two_bits_and_index_their_order() {
         assert_eq!(Size::DEFAULT, Size::Small);
-        for size in Size::ALL {
-            assert_eq!(size.toggled().toggled(), size);
-            assert_ne!(size.toggled(), size);
-            assert_eq!(Size::of_large(size.large()), size);
+        for (i, size) in Size::ALL.into_iter().enumerate() {
+            assert_eq!(Size::of_record(size.record()), size);
+            assert_eq!(size.index(), i);
         }
+        assert_eq!(Size::of_record(0), Size::Small);
+        assert_eq!(Size::of_record(1), Size::Large);
+        assert_eq!(Size::of_record(3), Size::DEFAULT);
     }
 }

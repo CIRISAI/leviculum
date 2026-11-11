@@ -1264,46 +1264,95 @@ fn a_reply_being_written_is_the_golden_frame() {
     check("m9-reply-compose.png", &shown(&model));
 }
 
-/// The house key's overview (1532) drawn as the board draws it
-/// (`Renderer::text` over `Overview::lines`), open, in the default size,
-/// in `lang`.
-fn overview_frame(lang: Lang) -> (Frame, Vec<String>) {
-    let mut overview = loquax_m9::house::Overview::new(Size::DEFAULT);
+/// The house key's settings page (1532, 1561) drawn as the board draws
+/// it (`Renderer::text` over `Overview::lines` of `house::page`), open,
+/// in `size`, in `lang`, the size row's value stepped to `stepped` or not.
+fn overview_frame(lang: Lang, size: Size, stepped: Option<Size>) -> (Frame, Vec<String>) {
+    let mut overview = loquax_m9::house::Overview::new(size);
     overview.open = true;
+    overview.stepped = stepped.map(Size::index);
+    let mut model = UiModel::<Field>::new(&[]);
+    model.lang = lang;
+    let page = loquax_m9::house::page(&model, size, "0.0.0");
     let look = Look::m9(lang, Some(now()));
-    let (cols, rows) = Size::DEFAULT.grid();
+    let (cols, rows) = size.grid();
     let words = overview
-        .lines(&look, cols, rows)
+        .lines(&page, &look, cols, rows)
         .iter()
         .map(row_text)
         .collect();
     let mut frame = Frame::new();
     let mut renderer = Renderer::new(&mut frame).expect("renderer");
-    renderer.set_size(Size::DEFAULT);
+    renderer.set_size(size);
     renderer
-        .text(|cols, rows| overview.lines(&look, cols, rows))
+        .text(|cols, rows| overview.lines(&page, &look, cols, rows))
         .expect("draw");
     drop(renderer);
     (frame, words)
 }
 
-/// 1451, the M9's settings: the M9 has no settings screen (the model's
-/// settings are one of the states `group::close_unshown` closes); what it
-/// has is the house key's overview (`house.rs`, 1532), its one row the
-/// type switch. `m9-settings.png` is that page in English ("Overview",
-/// "Text: small | large"), `m9-settings-de.png` in German ("Übersicht",
-/// "Schrift: klein | groß"): its words go through the catalogue.
+/// 1451, 1561, the M9's settings: the house key's page (`house.rs`), the
+/// core's settings for the M9 (`settings::PLACES`' M9 column):
+/// Appearance with the type size row, Advanced with the version and the
+/// map's data. `m9-settings.png` is that page in English,
+/// `m9-settings-de.png` in German: its words go through the catalogue.
+/// `m9-settings-tiny.png` is it in the very small size with the value
+/// stepped (between `<` and `>`, the hint says what Enter does).
 #[test]
-fn the_house_keys_overview_is_the_settings_golden() {
-    let (en, rows) = overview_frame(Lang::En);
-    assert!(rows[0].starts_with(" Overview"), "{rows:#?}");
-    assert!(rows[2].contains("Text: small | large"), "{rows:#?}");
+fn the_house_keys_page_is_the_settings_golden() {
+    let (en, rows) = overview_frame(Lang::En, Size::DEFAULT, None);
+    assert!(rows[0].starts_with(" Settings"), "{rows:#?}");
+    assert!(rows[2].starts_with(" Appearance"), "{rows:#?}");
+    assert!(rows[3].starts_with("▌ Text"), "{rows:#?}");
+    assert!(rows[3].trim_end().ends_with("small"), "{rows:#?}");
+    assert!(rows[5].starts_with(" Advanced"), "{rows:#?}");
+    assert!(
+        rows[6].contains("Version") && rows[6].contains("0.0.0"),
+        "{rows:#?}"
+    );
     check("m9-settings.png", &en);
-    let (de, rows) = overview_frame(Lang::De);
-    assert!(rows[0].starts_with(" Übersicht"), "{rows:#?}");
-    assert!(rows[2].contains("Schrift: klein | groß"), "{rows:#?}");
+    let (de, rows) = overview_frame(Lang::De, Size::DEFAULT, None);
+    assert!(rows[0].starts_with(" Einstellungen"), "{rows:#?}");
+    assert!(rows[3].trim_end().ends_with("klein"), "{rows:#?}");
     check("m9-settings-de.png", &de);
     assert_ne!(en.pixels(), de.pixels());
+    let (tiny, rows) = overview_frame(Lang::De, Size::Tiny, Some(Size::Large));
+    assert_eq!(rows.len(), 20);
+    assert!(rows[3].trim_end().ends_with("< groß >"), "{rows:#?}");
+    assert!(
+        rows.iter().any(|r| r.contains("Enter übernimmt")),
+        "{rows:#?}"
+    );
+    check("m9-settings-tiny.png", &tiny);
+}
+
+/// 1561: the list and the open chat in the very small size, the 6 x 12,
+/// which a reader may choose. The control: it shows more entries than
+/// the small size (9 against 7) and draws a different frame.
+#[test]
+fn the_list_and_the_chat_in_the_tiny_size_are_golden_frames() {
+    let home = tempfile::tempdir().expect("home");
+    let mut model = on_the_list(home.path());
+    model.viewing = screen::viewing(Size::Tiny);
+    assert_eq!(screen::size_of(&model), Size::Tiny);
+    let tiny = shown(&model);
+    check("m9-chats-tiny.png", &tiny);
+    let entries = |model: &UiModel<Field>| {
+        screen::scene(model)
+            .list
+            .map_or(0, |list| list.rows.len().min(model.viewing.list_rows))
+    };
+    let mut small = model.clone();
+    small.viewing = screen::viewing(Size::Small);
+    assert_eq!(entries(&small), 7);
+    assert_eq!(entries(&model), 9);
+    assert!(changed_rows(&tiny, &shown(&small)).is_some());
+    let rows = text_of(&model);
+    assert_eq!(rows.len(), 20);
+    assert_eq!(rows[0].chars().count(), 53);
+    press(&mut model, M9Key::Enter);
+    assert_eq!(model.focus, Pane::Messages);
+    check("m9-chat-tiny.png", &shown(&model));
 }
 
 /// The board's chats list (the fixture's, in English) with `word` at the

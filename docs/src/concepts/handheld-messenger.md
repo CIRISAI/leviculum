@@ -421,7 +421,7 @@ The renderer is a crate: `loquax-m9`, `no_std` plus `alloc`, built for
 `thumbv7em-none-eabihf` and the M9's `xtensa-esp32s3-none-elf` by `just
 m9-render-no-std` (in `guards`, with an injected `std::fs` call as its
 positive control). It words the chats list scene in cells
-(`lines`, `loquax-m9/src/screen.rs:225`) and draws them through
+(`lines`, `loquax-m9/src/screen.rs:221`) and draws them through
 `leviculum-ui-ratatui`'s styled-line bridge, which builds `no_std`
 without that crate's new default `terminal` feature, into ratatui over
 mousefood (`draw`, `loquax-m9/src/render.rs:199`). Mousefood's own
@@ -439,10 +439,10 @@ measurement. What the slice settled on the host:
   character's second cell, the atlas has no glyph wider than one, so an
   emoji left the old pixels beside it. The screen now draws a wide
   character as `?` and drops zero-width ones before it measures a line
-  (`narrow`, `loquax-m9/src/screen.rs:577`).
+  (`narrow`, `loquax-m9/src/screen.rs:570`).
 - **The tick ladder.** The list's mark stands on the shared glyph table's
   ASCII rungs (`. . v vv VV !` for sending, unconfirmed, mailbox,
-  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:521`).
+  delivered, read, failed; `state_of`, `loquax-m9/src/screen.rs:514`).
 - **The key table.** Up, down, open and back are the navigation keys and
   Enter, sent as the terminal's `Up`, `Down`, `Enter` and `Esc`
   (`LIST_ROWS`, `loquax-m9/src/keys.rs:52`); a test resolves each through
@@ -510,8 +510,8 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   the cursor nine bubbles, opens the line and types an emoji with one
   renderer, and must equal a fresh draw.
 - **What the M9 shows of a model** (`scene`,
-  `loquax-m9/src/screen.rs:198`, and `Look::of`,
-  `loquax-m9/src/screen.rs:175`). The Compact scene, which is the open chat
+  `loquax-m9/src/screen.rs:194`, and `Look::of`,
+  `loquax-m9/src/screen.rs:171`). The Compact scene, which is the open chat
   alone, with the cursor of the pane the keys are in; and the list while
   the keys are on the list. The model's back from the chat moves the keys
   to the list and keeps the chat open, as the terminal's panes do, so a
@@ -528,7 +528,7 @@ halves stay: the store in flash, the scancodes, the send over the mesh.
   and reads nothing (`behind_the_list`, `loquax-m9/src/home.rs:292`); Enter
   reads, and an Enter before the page arrived names the row's kept unread
   ids. What a type size set asks of the model, the boot's cursor chat's
-  page among it, is routed (`set_size`, `loquax-m9/src/house.rs:299`).
+  page among it, is routed (`set_size`, `loquax-m9/src/house.rs:469`).
 - **The compose line** (`compose_line`, `loquax-m9/src/chat.rs:578`): the
   hint while empty and not typed into, the text scrolled so the caret
   shows and the caret's cell reversed while it is. The field is
@@ -597,10 +597,10 @@ this slice.
   keyboard controller, measured"). 1427 replaced the matrix driver with
   the measured one; the scan frame, the `KB` line and the test layout are
   gone.
-- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:160`) keeps no
+- **The driver** (`Key::of`, `loquax-m9/src/keyboard.rs:161`) keeps no
   state: a non-zero code is one press, printable ASCII a character,
   `0x0d` Enter, `0x08` Backspace, a code of `SPECIALS`
-  (`loquax-m9/src/keyboard.rs:132`) its control's role, any other
+  (`loquax-m9/src/keyboard.rs:133`) its control's role, any other
   `special_0x..`, which makes no key event. A role is a key of the
   shared table (the ring and Back) or a palette command run as a GUI's
   menu runs one (the chats list, the compose line, the map;
@@ -708,7 +708,7 @@ draws is the scene the terminal, the window and the phone already draw.
 - **The keyboard:** the controller's answer is read as the community port
   reads it, register 0x01 of 0x6D, eight bytes a poll. Every answer goes
   out raw, `KBRAW <ms> <hex>`, one a 10 ms poll, and `parse_raw`
-  (`loquax-m9/src/kbraw.rs:285`) replays a capture on the host. Slice four
+  (`loquax-m9/src/kbraw.rs:287`) replays a capture on the host. Slice four
   first decoded the answer as a matrix bitmap; the capture that line made
   possible read the protocol (one code per press, 1427), and the board
   now reads it so (`MEASURED`, `loquax-m9/src/kbraw.rs:37`; `read`,
@@ -1325,7 +1325,7 @@ below. The board keeps lnomad's 500 nodes (`REGISTRY` in
 The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
-a branch in `lines` (`loquax-m9/src/screen.rs:225`) for the scene's
+a branch in `lines` (`loquax-m9/src/screen.rs:221`) for the scene's
 `rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:1096`), which
 the model already returns while the tab is in front (`rooms_scene`,
 `loquax/src/ui/scene.rs:1222`), and its tab in the tab bar the screen
@@ -1444,7 +1444,7 @@ the cache those routines switch off.
   message that fits no page ends the pull with an error, never a panic
   and never a skipped message. The answer ceiling is the largest message
   the board takes in, 256 KiB on the PSRAM heap, not the session's room.
-- **The record** (`ClientRecord`, `loquax/src/home/record.rs:78`), the
+- **The record** (`ClientRecord`, `loquax/src/home/record.rs:81`), the
   board's form of the desktop's three files: the device identity's
   private key, the home's public key, the admission (pending with its
   token, or admitted), the sync cursor and the device name, 196 bytes
@@ -1987,17 +1987,17 @@ instead of draws; a draw's own copy is not counted.
 **The census in the reader's size.** 1532's census walked every screen
 in both type sizes and core 0 waited 6026 ms for it (window 12: 2857).
 A release boot now walks the reader's size only; the bench image walks
-both (`thinknode_m9.rs:2856`).
+both (`thinknode_m9.rs:2863`).
 
 **The walk.** `expect <field> changed` waits for a `[PAGE]` line that
 moves the field, up to 1 s after the action began
 (`CHANGED_WAIT_S`, `scripts/m9-walk.py:162`): T on the map flushes the
 hint's row first and says the zoom about 400 ms later. `key_ms` still
 measures the first flush after the key, and walk.md names its `rows=`.
-The house key opens the house page after its tap's 300 ms gap
-(`GAP_MS`, `loquax-m9/src/house.rs:43`), so its bar is that much longer
-(`HOUSE_GAP_MS`, `scripts/m9-walk.py:159`); `bench.walk` waits for
-`page=house` and leaves it with Back. An lnsd on the proxy's pty
+The house key opens the house page on the press since 1561 (the
+controller repeats no held key, so the 300 ms tap gap of 1532 and the
+walker's longer bar for it went), and its bar is every key's;
+`bench.walk` waits for `page=house` and leaves it with Back. An lnsd on the proxy's pty
 re-attaches by itself after a flash; a second one is refused with
 "shared-instance name already served" (`scripts/m9-walk.sh`).
 
@@ -2058,12 +2058,13 @@ the index keeps the group's name from the invitation, so both boots
 name and list it alike.
 
 **The boot's census.** The release image's census leaves out the map
-and its pan (`thinknode_m9.rs:2868`): window 15's boot `[MAP] zoom=15
+and its pan (`thinknode_m9.rs:2875`): window 15's boot `[MAP] zoom=15
 picture_ms=241` before the list was the census's own pan draw, kept by
 no reader's map. The census's map stats are dropped after it. A chat's
 draw may keep the renderer's seen record (ea3ffd02), and the next screen
 gives it back: `draw_held` +64 / -64 B (+32 / -32 large) is within
-`SEEN_HELD` (`loquax-m9/src/census.rs:170`), more either way stays over.
+`SEEN_HELD`, 256 B since 1561 for the very small size's 19 chat rows
+(`loquax-m9/src/census.rs:170`), more either way stays over.
 
 ### A pull never starves the panel, a reset never refolds the ring (1563)
 
@@ -2165,7 +2166,7 @@ boot the log shows `[PAGE] name=chats`, then a `[STORE] page_read`, a
 summary record, the cursor on row 12 and a bench `[OPEN]` with
 `keys=0`. That is 1546's preload: the boot's `house::set_size` asks
 the model, the model asks the cursor chat's page
-(`thinknode_m9.rs:2929`), and the fold runs behind the list
+(`thinknode_m9.rs:2936`), and the fold runs behind the list
 (`behind_the_list`, `loquax-m9/src/home.rs:292`), so no read mark is
 queued — `route` takes marks only from `take_marks`, and the hidden
 fold queues none. The summary write beside it is the touched row with
@@ -2461,9 +2462,9 @@ the image, the 1489 store's long chat has 1200). It failed because the
 reopen held a second whole model in the IO pool: the UI core's, every
 message of the ring after the boot's own rebuild, and the old client's
 shelf. Now the UI core is handed an empty model first and frees its own
-(`Handheld::bench_release`, `leviculum-esp/src/handheld.rs:980`), and the
+(`Handheld::bench_release`, `leviculum-esp/src/handheld.rs:982`), and the
 old client is dropped before the restore starts (`Handheld::bench_reopen`,
-`leviculum-esp/src/handheld.rs:964`); the sim's `bench forget` frees in
+`leviculum-esp/src/handheld.rs:966`); the sim's `bench forget` frees in
 the same order.
 
 Two blocks of the rebuild grew with the ring whatever the chats were,
@@ -2491,7 +2492,7 @@ entries=<n> ms=<t>` every `REBUILD_CHUNK` entries
 (the watchdog is not armed yet), so its 25 s lost what the 8 KiB keep
 could not hold (`rx_lost=7916`). Its clock now pumps the keep to the
 heap at every step, as the forget's reopen and a taken code do
-(`leviculum-esp/src/bin/thinknode_m9.rs:2077`). The held bytes live in
+(`leviculum-esp/src/bin/thinknode_m9.rs:2084`). The held bytes live in
 2 KiB blocks, at most 35 s of the line (`RxHeld`,
 `leviculum-nrf/serial-mux/src/rx.rs:126`): a doubling buffer would ask
 the pool for 256 KiB in one piece, and 22 s was shorter than the
@@ -2517,7 +2518,7 @@ owed, the reboot `rebuilt`).
 **A dump is its own stage.** Core 0 wrote a screen dump's lines inside
 the take stage, so the walks read takes of 1 to 6 s. The dump is now
 timed apart: stall stage `dump`, and `dump=` in the `[LOOP]` line beside
-`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2580`); `m9-walk.py`
+`take=` (`leviculum-esp/src/bin/thinknode_m9.rs:2587`); `m9-walk.py`
 takes `dump=` as the dump's turn and holds the rest of that turn to the
 bar.
 

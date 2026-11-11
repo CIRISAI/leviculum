@@ -1455,15 +1455,19 @@ fn redraw(
         row,
         home: shown.word,
         fault: shown.fault,
-        note: shown.overview.note(),
         map: shown.map,
         ..screen::Look::of(model)
     };
     let overview = shown.overview;
+    // The house key's settings page (1561), the core's settings for the M9.
+    let house_page = || house::page(model, overview.size, env!("CARGO_PKG_VERSION"));
     #[cfg(not(m9_bench))]
     let drawn = match &shown.pairing {
         Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
-        None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
+        None if overview.open => {
+            let page = house_page();
+            renderer.text(|cols, rows| overview.lines(&page, &look, cols, rows))
+        }
         None => renderer.show(model, &look, map),
     };
     // The bench times the scene and the draw apart (1540).
@@ -1472,7 +1476,10 @@ fn redraw(
     #[cfg(m9_bench)]
     let drawn = match &shown.pairing {
         Some(pairing) => pair::draw(renderer, pairing, shown.word, &look),
-        None if overview.open => renderer.text(|cols, rows| overview.lines(&look, cols, rows)),
+        None if overview.open => {
+            let page = house_page();
+            renderer.text(|cols, rows| overview.lines(&page, &look, cols, rows))
+        }
         None => bench::show(renderer, model, &look, map),
     };
     #[cfg(m9_bench)]
@@ -1507,7 +1514,7 @@ fn redraw(
         );
     }
     let at = match shown.pairing.is_none() && overview.open {
-        true => page::house(),
+        true => page::house(overview.at),
         false => page::of(model, row, shown.pairing.is_some(), &renderer.window()),
     };
     let moved = said.say(at);
@@ -2095,7 +2102,7 @@ fn main() -> ! {
         fault: None,
         map: map::Overlay::default(),
         // The record's type (1532); a board without one shows the default.
-        overview: Overview::new(node.large_type().map_or(Size::DEFAULT, Size::of_large)),
+        overview: Overview::new(node.type_size().map_or(Size::DEFAULT, Size::of_record)),
     };
 
     // The seed the UI core draws client ids from (1493): entropy taken
@@ -2589,7 +2596,7 @@ fn main() -> ! {
                 FromUi::Gnss(wanted) => gnss_run.wanted = wanted,
                 FromUi::Type(size) => {
                     // The reader's type into the client record (1532).
-                    let kept = match node.keep_type(size.large(), &mut stores) {
+                    let kept = match node.keep_type(size.record(), &mut stores) {
                         Some(true) => "yes",
                         Some(false) => "no reason=write",
                         None => "no reason=no-record",
@@ -3284,10 +3291,17 @@ fn ui_main(
                         // The `[UART]` line's `keys_ui=` (1612): this
                         // press reached a UI turn.
                         leviculum_esp::count_key_ui();
-                        // The house key and the open overview (1532);
-                        // the pairing has the keys while it shows.
+                        // The house key and its settings page (1532,
+                        // 1561); the pairing has the keys while it shows.
                         let took = match shown.pairing {
-                            None => shown.overview.press(key, ms),
+                            None => {
+                                let page = house::page(
+                                    &model,
+                                    shown.overview.size,
+                                    env!("CARGO_PKG_VERSION"),
+                                );
+                                shown.overview.press(key, &page)
+                            }
                             Some(_) => None,
                         };
                         if let Some(did) = took {
@@ -3371,9 +3385,6 @@ fn ui_main(
 
         let t_draw = leviculum_esp::uptime_us();
         stall::stage(Core::Ui, Stage::Draw);
-        // A house tap's gap, the switch's word (1532).
-        let did = shown.overview.tick(leviculum_esp::uptime_ms() as u32);
-        dirty |= switched(did, &mut model, &mut renderer, &mut log, &mut asked);
         dirty |= drawn.due(&model);
         // The map's words come and go by the clock (1531): a redraw when
         // they change, none while they stand.

@@ -347,7 +347,7 @@ impl Board {
         // The record's type (1532), as the board reads it at boot; a board
         // without a record shows the default.
         let size = match board.flash.home {
-            Some(_) => Size::of_large(board.flash.large_type),
+            Some(_) => Size::of_record(board.flash.type_size),
             None => Size::DEFAULT,
         };
         board.overview.restore(size);
@@ -549,7 +549,10 @@ impl Board {
         let (cols, rows) = self.overview.size.grid();
         let lines = match &self.shown.pairing {
             Some(pairing) => pair::screen(pairing, self.shown.word, &look, cols, rows),
-            None if self.overview.open => self.overview.lines(&look, cols, rows),
+            None if self.overview.open => {
+                let page = house::page(&self.model, self.overview.size, env!("CARGO_PKG_VERSION"));
+                self.overview.lines(&page, &look, cols, rows)
+            }
             None if map::shown(&self.model) => {
                 let bare = map::view(&self.model)
                     .is_none_or(|(view, _)| self.map.choose(&view) == map::Drawn::Bare);
@@ -704,7 +707,6 @@ impl Board {
             row: self.row,
             home: self.shown.word,
             fault: self.shown.fault,
-            note: self.overview.note(),
             map: self.shown.map,
             ..Look::of(&self.model)
         }
@@ -864,10 +866,17 @@ impl Board {
                         let line = keyboard::key_line(ms, code, key);
                         self.log.raw(&line);
                         self.last_key = Some(line);
-                        // The house key and the open overview (1532);
-                        // the pairing has the keys while it shows.
+                        // The house key and its settings page (1532,
+                        // 1561); the pairing has the keys while it shows.
                         let took = match self.shown.pairing {
-                            None => self.overview.press(key, ms),
+                            None => {
+                                let page = house::page(
+                                    &self.model,
+                                    self.overview.size,
+                                    env!("CARGO_PKG_VERSION"),
+                                );
+                                self.overview.press(key, &page)
+                            }
                             Some(_) => None,
                         };
                         if let Some(did) = took {
@@ -927,9 +936,6 @@ impl Board {
         }
 
         let t_draw = std::time::Instant::now();
-        // A house tap's gap, the switch's word (1532).
-        let did = self.overview.tick(uptime_ms() as u32);
-        dirty |= self.did(did);
         dirty |= std::mem::take(&mut self.owed);
         dirty |= self.drawn.due(&self.model);
         let now = uptime_ms();
@@ -983,9 +989,11 @@ impl Board {
         let overview = self.overview;
         let drawn = match &self.shown.pairing {
             Some(pairing) => pair::draw(&mut self.renderer, pairing, self.shown.word, &look),
-            None if overview.open => self
-                .renderer
-                .text(|cols, rows| overview.lines(&look, cols, rows)),
+            None if overview.open => {
+                let page = house::page(&self.model, overview.size, env!("CARGO_PKG_VERSION"));
+                self.renderer
+                    .text(|cols, rows| overview.lines(&page, &look, cols, rows))
+            }
             None => self.renderer.show(&self.model, &look, &mut self.map),
         };
         if drawn.is_err() {
@@ -1007,7 +1015,7 @@ impl Board {
             );
         }
         let at = match self.shown.pairing.is_none() && overview.open {
-            true => page::house(),
+            true => page::house(overview.at),
             false => page::of(
                 &self.model,
                 self.row,
@@ -1068,7 +1076,7 @@ impl Board {
                     // it until the power goes.
                     let kept = match self.flash.home {
                         Some(_) => {
-                            self.flash.large_type = size.large();
+                            self.flash.type_size = size.record();
                             "yes"
                         }
                         None => "no reason=no-record",

@@ -65,6 +65,7 @@ const TUI: &str = "loquax/src/tui.rs";
 const KEYS: &str = "loquax/src/keys.rs";
 const M9_KEYS: &str = "loquax-m9/src/keys.rs";
 const M9_GROUP: &str = "loquax-m9/src/group.rs";
+const M9_HOUSE: &str = "loquax-m9/src/house.rs";
 
 const KEY: Cell = Cell::Built(Via::Key);
 const PALETTE: Cell = Cell::Built(Via::Palette);
@@ -639,7 +640,7 @@ pub const INVENTORY: &[Row] = &[
         window: at(GUI, "Intent::Profile"),
         terminal: KEY,
         m9: missing(
-            "the house key (provisionally 0x82) leads to the start screen; the M9 draws no profile yet",
+            "the house key leads to the settings (1561), which hold no profile: the M9 is a device of its home (super::settings::PLACES)",
         ),
     },
     Row {
@@ -878,7 +879,7 @@ pub const INVENTORY: &[Row] = &[
         phone: at(SESSION, "Query::Receipts"),
         window: at(GUI, "Intent::ReadReceipts"),
         terminal: PALETTE,
-        m9: missing("no settings on the M9"),
+        m9: missing("the M9's settings have no read receipts row: the home signs them (super::settings::PLACES, Privacy)"),
     },
     Row {
         intent: "DeleteAllRegions",
@@ -894,7 +895,7 @@ pub const INVENTORY: &[Row] = &[
         phone: at(JAVA_LIST, "SettingsActivity.class"),
         window: at(GUI, "Intent::Settings"),
         terminal: KEY,
-        m9: missing("no menu screen and no key for it on the M9 (super::settings::PLACES)"),
+        m9: at(M9_HOUSE, "settings::screen(model, Target::M9, None)"),
     },
     Row {
         intent: "RoomsHub",
@@ -902,7 +903,7 @@ pub const INVENTORY: &[Row] = &[
         phone: at(SESSION, "Query::RoomsHub"),
         window: at(GUI, "Intent::RoomsHub"),
         terminal: at(UI, "Intent::RoomsHub(rooms::HubPick::Paste)"),
-        m9: missing("no settings on the M9"),
+        m9: missing("the M9 has no rooms: its settings hold no hub (super::settings::PLACES, Advanced)"),
     },
 ];
 

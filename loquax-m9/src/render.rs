@@ -53,14 +53,14 @@ where
 {
     panel: &'d mut D,
     /// Each size's last frame's cells and the one being drawn, ratatui's
-    /// two buffers, in that size's grid; small first.
-    grids: [Grid; 2],
+    /// two buffers, in that size's grid; in [`Size::ALL`]'s order.
+    grids: [Grid; 3],
     /// The size the panel's cells are in now.
     drawn: Size,
     /// The size the reader chose: everything but the map is set in it.
     size: Size,
     /// Each size's atlas, made once (each making leaks its table).
-    fonts: [MonoFont<'static>; 2],
+    fonts: [MonoFont<'static>; 3],
     /// The last draw put the map's pixels over the cells.
     map_drawn: bool,
     /// Where the last draw's screen stood (1533).
@@ -164,7 +164,7 @@ where
 
     /// The atlas of `size`.
     fn font(&self, size: Size) -> MonoFont<'static> {
-        self.fonts[usize::from(size.large())]
+        self.fonts[size.index()]
     }
 
     /// mousefood over the panel in `size`'s atlas, for one draw. Every
@@ -188,7 +188,7 @@ where
     /// buffers blank, so the next draw draws every cell that is not blank.
     fn set_grid(&mut self, size: Size) -> Result<(), DrawError> {
         self.backend(size).clear().map_err(|_| DrawError)?;
-        let grid = &mut self.grids[usize::from(size.large())];
+        let grid = &mut self.grids[size.index()];
         grid.last.reset();
         grid.next.reset();
         self.drawn = size;
@@ -409,7 +409,7 @@ where
         if self.drawn != size {
             self.set_grid(size)?;
         }
-        let at = usize::from(size.large());
+        let at = size.index();
         let area = self.grids[at].next.area;
         let t0 = self.now();
         let lines = lines(area.width.into(), area.height.into());

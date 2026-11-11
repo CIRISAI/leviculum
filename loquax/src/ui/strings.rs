@@ -775,13 +775,16 @@ leviculum_ui::catalogue! {
     M9NotSaved = "m9_not_saved", "Not saved: memory error", "Nicht gespeichert: Speicherfehler";
     M9JoinNotSaved = "m9_join_not_saved", "Connected, but not saved: pair again after a restart", "Verbunden, aber nicht gespeichert: nach einem Neustart neu koppeln";
     M9NoIdentity = "m9_no_identity", "Memory error: this device cannot read its identity and cannot start. Restart it; if this stays, it needs service.", "Speicherfehler: Dieses Gerät kann seine Identität nicht lesen und nicht starten. Starte es neu; bleibt das so, braucht es Service.";
-    // The M9's overview behind the house key and its type switch (1532).
-    M9Overview = "m9_overview", "Overview", "Übersicht";
+    // The M9's settings behind the house key (1532, 1561): the type size
+    // row, its three sizes, the words under a row, the about rows.
     M9Type = "m9_type", "Text", "Schrift";
+    M9TypeTiny = "m9_type_tiny", "very small", "sehr klein";
     M9TypeSmall = "m9_type_small", "small", "klein";
     M9TypeLarge = "m9_type_large", "large", "groß";
-    M9TypeNowSmall = "m9_type_now_small", "Text: small", "Schrift: klein";
-    M9TypeNowLarge = "m9_type_now_large", "Text: large", "Schrift: groß";
+    M9SettingsChange = "m9_settings_change", "Enter changes, Back closes", "Enter ändert, Zurück schließt";
+    M9SettingsApply = "m9_settings_apply", "Enter applies, Back keeps", "Enter übernimmt, Zurück nicht";
+    M9Version = "m9_version", "Version", "Version";
+    M9MapData = "m9_map_data", "Map data", "Kartendaten";
     // The M9's top bar (1564): the page's name and at most one short word
     // of state that stands on its own, never a sentence cut by the bar.
     M9BarConnected = "m9_bar_connected", "Connected", "Verbunden";

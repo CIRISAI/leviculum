@@ -613,12 +613,14 @@
     <string name="m9_not_saved">Nicht gespeichert: Speicherfehler</string>
     <string name="m9_join_not_saved">Verbunden, aber nicht gespeichert: nach einem Neustart neu koppeln</string>
     <string name="m9_no_identity">Speicherfehler: Dieses Gerät kann seine Identität nicht lesen und nicht starten. Starte es neu; bleibt das so, braucht es Service.</string>
-    <string name="m9_overview">Übersicht</string>
     <string name="m9_type">Schrift</string>
+    <string name="m9_type_tiny">sehr klein</string>
     <string name="m9_type_small">klein</string>
     <string name="m9_type_large">groß</string>
-    <string name="m9_type_now_small">Schrift: klein</string>
-    <string name="m9_type_now_large">Schrift: groß</string>
+    <string name="m9_settings_change">Enter ändert, Zurück schließt</string>
+    <string name="m9_settings_apply">Enter übernimmt, Zurück nicht</string>
+    <string name="m9_version">Version</string>
+    <string name="m9_map_data">Kartendaten</string>
     <string name="m9_bar_connected">Verbunden</string>
     <string name="m9_bar_disconnected">Getrennt</string>
     <string name="m9_bar_connecting">Verbindet…</string>

@@ -613,12 +613,14 @@
     <string name="m9_not_saved">Not saved: memory error</string>
     <string name="m9_join_not_saved">Connected, but not saved: pair again after a restart</string>
     <string name="m9_no_identity">Memory error: this device cannot read its identity and cannot start. Restart it; if this stays, it needs service.</string>
-    <string name="m9_overview">Overview</string>
     <string name="m9_type">Text</string>
+    <string name="m9_type_tiny">very small</string>
     <string name="m9_type_small">small</string>
     <string name="m9_type_large">large</string>
-    <string name="m9_type_now_small">Text: small</string>
-    <string name="m9_type_now_large">Text: large</string>
+    <string name="m9_settings_change">Enter changes, Back closes</string>
+    <string name="m9_settings_apply">Enter applies, Back keeps</string>
+    <string name="m9_version">Version</string>
+    <string name="m9_map_data">Map data</string>
     <string name="m9_bar_connected">Connected</string>
     <string name="m9_bar_disconnected">Disconnected</string>
     <string name="m9_bar_connecting">Connecting…</string>

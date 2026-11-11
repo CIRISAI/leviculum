@@ -318,8 +318,7 @@ fn headless(mut board: Board, args: &Args) -> Result<(), String> {
             }
             Step::Dump(path) => write_png(board.frame(), Path::new(path))?,
             Step::Bar => {
-                // The turns the clock owes first: a house tap's gap that
-                // ran out in the wait opens the overview in its next turn.
+                // The turns the clock owes first.
                 board.settle();
                 let top = board.text().first().cloned().unwrap_or_default();
                 board.log.line("[SIM] ", &format!("bar=\"{}\"", top.trim()));

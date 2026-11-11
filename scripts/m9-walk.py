@@ -17,7 +17,10 @@ A walk is a text file, one step a line, `#` to the line's end a comment:
                               map new_message pin space backspace), one
                               character, or a code (0xb6); waits for its
                               KEY line and the frame after it
-    hold <key> <ms>           hold a key, answers again every 200 ms
+    hold <key> <ms>           hold a key, answers again every 200 ms:
+                              simulates what the hardware does not do
+                              (the controller repeats no held key, 1561;
+                              loquax-m9/src/kbraw.rs, HOLD_REPEAT_MS)
     wait page=<name> [<ms>]   until a [PAGE] line names the page (5000)
     expect <field><op><value> page, cursor, top, zoom against the last
                               [PAGE] line; op one of = != < >
@@ -96,8 +99,8 @@ the fixture and is walked; a walk without opens is walked on any home.
 The walk's verdict is held to the bars of order 1533: key to frame under
 100 ms (a KEY line's board time to the next `[DISP] flush` line's t=;
 walk.md names that flush's rows=, the first after the key whatever it
-draws, 1554; the house key's bar is HOUSE_GAP_MS longer, the time its tap
-waits to tell itself from a hold before the overview opens),
+draws, 1554; the house key's bar too since 1561, whose page opens on the
+press),
 a resumed restore under 2 s on every boot after the first, no `[LOOP]`
 turn over 250 ms (a dump step's own turn, core 0 writing the dump's lines,
 is exempt and named `dump_ms=` in walk.md instead), no `[LOOP] core=ui`
@@ -154,9 +157,6 @@ OWE_FLAGS = {None: 0x00, "erase-log": 0x01, "erase-ring": 0x02, "erase": 0x03}
 # back to the last of them.
 ACTIONS = ("key", "hold", "dump", "reboot", "idle", "sleep", "bench", "open", "row")
 KEY_MS_BAR = 100
-# loquax-m9/src/house.rs, GAP_MS: a house tap opens the overview only once
-# this long passed without another press (1532), so its frame comes after.
-HOUSE_GAP_MS = 300
 # How long `expect <field> changed` waits for a [PAGE] line that moves the
 # field, from the action's start (1554).
 CHANGED_WAIT_S = 1.0
@@ -742,7 +742,7 @@ class Walk:
         ms = int(fields(flush)["t"]) - pressed
         rows = fields(flush).get("rows", "?")
         self.keys.append((code, ms))
-        bar = self.key_bar + (HOUSE_GAP_MS if code == NAMES["home"] else 0)
+        bar = self.key_bar
         if ms >= bar:
             self.fail(f"key {code:#04x}: {ms} ms to its frame (rows={rows}), the bar is under {bar}")
         return f"key_ms={ms} rows={rows}"
@@ -1147,7 +1147,7 @@ class FakeBoard(threading.Thread):
     [LOOP] turn as the board's does. 1554: the map key opens the map, T
     flushes the hint row at once and says the new zoom 400 ms later (as
     window 13's board did; `stuck_zoom` never moves it), and the house
-    key opens the house page after its tap's 300 ms gap. 1581: `trail_ms`
+    key opens the house page on the press (1561). 1581: `trail_ms`
     is a board behind its keys, as window 17's: a key's flush comes at
     once, its [PAGE] line `trail_ms` later. `marks` is what an open
     writes into the rig's mailbox.log, the home's log (see __init__)."""
@@ -1287,8 +1287,6 @@ class FakeBoard(threading.Thread):
                 self.page_line()
                 return
             elif code == 0x82:
-                # The tap waits out its gap before the overview opens.
-                time.sleep(0.3)
                 self.page = "house"
             time.sleep(self.slow_ms / 1000)
             self.say(f"[DISP] flush rows=0..239 ms=4.000 t={self.ms() + 20}")
@@ -1395,7 +1393,7 @@ wait page=chats
 """
 
 # 1554: bench.walk's map and house steps: the zoom said behind the hint
-# row's flush, the house page behind its tap's gap.
+# row's flush, the house page on the press (1561).
 SELFTEST_MAP_WALK = """
 key map
 wait page=map
@@ -1704,7 +1702,8 @@ def selftest():
             rc = 1
         # 1554: the zoom's [PAGE] line 400 ms after the key's first flush
         # is waited for, walk.md names that flush's rows, and the house
-        # key's frame after its gap passes; a zoom that never moves fails.
+        # key's frame under the plain key bar (1561); a zoom that never
+        # moves fails.
         got, w, out = walk("late", steps=SELFTEST_MAP_WALK)
         if got != 0:
             print("[m9-walk] selftest FAIL: a zoom said behind the hint row's flush failed", w.fails)

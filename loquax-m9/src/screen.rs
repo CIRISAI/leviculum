@@ -140,9 +140,6 @@ pub struct Look {
     /// not reach the flash, a join the record could not keep. It takes
     /// the home word's place at the bar's right end until it clears.
     pub fault: Option<loquax::ui::strings::StrId>,
-    /// The type switch's word (1532, [`crate::house`]): for a moment it
-    /// takes the bar's right end, before the fault and the home's word.
-    pub note: Option<loquax::ui::strings::StrId>,
     /// What the map shows over its picture (1531): the key hint and the
     /// corner credit, which the board's clock says ([`crate::map::Chrome`]).
     pub map: crate::map::Overlay,
@@ -161,7 +158,6 @@ impl Look {
             row: 0,
             home: None,
             fault: None,
-            note: None,
             map: crate::map::Overlay {
                 hint: None,
                 credit: false,
@@ -339,15 +335,12 @@ pub fn lines_seen(
     (out, window, seen)
 }
 
-/// The word at the top bar's right end (1564): the type switch's note
-/// for a moment, else a fault, else the home's state, each one short word
+/// The word at the top bar's right end (1564): a fault, else the home's
+/// state (1561 took the type switch's note out with the held house key), each one short word
 /// that stands on its own ([`Word::bar`](loquax::home::board::Word::bar)).
 /// None on a board that is no device of a home and has nothing to say.
 pub fn bar_word(look: &Look) -> Option<alloc::string::String> {
     use loquax::ui::strings::{StrId, Text as Words};
-    if let Some(note) = look.note {
-        return Some(Words::key(note).resolve(look.lang));
-    }
     if let Some(fault) = look.fault {
         // A write that did not land matters more than the fetch (1493);
         // its sentence is the log's, the bar says the state.

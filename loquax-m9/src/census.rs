@@ -163,11 +163,11 @@ pub struct Budget {
 /// at most one per row of the chat. A chat's draw keeps it (window 15:
 /// `chat` +64 B with 8 keys, `chat-large` +32 B with 4), the next draw of
 /// another screen gives it back (`groups` -64, `groups-large` -32): the
-/// census walks its screens on one renderer. 128 B is a vector of 16
-/// keys, the capacity a push grows to for the 15 rows the default size's
-/// chat shows at most (`page_entries` is twice them); a test keeps the
-/// rows under it.
-pub const SEEN_HELD: isize = 128;
+/// census walks its screens on one renderer. 256 B is a vector of 32
+/// keys, the capacity a push grows to for the 19 rows the very small
+/// size's chat shows at most (1561; 128 B, 16 keys, held the default
+/// size's 15 before); a test keeps the rows under it.
+pub const SEEN_HELD: isize = 256;
 
 /// The chats list: a list scene is rows, not the history (held under
 /// 60,000 B, peak 70,000 B, stack 100,000 B); a draw keeps nothing and

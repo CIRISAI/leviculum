@@ -12,8 +12,9 @@
 //!   [`Section::summary`]), which the phone reads as `R.string` too.
 //! - The entry point is the target's own: the ⋮ menu on the phone, the
 //!   gear on the window, `S` and the palette's `settings` on the terminal
-//!   ([`super::intent::Intent::Settings`]), and on the M9 none yet
-//!   ([`PLACES`] says why).
+//!   ([`super::intent::Intent::Settings`]), and on the M9 the house key
+//!   (1561, `loquax-m9/src/house.rs`), whose page lists the sections the
+//!   M9 draws ([`PLACES`] says why the others are not).
 //! - The theme switch lives in Appearance: the window's bar has no
 //!   light/dark button any more.
 //! - [`PLACES`] says per section and target whether it is drawn, with the
@@ -157,11 +158,9 @@ const fn at(file: &'static str, token: &'static str) -> Cell {
     Cell::Built(Via::At(file, token))
 }
 
-/// The M9 has no settings yet: the reason each of its cells gives.
-const M9: Cell = Cell::Missing(
-    "the M9 has no menu screen to list the sections in: a screen in loquax-m9 that draws \
-     SettingsScreen, and the key that opens it (the home key is the list's, 1440)",
-);
+/// The M9's settings page (1561): the house key's, which draws
+/// [`screen`] for [`Target::M9`].
+const M9_HOUSE: &str = "loquax-m9/src/house.rs";
 
 /// Where each section is drawn. The window's and the terminal's cells are
 /// the page's handler for the section; the phone's the arm of
@@ -172,63 +171,63 @@ pub const PLACES: [Place; 9] = [
         phone: at(JAVA, "\"profile\".equals(target)"),
         window: at(GUI_CHAT, "Section::Profile =>"),
         terminal: at(UI, "Section::Profile =>"),
-        m9: M9,
+        m9: Cell::Na("the M9 is a device of its home (#232): its name and address are the home's, shown where the home runs"),
     },
     Place {
         section: Section::Mailbox,
         phone: at(JAVA, "\"mailbox\".equals(page)"),
         window: at(GUI_CHAT, "Section::Mailbox"),
         terminal: at(UI, "Section::Mailbox"),
-        m9: M9,
+        m9: Cell::Missing("the M9 joins its home on the pairing screen; a page that names the home and its devices is owed (1642's mailbox page drawn on the board)"),
     },
     Place {
         section: Section::Appearance,
         phone: at(JAVA, "\"appearance\".equals(page)"),
         window: at(GUI_CHAT, "Section::Appearance =>"),
         terminal: at(UI, "Section::Appearance"),
-        m9: M9,
+        m9: at(M9_HOUSE, "Section::Appearance =>"),
     },
     Place {
         section: Section::Chats,
         phone: at(JAVA, "\"chats\".equals(page)"),
         window: at(GUI_CHAT, "Section::Chats =>"),
         terminal: at(UI, "Section::Chats"),
-        m9: M9,
+        m9: Cell::Na("photo size: the M9 has no camera and sends no photos, and its Enter always sends"),
     },
     Place {
         section: Section::Notifications,
         phone: at(JAVA, "\"notifications\".equals(page)"),
         window: at(GUI_CHAT, "Section::Notifications"),
         terminal: at(UI, "Section::Notifications"),
-        m9: M9,
+        m9: Cell::Na("the M9 has no notification service: an arrival shows on its list and in its top bar"),
     },
     Place {
         section: Section::Privacy,
         phone: at(JAVA, "\"privacy\".equals(page)"),
         window: at(GUI_CHAT, "Section::Privacy =>"),
         terminal: at(UI, "Section::Privacy"),
-        m9: M9,
+        m9: Cell::Missing("read receipts: the home signs them, so a switch on the board must reach the home and the client record must keep it; neither path exists yet"),
     },
     Place {
         section: Section::Maps,
         phone: at(JAVA, "\"maps\".equals(page)"),
         window: at(GUI_CHAT, "Section::Maps =>"),
         terminal: at(UI, "Section::Maps"),
-        m9: M9,
+        m9: Cell::Na("the M9 draws the regions lnflash wrote and the world overview; it downloads none"),
     },
     Place {
         section: Section::Backup,
         phone: at(JAVA, "\"backup\".equals(page)"),
         window: at(GUI_CHAT, "Section::Backup"),
         terminal: at(UI, "Section::Backup"),
-        m9: M9,
+        m9: Cell::Na("the M9 keeps no history of its own to save: the home holds it, and a new board pulls it"),
     },
     Place {
         section: Section::Advanced,
         phone: at(JAVA, "\"advanced\".equals(page)"),
         window: at(GUI_CHAT, "Section::Advanced"),
         terminal: at(UI, "Section::Advanced"),
-        m9: M9,
+        m9: at(M9_HOUSE, "Section::Advanced =>"),
     },
 ];
 
@@ -333,6 +332,9 @@ pub fn rows<B>(model: &UiModel<B>, target: Target, section: Section) -> Vec<Page
         Section::Profile => Vec::from([verb(StrId::ProfileTitle, None, 'p', Intent::Profile)]),
         // 1642: which mailbox, how it is reached, which devices use it.
         Section::Mailbox => super::mailbox_page::page(model).rows(),
+        // The M9 draws the dark tokens only (`Look::m9`), so no theme
+        // switch; its type size row is the board's own (`house.rs`).
+        Section::Appearance if target == Target::M9 => Vec::new(),
         Section::Appearance => {
             let value = Text::key(match model.theme {
                 Theme::Dark => StrId::SettingsDark,
@@ -381,6 +383,9 @@ pub fn rows<B>(model: &UiModel<B>, target: Target, section: Section) -> Vec<Page
             false => Vec::new(),
         },
         Section::Backup => Vec::from([note(StrId::SettingsBackupDesktop)]),
+        // The M9 has no rooms and no help screen; its about rows (the
+        // version, the map's data) are the board's own (`house.rs`).
+        Section::Advanced if target == Target::M9 => Vec::new(),
         Section::Advanced => {
             let mut rows = Vec::from([
                 note(StrId::PropagationNode),
@@ -896,6 +901,14 @@ mod tests {
                 "{target:?} draws all nine"
             );
         }
+        // The M9 (1561): the type size and the about rows behind its
+        // house key; every other cell says why not.
+        assert_eq!(
+            sections(Target::M9).collect::<Vec<_>>(),
+            [Section::Appearance, Section::Advanced]
+        );
+        let entries = entries(Target::M9);
+        assert_eq!((entries[0].key, entries[1].key), ('1', '2'));
     }
 
     /// The control of the guard's ingredient: a token a file lacks is

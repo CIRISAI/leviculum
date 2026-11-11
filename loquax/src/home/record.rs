@@ -48,8 +48,11 @@ const VERSION: u8 = 1;
 const PENDING: u8 = 1;
 const ADMITTED: u8 = 2;
 const SUMMED: usize = RECORD_LEN - 4;
-/// Byte 6's bit for the large type (1532).
-const LARGE_TYPE: u8 = 1;
+/// Byte 6's bits 0-1: the reader's type size (1532, 1561). 0 the
+/// default, 1 the large one (1532's flag, so an older record reads as it
+/// was written), 2 the very small one; the board names them
+/// (`loquax_m9::font::Size::of_record`).
+const TYPE_SIZE: u8 = 0b11;
 
 /// Where the device's admission stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,8 +89,9 @@ pub struct ClientRecord {
     pub cursor: u64,
     /// The name the device joins under, at most [`NAME_MAX`] bytes.
     pub name: String,
-    /// The reader switched the board's type to the large size (1532).
-    pub large_type: bool,
+    /// The reader's type size on the board (1532, 1561): byte 6 bits
+    /// 0-1, 0 the default, 1 large, 2 very small.
+    pub type_size: u8,
 }
 
 impl ClientRecord {
@@ -107,7 +111,7 @@ impl ClientRecord {
             admission: Admission::Pending { token: code.token },
             cursor: 0,
             name: String::from(&name[..end]),
-            large_type: false,
+            type_size: 0,
         })
     }
 
@@ -159,7 +163,7 @@ impl ClientRecord {
         let mut out = [0u8; RECORD_LEN];
         out[..4].copy_from_slice(MAGIC);
         out[4] = VERSION;
-        out[6] = u8::from(self.large_type) & LARGE_TYPE;
+        out[6] = self.type_size & TYPE_SIZE;
         out[8..72].copy_from_slice(&self.device);
         out[72..136].copy_from_slice(&self.home);
         match self.admission {
@@ -219,7 +223,7 @@ impl ClientRecord {
             admission,
             cursor: u64::from_le_bytes(cursor),
             name: String::from(name),
-            large_type: bytes[6] & LARGE_TYPE != 0,
+            type_size: bytes[6] & TYPE_SIZE,
         };
         record.device_identity()?;
         Ok(Some(record))
@@ -333,29 +337,38 @@ mod tests {
         assert_eq!(pull.page_bytes(), Some(412));
     }
 
-    /// The type's flag (1532) round-trips in byte 6 under the checksum; a
-    /// record written before it, byte 6 zero, reads as the small type, and
-    /// the bit flipped by hand without the checksum is a torn record.
+    /// The type size (1532, 1561) round-trips in byte 6's two low bits
+    /// under the checksum, all three of them; a record written before
+    /// 1532, byte 6 zero, reads as the default, and one written by 1532
+    /// with its large flag reads as large; a bit flipped by hand without
+    /// the checksum is a torn record.
     #[test]
-    fn the_large_type_is_kept_and_an_older_record_reads_small() {
+    fn the_type_size_is_kept_in_two_bits_and_an_older_record_reads_as_written() {
         let device = Identity::generate(&mut rand_core::OsRng);
         let mut record = ClientRecord::pending(&device, &code(), "M9").expect("record");
-        assert!(!record.large_type);
+        assert_eq!(record.type_size, 0);
         let small = record.encode();
         assert_eq!(small[6], 0, "as a record before 1532 wrote it");
-        record.large_type = true;
+        for size in [1u8, 2] {
+            record.type_size = size;
+            let bytes = record.encode();
+            assert_eq!(bytes[6], size);
+            let back = ClientRecord::decode(&bytes).expect("decode").expect("some");
+            assert_eq!(back.type_size, size);
+            assert_eq!(back, record);
+        }
+        record.type_size = 1;
         let large = record.encode();
-        assert_eq!(large[6], 1);
-        let back = ClientRecord::decode(&large).expect("decode").expect("some");
-        assert!(back.large_type);
-        assert_eq!(back, record);
         let back = ClientRecord::decode(&small).expect("decode").expect("some");
-        assert!(!back.large_type);
+        assert_eq!(back.type_size, 0);
         let mut forged = small;
-        forged[6] = 1;
+        forged[6] = 2;
         assert_eq!(ClientRecord::decode(&forged), Err(RecordError::Torn));
+        let back = ClientRecord::decode(&large).expect("decode").expect("some");
+        assert_eq!(back.type_size, 1, "1532's large flag");
+        record.type_size = 2;
         let slot = slots::encode(&record, 3);
-        assert_eq!(slots::decode(&slot).map(|(r, _)| r.large_type), Some(true));
+        assert_eq!(slots::decode(&slot).map(|(r, _)| r.type_size), Some(2));
     }
 
     /// An erased or empty sector is no record; a flipped byte anywhere is a

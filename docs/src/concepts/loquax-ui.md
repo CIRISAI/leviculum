@@ -549,9 +549,9 @@ on it does:
   list's title (the reader's own name), and the palette's `my code`
   open it as a detail view; `s` there copies the code, Esc closes it;
 - the M9: the house key (provisionally `0x82`, `SPECIALS` in
-  `loquax-m9/src/keyboard.rs`, 1440) leads to the start screen, which
-  is the chats list until the overview exists; the M9 draws no profile
-  yet, so the cell below says missing.
+  `loquax-m9/src/keyboard.rs`, 1440) leads to the settings (1561,
+  `loquax-m9/src/house.rs`), which hold no profile: the M9 is a device
+  of its home, so the cell below says missing.
 
 Goldens: `loquax/tests/golden/gui-profile-light.png`,
 `loquax/tests/fixtures/tui_profile.frames`,
@@ -1030,7 +1030,7 @@ it). A missing cell is the next order.
 | `AddContact` | a friend's code pasted or scanned: the contact | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no way to add a contact |
 | `Group` | New group, Join, the member sheet, Leave, Remove | built (`session.rs`) | built (`gui.rs`) | built (palette) | built (`group.rs`) |
 | `NewConversation` | the bar's pencil: a new chat | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (palette) | **missing**: no way to start a chat |
-| `Profile` | a tap or click on the reader's avatar, `P`, `my code` | built (`session.rs`) | built (`gui.rs`) | built (key) | **missing**: the house key (provisionally 0x82) leads to the start screen; the M9 draws no profile yet |
+| `Profile` | a tap or click on the reader's avatar, `P`, `my code` | built (`session.rs`) | built (`gui.rs`) | built (key) | **missing**: the house key leads to the settings (1561), which hold no profile: the M9 is a device of its home (super::settings::PLACES) |
 | `ShareCode` | the profile's "Share my address" | built (`ProfileActivity.java`) | built (`gui.rs`) | built (`ui.rs`) | n/a: no clipboard or share sheet |
 | `Name` | the name recipients see | built (`session.rs`) | **missing**: the profile shows the name, nothing sets it | **missing**: the profile shows the name, nothing sets it | **missing**: the name is the pairing's |
 | `Scroll` | the list's cursor up and down | n/a: the list scrolls itself | built (`gui.rs`) | built (key) | built (`keys.rs`) |
@@ -1059,10 +1059,10 @@ it). A missing cell is the next order.
 | `SendOnEnter` | whether Enter sends | n/a: the platform's text field does it | **missing**: the window has no switch for Enter | built (palette) | n/a: Enter sends |
 | `Mouse` | the mouse captured or the terminal's own selection | n/a: no pointer | n/a: the window's pointer is its own | built (palette) | n/a: no pointer |
 | `Import` | import from another messenger | **missing**: the phone imports nothing | **missing**: the window imports nothing | built (palette) | n/a: the board takes its history from the home |
-| `ReadReceipts` | the switch "Send read receipts" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: no settings on the M9 |
+| `ReadReceipts` | the switch "Send read receipts" | built (`session.rs`) | built (`gui.rs`) | built (palette) | **missing**: the M9's settings have no read receipts row: the home signs them (super::settings::PLACES, Privacy) |
 | `DeleteAllRegions` | the Maps page's Delete all | built (`session.rs`) | built (`gui.rs`) | built (palette) | n/a: the board carries its regions |
-| `Settings` | the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (key) | **missing**: no menu screen and no key for it on the M9 (super::settings::PLACES) |
-| `RoomsHub` | the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577) | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: no settings on the M9 |
+| `Settings` | the settings: the nine sections of super::settings::SECTIONS, whose own table says per section and target where it is drawn | built (`ConversationsActivity.java`) | built (`gui.rs`) | built (key) | built (`house.rs`) |
+| `RoomsHub` | the public rooms' hub in Advanced: a shipped hub, none, or another pasted (1577) | built (`session.rs`) | built (`gui.rs`) | built (`ui.rs`) | **missing**: the M9 has no rooms: its settings hold no hub (super::settings::PLACES, Advanced) |
 <!-- intent-inventory:end -->
 
 ### The goldens' index
@@ -1094,8 +1094,9 @@ golden without its German twin.
 | The chats list and an open chat | `gui-chat-light.png`, `gui-chat-dark.png` | `tui_session.frames`, `tui_chat.frames`, `tui_chat.styles`, `tui_layout.frames` | `tui_session_de.frames`, `tui_chat_de.frames`, `tui_layout_de.frames` | `m9-chats.png`, `m9-chats-cursor.png`, `m9-chat.png`, `m9-chat-cursor.png`, `m9-fw-chats.png`, `m9-fw-chat.png` | | `scene-compact-list.json`, `scene-compact-chat.json`, `scene-wide.json` |
 | A narrow window | `gui-chat-compact-chat.png`, `gui-chat-compact-list.png` | | | | | |
 | The large type | | | | `m9-chats-large.png`, `m9-chat-large.png` | | |
-| The settings | `gui-settings-light.png`, `gui-settings-privacy-light.png`, `gui-settings-advanced-light.png` | `tui-settings.txt`, `tui-settings-advanced.txt` | `tui-settings-de.txt`, `tui-settings-advanced-de.txt` | `m9-settings.png`, `m9-settings-de.png` (the house key's overview, the M9's only settings) | | |
-| The mailbox page, which mailbox and how it is reached | `gui-settings-mailbox-light.png` | `tui-settings-mailbox.txt` | `tui-settings-mailbox-de.txt` | not drawn: the M9 has no settings screen | `mailbox-page-reachable.json`, `mailbox-page-unreachable.json` | |
+| The very small type (1561) | | | | `m9-chats-tiny.png`, `m9-chat-tiny.png` | | |
+| The settings | `gui-settings-light.png`, `gui-settings-privacy-light.png`, `gui-settings-advanced-light.png` | `tui-settings.txt`, `tui-settings-advanced.txt` | `tui-settings-de.txt`, `tui-settings-advanced-de.txt` | `m9-settings.png`, `m9-settings-de.png`, `m9-settings-tiny.png` (the house key's page: the core's settings for the M9, Appearance and Advanced, 1561) | | |
+| The mailbox page, which mailbox and how it is reached | `gui-settings-mailbox-light.png` | `tui-settings-mailbox.txt` | `tui-settings-mailbox-de.txt` | not drawn: the M9's settings have no mailbox page (`settings::PLACES`) | `mailbox-page-reachable.json`, `mailbox-page-unreachable.json` | |
 | The keys' help | not pinned: the shared overlay lnomad's window draws | not pinned: `?` | | not drawn: no key opens the help; the keys stand on their screens (`m9-fw-pairing.png`, `m9-map-hint.png`, the group's frames) | n/a: no keys | |
 | The keymap and the mouse | | `tui_keys.frames`, `tui_mouse.frames` | `tui_keys_de.frames`, `tui_mouse_de.frames` | | | |
 | Typing and sending | | | | `m9-compose.png`, `m9-sent.png` | | |
