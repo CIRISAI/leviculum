@@ -1326,7 +1326,7 @@ The Rooms tab (Reticulum Relay Chat, 1379) is drawn on the terminal and
 the window and since 1384 on the phone; the M9 is the one target where it
 is not, because its renderer is still host-only. On the renderer it needs
 a branch in `lines` (`loquax-m9/src/screen.rs:225`) for the scene's
-`rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:1057`), which
+`rooms` node (`RoomsNode`, `node`, `loquax/src/ui/rooms.rs:1088`), which
 the model already returns while the tab is in front (`rooms_scene`,
 `loquax/src/ui/scene.rs:1222`), and its tab in the tab bar the screen
 already draws: the hub's line under the top bar, then either the room
@@ -1335,7 +1335,7 @@ as `who text`, and one input line at the bottom on the chat's editor
 (`loquax-m9/src/field.rs:20`), nicks through `narrow` as every other
 text. In the key table it needs no verbs of its own: while the tab is in
 front the model takes the terminal's keys itself (`key`,
-`loquax/src/ui/rooms.rs:754`: characters into the line, Backspace,
+`loquax/src/ui/rooms.rs:785`: characters into the line, Backspace,
 Enter sends, Up and Down step the rooms, Esc closes the room and then
 the tab), so a `ROOMS_ROWS` table beside `LIST_ROWS` and `CHAT_ROWS` in
 `loquax-m9/src/keys.rs` maps the M9's navigation keys, Enter, back,

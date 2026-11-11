@@ -52,7 +52,7 @@ settles the conflicts.
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
 2. *Mode gating*. `Mode::{Browse, Address, Hint, Search, Field}`
-   (`lnomad/src/app/model.rs:101-120`), each with its own handler. Text modes
+   (`lnomad/src/app/model.rs:102-121`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
    leaks into browse hotkeys" (`type_field`, `lnomad/src/app/event.rs:536`,
@@ -78,7 +78,7 @@ That is a cost-aware keymap, and a messenger sends over the same radios.
 
 **Architecture.** Elm-style with an explicit effect list. The core sits in
 `lnomad/src/app/` since the #219 cut (2026-10-25): `Model` at
-`lnomad/src/app/model.rs:469-654` (`#[derive(Clone, Debug, Default)]` at
+`lnomad/src/app/model.rs:470-677` (`#[derive(Clone, Debug, Default)]` at
 `:565`), `Effect` at `:478-532`; `AppEvent` at
 `lnomad/src/app/event.rs:36-105` and `update(&mut Model, AppEvent) ->
 Vec<Effect>` at `:98-208`. The terminal frontend is `lnomad/src/tui.rs`:
@@ -106,7 +106,7 @@ slices (`spawn_discovery`, `lnomad/src/transfer.rs:207-229`), and a
 (`lnomad/src/tui.rs:1454-1456`). The main loop has five arms
 (`lnomad/src/tui.rs:1358-1461`), and the timer arm is conditionally enabled
 (`, if animate` at `:2229`, driven by `needs_tick()` at
-`lnomad/src/app/model.rs:892-895`) so an idle browser does not wake eight
+`lnomad/src/app/model.rs:898-901`) so an idle browser does not wake eight
 times a second.
 
 **Persistence.** Three small files under
@@ -133,7 +133,7 @@ browser is holding, and pictures differ in size by three orders of
 magnitude" (`lnomad/src/image_cache.rs:11-14`).
 
 **Rendering.** One layout core, two sinks. `layout_blocks`
-(`lnomad/src/render.rs:197-222`) produces `Vec<RLine>` where `RLine`, the
+(`lnomad/src/render.rs:197-243`) produces `Vec<RLine>` where `RLine`, the
 shared styled text model of `leviculum-ui` since 984, is a vector of
 `StyledChar { ch, st, link, field }`
 (`leviculum-ui/src/style.rs:95-116`): already wrapped, aligned and indented,
@@ -141,7 +141,7 @@ one `RLine` per output row, every cell carrying its resolved style and its
 owning link index. That IR feeds either the scene's page, a window of
 runs the TUI draws as spans (`page_line`, `lnomad/src/app/scene.rs:489`,
 since 1255), or `emit_ansi`
-(`lnomad/src/render.rs:230-236`) for `--print`. Scrolling is a slice, not a
+(`lnomad/src/render.rs:251-257`) for `--print`. Scrolling is a slice, not a
 widget scroll, because the page is pre-wrapped
 (`lnomad/src/app/scene.rs:446-449`), and there is one scroll rule shared by
 every scrollable window (`scrolled`, `leviculum-ui/src/keymap.rs:639-653`),
@@ -149,10 +149,10 @@ which Loquax's help and detail view scroll by too.
 
 Two rendering caveats. Wrapping compares `cur.len() > width`, i.e.
 character count rather than display width (`wrap`,
-`lnomad/src/render.rs:778-805`), which will overflow on CJK and emoji. No
+`lnomad/src/render.rs:803-830`), which will overflow on CJK and emoji. No
 test covering that was found, so whether it is a known limitation or an
 oversight is unclear. And the whole page is laid out eagerly on every
-relayout (`lnomad/src/app/model.rs:770-794`), including on every keystroke in a
+relayout (`lnomad/src/app/model.rs:776-800`), including on every keystroke in a
 form field (`:1657-1660`).
 
 **Scriptability, and the absence of settings.** `--print` fetches, renders
@@ -810,7 +810,7 @@ Three specific things `lnomad` does that must change:
    scrolled up. NomadNet gets this wrong: it resets to the bottom on every
    refresh (NomadNet's `Conversations.py`, line 2287).
 2. **Windowed layout.** `lnomad` re-lays out the whole page on every
-   relayout (`lnomad/src/app/model.rs:770-794`). A ten-thousand-message
+   relayout (`lnomad/src/app/model.rs:776-800`). A ten-thousand-message
    conversation must not do that, and a compose buffer must not trigger it
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.
