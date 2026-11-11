@@ -284,6 +284,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // key, because the config format is shared with Python rnsd.
     let window_policy = leviculum_std::resource_policy::resource_window_policy_from_env();
 
+    // The two shutdown signals are taken before the daemon opens its
+    // sockets: a client that connects the moment the shared instance
+    // listens and stops the daemon at once (Loquax does, when it started
+    // the daemon and then finds no terminal to draw in) must reach the
+    // shutdown below. Taken only after the start, a SIGTERM in between
+    // met the default action, which ended lnsd mid-start with no line in
+    // its log and nothing persisted (1684: the log of a red
+    // `with_an_lnsd_to_start_the_messenger...` ended at "Local server
+    // listening", before the "Out-of-band control" line the registration
+    // below prints). tokio holds a signal that arrives before the loop
+    // waits for it.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
     let mut rns = Reticulum::with_config_daemon(config, window_policy)?;
     rns.start().await?;
 
@@ -375,7 +389,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let announce_signal = leviculum_std::interfaces::FIRMWARE_ANNOUNCE_SIGNAL;
         let silence_signal = leviculum_std::interfaces::FIRMWARE_MEDIA_SILENCE_SIGNAL;
         let restore_signal = leviculum_std::interfaces::FIRMWARE_MEDIA_RESTORE_SIGNAL;
-        let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigusr1 = signal(SignalKind::user_defined1())?;
         let mut sigusr2 = signal(SignalKind::user_defined2())?;
         let mut announce = signal(SignalKind::from_raw(announce_signal))?;
@@ -388,7 +401,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => { info!("Received SIGINT"); break; }
+                _ = sigint.recv() => { info!("Received SIGINT"); break; }
                 _ = sigterm.recv() => { info!("Received SIGTERM"); break; }
                 Some(section) = serial_rx.recv() => {
                     let name = section.name.clone();
