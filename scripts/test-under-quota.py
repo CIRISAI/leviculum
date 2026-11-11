@@ -40,7 +40,8 @@ rustc takes on one. That build has no binary for a target with
 own with its features, from the list `scripts/check-standard-integ.py --gated`
 reads out of `cargo metadata` (1067: `--only tui_snapshot` used to exit 0
 having run nothing). Those narrow builds run before the workspace one, which
-uplifts the program binaries last with the features of the whole graph, and
+uplifts the program binaries last with the features of the whole graph plus
+every gated target's (1691: no member enables `tui`, so loquax had no `mailbox`), and
 a control checks a flag a test passes is in the binary before any shard runs
 (1590: a `history`-only loquax without `--photo` was left behind). An `--only` that matches no built binary is an error. The release binaries the mvr tests spawn are not built
 here; `just test-under-quota` builds them first (`build-integ-bins`).
@@ -65,6 +66,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -120,6 +122,13 @@ def gated_targets() -> list[tuple[str, str, str]]:
     return targets
 
 
+def package_name(member: str) -> str:
+    """The package name in `<member>/Cargo.toml`, which `--features
+    <package>/<feature>` names."""
+    with open(REPO / member / "Cargo.toml", "rb") as f:
+        return tomllib.load(f)["package"]["name"]
+
+
 def build() -> list[dict]:
     """Build every test binary, return one entry per executable."""
     bins = {}
@@ -129,11 +138,21 @@ def build() -> list[dict]:
     # debug/loquax` has: a gated target built with `history` alone left a
     # loquax without `--photo` there, and python_interop's photo test went
     # red on every survey. The workspace build unifies the features of the
-    # whole graph, so its binaries are the superset every test asks for.
+    # whole graph, and it takes every gated target's features as well
+    # (1691): no member enables loquax's `tui`, so a plain workspace build
+    # left a loquax without `mailbox`, and every `tui` target that spawns
+    # it went red on the survey with "unrecognized subcommand".
+    gated = gated_targets()
+    union = sorted({
+        f"{package_name(member)}/{feature}"
+        for member, _name, features in gated
+        for feature in features.split(",")
+        if feature
+    })
     invocations = [
         ["--manifest-path", f"{member}/Cargo.toml", "--features", features, "--test", name]
-        for member, name, features in gated_targets()
-    ] + [["--workspace"]]
+        for member, name, features in gated
+    ] + [["--workspace", *(["--features", ",".join(union)] if union else [])]]
     programs = {}
     for sel in invocations:
         tests, progs = build_one(sel)
@@ -152,6 +171,10 @@ PROGRAM_FLAGS = [
     ("loquax/test/python_interop",
      "a_photo_reaches_a_python_lxmf_receiver_as_the_image_field",
      "loquax", ["send", "--help"], "--photo"),
+    # 1691: `mailbox` is `tui`'s, which no workspace member enables.
+    ("loquax/test/mailbox_census",
+     "sigusr1_prints_the_census_and_the_mailbox_lives_on",
+     "loquax", ["mailbox", "run", "--help"], "--sync-interval"),
 ]
 
 
