@@ -1159,6 +1159,25 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PATH_LOOP_DROP",
         required_keys: &["dst", "next_hop", "iface", "path_hops", "pkt_hops"],
     },
+    // Order 1672: a copy of an emission we hold, refused as a route.
+    // `reason` is `longer_than_installed` (its hops beat the rebalanced
+    // `path_hops` but not `installed_hops`, the count we installed and
+    // advertised the emission at: a neighbour that learned it through us
+    // offers exactly such a copy), `proven_loop` (leviculum#852) or
+    // `next_hop_unresponsive` (a link request died on that next hop).
+    // `next_hop` is the copy's transport id, empty for a direct copy;
+    // `iface` an interface name.
+    EventSchema {
+        name: "PATH_REFUSED",
+        required_keys: &["dst", "next_hop", "iface", "hops", "path_hops", "reason"],
+    },
+    // Order 1672: a link request forwarded toward `dst` expired unproven;
+    // the path is marked unresponsive and `next_hop`'s copies of the
+    // emission it holds are refused until the destination announces anew.
+    EventSchema {
+        name: "PATH_UNRESPONSIVE",
+        required_keys: &["dst", "next_hop", "iface", "path_hops"],
+    },
     // Remaining `leviculum-core` transport events.
     EventSchema {
         name: "ANN_SLOW",

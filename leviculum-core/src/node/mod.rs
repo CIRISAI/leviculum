@@ -177,6 +177,8 @@ mod mvr_orphaned_path_cache;
 mod mvr_overheard_direct_data;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_own_path_response_gone_requester;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_path_answer_through_us;
 #[cfg(test)]
 mod mvr_path_request_prune;
 #[cfg(test)]

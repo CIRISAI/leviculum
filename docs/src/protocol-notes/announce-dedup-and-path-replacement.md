@@ -361,3 +361,57 @@ One difference stays, noted here because the control has to work
 around it: our replay gate runs before this check and the reference's
 after it (`:1772`), so an identical copy normally never reaches either
 arm here.
+
+## 9. Same emission against the installed count, and a dead next hop
+
+**The invariant.** A second copy of an emission we already hold wins on
+hop count only if it is shorter than the count we installed that
+emission at — the count every rebroadcast and path response of ours
+then told our neighbours. A neighbour that learned the emission through
+us offers it at that count plus at least one, so its copy can never be
+"fewer hops", however a link proof has moved our own count since.
+
+The reference has no hop count in the same-emission test at all
+(`Transport.py:1772` wants an unseen blob and a strictly newer emission;
+the only same-emission acceptance is the unresponsive one at
+`Transport.py:1822`), so its 1.5 link-proof rebalance cannot turn an
+echo into a better route. Ours has one (§5, `FewerHopsWins`), and until
+order 1672 it compared against the REBALANCED count. On miauhaus
+(2026-11-11) a proof at 6 hops moved a 3-hop path to 6
+(`PATH_REBALANCE from=3 to=6`), and the next answer, the same emission
+at 4 hops from another neighbour, was adopted as
+`same_emission_fewer_hops`; every link request after it died on that
+neighbour. Since 1672 `same_emission_hop_floor` in
+`leviculum-core/src/transport.rs` reads the installed count from the
+announce cache (the accepted copy, cached with its wire count) and both
+the replay gate and the acceptance arms compare against it; the refused
+copy is logged as `PATH_REFUSED reason=longer_than_installed`. What the
+deviation still allows is the case it was made for: a copy shorter than
+the installed count, the direct copy after a relay, which heals
+`conformance/link_failure_recovery`.
+
+**A dead next hop.** The reference marks a path unresponsive when a
+forwarded link request expires unproven only if the destination or the
+initiator was one hop away (`Transport.py:724` onward); for a request
+from a local client it only asks the path again (`Transport.py:715`).
+A daemon whose links come from its own clients (a mailbox host, a
+desktop running lnomad) therefore never left a relayed next hop that
+stopped delivering: every answer to the path request was the emission it
+already held, and the longer copies were refused while the path was not
+unresponsive. Since 1672 such an expiry marks the path unresponsive when
+it has a next hop (`PATH_UNRESPONSIVE`), and refuses that next hop's
+copies of the held emission until the destination announces anew
+(`PATH_REFUSED reason=next_hop_unresponsive`, the table leviculum#852's
+loop refusals live in). The unresponsive rule then takes another next
+hop's copy, more hops or not, and the dead hop's shorter copy cannot
+take the path back. A link toward the same destination proven after the
+expired one was set outranks the expiry and nothing is marked: on
+miauhaus the first of two requests expired 1.6 s after the second one's
+proof came back over the same next hop.
+
+The mvr is `leviculum-core/src/node/mvr_path_answer_through_us.rs`: the
+three-node loop (a neighbour that routes the destination through us
+hands our link request back), the heal after a rebalance, the five
+expiries of the field, and the later-proof race with its positive
+control. Wire and semantics are unchanged: a copy is accepted or not,
+a path entry is ours alone.

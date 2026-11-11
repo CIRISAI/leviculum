@@ -166,6 +166,11 @@ const MAX_LOOP_REFUSALS: usize = 8;
 /// to us, so `next_hop` routes `dest_hash` through this node. The entry was
 /// dropped; this keeps `next_hop`'s answers carrying the same emission
 /// (`random_blob`) from reinstalling it.
+///
+/// Order 1672 puts a second kind of refusal in the same table: a next hop
+/// a link request died on ([`RefusalCause::NextHopUnresponsive`]). Both
+/// say the same thing about one emission — this neighbour's copy of it is
+/// not a route — and both end when the destination announces anew.
 #[derive(Debug, Clone, Copy)]
 struct LoopRefusal {
     dest_hash: [u8; TRUNCATED_HASHBYTES],
@@ -175,6 +180,30 @@ struct LoopRefusal {
     /// entry's own expiry, so the refusal never outlives the route it
     /// refused.
     expires_ms: u64,
+    cause: RefusalCause,
+}
+
+/// Why a [`LoopRefusal`] refuses its next hop's copies of one emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusalCause {
+    /// A packet we relayed came back from the next hop addressed to us
+    /// (leviculum#852).
+    ProvenLoop,
+    /// A link request we forwarded to the next hop expired unproven, and
+    /// no later request over the same destination was proven (order 1672).
+    /// Without it, the unresponsive rule moves the path to another next
+    /// hop and the same emission's shorter copy from the dead one moves it
+    /// straight back.
+    NextHopUnresponsive,
+}
+
+impl RefusalCause {
+    fn as_str(self) -> &'static str {
+        match self {
+            RefusalCause::ProvenLoop => "proven_loop",
+            RefusalCause::NextHopUnresponsive => "next_hop_unresponsive",
+        }
+    }
 }
 
 /// The heap side of [`Transport`]'s loop refusals; see its field.
@@ -3839,7 +3868,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Mark a path as unresponsive
     ///
     /// Only succeeds if the destination exists in the path table.
-    /// Called when an unvalidated link expires for a 1-hop destination/initiator.
+    /// Called when an unvalidated link expires for a 1-hop destination/initiator,
+    /// and (order 1672) for a local client's link over a relayed path.
     pub fn mark_path_unresponsive(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> bool {
         if self.storage.has_path(dest_hash) {
             self.storage
@@ -3933,10 +3963,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// replay gate (which would otherwise drop a worse-hops copy before the
     /// acceptance arms ever price it) and the acceptance arms themselves —
     /// so a copy passes the gate exactly when it will be accepted.
+    ///
+    /// `existing_hops` prices the installed route: the caller passes
+    /// [`Self::same_emission_hop_floor`], so a rebalanced count cannot make
+    /// a copy that came back through a neighbour look cheaper (order 1672).
     fn same_emission_cost_swap(
         &self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         existing: &PathEntry,
+        existing_hops: u8,
         incoming_hops: u8,
         incoming_direct: bool,
         incoming_iface: usize,
@@ -3965,7 +4000,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         lower_route_cost(
             &candidate(incoming_hops, incoming_direct, incoming_iface),
             &candidate(
-                existing.hops,
+                existing_hops,
                 existing.next_hop.is_none(),
                 existing.interface_index,
             ),
@@ -6402,6 +6437,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 next_hop,
                 random_blob,
                 expires_ms,
+                cause: RefusalCause::ProvenLoop,
             });
         }
         crate::tracing::debug!(
@@ -6415,31 +6451,84 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 
     /// Whether an announce for `dest_hash` relayed by `transport_id` and
-    /// carrying `random_blob` replays a route a returning relay proved
-    /// circular (leviculum#852). A different emission of the destination
-    /// ends the refusal: the loop was proven for the old one only.
-    fn refuses_proven_loop(
+    /// carrying `random_blob` replays a route this node refused for that
+    /// emission: one a returning relay proved circular (leviculum#852), or
+    /// one a forwarded link request died on (order 1672). A different
+    /// emission of the destination ends the refusal: the loop was proven,
+    /// and the next hop failed, for the old one only.
+    fn refused_next_hop(
         &mut self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         transport_id: Option<&[u8; TRUNCATED_HASHBYTES]>,
         random_blob: &[u8; crate::constants::RANDOM_HASHBYTES],
-    ) -> bool {
-        let Some(refusals) = self.loop_refusals.as_mut() else {
-            return false;
-        };
+    ) -> Option<RefusalCause> {
+        let refusals = self.loop_refusals.as_mut()?;
         let now = self.clock.now_ms();
         refusals.0.retain(|r| {
             r.expires_ms > now && (&r.dest_hash != dest_hash || &r.random_blob == random_blob)
         });
-        let refused = refusals.0.iter().any(|r| {
-            &r.dest_hash == dest_hash
-                && &r.random_blob == random_blob
-                && transport_id == Some(&r.next_hop)
-        });
+        let refused = refusals
+            .0
+            .iter()
+            .find(|r| {
+                &r.dest_hash == dest_hash
+                    && &r.random_blob == random_blob
+                    && transport_id == Some(&r.next_hop)
+            })
+            .map(|r| r.cause);
         if refusals.0.is_empty() {
             self.loop_refusals = None;
         }
         refused
+    }
+
+    /// A link request forwarded toward `dest_hash` expired unproven: refuse
+    /// the path's current next hop's copies of the emission the path holds
+    /// (order 1672). The unresponsive rule then moves the path to another
+    /// next hop's copy, more hops or not, and this refusal keeps the dead
+    /// next hop's shorter copy of the same emission from moving it back.
+    /// One refusal per (destination, next hop); a direct path has no next
+    /// hop to refuse.
+    fn refuse_unresponsive_next_hop(&mut self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) {
+        let Some(path) = self.storage.get_path(dest_hash) else {
+            return;
+        };
+        let Some(next_hop) = path.next_hop else {
+            return;
+        };
+        let Some(random_blob) = path
+            .random_blobs
+            .iter()
+            .max_by_key(|blob| emission_from_random_hash(blob))
+            .copied()
+        else {
+            return;
+        };
+        let expires_ms = path.expires_ms;
+        let path_hops = path.hops;
+        let iface = path.interface_index;
+        let now = self.clock.now_ms();
+        let refusals = &mut self.loop_refusals.get_or_insert_with(Box::default).0;
+        refusals.retain(|r| {
+            r.expires_ms > now && !(&r.dest_hash == dest_hash && r.next_hop == next_hop)
+        });
+        if refusals.len() >= MAX_LOOP_REFUSALS {
+            refusals.remove(0);
+        }
+        refusals.push(LoopRefusal {
+            dest_hash: *dest_hash,
+            next_hop,
+            random_blob,
+            expires_ms,
+            cause: RefusalCause::NextHopUnresponsive,
+        });
+        crate::tracing::debug!(
+            event = "PATH_UNRESPONSIVE",
+            dst = %HexShort(dest_hash),
+            next_hop = %HexShort(&next_hop),
+            iface = %self.iface_name(iface),
+            path_hops = path_hops,
+        );
     }
 
     // Blackholed identities (Codeberg #67)
@@ -6487,7 +6576,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4607. A destination with no cached
+    /// link-request path uses at transport.rs:4642. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7288,7 +7377,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1796 ran in the
+        // Gate on the already-incremented hops (transport.rs:1825 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -7329,12 +7418,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         //   fewer-hops copy passes too because it is direct-link evidence
         //   for the knob even when it does not win.
         if let Some(path) = self.storage.get_path(&dest_hash) {
+            // Against the count we installed and advertised the emission
+            // at, not a rebalanced one (`same_emission_hop_floor`).
+            let hop_floor = self.same_emission_hop_floor(&dest_hash, path);
             let same_emission_may_win =
                 match self.same_emission_path_choice(path.interface_index, interface_index) {
                     PathChoice::Hops => accept_same_emission(
                         SAME_EMISSION_RULE,
                         SameEmissionCopy {
-                            hops: path.hops,
+                            hops: hop_floor,
                             interface_index: path.interface_index,
                         },
                         SameEmissionCopy {
@@ -7343,10 +7435,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         },
                     ),
                     PathChoice::HopsAndLoss => {
-                        packet.hops < path.hops
+                        packet.hops < hop_floor
                             || self.same_emission_cost_swap(
                                 &dest_hash,
                                 path,
+                                hop_floor,
                                 packet.hops,
                                 packet.transport_id.is_none(),
                                 interface_index,
@@ -7357,6 +7450,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 && !self.path_is_unresponsive(&dest_hash)
                 && !same_emission_may_win
             {
+                if packet.hops < path.hops {
+                    // A copy the rebalanced count would have taken as
+                    // "fewer hops" (order 1672: a neighbour's answer at 4
+                    // against our 3 rebalanced to 6). Named, so the next
+                    // field log says why the shorter-looking answer was left.
+                    crate::tracing::debug!(
+                        event = "PATH_REFUSED",
+                        dst = %HexShort(&dest_hash),
+                        next_hop = %HexShort(packet.transport_id.as_ref().map_or(&[][..], |h| &h[..])),
+                        iface = %self.iface_name(interface_index),
+                        hops = packet.hops,
+                        path_hops = path.hops,
+                        installed_hops = hop_floor,
+                        reason = "longer_than_installed",
+                    );
+                }
                 crate::tracing::trace!(
                     dest = %HexShort(&dest_hash),
                     "Dropped announce, random hash already seen (replay)"
@@ -7370,11 +7479,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // destination through us offers the same emission again. Taking it
         // would rebuild the loop the dedup gate just broke, so it counts as
         // a replay; a new emission, from anyone, passes.
-        if self.refuses_proven_loop(&dest_hash, packet.transport_id.as_ref(), &random_hash) {
+        //
+        // Order 1672: the same holds for a next hop a forwarded link
+        // request died on. Its copies of the emission the unresponsive rule
+        // moved the path away from are refused, or the shorter of them would
+        // move the path straight back onto the hop that just failed.
+        if let Some(cause) =
+            self.refused_next_hop(&dest_hash, packet.transport_id.as_ref(), &random_hash)
+        {
             crate::tracing::debug!(
-                dest = %HexShort(&dest_hash),
+                event = "PATH_REFUSED",
+                dst = %HexShort(&dest_hash),
+                next_hop = %HexShort(packet.transport_id.as_ref().map_or(&[][..], |h| &h[..])),
                 iface = %self.iface_name(interface_index),
-                "Dropped announce, its relay routes this destination through us (proven loop)"
+                hops = packet.hops,
+                path_hops = ?self.storage.get_path(&dest_hash).map(|p| p.hops),
+                reason = cause.as_str(),
             );
             self.stats.record_drop(DropReason::AnnounceReplay);
             return Ok(());
@@ -7504,7 +7624,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         {
             let announce_emitted = emission_from_random_hash(&random_hash);
             let path_timebase = max_emission_from_blobs(&existing.random_blobs);
-            if packet.hops <= existing.hops {
+            // "Equal or fewer" is counted against the fewest hops we
+            // installed this emission at, which is the count the reference
+            // compares too: Python's path entry holds that count until a
+            // link proof rebalances it, and its same-emission test never
+            // looks at hops at all (Transport.py:1765-1774). A rebalance
+            // moves `existing.hops`, never the floor
+            // (`same_emission_hop_floor`, order 1672).
+            let hop_floor = self.same_emission_hop_floor(&dest_hash, existing);
+            if packet.hops <= hop_floor {
                 // Equal or fewer hops: accept if emission is newer, or if
                 // same emission but strictly fewer hops (same announce via
                 // a shorter path, e.g. direct vs relayed path response).
@@ -7537,7 +7665,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         accept_same_emission(
                             SAME_EMISSION_RULE,
                             SameEmissionCopy {
-                                hops: existing.hops,
+                                hops: hop_floor,
                                 interface_index: existing.interface_index,
                             },
                             SameEmissionCopy {
@@ -7551,6 +7679,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         self.same_emission_cost_swap(
                             &dest_hash,
                             existing,
+                            hop_floor,
                             packet.hops,
                             packet.transport_id.is_none(),
                             interface_index,
@@ -7606,6 +7735,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     && self.same_emission_cost_swap(
                         &dest_hash,
                         existing,
+                        hop_floor,
                         packet.hops,
                         packet.transport_id.is_none(),
                         interface_index,
@@ -7622,6 +7752,21 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     self.mark_path_unknown_state(&dest_hash);
                     Some("same_emission_lower_cost_worse_hops")
                 } else {
+                    if announce_emitted == path_timebase && packet.hops < existing.hops {
+                        // The copy the rebalanced count would have taken as
+                        // "fewer hops" (order 1672). Named, so the next field
+                        // log says why the shorter-looking answer was left.
+                        crate::tracing::debug!(
+                            event = "PATH_REFUSED",
+                            dst = %HexShort(&dest_hash),
+                            next_hop = %HexShort(packet.transport_id.as_ref().map_or(&[][..], |h| &h[..])),
+                            iface = %self.iface_name(interface_index),
+                            hops = packet.hops,
+                            path_hops = existing.hops,
+                            installed_hops = hop_floor,
+                            reason = "longer_than_installed",
+                        );
+                    }
                     None
                 }
             }
@@ -11128,6 +11273,39 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             }
         }
     }
+    /// The fewest hops this node has held `existing`'s emission at: the
+    /// count the copy that installed it carried, which is also the count
+    /// every rebroadcast and path response of ours told the neighbours.
+    ///
+    /// `existing.hops` is that count until a link proof rebalances it
+    /// (`rebalance_path_hops`, Python 1.5's `ALLOW_LINK_PATH_REBALANCE`).
+    /// A rebalance raises the live length of OUR route; it says nothing
+    /// about the copies a neighbour can offer, and a neighbour that learned
+    /// the emission through us offers it at this floor plus at least one.
+    /// Comparing a same-emission copy against the rebalanced count turned
+    /// such an echo into "fewer hops" (order 1672: 3 rebalanced to 6, then a
+    /// 4-hop copy of the same emission adopted on miauhaus, and every link
+    /// request after it died on that next hop). The installing copy sits in
+    /// the announce cache, written on every accepted announce
+    /// (`handle_announce`), with its pre-increment wire count; a cache that
+    /// holds another emission, or nothing, leaves the stored count.
+    fn same_emission_hop_floor(
+        &self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        existing: &PathEntry,
+    ) -> u8 {
+        let timebase = max_emission_from_blobs(&existing.random_blobs);
+        self.storage
+            .get_announce_cache(dest_hash)
+            .and_then(|raw| {
+                let packet = Packet::unpack(raw).ok()?;
+                let announce = ReceivedAnnounce::from_packet(&packet).ok()?;
+                (emission_from_random_hash(announce.random_hash()) == timebase)
+                    .then(|| packet.hops.saturating_add(1))
+            })
+            .map_or(existing.hops, |installed| installed.min(existing.hops))
+    }
+
     /// Emission timestamp of the announce we hold in the cache for
     /// `dest_hash`, read from its random hash — the replay memory that
     /// survives a culled path entry (#374). `None` when nothing is cached or
@@ -12653,7 +12831,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2944`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2973`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -14166,13 +14344,38 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Sub-case 1: Path missing, unconditionally try to rediscover
                 // (no throttle check). Python Transport.py:708-710.
                 should_request_path = true;
-            } else if !path_request_throttled && entry.hops == 0 {
+            } else if entry.hops == 0 {
                 // Sub-case 2: link initiated by a LOCAL CLIENT (lr_taken_hops == 0).
-                // Rediscover the path, but do NOT mark it unresponsive: Python
-                // Transport.py:715-717 sets path_request_conditions only — no
-                // mark_path_unresponsive, no blocked_if. Order matters (elif
-                // chain): this must sit before the is_direct and hops == 1 cases.
-                should_request_path = true;
+                // Rediscover the path (Python Transport.py:715-717). Order
+                // matters (elif chain): this must sit before the is_direct
+                // and hops == 1 cases.
+                should_request_path = !path_request_throttled;
+                // Deviation (order 1672): Python sets path_request_conditions
+                // only here — no mark_path_unresponsive. A daemon whose
+                // links all come from its own clients (a mailbox host, a
+                // desktop running lnomad) then never leaves a relayed next
+                // hop that stopped delivering: every answer to the path
+                // request is the emission it already holds, the longer
+                // copies are refused for as long as the path is not
+                // unresponsive, and the dead route stands until the
+                // destination announces again (miauhaus, 2026-11-11: five
+                // link requests in a row to one next hop, 102 s each).
+                // Marking it lets the unresponsive rule take another next
+                // hop's copy; refusing the dead next hop's copies of this
+                // emission keeps it from coming back. Wire unchanged, a
+                // path entry is ours alone; a link proven over the same
+                // destination after this one was set says the route works,
+                // and then nothing is marked.
+                if self.config.enable_transport
+                    && self
+                        .storage
+                        .get_path(&dest_hash)
+                        .is_some_and(|p| p.next_hop.is_some())
+                    && !self.link_proven_since(&dest_hash, entry.timestamp_ms)
+                {
+                    self.mark_path_unresponsive(&dest_hash);
+                    self.refuse_unresponsive_next_hop(&dest_hash);
+                }
             } else if !path_request_throttled
                 && self
                     .storage
@@ -14191,6 +14394,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 should_request_path = true;
                 if self.config.enable_transport {
                     self.mark_path_unresponsive(&dest_hash);
+                    // Order 1672, as in sub-case 2: the next hop that let
+                    // this request die does not get the emission back.
+                    if !self.link_proven_since(&dest_hash, entry.timestamp_ms) {
+                        self.refuse_unresponsive_next_hop(&dest_hash);
+                    }
                 }
             }
 
@@ -14213,6 +14421,17 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 }
             }
         }
+    }
+
+    /// Whether a link request toward `dest_hash` set at or after `since_ms`
+    /// has been proven: the route answered after the request that just
+    /// expired was sent, so that expiry says nothing against it (order
+    /// 1672 — on miauhaus the first of two requests expired 1.6 s after
+    /// the second one's proof came back over the same next hop).
+    fn link_proven_since(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES], since_ms: u64) -> bool {
+        self.storage.link_entries().iter().any(|(_, e)| {
+            &e.destination_hash == dest_hash && e.validated && e.timestamp_ms >= since_ms
+        })
     }
 
     /// Remove path_states and announce_rate entries for destinations no longer in path_table.
@@ -19005,7 +19224,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:8104), a deliberate anti-replay
+            // `random_blobs` (transport.rs:8249), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -25299,7 +25518,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1796) before
+        // The inbound path increments hops once (transport.rs:1825) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
