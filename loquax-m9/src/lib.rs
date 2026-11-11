@@ -65,6 +65,7 @@ pub mod field;
 pub mod fixture;
 pub mod font;
 pub mod frame;
+pub mod glyphs;
 pub mod gnss;
 pub mod group;
 pub mod home;

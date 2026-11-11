@@ -67,10 +67,12 @@
 //! [CENSUS] screen=<map|pan> ... verdict=ok t=<ms>               (1375)
 //! [CENSUS] map_kept held=153600 t=<ms>   the map's picture kept between
 //!                           draws from here on (1507), after the census
-//! [MAP] zoom=<z> picture_ms=.. names_ms=.. names=<n> dropped=<n> kept=<0|1>
+//! [MAP] zoom=<z> picture_ms=.. names_ms=.. names=<n> dropped=<n> glyphs=<n> heap_peak=<B> kept=<0|1>
 //!                           every map draw (1531); kept=1 copied the kept
 //!                           picture back, a page switch or a key that moved
-//!                           no view and no pin (1507), and its ms are 0
+//!                           no view and no pin (1507), and its ms are 0;
+//!                           glyphs= the names' glyphs rasterised, heap_peak=
+//!                           the draw's peak above what was live (1565)
 //! [CENSUS] session=pull held=<n> peak=<n> stack=<n> verdict=ok pages=<n> entries=30 t=<ms>
 //! [HOME] client=none page=<n> t=<ms>        or client=yes admitted=... cursor=... page=.. max_answer=.. home=<32 hex>
 //!                           home: the LXMF address of the home the client
@@ -1459,6 +1461,8 @@ fn redraw(
         ..screen::Look::of(model)
     };
     let overview = shown.overview;
+    // The draw's heap peak for the `[MAP]` line (1565).
+    let heap_before = leviculum_esp::heap_window_start();
     // The house key's settings page (1561), the core's settings for the M9.
     let house_page = || house::page(model, overview.size, env!("CARGO_PKG_VERSION"));
     #[cfg(not(m9_bench))]
@@ -1497,18 +1501,22 @@ fn redraw(
         return false;
     }
     // What the map's draw did (1531): its zoom, the picture's and the
-    // label pass's time, the names set and dropped.
+    // label pass's time, the names set and dropped; since 1565 the glyphs
+    // the names took and the draw's heap peak above what was live before.
     if let Some(stats) = renderer.take_map_stats() {
         let ms = |us: u64| alloc::format!("{}.{:03}", us / 1000, us % 1000);
+        let heap_peak = leviculum_esp::heap_window_peak().saturating_sub(heap_before);
         log.line(
             "[MAP] ",
             alloc::format!(
-                "zoom={} picture_ms={} names_ms={} names={} dropped={} kept={}",
+                "zoom={} picture_ms={} names_ms={} names={} dropped={} glyphs={} heap_peak={} kept={}",
                 stats.zoom,
                 ms(stats.picture_us),
                 ms(stats.names_us),
                 stats.names.drawn,
                 stats.names.dropped(),
+                stats.names.glyphs,
+                heap_peak,
                 u8::from(stats.kept)
             ),
         );

@@ -52,7 +52,9 @@ required-features = ["sim"]
 # The messenger core: the scene, its catalogue, the key table and the
 # intents. Without `std` it is `no_std` plus `alloc` (`just
 # loquax-core-no-std`).
-loquax = { path = "../loquax", default-features = false }
+# `mapnames` (1565): the phone's label pass, its rule, masks, halos and
+# paint, without the cosmic-text typesetter, which needs `std`.
+loquax = { path = "../loquax", default-features = false, features = ["mapnames"] }
 # Styled lines, colour tokens, the delivery glyph table and the key events.
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
 # The styled-line bridge to ratatui, without the terminal.
@@ -69,6 +71,13 @@ embedded-graphics = "0.8"
 # filler straight into the panel, `no_std` both (`just map-core-no-std`).
 leviculum-map = { path = "../leviculum-map" }
 leviculum-mapfill = { path = "../leviculum-mapfill" }
+# The map's names in Fira Sans (1565, `src/glyphs.rs`): ab_glyph's outline
+# reader and rasteriser, `no_std` with `libm`. cosmic-text, the phone's
+# shaper, needs `std`. The release image grew by 482,368 B with 1565
+# (3,378,848 to 3,861,216): the face's 440,984 B and 41,384 B of code,
+# ab_glyph, the name pass, the casings and the buildings together.
+ab_glyph = { version = "0.2.32", default-features = false, features = ["libm"] }
+libm = "0.2"
 # The position a fixture's GNSS fix and its friends' shares are read in.
 leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false }
 # The sim's (1530): the 1489 fixture's messages signed as the home packs

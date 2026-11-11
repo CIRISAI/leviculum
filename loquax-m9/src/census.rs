@@ -54,7 +54,7 @@ pub fn measure<D>(
     map: &mut Map<'_>,
 ) -> Result<Census, DrawError>
 where
-    D: DrawTarget<Color = Rgb565> + 'static,
+    D: DrawTarget<Color = Rgb565> + leviculum_mapfill::coverage::Coverage + 'static,
 {
     measure_at(probe, model, 0, renderer, map)
 }
@@ -70,7 +70,7 @@ pub fn measure_at<D>(
     map: &mut Map<'_>,
 ) -> Result<Census, DrawError>
 where
-    D: DrawTarget<Color = Rgb565> + 'static,
+    D: DrawTarget<Color = Rgb565> + leviculum_mapfill::coverage::Coverage + 'static,
 {
     if map::shown(model) {
         probe.begin();
@@ -128,7 +128,7 @@ fn step_map<D>(
     map: &mut Map<'_>,
 ) -> Result<(), DrawError>
 where
-    D: DrawTarget<Color = Rgb565> + 'static,
+    D: DrawTarget<Color = Rgb565> + leviculum_mapfill::coverage::Coverage + 'static,
 {
     renderer.show(model, look, map)
 }
@@ -140,7 +140,7 @@ fn step_draw<D>(
     look: &Look,
 ) -> Result<(), DrawError>
 where
-    D: DrawTarget<Color = Rgb565> + 'static,
+    D: DrawTarget<Color = Rgb565> + leviculum_mapfill::coverage::Coverage + 'static,
 {
     renderer.draw(scene, look)
 }

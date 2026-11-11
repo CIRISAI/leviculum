@@ -201,6 +201,10 @@ struct CountedHeap {
     heap: Heap,
     live: AtomicUsize,
     peak: AtomicUsize,
+    /// A second peak, since [`heap_window_start`] (1565): what one draw
+    /// took, read without resetting [`heap_peak`], which a census on the
+    /// other core may be counting by.
+    window: AtomicUsize,
 }
 
 // SAFETY: every call goes to the inner allocator unchanged; the counts are
@@ -214,6 +218,7 @@ unsafe impl GlobalAlloc for CountedHeap {
         if !ptr.is_null() {
             let live = self.live.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
             self.peak.fetch_max(live, Ordering::Relaxed);
+            self.window.fetch_max(live, Ordering::Relaxed);
         }
         #[cfg(m9_bench)]
         {
@@ -362,6 +367,7 @@ static HEAP: CountedHeap = CountedHeap {
     ]),
     live: AtomicUsize::new(0),
     peak: AtomicUsize::new(0),
+    window: AtomicUsize::new(0),
 };
 
 /// Bytes allocated and not yet freed.
@@ -377,6 +383,22 @@ pub fn heap_peak() -> usize {
 /// Start a new peak at what is live now.
 pub fn heap_reset_peak() {
     HEAP.peak.store(heap_live(), Ordering::Relaxed);
+}
+
+/// Start the window's peak at what is live now (1565): the map's draw
+/// says what it took on its `[MAP]` line as [`heap_window_peak`] minus
+/// what was live here. Both cores allocate from the one heap, so a window
+/// counts what the other core took meanwhile too; it never touches
+/// [`heap_peak`].
+pub fn heap_window_start() -> usize {
+    let live = heap_live();
+    HEAP.window.store(live, Ordering::Relaxed);
+    live
+}
+
+/// The most [`heap_live`] has been since [`heap_window_start`].
+pub fn heap_window_peak() -> usize {
+    HEAP.window.load(Ordering::Relaxed)
 }
 
 /// Bytes the allocator still has, all pools.

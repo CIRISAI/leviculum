@@ -536,7 +536,7 @@ another firmware's header.
   the map measurement), 16 MB flash. How much SRAM is free beside the
   radio stack — and later WiFi or BLE — is unmeasured ("Open"). The
   `leviculum-esp` heap is a 64 KiB placeholder today (`HEAP_SIZE`,
-  `leviculum-esp/src/lib.rs:399`); the UI budgets on the messenger page
+  `leviculum-esp/src/lib.rs:421`); the UI budgets on the messenger page
   say what has to replace it.
 - **Radio.** The LR1110 through `leviculum-lr11xx`, usable ceiling about
   +17 dBm ("What the community port measured"). For the UI it is the

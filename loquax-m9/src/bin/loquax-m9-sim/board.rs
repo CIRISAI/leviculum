@@ -1005,12 +1005,13 @@ impl Board {
             self.log.line(
                 "[MAP] ",
                 &format!(
-                    "zoom={} picture_ms={} names_ms={} names={} dropped={}",
+                    "zoom={} picture_ms={} names_ms={} names={} dropped={} glyphs={}",
                     stats.zoom,
                     ms(stats.picture_us),
                     ms(stats.names_us),
                     stats.names.drawn,
-                    stats.names.dropped()
+                    stats.names.dropped(),
+                    stats.names.glyphs
                 ),
             );
         }

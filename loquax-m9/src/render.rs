@@ -262,7 +262,10 @@ where
         model: &UiModel<Field>,
         look: &Look,
         map: &mut Map<'_>,
-    ) -> Result<(), DrawError> {
+    ) -> Result<(), DrawError>
+    where
+        D: leviculum_mapfill::coverage::Coverage,
+    {
         let Some((view, pins)) = map::shown(model).then(|| map::view(model)).flatten() else {
             let t0 = self.now();
             let scene = screen::scene(model);
@@ -312,6 +315,7 @@ where
             more,
             world,
             painter,
+            glyphs,
             kept,
         } = map;
         let region = map::region_of(first, more, world.as_ref(), drawn);
@@ -326,7 +330,7 @@ where
                     stats.names = self.names_kept;
                 } else {
                     let (found, picture_us, names_us) = kept
-                        .draw(painter, region, &painted, &taken, &font, &now)
+                        .draw(painter, glyphs, region, &painted, &taken, &now)
                         .map_err(|_| DrawError)?;
                     stats.picture_us = picture_us;
                     stats.names_us = names_us;
@@ -340,9 +344,8 @@ where
                     .picture(region, &painted, panel)
                     .map_err(|_| DrawError)?;
                 let t1 = now();
-                let rows = (painted.size().1 / u32::from(map::CELL_PX.1)) as u16;
-                let (names, found) = map::names(region, &painted, rows, &taken);
-                map::draw_names(&names, &font, panel).map_err(|_| DrawError)?;
+                let (names, found) = map::names(region, &painted, &taken, glyphs);
+                map::draw_names(&names, panel);
                 let t2 = now();
                 stats.picture_us = t1.saturating_sub(t0);
                 stats.names_us = t2.saturating_sub(t1);

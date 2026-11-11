@@ -9,6 +9,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
 dependencies = [
  "ab_glyph_rasterizer",
+ "libm",
  "owned_ttf_parser",
 ]
 
@@ -17,6 +18,9 @@ name = "ab_glyph_rasterizer"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "addr2line"
@@ -3558,6 +3562,7 @@ dependencies = [
 name = "loquax-m9"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "embedded-graphics",
  "leviculum-core",
  "leviculum-log-line",
@@ -3568,6 +3573,7 @@ dependencies = [
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-ratatui",
+ "libm",
  "loquax",
  "mousefood",
  "png",
