@@ -364,7 +364,7 @@ clear log line, not a silent skip.
 An attached LNode, and the M9, gets `interface_mode = gateway` on its
 interface: the board behind the line asks paths for itself and only a
 discovering mode looks for them onwards
-(`leviculum-core/src/transport.rs:12780`); in full mode a board's join
+(`leviculum-core/src/transport.rs:12958`); in full mode a board's join
 to its home ends in `NoPath` (1439, measured on the bench).
 
 All found boards are attached. Two RNodes on one frequency in one room

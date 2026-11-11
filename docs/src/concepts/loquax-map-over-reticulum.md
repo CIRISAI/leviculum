@@ -76,8 +76,8 @@ covering its view.
 
 **The request API**, over a Link on `lev.maps`, with handlers
 registered per path (`register_request_handler`,
-`leviculum-core/src/node/mod.rs:1546`) and every answer a Resource
-(`send_response_resource`, `leviculum-core/src/node/mod.rs:2028`):
+`leviculum-core/src/node/mod.rs:1548`) and every answer a Resource
+(`send_response_resource`, `leviculum-core/src/node/mod.rs:2030`):
 
 - `/regions` — no request data; the index as msgpack: per region id,
   name, bounds, zoom range, bytes, and the SHA-256 hash of the file.

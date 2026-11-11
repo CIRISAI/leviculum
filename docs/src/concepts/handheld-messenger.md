@@ -802,7 +802,7 @@ well as into the renderer, and both must be refused for thumbv7em.
 **The page fits a packet.** A link on LoRa keeps the default MTU, 500
 bytes, and its MDU is 431 (`LORA_LINK_MDU`,
 `loquax/src/home/ask.rs:139`). A response longer than that goes as a
-resource (`leviculum-core/src/node/mod.rs:1841`), which is an
+resource (`leviculum-core/src/node/mod.rs:1843`), which is an
 advertisement, its parts and a proof. The home's own page bound is
 64 KiB of messages (`SYNC_PAGE_BYTES`, `loquax/src/home.rs:368`). So
 the client asks smaller pages: `/sync [cursor, page]`, a second element
@@ -1559,7 +1559,7 @@ phone pulls from; the bench line is lnsd on schneckenschreck, the
 rendezvous, the home behind it. lnsd's serial interface to the M9 needs
 `interface_mode = gateway`: in the default full mode a path request
 from the board for the home is not discovered onwards
-(`leviculum-core/src/transport.rs:12780`, only access point, gateway
+(`leviculum-core/src/transport.rs:12958`, only access point, gateway
 and roaming re-originate), and the join ends in `NoPath`. The M9 sets
 its own end to Gateway already (`leviculum-esp/src/handheld.rs:210`).
 

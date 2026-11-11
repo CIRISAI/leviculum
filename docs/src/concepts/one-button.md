@@ -236,7 +236,7 @@ reason=immediate trigger=button …`. Each report names who asked for it
 
 **The proof.** The report goes out opportunistically, and the recipient
 proves it. The core surfaces a verified proof for a sent packet as
-`NodeEvent::PacketDeliveryConfirmed` (`leviculum-core/src/node/mod.rs:4912`),
+`NodeEvent::PacketDeliveryConfirmed` (`leviculum-core/src/node/mod.rs:4914`),
 and the reporter's proof wait (`ProofTracker`, with its one
 retransmission) takes it (`leviculum-nrf/src/telemetry.rs:1814`). The
 wait now carries who asked for the report. When the proof of a press's

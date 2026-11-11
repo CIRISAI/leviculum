@@ -30,7 +30,7 @@ your own allocator. The reference firmware `leviculum-nrf` targets
 ## The sans-IO contract
 
 The core is a state machine with exactly three ways in, and one way out. The way
-out is always a `TickOutput` (`leviculum-core/src/transport.rs:616`), carrying
+out is always a `TickOutput` (`leviculum-core/src/transport.rs:645`), carrying
 `actions` to perform, `events` that occurred, and `next_deadline_ms`, the time at
 which you must next tick the timer. It is `#[must_use]`: dropping it loses
 outbound packets and events.
@@ -46,13 +46,13 @@ timer expired  ─► handle_timeout()            ├─► TickOutput { actions
 The three entry points (signatures in the
 [reference](rust-api-spec.md#nodecorer-c-s)):
 
-- `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1126`. Feed one
+- `handle_packet(iface, data)` — `leviculum-core/src/node/mod.rs:1128`. Feed one
   received frame, tagged with the [`InterfaceId`](rust-api-spec.md#core-tickoutput-and-action)
   it arrived on.
-- `handle_timeout()` — `leviculum-core/src/node/mod.rs:2924`. Run periodic
+- `handle_timeout()` — `leviculum-core/src/node/mod.rs:2926`. Run periodic
   maintenance (path expiry, announce rebroadcasts, keepalives, retransmissions).
   Call it at or before `next_deadline`.
-- `next_deadline()` (`leviculum-core/src/node/mod.rs:2954`). The earliest timer
+- `next_deadline()` (`leviculum-core/src/node/mod.rs:2956`). The earliest timer
   deadline in milliseconds, or `None` if no timer is pending. Sleep until this,
   or until a packet arrives, whichever comes first.
 
@@ -126,7 +126,7 @@ Three things to notice:
 3. **`dispatch_actions` does the routing.** Rather than matching on each `Action`
    yourself, hand the whole `actions` vec plus your `&mut dyn Interface` slice
    (or a slice of your own interface type, through `AsInterface`) to the
-   generic `dispatch_actions` (`leviculum-core/src/transport.rs:799`). Broadcast
+   generic `dispatch_actions` (`leviculum-core/src/transport.rs:828`). Broadcast
    exclusion, interface selection, and IFAC wrapping live in core, so every
    driver gets them for free. Bind what it returns: the `DispatchResult` is
    `#[must_use]` because dropping it discards the retries the core asked for,

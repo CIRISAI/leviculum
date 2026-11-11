@@ -171,7 +171,7 @@ fresh random ratchet when it announces after its interval
 every 30 minutes, and keeps 512 (`reference/Reticulum/RNS/Destination.py:85`,
 `:90`). A sender keeps one ratchet per destination, the last it heard
 (`reference/Reticulum/RNS/Identity.py:440`); ours does the same
-(`known_remote_ratchet`, `leviculum-core/src/node/mod.rs:4107`). The
+(`known_remote_ratchet`, `leviculum-core/src/node/mod.rs:4109`). The
 receiver tries its ring and then the identity key
 (`reference/Reticulum/RNS/Identity.py:910-912`), which cannot open a
 packet sealed to a ratchet. A packet routed to the home without the
@@ -229,7 +229,7 @@ interface the request came in on
 path response needs the filter too.
 
 The core can already announce on one interface,
-`announce_destination_on_interface` (`leviculum-core/src/node/mod.rs:1022`).
+`announce_destination_on_interface` (`leviculum-core/src/node/mod.rs:1024`).
 The path response filter and the one-hour fallback are new. Planned
 (slice H3).
 
@@ -259,7 +259,7 @@ path a newer emission still wins
 announcing host's clock in whole seconds inside the random hash
 (`reference/Reticulum/RNS/Destination.py:282`). Ours keeps the same rule
 and lets the same emission over fewer hops win a tie
-(`leviculum-core/src/transport.rs:7561-7564`). Hops only decide between
+(`leviculum-core/src/transport.rs:7690-7693`). Hops only decide between
 copies of the same emission. Two homes on one segment therefore flap by
 recency and by their hosts' clocks, which `loquax_homes_flap` shows.
 Hence decision (d).
