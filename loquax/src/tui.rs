@@ -2299,6 +2299,7 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
         (Some(shown), Some(painter)) => {
             painter.set_tier(tier);
             painter.set_theme(loquax::picture::map_theme(view.map_theme, Some(view.theme)));
+            painter.set_time_zones(view.time_zones);
             painter.render(frame, shown, Style::default().add_modifier(Modifier::DIM));
             if view.map_glyph_test {
                 map::draw_glyph_test(frame, to_ratatui(shown.area));

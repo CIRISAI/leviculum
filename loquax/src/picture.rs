@@ -46,9 +46,10 @@ use leviculum_map::draw::{attach_buildings, draw_in_scaled, draw_tiles, draws_bu
 use leviculum_map::labels::ViewLabel;
 use leviculum_map::outline;
 use leviculum_map::region::{Header, Region, TileId};
+use leviculum_map::timezones;
 use leviculum_map::viewport::{ViewTile, Viewport};
 use leviculum_mapfill::coverage::{Coverage, Hard};
-use leviculum_mapfill::fill::{Edge, Scratch};
+use leviculum_mapfill::fill::{Edge, Filler, Scratch};
 use leviculum_mapfill::frame::{Frame, RgbaFrame};
 use leviculum_mapfill::render::{NoClock, Work};
 use leviculum_mapfill::style::{MapTheme, Profile, Style};
@@ -306,6 +307,10 @@ pub struct Painter {
     /// Place no names ([`Painter::set_names_off`]): a measuring tool's
     /// ground.
     names_off: bool,
+    /// The time zone view (1684): the zones' borders over the picture and
+    /// their clocks at this instant, in seconds since the epoch, in place
+    /// of the names.
+    time_zones: Option<i64>,
 }
 
 /// The filler's storage for one region drawn ([`region_into`]). The filler
@@ -347,6 +352,7 @@ impl Painter {
             scratch: FillScratch::new(),
             viewed: HashMap::new(),
             names_off: false,
+            time_zones: None,
         }
     }
 
@@ -380,6 +386,17 @@ impl Painter {
     /// Place and draw no names, or again: a measuring tool's ground.
     pub fn set_names_off(&mut self, off: bool) {
         self.names_off = off;
+    }
+
+    /// Show the time zone view at `unix` seconds since the epoch, or not
+    /// (1684): [`draw`](Self::draw) strokes the zones' borders over the
+    /// picture and [`labels`](Self::labels) gives each zone's clock in
+    /// place of the names. The tile cache's painters never get it: the
+    /// window and the phone stroke the borders over the composed frame
+    /// ([`crate::screenmap::draw_time_zones`]), so no cached tile holds
+    /// them.
+    pub fn set_time_zones(&mut self, unix: Option<i64>) {
+        self.time_zones = unix;
     }
 
     /// The regions' headers, which say how deep a fit goes, newest first
@@ -503,6 +520,25 @@ impl Painter {
         for i in shown {
             self.viewed(i);
         }
+        if self.time_zones.is_some() {
+            let (_, h) = view.size();
+            self.scratch.heads.resize(h as usize, 0);
+            let mut scratch = Scratch {
+                edges: &mut self.scratch.edges,
+                heads: &mut self.scratch.heads,
+                active: &mut self.scratch.active,
+            };
+            let mut filler = Filler::new(&mut scratch, frame.bounding_box());
+            let Ok(_) = outline::bounds(
+                &timezones::BOUNDARIES,
+                view,
+                Point::zero(),
+                crate::zoneclock::line_colour(style.theme),
+                &mut filler,
+                frame,
+            );
+            attribution = format!("{attribution} · {}", timezones::ATTRIBUTION);
+        }
         (attribution, pending)
     }
 
@@ -519,6 +555,9 @@ impl Painter {
     pub fn labels(&mut self, view: &Viewport, lines: bool) -> Vec<ViewLabel> {
         if self.names_off {
             return Vec::new();
+        }
+        if let Some(unix) = self.time_zones {
+            return crate::zoneclock::labels(view, unix);
         }
         self.refresh();
         let order = drawn(

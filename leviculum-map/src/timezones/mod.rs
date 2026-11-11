@@ -350,7 +350,7 @@ pub fn labels(view: &Viewport, out: &mut Vec<ViewLabel>) {
     }
 }
 
-/// The tzdata version [`RULES`] was generated from, `2026b`.
+/// The tzdata version [`RULES`] was generated from, `2026f` today.
 pub fn board_tzdata_version() -> Option<&'static str> {
     RULES
         .lines()

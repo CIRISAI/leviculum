@@ -2850,6 +2850,10 @@ pub struct MapRequest {
     /// inside the tracks' time window in view.
     #[serde(default)]
     pub fit_window: bool,
+    /// The map menu's "Time zones" chosen (1684): the time zone view on,
+    /// or off again. The answer's `time_zones` says which the frame drew.
+    #[serde(default)]
+    pub time_zones_toggle: bool,
     /// The position sheet's map (1448, walk finding 16): the own fix
     /// alone, no one else's pin or track and never the radar; where no
     /// region covers the fix, the world's outline around it.
@@ -3031,6 +3035,11 @@ pub struct MapShown {
     /// the default first, the window the frame drew chosen.
     #[serde(default)]
     pub track_windows: Vec<TrackChoice>,
+    /// The frame draws the time zone view (1684): the zones' borders and
+    /// each one's clock. The menu marks its entry, and the app asks for a
+    /// frame again as the minute turns, so the clocks go on.
+    #[serde(default)]
+    pub time_zones: bool,
 }
 
 /// An entry of the map menu's time window sheet (1419).

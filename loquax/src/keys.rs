@@ -183,6 +183,9 @@ pub enum MapCmd {
     /// Every peer with a position inside the tracks' time window in view
     /// (1386).
     FitWindow,
+    /// The time zone view on or off (1684): the zones' borders and each
+    /// one's clock over the map.
+    TimeZones,
 }
 
 const fn key(code: KeyCode, mods: Mods, action: Action, panes: Panes) -> Chord<Action> {
@@ -758,6 +761,13 @@ pub const ROWS: &[Row<Action>] = {
                 key(Char('w'), Mods::Plain, Map(MapCmd::TrackWindow(true)), MAP),
                 key(Char('W'), Mods::Plain, Map(MapCmd::TrackWindow(false)), MAP),
             ]],
+        ),
+        // 1684: the time zone view, the window's and the phone's map menu
+        // entry.
+        Row::new(
+            "the time zones and their clocks over the map, or away again",
+            MAP_GROUP,
+            &[&[key(Char('z'), Mods::Plain, Map(MapCmd::TimeZones), MAP)]],
         ),
         Row::new(
             "the glyph test: which glyph sets the font draws",

@@ -537,6 +537,7 @@
     <string name="scene_tracks_month">This month</string>
     <string name="scene_tracks_all">All</string>
     <string name="scene_fit_window">Fit all</string>
+    <string name="scene_time_zones">Time zones</string>
     <string name="scene_load_map_area">Load this map area</string>
     <string name="scene_date">%1$s %2$d %3$s</string>
     <string name="scene_date_year">%1$s %2$d %3$s %4$d</string>

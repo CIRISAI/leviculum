@@ -104,6 +104,7 @@ pub(super) mod tests {
             measure: Some(measure),
             now_ms: None,
             scaled_while_moving: false,
+            time_zones: None,
         })
     }
 
@@ -247,6 +248,7 @@ pub(super) mod tests {
             measure: Some(measure),
             now_ms: None,
             scaled_while_moving: false,
+            time_zones: None,
         };
         let mut ground = florence();
         ground.set_names_off(true);
@@ -379,6 +381,7 @@ pub(super) mod tests {
                         measure: Some(measure),
                         now_ms: None,
                         scaled_while_moving: false,
+                        time_zones: None,
                     });
                     (shot, frames.drawn_names())
                 };
@@ -435,6 +438,7 @@ pub(super) mod tests {
                     measure: Some(measure),
                     now_ms: None,
                     scaled_while_moving: false,
+                    time_zones: None,
                 });
                 let names = frames.drawn_names();
                 println!("z{zoom} {who}: {names:?}");
@@ -496,6 +500,7 @@ pub(super) mod tests {
             measure: Some(measure),
             now_ms: None,
             scaled_while_moving: false,
+            time_zones: None,
         });
         assert!(
             frames.drawn_names().is_empty(),
@@ -548,6 +553,7 @@ pub(super) mod tests {
                     measure: None,
                     now_ms: None,
                     scaled_while_moving: false,
+                    time_zones: None,
                 });
                 let rgb: Vec<u8> = shot
                     .rgba
@@ -634,6 +640,7 @@ pub(super) mod tests {
                 measure: None,
                 now_ms: None,
                 scaled_while_moving: false,
+                time_zones: None,
             });
             let rgb: Vec<u8> = shot
                 .rgba
@@ -693,6 +700,7 @@ pub(super) mod tests {
                         measure: Some(measure),
                         now_ms: None,
                         scaled_while_moving: false,
+                        time_zones: None,
                     });
                     (frames.drawn_names(), shot.rgba)
                 };

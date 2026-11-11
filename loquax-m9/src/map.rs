@@ -46,6 +46,7 @@ use leviculum_map::draw::{draw_in_scaled, Ink};
 use leviculum_map::labels::{place, Candidate, LabelKind, Rect as LabelRect, Rule, ViewLabel};
 use leviculum_map::outline;
 use leviculum_map::region::{Header, Region, RegionError};
+use leviculum_map::timezones;
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, Filler, Scratch};
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
@@ -563,6 +564,49 @@ pub fn names(
     if overview {
         outline::names(outline::NAMES_M9, view, &mut found);
     }
+    place_names(found, view, rows, taken)
+}
+
+/// The time zone view's names (1684): each zone's clock at `unix` by the
+/// board's own rules ([`timezones::board_time`]), `HH:MM`, placed as
+/// [`names`] places a view's names; a zone the table lacks is left out.
+pub fn zone_names(
+    view: &Viewport,
+    rows: u16,
+    taken: &[(u16, u16, u16)],
+    unix: i64,
+) -> (Vec<NameCell>, NameStats) {
+    let mut found: Vec<ViewLabel> = Vec::new();
+    timezones::labels(view, &mut found);
+    found.retain_mut(|l| {
+        let Some(offset) = timezones::board_offset(&l.local, unix) else {
+            return false;
+        };
+        let minute = (unix + i64::from(offset))
+            .div_euclid(60)
+            .rem_euclid(24 * 60);
+        l.text = alloc::format!("{:02}:{:02}", minute / 60, minute % 60);
+        true
+    });
+    place_names(found, view, rows, taken)
+}
+
+/// Whether the time zone view is on, and the minute its clocks show
+/// (1684): the model's `z`, once the board knows the time; a board
+/// without a clock draws the map as ever.
+pub fn zones<B>(model: &UiModel<B>) -> Option<i64> {
+    let now = model.now.filter(|_| model.time_zones)?;
+    Some(now.unix_secs - now.unix_secs.rem_euclid(60))
+}
+
+/// `found` placed on the cells of `rows` rows by the rounds [`names`]
+/// documents.
+fn place_names(
+    mut found: Vec<ViewLabel>,
+    view: &Viewport,
+    rows: u16,
+    taken: &[(u16, u16, u16)],
+) -> (Vec<NameCell>, NameStats) {
     let zoom = view.zoom();
     let poi = |k: LabelKind| matches!(k, LabelKind::Park | LabelKind::Water);
     found.retain(|l| zoom >= POI_ZOOM || !poi(l.kind));
@@ -890,7 +934,37 @@ impl Painter {
         }
         Ok(stats)
     }
+
+    /// The time zone view's borders over a picture already drawn for
+    /// `view` (1684), from the map core's zone table, in a violet no other
+    /// line of the map has. Past the outline's deepest zoom nothing.
+    pub fn zone_borders<D>(&mut self, view: &Viewport, panel: &mut D)
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let top = i32::from(PICTURE.y * CELL_PX.1);
+        let (w, h) = view.size();
+        let mut target = panel.cropped(&Rectangle::new(Point::new(0, top), Size::new(w, h)));
+        let mut scratch = Scratch {
+            edges: &mut self.edges,
+            heads: &mut self.heads,
+            active: &mut self.active,
+        };
+        let mut filler = Filler::new(&mut scratch, target.bounding_box());
+        let _ = outline::bounds(
+            &timezones::BOUNDARIES,
+            view,
+            Point::new(0, top),
+            ZONE_LINE,
+            &mut filler,
+            &mut target,
+        );
+    }
 }
+
+/// The time zone view's line colour (1684), the window's and the phone's
+/// violet, `#8e44ad`.
+pub const ZONE_LINE: Rgb565 = Rgb565::new(0x8e >> 3, 0x44 >> 2, 0xad >> 3);
 
 /// The pins over the picture: each pin's text where the model placed it,
 /// in the atlas, on the bar's colours; the chosen one reversed, an old
@@ -1132,8 +1206,9 @@ pub type Clear = Vec<(u16, u16, u16)>;
 /// zoom, a pin that came or went.
 pub struct Kept {
     pixels: Vec<u16>,
-    /// The view and the pins' cells of what `pixels` holds.
-    holds: Option<(Viewport, Clear)>,
+    /// The view, the pins' cells and the time zone view's minute of what
+    /// `pixels` holds.
+    holds: Option<(Viewport, Clear, Option<i64>)>,
     /// The picture's size.
     size: (u32, u32),
     /// Pictures drawn, and draws that copied a kept picture back instead
@@ -1165,11 +1240,12 @@ impl Kept {
         self.pixels.len() * 2
     }
 
-    /// Whether it holds `view` drawn clear of `taken`.
-    pub fn holds(&self, view: &Viewport, taken: &[(u16, u16, u16)]) -> bool {
+    /// Whether it holds `view` drawn clear of `taken`, with the time zone
+    /// view at `zones` (1684).
+    pub fn holds(&self, view: &Viewport, taken: &[(u16, u16, u16)], zones: Option<i64>) -> bool {
         self.holds
             .as_ref()
-            .is_some_and(|(v, t)| v == view && t.as_slice() == taken)
+            .is_some_and(|(v, t, z)| v == view && t.as_slice() == taken && *z == zones)
     }
 
     /// Draw `view` of `map`'s region and its names into the kept pixels,
@@ -1188,18 +1264,25 @@ impl Kept {
         taken: &[(u16, u16, u16)],
         font: &MonoFont<'_>,
         overview: bool,
+        zones: Option<i64>,
         clock: &dyn Fn() -> u64,
     ) -> Result<(NameStats, u64, u64), MapError> {
         self.holds = None;
         self.size = view.size();
         let t0 = clock();
         painter.picture(region, view, self, overview)?;
+        if zones.is_some() {
+            painter.zone_borders(view, self);
+        }
         let t1 = clock();
         let rows = (view.size().1 / u32::from(CELL_PX.1)) as u16;
-        let (names, found) = names(region, view, rows, taken, overview);
+        let (names, found) = match zones {
+            Some(unix) => zone_names(view, rows, taken, unix),
+            None => names(region, view, rows, taken, overview),
+        };
         draw_names(&names, font, self)?;
         let t2 = clock();
-        self.holds = Some((*view, taken.to_vec()));
+        self.holds = Some((*view, taken.to_vec(), zones));
         self.drawn = self.drawn.saturating_add(1);
         Ok((found, t1.saturating_sub(t0), t2.saturating_sub(t1)))
     }

@@ -128,3 +128,5 @@ pub mod ui;
 #[cfg(feature = "voice")]
 pub mod voice;
 pub mod when;
+#[cfg(feature = "picture")]
+pub mod zoneclock;

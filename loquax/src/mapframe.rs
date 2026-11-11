@@ -104,6 +104,10 @@ pub struct Ask<'a> {
     /// frontend scales it the rest of the way (1155). A pan at the zoom
     /// at rest stays drawn at it, its names as sharp as at rest.
     pub scaled_while_moving: bool,
+    /// The time zone view at this instant, in seconds since the epoch
+    /// (1684): the zones' borders over the composed frame and each zone's
+    /// clock in place of the names; `None` for the map as ever.
+    pub time_zones: Option<i64>,
 }
 
 /// A frame drawn.
@@ -420,6 +424,9 @@ struct RestKey {
     scale: u32,
     taken: Vec<Rect>,
     epoch: u64,
+    /// The minute the time zone view's clocks show, which places them
+    /// anew as it turns (1684).
+    clock: Option<i64>,
 }
 
 /// A carried name in a frame: which, moved by how many whole pixels,
@@ -678,6 +685,12 @@ impl Frames {
             at = self.passed(Pass::Radar, at);
         }
         let names_off = self.names_off || ask.radar.is_some();
+        // The time zone view (1684): its borders over the composed ground,
+        // under the names, which are then the zones' clocks.
+        self.painter.set_time_zones(ask.time_zones);
+        if ask.time_zones.is_some() && ask.radar.is_none() {
+            screenmap::draw_time_zones(rgba, w, h, &drawn, scale, theme);
+        }
         // Placed anew only where the rung or the view at rest has them;
         // otherwise the names ride along as the sprites they were.
         let place = layers.has(Pass::Labels);
@@ -696,6 +709,7 @@ impl Frames {
                 scale: scale.to_bits(),
                 taken,
                 epoch: self.painter.epoch(),
+                clock: ask.time_zones.map(|t| t.div_euclid(60)),
             };
             if !(self.fading && self.rest_key.as_ref() == Some(&key)) {
                 let base = drawn.at_zoom(rest_zoom);
@@ -1445,7 +1459,58 @@ mod tests {
             measure: None,
             now_ms: None,
             scaled_while_moving: false,
+            time_zones: None,
         }
+    }
+
+    /// 1684: the time zone view strokes the zones' borders over the world
+    /// view in their own violet, which the map without it never has, and
+    /// its names are then the zones' clocks, `HH:MM` each, Paris's among
+    /// them at its offset; the next minute places them anew.
+    #[test]
+    fn the_time_zone_view_draws_the_zones_and_their_clocks() {
+        let centre = project(LatLon::from_degrees(30.0, 10.0));
+        let view = ExactView::new(centre, 2 * MILLI, 1000, 700);
+        let violet = crate::zoneclock::line_rgb(MapTheme::Light);
+        let near = |rgba: &[u8]| {
+            rgba.chunks_exact(4)
+                .filter(|p| {
+                    let d = |a: u8, b: u8| i32::from(a).abs_diff(i32::from(b));
+                    d(p[0], violet[0]) < 24 && d(p[1], violet[1]) < 24 && d(p[2], violet[2]) < 24
+                })
+                .count()
+        };
+        let mut frames = florence();
+        let plain = frames.frame(&ask(view, false, 1.0, MapTheme::Light));
+        let plain_names = frames.names();
+        // 2026-07-01T12:00:00Z.
+        let noon = 1_782_907_200;
+        let zones = frames.frame(&Ask {
+            time_zones: Some(noon),
+            ..ask(view, false, 1.0, MapTheme::Light)
+        });
+        let clocks = frames.names();
+        assert!(near(&plain.rgba) < 50, "{}", near(&plain.rgba));
+        assert!(near(&zones.rgba) > 2000, "{}", near(&zones.rgba));
+        assert!(plain_names.iter().all(|n| !is_clock(n)), "{plain_names:?}");
+        assert!(clocks.len() > 5, "{clocks:?}");
+        assert!(clocks.iter().all(|n| is_clock(n)), "{clocks:?}");
+        assert!(clocks.iter().any(|n| n == "14:00"), "{clocks:?}");
+        let later = frames.frame(&Ask {
+            time_zones: Some(noon + 60),
+            ..ask(view, false, 1.0, MapTheme::Light)
+        });
+        assert!(near(&later.rgba) > 2000);
+        assert!(frames.names().iter().any(|n| n == "14:01"));
+    }
+
+    fn is_clock(name: &str) -> bool {
+        let b = name.as_bytes();
+        b.len() == 5
+            && b[2] == b':'
+            && b.iter()
+                .enumerate()
+                .all(|(i, c)| i == 2 || c.is_ascii_digit())
     }
 
     /// 1154: the names pipeline (kept sizes, masks and halos, the halo
@@ -1525,6 +1590,7 @@ mod tests {
         };
         let scaled = |view: ExactView| Ask {
             scaled_while_moving: true,
+            time_zones: None,
             ..ask(view, true, 2.75, theme)
         };
         let mut pinch = florence();
@@ -1624,6 +1690,7 @@ mod tests {
             view.zoom_about(15_000 - 150 * i, 640.0, 480.0);
             frames.frame(&Ask {
                 scaled_while_moving: true,
+                time_zones: None,
                 ..ask(view, true, SCALE, theme)
             });
             let drawn = frames.drawn_names();
@@ -1701,6 +1768,7 @@ mod tests {
             view.zoom_about(14_000 - 500 * i, 640.0, 480.0);
             frames.frame(&Ask {
                 scaled_while_moving: true,
+                time_zones: None,
                 ..ask(view, true, 1.0, MapTheme::Light)
             });
             let shown: Vec<DrawnName> = frames
@@ -1760,6 +1828,7 @@ mod tests {
             view.zoom_about(z, 450.0, 350.0);
             let got = frames.frame(&Ask {
                 scaled_while_moving: true,
+                time_zones: None,
                 ..ask(view, true, 2.75, theme)
             });
             let k = got.view.scale_at(0) / view.scale_at(0);
@@ -1816,6 +1885,7 @@ mod tests {
         pinch.frame(&ask(at(14_300), false, 2.75, theme));
         let got = pinch.frame(&Ask {
             scaled_while_moving: true,
+            time_zones: None,
             ..ask(at(14_600), true, 2.75, theme)
         });
         assert_eq!(got.tile_zoom, 14);

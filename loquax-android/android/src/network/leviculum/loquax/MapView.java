@@ -198,6 +198,16 @@ final class MapView extends View {
     private String trackPressed;
     /** The map menu's "fit all" chosen and not yet drawn (1386, 1419). */
     private boolean fitWindowPressed;
+    /** The map menu's "Time zones" chosen and not yet sent (1684). */
+    private boolean timeZonesPressed;
+    /** The next frame when the minute turns, while the time zone view shows
+     *  its clocks (1684): one at a time, the last frame's. */
+    private final Runnable zoneMinute = new Runnable() {
+        @Override
+        public void run() {
+            ask();
+        }
+    };
     /** The last frame's marks (1200), in its view's pixels. */
     private List<Map<String, Object>> marks = Collections.emptyList();
     /** When the last frame's marks came, uptime ms: a live ring pulses from then (1455). */
@@ -583,6 +593,18 @@ final class MapView extends View {
     void fitWindow() {
         synchronized (this) {
             fitWindowPressed = true;
+            owed = true;
+            notifyAll();
+        }
+    }
+
+    /**
+     * The map menu's "Time zones" chosen (1684): the library turns the time
+     * zone view on or off and the next frame says which.
+     */
+    void toggleTimeZones() {
+        synchronized (this) {
+            timeZonesPressed = true;
             owed = true;
             notifyAll();
         }
@@ -985,6 +1007,10 @@ final class MapView extends View {
                     request.put("fit_window", true);
                     fitWindowPressed = false;
                 }
+                if (timeZonesPressed) {
+                    request.put("time_zones_toggle", true);
+                    timeZonesPressed = false;
+                }
                 if (trackPressed != null) {
                     request.put("track_window", trackPressed);
                     trackPressed = null;
@@ -1058,6 +1084,13 @@ final class MapView extends View {
                 // Tiles the frame showed from another step, or a name
                 // fading in or out: draw the next frame now.
                 ask();
+            }
+            // The time zone view's clocks (1684): a frame again as the
+            // minute turns, and none once the view is off.
+            removeCallbacks(zoneMinute);
+            if (Core.bool(shown, "time_zones")) {
+                long now = System.currentTimeMillis();
+                postDelayed(zoneMinute, 60_000L - now % 60_000L + 50L);
             }
             if (Core.bool(shown, "filling") || Core.bool(shown, "loading_here")) {
                 // A region on screen is still arriving (1291), or a load

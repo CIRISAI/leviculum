@@ -664,6 +664,71 @@ impl Cover {
     }
 }
 
+/// The time zone view's borders (1684) over a frame already composed for
+/// `view`, `w` by `h`: every border line of
+/// [`leviculum_map::timezones::BORDERS`] whose box reaches the frame, in
+/// [`crate::zoneclock::line_rgb`], `scale` pixels a logical one. Points
+/// closer than a pixel and a half to the last one drawn are passed over, so
+/// the world view strokes about what the screen can show and not the
+/// table's 300,000 points; a step across the antimeridian is not drawn as
+/// a line across the frame. The tile cache never holds them: the frame is
+/// composed first and the borders go over it, like the tracks.
+pub fn draw_time_zones(
+    rgba: &mut [u8],
+    w: u32,
+    h: u32,
+    view: &ExactView,
+    scale: f32,
+    theme: MapTheme,
+) {
+    use leviculum_map::mercator::World;
+    use leviculum_map::{outline, timezones};
+    let Some(bits) = outline::bits(timezones::BORDERS) else {
+        return;
+    };
+    if w == 0 || h == 0 || rgba.len() < w as usize * h as usize * 4 {
+        return;
+    }
+    let shift = 32u32.saturating_sub(bits);
+    let world = |(x, y): (u32, u32)| World {
+        x: x.checked_shl(shift).unwrap_or(u32::MAX),
+        y: y.checked_shl(shift).unwrap_or(u32::MAX),
+    };
+    let world_px = 4_294_967_296.0 / view.unit();
+    let (fw, fh) = (f64::from(w), f64::from(h));
+    let mut cover = Cover::new(w, h);
+    let width = 1.5 * scale;
+    let step = 1.5 * f64::from(scale);
+    for line in outline::lines(timezones::BORDERS) {
+        let [west, north, east, south] = line.bbox;
+        let (x0, y0) = view.to_screen(world((west, north)));
+        let (x1, y1) = view.to_screen(world((east, south)));
+        // A box wrapped round the antimeridian is never passed over.
+        if x0 <= x1 && (x1 < 0.0 || x0 > fw || y1 < 0.0 || y0 > fh) {
+            continue;
+        }
+        let mut last: Option<(f64, f64)> = None;
+        for p in line.points() {
+            let at = view.to_screen(world(p));
+            let Some(from) = last else {
+                last = Some(at);
+                continue;
+            };
+            let (dx, dy) = (at.0 - from.0, at.1 - from.1);
+            if dx.abs() > world_px / 2.0 {
+                last = Some(at);
+                continue;
+            }
+            if dx * dx + dy * dy < step * step {
+                continue;
+            }
+            cover.line(from, at, width, 0.85);
+            last = Some(at);
+        }
+    }
+    cover.blend(rgba, crate::zoneclock::line_rgb(theme));
+}
+
 /// Draw `tracks` into `rgba`, `w` by `h` pixels, under the pins (1385,
 /// `loquax-tracks.md`): the places faint, labelled where they are among
 /// the largest; the lines at their age's opacity; the dwells as blobs;

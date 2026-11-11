@@ -660,9 +660,42 @@ fn an_unknown_key_on_the_map_is_told_apart() {
     for (verb, key, _) in ROWS {
         assert!(map::bound(&model, &event(key)), "{verb} ({key:?})");
     }
-    for c in ['q', 'x', 'z'] {
+    // `z` is the time zone view's since 1684.
+    for c in ['q', 'x', 'v'] {
         assert!(!map::bound(&model, &event(M9Key::Char(c))), "{c}");
     }
     let list = fixture::model();
     assert!(map::bound(&list, &event(M9Key::Char('q'))));
+}
+
+/// 1684: the time zone view on the M9: `z` turns it on in the shared
+/// model, and once the board knows the time the names over the world are
+/// the zones' clocks by the board's own table, Paris's at its summer
+/// offset among them; without a clock the map stays as it was.
+#[test]
+fn the_time_zone_view_writes_the_boards_clocks() {
+    let mut model = Screen::Map.model();
+    assert_eq!(map::zones(&model), None, "off by default");
+    model.time_zones = true;
+    let fixture_now = model.now.take();
+    assert_eq!(map::zones(&model), None, "no clock, no clocks");
+    assert!(fixture_now.is_some(), "the fixture's board knows the time");
+    // 2026-07-01T12:00:30Z: the minute is what the clocks show.
+    model.now = Some(loquax::when::WallTime {
+        unix_secs: 1_782_907_230,
+        offset_secs: 0,
+    });
+    let unix = map::zones(&model).expect("on, with a clock");
+    assert_eq!(unix, 1_782_907_200);
+    let centre = leviculum_map::mercator::project(leviculum_map::LatLon::from_degrees(45.0, 10.0));
+    let view = leviculum_map::Viewport::new(centre, 3, 320, 240);
+    let (names, _) = map::zone_names(&view, map::BOTTOM + 1, &[], unix);
+    assert!(!names.is_empty());
+    assert!(
+        names
+            .iter()
+            .all(|n| n.text.len() == 5 && &n.text[2..3] == ":"),
+        "{names:?}"
+    );
+    assert!(names.iter().any(|n| n.text == "14:00"), "{names:?}");
 }

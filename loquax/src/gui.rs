@@ -635,6 +635,11 @@ pub enum Message {
     TrackWindow(loquax::ui::tracks::TrackWindow),
     /// The map bar's More: its menu open, or closed again (1419).
     MapMenu,
+    /// The map menu's "Time zones" (1684): the time zone view on or off.
+    TimeZones,
+    /// The time zone view's minute turned: its clocks drawn anew, if the
+    /// view is still the one this timer was set for.
+    ZoneClock(u64),
     /// The mouse on the photo viewer (1269).
     Viewer(viewer::Input),
     /// The viewer's Close.
@@ -778,6 +783,9 @@ pub struct Order {
     /// The maps directory's epoch it is asked at.
     pub epoch: u64,
     pub motion: Motion,
+    /// The time zone view at this minute, in seconds since the epoch
+    /// (1684); `None` without it.
+    pub time_zones: Option<i64>,
 }
 
 /// A frame drawn for the window.
@@ -833,6 +841,7 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         // (1431): drawn there, at the exact zoom, the glide scales it the
         // rest of the way and ends on it sharp. A pan stays at its zoom.
         scaled_while_moving: false,
+        time_zones: order.time_zones,
     });
     let (w, h) = shot.view.size();
     Arc::new(Shown {
@@ -845,6 +854,14 @@ pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
         ms: start.elapsed().as_secs_f64() * 1e3,
         order,
     })
+}
+
+/// Milliseconds until the next minute begins, and a little past it.
+fn to_next_minute() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    u64::try_from(60_000 - now % 60_000).unwrap_or(60_000) + 50
 }
 
 /// One prefetch batch; whether more is to draw.
@@ -994,6 +1011,12 @@ struct App {
     /// The map's menu over the map while it is open (1419): the tracks'
     /// time window and "fit all".
     map_menu: bool,
+    /// The time zone view (1684): the zones' borders and each one's clock
+    /// over the map, from the map's menu.
+    time_zones: bool,
+    /// Which switching-on of the time zone view the minute's timer
+    /// belongs to: an older timer finds another number and stops.
+    zone_clock: u64,
     /// The bubble whose Forward was pressed (1371): its menu lists the
     /// conversations to send the copy to.
     forwarding: Option<NodeId>,
@@ -1133,6 +1156,8 @@ impl App {
             map_shown: false,
             help: None,
             map_menu: false,
+            time_zones: false,
+            zone_clock: 0,
             forwarding: None,
             compose: text_editor::Content::new(),
             reply: None,
@@ -1776,6 +1801,9 @@ impl App {
                     self.tell(UiEvent::Delete { peer, keys });
                 }
             },
+            Intent::Map(MapCmd::TimeZones) if self.screen == Screen::Map => {
+                return self.update(Message::TimeZones);
+            }
             Intent::Map(cmd) if self.screen == Screen::Map => {
                 self.map_cmd(cmd);
                 return self.paint();
@@ -1875,7 +1903,8 @@ impl App {
                 let next = self.seen.track_window.step(forward);
                 self.tell(UiEvent::TrackWindow(next));
             }
-            MapCmd::Drawing(_) | MapCmd::GlyphTest => {}
+            // The time zone view is the update's, which sets its timer.
+            MapCmd::Drawing(_) | MapCmd::GlyphTest | MapCmd::TimeZones => {}
         }
     }
 
@@ -2209,6 +2238,26 @@ impl App {
                 self.map_menu = !self.map_menu;
                 return Task::none();
             }
+            Message::TimeZones => {
+                self.map_menu = false;
+                self.time_zones = !self.time_zones;
+                self.zone_clock = self.zone_clock.wrapping_add(1);
+                let paint = self.paint();
+                return match self.time_zones {
+                    true => Task::batch([
+                        paint,
+                        after(to_next_minute(), Message::ZoneClock(self.zone_clock)),
+                    ]),
+                    false => paint,
+                };
+            }
+            Message::ZoneClock(n) => {
+                if !self.time_zones || n != self.zone_clock {
+                    return Task::none();
+                }
+                let paint = self.paint();
+                return Task::batch([paint, after(to_next_minute(), Message::ZoneClock(n))]);
+            }
             Message::CopyText(words) => {
                 self.seen.notice = Some(StrId::MailboxCopied.text(self.lang).to_string());
                 return iced::clipboard::write(words);
@@ -2415,6 +2464,7 @@ impl App {
             zooms: self.zooms(),
             epoch: self.seen.maps,
             motion: self.motion,
+            time_zones: self.time_zones.then(loquax::zoneclock::unix_minute),
         })
     }
 
@@ -3107,6 +3157,18 @@ impl App {
                     .padding([2, 8])
                     .width(Length::Fill)
                     .style(button::text),
+            )
+            // The time zone view (1684): one entry that turns it on and
+            // off, marked while it is on.
+            .push(
+                button(text(StrId::TimeZones.text(self.lang)).size(13))
+                    .on_press(Message::TimeZones)
+                    .padding([2, 8])
+                    .width(Length::Fill)
+                    .style(match self.time_zones {
+                        true => button::primary,
+                        false => button::text,
+                    }),
             )
             .width(Length::Fixed(200.0));
         // The background's ground with a line round it, so the menu

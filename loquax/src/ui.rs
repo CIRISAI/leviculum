@@ -1387,6 +1387,9 @@ pub struct UiModel<B> {
     /// The map's time window for the tracks' lines: a map control, the
     /// current episode until the reader picks another.
     pub track_window: tracks::TrackWindow,
+    /// The time zone view (1684): the zones' borders and each one's clock
+    /// over the map, `z` in the terminal, the map menu's entry elsewhere.
+    pub time_zones: bool,
     /// The fix time of the own fix the store last kept (1386): the way
     /// back is stored a row every [`OWN_TRACK_EVERY_SECS`] at most.
     own_stored_at: Option<i64>,
@@ -1661,6 +1664,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             fixes_received: Vec::new(),
             tracks: BTreeMap::new(),
             track_window: tracks::TrackWindow::default(),
+            time_zones: false,
             own_stored_at: None,
             map: None,
             map_setup: map::MapSetup::default(),
@@ -4835,6 +4839,7 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
             }
         }
         MapCmd::GlyphTest => model.map_glyph_test = !model.map_glyph_test,
+        MapCmd::TimeZones => model.time_zones = !model.time_zones,
         MapCmd::TrackWindow(forward) => {
             model.track_window = model.track_window.step(forward);
             let word = model.track_window.word();
@@ -7326,6 +7331,8 @@ pub struct View {
     pub map: Option<map::MapView>,
     /// The glyph test pattern over the open map.
     pub map_glyph_test: bool,
+    /// The time zone view over the open map (1684).
+    pub time_zones: bool,
 }
 
 /// The map pane's title.
@@ -8219,6 +8226,7 @@ fn view_fresh<B: InputBuffer>(model: &UiModel<B>) -> View {
         theme: model.theme,
         map_theme: model.map_theme,
         map_glyph_test: map.is_some() && model.map_glyph_test,
+        time_zones: map.is_some() && model.time_zones,
         map,
     }
 }

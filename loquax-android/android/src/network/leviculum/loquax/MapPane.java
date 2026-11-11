@@ -158,12 +158,14 @@ final class MapPane implements MapView.Listener {
     }
 
     /**
-     * The map's entries of the bar's menu (1419): "Time window" and "Fit
-     * all", before the main views' own; their ids are their strings.
+     * The map's entries of the bar's menu (1419): "Time window", "Fit
+     * all" and "Time zones" (1684), before the main views' own; their ids
+     * are their strings.
      */
     static void menu(android.view.Menu menu) {
         menu.add(0, R.string.scene_track_window, 0, R.string.scene_track_window);
         menu.add(0, R.string.scene_fit_window, 0, R.string.scene_fit_window);
+        menu.add(0, R.string.scene_time_zones, 0, R.string.scene_time_zones);
     }
 
     /** A menu entry chosen: whether it was one of the map's. */
@@ -175,6 +177,12 @@ final class MapPane implements MapView.Listener {
         if (id == R.string.scene_fit_window) {
             // "Fit all" (1386): every peer inside the time window in view.
             map.fitWindow();
+            return true;
+        }
+        if (id == R.string.scene_time_zones) {
+            // The time zone view (1684): the zones and their clocks, on or
+            // off again.
+            map.toggleTimeZones();
             return true;
         }
         return false;

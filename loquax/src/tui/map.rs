@@ -667,6 +667,8 @@ struct Painted {
     style: MapStyle,
     /// The maps directory's epoch it was painted at.
     epoch: u64,
+    /// The time zone view's minute it was painted at (1684).
+    time_zones: Option<i64>,
     fb: Vec<u16>,
     attribution: String,
     picture: Option<Picture>,
@@ -688,6 +690,9 @@ struct Ask {
     epoch: u64,
     /// The map's style, which follows the theme ([`MapPainter::set_theme`]).
     style: MapStyle,
+    /// The time zone view at this minute, in seconds since the epoch
+    /// ([`MapPainter::set_time_zones`], 1684).
+    time_zones: Option<i64>,
 }
 
 /// What draws a view: the regions, the backend, the scratch. It does not
@@ -728,6 +733,7 @@ impl Canvas {
     /// [`paint`](Self::paint), untimed.
     fn paint_view(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
+        self.painter.set_time_zones(ask.time_zones);
         // Places, waters and parks, and the streets and rivers, which the
         // cells name where they run level.
         let names = self.painter.labels(view, true);
@@ -738,6 +744,7 @@ impl Canvas {
                 cells: ask.cells,
                 style: ask.style,
                 epoch: ask.epoch,
+                time_zones: ask.time_zones,
                 fb: Vec::new(),
                 attribution,
                 picture: None,
@@ -761,6 +768,7 @@ impl Canvas {
             cells: ask.cells,
             style: ask.style,
             epoch: ask.epoch,
+            time_zones: ask.time_zones,
             fb,
             attribution,
             picture,
@@ -1036,6 +1044,8 @@ pub struct MapPainter {
     tier: Tier,
     /// The map's colour table.
     theme: MapTheme,
+    /// The time zone view (1684, [`MapPainter::set_time_zones`]).
+    time_zones: bool,
     /// The frame budget (1422): a drag is the gesture, the paint the
     /// ground, the names placed in cells a pass the minimal rung leaves
     /// to the frame at rest.
@@ -1095,6 +1105,7 @@ impl MapPainter {
             nudge: false,
             tier: Tier::Truecolor,
             theme: MapTheme::Light,
+            time_zones: false,
             ladder: Ladder::new(),
         }
     }
@@ -1122,6 +1133,13 @@ impl MapPainter {
     /// paints the view again.
     pub fn set_theme(&mut self, theme: MapTheme) {
         self.theme = theme;
+    }
+
+    /// Draw the time zone view, or not, from the next frame on (1684):
+    /// the zones' borders over the picture and each one's clock in place
+    /// of the names, painted again as the minute turns.
+    pub fn set_time_zones(&mut self, on: bool) {
+        self.time_zones = on;
     }
 
     /// The style a paint asks for: the PC's finish where the picture has
@@ -1195,6 +1213,7 @@ impl MapPainter {
                     && p.cells == ask.cells
                     && p.epoch == ask.epoch
                     && p.style == ask.style
+                    && p.time_zones == ask.time_zones
             })
         };
         match &mut self.engine {
@@ -1213,6 +1232,7 @@ impl MapPainter {
                         cells: done.cells,
                         epoch: done.epoch,
                         style: done.style,
+                        time_zones: done.time_zones,
                     };
                     if keep(&of, &ask, shown_for) {
                         self.painted = Some(done);
@@ -1237,6 +1257,7 @@ impl MapPainter {
             cells: (shown.area.width, shown.area.height),
             epoch: self.maps.epoch(),
             style: self.style(),
+            time_zones: self.time_zones.then(loquax::zoneclock::unix_minute),
         };
         let started = Instant::now();
         match shown.moving {
@@ -2982,6 +3003,7 @@ mod tests {
                     cells: (cols, rows),
                     epoch: 0,
                     style: MapStyle::M9,
+                    time_zones: None,
                 };
                 // Painted whole for the render's share: the picture is
                 // encoded again below, both ways.
@@ -3046,6 +3068,7 @@ mod tests {
                 cells: (cols, rows),
                 epoch: 0,
                 style: MapStyle::M9,
+                time_zones: None,
             }
         };
         for per_s in [25u32, 50] {
@@ -3143,6 +3166,7 @@ mod tests {
             cells: (30, 8),
             epoch: 0,
             style: MapStyle::M9,
+            time_zones: None,
         }
     }
 
@@ -3153,6 +3177,7 @@ mod tests {
             cells: ask.cells,
             style: ask.style,
             epoch: ask.epoch,
+            time_zones: ask.time_zones,
             fb: Vec::new(),
             attribution: String::new(),
             picture: None,
@@ -3184,6 +3209,7 @@ mod tests {
             cells: done.cells,
             epoch: done.epoch,
             style: done.style,
+            time_zones: done.time_zones,
         };
         assert!(!keep(&of, &c, fresh), "A is dropped");
         assert_eq!(slot.start(), Some(c), "B is never painted");
@@ -3195,6 +3221,7 @@ mod tests {
             cells: done.cells,
             epoch: done.epoch,
             style: done.style,
+            time_zones: done.time_zones,
         };
         assert!(keep(&of, &c, fresh), "C is the view wanted");
         // Keys faster than paints: after CATCH_UP_MS the paint behind is

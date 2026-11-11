@@ -237,6 +237,7 @@ compose too.
 | next / previous way of drawing the map (1093) | `t` / `T` | | `F2` | | P |
 | every way of drawing the map, the one now marked | | | palette `map drawing` | | P |
 | the glyph test: which glyph sets the font draws | `g` | | | | P |
+| the time zones and their clocks over the map, or away again (1684) | `z` | | | the map menu's "Time zones" | P |
 | every pin in view again | | | `0` | | P |
 | next / previous pin | | | `Tab` / `Shift-Tab` | | P |
 | open the pin's conversation | | | `Enter` | click the pin | P |

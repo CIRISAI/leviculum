@@ -286,6 +286,7 @@ fn run_scene(maps: &Path, scene: Scene, reps: &Reps) {
             measure: None,
             now_ms: None,
             scaled_while_moving: true,
+            time_zones: None,
         });
         std::hint::black_box(shot.rgba.len());
         frames.recycle(shot.rgba);
@@ -380,6 +381,7 @@ fn run_scene(maps: &Path, scene: Scene, reps: &Reps) {
             measure: None,
             now_ms: Some(now_ms),
             scaled_while_moving: true,
+            time_zones: None,
         };
         ladder(&mut frames, &scene_key, base, &ask);
     }

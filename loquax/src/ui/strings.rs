@@ -678,6 +678,8 @@ leviculum_ui::catalogue! {
     TracksAll = "scene_tracks_all", "All", "Alles";
     // 1386: every peer with a position inside the time window in view.
     FitWindow = "scene_fit_window", "Fit all", "Alle zeigen";
+    // 1684: the map menu's time zone view, the zones and their clocks.
+    TimeZones = "scene_time_zones", "Time zones", "Zeitzonen";
     LoadMapArea = "scene_load_map_area", "Load this map area", "Diesen Kartenausschnitt laden";
     // The day line: the weekday, the day and the month, the year when it
     // is not this one.

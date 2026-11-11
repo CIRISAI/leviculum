@@ -123,6 +123,8 @@ pub struct Renderer {
     fitted_at: Option<(World, u32)>,
     /// Whether a fit with pins asked for their places already.
     pins_asked: bool,
+    /// The time zone view (1684), from the map menu.
+    time_zones: bool,
     /// The loader's last steps, oldest first, at most [`LOAD_EVENTS`]
     /// ([`load_events`], 1616).
     load_events: Vec<LoadEvent>,
@@ -162,6 +164,7 @@ impl Renderer {
             held_ms: None,
             fitted_at: None,
             pins_asked: false,
+            time_zones: false,
             load_events: Vec::new(),
         }
     }
@@ -588,6 +591,9 @@ impl Renderer {
         let flag = self.theme.or(Some(ThemeFlag::Auto));
         let table = map_theme(flag, Some(screen));
         let style = Style::SCREEN.in_theme(table);
+        if request.time_zones_toggle {
+            self.time_zones = !self.time_zones;
+        }
         // The running session's tracks at the view's tile zoom (1385);
         // none without a session, as a test or a measuring tool draws.
         let chosen = request
@@ -634,6 +640,10 @@ impl Renderer {
             measure: None,
             now_ms: Some(now),
             scaled_while_moving: true,
+            time_zones: self
+                .time_zones
+                .then(loquax::zoneclock::unix_minute)
+                .filter(|_| !request.own_only),
         };
         let shot = match draw(&mut self.frames, &ask) {
             Ok(shot) => shot,
@@ -710,6 +720,7 @@ impl Renderer {
             track_window: window.word().to_string(),
             title: window.title(lang),
             track_windows: track_choices(window, lang),
+            time_zones: self.time_zones && !request.own_only,
         };
         shown
     }
