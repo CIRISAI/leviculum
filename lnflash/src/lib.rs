@@ -47,6 +47,7 @@ pub mod ui;
 pub mod usb;
 pub mod verify;
 pub mod watch;
+pub mod wifi;
 
 // The committed sysfs fixture tree encodes ':' as '+' (NTFS cannot check a
 // colon out); this helper materializes the decoded tree for unit tests.

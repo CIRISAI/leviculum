@@ -44,6 +44,7 @@
 //! [STACK] bytes=<n> t=<ms>
 //! [FLASH] identity=<offset|none/why> client=<offset|none/why> messages=<offset|none/why> t=<ms>  (1414, 1476)
 //! [MAP] regions=firenze:image,world:image[,<name>:area:<bytes>|,<name>:damaged][ area=<error>] area=<offset|none/why> world_bytes=<n> t=<ms>  (1477; again with the banner)
+//! [WIFI] creds=<set ssid_bytes=<n> secured=<0|1>|none> slot=<offset|none/why>[ error=<why>] radio=off t=<ms>  (1479: the WLAN lnflash --wifi wrote, never its passphrase)
 //! [IDENTITY] identity=<hash> probe=none lxmf=none source=<flash|generated> stored=<yes|no> t=<ms>
 //! [CENSUS] node held=<n> box=<n> links=8 max_answer=262144 t=<ms>
 //! [NODE] state=up iface=serial hw_mtu=564 serial_mux=1 t=<ms>
@@ -1808,6 +1809,32 @@ fn main() -> ! {
             map::WORLD.len()
         ),
     );
+
+    // The WLAN `lnflash --wifi` named (1479). The name is said, the
+    // passphrase never; without a record the WiFi radio stays off.
+    let wifi = stores.load_wifi();
+    match &wifi {
+        Ok(Some(creds)) => log.line(
+            "[WIFI] ",
+            format_args!(
+                "creds=set ssid_bytes={} secured={} slot={} radio=off",
+                creds.ssid().len(),
+                u8::from(!creds.passphrase().is_empty()),
+                stores.wifi_slot()
+            ),
+        ),
+        Ok(None) => log.line(
+            "[WIFI] ",
+            format_args!("creds=none slot={} radio=off", stores.wifi_slot()),
+        ),
+        Err(error) => log.line(
+            "[WIFI] ",
+            format_args!(
+                "creds=none slot={} error={error} radio=off",
+                stores.wifi_slot()
+            ),
+        ),
+    }
 
     // The true random source: the SoC's RNG with the ADC's noise. Kept for
     // the life of the image; `Trng` refuses to exist without it.
