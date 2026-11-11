@@ -159,7 +159,7 @@ its fields (a 4-byte `char`, a 12-byte style, two 8-byte
 `Option<usize>`), arithmetic and not measured on the board: 634 KB for
 the README. The M9 has 512 KB of SRAM and 8 MB of PSRAM
 ([The ThinkNode M9](thinknode-m9.md), the hardware table); the ESP32 heap
-today is a 64 KiB placeholder (`HEAP_SIZE`, `leviculum-esp/src/lib.rs:421`).
+today is a 64 KiB placeholder (`HEAP_SIZE`, `leviculum-esp/src/lib.rs:423`).
 The nRF board's heap of `leviculum-nrf/heap-budget` (96 KiB, `HEAP_SIZE`,
 `leviculum-nrf/heap-budget/src/lib.rs:49`) is full but for 8 bytes
 ([The board heap budget](../firmware/heap-budget.md)) and hosts no UI;
