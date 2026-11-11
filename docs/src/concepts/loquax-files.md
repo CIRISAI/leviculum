@@ -118,9 +118,30 @@ through the mailbox's `/send` as a request resource from the phone
 (1220's fallback in `leviculum-std`). The archive stores it packed and
 counts it against `archive_cap_mb` like any other message.
 
-Progress in the bubble is not built yet, for photos or files: the request
-resource's progress does not reach the scene. It is the next slice for
-both.
+Progress is in the bubble (1662), for photos and files alike: a bar and
+its words under the media, "wird gesendet · 43 %", while the message still
+sends; "wird geholt · 1,2 MB von 3,0 MB" for one being fetched. The model
+keeps one `ui::transfer::Transfer` a bubble and takes a new one at most
+every 250 ms of its clock (`transfer::EVERY_MS`), the complete one always.
+Two feeds reach it:
+
+- Over a link the router keeps the resource's share in its outbound entry
+  and reports no event of it; the engine reads the entry after every hook
+  and says `OutboxEvent::Progress { message_id, permille }` when it moved.
+- A client's `/send` to its mailbox is a request that goes as a resource:
+  `home::client::send_watching` asks the link
+  (`ReticulumNode::link_outgoing_resource_progress`) every 250 ms while the
+  answer is awaited, and the runner hands the screen
+  `UiEvent::SendProgress`. The terminal and the phone fold it as it comes.
+
+The terminal draws `▰▰▰▰▰▱▱▱▱▱ sending · 43 %` (`[#####-----]` in ASCII)
+under the file's line, the window the words and a thin bar, the phone the
+words and a horizontal `ProgressBar` (`MessageRow::progress_words`,
+`progress_percent`). Fetching has its words and its event
+(`UiEvent::Transfer`), and no feed yet: a message is fetched whole before
+its bubble exists, on the phone in the pull's pages and on a desktop as
+the delivery resource whose sender is known only once it is opened. A
+transfer is not kept: it goes with the runner's end and with a restart.
 
 ## 6. Proof
 

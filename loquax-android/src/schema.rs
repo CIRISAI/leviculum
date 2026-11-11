@@ -1926,6 +1926,13 @@ pub struct MessageRow {
     /// asks [`Query::SaveFile`] with its place.
     #[serde(default)]
     pub files: Vec<FileRow>,
+    /// Its photo's or files' bytes under way (1662): the words the
+    /// bubble shows under its media, "wird gesendet · 43 %", and the bar's
+    /// 0 to 100; empty and 0 while nothing goes.
+    #[serde(default)]
+    pub progress_words: String,
+    #[serde(default)]
+    pub progress_percent: u32,
     /// The voice message it carries (1222), else 0 and empty: the
     /// sender's audio mode, its length in ms and as `0:07`, the level bar
     /// (32 heights 0 to 100, empty for an even bar), whether this build

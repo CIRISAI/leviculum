@@ -59,8 +59,21 @@ fn millis(duration: Duration) -> u64 {
 pub async fn run_ask(
     node: &ReticulumNode,
     device: &Identity,
+    ask: Ask,
+    page: impl FnMut(wire::Page),
+) -> Result<Outcome, HomeError> {
+    run_ask_watching(node, device, ask, page, &mut |_| {}).await
+}
+
+/// [`run_ask`], telling `progress` how far a request that goes as a
+/// resource has gone, 0.0 to 1.0, every [`WATCH_EVERY`] it moved (1662):
+/// a photo or a file handed to the mailbox shows it in its bubble.
+pub async fn run_ask_watching(
+    node: &ReticulumNode,
+    device: &Identity,
     mut ask: Ask,
     mut page: impl FnMut(wire::Page),
+    progress: &mut (dyn FnMut(f32) + Send),
 ) -> Result<Outcome, HomeError> {
     let start = tokio::time::Instant::now();
     let now = || millis(start.elapsed());
@@ -119,7 +132,7 @@ pub async fn run_ask(
                 let deadline =
                     tokio::time::Instant::now() + Duration::from_millis(ask.left_ms(now()));
                 let answer = match &link {
-                    Some(id) => request(node, id, path, &data, deadline).await,
+                    Some(id) => request_watching(node, id, path, &data, deadline, progress).await,
                     None => Err(HomeError::Transfer("no link".to_string())),
                 };
                 ask.answered(answer.as_deref().map_err(HomeError::clone))
@@ -159,13 +172,26 @@ pub async fn send(
     submission: &wire::Submission,
     budget: Duration,
 ) -> Result<[u8; 32], HomeError> {
+    send_watching(node, public_key, device, submission, budget, &mut |_| {}).await
+}
+
+/// [`send`], telling `progress` how far a submission that goes as a
+/// resource has gone, 0.0 to 1.0 (1662).
+pub async fn send_watching(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    submission: &wire::Submission,
+    budget: Duration,
+    progress: &mut (dyn FnMut(f32) + Send),
+) -> Result<[u8; 32], HomeError> {
     let ask = Ask::new(
         public_key,
         Verb::Send(submission.clone()),
         0,
         millis(budget),
     )?;
-    match run_ask(node, device, ask, |_| {}).await? {
+    match run_ask_watching(node, device, ask, |_| {}, progress).await? {
         Outcome::Sent(id) => Ok(id),
         _ => Err(HomeError::Malformed),
     }
@@ -822,6 +848,40 @@ pub async fn pn_answer(
 }
 
 /// One request on `link` and its answer's bytes.
+/// How often a request under way is asked how far its resource went
+/// (1662): the bubble takes an update at most this often.
+pub const WATCH_EVERY: Duration = Duration::from_millis(250);
+
+/// [`request`], telling `progress` how far the request's resource has
+/// gone each [`WATCH_EVERY`] it moved; a request that goes as one packet
+/// tells nothing.
+async fn request_watching(
+    node: &ReticulumNode,
+    link: &LinkId,
+    path: &str,
+    data: &[u8],
+    deadline: tokio::time::Instant,
+    progress: &mut (dyn FnMut(f32) + Send),
+) -> Result<Vec<u8>, HomeError> {
+    let asked = request(node, link, path, data, deadline);
+    tokio::pin!(asked);
+    let mut tick = tokio::time::interval(WATCH_EVERY);
+    let mut said = None;
+    loop {
+        tokio::select! {
+            answer = &mut asked => return answer,
+            _ = tick.tick() => {
+                if let Some(share) = node.link_outgoing_resource_progress(link) {
+                    if said != Some(share.to_bits()) {
+                        said = Some(share.to_bits());
+                        progress(share);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn request(
     node: &ReticulumNode,
     link: &LinkId,

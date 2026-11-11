@@ -293,6 +293,10 @@ pub enum OutboxEvent {
         state: crate::home::wire::PeerState,
         at: i64,
     },
+    /// How far a tracked message's resource has gone, in thousandths, as
+    /// the router's outbound entry says (1662): emitted when it moved, at
+    /// most once a hook. A message small enough for a packet has none.
+    Progress { message_id: [u8; 32], permille: u16 },
     /// The message left the router's outbound queue, which the router does
     /// only in a terminal state (`leviculum-lxmf/src/router.rs:872-874`).
     /// `last` is the last state seen for it, when there was one, and

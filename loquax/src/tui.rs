@@ -2662,6 +2662,54 @@ mod tests {
         assert!(model.profile_open, "c shows the code");
     }
 
+    /// 1662, a file tells its progress: the terminal draws the bubble of
+    /// a 300 KB file mid-transfer, 43 % sent by its link's resource, the
+    /// bar and its words under the file's line; the golden is the screen,
+    /// 80 by 24, in both languages.
+    #[test]
+    fn a_file_mid_transfer_is_the_terminals_golden() {
+        use loquax::outbox::OutboxEvent;
+        let scene = |lang| {
+            let peer = [0x41; 16];
+            let mut model = Model::new(&[peer]);
+            model.lang = lang;
+            model.address = Some([0x30; 16]);
+            update(&mut model, UiEvent::Clock(shell::script_clock()));
+            update(
+                &mut model,
+                UiEvent::SendFile {
+                    peer,
+                    name: "Protokoll.pdf".into(),
+                    data: vec![7; 300_000],
+                },
+            );
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Queued {
+                    message_id: [0x62; 32],
+                }),
+            );
+            update(&mut model, UiEvent::Elapsed(1_000));
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Progress {
+                    message_id: [0x62; 32],
+                    permille: 430,
+                }),
+            );
+            model.focus = loquax::ui::Pane::Messages;
+            model.toasts.clear();
+            whole_screen(&model)
+        };
+        let screen = scene(Lang::En);
+        says(&screen, "▤ Protokoll.pdf · 300 KB");
+        says(&screen, "▰▰▰▰▰▱▱▱▱▱ sending · 43 %");
+        same_text("tui-file-progress.txt", &screen);
+        let german = scene(Lang::De);
+        says(&german, "▰▰▰▰▰▱▱▱▱▱ wird gesendet · 43 %");
+        same_text(&german_name("tui-file-progress.txt"), &german);
+    }
+
     /// 1505, a late message sits at its sent time: the terminal draws
     /// Anna's chat of the shared fixture, the message she wrote last night
     /// at 22:10 that came today at 14:05 under last night's day line, the

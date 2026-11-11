@@ -3248,10 +3248,25 @@ impl Inner {
                 let client = self.client.clone();
                 let done = self.finished_tx.clone();
                 let wake = Arc::clone(&self.wake);
+                let (told, woken) = (self.finished_tx.clone(), Arc::clone(&self.wake));
                 self.runtime.spawn(async move {
-                    let event =
-                        runner::send_home(&mut tap, &client, to, body, fields, BUDGET, SETTLE)
-                            .await;
+                    // How far the upload went (1662): the bubble's bar,
+                    // folded on the next turn.
+                    let mut progress = move |event: UiEvent| {
+                        let _ = told.send(Finished::Event(event));
+                        woken.notify_one();
+                    };
+                    let event = runner::send_home(
+                        &mut tap,
+                        &client,
+                        to,
+                        body,
+                        fields,
+                        BUDGET,
+                        SETTLE,
+                        &mut progress,
+                    )
+                    .await;
                     let _ = done.send(Finished::Send(event));
                     wake.notify_one();
                 });
@@ -4126,6 +4141,10 @@ pub fn rows<B>(model: &UiModel<B>, c: usize, lang: Lang) -> Vec<schema::MessageR
             // app draws no text row under a photo without words.
             row.body = node.text.unwrap_or_default();
             row.files = files;
+            if let Some(progress) = &node.progress {
+                row.progress_words = progress.words.resolve(lang);
+                row.progress_percent = u32::from(progress.percent);
+            }
             if let Some(voice) = &node.voice {
                 row.voice_mode = u32::from(voice.mode);
                 row.voice_ms = voice.duration_ms;
@@ -4242,6 +4261,8 @@ fn row(bubble: chat::Bubble) -> schema::MessageRow {
         photo_h: 0,
         photo_words: String::new(),
         files: Vec::new(),
+        progress_words: String::new(),
+        progress_percent: 0,
         voice_mode: 0,
         voice_ms: 0,
         voice_duration: String::new(),

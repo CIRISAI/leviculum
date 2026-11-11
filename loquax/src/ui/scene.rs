@@ -118,6 +118,8 @@ pub enum NodeId {
     File(u64, usize),
     /// A bubble's voice message, by its message's key (1222).
     Voice(u64),
+    /// A bubble's bytes under way, by its message's key (1662).
+    Progress(u64),
     Compose,
     /// The compose bar's microphone (1222).
     Record,
@@ -191,6 +193,7 @@ impl NodeId {
             NodeId::Photo(key) => format!("photo_{key}"),
             NodeId::File(key, index) => format!("file_{key}_{index}"),
             NodeId::Voice(key) => format!("voice_{key}"),
+            NodeId::Progress(key) => format!("progress_{key}"),
             NodeId::Compose => "compose".to_string(),
             NodeId::Record => "record".to_string(),
             NodeId::Emoji => "emoji".to_string(),
@@ -503,6 +506,9 @@ pub struct BubbleNode {
     pub voice: Option<VoiceNode>,
     /// The invitation it carries, as a card (1307).
     pub invite: Option<super::group_scene::InviteNode>,
+    /// Its bytes under way (1662): a bar and its words, "wird gesendet ·
+    /// 43 %", under the media. Boxed, as the bubble's transfer is.
+    pub progress: Option<Box<ProgressNode>>,
     /// A long press or a right click.
     pub actions: Vec<Action>,
     pub a11y: A11y,
@@ -529,6 +535,17 @@ pub struct PhotoNode {
     pub words: Text,
     /// [`Intent::ViewPhoto`].
     pub open: Action,
+}
+
+/// A bubble's bytes under way (1662): how far, for the bar, and the
+/// words beside it, which a screen reader says too.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgressNode {
+    pub id: NodeId,
+    /// 0 to 100.
+    pub percent: u8,
+    /// "wird gesendet · 43 %", "wird geholt · 1,2 MB von 3,0 MB".
+    pub words: Text,
 }
 
 /// A bubble's file: its name, size, what a screen reader says, and the
@@ -2105,6 +2122,13 @@ fn bubble_node(
             })
         }),
     });
+    let progress = bubble.transfer.as_ref().map(|transfer| {
+        Box::new(ProgressNode {
+            id: NodeId::Progress(bubble.key),
+            percent: transfer.percent(),
+            words: transfer.words(),
+        })
+    });
     let text = (!bubble.body.trim().is_empty()).then(|| bubble.body.clone());
     BubbleNode {
         id,
@@ -2119,6 +2143,7 @@ fn bubble_node(
         files,
         voice,
         invite: None,
+        progress,
         actions,
     }
 }
@@ -2477,6 +2502,17 @@ impl BubbleNode {
         // A group's keys only where there is a group (1307): the goldens
         // of a plain chat stay as they were.
         if let Value::Object(map) = &mut value {
+            // Bytes under way only while they go (1662), as a group's.
+            if let Some(p) = &self.progress {
+                map.insert(
+                    "progress".into(),
+                    json!({
+                        "id": p.id.resource(),
+                        "percent": p.percent,
+                        "words": p.words.to_json(),
+                    }),
+                );
+            }
             if let Some(invite) = &self.invite {
                 map.insert("invite".into(), invite.to_json());
             }

@@ -24,8 +24,8 @@
 //! its bar, as the phone stacks them.
 
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, text, text_editor, text_input, toggler,
-    tooltip, Space,
+    button, column, container, mouse_area, progress_bar, row, scrollable, text, text_editor,
+    text_input, toggler, tooltip, Space,
 };
 use iced::{border, mouse, Alignment, Background, Border, Color, Element, Length, Theme};
 use std::collections::HashMap;
@@ -135,6 +135,7 @@ fn bubble_stamp(node: &BubbleNode) -> u64 {
         .map(|q| (q.ours, &q.text))
         .hash(&mut h);
     node.photo.is_some().hash(&mut h);
+    node.progress.is_some().hash(&mut h);
     for file in &node.files {
         (&file.name, &file.size).hash(&mut h);
     }
@@ -2204,6 +2205,25 @@ impl App {
                     22.0,
                 ));
             }
+        }
+        // Its bytes under way (1662): the words and a thin bar under the
+        // media, in the bubble's ink.
+        if let Some(progress) = &node.progress {
+            inside = inside.push(
+                text(progress.words.resolve(self.lang))
+                    .size(size::BODY - 2.0)
+                    .color(meta),
+            );
+            inside = inside.push(
+                progress_bar(0.0..=100.0, f32::from(progress.percent))
+                    .length(Length::Fixed(160.0))
+                    .girth(4.0)
+                    .style(move |_: &Theme| progress_bar::Style {
+                        background: Background::Color(Color { a: 0.25, ..meta }),
+                        bar: Background::Color(ink),
+                        border: border::rounded(2.0),
+                    }),
+            );
         }
         // An invitation is a card (1307): its words, the trust sentence and
         // Join, in place of the text a stock client reads.

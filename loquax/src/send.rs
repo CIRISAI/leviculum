@@ -395,7 +395,7 @@ async fn run_send_steps<O: Outbox>(
                         return Err(gave_up(id, state, on_link));
                     }
                 }
-                OutboxEvent::State { .. } => {}
+                OutboxEvent::State { .. } | OutboxEvent::Progress { .. } => {}
                 OutboxEvent::Left {
                     message_id: id,
                     last,

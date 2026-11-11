@@ -1065,8 +1065,14 @@ impl Shell {
                 let tap = self.fanout.tap();
                 let context = self.job_context();
                 let done = self.done_tx.clone();
+                let told = self.done_tx.clone();
                 self.send_task = Some(tokio::spawn(async move {
-                    let event = send(tap, context, to, body, fields).await;
+                    // How far a client's upload went (1662), folded as
+                    // it comes, before the send's end.
+                    let mut progress = move |event: UiEvent| {
+                        let _ = told.send(Finished::Event(event));
+                    };
+                    let event = send(tap, context, to, body, fields, &mut progress).await;
                     let _ = done.send(Finished::Send(event));
                 }));
             }
@@ -1531,11 +1537,21 @@ async fn send(
     to: [u8; 16],
     body: String,
     fields: Vec<Field>,
+    progress: &mut (dyn FnMut(UiEvent) + Send),
 ) -> UiEvent {
     if let Some(client) = &context.client {
         let settle = Duration::from_millis(SETTLE_MS);
-        return runner::send_home(&mut tap, client, to, body, fields, context.timeout, settle)
-            .await;
+        return runner::send_home(
+            &mut tap,
+            client,
+            to,
+            body,
+            fields,
+            context.timeout,
+            settle,
+            progress,
+        )
+        .await;
     }
     let mut options = SendOptions::new(context.instance.clone(), context.timeout);
     let mut effects = context.effects.clone();

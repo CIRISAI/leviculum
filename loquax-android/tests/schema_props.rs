@@ -369,6 +369,13 @@ fn voice_parts() -> BoxedStrategy<VoiceParts> {
         .boxed()
 }
 
+/// A bubble's voice message and its bytes under way (1662), boxed
+/// together: an eleventh element of the row's tuple overflowed the test
+/// thread's stack in [`the_lists_round_trip`].
+fn media_parts() -> BoxedStrategy<(VoiceParts, (String, u32))> {
+    (voice_parts(), (text(), u32s())).boxed()
+}
+
 /// A bubble's group parts (1307): its writer and an invitation's card,
 /// boxed on their own as [`voice_parts`] is.
 type InviteParts = (String, String, String, String, String, bool);
@@ -415,7 +422,7 @@ fn message_row() -> BoxedStrategy<MessageRow> {
             invite_parts(),
             line_parts(),
         ),
-        voice_parts(),
+        media_parts(),
     )
         .prop_map(
             |(
@@ -433,12 +440,15 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                     (note, late, state_words, position_words),
                 ),
                 (
-                    voice_mode,
-                    voice_ms,
-                    voice_duration,
-                    voice_levels,
-                    (voice_playable, voice_playing),
-                    voice_words,
+                    (
+                        voice_mode,
+                        voice_ms,
+                        voice_duration,
+                        voice_levels,
+                        (voice_playable, voice_playing),
+                        voice_words,
+                    ),
+                    (progress_words, progress_percent),
                 ),
             )| MessageRow {
                 id,
@@ -474,6 +484,8 @@ fn message_row() -> BoxedStrategy<MessageRow> {
                 photo_h,
                 photo_words,
                 files,
+                progress_words,
+                progress_percent,
                 voice_mode,
                 voice_ms,
                 voice_duration,

@@ -1,0 +1,24 @@
+┌  Loquax────────────────┐┌● Unbekannt─────────────────────────────── no relay ┐
+│▌Unbekannt        12:00 ││                                                    │
+│▌du: Protokoll.pdf      ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││         ▌▤ Protokoll.pdf · 300 KB                  │
+│                        ││         ▌▰▰▰▰▰▱▱▱▱▱ wird gesendet · 43 %  12:00 ◷  │
+│                        │├  to Unbekannt────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

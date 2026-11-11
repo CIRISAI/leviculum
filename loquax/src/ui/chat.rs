@@ -629,6 +629,11 @@ pub struct Bubble {
     /// A group's line that came after newer ones (1307 pass four, study
     /// 6.1): a screen says "arrived late" under it, so nobody misses it.
     pub late: bool,
+    /// How far its bytes have gone while they go (1662): ours only while
+    /// it still sends, one being fetched until it is whole. Boxed: a
+    /// bubble without one, nearly every bubble, pays a pointer (the M9's
+    /// heap census, `m9_scene_census`).
+    pub transfer: Option<alloc::boxed::Box<super::transfer::Transfer>>,
 }
 
 /// The bubbles of conversation `c`, oldest first: a reaction is a chip on
@@ -813,6 +818,14 @@ fn bubbles_of<B>(model: &UiModel<B>, c: usize, from: usize, to: usize) -> Vec<Bu
                 photo: super::photos::photo_of(&message.fields),
                 files: super::files::files_of(&message.fields),
                 voice: super::voice::voice_of(&message.fields),
+                transfer: model
+                    .transfers
+                    .of(&conversation.peer, message.activity)
+                    .filter(|_| {
+                        !message.outbound
+                            || Mark::of(shown(message.delivery, model)) == Mark::Sending
+                    })
+                    .map(alloc::boxed::Box::new),
             };
             // A digest (1307 pass four): one bubble a line, under its
             // writer's name and at its writer's time, as if each had come
@@ -1270,6 +1283,7 @@ mod tests {
             invite: None,
             note: false,
             late: false,
+            transfer: None,
         }
     }
 

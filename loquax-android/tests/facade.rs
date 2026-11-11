@@ -4062,6 +4062,106 @@ fn the_phone_reads_grouping_days_and_search_from_the_scene() {
     assert!(!old(&row.name) && !old(&row.last), "{row:?}");
 }
 
+/// 1662, a file tells its progress: a scripted resource moves the
+/// running send of a file to 43 % and then a fetch to 1.2 MB of 3.0 MB;
+/// the facade's rows carry the bubble's words in the phone's language and
+/// the bar's percent, and a sent message has neither.
+#[test]
+fn a_file_under_way_carries_its_words_and_bar_to_the_phone() {
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::transfer::{Transfer, Way};
+    use loquax::ui::{update, UiEvent, UiModel};
+    use loquax_android::session::{self, Line};
+    let peer = ugly_store::peer(93);
+    let mut model = UiModel::<Line>::new(&[peer]);
+    update(
+        &mut model,
+        UiEvent::SendFile {
+            peer,
+            name: "Protokoll.pdf".into(),
+            data: vec![7; 300_000],
+        },
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Queued {
+            message_id: [0x62; 32],
+        }),
+    );
+    update(&mut model, UiEvent::Elapsed(1_000));
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Progress {
+            message_id: [0x62; 32],
+            permille: 430,
+        }),
+    );
+    let rows = session::rows(&model, 0, Lang::De);
+    let ours = rows.iter().find(|r| r.ours).expect("our row");
+    assert_eq!(ours.progress_words, "wird gesendet · 43 %");
+    assert_eq!(ours.progress_percent, 43);
+    assert_eq!(ours.files.len(), 1, "the file's line stays");
+    // A client's upload names the running send the same way.
+    update(&mut model, UiEvent::Elapsed(1_250));
+    update(&mut model, UiEvent::SendProgress(870));
+    let rows = session::rows(&model, 0, Lang::En);
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.ours)
+            .map(|r| r.progress_words.as_str()),
+        Some("sending · 87 %")
+    );
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::State {
+            message_id: [0x62; 32],
+            state: leviculum_lxmf::router::MessageState::Delivered,
+        }),
+    );
+    let rows = session::rows(&model, 0, Lang::De);
+    let ours = rows.iter().find(|r| r.ours).expect("our row");
+    assert_eq!(
+        (ours.progress_words.as_str(), ours.progress_percent),
+        ("", 0)
+    );
+    // A fetch says its bytes of the whole.
+    update(
+        &mut model,
+        UiEvent::Engine(OutboxEvent::Received {
+            sent_at: 0,
+            message_id: [0x63; 32],
+            source: peer,
+            title: Vec::new(),
+            body: b"das Bild".to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        }),
+    );
+    let key = model.conversations[0]
+        .messages
+        .iter()
+        .find(|m| !m.outbound)
+        .map(|m| m.activity)
+        .expect("theirs");
+    update(&mut model, UiEvent::Elapsed(2_000));
+    update(
+        &mut model,
+        UiEvent::Transfer {
+            peer,
+            key,
+            transfer: Transfer {
+                way: Way::Fetching,
+                done: 1_234_567,
+                total: 3_000_000,
+            },
+        },
+    );
+    let rows = session::rows(&model, 0, Lang::De);
+    let theirs = rows.iter().find(|r| !r.ours).expect("their row");
+    assert_eq!(theirs.progress_words, "wird geholt · 1,2 MB von 3,0 MB");
+    assert_eq!(theirs.progress_percent, 41);
+}
+
 /// The map's Friends sheet (1200), as the facade answers it from the
 /// session's model: everyone with a position, newest first, the last 24 h
 /// marked recent and the older after them; ourselves apart as `me`, the

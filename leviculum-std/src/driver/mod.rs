@@ -3449,6 +3449,18 @@ impl ReticulumNode {
             .map(|l| (l.keepalive_ms(), l.keepalives_acked()))
     }
 
+    /// How far the resource a link sends has gone, 0.0 to 1.0: the share
+    /// of its parts the peer asked for; `None` when the link does not
+    /// exist or sends none. A request too large for a packet goes as one,
+    /// so a requester shows its upload by it (Loquax's bubble, 1662).
+    /// Takes the core lock: never from a `CoreProcessor` hook.
+    pub fn link_outgoing_resource_progress(&self, link_id: &LinkId) -> Option<f32> {
+        self.inner
+            .lock_recover()
+            .link(link_id)
+            .and_then(|l| l.outgoing_resource_progress())
+    }
+
     /// Get the encrypted link MDU (maximum data unit) for a link
     ///
     /// Returns `None` if the link does not exist.

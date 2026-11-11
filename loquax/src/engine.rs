@@ -313,6 +313,10 @@ pub struct Engine {
     /// forgets a message the moment it reaches a terminal state, so without
     /// this the removal could not be attributed.
     tracked: BTreeMap<[u8; 32], Option<MessageState>>,
+    /// The resource progress last said of each tracked message
+    /// ([`OutboxEvent::Progress`], 1662), as the router's outbound entry
+    /// holds it.
+    progress: BTreeMap<[u8; 32], u16>,
     /// Why the last failed attempt of a tracked message failed, for its
     /// [`OutboxEvent::Left`] (1330).
     failures: BTreeMap<[u8; 32], AttemptFailure>,
@@ -369,6 +373,7 @@ impl Engine {
             resolves: Vec::new(),
             tracked: BTreeMap::new(),
             failures: BTreeMap::new(),
+            progress: BTreeMap::new(),
             mining: BTreeMap::new(),
             announced: false,
             pending_selection: None,
@@ -528,6 +533,30 @@ impl Engine {
                 }
                 out.events.push(event);
             }
+        }
+        self.say_progress(ready);
+    }
+
+    /// Each tracked message whose resource moved since it was last said
+    /// (1662): the router keeps the share in its outbound entry and
+    /// reports no event of it.
+    fn say_progress(&mut self, ready: &Ready) {
+        let outbound = ready.router.outbound();
+        let tracked = &self.tracked;
+        self.progress
+            .retain(|id, _| tracked.contains_key(id) && outbound.contains_key(id));
+        let moved: Vec<([u8; 32], u16)> = outbound
+            .iter()
+            .filter(|(id, _)| tracked.contains_key(*id))
+            .map(|(id, entry)| (*id, crate::ui::transfer::Transfer::permille(entry.progress)))
+            .filter(|(id, permille)| *permille > 0 && self.progress.get(id) != Some(permille))
+            .collect();
+        for (message_id, permille) in moved {
+            self.progress.insert(message_id, permille);
+            self.emit(OutboxEvent::Progress {
+                message_id,
+                permille,
+            });
         }
     }
 

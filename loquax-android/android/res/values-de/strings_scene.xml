@@ -449,6 +449,9 @@
     <string name="file_too_large">Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.</string>
     <string name="file_unreadable">Diese Datei ließ sich nicht lesen.</string>
     <string name="file_no_app">Keine App auf diesem Gerät kann diese Datei öffnen.</string>
+    <string name="transfer_sending">wird gesendet · %1$d %%</string>
+    <string name="transfer_fetching">wird geholt · %1$s von %2$s</string>
+    <string name="megabytes">%1$d,%2$d MB</string>
     <string name="scene_voice">Sprachnachricht, %1$s</string>
     <string name="scene_voice_unplayable">Sprachnachricht, %1$s, hier nicht abspielbar</string>
     <string name="scene_play_voice">Abspielen</string>

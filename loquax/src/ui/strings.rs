@@ -566,6 +566,10 @@ leviculum_ui::catalogue! {
     FileTooLarge = "file_too_large", "This file is %1$s. A message carries at most %2$s.", "Diese Datei hat %1$s. Eine Nachricht trägt höchstens %2$s.";
     FileUnreadable = "file_unreadable", "This file could not be read.", "Diese Datei ließ sich nicht lesen.";
     FileNoApp = "file_no_app", "No app on this device opens this file.", "Keine App auf diesem Gerät kann diese Datei öffnen.";
+    // A photo or a file under way, in its bubble (1662).
+    TransferSending = "transfer_sending", "sending · %1$d %%", "wird gesendet · %1$d %%";
+    TransferFetching = "transfer_fetching", "fetching · %1$s of %2$s", "wird geholt · %1$s von %2$s";
+    Megabytes = "megabytes", "%1$d.%2$d MB", "%1$d,%2$d MB";
     // Voice messages (1222): the bubble's words, its buttons, the
     // microphone's hint, the slide that cancels, the refusals, and what
     // the phone says without the microphone.

@@ -35,7 +35,10 @@ pub struct HomeClient {
 /// it, and takes its later states from the archive's entries on each pull.
 /// `settle` is how long the runner waits for that name to reach the
 /// screen: the screen names the oldest running send, so the name has to
-/// arrive before this runner's end does.
+/// arrive before this runner's end does. `progress` hears how far a
+/// submission that goes as a resource has gone (1662), as the event the
+/// screen folds ([`UiEvent::SendProgress`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn send_home(
     tap: &mut impl Outbox,
     client: &HomeClient,
@@ -44,6 +47,7 @@ pub async fn send_home(
     fields: Vec<Field>,
     budget: Duration,
     settle: Duration,
+    progress: &mut (dyn FnMut(UiEvent) + Send),
 ) -> UiEvent {
     let submission = super::wire::Submission {
         client_id: super::client::client_id(),
@@ -52,12 +56,18 @@ pub async fn send_home(
         content: body.into_bytes(),
         fields,
     };
-    let accepted = super::client::send(
+    let mut moved = |share: f32| {
+        progress(UiEvent::SendProgress(
+            crate::ui::transfer::Transfer::permille(share),
+        ))
+    };
+    let accepted = super::client::send_watching(
         &client.node,
         &client.public_key,
         &client.device,
         &submission,
         budget,
+        &mut moved,
     )
     .await;
     let message_id = match accepted {

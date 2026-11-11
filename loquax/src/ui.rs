@@ -177,6 +177,7 @@ pub mod state;
 pub mod strings;
 pub mod summary;
 pub mod tracks;
+pub mod transfer;
 pub mod verbs;
 pub mod viewload;
 pub mod voice;
@@ -1442,6 +1443,13 @@ pub struct UiModel<B> {
     /// for one the shell measured. Memory only; a bubble without one
     /// draws its stream's packet sizes.
     pub voice_tracks: BTreeMap<([u8; 16], u64), recording::LevelTrack>,
+    /// The photos and files under way, a bubble each (1662): how far a
+    /// sending message's resource has gone ([`transfer::Transfers`]).
+    pub transfers: transfer::Transfers,
+    /// Conversations whose bubble's transfer moved in this fold (1662):
+    /// the note bumps their revision so every target draws it again, and
+    /// nothing is written, as a transfer is not kept.
+    transfer_poked: BTreeSet<[u8; 16]>,
     /// The running position shares (1273).
     pub shares: share::Shares,
     /// The groups the reader is in, was invited to or left (1307), learned
@@ -1665,6 +1673,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             bar: compose::Bar::default(),
             recording: recording::Recording::default(),
             voice_tracks: BTreeMap::new(),
+            transfers: transfer::Transfers::default(),
+            transfer_poked: BTreeSet::new(),
             shares: share::Shares::default(),
             groups: groups::Groups::new(),
             group_draft: None,
@@ -2062,9 +2072,11 @@ impl<B> UiModel<B> {
         let changed = core::mem::take(&mut self.changed);
         let peers = core::mem::take(&mut self.changed_peers);
         let groups = core::mem::take(&mut self.groups_changed);
+        let transferred = core::mem::take(&mut self.transfer_poked);
         let poked = |peer: &[u8; 16]| {
             peers.contains(peer)
                 || groups.contains(peer)
+                || transferred.contains(peer)
                 || changed
                     .range((*peer, 0)..=(*peer, u64::MAX))
                     .next()
@@ -2077,7 +2089,13 @@ impl<B> UiModel<B> {
         indices.clear();
         if scoped {
             // The scope's conversations, each found once.
-            named.extend(peers.iter().chain(groups.iter()).chain(self.made.iter()));
+            named.extend(
+                peers
+                    .iter()
+                    .chain(groups.iter())
+                    .chain(transferred.iter())
+                    .chain(self.made.iter()),
+            );
             let mut last = None;
             for (peer, _) in changed.iter() {
                 if last != Some(*peer) {
@@ -2899,6 +2917,7 @@ impl<B> UiModel<B> {
             tracks: Some(&self.voice_tracks),
             lang: self.lang,
             names: Some(&self.names),
+            transfers: Some(&self.transfers),
         }
     }
 
@@ -3067,6 +3086,17 @@ pub enum UiEvent {
     SendUnproven(String),
     /// The oldest running send moved onto this leg.
     SendLeg(Leg),
+    /// The oldest running send's resource moved this share of its parts,
+    /// in thousandths (1662): a client's `/send` to its mailbox. The bubble
+    /// says it, at most every [`transfer::EVERY_MS`].
+    SendProgress(u16),
+    /// How far the bubble `key` of `peer`'s conversation has gone, as the
+    /// runner that moves its bytes measured it (1662).
+    Transfer {
+        peer: [u8; 16],
+        key: u64,
+        transfer: transfer::Transfer,
+    },
     /// The fetch finished: how many messages were new, or why it failed.
     FetchDone(Result<usize, String>),
     /// The propagation node `node` answered [`UiEffect::AskPn`] (1409):
@@ -4092,6 +4122,20 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::SendUnproven(detail) => on_send_unproven(model, detail),
+        UiEvent::SendProgress(permille) => {
+            if let Some(&(c, m)) = model.sending.front() {
+                transfer_sent(model, c, m, permille);
+            }
+            Vec::new()
+        }
+        UiEvent::Transfer {
+            peer,
+            key,
+            transfer,
+        } => {
+            model.transfer(peer, key, transfer);
+            Vec::new()
+        }
         UiEvent::SendLeg(leg) => {
             let (tick, now) = (model.tick, model.now);
             if let Some(&(c, m)) = model.sending.front() {
@@ -6222,6 +6266,10 @@ fn on_engine<B: InputBuffer>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<
                 }
             }
         }
+        OutboxEvent::Progress {
+            message_id,
+            permille,
+        } => transfer_of_id(model, message_id, permille),
         OutboxEvent::State { message_id, state } => {
             if state == MessageState::Delivered {
                 // A proof says more than the node can.
@@ -6912,6 +6960,23 @@ impl<B> UiModel<B> {
 impl<B> UiModel<B> {
     /// Message `message` of conversation `conversation`, to change: the
     /// store will learn of it.
+    /// Bubble `key` of `peer`'s conversation has its bytes `transfer` far
+    /// (1662), taken at most every [`transfer::EVERY_MS`].
+    fn transfer(&mut self, peer: [u8; 16], key: u64, transfer: transfer::Transfer) {
+        if self.transfers.set(peer, key, transfer, self.elapsed_ms) {
+            self.transfer_poked.insert(peer);
+        }
+    }
+
+    /// Bubble `key`'s bytes stopped going, however it ended (1662).
+    fn transfer_over(&mut self, peer: [u8; 16], key: u64) {
+        let rev = self.transfers.rev();
+        self.transfers.end(&peer, key);
+        if self.transfers.rev() != rev {
+            self.transfer_poked.insert(peer);
+        }
+    }
+
     fn message_mut(
         &mut self,
         conversation: usize,
@@ -6922,6 +6987,58 @@ impl<B> UiModel<B> {
             .get_mut(conversation)?
             .messages
             .get_mut(message)
+    }
+}
+
+/// The bytes a message's transfer counts (1662): its photo's, files'
+/// and voice's on the wire, or its body's when it carries none.
+fn transfer_bytes(message: &Message) -> u64 {
+    let media = photos::photo_of(&message.fields).map_or(0, |p| p.bytes)
+        + files::files_of(&message.fields)
+            .iter()
+            .map(|f| f.bytes)
+            .sum::<usize>()
+        + voice::voice_of(&message.fields).map_or(0, |v| v.bytes);
+    match media {
+        0 => message.size as u64,
+        bytes => bytes as u64,
+    }
+}
+
+/// Message `m` of conversation `c`, ours and still sending, moved
+/// `permille` thousandths of its resource (1662).
+fn transfer_sent<B>(model: &mut UiModel<B>, c: usize, m: usize, permille: u16) {
+    let Some(conversation) = model.conversations.get(c) else {
+        return;
+    };
+    let Some(message) = conversation.messages.get(m) else {
+        return;
+    };
+    if !message.outbound {
+        return;
+    }
+    let transfer = transfer::Transfer::sending(permille, transfer_bytes(message));
+    let (peer, key) = (conversation.peer, message.activity);
+    model.transfer(peer, key, transfer);
+}
+
+/// [`OutboxEvent::Progress`]: the ours with the router's id `id` moved
+/// `permille` thousandths of its resource (1662).
+fn transfer_of_id<B>(model: &mut UiModel<B>, id: [u8; 32], permille: u16) {
+    let ops = &model.ops;
+    let mut found = None;
+    for (c, conversation) in model.conversations.iter_mut().enumerate() {
+        let ours = conversation
+            .with_id(&id, ops)
+            .into_iter()
+            .find(|&m| conversation.messages.get(m).is_some_and(|m| m.outbound));
+        if let Some(m) = ours {
+            found = Some((c, m));
+            break;
+        }
+    }
+    if let Some((c, m)) = found {
+        transfer_sent(model, c, m, permille);
     }
 }
 
@@ -7154,6 +7271,14 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
                 vec![UiEffect::Notice(format!("group: {detail}"))]
             }
         };
+    }
+    // The runner is done with its bytes, whatever came of them (1662).
+    if let Some((peer, key)) = model
+        .conversations
+        .get(c)
+        .and_then(|conversation| Some((conversation.peer, conversation.messages.get(m)?.activity)))
+    {
+        model.transfer_over(peer, key);
     }
     if let Some(mut message) = model.message_mut(c, m) {
         message.leg = None;
@@ -17154,6 +17279,143 @@ pub(crate) mod tests {
                 key: photo_key
             }]
         );
+    }
+
+    /// 1662: a file's progress reaches its bubble. The engine's word
+    /// for the router's outbound entry (a link's resource) and a client's
+    /// `/send` (the running send) both move the bar and its words, at most
+    /// once a quarter second of the model's clock, the last always; the
+    /// bar goes when the message is sent. A fetch says its bytes.
+    #[test]
+    fn a_files_progress_is_in_its_bubble_while_it_goes() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        update(
+            &mut model,
+            UiEvent::SendFile {
+                peer: PEER,
+                name: "Protokoll.pdf".into(),
+                data: vec![7; 300_000],
+            },
+        );
+        let rows = |model: &UiModel<Field>| -> Vec<String> {
+            view(model).messages.iter().map(text_of).collect()
+        };
+        let line =
+            |model: &UiModel<Field>| rows(model).into_iter().find(|r| r.contains("sending ·"));
+        let scene_words = |model: &UiModel<Field>| {
+            scene::chat(model, 0)
+                .groups
+                .iter()
+                .flat_map(|g| g.bubbles.iter())
+                .find_map(|b| {
+                    b.progress
+                        .as_ref()
+                        .map(|p| (p.percent, p.words.resolve(strings::Lang::De)))
+                })
+        };
+        assert_eq!(line(&model), None, "nothing goes yet");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        update(&mut model, UiEvent::Elapsed(1_000));
+        engine(
+            &mut model,
+            OutboxEvent::Progress {
+                message_id: ID,
+                permille: 430,
+            },
+        );
+        let at_43 = line(&model).expect("the bar");
+        assert!(at_43.contains("▰▰▰▰▰▱▱▱▱▱ sending · 43 %"), "{at_43}");
+        assert_eq!(
+            scene_words(&model),
+            Some((43, "wird gesendet · 43 %".to_string()))
+        );
+        // Under the file's line, above nothing else.
+        let all = rows(&model);
+        let file = all
+            .iter()
+            .position(|r| r.contains("▤ Protokoll.pdf"))
+            .expect("file");
+        let bar = all
+            .iter()
+            .position(|r| r.contains("sending ·"))
+            .expect("bar");
+        assert_eq!(bar, file + 1, "{all:#?}");
+        // A second word in the same quarter second waits.
+        engine(
+            &mut model,
+            OutboxEvent::Progress {
+                message_id: ID,
+                permille: 500,
+            },
+        );
+        assert!(line(&model).is_some_and(|l| l.contains("43 %")));
+        // A client's upload names the running send.
+        update(&mut model, UiEvent::Elapsed(1_250));
+        update(&mut model, UiEvent::SendProgress(910));
+        assert!(
+            line(&model).is_some_and(|l| l.contains("91 %")),
+            "{:?}",
+            line(&model)
+        );
+        // The whole always goes through.
+        update(&mut model, UiEvent::SendProgress(1000));
+        assert!(line(&model).is_some_and(|l| l.contains("100 %")));
+        state(&mut model, ID, MessageState::Sent);
+        assert_eq!(line(&model), None, "sent: no bar");
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        assert!(model.transfers.is_empty(), "the runner's end drops it");
+        // A fetch says its bytes of the whole.
+        let key = model.conversations[0].messages[0].activity;
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                sent_at: 0,
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"und das Bild".to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            },
+        );
+        let theirs = model.conversations[0]
+            .messages
+            .iter()
+            .find(|m| !m.outbound)
+            .map(|m| m.activity)
+            .expect("theirs");
+        assert_ne!(theirs, key);
+        update(&mut model, UiEvent::Elapsed(2_000));
+        update(
+            &mut model,
+            UiEvent::Transfer {
+                peer: PEER,
+                key: theirs,
+                transfer: transfer::Transfer {
+                    way: transfer::Way::Fetching,
+                    done: 1_200_000,
+                    total: 3_000_000,
+                },
+            },
+        );
+        assert!(
+            rows(&model)
+                .iter()
+                .any(|r| r.contains("▰▰▰▰▱▱▱▱▱▱ fetching · 1.2 MB of 3.0 MB")),
+            "{:#?}",
+            rows(&model)
+        );
+        model.ascii = true;
+        assert!(rows(&model)
+            .iter()
+            .any(|r| r.contains("[####------] fetching")));
     }
 
     /// A received file in the terminal (1221): its name, made safe, and
