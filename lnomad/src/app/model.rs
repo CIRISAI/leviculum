@@ -645,6 +645,17 @@ pub struct Model {
     /// here; the page cache only holds pages fetched this run, so the answer was
     /// always learned first.
     pub identify_known: alloc::collections::BTreeSet<[u8; 16]>,
+    /// A host that has said once what identifying means (1650): the first
+    /// switch-on in a hosted browser says the sentence a reader without the
+    /// help screen needs, every later one the usual toast.
+    pub identify_explained: bool,
+    /// The lines the scene carries for a host that scrolls the page itself
+    /// (1650, the phone's native scroll): the whole page while it has no
+    /// more lines than this, else a window this tall around
+    /// [`scroll`](Model::scroll). `None`, the terminal's rule: the
+    /// viewport's lines from `scroll`. [`scroll`](Model::scroll) keeps its
+    /// meaning either way, the top line the reader sees.
+    pub window: Option<usize>,
     /// The current page's inline images, one slot per standalone image link,
     /// in link order. Rebuilt on every page load; drives both the rows the
     /// relayout reserves and what is drawn into them.

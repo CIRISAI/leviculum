@@ -1506,7 +1506,12 @@ pub(crate) fn toggle_identify(model: &mut Model) -> Vec<Effect> {
         .chars()
         .take(8)
         .collect();
-    if on {
+    if on && model.hosted && !model.identify_explained {
+        // A host's reader has no help screen and no `i` key (1650): the
+        // first switch-on says what it means.
+        model.identify_explained = true;
+        model.say(ToastKind::Info, Text::key(StrId::IdentifyExplained));
+    } else if on {
         let fp8: String = model.fingerprint.chars().take(8).collect();
         model.say(
             ToastKind::Info,

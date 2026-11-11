@@ -440,11 +440,12 @@ fn status(model: &Model) -> Option<Chip> {
     Some(chip(ChipId::Status, text))
 }
 
-/// The window of the page the screen shows, as runs.
+/// The window of the page the screen shows, as runs: the viewport's lines
+/// from the scroll, or for a host that scrolls natively
+/// ([`Model::window`]) the whole page up to its cap.
 fn page(model: &Model) -> Page {
     let total = model.page.len();
-    let end = model.scroll.saturating_add(model.viewport()).min(total);
-    let first = model.scroll.min(end);
+    let (first, end) = window(model, total);
     let lines = (first..end).map(|at| page_line(model, at)).collect();
     Page {
         id: NodeId::Page,
@@ -460,6 +461,26 @@ fn page(model: &Model) -> Page {
                 title => Text::Raw(title.to_string()),
             },
         ),
+    }
+}
+
+/// The lines `[first, end)` of a page `total` lines long the scene carries.
+fn window(model: &Model, total: usize) -> (usize, usize) {
+    match model.window {
+        None => {
+            let end = model.scroll.saturating_add(model.viewport()).min(total);
+            (model.scroll.min(end), end)
+        }
+        Some(cap) if total <= cap => (0, total),
+        // A page longer than the cap: a window around the reader's line,
+        // so the native scroll reaches both ways from it.
+        Some(cap) => {
+            let first = model
+                .scroll
+                .saturating_sub(cap / 2)
+                .min(total.saturating_sub(cap));
+            (first, first.saturating_add(cap).min(total))
+        }
     }
 }
 

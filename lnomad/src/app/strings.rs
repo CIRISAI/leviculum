@@ -127,6 +127,7 @@ leviculum_ui::catalogue! {
     NothingToCopy = "browser_nothing_to_copy", "nothing to copy", "nichts zu kopieren";
     Copied = "browser_copied", "copied %1$s", "%1$s kopiert";
     IdentifyingTo = "browser_identifying_to", "Identifying to %1$s as %2$s  (i to stop)", "Identifiziert bei %1$s als %2$s  (i beendet)";
+    IdentifyExplained = "browser_identify_explained", "The page learns your address while this is on", "Die Seite erfährt deine Adresse, solange das an ist";
     AnonymousTo = "browser_anonymous_to", "Now anonymous to %1$s", "Jetzt anonym bei %1$s";
     WontOpen = "browser_wont_open", "won't open %1$s: link", "öffne keinen %1$s:-Link";
     LxmfCopied = "browser_lxmf_copied", "LXMF address copied: %1$s", "LXMF-Adresse kopiert: %1$s";
