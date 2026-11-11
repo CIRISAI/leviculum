@@ -575,6 +575,13 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         ),
         None => None,
     };
+    // From here a SIGUSR1 is the census's, not the end of the process
+    // (1691): before this line its default disposition still kills the
+    // mailbox, and `HOME up` and `HOME upstream` come earlier, so a
+    // supervisor that signals on either can lose the process.
+    if usr1.is_some() {
+        tracing::warn!("HOME signals SIGUSR1=census SIGTERM=stop");
+    }
     #[cfg(feature = "heap-accounting")]
     if usr1.is_some() {
         tracing::info!(

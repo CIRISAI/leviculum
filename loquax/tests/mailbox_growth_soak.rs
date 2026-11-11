@@ -145,7 +145,9 @@ async fn the_mailbox_does_not_grow_with_uptime() {
         std::thread::spawn(move || {
             let mut current = String::new();
             for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                if line.contains("HOME up") {
+                // SIGUSR1 is handled from here (1691); `HOME up` matched
+                // `HOME upstream`, logged before the handler.
+                if line.contains("HOME signals SIGUSR1=census") {
                     *up.lock().expect("up") = true;
                 }
                 if line.starts_with("MAILBOX_CENSUS ")

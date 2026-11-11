@@ -18,6 +18,9 @@ mod support;
 
 const LOQUAX: &str = env!("CARGO_BIN_EXE_loquax");
 
+/// The mailbox's line once its SIGUSR1 and SIGTERM handlers are installed.
+const SIGNALS_HANDLED: &str = "HOME signals SIGUSR1=census";
+
 /// Wait until `stderr` holds `needle`, or panic with what it holds.
 fn wait_for(stderr: &Arc<Mutex<String>>, needle: &str, secs: u64) {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -71,8 +74,12 @@ async fn sigusr1_prints_the_census_and_the_mailbox_lives_on() {
         assert!(status.success(), "kill -s {name} {pid}");
     };
 
+    // The daemon's own word that SIGUSR1 is handled (1691). `HOME up` came
+    // too early, and as a substring it matched `HOME upstream`, logged
+    // before the handler: a slow forge signalled into the default
+    // disposition and the mailbox died of signal 10 with no dump.
     let stderr_ = Arc::clone(&stderr);
-    tokio::task::spawn_blocking(move || wait_for(&stderr_, "HOME up", 30))
+    tokio::task::spawn_blocking(move || wait_for(&stderr_, SIGNALS_HANDLED, 30))
         .await
         .expect("waited");
     signal("USR1");
@@ -166,7 +173,7 @@ async fn an_idle_mailbox_uses_almost_no_cpu() {
     };
     let pid = child.id();
     let stderr_ = Arc::clone(&stderr);
-    tokio::task::spawn_blocking(move || wait_for(&stderr_, "HOME up", 30))
+    tokio::task::spawn_blocking(move || wait_for(&stderr_, SIGNALS_HANDLED, 30))
         .await
         .expect("waited");
     // The start's own work settles first.

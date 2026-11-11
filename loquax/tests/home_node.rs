@@ -140,7 +140,9 @@ impl HomeNode {
         let process = leviculum_std::process::spawn_supervised(command).expect("spawn the daemon");
         let node = Self { process, stderr };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-        while !node.log().contains("HOME up") {
+        // `HOME up address=`, not `HOME up`: that also matches the
+        // earlier `HOME upstream` line (1691).
+        while !node.log().contains("HOME up address=") {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the home node never came up:\n{}",
