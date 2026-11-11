@@ -631,3 +631,90 @@ fn a_long_page_crosses_in_time() {
     );
     assert!(out.contains("checks passed"), "{out}");
 }
+
+/// Walk 11, finding 60 (1667): text graphics on rns.moscow were cut on
+/// the right and broke into short and long lines. The phone says its
+/// real cells (`size`, from the view's measured width and the font's
+/// advance), and the library lays prose out on them; a line the page
+/// draws wider than that (a literal block, a run of art without a space)
+/// comes whole, as wide as the page drew it, and the phone's view scrolls
+/// sideways rather than breaking it (`BrowsePane`'s HorizontalScrollView).
+#[test]
+fn a_page_wider_than_the_phone_comes_whole_for_the_sideways_scroll() {
+    let (_home, mut model) = opened();
+    tap(
+        &mut model,
+        &[
+            ("verb", Java::Str("size")),
+            ("cols", Java::Long(48)),
+            ("rows", Java::Long(30)),
+        ],
+    );
+    open_node(&mut model);
+    let art: String = "\u{28ff}\u{2800}".repeat(60);
+    let boxed = format!("+{}+", "-".repeat(118));
+    let prose = "word ".repeat(40);
+    let micron = format!("`=\n{boxed}\n`=\n{art}\n{}\n", prose.trim_end());
+    arrive(&mut model, &micron);
+    let page = screen(&model);
+    let widths: Vec<usize> = page
+        .lines
+        .iter()
+        .map(|l| line_text(l).chars().count())
+        .collect();
+    eprintln!("FACADE wide: widths={widths:?}");
+    let texts: Vec<String> = page.lines.iter().map(line_text).collect();
+    assert!(
+        texts.iter().any(|t| t.trim_end() == boxed),
+        "the literal box line whole: {texts:#?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.trim() == art),
+        "the art run whole: {texts:#?}"
+    );
+    // Prose still wraps on the phone's cells: no prose line past 48.
+    for t in texts.iter().filter(|t| t.contains("word")) {
+        assert!(t.chars().count() <= 48, "prose wraps at 48: {t:?}");
+    }
+}
+
+/// Walk 11, finding 65 (1667): a page opened from Explore a second time
+/// looked refetched. Explore's tap goes the cache's way as the browser's
+/// Back does: the cached copy at once, its lines on screen and the chip
+/// saying so, and the fresh copy asked behind it.
+#[test]
+fn a_page_opened_again_from_explore_shows_the_cached_copy_first() {
+    let (_home, mut model) = opened();
+    open_node(&mut model);
+    arrive(&mut model, &numbered(5, "Zeile"));
+    let first = screen(&model);
+    assert!(first.lines.iter().any(|l| line_text(l).contains("Zeile 4")));
+    // Back to Explore and the same page again.
+    update(&mut model, UiEvent::Tab(loquax::ui::scene::TabId::Explore));
+    let effects = open_node(&mut model);
+    let again = screen(&model);
+    eprintln!(
+        "FACADE again: loading={} chips={:?} lines={} effects={effects:?}",
+        again.loading,
+        again.chips,
+        again.lines.len()
+    );
+    assert!(
+        again.lines.iter().any(|l| line_text(l).contains("Zeile 4")),
+        "the cached lines at once: {:?}",
+        again.lines.iter().map(line_text).collect::<Vec<_>>()
+    );
+    assert!(
+        again
+            .chips
+            .iter()
+            .any(|c| c.contains("aus dem Seitenspeicher")),
+        "the chip says the cache: {:?}",
+        again.chips
+    );
+    assert!(
+        again.status.contains("wird aktualisiert"),
+        "the fresh copy comes behind it: {:?}",
+        again.status
+    );
+}

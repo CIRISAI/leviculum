@@ -936,7 +936,14 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         @Override
         public void doFrame(long frameTimeNanos) {
             refreshOwed = false;
-            refresh(ask());
+            // Drawn again only when the answer moved (1455), here too
+            // (1667, walk 11, finding 64: every engine change redrew the
+            // list, and each redraw woke its scrollbar, 508 frames in three
+            // idle minutes with nothing on screen moving but that strip).
+            Map<String, Object> answer = ask();
+            if (!Quiet.same(shownAnswer, answer)) {
+                refresh(answer);
+            }
             if (panesOwed) {
                 panesOwed = false;
                 if (onRooms) {

@@ -49,7 +49,7 @@ final class MailboxLinesTest {
             }
         }
         check(rebuilds == 1, "twelve asks, no rebuild: " + rebuilds);
-        check("Verbunden seit 1 Min.".equals(onScreen.get(2).label), onScreen.get(2).label);
+        check("Dieses Gerät verbunden seit 1 Min.".equals(onScreen.get(2).label), onScreen.get(2).label);
         check(onScreen.get(2).writes == 12, "written in place twelve times");
         check("Meinen Code zeigen".equals(onScreen.get(onScreen.size() - 1).label),
                 "the line below the fold is the same view");
@@ -106,8 +106,8 @@ final class MailboxLinesTest {
         which.add(line("Name", "Lew Palm", null, null, false));
         which.add(line("Adresse", "5a5a", "5a5a", null, false));
         List<Object> reach = new ArrayList<Object>();
-        reach.add(line(secs < 60 ? "Verbunden seit weniger als einer Minute"
-                : "Verbunden seit " + secs / 60 + " Min.", null, null, null, false));
+        reach.add(line(secs < 60 ? "Dieses Gerät verbunden seit weniger als einer Minute"
+                : "Dieses Gerät verbunden seit " + secs / 60 + " Min.", null, null, null, false));
         reach.add(line("Letzter Kontakt", "vor " + secs + " Sek.", null, null, false));
         List<Object> devices = new ArrayList<Object>();
         devices.add(line("Fairphone", "dieses Gerät", null, null, false));

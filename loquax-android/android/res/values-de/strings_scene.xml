@@ -12,6 +12,7 @@
     <string name="explore_sort_seen">Zuletzt gesehen</string>
     <string name="browse_loading">Lade %1$s …</string>
     <string name="browse_loading_secs">Lade %1$s … %2$d s</string>
+    <string name="browse_field_title">Eingabe: %1$s</string>
     <string name="explore_sort_az">A bis Z</string>
     <string name="explore_bookmarks">Lesezeichen</string>
     <string name="explore_today">Heute</string>
@@ -109,7 +110,8 @@
     <string name="rooms_hub_no_answer">keine Antwort</string>
     <string name="rooms_hub_more">Mehr…</string>
     <string name="rooms_name_visible">Dein Name ist im Raum für alle sichtbar.</string>
-    <string name="rooms_no_name">Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen.</string>
+    <string name="rooms_no_name">Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne Namen.</string>
+    <string name="rooms_no_name_profile">Auf diesem Server hast du noch keinen Namen (dein Profil heißt %1$s): Im Raum erscheinst du ohne Namen.</string>
     <string name="settings">Einstellungen</string>
     <string name="settings_profile">Profil</string>
     <string name="settings_profile_summary">Name, Adresse, QR-Code</string>
@@ -391,10 +393,11 @@
     <string name="mailbox_version_old">älter als dieses Gerät</string>
     <string name="mailbox_old_text">Dein Postfach läuft mit einer älteren Version. Aktualisiere es dort, damit Entdecken und diese Seite vollständig sind.</string>
     <string name="mailbox_reach">Verbindung</string>
-    <string name="mailbox_up">Verbunden</string>
-    <string name="mailbox_up_for">Verbunden seit %1$s</string>
+    <string name="mailbox_up">Dieses Gerät ist verbunden</string>
+    <string name="mailbox_up_for">Dieses Gerät verbunden seit %1$s</string>
     <string name="mailbox_down">Nicht verbunden</string>
-    <string name="mailbox_down_for">Nicht verbunden seit %1$s</string>
+    <string name="mailbox_down_here">Dieses Gerät ist nicht verbunden</string>
+    <string name="mailbox_down_for">Dieses Gerät nicht verbunden seit %1$s</string>
     <string name="mailbox_moment">weniger als einer Minute</string>
     <string name="mailbox_contact">Letzter Kontakt</string>
     <string name="mailbox_contact_none">noch keiner</string>
@@ -405,6 +408,7 @@
     <string name="mailbox_way_local">Über die Netzverbindung dieses Rechners</string>
     <string name="mailbox_access">Geräte dieses Postfachs</string>
     <string name="mailbox_seen">zuletzt da %1$s</string>
+    <string name="mailbox_seen_never">noch nie verbunden</string>
     <string name="mailbox_this_device">dieses Gerät</string>
     <string name="mailbox_devices_asking">Dein Postfach wird gefragt, welche Geräte es nutzen …</string>
     <string name="mailbox_devices_old">Dein Postfach nennt seine Geräte noch nicht: dafür braucht es dort eine neuere Version.</string>

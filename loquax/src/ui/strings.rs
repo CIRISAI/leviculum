@@ -50,6 +50,9 @@ leviculum_ui::catalogue! {
     ExploreSortSeen = "explore_sort_seen", "Last seen", "Zuletzt gesehen";
     BrowseLoading = "browse_loading", "Loading %1$s …", "Lade %1$s …";
     BrowseLoadingSecs = "browse_loading_secs", "Loading %1$s … %2$d s", "Lade %1$s … %2$d s";
+    // 1667 (walk 11, finding 59): a page's text field's editor, titled by
+    // the field's label or name, never a lone name.
+    BrowseFieldTitle = "browse_field_title", "Input: %1$s", "Eingabe: %1$s";
     ExploreSortAz = "explore_sort_az", "A to Z", "A bis Z";
     ExploreBookmarks = "explore_bookmarks", "Bookmarks", "Lesezeichen";
     ExploreToday = "explore_today", "Today", "Heute";
@@ -163,7 +166,8 @@ leviculum_ui::catalogue! {
     RoomsHubNoAnswer = "rooms_hub_no_answer", "no answer", "keine Antwort";
     RoomsHubMore = "rooms_hub_more", "More…", "Mehr…";
     RoomsNameVisible = "rooms_name_visible", "Your name is visible to everyone in the room.", "Dein Name ist im Raum für alle sichtbar.";
-    RoomsNoName = "rooms_no_name", "You have no name here: in the room you appear without one.", "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen.";
+    RoomsNoName = "rooms_no_name", "You have no name on this server yet: in the room you appear without one.", "Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne Namen.";
+    RoomsNoNameProfile = "rooms_no_name_profile", "You have no name on this server yet (your profile is called %1$s): in the room you appear without one.", "Auf diesem Server hast du noch keinen Namen (dein Profil heißt %1$s): Im Raum erscheinst du ohne Namen.";
     Settings = "settings", "Settings", "Einstellungen";
     // 1450 (walk 1, finding 21): the settings' nine sections, one list on
     // every target (`super::settings`), in the phone's order.
@@ -499,10 +503,11 @@ leviculum_ui::catalogue! {
     MailboxVersionOld = "mailbox_version_old", "older than this device", "älter als dieses Gerät";
     MailboxOldText = "mailbox_old_text", "Your mailbox runs an older version. Update it there so that Explore and this page are complete.", "Dein Postfach läuft mit einer älteren Version. Aktualisiere es dort, damit Entdecken und diese Seite vollständig sind.";
     MailboxReach = "mailbox_reach", "Connection", "Verbindung";
-    MailboxUp = "mailbox_up", "Connected", "Verbunden";
-    MailboxUpFor = "mailbox_up_for", "Connected for %1$s", "Verbunden seit %1$s";
+    MailboxUp = "mailbox_up", "This device is connected", "Dieses Gerät ist verbunden";
+    MailboxUpFor = "mailbox_up_for", "This device connected for %1$s", "Dieses Gerät verbunden seit %1$s";
     MailboxDown = "mailbox_down", "Not connected", "Nicht verbunden";
-    MailboxDownFor = "mailbox_down_for", "Not connected for %1$s", "Nicht verbunden seit %1$s";
+    MailboxDownHere = "mailbox_down_here", "This device is not connected", "Dieses Gerät ist nicht verbunden";
+    MailboxDownFor = "mailbox_down_for", "This device not connected for %1$s", "Dieses Gerät nicht verbunden seit %1$s";
     MailboxMoment = "mailbox_moment", "less than a minute", "weniger als einer Minute";
     MailboxContact = "mailbox_contact", "Last contact", "Letzter Kontakt";
     MailboxContactNone = "mailbox_contact_none", "none yet", "noch keiner";
@@ -513,6 +518,7 @@ leviculum_ui::catalogue! {
     MailboxWayLocal = "mailbox_way_local", "Over this computer's network connection", "Über die Netzverbindung dieses Rechners";
     MailboxAccess = "mailbox_access", "Devices of this mailbox", "Geräte dieses Postfachs";
     MailboxSeen = "mailbox_seen", "last there %1$s", "zuletzt da %1$s";
+    MailboxSeenNever = "mailbox_seen_never", "never connected yet", "noch nie verbunden";
     MailboxThisDevice = "mailbox_this_device", "this device", "dieses Gerät";
     MailboxDevicesAsking = "mailbox_devices_asking", "Asking your mailbox which devices use it …", "Dein Postfach wird gefragt, welche Geräte es nutzen …";
     MailboxDevicesOld = "mailbox_devices_old", "Your mailbox does not list its devices yet: that needs a newer version there.", "Dein Postfach nennt seine Geräte noch nicht: dafür braucht es dort eine neuere Version.";

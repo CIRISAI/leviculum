@@ -664,7 +664,12 @@ pub fn hub_rows<B>(model: &UiModel<B>, target: Target) -> Vec<PageRow> {
         key: Some('a'),
         action: Some(Action::of(Intent::RoomsHub(HubPick::Paste))),
     });
-    rows.push(note(super::rooms::name_notice(model)));
+    rows.push(PageRow {
+        label: super::rooms::name_notice(model),
+        value: None,
+        key: None,
+        action: None,
+    });
     rows
 }
 

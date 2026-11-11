@@ -15,14 +15,14 @@
 │ │Version: 0.9.7                                                            │ │
 │ │                                                                          │ │
 │ │Verbindung                                                                │ │
-│ │Verbunden seit 12 Min.                                                    │ │
+│ │Dieses Gerät verbunden seit 12 Min.                                       │ │
 │ │Letzter Kontakt: gerade eben                                              │ │
 │ │Verbindung zu miauhaus, geschirmt (das Handy hört nur sein Postfach)      │ │
 │ │                                                                          │ │
 │ │Geräte dieses Postfachs                                                   │ │
 │ │Fairphone: dieses Gerät                                                   │ │
 │ │M9: zuletzt da vor 2 Std.                                                 │ │
-│ │Laptop                                                                    │ │
+│ │Laptop: noch nie verbunden                                                │ │
 │ │Ein Gerät wird am Postfach selbst hinzugefügt oder entfernt.              │ │
 │ │c  Meinen Code zeigen                                                     │ │
 │ │                                                                          │ │

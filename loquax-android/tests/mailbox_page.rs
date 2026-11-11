@@ -106,7 +106,8 @@ fn the_unreachable_older_mailbox_page_for_java() {
         .map(|l| l.label.clone())
         .collect();
     assert!(
-        said.iter().any(|l| l == "Nicht verbunden seit 2 Std."),
+        said.iter()
+            .any(|l| l == "Dieses Gerät nicht verbunden seit 2 Std."),
         "{said:#?}"
     );
     check("mailbox-page-unreachable.json", &page);

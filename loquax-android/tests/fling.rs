@@ -490,3 +490,41 @@ fn the_mailbox_page_writes_a_fitting_answer_into_its_lines() {
     );
     assert!(out.contains("checks passed"), "{out}");
 }
+
+/// The form field's editor (1667, walk 11, finding 59): `FormField.java`
+/// run on the host with `tests/java/FormFieldTest.java`. The dialog's hint
+/// is what the page writes before the field on its line; a field opening
+/// its line, or one no line holds (the control), has none.
+#[test]
+fn a_form_fields_hint_is_the_pages_words_before_it() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let classes = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("form-field-classes");
+    let _ = std::fs::remove_dir_all(&classes);
+    std::fs::create_dir_all(&classes).expect("a class directory");
+    let compiled = Command::new("javac")
+        .args(["-source", "8", "-target", "8", "-Xlint:-options", "-d"])
+        .arg(&classes)
+        .arg(manifest.join("android/src/network/leviculum/loquax/FormField.java"))
+        .arg(manifest.join("tests/java/FormFieldTest.java"))
+        .output()
+        .expect("javac runs (a JDK on PATH; scripts/integ-prerequisites.txt skips this test where none is)");
+    assert!(
+        compiled.status.success(),
+        "javac:\n{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let ran = Command::new("java")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(&classes)
+        .arg("network.leviculum.loquax.FormFieldTest")
+        .output()
+        .expect("java runs (the same JDK)");
+    let out = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        ran.status.success(),
+        "{out}\n{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(out.contains("5 checks passed"), "{out}");
+}

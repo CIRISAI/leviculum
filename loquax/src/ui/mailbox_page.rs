@@ -200,7 +200,7 @@ fn reach_lines(reach: &Reach, now: Option<i64>, about: Option<&About>) -> Vec<Li
             StrId::MailboxDownFor,
             Vec::from([Arg::Text(Box::new(span(secs)))]),
         ),
-        (Some(false) | None, _) => Text::key(StrId::MailboxDown),
+        (Some(false) | None, _) => Text::key(StrId::MailboxDownHere),
     };
     lines.push(line(state, None));
     let contact = match (reach.last_contact, now) {
@@ -255,9 +255,9 @@ fn this_device(name: &str) -> Line {
 /// last there, this one said as such; or why there is no list.
 ///
 /// A device the mailbox has not heard since it began keeping the time
-/// (`last_seen` NULL after the schema 20 migration, 1647, walk 6, finding
-/// 29) is named without a time: unknown is not never. Its first request
-/// gives it one.
+/// (`last_seen` NULL, schema 20, 1647) says "never connected yet": a row
+/// with no second line read as broken (walk 11, finding 57, 1667). Its
+/// first request gives it a time.
 fn access_lines(
     told: &Told,
     this: Option<[u8; 16]>,
@@ -276,13 +276,22 @@ fn access_lines(
                     "" => Text::key(StrId::ProfileDeviceUnnamed),
                     name => Text::Raw(String::from(name)),
                 };
-                let value = device.last_seen.zip(now).map(|(at, now)| {
-                    Text::Key(
+                let value = match (device.last_seen, now) {
+                    (Some(at), Some(now)) => Text::Key(
                         StrId::MailboxSeen,
                         Vec::from([Arg::Text(Box::new(ago(now.saturating_sub(at))))]),
-                    )
-                });
-                lines.push(line(name, value));
+                    ),
+                    // Walk 11, finding 57: a row without a second line
+                    // read as broken. A device the mailbox never heard
+                    // since it keeps the time says so (1667).
+                    (None, _) => Text::key(StrId::MailboxSeenNever),
+                    // No clock here: say nothing rather than guess.
+                    (Some(_), None) => {
+                        lines.push(line(name, None));
+                        continue;
+                    }
+                };
+                lines.push(line(name, Some(value)));
             }
         }
         Told::NotYet | Told::Older => {
@@ -541,7 +550,7 @@ mod tests {
             "Läuft auf: miauhaus",
             "Das ist auch deine Adresse: Postfach und du sind eine Identität.",
             "Version: 0.9.7",
-            "Verbunden seit 12 Min.",
+            "Dieses Gerät verbunden seit 12 Min.",
             "Letzter Kontakt: gerade eben",
             "Verbindung zu miauhaus, geschirmt (das Handy hört nur sein Postfach)",
             "Fairphone: dieses Gerät",
@@ -570,7 +579,7 @@ mod tests {
         for want in [
             "Name: not heard yet",
             "Version: older than this device",
-            "Not connected for 2 h",
+            "This device not connected for 2 h",
             "Last contact: 2 h ago",
             "Connection to leviculum.network, not shielded (the phone hears the whole network, which costs battery and data)",
             "Fairphone: this device",
@@ -626,21 +635,24 @@ mod tests {
         }
     }
 
-    /// Walk 6, finding 29: after the schema 20 migration every old device's
-    /// `last_seen` is unknown; the page names it without a time, never
-    /// "not there yet". Finding 34: this device is said once.
+    /// Walk 11, finding 57: a device whose `last_seen` the mailbox does
+    /// not know (never heard since schema 20) says "never connected yet"
+    /// rather than a bare name that read as a broken row. Walk 6,
+    /// finding 34: this device is said once.
     #[test]
-    fn a_device_not_heard_since_the_migration_is_named_without_a_time() {
+    fn a_device_never_heard_says_never_connected() {
         let mut told = about();
         told.devices[1].last_seen = None;
         told.devices[0].name = String::new();
         let de = said(&page(&model(Told::Told(told), Reach::default())), Lang::De);
-        assert!(de.iter().any(|l| l == "M9"), "{de:#?}");
+        assert!(de.iter().any(|l| l == "M9: noch nie verbunden"), "{de:#?}");
+        assert!(!de.iter().any(|l| l == "M9"), "{de:#?}");
         assert!(de.iter().any(|l| l == "Dieses Gerät"), "{de:#?}");
-        assert!(!de.iter().any(|l| l.contains("noch nicht")), "{de:#?}");
+        // In the devices' list; the connection's line names this device
+        // too since walk 11 (1667).
         assert_eq!(
             de.iter()
-                .filter(|l| l.to_lowercase().contains("dieses gerät"))
+                .filter(|l| *l == "Dieses Gerät" || l.ends_with(": dieses Gerät"))
                 .count(),
             1,
             "{de:#?}"
@@ -671,11 +683,14 @@ mod tests {
         );
         assert!(
             de.iter()
-                .any(|l| l == "Verbunden seit weniger als einer Minute"),
+                .any(|l| l == "Dieses Gerät verbunden seit weniger als einer Minute"),
             "{de:#?}"
         );
         let de = said(&page(&model(Told::Told(about()), reach.clone())), Lang::De);
-        assert!(de.iter().any(|l| l == "Verbunden seit 3 Std."), "{de:#?}");
+        assert!(
+            de.iter().any(|l| l == "Dieses Gerät verbunden seit 3 Std."),
+            "{de:#?}"
+        );
         // Without a host word the way names the server; an unusual port
         // is said, the usual ones never.
         let mut nameless = about();

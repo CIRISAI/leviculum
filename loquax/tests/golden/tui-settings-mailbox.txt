@@ -15,14 +15,14 @@
 │ │Version: 0.9.7                                                            │ │
 │ │                                                                          │ │
 │ │Connection                                                                │ │
-│ │Connected for 12 min                                                      │ │
+│ │This device connected for 12 min                                          │ │
 │ │Last contact: now                                                         │ │
 │ │Connection to miauhaus, shielded (the phone hears only its mailbox)       │ │
 │ │                                                                          │ │
 │ │Devices of this mailbox                                                   │ │
 │ │Fairphone: this device                                                    │ │
 │ │M9: last there 2 h ago                                                    │ │
-│ │Laptop                                                                    │ │
+│ │Laptop: never connected yet                                               │ │
 │ │A device is added or removed on the mailbox itself.                       │ │
 │ │c  Show my code                                                           │ │
 │ │                                                                          │ │

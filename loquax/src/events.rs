@@ -376,8 +376,10 @@ pub fn rooms_suggest(hub: Option<&[u8; 16]>, why: &str, fits: usize) {
 
 /// A page the browser asked for and how it went (1653, walk 8, 40: the
 /// places sheet closed once with "Link fehlgeschlagen" and nobody could
-/// tell a tap from a link dropped while idle): `state` `asked`, `ok` or
-/// `failed`, `why` the failure in English or `-`.
+/// tell a tap from a link dropped while idle): `state` `asked`, `ok`,
+/// `failed` or `aborted` (1667: another ask took its place, `why`
+/// `superseded`, or the browser stopped, `stopped`), `why` the failure in
+/// English or `-`.
 pub fn browse_fetch(dest: &[u8; 16], path: &str, state: &str, why: &str) {
     tracing::debug!(
         event = "BROWSE_FETCH",
@@ -385,6 +387,20 @@ pub fn browse_fetch(dest: &[u8; 16], path: &str, state: &str, why: &str) {
         path = %scalar(path),
         state = %scalar(state),
         why = %scalar(why),
+    );
+}
+
+/// Explore came to the front and whether it asked the mailbox for its list
+/// (1667, walk 11, finding 63: a walk could not tell an ask that did not
+/// fire from one that fired unseen): `ask` `yes` or `no`, `reason`
+/// `asked`, `recent` (an ask began `since_ms` ago, under the minute) or
+/// `no_mailbox` (the device told of no mailbox link).
+pub fn explore_open(ask: bool, reason: &str, since_ms: Option<u64>) {
+    tracing::debug!(
+        event = "EXPLORE_OPEN",
+        ask = if ask { "yes" } else { "no" },
+        reason = %scalar(reason),
+        since_ms = %since_ms.map_or_else(|| String::from("-"), |ms| ms.to_string()),
     );
 }
 

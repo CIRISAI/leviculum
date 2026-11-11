@@ -2594,11 +2594,11 @@ mod tests {
 
     /// 1647, walk 6, finding 29: after the schema 20 migration every
     /// device the mailbox already held has no `last_seen`. Its `/about`
-    /// says so (0 on the wire), and the page names such a device without
-    /// a time, never "not there yet"; the asking device gets its time on
-    /// its first request.
+    /// says so (0 on the wire), and the page says such a device was never
+    /// connected (1667, walk 11, finding 57: a bare name read as a broken
+    /// row); the asking device gets its time on its first request.
     #[test]
-    fn a_migrated_mailbox_names_its_old_devices_without_a_time() {
+    fn a_migrated_mailbox_names_its_old_devices_as_never_connected() {
         use crate::home::about::{about_request, read_about_answer};
         use crate::ui::mailbox_page::{page, Told};
         use crate::ui::profile::{Mailbox, ProfileFacts};
@@ -2671,7 +2671,11 @@ mod tests {
             "MIGRATED mailboxpage:\n{}",
             serde_json::to_string_pretty(&shown.to_json()).expect("json")
         );
-        assert!(said.iter().any(|l| l == "laptop"), "{said:#?}");
+        // Walk 11, finding 57 (1667): never heard says so.
+        assert!(
+            said.iter().any(|l| l == "laptop: noch nie verbunden"),
+            "{said:#?}"
+        );
         assert!(
             said.iter().any(|l| l == "Fairphone: dieses Gerät"),
             "{said:#?}"

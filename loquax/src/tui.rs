@@ -2066,10 +2066,12 @@ fn draw_explore(frame: &mut Frame, model: &Model) {
                 mark(sheet.cursor == row),
                 sheet.button.resolve(lang)
             )));
-            lines.push(Line::from(Span::styled(
-                format!("  {}", sheet.notice.resolve(lang)),
-                quiet,
-            )));
+            // Wrapped (1667: the notice that names the profile is longer
+            // than a row; the border cut it).
+            let cols = usize::from(area.width).saturating_sub(4);
+            for said in wrap_cols(&sheet.notice.resolve(lang), cols) {
+                lines.push(Line::from(Span::styled(format!("  {said}"), quiet)));
+            }
             row += 1;
         } else {
             lines.push(Line::from(format!(" ✓ {}", sheet.button.resolve(lang))));
@@ -2640,7 +2642,7 @@ mod tests {
             "Name: Lew Palm",
             "Adresse: 5a3e910c7742d81b6f03a4e258c92d80",
             "Läuft auf: miauhaus",
-            "Verbunden seit 12 Min.",
+            "Dieses Gerät verbunden seit 12 Min.",
             "Verbindung zu miauhaus, geschirmt",
             "Fairphone: dieses Gerät",
             "M9: zuletzt da vor 2 Std.",
@@ -2655,7 +2657,7 @@ mod tests {
         says(&shown, "Connection to miauhaus, shielded");
         same_text("tui-settings-mailbox.txt", &shown);
         let away = screen(&open(Lang::En, false));
-        says(&away, "Not connected for 2 h");
+        says(&away, "This device not connected for 2 h");
         says(&away, "Connection to leviculum.network, not shielded");
         says(&away, "Version: older than this device");
         update(&mut model, key('c'));

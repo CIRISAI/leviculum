@@ -209,6 +209,10 @@ command:java loquax-android/fling the_recorders_windows_are_the_librarys
 command:javac loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
 command:java loquax-android/fling the_service_notice_posts_on_a_change_and_the_boot_starts_what_ran
 
+# The form field's hint (1667): FormField.java run with its host test.
+command:javac loquax-android/fling a_form_fields_hint_is_the_pages_words_before_it
+command:java loquax-android/fling a_form_fields_hint_is_the_pages_words_before_it
+
 # When nothing changes, nothing is drawn (1455): Quiet.java run with its
 # host test.
 command:javac loquax-android/fling the_phone_draws_nothing_while_nothing_changes

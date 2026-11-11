@@ -2581,7 +2581,7 @@ async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
         // The connection is the watching link to the mailbox (1647).
         let reachable = until("the mailbox's devices, connected", &|l| {
             l.iter().any(|l| l == "phone: this device")
-                && l.iter().any(|l| l.starts_with("Connected"))
+                && l.iter().any(|l| l.starts_with("This device connected"))
         });
         let said = lines(&reachable);
         // The version's words, never a commit (1647, finding 30).
@@ -2611,7 +2611,10 @@ async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
                 "{want:?} in {said:#?}"
             );
         }
-        assert!(said.iter().any(|l| l.starts_with("Connected")), "{said:#?}");
+        assert!(
+            said.iter().any(|l| l.starts_with("This device connected")),
+            "{said:#?}"
+        );
         let address = reachable.groups[0]
             .lines
             .iter()
@@ -2689,7 +2692,10 @@ async fn the_mailbox_page_names_the_mailbox_and_says_when_it_went_away() {
     tokio::task::spawn_blocking(move || {
         link_event(false, 30);
         let unreachable = until("not connected", &|l| {
-            l.iter().any(|l| l.starts_with("Not connected"))
+            l.iter().any(|l| {
+                l.starts_with("This device is not connected")
+                    || l.starts_with("This device not connected")
+            })
         });
         let said = lines(&unreachable);
         assert!(

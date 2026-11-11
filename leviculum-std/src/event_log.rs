@@ -942,6 +942,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["dest", "path", "state", "why"],
     },
     EventSchema {
+        name: "EXPLORE_OPEN",
+        required_keys: &["ask", "reason", "since_ms"],
+    },
+    EventSchema {
         name: "LNMSG_SYNC_DONE",
         required_keys: &["received", "duplicates", "new"],
     },

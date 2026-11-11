@@ -3997,6 +3997,9 @@ pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
     // The phone scrolls the browser's page natively (1650): the scene
     // carries it whole, up to the cap.
     model.browse.model.window = Some(crate::browser::WHOLE_PAGE);
+    // And sideways (1667, walk 11, finding 60): a line of text art wider
+    // than the phone comes whole, its view scrolls across it.
+    model.browse.model.sideways = true;
     model.names.contacts = contacts;
     for (peer, name) in store.names().map_err(|error| error.to_string())? {
         model.names.remember(peer, &name);
@@ -5383,7 +5386,7 @@ mod tests {
         // No name on this phone: the room shows none (1629, walk 3 new 9).
         assert_eq!(
             choice.note,
-            "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen."
+            "Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne Namen."
         );
         model.profile.name = "Lew".into();
         let named = rooms_hub_choice(&model, Lang::De, String::new());

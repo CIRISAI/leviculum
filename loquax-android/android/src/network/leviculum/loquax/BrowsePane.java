@@ -79,6 +79,13 @@ final class BrowsePane {
     private final EditText address;
     private final TextView page;
     private final ScrollView pageScroll;
+    /**
+     * The page's sideways scroll (1667, walk 11, finding 60): a line of text
+     * art wider than the phone comes whole from the library and is scrolled
+     * across, as a terminal wider than the screen would show it, never cut
+     * at the right edge or broken.
+     */
+    private final android.widget.HorizontalScrollView pageSideways;
     /** The bar's state under it: the key while identifying, cache, hops (1650). */
     private final TextView chips;
     private final View foot;
@@ -233,7 +240,14 @@ final class BrowsePane {
         // which turned each long line into a long and a short one.
         page.setPadding(dp(16), dp(8), dp(16), dp(8));
         page.setHorizontallyScrolling(true);
-        body.addView(page);
+        pageSideways = new android.widget.HorizontalScrollView(activity);
+        pageSideways.setTag("browse_page_sideways");
+        pageSideways.setFillViewport(true);
+        pageSideways.setHorizontalScrollBarEnabled(false);
+        pageSideways.addView(page, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        body.addView(pageSideways, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         scroll.addView(body);
         FrameLayout stage = new FrameLayout(activity);
         stage.addView(scroll, new FrameLayout.LayoutParams(
@@ -329,13 +343,18 @@ final class BrowsePane {
         return button;
     }
 
+    /** The page view's top in the vertical scroll's content. */
+    private int pageTop() {
+        return pageSideways.getTop() + page.getTop();
+    }
+
     /** The page line at the top of the view, absolute, or -1 before a layout. */
     private int topLine() {
         int height = page.getLineHeight();
         if (height <= 0 || last == null) {
             return -1;
         }
-        int y = pageScroll.getScrollY() - page.getTop() - page.getPaddingTop();
+        int y = pageScroll.getScrollY() - pageTop() - page.getPaddingTop();
         return (int) Core.num(last, "first") + Math.max(0, y) / height;
     }
 
@@ -449,8 +468,10 @@ final class BrowsePane {
     private void size() {
         Paint paint = page.getPaint();
         float cell = paint.measureText("M");
-        int width = page.getWidth() - page.getPaddingLeft() - page.getPaddingRight();
-        View scroll = (View) page.getParent().getParent();
+        // The cells the screen shows, not the page's own width: inside the
+        // sideways scroll the page is as wide as its widest line (1667).
+        int width = pageSideways.getWidth() - page.getPaddingLeft() - page.getPaddingRight();
+        View scroll = pageScroll;
         int c = cell > 0 ? (int) (width / cell) : 0;
         int r = page.getLineHeight() > 0 ? scroll.getHeight() / page.getLineHeight() : 0;
         if (c > 0 && r > 0 && (c != cols || r != lines)) {
@@ -630,6 +651,9 @@ final class BrowsePane {
         if (!samePage || moved) {
             scrollToLine(at);
         }
+        if (!samePage) {
+            pageSideways.scrollTo(0, 0);
+        }
         // A page laid out wider than the view holds was laid out on cells
         // the library never heard of this view (a size said before the
         // session ran): say them again.
@@ -645,7 +669,7 @@ final class BrowsePane {
         page.post(new Runnable() {
             @Override
             public void run() {
-                int y = page.getTop() + page.getPaddingTop()
+                int y = pageTop() + page.getPaddingTop()
                         + Math.max(0, line) * page.getLineHeight();
                 pageScroll.scrollTo(0, line <= 0 ? 0 : y);
             }
@@ -830,7 +854,10 @@ final class BrowsePane {
 
     /**
      * A text field: the platform's editor, with what it holds and hiding it
-     * when the page masks it (1650), its text handed in whole.
+     * when the page masks it (1650), its text handed in whole. Titled
+     * "Input: <label>" with the page's own words before the field as its
+     * hint, and the keyboard up as it shows (1667, walk 11, finding 59: a
+     * title "q" and a keyboard that had to be asked for).
      */
     private void fill(final String node, Map<String, Object> shown) {
         verb("activate", node, "");
@@ -842,8 +869,14 @@ final class BrowsePane {
                 : InputType.TYPE_CLASS_TEXT);
         field.setText(Core.str(shown, "value"));
         field.setSelection(field.getText().length());
-        new AlertDialog.Builder(screen)
-                .setTitle(Core.str(shown, "label"))
+        AlertDialog.Builder builder = new AlertDialog.Builder(screen)
+                .setTitle(screen.getString(R.string.browse_field_title, Core.str(shown, "label")));
+        String hint = FormField.hint(drawn, node);
+        if (!hint.isEmpty()) {
+            // The message stays above a prefilled field, where a hint would hide.
+            builder.setMessage(hint);
+        }
+        AlertDialog dialog = builder
                 .setView(field)
                 .setPositiveButton(android.R.string.ok, new android.content.DialogInterface.OnClickListener() {
                     @Override
@@ -852,7 +885,13 @@ final class BrowsePane {
                     }
                 })
                 .setNegativeButton(android.R.string.cancel, null)
-                .show();
+                .create();
+        android.view.Window window = dialog.getWindow();
+        if (window != null) {
+            window.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        }
+        dialog.show();
+        field.requestFocus();
     }
 
     private int dp(int value) {

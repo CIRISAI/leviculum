@@ -46,7 +46,7 @@
       "title": "Verbindung",
       "lines": [
         {
-          "label": "Verbunden seit 12 Min.",
+          "label": "Dieses Gerät verbunden seit 12 Min.",
           "value": null,
           "copy": null,
           "action": null,
@@ -87,7 +87,7 @@
         },
         {
           "label": "Laptop",
-          "value": null,
+          "value": "noch nie verbunden",
           "copy": null,
           "action": null,
           "note": false

@@ -12,6 +12,7 @@
     <string name="explore_sort_seen">Last seen</string>
     <string name="browse_loading">Loading %1$s …</string>
     <string name="browse_loading_secs">Loading %1$s … %2$d s</string>
+    <string name="browse_field_title">Input: %1$s</string>
     <string name="explore_sort_az">A to Z</string>
     <string name="explore_bookmarks">Bookmarks</string>
     <string name="explore_today">Today</string>
@@ -109,7 +110,8 @@
     <string name="rooms_hub_no_answer">no answer</string>
     <string name="rooms_hub_more">More…</string>
     <string name="rooms_name_visible">Your name is visible to everyone in the room.</string>
-    <string name="rooms_no_name">You have no name here: in the room you appear without one.</string>
+    <string name="rooms_no_name">You have no name on this server yet: in the room you appear without one.</string>
+    <string name="rooms_no_name_profile">You have no name on this server yet (your profile is called %1$s): in the room you appear without one.</string>
     <string name="settings">Settings</string>
     <string name="settings_profile">Profile</string>
     <string name="settings_profile_summary">Name, address, QR code</string>
@@ -391,10 +393,11 @@
     <string name="mailbox_version_old">older than this device</string>
     <string name="mailbox_old_text">Your mailbox runs an older version. Update it there so that Explore and this page are complete.</string>
     <string name="mailbox_reach">Connection</string>
-    <string name="mailbox_up">Connected</string>
-    <string name="mailbox_up_for">Connected for %1$s</string>
+    <string name="mailbox_up">This device is connected</string>
+    <string name="mailbox_up_for">This device connected for %1$s</string>
     <string name="mailbox_down">Not connected</string>
-    <string name="mailbox_down_for">Not connected for %1$s</string>
+    <string name="mailbox_down_here">This device is not connected</string>
+    <string name="mailbox_down_for">This device not connected for %1$s</string>
     <string name="mailbox_moment">less than a minute</string>
     <string name="mailbox_contact">Last contact</string>
     <string name="mailbox_contact_none">none yet</string>
@@ -405,6 +408,7 @@
     <string name="mailbox_way_local">Over this computer\'s network connection</string>
     <string name="mailbox_access">Devices of this mailbox</string>
     <string name="mailbox_seen">last there %1$s</string>
+    <string name="mailbox_seen_never">never connected yet</string>
     <string name="mailbox_this_device">this device</string>
     <string name="mailbox_devices_asking">Asking your mailbox which devices use it …</string>
     <string name="mailbox_devices_old">Your mailbox does not list its devices yet: that needs a newer version there.</string>

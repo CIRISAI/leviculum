@@ -277,6 +277,11 @@ async fn serve(
                 }
                 if let Some(handle) = inflight.take() {
                     handle.abort();
+                    // A page whose fetch ends here says so (1667, walk 11,
+                    // finding 65: an abandoned fetch left no end line).
+                    if let Some(target) = asked_page.take() {
+                        crate::events::browse_fetch(&target.dest_hash, &target.path, "aborted", "superseded");
+                    }
                 }
                 generation = generation.wrapping_add(1);
                 let asked = generation;
@@ -311,6 +316,9 @@ async fn serve(
     };
     // The lender may be stopping its node, which it can only once nothing
     // here holds it: the fetch in flight and the discovery go first.
+    if let (Some(_), Some(target)) = (&inflight, asked_page.take()) {
+        crate::events::browse_fetch(&target.dest_hash, &target.path, "aborted", "stopped");
+    }
     for handle in [inflight.take(), pictures.take()].into_iter().flatten() {
         handle.abort();
         let _ = handle.await;

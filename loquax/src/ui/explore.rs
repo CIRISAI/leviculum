@@ -141,15 +141,24 @@ pub(crate) fn pages_answered<B>(model: &mut UiModel<B>) {
 /// Opening the tab asks the mailbox (1644): only a device that has one,
 /// and never within [`ASK_EVERY_MS`] of the last ask. The ask is marked
 /// begun here; the host runs it one at a time.
+///
+/// Every opening logs `EXPLORE_OPEN` with whether it asked and why not
+/// (1667, walk 11, finding 63).
 fn ask_on_opening<B>(model: &mut UiModel<B>) -> Option<UiEffect> {
     let list = &model.explore.mailbox;
-    list.link?;
-    let recent = list
-        .asked_ms
-        .is_some_and(|at| model.elapsed_ms < at.saturating_add(ASK_EVERY_MS));
-    if recent {
+    if list.link.is_none() {
+        crate::events::explore_open(false, "no_mailbox", None);
         return None;
     }
+    let since = list.asked_ms.map(|at| model.elapsed_ms.saturating_sub(at));
+    if list
+        .asked_ms
+        .is_some_and(|at| model.elapsed_ms < at.saturating_add(ASK_EVERY_MS))
+    {
+        crate::events::explore_open(false, "recent", since);
+        return None;
+    }
+    crate::events::explore_open(true, "asked", since);
     pages_asked(model);
     Some(UiEffect::AskPages)
 }
@@ -1086,7 +1095,7 @@ fn sheet<B>(model: &UiModel<B>) -> Option<HubSheet> {
             true => StrId::ExploreServerInUse,
             false => StrId::ExploreServerUse,
         }),
-        notice: Text::key(super::rooms::name_notice(model)),
+        notice: super::rooms::name_notice(model),
         rooms_title: Text::key(StrId::ExploreServerRooms),
         rooms_note: rooms_note(&model.rooms, &hash, !rooms.is_empty(), clock),
         retry: retry(&model.rooms, &hash, clock).then(|| Text::key(StrId::RoomsRetry)),
@@ -2620,7 +2629,19 @@ mod tests {
         assert_eq!(notice(&model), Text::key(StrId::RoomsNoName));
         assert_eq!(
             StrId::RoomsNoName.text(Lang::De),
-            "Du hast hier keinen Namen: Im Raum erscheinst du ohne Namen."
+            "Auf diesem Server hast du noch keinen Namen: Im Raum erscheinst du ohne Namen."
+        );
+        // Walk 11, finding 62: where the mailbox names the profile, the
+        // notice says that name beside "no name on this server".
+        model.profile.mailbox = crate::ui::profile::Mailbox::Away {
+            name: Some("lew".into()),
+            rung: None,
+            word: None,
+        };
+        assert_eq!(
+            notice(&model).resolve(Lang::De),
+            "Auf diesem Server hast du noch keinen Namen (dein Profil heißt lew): \
+             Im Raum erscheinst du ohne Namen."
         );
         model.profile.name = "Lew".into();
         assert_eq!(notice(&model), Text::key(StrId::RoomsNameVisible));

@@ -447,7 +447,7 @@ fn link<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
             // rooms show their name.
             if model.rooms.told != Some(hub) {
                 model.rooms.told = Some(hub);
-                let text = Text::key(name_notice(model)).resolve(model.lang);
+                let text = name_notice(model).resolve(model.lang);
                 model.toast(ToastKind::Info, text);
                 effects.push(UiEffect::RememberHash {
                     key: "rooms_told",
@@ -468,11 +468,42 @@ fn link<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 /// new 9: "your name is visible" beside a profile with no name): the
 /// name where there is one; without one the hub link goes without a nick
 /// and a room shows the writer with no name ([`line_node`]).
-pub(super) fn name_notice<B>(model: &UiModel<B>) -> StrId {
-    match model.profile.name.trim().is_empty() {
-        true => StrId::RoomsNoName,
-        false => StrId::RoomsNameVisible,
+///
+/// Walk 11, finding 62 (1667): "you have no name here" beside a profile
+/// the mailbox page calls "lew" read as if the profile had none. The
+/// notice says it is this server that has no name for the reader, and
+/// names the profile's where the mailbox or the reader's own announce
+/// carries one.
+pub(super) fn name_notice<B>(model: &UiModel<B>) -> Text {
+    if !model.profile.name.trim().is_empty() {
+        return Text::key(StrId::RoomsNameVisible);
     }
+    match profile_name_elsewhere(model) {
+        Some(name) => Text::Key(StrId::RoomsNoNameProfile, Vec::from([Arg::Str(name)])),
+        None => Text::key(StrId::RoomsNoName),
+    }
+}
+
+/// The reader's name as the mailbox says it, else as the reader's own
+/// announce carries it: the words the mailbox page shows for "Name".
+fn profile_name_elsewhere<B>(model: &UiModel<B>) -> Option<String> {
+    let told = match &model.profile.told {
+        super::mailbox_page::Told::Told(about) => Some(about.name.trim()),
+        _ => None,
+    };
+    let away = match &model.profile.mailbox {
+        super::profile::Mailbox::Away { name, .. } => name.as_deref().map(str::trim),
+        _ => None,
+    };
+    let announced = model
+        .address
+        .and_then(|own| model.names.announced(&own))
+        .map(str::trim);
+    [told, away, announced]
+        .into_iter()
+        .flatten()
+        .find(|n| !n.is_empty())
+        .map(String::from)
 }
 
 pub(super) fn choose<B>(model: &mut UiModel<B>, choice: HubChoice) -> Vec<UiEffect> {
