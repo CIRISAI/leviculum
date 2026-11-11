@@ -1344,6 +1344,34 @@ destination of our identity on first use). The device walk's
 `offgrid_positions` uses it with the mailbox stopped
 ([device walk](loquax-device-walk.md)).
 
+### The light data (1684)
+
+The map core carries four small tables of reference data
+(`leviculum-map`, provenance in `leviculum-map/fixtures/README.md` and
+THIRD-PARTY.md):
+
+- **The time zone view.** One control, in the map's menu like the tracks'
+  time window (the window and the phone) and `z` in the terminal and on
+  the M9: the world's zones (timezone-boundary-builder 2026f, the variant
+  with the oceans, ODbL, 63 zones in 1.5 MB) with their borders in a
+  violet no other line of the map has and the current time written into
+  each, `HH:MM`, in place of the names; the clocks turn with the minute.
+  The rules come from the system's tzdata on Linux and Android
+  (`/usr/share/zoneinfo`, the packed `tzdata` file), the board's own table
+  (the TZif footers of tzdata 2026f) where the system has no zone and on
+  the M9, which shows the clocks once it knows the time. The borders go
+  over the composed frame, never into a cached tile.
+- **Height above sea level.** The wire's altitude is the GNSS height over
+  the WGS84 ellipsoid, as Android and Sideband send it, and since 1684 the
+  M9 too (its GGA height plus the sentence's geoid separation). Every
+  place a height is shown subtracts the EGM2008 geoid (15' grid, 2 MB,
+  public domain), which lies up to about a hundred metres from it.
+- **A place's facts.** The detail of a position names the country it lies
+  in (Natural Earth 1:50m), its emergency numbers, the side of the road
+  and its currency (Wikidata, CC0), and the magnetic declination there on
+  the fix's day (WMM2025, public domain). A compass arrow and a measuring
+  tool do not exist yet; the declination is ready for them.
+
 ## 7. Decided
 
 Lew, 2026-10-27, accepted the five proposals of this section as written.

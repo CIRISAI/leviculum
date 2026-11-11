@@ -37,7 +37,13 @@ pub const UERE_M: u32 = 5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nmea {
     /// GGA: fix quality (0 none), satellites in use, HDOP in tenths,
-    /// altitude in centimetres, position in microdegrees.
+    /// altitude in centimetres, position in microdegrees. The altitude is
+    /// the height above the WGS84 ellipsoid (1684): the sentence's height
+    /// above mean sea level plus its geoid separation, the height Android
+    /// and Sideband put on the wire, which every reader turns into a
+    /// height above sea level by one geoid
+    /// ([`leviculum_map::geoid`]). A sentence without a separation gives
+    /// its height as it is.
     Gga {
         quality: u8,
         sats: u8,
@@ -153,7 +159,9 @@ pub fn parse(line: &[u8]) -> Option<Nmea> {
             quality: uint(get(5)).unwrap_or(0) as u8,
             sats: uint(get(6)).unwrap_or(0).min(255) as u8,
             hdop_e1: fixed(get(7), 1).and_then(|v| u16::try_from(v).ok()),
-            alt_e2: fixed(get(8), 2).and_then(|v| i32::try_from(v).ok()),
+            alt_e2: fixed(get(8), 2)
+                .map(|msl| msl + fixed(get(10), 2).unwrap_or(0))
+                .and_then(|v| i32::try_from(v).ok()),
             at: position(get(1), get(2), get(3), get(4)),
         }),
         b"RMC" => Some(Nmea::Rmc {

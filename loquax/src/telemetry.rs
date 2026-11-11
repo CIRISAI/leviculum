@@ -278,6 +278,85 @@ pub fn unpack_fields(packed: &[u8]) -> Option<Vec<Field>> {
 
 /// `43.77310 N 11.25600 E`: five decimals, a tenth of the wire's
 /// micro-degrees (about a metre), rounded half away from zero.
+/// What a traveller wants to know of the place `l` lies at (1684): the
+/// country with its emergency numbers, the side of the road and the
+/// currency (Wikidata, through [`leviculum_map::countries`]), and the
+/// magnetic declination there on the fix's day (WMM2025, through
+/// [`leviculum_map::declination`]), which turns a compass bearing into a
+/// true one. A place in no country, or one the table has nothing for,
+/// gives only what is known.
+fn place_rows(rows: &mut Vec<String>, l: &Location) {
+    use leviculum_map::countries::{self, Side};
+    let (lat, lon) = (
+        f64::from(l.latitude_e6) / 1e6,
+        f64::from(l.longitude_e6) / 1e6,
+    );
+    if let Some(f) = countries::country_at(lat, lon).and_then(countries::facts) {
+        rows.push(format!("  country   {}", f.name));
+        let numbers: Vec<String> = f
+            .numbers()
+            .map(|n| {
+                let mut services = Vec::new();
+                if n.police {
+                    services.push("police");
+                }
+                if n.ambulance {
+                    services.push("ambulance");
+                }
+                if n.fire {
+                    services.push("fire");
+                }
+                match services.is_empty() {
+                    true => n.digits.to_string(),
+                    false => format!("{} {}", n.digits, services.join("/")),
+                }
+            })
+            .collect();
+        if !numbers.is_empty() {
+            rows.push(format!("  emergency {}", numbers.join(", ")));
+        }
+        if let Some(side) = f.driving {
+            rows.push(format!(
+                "  driving   on the {}",
+                match side {
+                    Side::Left => "left",
+                    Side::Right => "right",
+                }
+            ));
+        }
+        if let Some(currency) = f.currency {
+            rows.push(format!("  currency  {currency}"));
+        }
+    }
+    let day = fix_wall(l.last_update, 0).civil();
+    let year = i32::try_from(day.year)
+        .ok()
+        .and_then(|y| leviculum_map::declination::decimal_year(y, day.month, day.day));
+    if let Some(year) = year {
+        let km = f64::from(l.altitude_e2) / 100_000.0;
+        let d = leviculum_map::declination::declination(lat, lon, km, year);
+        if d.is_finite() {
+            let tenths = libm::round(d.abs() * 10.0) as i64;
+            rows.push(format!(
+                "  magnetic  {}.{}° {} of true north",
+                tenths / 10,
+                tenths % 10,
+                if d < 0.0 { "west" } else { "east" }
+            ));
+        }
+    }
+}
+
+/// `location`'s altitude over sea level in centimetres: its ellipsoid
+/// height less the geoid's undulation where it lies (1684).
+pub fn above_sea_level(location: &Location) -> i32 {
+    leviculum_map::geoid::height_above_sea_level_cm(
+        location.latitude_e6,
+        location.longitude_e6,
+        location.altitude_e2,
+    )
+}
+
 pub fn coordinates(location: &Location) -> String {
     format!(
         "{} {}",
@@ -463,9 +542,13 @@ fn sensors(rows: &mut Vec<String>, t: &Telemetry, when: &When) {
     let before = rows.len();
     if let Some(l) = &t.location {
         rows.push(format!("  position  {}", coordinates(l)));
+        place_rows(rows, l);
+        // The wire's altitude is the GNSS height over the WGS84 ellipsoid,
+        // as Android and Sideband report it; shown over sea level by the
+        // EGM2008 geoid (1684), which is up to a hundred metres apart.
         rows.push(format!(
-            "  altitude  {} m",
-            hundredths(i64::from(l.altitude_e2))
+            "  altitude  {} m above sea level",
+            hundredths(i64::from(above_sea_level(l)))
         ));
         rows.push(format!(
             "  speed     {} m/s",
@@ -853,7 +936,31 @@ mod tests {
         let rows = detail_rows(&BOB, &fields, 0, Some(NOW));
         assert_eq!(rows[0], "telemetry");
         assert!(rows.contains(&"  position  43.77310 N 11.25600 E".to_string()));
-        assert!(rows.contains(&"  altitude  51.20 m".to_string()));
+        // 51.20 m over the ellipsoid in Florence, where the geoid lies
+        // 45.60 m above it (EGM2008, 1684): 5.60 m above sea level.
+        assert!(
+            rows.contains(&"  altitude  5.60 m above sea level".to_string()),
+            "{rows:?}"
+        );
+        // The place's facts (1684): Italy, by Wikidata, and the WMM2025
+        // declination in Florence on 2026-10-26, rounded to a tenth (the
+        // model itself is held to NOAA's published test values in
+        // leviculum-map's `declination` test).
+        for row in [
+            "  country   Italy",
+            "  driving   on the right",
+            "  currency  EUR",
+        ] {
+            assert!(rows.contains(&row.to_string()), "{row:?} in {rows:?}");
+        }
+        assert!(
+            rows.iter().any(|r| r.starts_with("  emergency 112")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.contains(&"  magnetic  4.0° east of true north".to_string()),
+            "{rows:?}"
+        );
         assert!(rows.contains(&"  accuracy  ±5 m".to_string()));
         assert!(rows.contains(&"  battery   87.00 %, not charging".to_string()));
     }

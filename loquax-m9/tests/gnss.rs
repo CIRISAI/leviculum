@@ -102,7 +102,9 @@ fn the_three_sentences_read_with_their_fields() {
             quality: 1,
             sats: 8,
             hdop_e1: Some(9),
-            alt_e2: Some(6230),
+            // 62.3 m over sea level and the geoid 47.0 m over the
+            // ellipsoid: 109.3 m over the ellipsoid, the wire's height (1684).
+            alt_e2: Some(10930),
             at: Some((43_773_333, 11_256_000)),
         })
     );
@@ -248,7 +250,8 @@ fn the_receiver_goes_from_off_to_searching_to_a_fix() {
     );
     assert_eq!(fix.last_update, 1_794_202_212);
     assert_eq!(fix.accuracy_e2, 450);
-    assert_eq!(fix.altitude_e2, 6230);
+    // Over the ellipsoid: 62.3 m over sea level plus the 47.0 m geoid.
+    assert_eq!(fix.altitude_e2, 10930);
     assert_eq!(rx.sky(3_000), Sky::Fix { age_s: 0 });
     assert_eq!(rx.sky(15_500), Sky::Fix { age_s: 12 });
     assert!(rx
