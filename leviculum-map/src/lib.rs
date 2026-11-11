@@ -18,6 +18,8 @@
 //!   lines alone, at the line widths of the view's zoom.
 //! - [`outline`]: the world outline, Natural Earth 1:50m land, where no
 //!   region covers the view.
+//! - [`countries`]: the country a point lies in, Natural Earth 1:50m, and
+//!   its emergency numbers, driving side and currency, from Wikidata.
 //! - [`ladder`]: the frame budget, which passes a moving frame runs and
 //!   how a view at rest grows back to the full picture.
 //! - [`cells`]: a view as terminal cells, the text techniques of the
@@ -48,6 +50,7 @@ pub mod area;
 pub mod buildings;
 pub mod cells;
 pub mod choice;
+pub mod countries;
 pub mod declination;
 pub mod draw;
 pub mod geoid;

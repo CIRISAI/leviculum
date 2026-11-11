@@ -297,3 +297,59 @@ scripts/gen-tz-table.py ../zoneinfo-2026f
 strings to the TZif files they came from, every hour of 2026, and finds
 the one known disagreement, Havana from 2026-11-01T05:00Z (Cuba stays on
 -04 through 2027-11-07, an exception its lasting rule cannot express).
+
+## Countries
+
+`../data/ne_50m_admin_0_countries.lco` is the table `src/countries.rs`
+looks a point's country up in: Natural Earth's 1:50m admin-0 countries,
+version 5.1.2, 239 countries, 1,631 rings (12 of them holes, Lesotho's in
+South Africa among them) and 97,910 points in 200,354 bytes, the rings in
+the `LWO2` format of the world outline at 16 bits behind a header of codes
+(`LCO1`). The code is Natural Earth's `ISO_A2`, else its `ISO_A2_EH`
+(France, Norway, Kosovo XK, Taiwan TW, the Australian territories); the
+Indian Ocean Territories split into Christmas Island CX and the Cocos
+(Keeling) Islands CC; Somaliland counts as SO and Northern Cyprus as CY,
+ISO's view; the Siachen Glacier, in no ISO country, is left out. Natural
+Earth keeps overseas departments inside their state (French Guiana is FR).
+Baked with
+
+```sh
+scripts/bake-country-outline.py ne_50m_admin_0_countries.geojson \
+    leviculum-map/data/ne_50m_admin_0_countries.lco
+```
+
+from
+`https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_50m_admin_0_countries.geojson`
+(3,083,490 bytes, sha256
+`3e458fc036ad0a66411f2c1e6cac49c5d7bfb81cb1123bc513b22511a2b7fdeb`). Baking
+again gives the same bytes (sha256
+`3b27ee3172c3dbf6de3fb31ca4923e76df9508ef2abb8e040773649ecb69374d`). Public
+domain, as the outline above.
+
+`../data/country-facts.lcf` holds per country its English name, emergency
+numbers, driving side and currencies (`LCF1`, UTF-8 text, 255 rows, 8,421
+bytes, sha256
+`9c21b8bbd6894f64b3dcf91c8bc6a47477544705e252fad584c1748615acad9e`), from
+Wikidata: emergency phone number P2852 with its use P366, driving side
+P1622, currency P38 with its ISO 4217 code P498, over every item with an
+ISO 3166-1 alpha-2 code P297 that is not dissolved. Baked with
+
+```sh
+scripts/bake-country-facts.py --fetch wikidata-country-facts.json \
+    leviculum-map/data/country-facts.lcf
+```
+
+whose query ran against `https://query.wikidata.org/sparql` on 2026-11-11
+at 19:14:58 UTC; the response (1,762,694 bytes, sha256
+`828ba77b85e02bf8dc427d2422d978e225bd771f458eac8b4b158aefde62f946`) bakes
+again without `--fetch` into the same bytes. A later query gives other
+bytes as Wikidata changes. Where Wikidata has no value the field is empty:
+no emergency number for AC AQ BL BQ BV CC CQ CX DG EH FK GF HM IO KP MF MP
+MS NF PN PS SJ SX TA TF TK UM WF, no driving side for AQ BV CP HM, no
+currency with an ISO code for AC AQ BV CP CQ DG FO HM.
+
+**Wikidata**: "All structured data from the main, Property, Lexeme, and
+EntitySchema namespaces is available under the Creative Commons CC0
+License" (<https://www.wikidata.org/wiki/Wikidata:Licensing>, read
+2026-11-11), CC0 1.0, <https://creativecommons.org/publicdomain/zero/1.0/>.
+No attribution is owed; this note names the source anyway.

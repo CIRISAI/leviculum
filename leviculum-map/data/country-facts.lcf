@@ -1,0 +1,256 @@
+LCF1 255
+AC	Ascension		L	
+AD	Andorra	118 112 110:p 116:a	R	EUR
+AE	United Arab Emirates	112 999:p 998:a 997:f	R	AED
+AF	Afghanistan	112 100:p 102:a 101:f	R	AFN
+AG	Antigua and Barbuda	911:paf 999:paf	L	XCD
+AI	Anguilla	911	L	XCD
+AL	Albania	112 129:p 127:a 128:f	R	ALL
+AM	Armenia	112 102:p 103:a 101:f	R	AMD
+AO	Angola	113:p 116:a 115:f	R	AOA
+AQ	Antarctica			
+AR	Argentina	117 911 101:p 100:f	R	ARS
+AS	American Samoa	911	R	USD
+AT	Austria	112 133:p 144:a 122:f	R	EUR
+AU	Australia	000	L	AUD
+AW	Aruba	911	R	AWG
+AX	Åland	112	R	EUR
+AZ	Azerbaijan	102 112 103:a 101:f	R	AZN
+BA	Bosnia and Herzegovina	112 122:p 124:a 123:f	R	BAM
+BB	Barbados	911 211:p 511:a 311:f	L	BBD
+BD	Bangladesh	999	L	BDT
+BE	Belgium	112 101:p 100:af	R	EUR
+BF	Burkina Faso	17:p 112:a 18:f	R	XOF
+BG	Bulgaria	112	R	EUR
+BH	Bahrain	999 112:paf	R	BHD
+BI	Burundi	112:p 117:a 113:f	R	BIF
+BJ	Benin	117:p 112:a 118:f	R	XOF
+BL	Saint Barthélemy		R	EUR
+BM	Bermuda	911	L	BMD
+BN	Brunei	993:p 991:a 995:f	L	BND
+BO	Bolivia	911 110:p 160:a 119:f	R	BOB
+BQ	Caribbean Netherlands		R	USD
+BR	Brazil	190:p 192:a 193:f	R	BRL
+BS	The Bahamas	919:paf	L	BSD
+BT	Bhutan	113:p 112:a 110:f	L	BTN
+BV	Bouvet Island			
+BW	Botswana	911 999:p 997:a 998:f	L	BWP
+BY	Belarus	102:p 103:a 101:f	R	BYN
+BZ	Belize	911 90:paf	R	BZD
+CA	Canada	911	R	CAD
+CC	Cocos (Keeling) Islands		L	AUD
+CD	Democratic Republic of the Congo	114:p 118:p 113:f	R	CDF
+CF	Central African Republic	117:p 1220:a 118:f	R	XAF
+CG	Republic of the Congo	117:p 118:f	R	XAF
+CH	Switzerland	112 117:p 144:a 1414:a 118:f	R	CHF
+CI	Ivory Coast	110:p 111:p 170:p 185:a 180:f	R	XOF
+CK	Cook Islands	999:p 998:a 996:f	L	NZD
+CL	Chile	133:p 131:a 132:f	R	CLP
+CM	Cameroon	112	R	XAF
+CN	People's Republic of China	110:p 120:a 119:f	R	CNY
+CO	Colombia	123	R	COP
+CP	Clipperton Island	112		
+CQ	Sark		L	
+CR	Costa Rica	911 112:paf	R	CRC
+CU	Cuba	106:p 104:a 105:f	R	CUP
+CV	Cape Verde	132:p 130:a 131:f	R	CVE
+CW	Curaçao	911	R	XCG
+CX	Christmas Island		L	AUD
+CY	Cyprus	112 1400:a 199:f	L	EUR
+CZ	Czech Republic	112 158:p 155:a 150:f	R	CZK
+DE	Germany	112 110:p	R	EUR
+DG	Diego Garcia		R	
+DJ	Djibouti	17:p 19:a 18:f	R	DJF
+DK	Denmark	112	R	DKK
+DM	Dominica	999	L	XCD
+DO	Dominican Republic	911	R	DOP
+DZ	Algeria	17:p 1055:p 1548:p 14:af	R	DZD
+EC	Ecuador	911 101:p 131:a 102:f	R	USD
+EE	Estonia	112	R	EUR
+EG	Egypt	122:p 123:a 180:f	R	EGP
+EH	Western Sahara		R	MAD
+ER	Eritrea	113:p 114:a 116:f	R	ERN
+ES	Spain	112 091:p 061:a	R	EUR
+ET	Ethiopia	911 991:p 907:a 939:f	R	ETB
+FI	Finland	112	R	EUR
+FJ	Fiji	000 911 919:p	L	FJD
+FK	Falkland Islands		L	FKP
+FM	Federated States of Micronesia	911 111:a	R	USD
+FO	Faroe Islands	112	R	
+FR	France	112 17:p 15:a 18:f	R	EUR XPF
+GA	Gabon	1722:p 1300:a 18:f	R	XAF
+GB	United Kingdom	999 112	L	GBP
+GD	Grenada	911 434:a 724:a 774:a	L	XCD
+GE	Georgia	112 122:p 113:a 111:f	R	GEL
+GF	French Guiana		R	EUR
+GG	Guernsey	999 112	L	GBP
+GH	Ghana	999 191:p 193:a 192:f	R	GHS
+GI	Gibraltar	112	R	GIP
+GL	Greenland	112	R	DKK
+GM	The Gambia	112:p 116:a 118:f	R	GMD
+GN	Guinea	117:p 18:f	R	GNF
+GP	Guadeloupe	112	R	EUR
+GQ	Equatorial Guinea	113:p 114:p 112:a 115:f	R	XAF
+GR	Greece	112 100:p 166:a 199:f	R	EUR
+GS	South Georgia and the South Sandwich Islands	999	L	GBP
+GT	Guatemala	110:p 120:p 128:a 123:f	R	GTQ
+GU	Guam	911	R	USD
+GW	Guinea-Bissau	112 121:p 119:a 180:f	R	XOF
+GY	Guyana	999 911:p 913:a 912:f	L	GYD
+HK	Hong Kong	999	L	HKD
+HM	Heard Island and McDonald Islands			
+HN	Honduras	199:pa 198:f	R	HNL
+HR	Croatia	112 192:p 94:a 93:f	R	EUR
+HT	Haiti	114:p 122:p 116:a 115:f	R	HTG
+HU	Hungary	112 107:p 104:a 105:f	R	HUF
+ID	Indonesia	112	L	IDR
+IE	Ireland	112	L	EUR
+IL	Israel	100:p 101:a 102:f	R	ILS
+IM	Isle of Man	999 112	L	GBP
+IN	India	112 108 100:p 102:a 101:f	L	INR
+IO	British Indian Ocean Territory		R	USD GBP
+IQ	Iraq	911 104:p 122:a 115:f	R	IQD
+IR	Iran	110:p 115:a 125:f	R	IRR
+IS	Iceland	112	R	ISK
+IT	Italy	112 113:p 118:a 115:f	R	EUR
+JE	Jersey	112	L	GBP
+JM	Jamaica	110:paf 112:p 119:p 911:p	L	JMD
+JO	Jordan	911	R	JOD
+JP	Japan	110:p 119:f	L	JPY
+KE	Kenya	112:paf 999:paf	L	KES
+KG	Kyrgyzstan	161 102:p 103:a 101:f	R	KGS
+KH	Cambodia	117:p 119:a 118:f	R	KHR
+KI	Kiribati	999 192:p 194:a 195:a 193:f	L	AUD
+KM	Comoros	17:p 18:a	R	KMF
+KN	Saint Kitts and Nevis	911	L	XCD
+KP	North Korea		R	KPW
+KR	South Korea	112:p 119:af	R	KRW
+KW	Kuwait	112	R	KWD
+KY	Cayman Islands	911	L	KYD
+KZ	Kazakhstan	112 102:p 103:a 101:f	R	KZT
+LA	Laos	191:p 195:a 190:f	R	LAK
+LB	Lebanon	112:p 160:p 140:a 175:f	R	LBP
+LC	Saint Lucia	999:p 911:af	L	XCD
+LI	Liechtenstein	112 117:p 144:a 118:f	R	CHF
+LK	Sri Lanka	119:p 110:af	L	LKR
+LR	Liberia	911 114:f	R	LRD
+LS	Lesotho	112:p 114:a 115:f	L	LSL ZAR
+LT	Lithuania	112 02:p	R	EUR
+LU	Luxembourg	112 113:p	R	EUR
+LV	Latvia	112 110:p 113:a	R	EUR
+LY	Libya	193:p 191:a 190:f	R	LYD
+MA	Morocco	19:p 112:p 177:p 15:af	R	MAD
+MC	Monaco	112 17:p 18:f	R	EUR
+MD	Moldova	112	R	MDL
+ME	Montenegro	112 122:p 124:a 123:f	R	EUR
+MF	Saint-Martin		R	EUR
+MG	Madagascar	117:p 124:a 118:f	R	MGA
+MH	Marshall Islands	911	R	USD
+MK	North Macedonia	112 192:p 194:a 193:f	R	MKD
+ML	Mali	112 17:p 15:a 18:f	R	XOF
+MM	Myanmar	199:p 192:a 191:f	R	MMK
+MN	Mongolia	105 102:p 103:a 101:f	R	MNT
+MO	Macau	999	L	MOP HKD
+MP	Northern Mariana Islands		R	USD
+MQ	Martinique	112	R	EUR
+MR	Mauritania	117:p 101:a 118:f	R	MRU
+MS	Montserrat		L	XCD
+MT	Malta	112	L	EUR
+MU	Mauritius	112:p 999:p 114:a 115:f 995:f	L	MUR
+MV	Maldives	119:p 102:a 118:f	L	MVR
+MW	Malawi	990:p 997:p 998:a 999:f	L	MWK
+MX	Mexico	911	R	MXN
+MY	Malaysia	999:paf	L	MYR
+MZ	Mozambique	119:p 198:a 117:f	L	MZN
+NA	Namibia	112 10111:p	L	NAD ZAR
+NC	New Caledonia	112	R	XPF
+NE	Niger	17:p 18:f	R	XOF
+NF	Norfolk Island		L	AUD
+NG	Nigeria	112 199:paf	R	NGN
+NI	Nicaragua	118:p 128:a 115:f 120:f	R	NIO
+NL	Kingdom of the Netherlands	112	R	EUR USD XCG AWG
+NO	Norway	112:p 113:a 110:f	R	NOK
+NP	Nepal	100:p 102:a 101:f	L	NPR
+NR	Nauru	110:p 111:a 112:f	L	AUD
+NU	Niue	999	L	NZD
+NZ	New Zealand	111	L	NZD
+OM	Oman	968 112:paf	R	OMR
+PA	Panama	911 104:p 103:f	R	PAB USD
+PE	Peru	111 911 105:p 106:a 117:a 116:f	R	PEN
+PF	French Polynesia	112	R	XPF
+PG	Papua New Guinea	112:p 111:a 110:f	L	PGK
+PH	Philippines	911	R	PHP
+PK	Pakistan	15:p 1122:a 16:f	L	PKR
+PL	Poland	112 997:p 999:a 998:f	R	PLN
+PM	Saint Pierre and Miquelon	112	R	EUR
+PN	Pitcairn Islands		L	NZD
+PR	Puerto Rico	911	R	USD
+PS	Palestine		R	ILS
+PT	Portugal	112	R	EUR
+PW	Palau	911	R	USD
+PY	Paraguay	911	R	PYG
+QA	Qatar	999 112:paf	R	QAR
+RE	Réunion	112	R	EUR
+RO	Romania	112	R	RON
+RS	Serbia	92:p 192:p 94:a 194:a 93:f 193:f	R	RSD
+RU	Russia	112 02:p 102:p 03:a 103:a 01:f 101:f	R	RUB
+RW	Rwanda	112:pf 912:a	R	RWF
+SA	Saudi Arabia	911 112 999:p	R	SAR
+SB	Solomon Islands	999:p 911:a 988:f	L	SBD
+SC	Seychelles	999 112 133:p 151:a	L	SCR
+SD	Sudan	999	R	SDG
+SE	Sweden	112	R	SEK
+SG	Singapore	999:p 995:af	L	SGD
+SH	Saint Helena, Ascension and Tristan da Cunha	999	L	GBP SHP
+SI	Slovenia	112 113:p	R	EUR
+SJ	Svalbard and Jan Mayen		R	NOK
+SK	Slovakia	112 158:p 155:a 150:f	R	EUR
+SL	Sierra Leone	019:p 999:af	R	SLE
+SM	San Marino	112 113:p 118:a 115:f	R	EUR
+SN	Senegal	17:p 18:f	R	XOF
+SO	Somalia	888:p 555:a 999:f	R	SOS
+SR	Suriname	112 111:p 115:p 113:a 110:f	L	SRD
+SS	South Sudan	911	R	SSP
+ST	São Tomé and Príncipe	112	R	STN
+SV	El Salvador	911:paf 913:f	R	USD
+SX	Sint Maarten		R	XCG
+SY	Syria	112:p 110:a 113:f	R	SYP
+SZ	Eswatini	999:p 977:a 933:f	L	SZL
+TA	Tristan da Cunha		L	GBP
+TC	Turks and Caicos Islands	911	L	USD
+TD	Chad	17:p 18:a	R	XAF
+TF	French Southern and Antarctic Lands		R	EUR
+TG	Togo	117:p 171:p 172:p 118:f	R	XOF
+TH	Thailand	191:p 1669:a 199:f	L	THB
+TJ	Tajikistan	112	R	TJS
+TK	Tokelau		L	NZD
+TL	Timor-Leste	112	L	USD
+TM	Turkmenistan	112	R	TMT
+TN	Tunisia	197:p 190:a 198:f	R	TND
+TO	Tonga	911 922:p 933:a 927:f 928:f 999:f	L	TOP
+TR	Turkey	112:pf	R	TRY
+TT	Trinidad and Tobago	911:p 999:p 811:a 990:f	L	TTD
+TV	Tuvalu	911	L	AUD
+TW	Taiwan	110 119 112	R	TWD
+TZ	Tanzania	112:p 115:a 114:f	L	TZS
+UA	Ukraine	112 102:p 103:a 101:f	R	UAH
+UG	Uganda	112:pf 999:pf 911:a	L	UGX
+UM	United States Minor Outlying Islands		R	USD
+US	United States	911	R	USD
+UY	Uruguay	911	R	UYU
+UZ	Uzbekistan	112	R	UZS
+VA	Vatican City	112	R	EUR
+VC	Saint Vincent and the Grenadines	911:pf 999:pf	L	XCD
+VE	Venezuela	911 171:paf	R	VES
+VG	British Virgin Islands	999	L	USD
+VI	United States Virgin Islands	911	L	USD
+VN	Vietnam	113:p 115:a 114:f	R	VND
+VU	Vanuatu	112 11:p 113:f	R	VUV
+WF	Wallis and Futuna		R	XPF
+WS	Samoa	999 995:p 996:a 994:f	L	WST
+XK	Kosovo	112	R	EUR
+YE	Yemen	199:p	R	YER
+YT	Mayotte	112	R	EUR
+ZA	South Africa	112:paf	L	ZAR
+ZM	Zambia	991 999 112:pf 911:p 992:a 993:f	L	ZMW
+ZW	Zimbabwe	999 995:p 994:a 993:f	L	ZWG EUR USD GBP AUD ZAR CNY INR JPY
