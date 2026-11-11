@@ -63,8 +63,10 @@ use leviculum_mapfill::stroke::stroke;
 use leviculum_mapfill::style::{Class, MapTheme};
 use leviculum_mapfill::SUBPIXEL;
 
+use crate::blend::Blend;
 use crate::draw::Ink;
 use crate::labels::{LabelKind, ViewLabel};
+use crate::mercator::World as Mercator;
 use crate::viewport::Viewport;
 
 /// The table, Natural Earth 1:50m land.
@@ -413,6 +415,136 @@ fn clip_segment(
     Some((a, b))
 }
 
+/// How a table's points land on the view: a [`Viewport`]'s linear
+/// Mercator placement, which every golden below the blend keeps pixel
+/// for pixel, or the blended world projection of a world view (1710).
+#[derive(Clone, Copy, Debug)]
+enum Place<'a> {
+    Flat(&'a Viewport),
+    Curved(&'a Blend),
+}
+
+impl Place<'_> {
+    fn size(&self) -> (u32, u32) {
+        match self {
+            Place::Flat(view) => view.size(),
+            Place::Curved(blend) => blend.size(),
+        }
+    }
+
+    /// The zoom the view draws for, whole, rounded down between steps:
+    /// what [`MAX_ZOOM`] and a name's shallowest zoom are checked against.
+    fn zoom(&self) -> u8 {
+        match self {
+            Place::Flat(view) => view.zoom(),
+            Place::Curved(blend) => {
+                let z = libm::floor(blend.zoom().clamp(0.0, 20.0));
+                z as u8
+            }
+        }
+    }
+
+    /// The copies of the world the view shows: every one that reaches
+    /// into a flat view; a curved view holds the whole world once, its
+    /// own wrap in the projection.
+    fn copies(&self, vw: i64) -> core::ops::RangeInclusive<i64> {
+        match self {
+            Place::Flat(view) => {
+                let (left, _) = view.top_left_sub();
+                let world = 1i64 << (12 + u32::from(view.zoom()));
+                left.div_euclid(world)..=(left + vw - 1).div_euclid(world)
+            }
+            Place::Curved(_) => 0..=0,
+        }
+    }
+
+    /// Where a table point of `bits` lands in view sub-pixels, on copy
+    /// `k` of the world.
+    fn map(&self, bits: u32, x: u32, y: u32, k: i64) -> (i64, i64) {
+        match self {
+            Place::Flat(view) => {
+                let (left, top) = view.top_left_sub();
+                let world = 1i64 << (12 + u32::from(view.zoom()));
+                let up = i32::from(view.zoom()) + 12 - bits as i32;
+                let scale = |v: u32| -> i64 {
+                    match up >= 0 {
+                        true => i64::from(v) << up,
+                        false => i64::from(v) >> -up,
+                    }
+                };
+                (scale(x) + k * world - left, scale(y) - top)
+            }
+            Place::Curved(blend) => {
+                let shift = 32 - bits;
+                blend.to_screen_sub(Mercator {
+                    x: x << shift,
+                    y: y << shift,
+                })
+            }
+        }
+    }
+
+    /// Whether a table point is on the view's far side (the globe's far
+    /// half): a stroked line breaks there instead of chording along the
+    /// limb, and a name is not set there. A filled ring keeps its far
+    /// points — pushed onto the limb they close the ring without area.
+    fn hidden(&self, bits: u32, x: u32, y: u32) -> bool {
+        match self {
+            Place::Flat(_) => false,
+            Place::Curved(blend) => {
+                let shift = 32 - bits;
+                !blend.facing(Mercator {
+                    x: x << shift,
+                    y: y << shift,
+                })
+            }
+        }
+    }
+
+    /// Whether everything in the box `bbox` (table units, west north
+    /// east south) lies outside the view on copy `k`: the flat test is
+    /// exact, the curved one samples the box's corners, edge middles and
+    /// centre and pads by a quarter of the spanned extent, generous
+    /// enough for the projections' bending.
+    fn culled(&self, bits: u32, bbox: [u32; 4], k: i64, vw: i64, vh: i64) -> bool {
+        let [x0, y0, x1, y1] = bbox;
+        match self {
+            Place::Flat(_) => {
+                let (ax, ay) = self.map(bits, x0, y0, k);
+                let (bx, by) = self.map(bits, x1, y1, k);
+                bx < -GUARD || ax > vw + GUARD || by < -GUARD || ay > vh + GUARD
+            }
+            Place::Curved(_) => {
+                let (mx, my) = (x0 / 2 + x1 / 2, y0 / 2 + y1 / 2);
+                let samples = [
+                    (x0, y0),
+                    (mx, y0),
+                    (x1, y0),
+                    (x0, my),
+                    (mx, my),
+                    (x1, my),
+                    (x0, y1),
+                    (mx, y1),
+                    (x1, y1),
+                ];
+                let mut west = i64::MAX;
+                let mut north = i64::MAX;
+                let mut east = i64::MIN;
+                let mut south = i64::MIN;
+                for (sx, sy) in samples {
+                    let (px, py) = self.map(bits, sx, sy, k);
+                    west = west.min(px);
+                    north = north.min(py);
+                    east = east.max(px);
+                    south = south.max(py);
+                }
+                let pad = GUARD + (east - west).max(south - north) / 4;
+                east < -pad || west > vw + pad || south < -pad || north > vh + pad
+            }
+        }
+    }
+}
+
 /// Every table the world view draws, empty for one it does not (1683).
 #[derive(Clone, Copy, Debug)]
 pub struct World<'a> {
@@ -500,6 +632,36 @@ pub fn draw_world<D>(
 where
     D: Coverage<Color = Rgb565>,
 {
+    draw_world_at(world, Place::Flat(view), ink, theme, target)
+}
+
+/// [`draw_world`] through the blended world projection (1710): the same
+/// layers, every point through [`Blend::to_screen_sub`], so the world
+/// view is Equal Earth or the globe on its way into Mercator. The caller
+/// keeps regions off this path: a blended view draws no tiles.
+pub fn draw_world_view<D>(
+    world: &World,
+    blend: &Blend,
+    ink: Ink,
+    theme: MapTheme,
+    target: &mut D,
+) -> Result<OutlineStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
+    draw_world_at(world, Place::Curved(blend), ink, theme, target)
+}
+
+fn draw_world_at<D>(
+    world: &World,
+    place: Place<'_>,
+    ink: Ink,
+    theme: MapTheme,
+    target: &mut D,
+) -> Result<OutlineStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
     let mut st = OutlineStats::default();
     let palette = theme.palette();
     let land = palette.background;
@@ -526,7 +688,7 @@ where
         }
     }
     let room = room.min(usize::from(u16::MAX));
-    let (_, h) = view.size();
+    let (_, h) = place.size();
     let mut edges = vec![Edge::EMPTY; room];
     let mut active = vec![0u16; room];
     let mut heads = vec![0u16; h as usize];
@@ -536,8 +698,8 @@ where
         active: &mut active,
     };
     let mut filler = Filler::new(&mut scratch, target.bounding_box());
-    let here = view.zoom() <= MAX_ZOOM;
-    let landst = rings_into(world.land, view, ink, shade(land), &mut filler, target)?;
+    let here = place.zoom() <= MAX_ZOOM;
+    let landst = rings_into(world.land, place, ink, shade(land), &mut filler, target)?;
     st.rings = landst.rings;
     st.culled = landst.culled;
     st.vertices = landst.vertices;
@@ -546,7 +708,7 @@ where
     st.overflows = landst.overflows;
     if here {
         let water = water(theme);
-        let s = rings_into(world.lakes, view, ink, shade(water), &mut filler, target)?;
+        let s = rings_into(world.lakes, place, ink, shade(water), &mut filler, target)?;
         st.lakes = s.rings;
         st.lake += match ink {
             Ink::Colour => s.fill,
@@ -555,7 +717,7 @@ where
         st.overflows += s.overflows;
         let rivers = lines_into(
             world.rivers,
-            view,
+            place,
             Point::zero(),
             shade(water),
             None,
@@ -566,7 +728,7 @@ where
         st.river += rivers.stroke;
         let ice = ice(theme);
         for table in [world.ice, world.shelves] {
-            let s = rings_into(table, view, ink, shade(ice), &mut filler, target)?;
+            let s = rings_into(table, place, ink, shade(ice), &mut filler, target)?;
             st.ice += s.rings;
             st.snowy += match ink {
                 Ink::Colour => s.fill,
@@ -584,7 +746,7 @@ where
     };
     let b = lines_into(
         world.borders,
-        view,
+        place,
         Point::zero(),
         colour,
         None,
@@ -595,7 +757,7 @@ where
     st.border += b.stroke;
     let d = lines_into(
         world.disputed,
-        view,
+        place,
         Point::zero(),
         colour,
         Some(DASH),
@@ -625,18 +787,56 @@ pub fn bounds<D>(
 where
     D: Coverage<Color = Rgb565>,
 {
+    bounds_at(world, Place::Flat(view), at, colour, filler, target)
+}
+
+/// [`bounds`] through the blended world projection (1710): the time zone
+/// view's borders over a blended world picture.
+pub fn bounds_view<D>(
+    world: &World,
+    blend: &Blend,
+    at: Point,
+    colour: Rgb565,
+    filler: &mut Filler<'_, '_>,
+    target: &mut D,
+) -> Result<OutlineStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
+    bounds_at(world, Place::Curved(blend), at, colour, filler, target)
+}
+
+fn bounds_at<D>(
+    world: &World,
+    place: Place<'_>,
+    at: Point,
+    colour: Rgb565,
+    filler: &mut Filler<'_, '_>,
+    target: &mut D,
+) -> Result<OutlineStats, D::Error>
+where
+    D: Coverage<Color = Rgb565>,
+{
     let mut st = OutlineStats::default();
-    if view.zoom() > MAX_ZOOM {
+    if place.zoom() > MAX_ZOOM {
         return Ok(st);
     }
     let (Some(bits), disputed) = (self::bits(world.borders), self::bits(world.disputed)) else {
         return Ok(st);
     };
-    let b = lines_into(world.borders, view, at, colour, None, filler, target)?;
+    let b = lines_into(world.borders, place, at, colour, None, filler, target)?;
     st.borders = b.rings;
     st.border += b.stroke;
     if disputed == Some(bits) {
-        let d = lines_into(world.disputed, view, at, colour, Some(DASH), filler, target)?;
+        let d = lines_into(
+            world.disputed,
+            place,
+            at,
+            colour,
+            Some(DASH),
+            filler,
+            target,
+        )?;
         st.disputed = d.rings;
         st.dash += d.stroke;
     }
@@ -657,7 +857,7 @@ pub const DASH_OFF: i64 = 3;
 /// what the layer added.
 fn rings_into<D>(
     table: &[u8],
-    view: &Viewport,
+    place: Place<'_>,
     ink: Ink,
     colour: Rgb565,
     filler: &mut Filler<'_, '_>,
@@ -667,45 +867,31 @@ where
     D: Coverage<Color = Rgb565>,
 {
     let mut st = LayerStats::default();
-    let (w, h) = view.size();
-    let (left, top) = view.top_left_sub();
+    let (w, h) = place.size();
     let sub = i64::from(SUBPIXEL);
     let (vw, vh) = (i64::from(w) * sub, i64::from(h) * sub);
     // Table units to view sub-pixels: a unit is 2^(32 - bits) world
-    // units, a sub-pixel 2^(20 - zoom).
+    // units, a sub-pixel 2^(20 - zoom); a curved view maps each point
+    // through the blend instead.
     let Some(bits) = bits(table) else {
         return Ok(st);
     };
-    let up = i32::from(view.zoom()) + 12 - bits as i32;
-    let scale = |v: u32| -> i64 {
-        match up >= 0 {
-            true => i64::from(v) << up,
-            false => i64::from(v) >> -up,
-        }
-    };
-    let world = 1i64 << (12 + u32::from(view.zoom()));
     let mut ring = Vec::new();
     let mut clipped = Vec::new();
     let mut points: Vec<Point> = Vec::new();
-    for k in left.div_euclid(world)..=(left + vw - 1).div_euclid(world) {
-        let dx = k * world - left;
+    for k in place.copies(vw) {
         for r in rings(table) {
             // A new polygon: fill the one before, whose holes are in.
             if !r.hole && ink == Ink::Colour && !filler.is_empty() {
                 st.fill += filler.fill(target, colour, FillRule::EvenOdd)?;
             }
-            let [x0, y0, x1, y1] = r.bbox;
-            if scale(x1) + dx < -GUARD
-                || scale(x0) + dx > vw + GUARD
-                || scale(y1) - top < -GUARD
-                || scale(y0) - top > vh + GUARD
-            {
+            if place.culled(bits, r.bbox, k, vw, vh) {
                 st.culled += 1;
                 continue;
             }
             st.rings += 1;
             ring.clear();
-            ring.extend(r.points().map(|(x, y)| (scale(x) + dx, scale(y) - top)));
+            ring.extend(r.points().map(|(x, y)| place.map(bits, x, y, k)));
             clip(&ring, -GUARD, -GUARD, vw + GUARD, vh + GUARD, &mut clipped);
             if clipped.len() < 3 {
                 continue;
@@ -739,7 +925,7 @@ where
 /// the clip keeps joined are stroked as one line.
 fn lines_into<D>(
     table: &[u8],
-    view: &Viewport,
+    place: Place<'_>,
     at: Point,
     colour: Rgb565,
     dash: Option<(i64, i64)>,
@@ -750,31 +936,16 @@ where
     D: Coverage<Color = Rgb565>,
 {
     let mut st = LayerStats::default();
-    let (w, h) = view.size();
-    let (left, top) = view.top_left_sub();
+    let (w, h) = place.size();
     let sub = i64::from(SUBPIXEL);
     let (vw, vh) = (i64::from(w) * sub, i64::from(h) * sub);
     let Some(bits) = bits(table) else {
         return Ok(st);
     };
-    let up = i32::from(view.zoom()) + 12 - bits as i32;
-    let scale = |v: u32| -> i64 {
-        match up >= 0 {
-            true => i64::from(v) << up,
-            false => i64::from(v) >> -up,
-        }
-    };
-    let world = 1i64 << (12 + u32::from(view.zoom()));
     let mut points: Vec<Point> = Vec::new();
-    for k in left.div_euclid(world)..=(left + vw - 1).div_euclid(world) {
-        let dx = k * world - left;
+    for k in place.copies(vw) {
         for l in lines(table) {
-            let [x0, y0, x1, y1] = l.bbox;
-            if scale(x1) + dx < -GUARD
-                || scale(x0) + dx > vw + GUARD
-                || scale(y1) - top < -GUARD
-                || scale(y0) - top > vh + GUARD
-            {
+            if place.culled(bits, l.bbox, k, vw, vh) {
                 st.culled += 1;
                 continue;
             }
@@ -783,7 +954,11 @@ where
             points.clear();
             let mut prev: Option<(i64, i64)> = None;
             for (x, y) in l.points() {
-                let p = (scale(x) + dx, scale(y) - top);
+                if place.hidden(bits, x, y) {
+                    prev = None;
+                    continue;
+                }
+                let p = place.map(bits, x, y, k);
                 let Some(a) = prev.replace(p) else {
                     continue;
                 };
@@ -929,10 +1104,21 @@ pub fn names(table: &[u8], view: &Viewport, out: &mut Vec<ViewLabel>) {
     if view.zoom() > MAX_ZOOM {
         return;
     }
-    let _ = read_names(table, view, out);
+    let _ = read_names(table, Place::Flat(view), out);
 }
 
-fn read_names(table: &[u8], view: &Viewport, out: &mut Vec<ViewLabel>) -> Option<()> {
+/// [`names`] through the blended world projection (1710): each anchor by
+/// [`Blend::to_screen_sub`], the world once, a name on the globe's far
+/// side not set.
+pub fn names_view(table: &[u8], blend: &Blend, out: &mut Vec<ViewLabel>) {
+    let place = Place::Curved(blend);
+    if place.zoom() > MAX_ZOOM {
+        return;
+    }
+    let _ = read_names(table, place, out);
+}
+
+fn read_names(table: &[u8], place: Place<'_>, out: &mut Vec<ViewLabel>) -> Option<()> {
     let bits = name_bits(table)?;
     let mut at = 5usize;
     let count = usize::try_from(varint(table, &mut at)?).ok()?;
@@ -957,18 +1143,9 @@ fn read_names(table: &[u8], view: &Viewport, out: &mut Vec<ViewLabel>) -> Option
         );
         core::str::from_utf8(data.get(a..b)?).ok()
     };
-    let (w, h) = view.size();
-    let (left, top) = view.top_left_sub();
+    let (w, h) = place.size();
     let sub = i64::from(SUBPIXEL);
     let (vw, vh) = (i64::from(w) * sub, i64::from(h) * sub);
-    let up = i32::from(view.zoom()) + 12 - bits as i32;
-    let scale = |v: u32| -> i64 {
-        match up >= 0 {
-            true => i64::from(v) << up,
-            false => i64::from(v) >> -up,
-        }
-    };
-    let world = 1i64 << (12 + u32::from(view.zoom()));
     for _ in 0..points {
         let (kind, rank, min_zoom, _) = (
             *table.get(at)?,
@@ -983,7 +1160,7 @@ fn read_names(table: &[u8], view: &Viewport, out: &mut Vec<ViewLabel>) -> Option
         let Some(kind) = LabelKind::from_wire(kind) else {
             continue;
         };
-        if min_zoom > view.zoom() {
+        if min_zoom > place.zoom() {
             continue;
         }
         let Some(local) = string(string_at) else {
@@ -993,9 +1170,11 @@ fn read_names(table: &[u8], view: &Viewport, out: &mut Vec<ViewLabel>) -> Option
             Some(a) => string(a).unwrap_or(local),
             None => local,
         };
-        let (sx, sy) = (scale(x), scale(y) - top);
-        for k in left.div_euclid(world)..=(left + vw - 1).div_euclid(world) {
-            let (ax, ay) = (sx + k * world - left, sy);
+        if place.hidden(bits, x, y) {
+            continue;
+        }
+        for k in place.copies(vw) {
+            let (ax, ay) = place.map(bits, x, y, k);
             if !(0..vw).contains(&ax) || !(0..vh).contains(&ay) {
                 continue;
             }

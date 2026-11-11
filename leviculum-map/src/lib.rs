@@ -5,6 +5,9 @@
 //!   flat geometry behind an index, read in place through a [`Storage`].
 //! - [`mercator`]: Web Mercator between degrees and a 32-bit world
 //!   coordinate.
+//! - [`blend`]: the world view's projection (1710): Equal Earth or the
+//!   orthographic globe at world zooms, blending into Mercator as the
+//!   view zooms in, and the Newton inverse for hits.
 //! - [`viewport`]: centre, zoom, pan, fit, and the tiles a view needs.
 //! - [`profile`]: which classes each zoom of a region keeps, and how its
 //!   geometry was simplified.
@@ -47,6 +50,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod area;
+pub mod blend;
 pub mod buildings;
 pub mod cells;
 pub mod choice;
