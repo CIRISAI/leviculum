@@ -870,6 +870,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // line per change of the entry that carries a phone's or a mailbox's
     // traffic, and the phone's path request for its mailbox on every up.
     EventSchema {
+        name: "HOME_ABOUT",
+        required_keys: &["host", "version", "ours", "started", "devices"],
+    },
+    EventSchema {
         name: "HOME_RENDEZVOUS",
         required_keys: &["host", "port", "state", "entry"],
     },
@@ -927,7 +931,7 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     },
     EventSchema {
         name: "ROOMS_LIST",
-        required_keys: &["hub", "rooms", "via", "answered"],
+        required_keys: &["hub", "rooms", "via", "answered", "why"],
     },
     EventSchema {
         name: "ROOMS_JOIN",

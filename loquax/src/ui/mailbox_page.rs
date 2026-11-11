@@ -143,20 +143,20 @@ fn version_numbers(words: &str) -> Option<Vec<u64>> {
 /// The mailbox's version as the page says it (1647, walk 6, finding 30):
 /// the words only, never a commit (`feedback_no_hashes_on_screen`), and
 /// how they stand to this device's: "0.1.9, newer", "0.1.7, older", and
-/// "0.1.8, another build" where the words agree and the commits do not.
-/// The commits are in the phone's log line (`HOME about`).
+/// "0.1.8-nightly.1, another build" where the words differ and do not
+/// read as numbers. Where the words agree it says them alone, whatever the
+/// commits (1669, walk 12, finding 66: "0.1.9, anderer Stand" read as a
+/// problem nobody could act on). The commits are in the phone's log line
+/// (`HOME_ABOUT`).
 pub fn version_said(theirs: &str, ours: &str) -> Text {
-    let (words, commit) = split_version(theirs);
-    let (our_words, our_commit) = split_version(ours);
+    let (words, _) = split_version(theirs);
+    let (our_words, _) = split_version(ours);
     let said = |id| Text::Key(id, Vec::from([Arg::Str(String::from(words))]));
     if ours.trim().is_empty() {
         return Text::Raw(String::from(words));
     }
     if words == our_words {
-        return match (commit, our_commit) {
-            (Some(a), Some(b)) if a != b => said(StrId::MailboxVersionBuild),
-            _ => Text::Raw(String::from(words)),
-        };
+        return Text::Raw(String::from(words));
     }
     match (version_numbers(words), version_numbers(our_words)) {
         (Some(a), Some(b)) if a > b => said(StrId::MailboxVersionNewer),
@@ -592,13 +592,14 @@ mod tests {
 
     /// The version line says words, never a commit (1647, walk 6, finding
     /// 30, Lew's "0.1.8 (1aa683db…) (dieses Gerät: 0.1.8 (c274f885…))"):
-    /// older, newer, or the same words on another build.
+    /// older, newer, or the words alone where they agree, another build or
+    /// not (1669, walk 12, finding 66).
     #[test]
     fn the_version_says_words_and_how_they_stand_never_a_commit() {
         let a = "0.1.8 (1aa683db8a2c4f0e9d1b7c6a5f4e3d2c1b0a9f8e)";
         let b = "0.1.8 (c274f8853f6743cfe98237bd22203f93e38d69cf)";
         let cases = [
-            (a, b, "0.1.8, anderer Stand"),
+            (a, b, "0.1.8"),
             (a, a, "0.1.8"),
             ("0.1.9 (1aa683db)", b, "0.1.9, neuer"),
             ("0.1.7 (1aa683db)", b, "0.1.7, älter"),
@@ -623,10 +624,7 @@ mod tests {
         let mut model = model(Told::Told(other), Reach::default());
         model.profile.version = String::from(b);
         let de = said(&page(&model), Lang::De);
-        assert!(
-            de.iter().any(|l| l == "Version: 0.1.8, anderer Stand"),
-            "{de:#?}"
-        );
+        assert!(de.iter().any(|l| l == "Version: 0.1.8"), "{de:#?}");
         for line in &de {
             assert!(
                 !line.contains("1aa683db") && !line.contains("c274f885"),

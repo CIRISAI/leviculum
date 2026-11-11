@@ -58,6 +58,7 @@
     <string name="explore_server_asking">Asking the server for its rooms…</string>
     <string name="explore_server_asking_for">Asking the server for its rooms… %1$d s</string>
     <string name="explore_server_close">Close</string>
+    <string name="explore_server_slow_for">The server is slow. Still waiting for its rooms… %1$d s</string>
     <string name="tab_rooms">Rooms</string>
     <string name="rooms_live">A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.</string>
     <string name="rooms_no_hub">No public rooms yet. Choose a server under Explore.</string>

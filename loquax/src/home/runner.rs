@@ -458,11 +458,12 @@ pub async fn home_about(client: HomeClient, budget: Duration) -> Option<UiEvent>
     use crate::ui::mailbox_page::Told;
     match super::client::about(&client.node, &client.public_key, &client.device, budget).await {
         Ok(about) => {
-            tracing::info!(
-                "HOME about host={:?} version={} devices={}",
-                about.host,
-                about.version,
-                about.devices.len()
+            crate::events::home_about(
+                &about.host,
+                &about.version,
+                crate::VERSION,
+                about.started,
+                about.devices.len(),
             );
             Some(UiEvent::MailboxTold(Box::new(Told::Told(about))))
         }

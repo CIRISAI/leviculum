@@ -459,8 +459,8 @@ pub struct HubSheet {
     /// The one sentence about them: asking, no answer, or that it named
     /// none (only once it answered and named none, walk 2).
     pub rooms_note: Option<Text>,
-    /// "Try again" once the server gave no answer, or none within
-    /// [`super::rooms::ASK_PATIENCE_SECS`] (1653).
+    /// "Try again" once the server gave no answer, or the question
+    /// outlived [`super::rooms::PEEK_BUDGET_SECS`] untold (1653, 1669).
     pub retry: Option<Text>,
     /// The question is out and the sentence may still turn: a frontend
     /// that draws on answers only draws again within a second.
@@ -1018,10 +1018,12 @@ fn rooms_note(
             Some(Text::key(StrId::RoomsNoAnswer))
         }
         Some(Named::Asking { since }) => Some(match (*since, now) {
-            // Slow from 20 s, as the rooms screen says it (1659, walk 10, 53).
-            (Some(since), Some(now)) if now - since >= super::rooms::SLOW_SECS => {
-                Text::Key(StrId::RoomsSlowFor, Vec::from([Arg::Int(now - since)]))
-            }
+            // Slow from 20 s, as the rooms screen says it (1659, walk 10,
+            // 53), and still waiting for the rooms (1669, walk 12, 68).
+            (Some(since), Some(now)) if now - since >= super::rooms::SLOW_SECS => Text::Key(
+                StrId::ExploreServerSlowFor,
+                Vec::from([Arg::Int(now - since)]),
+            ),
             (Some(since), Some(now)) if now - since >= super::rooms::LINKING_QUIET_SECS => {
                 Text::Key(
                     StrId::ExploreServerAskingFor,
@@ -1036,11 +1038,16 @@ fn rooms_note(
     }
 }
 
-/// The question asked at `since` waited [`super::rooms::ASK_PATIENCE_SECS`]
-/// by `now` (1653).
+/// How long past the question's own budget the sheet still waits for its
+/// end to be told, should it never be (the task gone with its node).
+const PEEK_GRACE_SECS: i64 = 10;
+
+/// The question asked at `since` outlived its own budget by `now` (1653;
+/// 1669, walk 12, finding 68: until then the sheet waits, since the
+/// question's end, answer or none, is what tells it).
 fn overdue(since: Option<i64>, now: Option<i64>) -> bool {
     match (since, now) {
-        (Some(since), Some(now)) => now - since >= super::rooms::ASK_PATIENCE_SECS,
+        (Some(since), Some(now)) => now - since >= super::rooms::PEEK_BUDGET_SECS + PEEK_GRACE_SECS,
         _ => false,
     }
 }
@@ -2885,17 +2892,17 @@ mod tests {
     }
 
     /// Walk 8 of 1653, 42: a server's sheet said "Frage den Server nach
-    /// seinen Räumen…" for 90 s, the question's whole budget. After
-    /// [`super::super::rooms::ASK_PATIENCE_SECS`] it says what the Rooms
-    /// pane says of a silent server (1652's words) and offers to ask
-    /// again; the question is asked again on that tap, the sentence back
-    /// to asking, and a late answer still fills the sheet. The control:
-    /// 19 s in it still asks, and an answered sheet offers no retry.
-    /// Since 1659 (walk 10, 53: Minuteman answered after 45 s, the sheet
-    /// had said "does not answer" at 20 s) it says the server is slow from
-    /// 20 s, with the seconds, and gives up at 45 s, as the rooms screen.
+    /// seinen Räumen…" for 90 s, the question's whole budget, with nothing
+    /// changing. It counts the seconds from the fifth, says from 20 s that
+    /// the server is slow and that it still waits for its rooms (1659,
+    /// walk 10, 53; 1669, walk 12, 68), and keeps waiting as long as the
+    /// question is alive: Nordic's list came after 83.5 s while the sheet
+    /// had said "does not answer" at 45 s. The question's end without an
+    /// answer says the server's silence and offers to ask again; a sheet
+    /// never told the end gives up just past the question's budget. The
+    /// retry asks again and a late answer still fills the sheet.
     #[test]
-    fn a_silent_server_is_slow_at_twenty_seconds_and_silent_at_forty_five() {
+    fn a_slow_server_is_waited_for_as_long_as_the_question_lives() {
         let mut model = phone();
         let hub = [0x98; 16];
         let at = |model: &mut UiModel<Buffer>, secs: i64| {
@@ -2916,8 +2923,6 @@ mod tests {
         let sheet = node(&model).sheet.expect("the sheet");
         assert!(sheet.asking);
         assert_eq!(sheet.retry, None);
-        // The seconds from the fifth on (1655, walk 9, 47: the sheet said
-        // the same sentence for 60 to 90 s), as the rooms screen counts.
         at(&mut model, 1_000_004);
         assert_eq!(
             node(&model).sheet.expect("the sheet").rooms_note,
@@ -2932,49 +2937,40 @@ mod tests {
             "5 s"
         );
         at(&mut model, 1_000_019);
-        let sheet = node(&model).sheet.expect("the sheet");
         assert_eq!(
-            sheet.rooms_note,
+            node(&model).sheet.expect("the sheet").rooms_note,
             Some(Text::Key(StrId::ExploreServerAskingFor, vec![Arg::Int(19)])),
             "19 s"
         );
-        assert_eq!(sheet.retry, None);
         at(&mut model, 1_000_020);
-        let sheet = node(&model).sheet.expect("the sheet");
+        let note = node(&model).sheet.expect("the sheet").rooms_note;
         assert_eq!(
-            sheet
-                .rooms_note
-                .as_ref()
-                .map(|t| t.resolve(Lang::De))
-                .as_deref(),
-            Some("Server antwortet langsam… 20 s"),
-            "20 s: slow, not silent"
+            note.as_ref().map(|t| t.resolve(Lang::De)).as_deref(),
+            Some("Der Server antwortet langsam. Warte weiter auf seine Räume… 20 s"),
+            "20 s: slow, and what it waits for"
         );
-        assert_eq!(sheet.retry, None, "20 s: no retry yet");
-        at(&mut model, 1_000_044);
-        let sheet = node(&model).sheet.expect("the sheet");
-        assert_eq!(
-            sheet.rooms_note,
-            Some(Text::Key(StrId::RoomsSlowFor, vec![Arg::Int(44)])),
-            "44 s"
-        );
-        assert_eq!(sheet.retry, None);
-        at(&mut model, 1_000_045);
+        // Past the old patience of 45 s and up to the question's budget,
+        // the sheet still waits, no retry.
+        for secs in [45, 83, 99] {
+            at(&mut model, 1_000_000 + secs);
+            let sheet = node(&model).sheet.expect("the sheet");
+            assert_eq!(
+                sheet.rooms_note,
+                Some(Text::Key(StrId::ExploreServerSlowFor, vec![Arg::Int(secs)])),
+                "{secs} s"
+            );
+            assert_eq!(sheet.retry, None, "{secs} s");
+            assert!(sheet.asking, "{secs} s");
+        }
+        // Never told its end, the sheet gives up just past the budget.
+        at(&mut model, 1_000_100);
         let sheet = node(&model).sheet.expect("the sheet");
         assert_eq!(
             sheet.rooms_note,
             Some(Text::key(StrId::RoomsNoAnswer)),
-            "45 s"
+            "100 s"
         );
         assert_eq!(sheet.retry, Some(Text::key(StrId::RoomsRetry)));
-        assert_eq!(
-            sheet
-                .rooms_note
-                .as_ref()
-                .map(|t| t.resolve(Lang::De))
-                .as_deref(),
-            Some("Server antwortet nicht.")
-        );
         // The retry asks again, and the sentence asks again.
         assert_eq!(
             explore(&mut model, ExploreEvent::AskAgain(hub)),
@@ -3002,7 +2998,8 @@ mod tests {
             (sheet.rooms_note, sheet.retry, sheet.asking),
             (None, None, false)
         );
-        // A question that ended without an answer offers the retry too.
+        // A question that ended without an answer says so at once and
+        // offers the retry, whatever the clock.
         let silent = [0x9a; 16];
         explore(&mut model, ExploreEvent::Hub(silent));
         update(
@@ -3012,10 +3009,9 @@ mod tests {
                 rooms: None,
             }),
         );
-        assert_eq!(
-            node(&model).sheet.expect("the sheet").retry,
-            Some(Text::key(StrId::RoomsRetry))
-        );
+        let sheet = node(&model).sheet.expect("the sheet");
+        assert_eq!(sheet.rooms_note, Some(Text::key(StrId::RoomsNoAnswer)));
+        assert_eq!(sheet.retry, Some(Text::key(StrId::RoomsRetry)));
     }
 
     fn page_text(model: &UiModel<Buffer>) -> String {

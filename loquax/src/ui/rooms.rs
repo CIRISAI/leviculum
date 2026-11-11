@@ -102,6 +102,14 @@ pub const ASK_PATIENCE_SECS: i64 = 45;
 /// slow, with the seconds (1659, walk 10, 53), until [`ASK_PATIENCE_SECS`].
 pub const SLOW_SECS: i64 = 20;
 
+/// The most a server's question (Explore's sheet, [`RoomAsk::Peek`]) may
+/// take, path, link and HELLOs: the question's own budget, which ends it
+/// with an answer or with none (`crate::rooms_link`). The sheet waits as
+/// long as the question is alive (1669, walk 12, finding 68: Nordic's
+/// list came after 83.5 s, the sheet had given up at 45 s), and a little
+/// past it only should its end never be told.
+pub const PEEK_BUDGET_SECS: i64 = 90;
+
 /// The settings' hub row (1577): what a press on one of its lines asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HubPick {

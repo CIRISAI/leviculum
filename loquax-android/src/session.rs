@@ -2814,14 +2814,14 @@ impl Inner {
             let told = match loquax::home::client::about(&node, &public_key, &device, BUDGET).await
             {
                 Ok(about) => {
-                    // The commits stay here, never on the page (1647).
-                    tracing::info!(
-                        "HOME about host={:?} version={:?} ours={:?} started={:?} devices={}",
-                        about.host,
-                        about.version,
+                    // The commits stay here, never on the page (1647), in
+                    // a line logcat carries (1669, walk 12, finding 67).
+                    loquax::events::home_about(
+                        &about.host,
+                        &about.version,
                         loquax::VERSION,
                         about.started,
-                        about.devices.len()
+                        about.devices.len(),
                     );
                     Some(Told::Told(about))
                 }

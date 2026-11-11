@@ -35,8 +35,10 @@ const HELLO_TRIES: u32 = 5;
 /// How long a server's notices after its WELCOME are read for the rooms
 /// they name (1621), as the probe that measured the shipped list reads them.
 pub const NOTICE_WINDOW: Duration = Duration::from_secs(6);
-/// The most a question to a server may take, path, link and HELLOs.
-const PEEK_BUDGET: Duration = Duration::from_secs(90);
+/// The most a question to a server may take, path, link and HELLOs
+/// ([`crate::ui::rooms::PEEK_BUDGET_SECS`], which the sheet waits for).
+const PEEK_BUDGET: Duration =
+    Duration::from_secs(crate::ui::rooms::PEEK_BUDGET_SECS.unsigned_abs());
 /// How long the answer to `/list` is waited for after the WELCOME (1652);
 /// a hub that says nothing in time names what its greeting named.
 pub const LIST_WINDOW: Duration = Duration::from_secs(15);
@@ -246,7 +248,7 @@ async fn run(mut options: Options, mut asks: mpsc::UnboundedReceiver<Ask>, telle
                         task.teller.tell(Told::Down(Down::NodeGone));
                     }
                     if task.peek.is_some() {
-                        task.peek_done(None).await;
+                        task.peek_done(None, "node_gone").await;
                     }
                 }
             },
@@ -391,7 +393,7 @@ impl Task {
                     self.peek_up().await;
                 }
             }
-            None => self.peek_done(None).await,
+            None => self.peek_done(None, "no_link").await,
         }
     }
 
@@ -399,7 +401,7 @@ impl Task {
     /// then HELLO.
     async fn peek_up(&mut self) {
         let Some(node) = self.node() else {
-            return self.peek_done(None).await;
+            return self.peek_done(None, "node_gone").await;
         };
         let Some(peek) = self.peek.as_mut() else {
             return;
@@ -408,7 +410,7 @@ impl Task {
             return;
         };
         if node.identify_link(&link_id, &peek.identity).await.is_err() {
-            return self.peek_done(None).await;
+            return self.peek_done(None, "identify_failed").await;
         }
         let mut session = Session::new(*peek.identity.hash(), None, CLIENT_NAME, crate::VERSION);
         if let Some(mdu) = node.link_mdu(&link_id) {
@@ -427,13 +429,13 @@ impl Task {
             return;
         };
         if peek.hellos >= HELLO_TRIES {
-            return self.peek_done(None).await;
+            return self.peek_done(None, "no_welcome").await;
         }
         peek.hellos += 1;
         peek.next = tokio::time::Instant::now() + HELLO_EVERY;
         let bytes = session.hello(fresh_id(), now_ms());
         if !self.send(&link_id, &bytes).await {
-            self.peek_done(None).await;
+            self.peek_done(None, "send_failed").await;
         }
     }
 
@@ -446,13 +448,13 @@ impl Task {
         let now = tokio::time::Instant::now();
         if peek.welcomed && now >= peek.next {
             let named = named(peek.listed.as_deref(), &peek.notices);
-            return self.peek_done(Some(named)).await;
+            return self.peek_done(Some(named), "no_list").await;
         }
         if now >= peek.deadline {
             let named = peek
                 .welcomed
                 .then(|| named(peek.listed.as_deref(), &peek.notices));
-            return self.peek_done(named).await;
+            return self.peek_done(named, "timeout").await;
         }
         if peek.session.is_some() && !peek.welcomed && now >= peek.next {
             self.peek_hello().await;
@@ -518,7 +520,7 @@ impl Task {
                         // The greeting came with the WELCOME, before the
                         // list's answer: all there is is here.
                         let named = named(peek.listed.as_deref(), &peek.notices);
-                        return self.peek_done(Some(named)).await;
+                        return self.peek_done(Some(named), "-").await;
                     }
                 }
             }
@@ -531,7 +533,7 @@ impl Task {
                     // Closed under us: nothing left to close.
                     peek.link_id = None;
                 }
-                self.peek_done(named).await;
+                self.peek_done(named, "link_closed").await;
             }
             _ => {}
         }
@@ -539,7 +541,11 @@ impl Task {
 
     /// The question answered (`Some`, maybe no rooms) or not: told, its
     /// link closed, the next one asked.
-    async fn peek_done(&mut self, named: Option<Vec<String>>) {
+    ///
+    /// Every end leaves its line (1669, walk 12, finding 68: a sheet gave
+    /// up with no line at all): `why` is how a question ended that brought
+    /// no list, `timeout` its budget over, `-` when the hub's list came.
+    async fn peek_done(&mut self, named: Option<Vec<String>>, why: &str) {
         let Some(peek) = self.peek.take() else {
             return;
         };
@@ -547,9 +553,14 @@ impl Task {
         if let (Some(link_id), Some(node)) = (peek.link_id, self.node()) {
             let _ = node.close_link(&link_id).await;
         }
-        if let Some(named) = &named {
-            crate::events::rooms_list(&peek.hub, named.len(), "peek", peek.listed.is_some());
-        }
+        let answered = named.is_some() && peek.listed.is_some();
+        crate::events::rooms_list(
+            &peek.hub,
+            named.as_ref().map_or(0, Vec::len),
+            "peek",
+            answered,
+            if answered { "-" } else { why },
+        );
         self.teller.tell(Told::Peeked {
             hub: peek.hub,
             rooms: named,
@@ -734,7 +745,8 @@ impl Task {
             return;
         }
         let rooms = named(answer.as_deref(), &hub.greeting);
-        crate::events::rooms_list(&hub.hash, rooms.len(), "link", answer.is_some());
+        let why = if answer.is_some() { "-" } else { "timeout" };
+        crate::events::rooms_list(&hub.hash, rooms.len(), "link", answer.is_some(), why);
         self.teller.tell(Told::Listed { rooms });
     }
 

@@ -108,6 +108,8 @@ leviculum_ui::catalogue! {
     ExploreServerAsking = "explore_server_asking", "Asking the server for its rooms…", "Frage den Server nach seinen Räumen…";
     ExploreServerAskingFor = "explore_server_asking_for", "Asking the server for its rooms… %1$d s", "Frage den Server nach seinen Räumen… %1$d s";
     ExploreServerClose = "explore_server_close", "Close", "Schließen";
+    // 1669 (walk 12, 68): from 20 s on, while the question is still alive.
+    ExploreServerSlowFor = "explore_server_slow_for", "The server is slow. Still waiting for its rooms… %1$d s", "Der Server antwortet langsam. Warte weiter auf seine Räume… %1$d s";
     // The Rooms (1379): Reticulum Relay Chat on a hub, live, beside the groups.
     TabRooms = "tab_rooms", "Rooms", "Räume";
     RoomsLive = "rooms_live", "A room is live: no mailbox keeps it, there are no receipts and no ticks, and what you missed is gone.", "Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.";

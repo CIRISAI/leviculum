@@ -58,6 +58,7 @@
     <string name="explore_server_asking">Frage den Server nach seinen Räumen…</string>
     <string name="explore_server_asking_for">Frage den Server nach seinen Räumen… %1$d s</string>
     <string name="explore_server_close">Schließen</string>
+    <string name="explore_server_slow_for">Der Server antwortet langsam. Warte weiter auf seine Räume… %1$d s</string>
     <string name="tab_rooms">Räume</string>
     <string name="rooms_live">Ein Raum ist live: kein Postfach hebt ihn auf, es gibt keine Lesebestätigungen und keine Haken, und was du verpasst hast, ist weg.</string>
     <string name="rooms_no_hub">Noch keine öffentlichen Räume. Wähl einen Server unter Entdecken.</string>

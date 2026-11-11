@@ -340,14 +340,18 @@ pub fn rooms_welcome(hub: &[u8; 16], version: Option<&str>) {
 /// How many rooms a hub named (1652): `via` is `link` for the chosen
 /// hub's `/list` after its WELCOME, `peek` for a server sheet's question;
 /// `answered` is false when the hub gave no list in time and only its
-/// greeting was read.
-pub fn rooms_list(hub: &[u8; 16], rooms: usize, via: &str, answered: bool) {
+/// greeting was read, or when a question brought nothing at all; `why`
+/// says how such a question ended (1669, walk 12, finding 68: the sheet
+/// gave up with no line), `timeout` when its budget ran out, `-` when the
+/// list came.
+pub fn rooms_list(hub: &[u8; 16], rooms: usize, via: &str, answered: bool, why: &str) {
     tracing::debug!(
         event = "ROOMS_LIST",
         hub = %to_hex(hub),
         rooms = rooms,
         via = %scalar(via),
         answered = answered,
+        why = %scalar(why),
     );
 }
 
@@ -401,6 +405,22 @@ pub fn explore_open(ask: bool, reason: &str, since_ms: Option<u64>) {
         ask = if ask { "yes" } else { "no" },
         reason = %scalar(reason),
         since_ms = %since_ms.map_or_else(|| String::from("-"), |ms| ms.to_string()),
+    );
+}
+
+/// The mailbox's `/about` as a device read it (1669, walk 12, finding 67:
+/// the plain `HOME about` line never reached the phone's logcat, which
+/// carries structured events only, so the commits behind a version were
+/// nowhere a walk could read them): its machine, its version and ours,
+/// commits included, its start in unix seconds or `-`, its devices.
+pub fn home_about(host: &str, version: &str, ours: &str, started: Option<i64>, devices: usize) {
+    tracing::debug!(
+        event = "HOME_ABOUT",
+        host = %scalar(host),
+        version = %scalar(version),
+        ours = %scalar(ours),
+        started = %started.map_or_else(|| String::from("-"), |s| s.to_string()),
+        devices = devices,
     );
 }
 
