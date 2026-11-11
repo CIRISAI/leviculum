@@ -235,6 +235,32 @@ out, so a Python-driven LNode and an `lnsd`-driven one land on the same
 channel. Changing the channel of a Python-driven board is a reflash
 (`lnflash --radio-preset`), not a config edit.
 
+**A frame must reach rnsd without a hole in it.** Python-RNS
+`SerialInterface` throws a partly read frame away once no byte has
+arrived for 100 ms (`SerialInterface.py:190-195` in 1.5.2,
+`SerialInterface.py:189-193` in the 1.3.5 reference tree), and it does
+so in a way it never recovers from. The reset sets `in_frame = False`,
+so the torn frame's closing flag is taken as an opening one. And
+because a flag inside a frame closes it even when nothing was read
+(`SerialInterface.py:170-172`), every later frame is read as the bytes
+between two frames. The timeout only fires on a non-empty buffer, so
+nothing resynchronises it: from that frame on rnsd hears nothing more
+from the board until it is restarted. On the bench (LV-1006,
+2026-11-11) the symptom was **one link per rnsd start**: the first
+propagation-node deposit succeeded, an announce frame the board sent
+right after it arrived split at wire offset 128 with a 160 to 400 ms
+hole, and every later link to the board died as "never established".
+The hole came from the board: the transport port wrote a frame packet
+by packet and gave the CPU back between packets, and after a deposit
+the main loop kept it for hundreds of milliseconds. The firmware now
+writes a frame it has started to its end
+(`leviculum-nrf/usb-policy/src/frame_writer.rs`). Firmware older than
+that still tears frames this way: under rnsd, restart rnsd between
+deposits. `lnsd`'s reader drops the one torn frame too, but stays in
+phase, because a flag on an empty buffer starts a frame
+(`leviculum-core/src/framing/hdlc.rs:313`; the mvr
+`a_frame_torn_by_a_gap_leaves_the_serial_decoder_in_phase` holds it).
+
 After editing `/etc/reticulum/config`, restart the daemon so it picks up
 the new interface:
 

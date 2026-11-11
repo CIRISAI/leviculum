@@ -549,10 +549,54 @@ async fn write_packet_host_gated(
     }
 }
 
-/// HDLC-frame `payload` into `frame_buf` and write it out in 64-byte
-/// chunks, with a ZLP when the framed length lands exactly on the packet
-/// size. Returns `false` on a USB write error or when no host is reading
-/// the port (see [`write_packet_host_gated`]).
+/// The transport port's packets, each through [`write_packet_host_gated`]:
+/// what [`leviculum_usb_policy::frame_writer::write_frame`] writes a frame
+/// into.
+struct HostGated<'a> {
+    tx: &'a mut cdc_acm::Sender<'static, UsbDriver>,
+    control: &'a cdc_acm::ControlChanged<'static>,
+}
+
+impl leviculum_usb_policy::frame_writer::PacketOut for HostGated<'_> {
+    fn write_packet(&mut self, chunk: &[u8]) -> impl core::future::Future<Output = bool> {
+        write_packet_host_gated(self.tx, self.control, chunk)
+    }
+}
+
+/// The clock the frame writer bounds its spin with.
+fn now_us() -> u64 {
+    embassy_time::Instant::now().as_micros()
+}
+
+/// Write the already framed `frame_buf` on the transport port.
+///
+/// Once the first packet is out the rest of the frame leaves inside this
+/// poll, spinning at most
+/// [`PACKET_SPIN_US`](leviculum_usb_policy::frame_writer::PACKET_SPIN_US) a
+/// packet for the host to take the one before, instead of handing thread
+/// mode to a main loop that may keep it for hundreds of milliseconds. A
+/// frame with a hole over 100 ms in it is dropped by the reference's serial
+/// reader, and rnsd 1.5.2 reads every frame after it out of phase until it
+/// restarts (LV-1006; the mechanism is
+/// `leviculum_usb_policy::frame_writer`'s module docs). Returns `false` on
+/// a USB write error or when no host is reading the port (see
+/// [`write_packet_host_gated`]).
+async fn write_frame_buf(
+    tx: &mut cdc_acm::Sender<'static, UsbDriver>,
+    control: &cdc_acm::ControlChanged<'static>,
+    frame_buf: &[u8],
+) -> bool {
+    leviculum_usb_policy::frame_writer::write_frame(
+        &mut HostGated { tx, control },
+        &now_us,
+        leviculum_usb_policy::frame_writer::PACKET_SPIN_US,
+        frame_buf,
+    )
+    .await
+}
+
+/// HDLC-frame `payload` into `frame_buf` and write it out with
+/// [`write_frame_buf`].
 async fn write_framed(
     tx: &mut cdc_acm::Sender<'static, UsbDriver>,
     control: &cdc_acm::ControlChanged<'static>,
@@ -560,18 +604,7 @@ async fn write_framed(
     frame_buf: &mut Vec<u8>,
 ) -> bool {
     frame(payload, frame_buf);
-    for chunk in frame_buf.chunks(64) {
-        if !write_packet_host_gated(tx, control, chunk).await {
-            return false;
-        }
-    }
-    if !frame_buf.is_empty()
-        && frame_buf.len().is_multiple_of(64)
-        && !write_packet_host_gated(tx, control, &[]).await
-    {
-        return false;
-    }
-    true
+    write_frame_buf(tx, control, frame_buf).await
 }
 
 /// How long a radio config may wait for the LoRa task to drain the
@@ -1536,17 +1569,9 @@ async fn retic_serial_task(
                     // frame queued while no host reads if02 (an announce
                     // after the port was closed) is dropped here instead
                     // of pending forever and deafening the read side.
-                    let mut write_ok = true;
-                    for chunk in frame_buf.chunks(64) {
-                        if !write_packet_host_gated(&mut tx, &control, chunk).await {
-                            log("SER: TX dropped, no host reading");
-                            write_ok = false;
-                            break;
-                        }
-                    }
-                    // ZLP if last chunk was exactly 64 bytes
-                    if write_ok && !frame_buf.is_empty() && frame_buf.len() % 64 == 0 {
-                        let _ = write_packet_host_gated(&mut tx, &control, &[]).await;
+                    let write_ok = write_frame_buf(&mut tx, &control, &frame_buf).await;
+                    if !write_ok {
+                        log("SER: TX dropped, no host reading");
                     }
                     // Counted once it reached the host, not when the queue
                     // took it (`leviculum_usb_policy::tx_counted`).

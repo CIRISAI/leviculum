@@ -64,8 +64,17 @@
 //! [`debug_commands`] says which of the four one-byte commands a packet
 //! read on the debug port carries: `p` the post-mortem query, `s` the stack
 //! watermark reset, `c` the heap census, `b` the build banner now.
+//!
+//! # The transport port's frame writer
+//!
+//! [`frame_writer::write_frame`] writes one HDLC frame as 64-byte packets
+//! and, once the first is out, drives the rest out inside one poll, so a
+//! busy main loop cannot put a hole into a frame that the reference
+//! reader's 100 ms timeout tears (LV-1006, order 1671).
 
 extern crate alloc;
+
+pub mod frame_writer;
 
 use alloc::vec::Vec;
 use leviculum_core::envelope::{encode_duty_hold, DutyHoldWire};

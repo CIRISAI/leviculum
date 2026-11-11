@@ -56,7 +56,7 @@ src/sx1262.rs (1713): chtm log lora
 src/telemetry.rs (2158): ble flash log lora media name pn position radio_store
 src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (169): log lora
-src/usb.rs (1561): banner ble boards chtm heap_census log lora media mgmt name pn position postmortem_query radio_store record_store remote_dfu reset_stack_watermark telemetry
+src/usb.rs (1586): banner ble boards chtm heap_census log lora media mgmt name pn position postmortem_query radio_store record_store remote_dfu reset_stack_watermark telemetry
 src/vext.rs (87): boards log
 firmware/src/battery.rs (468): board_state fakes log seams
 firmware/src/ble_link.rs (1126): fakes iface_bytes log media seams
