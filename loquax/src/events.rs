@@ -232,6 +232,22 @@ pub fn home_announce(home: &[u8; 16], iface: &str, kind: &str) {
     );
 }
 
+/// A mailbox refused a device's request (1677, invariant 3 of
+/// `docs/src/concepts/loquax-mailbox-roles.md`): `device` the identity
+/// the link was identified with, in full, as `loquax mailbox devices`
+/// names it; `ask` the request (`sync`, `pages`, `join`, ...);
+/// `reason` why (`not-admitted`, `token`, `expired`). Every request of a
+/// device not admitted ends here, whatever it asked and whether or not
+/// it parsed: the door is the pairing, not the port.
+pub fn home_refuse(device: &[u8; 16], ask: &str, reason: &str) {
+    tracing::info!(
+        event = "HOME_REFUSE",
+        device = %to_hex(device),
+        ask = %scalar(ask),
+        reason = %reason,
+    );
+}
+
 fn id8(id: &[u8; 32]) -> String {
     let mut hex = to_hex(&id[..4]);
     hex.truncate(8);

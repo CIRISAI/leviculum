@@ -909,6 +909,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "HOME_ANNOUNCE",
         required_keys: &["home", "iface", "kind"],
     },
+    // A mailbox refused a device's request (1677): every ask of a device
+    // that is not paired, and a join whose token is unknown or expired.
+    // Emitter in `loquax/src/events.rs`.
+    EventSchema {
+        name: "HOME_REFUSE",
+        required_keys: &["device", "ask", "reason"],
+    },
     EventSchema {
         name: "LNMSG_VIA",
         required_keys: &["method", "reason"],

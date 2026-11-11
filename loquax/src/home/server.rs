@@ -157,6 +157,18 @@ fn route(
     now: f64,
     now_secs: i64,
 ) -> Answer {
+    // The pairing is the door (1677, invariant 3 of
+    // `docs/src/concepts/loquax-mailbox-roles.md`): a device that is not
+    // admitted gets one refusal for every ask but `/join`, before its
+    // request is read, so it learns neither what the mailbox holds nor
+    // whether its request was well formed, and nothing it sent is kept.
+    // The handlers keep their own checks as a second line.
+    if path != super::JOIN_PATH {
+        let ask = ask_name(path);
+        if let Some(refused) = refuse_unless_admitted(store, &device, ask) {
+            return Answer::only(refused);
+        }
+    }
     match path {
         super::JOIN_PATH => Answer::only(join(store, home, data, device, now_secs)),
         super::SYNC_PATH => Answer::only(sync(store, data, device)),
@@ -178,6 +190,34 @@ fn route(
     }
 }
 
+/// The name a request is logged under: its path without the slash for
+/// the paths the mailbox serves, `unknown` for any other, so a path a
+/// stranger chose never reaches the log.
+fn ask_name(path: &str) -> &'static str {
+    const SERVED: [&str; 16] = [
+        super::JOIN_PATH,
+        super::SYNC_PATH,
+        super::SEND_PATH,
+        super::MARK_PATH,
+        super::PETNAME_PATH,
+        super::PEERSTATE_PATH,
+        super::WATCH_PATH,
+        super::KEY_PATH,
+        super::MOVE_PATH,
+        super::MOVED_PATH,
+        super::GROUP_PATH,
+        super::GROUP_ADD_PATH,
+        super::GROUP_DELETE_PATH,
+        super::PAGES_PATH,
+        super::BOOKMARK_PATH,
+        super::ABOUT_PATH,
+    ];
+    SERVED
+        .iter()
+        .find(|served| **served == path)
+        .map_or("unknown", |served| served.trim_start_matches('/'))
+}
+
 /// Whether `device` may ask: an answer to refuse it with, when not.
 fn refuse_unless_admitted(store: &Store, device: &[u8; 16], what: &str) -> Option<Vec<u8>> {
     match store.is_admitted(device) {
@@ -187,6 +227,7 @@ fn refuse_unless_admitted(store: &Store, device: &[u8; 16], what: &str) -> Optio
                 "HOME {what} refused device={} reason=not-admitted",
                 crate::address::to_hex(device)
             );
+            crate::events::home_refuse(device, what, "not-admitted");
             Some(wire::status_answer(Status::NotAdmitted))
         }
         Err(error) => {
@@ -1173,6 +1214,7 @@ fn join(
                 "HOME join refused device={} reason=token",
                 crate::address::to_hex(&device)
             );
+            crate::events::home_refuse(&device, "join", "token");
             wire::status_answer(Status::BadToken)
         }
         Ok(Redeemed::Expired { name }) => {
@@ -1180,6 +1222,7 @@ fn join(
                 "HOME join refused device={} reason=expired name={name:?}",
                 crate::address::to_hex(&device)
             );
+            crate::events::home_refuse(&device, "join", "expired");
             wire::status_answer(Status::BadToken)
         }
         Err(error) => {
@@ -2546,6 +2589,88 @@ mod tests {
             .archive_append(KIND_RECEIVED, &[n; 32], &[n; 120], 50, u64::MAX)
             .expect("append")
             .expect("new")
+    }
+
+    /// 1677, invariant 3 of `docs/src/concepts/loquax-mailbox-roles.md`:
+    /// a device that never paired gets `NotAdmitted` for every ask but
+    /// `/join`, well formed, malformed and on a path the mailbox does not
+    /// serve alike, and the store is the same after as before; the paired
+    /// device, the control, gets its answers from the same store.
+    #[test]
+    fn an_unpaired_device_gets_nothing_whatever_it_asks() {
+        use crate::home::about::{about_request, read_about_answer};
+        use crate::home::{
+            ABOUT_PATH, BOOKMARK_PATH, GROUP_ADD_PATH, GROUP_DELETE_PATH, GROUP_PATH, KEY_PATH,
+            MARK_PATH, MOVED_PATH, MOVE_PATH, PAGES_PATH, PEERSTATE_PATH, PETNAME_PATH, WATCH_PATH,
+        };
+        const STRANGER: [u8; 16] = [0x77; 16];
+        let (_dir, mut store) = store();
+        let home = home();
+        admitted(&mut store);
+        archive(&mut store, 1);
+        let state = |store: &Store| {
+            (
+                store.archive_newest().expect("newest"),
+                store.devices().expect("devices"),
+                store.outbox_open().expect("outbox"),
+            )
+        };
+        let before = state(&store);
+
+        let well_formed: [(&str, Vec<u8>); 15] = [
+            (SYNC_PATH, sync_request(0)),
+            (SEND_PATH, wire::send_request(&submission(9))),
+            (ABOUT_PATH, about_request()),
+            (PAGES_PATH, crate::home::pages::pages_request(0, None)),
+            (WATCH_PATH, wire::watch_request(0)),
+            (KEY_PATH, wire::key_request(&[0x66; 16], &[0x55; 64])),
+            (MOVE_PATH, wire::move_request(&TOKEN, 0)),
+            (MOVED_PATH, wire::move_request(&TOKEN, 0)),
+            (MARK_PATH, Vec::new()),
+            (PETNAME_PATH, Vec::new()),
+            (PEERSTATE_PATH, Vec::new()),
+            (GROUP_PATH, Vec::new()),
+            (GROUP_ADD_PATH, Vec::new()),
+            (GROUP_DELETE_PATH, Vec::new()),
+            (BOOKMARK_PATH, Vec::new()),
+        ];
+        for (path, data) in &well_formed {
+            for data in [data.clone(), vec![0xc1], Vec::new()] {
+                let answer = answer(&mut store, &home, path, &data, Some(STRANGER), 200.0);
+                assert_eq!(
+                    read_status(&answer.bytes),
+                    Ok(Status::NotAdmitted),
+                    "{path} answered a stranger"
+                );
+                assert!(answer.accepted.is_empty(), "{path} accepted a message");
+                assert_eq!(answer.watching, None, "{path} watched for a stranger");
+                assert_eq!(answer.learned, None, "{path} learned a key");
+            }
+        }
+        let unknown = answer(&mut store, &home, "/secret", &[], Some(STRANGER), 200.0);
+        assert_eq!(read_status(&unknown.bytes), Ok(Status::NotAdmitted));
+        assert_eq!(state(&store), before, "a stranger changed the store");
+
+        // The control: the paired device is answered from the same store.
+        assert_eq!(
+            sync(&mut store, Some(LAPTOP), 0).map(|page| page.entries.len()),
+            Ok(1)
+        );
+        let about = answer(
+            &mut store,
+            &home,
+            ABOUT_PATH,
+            &about_request(),
+            Some(LAPTOP),
+            200.0,
+        );
+        assert!(matches!(read_about_answer(&about.bytes), Ok(Ok(_))));
+        assert!(pages_ask(&mut store, LAPTOP, 0, None).is_ok());
+        let (sent, accepted) = send(&mut store, &home, LAPTOP, &submission(9), 200.0);
+        assert!(sent.is_ok() && accepted.is_some());
+        // A malformed request of the paired device is still malformed.
+        let malformed = answer(&mut store, &home, SYNC_PATH, &[0xc1], Some(LAPTOP), 200.0);
+        assert_eq!(read_status(&malformed.bytes), Ok(Status::Malformed));
     }
 
     /// 1642: `/about` names the mailbox, its machine and version, and
