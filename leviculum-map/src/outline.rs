@@ -38,8 +38,8 @@
 //! (16,422) the glaciated areas of `scalerank` 1 or less and
 //! [`SHELVES_50M`] (14,344) Antarctica's ice shelves, both in
 //! [`ice`]'s colour, and [`DISPUTED_50M`] (1,828) the disputed boundary
-//! lines, stroked dashed. [`draw_world`] draws them all in that order;
-//! [`draw`] is the land and the borders alone.
+//! lines, stroked dashed in [`disputed`]'s ink. [`draw_world`] draws them
+//! all in that order; [`draw`] is the land and the borders alone.
 //!
 //! The names the world view sets come from [`NAMES_50M`] (63,899 bytes,
 //! `LWN1`): populated places, country names, the seas, the mountain
@@ -275,6 +275,16 @@ pub fn ice(theme: MapTheme) -> Rgb565 {
     match theme {
         MapTheme::Light => Rgb565::new(29, 60, 30),
         MapTheme::Dark => Rgb565::new(12, 26, 16),
+    }
+}
+
+/// The disputed boundary lines' colour in `theme` (1712, 1733): a crimson that
+/// reads apart from the borders' mauve and the time zones' violet, so a
+/// dashed disputed line is not taken for a border with gaps.
+pub fn disputed(theme: MapTheme) -> Rgb565 {
+    match theme {
+        MapTheme::Light => Rgb565::new(176 >> 3, 40 >> 2, 72 >> 3),
+        MapTheme::Dark => Rgb565::new(236 >> 3, 112 >> 2, 128 >> 3),
     }
 }
 
@@ -640,7 +650,8 @@ where
 /// colours, which is cleared first: to water under [`Ink::Colour`], to the
 /// background under [`Ink::Lines`]. The layers go in the order the map
 /// reads them: the land, the lakes over it, the rivers, the ice and the
-/// shelves, then the borders and the disputed lines dashed over all.
+/// shelves, then the borders and the disputed lines dashed over all, in
+/// [`disputed`]'s ink under [`Ink::Colour`].
 /// Nothing is drawn past [`MAX_ZOOM`] but the land, which the drawer itself
 /// does not limit.
 pub fn draw_world<D>(
@@ -780,7 +791,10 @@ where
         world.disputed,
         place,
         Point::zero(),
-        colour,
+        match ink {
+            Ink::Colour => disputed(theme),
+            Ink::Lines(colour) => colour,
+        },
         Some(DASH),
         &mut filler,
         target,
@@ -790,9 +804,10 @@ where
     Ok(st)
 }
 
-/// Stroke the borders of `world` and its disputed lines, dashed, over a
-/// picture already drawn for `view` (1683): the M9's overview, whose
-/// region carries no boundary class. Nothing is filled or cleared, and
+/// Stroke the borders of `world` in `colour` and its disputed lines,
+/// dashed, in `dispute` ([`disputed`] for the theme), over a picture
+/// already drawn for `view` (1683): the M9's overview, whose region
+/// carries no boundary class. Nothing is filled or cleared, and
 /// `filler` is the caller's, so a firmware with fixed buffers sizes it
 /// itself. `at` is where the view's top-left lies on `target`, which is
 /// how a frontend draws the picture below its bars. Past [`MAX_ZOOM`], or
@@ -802,13 +817,21 @@ pub fn bounds<D>(
     view: &Viewport,
     at: Point,
     colour: Rgb565,
+    dispute: Rgb565,
     filler: &mut Filler<'_, '_>,
     target: &mut D,
 ) -> Result<OutlineStats, D::Error>
 where
     D: Coverage<Color = Rgb565>,
 {
-    bounds_at(world, Place::Flat(view), at, colour, filler, target)
+    bounds_at(
+        world,
+        Place::Flat(view),
+        at,
+        (colour, dispute),
+        filler,
+        target,
+    )
 }
 
 /// [`bounds`] through the blended world projection (1710): the time zone
@@ -818,20 +841,28 @@ pub fn bounds_view<D>(
     blend: &Blend,
     at: Point,
     colour: Rgb565,
+    dispute: Rgb565,
     filler: &mut Filler<'_, '_>,
     target: &mut D,
 ) -> Result<OutlineStats, D::Error>
 where
     D: Coverage<Color = Rgb565>,
 {
-    bounds_at(world, Place::Curved(blend), at, colour, filler, target)
+    bounds_at(
+        world,
+        Place::Curved(blend),
+        at,
+        (colour, dispute),
+        filler,
+        target,
+    )
 }
 
 fn bounds_at<D>(
     world: &World,
     place: Place<'_>,
     at: Point,
-    colour: Rgb565,
+    (colour, dispute): (Rgb565, Rgb565),
     filler: &mut Filler<'_, '_>,
     target: &mut D,
 ) -> Result<OutlineStats, D::Error>
@@ -853,7 +884,7 @@ where
             world.disputed,
             place,
             at,
-            colour,
+            dispute,
             Some(DASH),
             filler,
             target,

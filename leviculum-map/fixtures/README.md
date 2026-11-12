@@ -165,8 +165,9 @@ The filters are the script's `--max-scalerank`: the whole river file is
 shows the features a `scalerank` of 4 or 1 reaches. The lakes and the
 shelves are small enough whole. The disputed lines are the boundaries
 Natural Earth marks as disputed; the drawer strokes them dashed (4 pixels
-on, 3 off, `outline::DASH_ON`/`DASH_OFF`), so they read apart from the
-borders without a legend.
+on, 3 off, `outline::DASH_ON`/`DASH_OFF`) and, since 1733, in their own
+crimson ink (`outline::disputed`), so they read apart from the borders
+without a legend.
 
 ```sh
 scripts/bake-world-outline.py ne_50m_lakes.geojson \

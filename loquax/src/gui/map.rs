@@ -526,6 +526,103 @@ pub(super) mod tests {
         );
     }
 
+    /// The disputed lines over Kashmir at z5 (1733): the window's world
+    /// view, where no region lies, strokes Natural Earth's disputed
+    /// boundary lines in their own ink, a crimson apart from the borders'
+    /// mauve ([`leviculum_map::outline::disputed`]), and dashed: the
+    /// pixels in that ink fall into many separate pieces, where a line
+    /// drawn whole would be one or two. Pinned as the golden
+    /// `gui-world-window-kashmir-z5.png`. The control: no pixel of the
+    /// picture is in the disputed ink where the view lies over the
+    /// Atlantic, which has no disputed line.
+    #[test]
+    fn the_world_view_dashes_the_disputed_lines_over_kashmir_at_z5() {
+        use leviculum_mapfill::frame::rgb888;
+        let dir = tempfile::tempdir().expect("tmp");
+        let shot_at = |lat: f64, lon: f64| {
+            let mut frames = Frames::new(Maps::new(Some(dir.path().to_path_buf())));
+            frames
+                .frame(&Ask {
+                    view: ExactView::new(
+                        project(LatLon::from_degrees(lat, lon)),
+                        5 * MILLI,
+                        480,
+                        320,
+                    ),
+                    margin: (0, 0),
+                    moving: false,
+                    style: Style::SCREEN,
+                    scale: 1.0,
+                    pins: &[],
+                    selected: None,
+                    zooms: (0, 20),
+                    draw_pins: false,
+                    tracks: &[],
+                    radar: None,
+                    measure: Some(measure),
+                    now_ms: None,
+                    scaled_while_moving: false,
+                    time_zones: None,
+                })
+                .rgba
+        };
+        let theme = Style::SCREEN.theme;
+        let ink = rgb888(leviculum_map::outline::disputed(theme));
+        assert_ne!(ink, rgb888(theme.palette().border), "the ink is its own");
+        let (w, h) = (480usize, 320usize);
+        let inked = |rgba: &[u8]| -> Vec<bool> { rgba.chunks(4).map(|p| p[..3] == ink).collect() };
+        let rgba = shot_at(34.5, 76.0);
+        let on = inked(&rgba);
+        let pixels = on.iter().filter(|&&b| b).count();
+        assert!(pixels > 100, "{pixels} pixels in the disputed ink");
+        // The pieces, 8-connected.
+        let mut seen = vec![false; w * h];
+        let mut pieces = 0;
+        for start in 0..w * h {
+            if !on[start] || seen[start] {
+                continue;
+            }
+            pieces += 1;
+            let mut stack = vec![start];
+            seen[start] = true;
+            while let Some(i) = stack.pop() {
+                let (x, y) = ((i % w) as i64, (i / w) as i64);
+                for (dx, dy) in [
+                    (-1, -1),
+                    (0, -1),
+                    (1, -1),
+                    (-1, 0),
+                    (1, 0),
+                    (-1, 1),
+                    (0, 1),
+                    (1, 1),
+                ] {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if !(0..w as i64).contains(&nx) || !(0..h as i64).contains(&ny) {
+                        continue;
+                    }
+                    let j = ny as usize * w + nx as usize;
+                    if on[j] && !seen[j] {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+        }
+        assert!(
+            pieces >= 20,
+            "{pieces} pieces of {pixels} pixels: not dashed"
+        );
+        let rgb: Vec<u8> = rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        same_as("gui-world-window-kashmir-z5.png", &rgb, 480, 320);
+        let sea = shot_at(30.0, -40.0);
+        assert_eq!(
+            inked(&sea).iter().filter(|&&b| b).count(),
+            0,
+            "ink over the Atlantic"
+        );
+    }
+
     /// The six track scenes (1385) through the window's own frames over
     /// the Florence fixture, 480 x 320, the pins drawn in: each the
     /// golden `gui-tracks-<name>.png`, the park also in the dark table.

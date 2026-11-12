@@ -928,6 +928,7 @@ impl Painter {
                 view,
                 Point::new(0, top),
                 style.theme.palette().border,
+                outline::disputed(style.theme),
                 &mut filler,
                 &mut target,
             );
@@ -955,6 +956,7 @@ impl Painter {
             &timezones::BOUNDARIES,
             view,
             Point::new(0, top),
+            ZONE_LINE,
             ZONE_LINE,
             &mut filler,
             &mut target,

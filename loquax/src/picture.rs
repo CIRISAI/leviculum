@@ -602,6 +602,7 @@ impl Painter {
                 blend,
                 Point::zero(),
                 crate::zoneclock::line_colour(style.theme),
+                crate::zoneclock::line_colour(style.theme),
                 &mut filler,
                 frame,
             );
@@ -680,6 +681,7 @@ impl Painter {
                 &timezones::BOUNDARIES,
                 view,
                 Point::zero(),
+                crate::zoneclock::line_colour(style.theme),
                 crate::zoneclock::line_colour(style.theme),
                 &mut filler,
                 frame,

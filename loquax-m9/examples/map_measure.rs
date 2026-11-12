@@ -302,6 +302,7 @@ fn border_row(view: &Viewport) -> (f64, leviculum_map::outline::OutlineStats) {
                 view,
                 Point::zero(),
                 colour,
+                leviculum_map::outline::disputed(map::style().theme),
                 &mut filler,
                 &mut frame,
             )

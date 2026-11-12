@@ -128,10 +128,10 @@ fn the_outline_table_is_natural_earth_50m() {
 }
 
 /// The world view's layers (1683) over the land: central Europe at z2
-/// draws its lakes and rivers and the Alps' ice over the earth, the
-/// disputed lines dashed beside the borders; past the outline's deepest
-/// zoom none of them is drawn, and no lake lands on the water it does
-/// not own.
+/// draws its lakes and rivers, meets the Arctic's ice (Greenland's fills
+/// at z2), and draws the disputed lines dashed beside the borders in
+/// their own ink; past the outline's deepest zoom none of them is drawn,
+/// and no lake lands on the water it does not own.
 #[test]
 fn the_world_view_draws_its_layers_over_the_land() {
     use leviculum_map::outline::WORLD;
@@ -144,8 +144,11 @@ fn the_world_view_draws_its_layers_over_the_land() {
     assert!(st.lakes > 0 && st.lake.pixels > 0, "{st:?}");
     assert!(st.rivers > 0 && st.river.pixels > 0, "{st:?}");
     assert!(st.ice > 0, "{st:?}");
-    // The Alps' ice is a sliver at z2, drawn but below a pixel; the ice
-    // sheets over Greenland are what fills.
+    // The glaciated areas are baked at `scalerank <= 1` (fixtures README):
+    // the Alps' and Iceland's glaciers are not in the table, so the z2
+    // view over Europe meets only the bounds of the Arctic's sheets and
+    // fills no pixel of ice (1733: measured at z2 to z6 over the Alps,
+    // Iceland and Norway). The ice sheet over Greenland is what fills.
     let icy = Viewport::new(project(LatLon::from_degrees(60.0, -45.0)), 2, 240, 160);
     let mut ifb = vec![0u16; 240 * 160];
     let mut frame = Frame::new(&mut ifb, 240, 160).expect("frame");
@@ -160,16 +163,26 @@ fn the_world_view_draws_its_layers_over_the_land() {
         "the Alps' disputed lines: {st:?}"
     );
     assert!(st.borders > 0 && st.border.pixels > 0, "{st:?}");
-    // Every pixel is one the layers know: water, land, a lake, ice or a
-    // border line (the disputed ones stroked in the same colour, dashed).
-    // A colour none of them paints means a layer painted outside its own.
+    // Every pixel is one the layers know: water, land, a lake, ice, a
+    // border line or a disputed line, which has its own ink (1733, as
+    // 1683's first form of this test asked of its dashes). A colour none
+    // of them paints means a layer painted outside its own.
     let water = outline::water(MapTheme::Light);
     let ice = outline::ice(MapTheme::Light);
+    let disputed = outline::disputed(MapTheme::Light);
+    assert!(
+        ![water, ice, BACKGROUND, BORDER].contains(&disputed),
+        "the disputed ink is a layer's own"
+    );
     let mut known = 0;
-    for colour in [water, ice, BACKGROUND, BORDER] {
+    for colour in [water, ice, BACKGROUND, BORDER, disputed] {
         known += count(&mut fb, 240, 160, colour);
     }
     assert_eq!(known, 240 * 160, "a pixel no layer paints");
+    assert!(
+        count(&mut fb, 240, 160, disputed) > 0,
+        "no pixel in the disputed lines' ink"
+    );
     // The control: past the deepest zoom only the land is drawn.
     let deep = Viewport::new(
         project(LatLon::from_degrees(50.0, 10.0)),
