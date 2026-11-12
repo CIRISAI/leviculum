@@ -28,6 +28,15 @@ const TAG_GDAL_NODATA: u16 = 42113;
 /// GeoKey GTRasterTypeGeoKey: 1 pixel is area, 2 pixel is point.
 const KEY_RASTER_TYPE: u16 = 1025;
 
+/// The largest cell edge this reader accepts, in pixels: a GLO-30 cell is
+/// at most 3600 x 3600 (1" spacing over 1°; the columns thin out towards
+/// the poles, the rows never exceed 3600). Anything larger is not a GLO-30
+/// cell, and `width * height` of a hostile header could wrap.
+pub const MAX_CELL_EDGE: u64 = 3600;
+/// The largest internal tile edge accepted: GLO-30's COGs are tiled
+/// 1024 x 1024.
+pub const MAX_TILE_EDGE: u64 = 1024;
+
 /// One decoded source cell: a grid of heights and where its pixels sit.
 #[derive(Debug)]
 pub struct Raster {
@@ -36,8 +45,28 @@ pub struct Raster {
     /// Rows.
     pub height: usize,
     /// Row-major heights in metres, north row first; no-data and
-    /// non-finite values already replaced by 0 (sea level).
+    /// non-finite values already replaced by 0 (sea level) and counted in
+    /// [`Raster::nodata`].
     pub data: Vec<f32>,
+    /// Longitude of pixel (0, 0)'s centre, degrees.
+    pub lon0: f64,
+    /// Latitude of pixel (0, 0)'s centre, degrees.
+    pub lat0: f64,
+    /// Degrees per column.
+    pub dx: f64,
+    /// Degrees per row (positive; rows run south).
+    pub dy: f64,
+    /// How many pixels were no-data or not finite (written as 0).
+    pub nodata: u64,
+}
+
+/// Where a cell's pixels sit, from its header alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Georef {
+    /// Columns.
+    pub width: usize,
+    /// Rows.
+    pub height: usize,
     /// Longitude of pixel (0, 0)'s centre, degrees.
     pub lon0: f64,
     /// Latitude of pixel (0, 0)'s centre, degrees.
@@ -205,41 +234,46 @@ fn unpredict_row(row: &mut [u8], out: &mut [f32]) {
     }
 }
 
-/// Decode a GLO-30 style GeoTIFF into a [`Raster`].
-pub fn decode(file: &[u8]) -> Res<Raster> {
-    let ifd = Ifd::read(file)?;
-    let width = ifd.need(TAG_WIDTH, "width")? as usize;
-    let height = ifd.need(TAG_HEIGHT, "height")? as usize;
-    if ifd.uint(TAG_BITS)?.unwrap_or(1) != 32 || ifd.uint(TAG_SAMPLE_FORMAT)?.unwrap_or(1) != 3 {
-        return Err(err("not 32-bit floating point samples"));
+/// Checked image and tile dimensions against [`MAX_CELL_EDGE`] and
+/// [`MAX_TILE_EDGE`]: (width, height, tile width, tile height).
+fn dimensions(ifd: &Ifd) -> Res<(usize, usize, usize, usize)> {
+    let width = ifd.need(TAG_WIDTH, "width")?;
+    let height = ifd.need(TAG_HEIGHT, "height")?;
+    let tw = ifd.need(TAG_TILE_WIDTH, "tile width")?;
+    let th = ifd.need(TAG_TILE_HEIGHT, "tile height")?;
+    if width > MAX_CELL_EDGE || height > MAX_CELL_EDGE {
+        return Err(err(&format!(
+            "cell claims {width} x {height} pixels, over the GLO-30 bound of {MAX_CELL_EDGE} a side"
+        )));
     }
-    if ifd.uint(TAG_SAMPLES)?.unwrap_or(1) != 1 || ifd.uint(TAG_PLANAR)?.unwrap_or(1) != 1 {
-        return Err(err("not a single band"));
+    if tw > MAX_TILE_EDGE || th > MAX_TILE_EDGE {
+        return Err(err(&format!(
+            "cell claims {tw} x {th} pixel tiles, over the GLO-30 bound of {MAX_TILE_EDGE} a side"
+        )));
     }
-    let compression = ifd.uint(TAG_COMPRESSION)?.unwrap_or(1);
-    if !matches!(compression, 1 | 8 | 32946) {
-        return Err(err(&format!("compression {compression}")));
-    }
-    let predictor = ifd.uint(TAG_PREDICTOR)?.unwrap_or(1);
-    if !matches!(predictor, 1 | 3) {
-        return Err(err(&format!("predictor {predictor}")));
-    }
-    let tw = ifd.need(TAG_TILE_WIDTH, "tile width")? as usize;
-    let th = ifd.need(TAG_TILE_HEIGHT, "tile height")? as usize;
-    let offsets = ifd
-        .uints(TAG_TILE_OFFSETS)?
-        .ok_or_else(|| err("not tiled"))?;
-    let counts = ifd
-        .uints(TAG_TILE_COUNTS)?
-        .ok_or_else(|| err("no tile byte counts"))?;
     if tw == 0 || th == 0 || width == 0 || height == 0 {
         return Err(err("empty image"));
     }
-    let across = width.div_ceil(tw);
-    let down = height.div_ceil(th);
-    if offsets.len() != across * down || counts.len() != offsets.len() {
-        return Err(err("tile count does not match the image"));
+    // Inside the bounds above both products fit any usize; checked anyway
+    // so the bound and the arithmetic cannot drift apart.
+    let pixels = width.checked_mul(height);
+    let tile_bytes = tw.checked_mul(th).and_then(|n| n.checked_mul(4));
+    if pixels.is_none() || tile_bytes.is_none() {
+        return Err(err("cell dimensions overflow"));
     }
+    Ok((width as usize, height as usize, tw as usize, th as usize))
+}
+
+/// Where the pixels of the cell whose header `file` starts with sit: the
+/// first IFD's dimensions, pixel scale, tiepoint and raster type, without
+/// a tile. A file cut short after its IFD values reads.
+pub fn georef(file: &[u8]) -> Res<Georef> {
+    let ifd = Ifd::read(file)?;
+    georef_of(&ifd)
+}
+
+fn georef_of(ifd: &Ifd) -> Res<Georef> {
+    let (width, height, _, _) = dimensions(ifd)?;
     let scale = ifd
         .doubles(TAG_PIXEL_SCALE)?
         .ok_or_else(|| err("no pixel scale"))?;
@@ -260,8 +294,48 @@ pub fn decode(file: &[u8]) -> Res<Raster> {
     }
     let (dx, dy) = (scale[0], scale[1]);
     let shift = if point { 0.0 } else { 0.5 };
-    let lon0 = tie[3] + (shift - tie[0]) * dx;
-    let lat0 = tie[4] - (shift - tie[1]) * dy;
+    Ok(Georef {
+        width,
+        height,
+        lon0: tie[3] + (shift - tie[0]) * dx,
+        lat0: tie[4] - (shift - tie[1]) * dy,
+        dx,
+        dy,
+    })
+}
+
+/// Decode a GLO-30 style GeoTIFF into a [`Raster`].
+pub fn decode(file: &[u8]) -> Res<Raster> {
+    let ifd = Ifd::read(file)?;
+    let (width, height, tw, th) = dimensions(&ifd)?;
+    if ifd.uint(TAG_BITS)?.unwrap_or(1) != 32 || ifd.uint(TAG_SAMPLE_FORMAT)?.unwrap_or(1) != 3 {
+        return Err(err("not 32-bit floating point samples"));
+    }
+    if ifd.uint(TAG_SAMPLES)?.unwrap_or(1) != 1 || ifd.uint(TAG_PLANAR)?.unwrap_or(1) != 1 {
+        return Err(err("not a single band"));
+    }
+    let compression = ifd.uint(TAG_COMPRESSION)?.unwrap_or(1);
+    if !matches!(compression, 1 | 8 | 32946) {
+        return Err(err(&format!("compression {compression}")));
+    }
+    let predictor = ifd.uint(TAG_PREDICTOR)?.unwrap_or(1);
+    if !matches!(predictor, 1 | 3) {
+        return Err(err(&format!("predictor {predictor}")));
+    }
+    let offsets = ifd
+        .uints(TAG_TILE_OFFSETS)?
+        .ok_or_else(|| err("not tiled"))?;
+    let counts = ifd
+        .uints(TAG_TILE_COUNTS)?
+        .ok_or_else(|| err("no tile byte counts"))?;
+    let across = width.div_ceil(tw);
+    let down = height.div_ceil(th);
+    if offsets.len() != across * down || counts.len() != offsets.len() {
+        return Err(err("tile count does not match the image"));
+    }
+    let Georef {
+        lon0, lat0, dx, dy, ..
+    } = georef_of(&ifd)?;
     let nodata = ifd
         .ascii(TAG_GDAL_NODATA)?
         .and_then(|s| s.parse::<f32>().ok());
@@ -308,9 +382,11 @@ pub fn decode(file: &[u8]) -> Res<Raster> {
             data[y * width + x0..y * width + x0 + w].copy_from_slice(&row[..w]);
         }
     }
+    let mut missing = 0u64;
     for v in &mut data {
         if !v.is_finite() || Some(*v) == nodata {
             *v = 0.0;
+            missing += 1;
         }
     }
     Ok(Raster {
@@ -321,6 +397,7 @@ pub fn decode(file: &[u8]) -> Res<Raster> {
         lat0,
         dx,
         dy,
+        nodata: missing,
     })
 }
 

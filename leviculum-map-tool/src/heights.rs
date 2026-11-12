@@ -11,10 +11,18 @@
 //! the box's width, 52 MB a cell decoded.
 //!
 //! Each height is the source bilinearly sampled at the centre of its z12
-//! Web Mercator pixel and rounded to whole metres. Where GLO-30 has no
-//! cell (open sea, as the distribution says) the height is 0. The output
-//! depends only on the source bytes, the box and the zooms: the same
-//! input gives the same bytes, whatever the thread count.
+//! Web Mercator pixel and rounded to whole metres. The pixel centres come
+//! from `leviculum_map::mercator`, the projection the map draws with: its
+//! degrees x 10^7 are 1.1 cm, under a two-thousandth of a GLO-30 pixel, so
+//! the cut needs no second, f64 projection of its own.
+//!
+//! Where GLO-30 has no cell the distribution says it is open sea, but it
+//! also withholds some land cells; so a cut that meets an absent cell
+//! fails, naming every absent cell of the box, unless
+//! [`HeightOptions::absent_is_sea`] accepts them as 0 m. No-data pixels
+//! inside a cell are written as 0 m and counted ([`HeightStats::nodata`]).
+//! The output depends only on the source bytes, the box and the zooms: the
+//! same input gives the same bytes, whatever the thread count.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -25,6 +33,7 @@ use leviculum_map::elevation::{
     heights_to_planes, write_block, write_directory, DirectoryInfo, TILE_BYTES, TILE_CELLS,
     TILE_EDGE,
 };
+use leviculum_map::mercator;
 use leviculum_mapcut::Res;
 
 use crate::geotiff::{self, Raster};
@@ -65,6 +74,9 @@ pub trait DemSource: Sync {
     /// The GeoTIFF bytes of the cell whose south-west corner is (lat, lon),
     /// or `None` where the source has no cell (open sea).
     fn fetch(&self, lat: i32, lon: i32) -> Res<Option<Vec<u8>>>;
+
+    /// Whether the source has the cell, without fetching it whole.
+    fn has(&self, lat: i32, lon: i32) -> Res<bool>;
 }
 
 /// Cells in a local directory, as `<name>.tif` or `<name>/<name>.tif`.
@@ -84,6 +96,12 @@ impl DemSource for DirSource {
             }
         }
         Ok(None)
+    }
+
+    fn has(&self, lat: i32, lon: i32) -> Res<bool> {
+        let name = glo30_name(lat, lon);
+        Ok(self.0.join(format!("{name}.tif")).is_file()
+            || self.0.join(&name).join(format!("{name}.tif")).is_file())
     }
 }
 
@@ -126,6 +144,16 @@ impl DemSource for HttpSource {
             Err(e) => Err(format!("{url}: {e}").into()),
         }
     }
+
+    fn has(&self, lat: i32, lon: i32) -> Res<bool> {
+        let name = glo30_name(lat, lon);
+        let url = format!("{}/{name}/{name}.tif", self.base);
+        match self.agent.head(&url).call() {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::StatusCode(404)) => Ok(false),
+            Err(e) => Err(format!("{url}: {e}").into()),
+        }
+    }
 }
 
 /// What to cut.
@@ -141,6 +169,10 @@ pub struct HeightOptions {
     pub level: i32,
     /// Worker threads; the output does not depend on it.
     pub threads: usize,
+    /// Accept cells the source does not have as sea (0 m). Off, a cut
+    /// meeting one fails before it writes a byte, naming every absent
+    /// cell; GLO-30 withholds some land cells, which would read as sea.
+    pub absent_is_sea: bool,
 }
 
 /// What the cut did.
@@ -154,8 +186,11 @@ pub struct HeightStats {
     pub bytes: u64,
     /// Source cells fetched.
     pub cells: usize,
-    /// Source cells the source does not have (taken as sea level).
-    pub absent: usize,
+    /// The names of the cells the box needs that the source does not
+    /// have, taken as sea level (only with [`HeightOptions::absent_is_sea`]).
+    pub absent: Vec<String>,
+    /// No-data or non-finite pixels in the fetched cells, written as 0 m.
+    pub nodata: u64,
     /// The most source cells held at once.
     pub peak_cells: usize,
     /// The bytes of the largest source cell fetched (the most a fetch holds
@@ -170,24 +205,45 @@ pub struct HeightStats {
 
 const EARTH_CIRCUMFERENCE_KM: f64 = 40_075.016_686;
 
-fn lon_of(px: f64, world: f64) -> f64 {
-    px / world * 360.0 - 180.0
+/// The world is 2^32 units of `leviculum_map::mercator` around.
+const WORLD_UNITS: u64 = 1 << 32;
+
+/// The longitude, degrees, of world x `v` (2^32 units, `v` up to the
+/// world's east edge inclusive: 180).
+fn lon_at(v: u64) -> f64 {
+    if v >= WORLD_UNITS {
+        return 180.0;
+    }
+    f64::from(mercator::lon_of_x(v as u32)) / 1e7
 }
 
-fn lat_of(py: f64, world: f64) -> f64 {
-    libm::atan(libm::sinh(core::f64::consts::PI * (1.0 - 2.0 * py / world))).to_degrees()
+/// The latitude, degrees, of world y `v` (2^32 units, clamped to the
+/// projection's south edge).
+fn lat_at(v: u64) -> f64 {
+    f64::from(mercator::lat_of_y(v.min(WORLD_UNITS - 1) as u32)) / 1e7
 }
 
+/// World units per tile at zoom `z`, and per pixel.
+fn tile_units(z: u8) -> u64 {
+    WORLD_UNITS >> z
+}
+
+/// The tile at zoom `z` holding a longitude; 180 is the last column.
 fn tile_x(lon: f64, z: u8) -> u32 {
-    let n = f64::from(1u32 << z);
-    (((lon + 180.0) / 360.0 * n).floor()).clamp(0.0, n - 1.0) as u32
+    let x = if lon >= 180.0 {
+        WORLD_UNITS - 1
+    } else {
+        u64::from(mercator::x_of_lon(
+            mercator::LatLon::from_degrees(0.0, lon).lon_e7,
+        ))
+    };
+    (x / tile_units(z)) as u32
 }
 
+/// The tile at zoom `z` holding a latitude, clamped to the projection.
 fn tile_y(lat: f64, z: u8) -> u32 {
-    let n = f64::from(1u32 << z);
-    let r = lat.to_radians();
-    let y = (1.0 - libm::log(libm::tan(r) + 1.0 / libm::cos(r)) / core::f64::consts::PI) / 2.0 * n;
-    y.floor().clamp(0.0, n - 1.0) as u32
+    let y = mercator::y_of_lat(mercator::LatLon::from_degrees(lat, 0.0).lat_e7);
+    (u64::from(y) / tile_units(z)) as u32
 }
 
 /// The decoded cells a block row needs; `None` for a cell the source does
@@ -246,13 +302,15 @@ impl Mosaic {
 
 /// One tile's heights, sampled from the mosaic.
 fn sample_tile(mosaic: &Mosaic, zoom: u8, tx: u32, ty: u32) -> Vec<i16> {
-    let world = f64::from(TILE_EDGE as u32) * f64::from(1u32 << zoom);
+    let pixel = tile_units(zoom) / TILE_EDGE as u64;
+    // The centre of pixel n of the tile row or column starting at `start`.
+    let centre = |start: u64, n: usize| start + n as u64 * pixel + pixel / 2;
     let mut out = vec![0i16; TILE_CELLS];
     let lons: Vec<f64> = (0..TILE_EDGE)
-        .map(|c| lon_of(f64::from(tx) * TILE_EDGE as f64 + c as f64 + 0.5, world))
+        .map(|c| lon_at(centre(u64::from(tx) * tile_units(zoom), c)))
         .collect();
     for r in 0..TILE_EDGE {
-        let lat = lat_of(f64::from(ty) * TILE_EDGE as f64 + r as f64 + 0.5, world);
+        let lat = lat_at(centre(u64::from(ty) * tile_units(zoom), r));
         for (c, &lon) in lons.iter().enumerate() {
             let h = mosaic.sample(lon, lat).round();
             out[r * TILE_EDGE + c] = h.clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
@@ -296,9 +354,20 @@ fn cells_for(north: f64, south: f64, west: f64, east: f64) -> Vec<(i32, i32)> {
     out
 }
 
+/// The cells a block row needs: block row `y` at the block zoom (`block`
+/// world units a block), columns `x0..=x1`.
+fn row_cells(block: u64, x0: u32, x1: u32, y: u32) -> Vec<(i32, i32)> {
+    let north = lat_at(u64::from(y) * block);
+    let south = lat_at(u64::from(y + 1) * block);
+    let west = lon_at(u64::from(x0) * block);
+    let east = lon_at(u64::from(x1 + 1) * block);
+    cells_for(north, south, west, east)
+}
+
 /// Cut the box into a height file written to `out`: the directory piece,
 /// then one block piece per block meeting the box, north to south, west
-/// to east.
+/// to east. Every cell the box needs is probed first; an absent one fails
+/// the cut before a byte is written, unless `options.absent_is_sea`.
 pub fn cut_heights(
     source: &dyn DemSource,
     options: &HeightOptions,
@@ -312,6 +381,27 @@ pub fn cut_heights(
     let tz = options.tile_zoom;
     let (x0, x1) = (tile_x(west, bz), tile_x(east, bz));
     let (y0, y1) = (tile_y(north, bz), tile_y(south, bz));
+    let block = tile_units(bz);
+
+    // Every cell the box needs, probed before a byte is written.
+    let mut absent = Vec::new();
+    for y in y0..=y1 {
+        for (la, lo) in row_cells(block, x0, x1, y) {
+            let name = glo30_name(la, lo);
+            if !absent.contains(&name) && !source.has(la, lo)? {
+                absent.push(name);
+            }
+        }
+    }
+    if !absent.is_empty() && !options.absent_is_sea {
+        return Err(format!(
+            "the source has no cell {} (open sea, or land the source withholds); \
+             accept them as 0 m with --absent-is-sea",
+            absent.join(", ")
+        )
+        .into());
+    }
+
     let mut blocks = Vec::new();
     for y in y0..=y1 {
         for x in x0..=x1 {
@@ -333,6 +423,7 @@ pub fn cut_heights(
     out.write_all(&directory)?;
     let mut stats = HeightStats {
         bytes: directory.len() as u64,
+        absent,
         ..HeightStats::default()
     };
 
@@ -343,16 +434,11 @@ pub fn cut_heights(
     };
     let threads = options.threads.max(1);
     for y in y0..=y1 {
-        // Pixel centres of this block row, with half a pixel's margin.
-        let north_lat = lat_of(f64::from(y), block_world);
-        let south_lat = lat_of(f64::from(y + 1), block_world);
-        let west_lon = lon_of(f64::from(x0), block_world);
-        let east_lon = lon_of(f64::from(x1 + 1), block_world);
-        let mid = lat_of(f64::from(y) + 0.5, block_world).to_radians();
+        let mid = lat_at(u64::from(y) * block + block / 2).to_radians();
         let edge_km = EARTH_CIRCUMFERENCE_KM * libm::cos(mid) / block_world;
         stats.area_km2 += edge_km * edge_km * f64::from(x1 - x0 + 1);
 
-        let needed = cells_for(north_lat, south_lat, west_lon, east_lon);
+        let needed = row_cells(block, x0, x1, y);
         mosaic.cells.retain(|k, _| needed.contains(k));
         for &(la, lo) in &needed {
             if mosaic.cells.contains_key(&(la, lo)) {
@@ -362,13 +448,21 @@ pub fn cut_heights(
                 Some(bytes) => {
                     stats.cells += 1;
                     stats.largest_fetch = stats.largest_fetch.max(bytes.len());
-                    Some(
-                        geotiff::decode(&bytes)
-                            .map_err(|e| format!("{}: {e}", glo30_name(la, lo)))?,
-                    )
+                    let raster = geotiff::decode(&bytes)
+                        .map_err(|e| format!("{}: {e}", glo30_name(la, lo)))?;
+                    stats.nodata += raster.nodata;
+                    Some(raster)
                 }
                 None => {
-                    stats.absent += 1;
+                    // Probed above; a cell that vanished since is absent
+                    // all the same, and only accepted as sea likewise.
+                    let name = glo30_name(la, lo);
+                    if !options.absent_is_sea {
+                        return Err(format!("the source has no cell {name}").into());
+                    }
+                    if !stats.absent.contains(&name) {
+                        stats.absent.push(name);
+                    }
                     None
                 }
             };

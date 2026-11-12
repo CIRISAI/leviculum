@@ -40,6 +40,7 @@ fn write_cell(dir: &Path, lat: i32, lon: i32) {
         lat0,
         dx: d,
         dy: d,
+        nodata: 0,
     };
     let bytes = geotiff::encode(&raster, 128);
     std::fs::write(dir.join(format!("{}.tif", glo30_name(lat, lon))), bytes).expect("write cell");
@@ -60,6 +61,7 @@ fn options(bbox: [f64; 4], threads: usize) -> HeightOptions {
         block_zoom: 11,
         level: 19,
         threads,
+        absent_is_sea: false,
     }
 }
 
@@ -96,6 +98,7 @@ fn a_geotiff_round_trips_through_the_glo30_layout() {
         lat0: 32.0,
         dx: 1.0 / 3600.0,
         dy: 1.0 / 3600.0,
+        nodata: 0,
     };
     let back = geotiff::decode(&geotiff::encode(&raster, 128)).expect("decode");
     assert_eq!((back.width, back.height), (300, 200));
@@ -157,9 +160,27 @@ fn the_cut_samples_the_surface_across_cell_edges() {
 }
 
 #[test]
-fn a_missing_cell_is_sea_level() {
+fn a_missing_cell_is_sea_level_when_accepted_and_named() {
     let dir = cells(&[]);
-    let file = cut(dir.path(), [3.0, 50.0, 3.001, 50.001], 1);
+    let mut file = Vec::new();
+    let stats = cut_heights(
+        &DirSource(dir.path().to_owned()),
+        &HeightOptions {
+            absent_is_sea: true,
+            ..options([3.0, 50.0, 3.001, 50.001], 1)
+        },
+        &mut file,
+    )
+    .expect("cut with absent cells accepted");
+    // The box's z11 block reaches over four cells; every one is named.
+    assert_eq!(
+        stats.absent,
+        [(49, 2), (49, 3), (50, 2), (50, 3)]
+            .iter()
+            .map(|&(lat, lon)| glo30_name(lat, lon))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(stats.cells, 0);
     let (_, ranges) = split(&file).expect("split");
     let block = Block::parse(&file[ranges[1].clone()]).expect("block");
     let (bx, by) = block.position();
@@ -170,4 +191,159 @@ fn a_missing_cell_is_sea_level() {
         .heights(&mut decoder, 11, bx, by, &mut out, &mut scratch)
         .expect("derive");
     assert!(out.iter().all(|&h| h == 0));
+}
+
+/// Rewrite the IFD entry of `tag` in an [`geotiff::encode`]d file (IFD at
+/// byte 8) as one LONG holding `value`.
+fn patch_long(file: &mut [u8], tag: u16, value: u32) {
+    let count = usize::from(u16::from_le_bytes([file[8], file[9]]));
+    for n in 0..count {
+        let e = 10 + 12 * n;
+        if u16::from_le_bytes([file[e], file[e + 1]]) == tag {
+            file[e + 2..e + 4].copy_from_slice(&4u16.to_le_bytes());
+            file[e + 4..e + 8].copy_from_slice(&1u32.to_le_bytes());
+            file[e + 8..e + 12].copy_from_slice(&value.to_le_bytes());
+            return;
+        }
+    }
+    panic!("tag {tag} not in the IFD");
+}
+
+/// The audit of 1740 (order 1758): a cell whose header claims huge
+/// dimensions overflowed `width * height` (a panic in a debug build, a
+/// wrapped allocation in release). It is refused with an error instead.
+#[test]
+fn audit_a_cell_claiming_huge_dimensions_is_refused_not_a_panic() {
+    let raster = Raster {
+        width: 100,
+        height: 100,
+        data: vec![1.0; 10_000],
+        lon0: -4.0,
+        lat0: 32.0,
+        dx: 1.0 / 3600.0,
+        dy: 1.0 / 3600.0,
+        nodata: 0,
+    };
+    let mut file = geotiff::encode(&raster, 128);
+    for tag in [256u16, 257, 322, 323] {
+        patch_long(&mut file, tag, 0xFFFF_FFF0);
+    }
+    let got = std::panic::catch_unwind(|| geotiff::decode(&file).map(|r| r.width));
+    match got {
+        Ok(Err(e)) => assert!(e.to_string().contains("4294967280"), "{e}"),
+        Ok(Ok(w)) => panic!("decoded a {w} pixel wide cell"),
+        Err(_) => panic!("decode panicked"),
+    }
+}
+
+/// The audit of 1740 (order 1758): a land cell the source does not have
+/// was cut as 0 m without a word. The cut now fails, naming the cell.
+#[test]
+fn a_missing_cell_is_refused_by_name() {
+    let dir = cells(&[]);
+    let mut out = Vec::new();
+    let got = cut_heights(
+        &DirSource(dir.path().to_owned()),
+        &options([3.0, 50.0, 3.001, 50.001], 1),
+        &mut out,
+    );
+    let message = got.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(
+        message.contains(&glo30_name(50, 3)),
+        "the absent cell is named: {message:?}"
+    );
+}
+
+/// A whole box of absent cells is refused naming each of them, before a
+/// byte is written.
+#[test]
+fn every_absent_cell_is_named_and_nothing_written() {
+    let dir = cells(&[(44, 9)]);
+    let mut out = Vec::new();
+    let got = cut_heights(
+        &DirSource(dir.path().to_owned()),
+        &options(CORNER, 1),
+        &mut out,
+    );
+    let message = got.err().map(|e| e.to_string()).unwrap_or_default();
+    for (lat, lon) in [(44, 10), (45, 9), (45, 10)] {
+        assert!(message.contains(&glo30_name(lat, lon)), "{message}");
+    }
+    assert!(!message.contains(&glo30_name(44, 9)), "{message}");
+    assert!(out.is_empty(), "nothing written before the refusal");
+}
+
+/// No-data pixels are written as 0 m but counted, by the decoder and in
+/// the cut's statistics.
+#[test]
+fn nodata_pixels_are_counted() {
+    let dir = cells(&[(44, 9), (44, 10), (45, 10)]);
+    // Cell (45, 9) with seven NaN pixels far from the box.
+    let d = 1.0 / N as f64;
+    let mut data = vec![100f32; N * N];
+    for i in 0..7 {
+        data[N * 10 + i] = f32::NAN;
+    }
+    let raster = Raster {
+        width: N,
+        height: N,
+        data,
+        lon0: 9.0,
+        lat0: 46.0,
+        dx: d,
+        dy: d,
+        nodata: 0,
+    };
+    let bytes = geotiff::encode(&raster, 128);
+    assert_eq!(geotiff::decode(&bytes).expect("decode").nodata, 7);
+    std::fs::write(dir.path().join(format!("{}.tif", glo30_name(45, 9))), bytes).expect("write");
+    let mut out = Vec::new();
+    let stats = cut_heights(
+        &DirSource(dir.path().to_owned()),
+        &options(CORNER, 1),
+        &mut out,
+    )
+    .expect("cut");
+    assert_eq!(stats.nodata, 7);
+    assert!(stats.absent.is_empty());
+}
+
+/// A huge cell met by a cut fails the cut with the cell's name.
+#[test]
+fn a_cell_claiming_huge_dimensions_fails_the_cut_by_name() {
+    let dir = cells(&[(44, 9), (44, 10), (45, 9), (45, 10)]);
+    let path = dir.path().join(format!("{}.tif", glo30_name(45, 10)));
+    let mut bytes = std::fs::read(&path).expect("read cell");
+    patch_long(&mut bytes, 256, 0xFFFF_FFF0);
+    std::fs::write(&path, bytes).expect("write cell");
+    let mut out = Vec::new();
+    let got = cut_heights(
+        &DirSource(dir.path().to_owned()),
+        &options(CORNER, 1),
+        &mut out,
+    );
+    let message = got.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(
+        message.contains(&glo30_name(45, 10)) && message.contains("4294967280"),
+        "{message}"
+    );
+}
+
+/// The header of a real GLO-30 cell, `Copernicus_DSM_COG_10_N31_00_W004_00_DEM`,
+/// cut after its first IFD's values (fixtures/README.md): its pixels sit
+/// where the cell's own metadata (`Copernicus_DSM_10_N31_00_W004_00.xml`)
+/// puts them. The XML names the upper-left corner -4.00000, 32.00000 and a
+/// 1.0 arcsec spacing for rows and columns; the GeoTIFF says pixel is
+/// point, so pixel (0, 0)'s centre is that corner. A pixel-is-area shift
+/// or a misread tiepoint moves lon0 or lat0 by half a pixel (1.4e-4°).
+#[test]
+fn a_real_glo30_header_places_its_pixels_where_its_metadata_says() {
+    let head = include_bytes!("fixtures/Copernicus_DSM_COG_10_N31_00_W004_00_DEM.head.tif");
+    let g = geotiff::georef(head).expect("the header reads");
+    assert_eq!((g.width, g.height), (3600, 3600));
+    let arcsec = 1.0 / 3600.0;
+    assert!((g.dx - arcsec).abs() < 1e-12, "dx {}", g.dx);
+    assert!((g.dy - arcsec).abs() < 1e-12, "dy {}", g.dy);
+    assert!((g.lon0 - -4.0).abs() < 1e-9, "lon0 {}", g.lon0);
+    assert!((g.lat0 - 32.0).abs() < 1e-9, "lat0 {}", g.lat0);
 }

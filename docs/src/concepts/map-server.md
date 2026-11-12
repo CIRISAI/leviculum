@@ -334,8 +334,16 @@ one source pixel past the row's south and east edges) into memory,
 decodes them, drops the cells the row no longer needs, and writes each
 block as it is done. Nothing touches the disk but the output: the peak
 disk is the pack, the peak memory the cells of one block row (ten
-cells, 631 MB resident, on the pilot box). A missing cell is sea level
-(the bucket has no cells over open sea). The output depends only on
+cells, 631 MB resident, on the pilot box). Before it writes a byte the
+cut probes every cell the box needs: the bucket has no cells over open
+sea, but it also withholds some land cells, so an absent cell fails the
+cut, every absent cell named, unless `--absent-is-sea` takes them as
+0 m; the `MAPTOOL heights` line then names them (`absent_cells=`).
+No-data pixels inside a cell are written as 0 m and counted
+(`nodata_pixels=`). A cell whose header claims more than 3600 pixels
+a side or tiles over 1024 (GLO-30's largest) is refused by name. Pixel
+centres come from `leviculum_map::mercator`, the projection the map
+draws with. The output depends only on
 the source bytes, the box and the zooms; the tests cut twice and with
 one and three threads and compare bytes.
 

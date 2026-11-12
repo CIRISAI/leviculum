@@ -104,6 +104,11 @@ enum Cmd {
         /// Worker threads; the output does not depend on it.
         #[arg(long)]
         threads: Option<usize>,
+        /// Take cells the source does not have as sea (0 m). Without it a
+        /// box meeting one fails, naming every absent cell: GLO-30 also
+        /// withholds some land cells.
+        #[arg(long)]
+        absent_is_sea: bool,
     },
     /// Check a height pack whole and time its decode: every stored tile,
     /// and every derived tile from the block zoom down.
@@ -165,14 +170,20 @@ fn cmd_heights(output: &Path, bbox: &str, source: &str, mut options: HeightOptio
     let s = cut_heights(source.as_ref(), &options, &mut out)?;
     std::io::Write::flush(&mut out)?;
     println!(
-        "MAPTOOL heights blocks={} tiles={} bytes={} area_km2={:.0} bytes_per_km2={:.1} cells={} absent={} peak_cells={} largest_fetch={} encode_s={:.1} wall_s={:.1}",
+        "MAPTOOL heights blocks={} tiles={} bytes={} area_km2={:.0} bytes_per_km2={:.1} cells={} absent={} absent_cells={} nodata_pixels={} peak_cells={} largest_fetch={} encode_s={:.1} wall_s={:.1}",
         s.blocks,
         s.tiles,
         s.bytes,
         s.area_km2,
         s.bytes as f64 / s.area_km2.max(1.0),
         s.cells,
-        s.absent,
+        s.absent.len(),
+        if s.absent.is_empty() {
+            "-".to_owned()
+        } else {
+            s.absent.join(",")
+        },
+        s.nodata,
         s.peak_cells,
         s.largest_fetch,
         s.encode_seconds,
@@ -613,6 +624,7 @@ fn main() -> Res<()> {
             block_zoom,
             level,
             threads,
+            absent_is_sea,
         } => cmd_heights(
             &output,
             &bbox,
@@ -624,6 +636,7 @@ fn main() -> Res<()> {
                 level,
                 threads: threads
                     .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get())),
+                absent_is_sea,
             },
         ),
         Cmd::HeightsInfo { pack } => cmd_heights_info(&pack),
