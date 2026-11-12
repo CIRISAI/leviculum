@@ -79,9 +79,10 @@ pub const PICTURE: Rect = Rect::new(0, 0, COLS as u16, (GRID_ROWS - 1) as u16);
 pub const BOTTOM: u16 = (GRID_ROWS - 1) as u16;
 
 /// The region the board shows before it has one of its own (1375): the
-/// map core's Florence fixture, zooms 11 to 15, 197,972 B, read in place
-/// from the image's flash. OpenStreetMap data under the ODbL, its notice
-/// in the file and in `leviculum-map/fixtures/README.md`.
+/// map core's Florence fixture, zooms 11 to 15, layer profile 2 (1707),
+/// 210,647 B, read in place from the image's flash. OpenStreetMap data
+/// under the ODbL, its notice in the file and in
+/// `leviculum-map/fixtures/README.md`.
 pub const FIXTURE: &[u8] = include_bytes!("../../leviculum-map/fixtures/firenze.lmr");
 
 /// The world on the board (1477): the map core's own cut of the whole
