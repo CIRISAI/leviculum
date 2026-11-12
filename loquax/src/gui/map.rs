@@ -175,8 +175,10 @@ pub(super) mod tests {
 
     /// The window shows one world at most (1131): a window of 1280 x 800
     /// asked for z0 is held at z3, the world 2048 pixels wide, and no
-    /// column of its picture repeats. The view as asked, the control,
-    /// repeats every 256.
+    /// column of its picture repeats. Since 1710 the view as asked is a
+    /// blended world view too, which holds the whole world once by
+    /// construction: the Mercator tiling of 256-pixel worlds that stood
+    /// here as the control cannot appear at any zoom.
     ///
     /// The names are off: since 1683 the world outline brings its own
     /// names, and those are placed per copy of the world, so a copy with
@@ -191,7 +193,7 @@ pub(super) mod tests {
         let centre = project(LatLon::from_degrees(30.0, 10.0));
         let asked = ExactView::new(centre, 0, size.0, size.1);
         let control = rest(&mut frames, asked, &[], None, 1.0);
-        assert_eq!(period(&control.rgba, 1280), Some(256), "the control");
+        assert_ne!(period(&control.rgba, 1280), Some(256), "the control");
         let floor = zoom_floor(area(size), &setup);
         let view = hold(asked, floor, setup.zooms.1);
         assert_eq!(view.zoom_milli(), 3 * MILLI);
