@@ -24,13 +24,17 @@
 //!   every frame at rest decides.
 //! - The cells next to the screen, those in the pan's direction first, and
 //!   while the view moves only those, come after the cells on screen.
+//! - A region cut under an old layer profile holds nothing (1707); a
+//!   screen over it asks for that region's own box and zooms
+//!   ([`renewals`], 1727), which land under its name and replace it, and
+//!   no cell or screen's box is asked for over it meanwhile.
 //! - A frame that shows the view of the last decision decides nothing
 //!   again: a load that failed for want of internet is tried again by the
 //!   next view the user moves to, not by a frame asked again.
 
 use alloc::vec::Vec;
 
-use leviculum_map::mercator::{lat_of_y, lon_of_x, unproject, World};
+use leviculum_map::mercator::{lat_of_y, lon_of_x, project, unproject, LatLon, World};
 use leviculum_map::region::{Bounds, Header};
 use leviculum_map::viewport::Viewport;
 
@@ -125,24 +129,77 @@ fn arriving(h: &Header) -> bool {
     h.streamed && h.len == 0
 }
 
-/// Whether a region of `regions` holds `at` at `zoom`.
+/// Whether `h` is a complete region cut under an old layer profile
+/// (1707): its deepest zoom was simplified, which every deeper view
+/// magnifies past a pixel, so it does not hold the screen; a view over it
+/// asks for it again ([`renewals`]).
+fn stale(h: &Header) -> bool {
+    h.profile < leviculum_map::profile::CUT_2 && !arriving(h)
+}
+
+/// Whether `h` reaches `at` (unprojected) at `zoom`.
+fn reaches(h: &Header, p: LatLon, zoom: u8) -> bool {
+    let b = &h.bounds;
+    h.min_zoom <= zoom
+        && h.max_zoom >= zoom
+        && (b.west..=b.east).contains(&p.lon_e7)
+        && (b.south..=b.north).contains(&p.lat_e7)
+}
+
+/// Whether a region of `regions` holds `at` at `zoom`: a complete region
+/// of the current profile.
 fn held(regions: &[Header], at: World, zoom: u8) -> bool {
     let p = unproject(at);
-    regions.iter().any(|h| {
-        let b = &h.bounds;
-        // A region cut under an old profile does not hold the screen
-        // (1707): its deepest zoom was simplified, which every deeper
-        // view magnifies past a pixel. The screen asks for its box
-        // again; an autoloaded region is rewritten under its own name
-        // (`mapload::auto_name`) and draws what has arrived meanwhile
-        // (1291); a hand-placed file stays beside the new autoloaded one.
-        h.profile >= leviculum_map::profile::CUT_2
-            && !arriving(h)
-            && h.min_zoom <= zoom
-            && h.max_zoom >= zoom
-            && (b.west..=b.east).contains(&p.lon_e7)
-            && (b.south..=b.north).contains(&p.lat_e7)
-    })
+    regions
+        .iter()
+        .any(|h| h.profile >= leviculum_map::profile::CUT_2 && !arriving(h) && reaches(h, p, zoom))
+}
+
+/// Whether `at` at `zoom` is held, or lies in an old profile's region
+/// that [`renewals`] asks for again whole (1727): no cell and no
+/// screen's box is asked for there, so the region's own load replaces it
+/// under its own name (`mapload::auto_name`) instead of a second region
+/// landing over it and the old one staying on disk.
+fn covered(regions: &[Header], at: World, zoom: u8) -> bool {
+    let p = unproject(at);
+    held(regions, at, zoom) || regions.iter().any(|h| stale(h) && reaches(h, p, zoom))
+}
+
+/// The loads that renew the old profile's regions under the screen of
+/// `view` (1727, the audit of 1707): each region's own box and zooms, its
+/// deepest never lowered, so the load lands under the region's own name
+/// and takes its place once it verifies (`crate::mapload`). An
+/// autoloaded region is so replaced; a hand-placed one gets an
+/// autoloaded copy beside it, which draws over it
+/// (`leviculum_map::choice::drawn`, the newer profile on top).
+fn renewals(view: &Viewport, regions: &[Header]) -> Vec<MapWant> {
+    let zoom = need_zoom(view);
+    let points: Vec<LatLon> = samples(view, SAMPLES).map(unproject).collect();
+    let mut out: Vec<MapWant> = Vec::new();
+    for h in regions.iter().filter(|h| stale(h)) {
+        if !points.iter().any(|&p| reaches(h, p, zoom)) {
+            continue;
+        }
+        let b = h.bounds;
+        if out
+            .iter()
+            .any(|w| w.bounds == b && w.zooms == (h.min_zoom, h.max_zoom))
+        {
+            continue;
+        }
+        let mid = |a: i32, z: i32| i32::try_from((i64::from(a) + i64::from(z)) / 2).unwrap_or(a);
+        out.push(MapWant {
+            bounds: b,
+            zooms: (h.min_zoom, h.max_zoom),
+            floor: h.max_zoom,
+            reason: LoadReason::View,
+            centre: project(LatLon {
+                lat_e7: mid(b.south, b.north),
+                lon_e7: mid(b.west, b.east),
+            }),
+        });
+    }
+    out
 }
 
 /// The sample points of `view`: `n` by `n` pixel middles.
@@ -174,7 +231,7 @@ fn gap_cells(view: &Viewport, regions: &[Header], n: u32) -> Vec<Cell> {
     let z = view.zoom().saturating_sub(CELL_ABOVE).min(CELL_DEEPEST);
     let mut cells: Vec<Cell> = Vec::new();
     for at in samples(view, n) {
-        if held(regions, at, zoom) {
+        if covered(regions, at, zoom) {
             continue;
         }
         let cell = Cell::of(at, z);
@@ -227,7 +284,7 @@ pub fn screen_want(view: &Viewport, regions: &[Header]) -> Option<MapWant> {
         for i in 0..n {
             let px = i64::from((2 * i + 1) * w / (2 * n));
             let py = i64::from((2 * j + 1) * h / (2 * n));
-            if held(regions, view.to_world(px as i32, py as i32), zoom) {
+            if covered(regions, view.to_world(px as i32, py as i32), zoom) {
                 continue;
             }
             span = Some(match span {
@@ -296,9 +353,9 @@ pub fn wants(
             ..ViewWants::default()
         };
     }
-    let here_cells = match share > GAP_SHARE {
-        true => gap_cells(view, regions, SAMPLES),
-        false => Vec::new(),
+    let (renew, here_cells) = match share > GAP_SHARE {
+        true => (renewals(view, regions), gap_cells(view, regions, SAMPLES)),
+        false => (Vec::new(), Vec::new()),
     };
     let mut ahead_cells = Vec::new();
     if view.zoom() >= AHEAD_MIN_ZOOM {
@@ -331,6 +388,7 @@ pub fn wants(
     ViewWants {
         here: screen
             .into_iter()
+            .chain(renew)
             .chain(here_cells.iter().map(|c| want(c, zoom)))
             .collect(),
         ahead: ahead_cells.iter().map(|c| want(c, zoom)).collect(),
@@ -444,7 +502,14 @@ mod tests {
         assert_eq!(uncovered(&view, &[r]), 0.0);
         r.profile = leviculum_map::profile::CUT_1;
         assert_eq!(uncovered(&view, &[r]), 1.0);
-        assert!(!wants(&view, &[r], false, None).here.is_empty());
+        // 1727: the region's own box and zooms, nothing else over it.
+        let w = wants(&view, &[r], false, None);
+        let asked: Vec<(Bounds, (u8, u8), u8)> = w
+            .here
+            .iter()
+            .map(|w| (w.bounds, w.zooms, w.floor))
+            .collect();
+        assert_eq!(asked, [(r.bounds, (10, 15), 15)]);
     }
 
     #[test]

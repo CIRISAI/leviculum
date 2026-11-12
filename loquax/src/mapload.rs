@@ -946,7 +946,11 @@ mod tests {
             n
         };
         let name = auto_name(&w.bounds, w.zooms);
-        assert_eq!(names(dir.path()), std::slice::from_ref(&name), "no part file left");
+        assert_eq!(
+            names(dir.path()),
+            std::slice::from_ref(&name),
+            "no part file left"
+        );
 
         serve.drop_at(None);
         loader.ask(w.clone(), BACKOFF_FIRST_MS);
@@ -958,6 +962,61 @@ mod tests {
         assert_eq!(names(dir.path()), [name], "replaced in place");
         assert_eq!(profile_of(&path), leviculum_map::profile::CUT_2);
         assert_ne!(std::fs::read(&path).expect("read"), old);
+    }
+
+    /// An installed autoloaded region of profile 1 is replaced, not
+    /// joined by another (1727, the audit of 1707): a view over it asks
+    /// for its own box and zooms, so the load lands under its name. The
+    /// region's box is not the tile grid's, as a screen's box or a hand
+    /// asked box is not: the cells and the screen's box of the view would
+    /// land beside it under other names and leave the old one on disk
+    /// for ever.
+    #[test]
+    fn a_view_over_an_old_profile_region_replaces_it() {
+        use crate::ui::viewload::wants;
+        use leviculum_map::mercator::project;
+        use leviculum_map::viewport::Viewport;
+
+        let serve = Serve::start(vec![("o.pmtiles".into(), FIXTURE.to_vec())]).expect("serve");
+        let dir = tempfile::tempdir().expect("tmp");
+        let w = want(112_615_000);
+        let path = installed(&serve, dir.path(), &w, leviculum_map::profile::CUT_1);
+        let maps = Maps::new(Some(dir.path().to_path_buf()));
+        let mut loader = Loader::new(maps.clone(), Source::Url(serve.url("o.pmtiles")), 1 << 30);
+        // A z16 view inside the box.
+        let b = w.bounds;
+        let centre = project(leviculum_map::mercator::LatLon {
+            lat_e7: (b.south / 2) + (b.north / 2),
+            lon_e7: (b.west / 2) + (b.east / 2),
+        });
+        let view = Viewport::new(centre, 16, 480, 320);
+        let mut now = 0;
+        for _ in 0..8 {
+            let asked = wants(&view, &maps.headers(), false, None);
+            if asked.here.is_empty() {
+                break;
+            }
+            loader.schedule(asked.here, Vec::new(), now);
+            while loader.busy() {
+                settle(&mut loader, now);
+                now += 1;
+            }
+        }
+        assert!(wants(&view, &maps.headers(), false, None).here.is_empty());
+        let (regions, problems) = maps.load();
+        assert!(problems.is_empty(), "{problems:?}");
+        let covering: Vec<(&str, u8)> = regions
+            .iter()
+            .filter(|r| r.region.header().bounds.holds(&b))
+            .map(|r| (r.name.as_str(), r.region.header().profile))
+            .collect();
+        let name = auto_name(&b, w.zooms);
+        assert_eq!(
+            covering,
+            [(name.as_str(), leviculum_map::profile::CUT_2)],
+            "exactly one region covers the box, of profile 2"
+        );
+        assert!(path.exists());
     }
 
     #[test]
