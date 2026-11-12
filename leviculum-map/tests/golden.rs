@@ -452,6 +452,37 @@ fn the_buildings_draw_their_goldens_from_z16() {
     assert!(moved.is_empty(), "moved:\n{}", moved.join("\n"));
 }
 
+/// The blended world views (1710): central Europe out of Equal Earth
+/// and out of the orthographic globe, at the world (`t = 0`) and in the
+/// middle of the handover (z3.5), pinned pixel for pixel. The linear
+/// goldens at z6 below pin the other end: from `t = 1` the blend is
+/// today's Mercator exactly, which `tests/blend.rs` holds to a
+/// nanopixel.
+#[test]
+fn the_blended_world_views_draw_their_goldens() {
+    use leviculum_map::blend::{Blend, Shape};
+    let at = project(LatLon::from_degrees(50.0, 10.0));
+    for (sname, shape) in [("ee", Shape::EqualEarth), ("globe", Shape::Globe)] {
+        for (zname, zoom) in [("z2", 2.0), ("z35", 3.5)] {
+            let (w, h) = (480u32, 320u32);
+            let blend = Blend::new(shape, at, zoom, w, h);
+            let mut fb = vec![0u16; (w * h) as usize];
+            let mut frame = Frame::new(&mut fb, w, h).expect("frame");
+            let Ok(_) = leviculum_map::outline::draw_world_view(
+                &leviculum_map::outline::WORLD,
+                &blend,
+                Ink::Colour,
+                Style::SCREEN.theme,
+                &mut frame,
+            );
+            let mut rgb = Vec::with_capacity(fb.len() * 3);
+            let frame = Frame::new(&mut fb, w, h).expect("frame");
+            frame.rgb888_into(&mut rgb);
+            same_as(&format!("world-blend-{sname}-480x320-{zname}.png"), &rgb, w, h);
+        }
+    }
+}
+
 /// The world view before any region covers it (1683): `view` drawn from
 /// the outline's own tables — land, lakes, rivers, ice, the shelves, the
 /// country borders and the disputed lines dashed — in `style` and `ink`,
