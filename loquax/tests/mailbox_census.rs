@@ -246,6 +246,33 @@ fn nth_census(stderr: &Arc<Mutex<String>>, n: usize, secs: u64) -> String {
     }
 }
 
+/// A census whose engines answered: SIGUSR1 through `signal`, then the next
+/// `MAILBOX_CENSUS` line after the `seen` ones; a line printed when its
+/// one-second wait passed without the engine's answer (`answered=0`, slow
+/// under a CPU quota) carries no engine count, so the census is asked
+/// again. Returns the line and the lines seen so far.
+async fn answered_census(
+    signal: &(dyn Fn(&str) + Sync),
+    stderr: &Arc<Mutex<String>>,
+    mut seen: usize,
+) -> (String, usize) {
+    for _ in 0..5 {
+        signal("USR1");
+        let stderr_ = Arc::clone(stderr);
+        let line = tokio::task::spawn_blocking(move || nth_census(&stderr_, seen, 15))
+            .await
+            .expect("waited");
+        seen += 1;
+        if census_count(&line, "answered") > 0 {
+            return (line, seen);
+        }
+    }
+    panic!(
+        "no census with the engine's answer in five asks; stderr:\n{}",
+        stderr.lock().expect("stderr")
+    )
+}
+
 /// Wakes per second an idle mailbox may spend, each count (1723). Idle, the
 /// daemon loop wakes about six times a second (the quiet pump's 4, the
 /// outbox tick and the outside look 1 each) and every engine ticks about 5
@@ -313,11 +340,7 @@ async fn an_idle_mailbox_uses_almost_no_cpu() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     // The wakes before the window; the census's own busy second passes
     // before the CPU is read.
-    signal("USR1");
-    let stderr_ = Arc::clone(&stderr);
-    let first = tokio::task::spawn_blocking(move || nth_census(&stderr_, 0, 15))
-        .await
-        .expect("waited");
+    let (first, seen) = answered_census(&signal, &stderr, 0).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let ticks_per_sec = 100.0; // USER_HZ on Linux
     let before = cpu_ticks(pid);
@@ -328,14 +351,15 @@ async fn an_idle_mailbox_uses_almost_no_cpu() {
     let parts = breakdown(pid).since(&parts_before);
     let elapsed = started.elapsed().as_secs_f64();
     let percent = 100.0 * used / elapsed;
-    signal("USR1");
-    let stderr_ = Arc::clone(&stderr);
-    let second = tokio::task::spawn_blocking(move || nth_census(&stderr_, 1, 15))
-        .await
-        .expect("waited");
+    let (second, _) = answered_census(&signal, &stderr, seen).await;
     let counted_secs = (Instant::now() - started).as_secs() + 3;
-    let turns = census_count(&second, "turns") - census_count(&first, "turns");
-    let engine_ticks = census_count(&second, "engine_ticks") - census_count(&first, "engine_ticks");
+    // The counts only grow; a smaller second would be the test's own error.
+    let turns = census_count(&second, "turns")
+        .checked_sub(census_count(&first, "turns"))
+        .unwrap_or_else(|| panic!("turns went back: {first} then {second}"));
+    let engine_ticks = census_count(&second, "engine_ticks")
+        .checked_sub(census_count(&first, "engine_ticks"))
+        .unwrap_or_else(|| panic!("engine_ticks went back: {first} then {second}"));
     eprintln!(
         "MAILBOX_IDLE_CPU percent={percent:.2} cpu_s={used:.2} window_s={} elapsed_s={elapsed:.2} {parts}",
         IDLE_WINDOW.as_secs()

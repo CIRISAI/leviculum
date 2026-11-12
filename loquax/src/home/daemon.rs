@@ -951,10 +951,12 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             }
             _ = tokio::time::sleep_until(next_census) => {
                 next_census = tokio::time::Instant::now() + super::census::CENSUS_PERIOD;
+                forget_answers(&mut census, &mut groups);
                 ask_census(&attached, &groups);
                 census_owed.get_or_insert((tokio::time::Instant::now() + super::census::ANSWER_WAIT, false));
             }
             _ = user_signal(usr1.as_mut()) => {
+                forget_answers(&mut census, &mut groups);
                 ask_census(&attached, &groups);
                 census_owed = Some((tokio::time::Instant::now() + super::census::ANSWER_WAIT, true));
             }
@@ -1513,6 +1515,19 @@ async fn user_signal(usr1: Option<&mut tokio::signal::unix::Signal>) {
             usr1.recv().await;
         }
         None => std::future::pending().await,
+    }
+}
+
+/// Drop the engines' census answers still held: one that came after its
+/// census had printed without it would otherwise stand in for the next
+/// census's own, and its counts would be a census old (1723).
+fn forget_answers<O>(
+    census: &mut Option<crate::outbox::EngineCensus>,
+    groups: &mut [GroupEngine<O>],
+) {
+    *census = None;
+    for hosted in groups {
+        hosted.census = None;
     }
 }
 

@@ -30,9 +30,10 @@
 //! `told_n`, `related_n`, `heard_n`, `asker_n`, `watchers_n`, `devices_n`,
 //! `tracked_n`, `recipients_n`, `unheard_n`, `events_queued`, the
 //! archive's `archive_kb` on disk (SQLite pages are not heap; its cache is
-//! bounded by SQLite's own `cache_size`), and two wake counts since the
-//! start (order 1723): `turns`, the daemon loop's, and `engine_ticks`,
-//! every engine's ticks summed. An idle mailbox wakes a few times a second;
+//! bounded by SQLite's own `cache_size`), `answered`, how many engines'
+//! answers the line holds (one under [`ANSWER_WAIT`] passed without them),
+//! and two wake counts since the start (order 1723): `turns`, the daemon
+//! loop's, and `engine_ticks`, the answering engines' ticks summed. An idle mailbox wakes a few times a second;
 //! a loop or a tick deadline that spins shows as a count far above that,
 //! measured in wakes and not in CPU time, so the host's speed does not move
 //! it.
@@ -134,6 +135,7 @@ pub struct MailboxCensus {
     pub unheard_n: usize,
     pub events_queued: usize,
     pub archive_kb: u64,
+    pub answered: usize,
     pub turns: u64,
     pub engine_ticks: u64,
 }
@@ -169,6 +171,7 @@ impl MailboxCensus {
         self.unheard_n += answer.unheard;
         self.events_queued += answer.events_queued;
         self.engine_ticks = self.engine_ticks.saturating_add(answer.ticks);
+        self.answered += 1;
     }
 
     /// The line as the log and the soak print it.
@@ -180,8 +183,8 @@ impl MailboxCensus {
         line.push_str(&format!(
             " tables={} rss_kb={} nodes={} outbox_n={} group_outbox_n={} told_n={} \
              related_n={} heard_n={} asker_n={} watchers_n={} devices_n={} tracked_n={} \
-             recipients_n={} unheard_n={} events_queued={} archive_kb={} turns={} \
-             engine_ticks={}",
+             recipients_n={} unheard_n={} events_queued={} archive_kb={} answered={} \
+             turns={} engine_ticks={}",
             self.tables(),
             self.rss_kb,
             self.nodes,
@@ -198,6 +201,7 @@ impl MailboxCensus {
             self.unheard_n,
             self.events_queued,
             self.archive_kb,
+            self.answered,
             self.turns,
             self.engine_ticks,
         ));
@@ -238,6 +242,7 @@ impl MailboxCensus {
             unheard_n = self.unheard_n,
             events_queued = self.events_queued,
             archive_kb = self.archive_kb,
+            answered = self.answered,
             turns = self.turns,
             engine_ticks = self.engine_ticks,
         );
@@ -355,6 +360,9 @@ mod tests {
         assert!(line.starts_with("MAILBOX_CENSUS outbox=10 "), "{line}");
         assert!(line.contains(" router=101 engine=7 tables=123 "), "{line}");
         assert!(line.contains(" tracked_n=2 "), "{line}");
-        assert!(line.ends_with(" turns=9 engine_ticks=5"), "{line}");
+        assert!(
+            line.ends_with(" answered=2 turns=9 engine_ticks=5"),
+            "{line}"
+        );
     }
 }
